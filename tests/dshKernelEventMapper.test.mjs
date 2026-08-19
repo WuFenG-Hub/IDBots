@@ -142,15 +142,19 @@ test('empty terminal turn flags a clean stop with no text and no tool calls', ()
   // The DeepSeek truncation signature: only reasoning deltas, then a clean stop.
   mapper.consume({ type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } } })
   const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
-  assert.equal(ended[0].kind, 'turnEnd')
-  assert.equal(ended[0].emptyTerminal, true)
+  const turnEnd = ended.find((a) => a.kind === 'turnEnd')
+  assert.equal(turnEnd.kind, 'turnEnd')
+  assert.equal(turnEnd.emptyTerminal, true)
+  const thinkingDone = ended.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.equal(thinkingDone.content, 'thinking…')
 })
 
 test('turn/end with text output is not an empty terminal turn', () => {
   const mapper = new DshEventMapper()
   mapper.consume({ type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'answer' } } })
   const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
-  assert.equal(ended[0].emptyTerminal, undefined)
+  const turnEnd = ended.find((a) => a.kind === 'turnEnd')
+  assert.equal(turnEnd.emptyTerminal, undefined)
 })
 
 test('turn/end after tool calls is not an empty terminal turn', () => {
@@ -212,7 +216,8 @@ test('text-delta think tags stream into the thinking slot and leave visible text
   assert.equal(first[3].content, 'hello')
 
   const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
-  assert.equal(ended[0].emptyTerminal, undefined)
+  const turnEnd = ended.find((a) => a.kind === 'turnEnd')
+  assert.equal(turnEnd.emptyTerminal, undefined)
 })
 
 test('think-tag-only text-delta is an empty terminal turn (reasoning, no reply)', () => {
@@ -222,7 +227,8 @@ test('think-tag-only text-delta is an empty terminal turn (reasoning, no reply)'
     data: { chunk: { type: 'text-delta', index: 0, text: '<think>still figuring it out</think>' } },
   })
   const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
-  assert.equal(ended[0].emptyTerminal, true)
+  const turnEnd = ended.find((a) => a.kind === 'turnEnd')
+  assert.equal(turnEnd.emptyTerminal, true)
 })
 
 test('block-start reasoning opens the thinking slot before deltas arrive', () => {
@@ -322,7 +328,8 @@ test('a turn whose only output is commentary is an empty terminal turn', () => {
   const ended = mapper.consume({ type: 'turn/end', data: { turn: 5, reason: { kind: 'stop' } } })
   // Commentary reclassified as thinking → nothing visible → the auto-continue
   // guard must fire instead of reporting a hollow completed turn.
-  assert.equal(ended[0].emptyTerminal, true)
+  const turnEnd = ended.find((a) => a.kind === 'turnEnd')
+  assert.equal(turnEnd.emptyTerminal, true)
 })
 
 test('unassembled commentary (block-end only) opens a thinking message', () => {
@@ -344,14 +351,15 @@ test('unassembled commentary (block-end only) opens a thinking message', () => {
       },
     },
   })
-  // No text slot was streamed, so commentary materializes as its own thinking
-  // message (open + finalize), exactly like assembled reasoning blocks.
+  // No text slot was streamed, so commentary materializes as a thinking
+  // message. The slot stays streaming across the tool round (update, not
+  // finalize) so the ThinkingBlock does not collapse before the next step.
   const opened = done.find((a) => a.kind === 'message')
   assert.equal(opened.slot, 'thinking')
   assert.equal(opened.message.metadata.isThinking, true)
-  const finalize = done.find((a) => a.kind === 'messageFinalize')
-  assert.equal(finalize.slot, 'thinking')
-  assert.equal(finalize.content, 'Thinking out loud without any streamed deltas.')
+  const updated = done.find((a) => a.kind === 'messageUpdate' && a.slot === 'thinking')
+  assert.equal(updated.content, 'Thinking out loud without any streamed deltas.')
+  assert.equal(done.some((a) => a.kind === 'messageFinalize' && a.slot === 'thinking'), false)
 })
 
 test('mixed commentary and final text split across slots in order', () => {
@@ -397,6 +405,105 @@ test('unsigned replay signatures keep the legacy all-visible classification', ()
   assert.equal(finalize.slot, 'text')
   assert.equal(finalize.content, 'plain visible reply')
   assert.equal(finalize.metadata, undefined)
+})
+
+test('native DeepSeek tool-step text folds into thinking and does not open a visible bubble', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+  })
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'reasoning-delta', index: 0, text: 'need a tool' } },
+  })
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 1, step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'need a tool' },
+          { type: 'text', text: '本地没装 tsx，用 npx 临时拉一个跑（不碰 package.json）：' },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  assert.equal(done.some((a) => a.slot === 'text'), false, 'commentary must not become a visible bubble')
+  assert.equal(done.some((a) => a.kind === 'messageFinalize' && a.slot === 'thinking'), false, 'thinking stays streaming across the tool round')
+  const updated = done.find((a) => a.kind === 'messageUpdate' && a.slot === 'thinking')
+  assert.match(updated.content, /need a tool/)
+  assert.match(updated.content, /本地没装 tsx/)
+})
+
+test('native DeepSeek keeps one thinking slot across tool rounds and only finalizes on the reply', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'reasoning-delta', index: 0, text: 'first plan' } },
+  })
+  const step1 = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'first plan' },
+          { type: 'text', text: '先看仓库结构。' },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  assert.equal(step1.filter((a) => a.kind === 'message' && a.slot === 'thinking').length, 0)
+
+  const step2open = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'reasoning-delta', index: 0, text: ' next' } },
+  })
+  assert.equal(step2open.some((a) => a.kind === 'message'), false, 'must reuse the live thinking slot')
+  assert.equal(step2open[0].kind, 'messageUpdate')
+  assert.match(step2open[0].content, /first plan/)
+  assert.match(step2open[0].content, /先看仓库结构/)
+  assert.match(step2open[0].content, / next/)
+
+  mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'next' },
+          { type: 'text', text: '继续读安装器。' },
+          { type: 'tool-call', id: 'c2', name: 'read', arguments: '{}' },
+        ],
+      },
+    },
+  })
+
+  const reply = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'ready to answer' },
+          { type: 'text', text: '## 本轮测试汇总' },
+        ],
+      },
+    },
+  })
+  const thinkingDone = reply.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  const textDone = reply.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(reply.some((a) => a.kind === 'message' && a.slot === 'thinking'), false, 'reply must not open a second thinking bubble')
+  assert.match(thinkingDone.content, /first plan/)
+  assert.match(thinkingDone.content, /先看仓库结构/)
+  assert.match(thinkingDone.content, /继续读安装器/)
+  assert.match(thinkingDone.content, /ready to answer/)
+  assert.equal(textDone.content, '## 本轮测试汇总')
+  assert.equal(textDone.metadata, undefined)
 })
 
 test('splitThinkTaggedContent extracts think and thinking tags', () => {
