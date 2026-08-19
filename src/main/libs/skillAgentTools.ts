@@ -9,7 +9,7 @@ import type {
 /**
  * Control surface the host (main.ts) provides for the skill_tool.
  * Backed by skillInstallService — extract MetaApp zips, install skill
- * packages into the global SKILLs/ directory, and list what is already
+ * packages into the user-data SKILLs directory, and list what is already
  * installed.
  */
 export type SkillToolControl = {
@@ -57,7 +57,7 @@ export function buildSkillAgentTools(deps: {
       [
         'Install, inspect, and list on-device skills (and extract a MetaApp package to read its APP.md).',
         'Use action "extract_metaapp" with pinId (or metaapp://<pinId>) after search_metaapps: downloads the app zip, unpacks it into the workspace temp dir, and returns the file list plus APP.md (install instructions live there).',
-        'Use action "install_skill" to install a skill into the global SKILLs/ directory so it is immediately usable. Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). The package must contain SKILL.md; it is installed as SKILLs/<name from SKILL.md>/. Size limit 4MB.',
+        'Use action "install_skill" to install a skill into the user-data SKILLs directory (the same folder the packaged app uses; never the source tree). Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). The package must contain SKILL.md; it is installed as SKILLs/<name from SKILL.md>/. Size limit 4MB.',
         'Use action "list_installed_skills" to verify a skill is on disk (name + version) after install.',
         'When NOT to use: do not call extract_metaapp just to open an app in the Bot Browser; this is for reading APP.md / installing the skill it describes. Chat-skill whitelist changes belong on metabot_update (chat_skill_op), not here.',
         'Returns JSON. extract_metaapp returns {ok, files, appMd, extractedDir} or {ok:false, reason:"not-a-zip"} when the pin is not a zip. install_skill returns {ok, name, version, dest} or {ok:false, error}.',
@@ -81,7 +81,7 @@ export function buildSkillAgentTools(deps: {
         if (args.action === 'list_installed_skills') {
           const skills = control.listInstalledSkills();
           if (skills.length === 0) {
-            return textResult('No skills installed in the global SKILLs/ directory.');
+            return textResult('No skills installed in the user-data SKILLs directory.');
           }
           const lines = skills.map((skill) => `- ${skill.name} (${skill.version})`);
           return textResult(

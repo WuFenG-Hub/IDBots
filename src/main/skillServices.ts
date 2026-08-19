@@ -8,6 +8,7 @@ import fs from 'fs';
 import { app } from 'electron';
 import { getEnhancedEnv } from './libs/coworkUtil';
 import { resolveElectronExecutablePath } from './libs/runtimePaths';
+import { resolveBundledSkillsRoot, resolveWritableSkillsRoot } from './libs/skillRoots';
 
 /**
  * Build an environment for spawning skill service scripts.
@@ -344,17 +345,8 @@ export class SkillServiceManager {
       candidates.push(path.join(path.resolve(envSkillsRoot), 'web-search'));
     }
 
-    if (app.isPackaged) {
-      // Prefer userData for packaged apps so scripts run from a real filesystem path.
-      candidates.push(path.join(app.getPath('userData'), 'SKILLs', 'web-search'));
-      candidates.push(path.join(process.resourcesPath, 'SKILLs', 'web-search'));
-      candidates.push(path.join(app.getAppPath(), 'SKILLs', 'web-search'));
-    } else {
-      // In development, __dirname is dist-electron/, so we need to go up one level to get to project root
-      const projectRoot = path.resolve(__dirname, '..');
-      candidates.push(path.join(projectRoot, 'SKILLs', 'web-search'));
-      candidates.push(path.join(app.getAppPath(), 'SKILLs', 'web-search'));
-    }
+    candidates.push(path.join(resolveWritableSkillsRoot(), 'web-search'));
+    candidates.push(path.join(resolveBundledSkillsRoot(), 'web-search'));
 
     return candidates.find(skillPath => fs.existsSync(skillPath)) ?? null;
   }

@@ -7,6 +7,7 @@ import extractZip from 'extract-zip';
 import { SqliteStore } from './sqliteStore';
 import { getEnhancedEnv } from './libs/coworkUtil';
 import { isPathWithin, resolveElectronExecutablePath } from './libs/runtimePaths';
+import { resolveBundledSkillsRoot, resolveWritableSkillsRoot } from './libs/skillRoots';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { getMetaidRpcBase, getMetaidRpcToken } from './services/metaidRpcEndpoint';
 
@@ -770,15 +771,7 @@ export class SkillManager {
   }
 
   getSkillsRoot(): string {
-    const envOverride = process.env.IDBOTS_SKILLS_ROOT?.trim() || process.env.SKILLS_ROOT?.trim();
-    if (envOverride) {
-      return path.resolve(envOverride);
-    }
-    if (!app.isPackaged) {
-      const projectRoot = path.resolve(__dirname, '..');
-      return path.resolve(projectRoot, SKILLS_DIR_NAME);
-    }
-    return path.resolve(app.getPath('userData'), SKILLS_DIR_NAME);
+    return resolveWritableSkillsRoot();
   }
 
   ensureSkillsRoot(): string {
@@ -2001,21 +1994,7 @@ export class SkillManager {
   }
 
   private getBundledSkillsRoot(): string {
-    if (app.isPackaged) {
-      // In production, bundled SKILLs should be in Resources/SKILLs.
-      const resourcesRoot = path.resolve(process.resourcesPath, SKILLS_DIR_NAME);
-      if (fs.existsSync(resourcesRoot)) {
-        return resourcesRoot;
-      }
-
-      // Fallback for older packages where SKILLs are inside app.asar.
-      return path.resolve(app.getAppPath(), SKILLS_DIR_NAME);
-    }
-
-    // In development, use the project root (parent of dist-electron).
-    // __dirname is dist-electron/, so we need to go up one level to get to project root
-    const projectRoot = path.resolve(__dirname, '..');
-    return path.resolve(projectRoot, SKILLS_DIR_NAME);
+    return resolveBundledSkillsRoot();
   }
 
   getSkillConfig(skillId: string): { success: boolean; config?: Record<string, string>; error?: string } {

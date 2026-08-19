@@ -2,7 +2,7 @@
  * Skill / MetaApp package install service.
  *
  * Backs the skill_tool actions: extract_metaapp (unzip a MetaApp pin and
- * return APP.md), install_skill (zip / github / skills.sh / npm → global
+ * return APP.md), install_skill (zip / github / skills.sh / npm → user-data
  * SKILLs/<name>/), and list_installed_skills.
  */
 

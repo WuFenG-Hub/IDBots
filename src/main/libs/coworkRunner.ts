@@ -26,6 +26,7 @@ import {
   buildCoworkSteerText,
 } from './coworkSteerChannel';
 import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
+import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult } from './coworkAssistantReply';
 import {
@@ -3254,6 +3255,7 @@ export class CoworkRunner extends EventEmitter {
       pushCandidate(root);
     }
     pushCandidate(getSkillsRoot());
+    pushCandidate(resolveBundledSkillsRoot());
 
     if (app.isPackaged) {
       pushCandidate(path.join(process.resourcesPath, 'SKILLs'));

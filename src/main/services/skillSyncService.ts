@@ -3,12 +3,12 @@
  * Fetches from /protocols/metabot-skill, compares with local config, and installs via metafile ZIP.
  */
 
-import { app, session } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { fetchContentWithFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './localIndexerProxy';
 import { getP2PLocalBase } from './p2pLocalEndpoint';
 import { parseProtocolPinContent } from './protocolPinContent';
+import { resolveWritableSkillsRoot } from '../libs/skillRoots';
 
 // Dynamically require AdmZip to avoid crash if not installed
 let AdmZip: typeof import('adm-zip') | null = null;
@@ -20,7 +20,6 @@ try {
 
 const MANAPI_BASE = 'https://manapi.metaid.io';
 const MAN_CONTENT_BASE = 'https://man.metaid.io/content';
-const SKILLS_DIR_NAME = 'SKILLs';
 const SKILLS_CONFIG_FILE = 'skills.config.json';
 
 export const FEATURED_SKILL_ADDRESSES = [
@@ -78,19 +77,12 @@ function compareVersions(a: string, b: string): number {
 }
 
 /**
- * Resolve SKILLs root: in dev use project SKILLs so edits (add/delete) in repo take effect;
- * in production use userData/SKILLs.
+ * Writable SKILLs root: always userData/SKILLs (dev and production).
+ * Official bundled skills remain in the source/resources tree and are listed
+ * separately; installs from MetaWeb never write into the repo.
  */
 function getSkillsRoot(): string {
-  const envOverride = process.env.IDBOTS_SKILLS_ROOT?.trim() || process.env.SKILLS_ROOT?.trim();
-  if (envOverride) {
-    return path.resolve(envOverride);
-  }
-  if (app.isPackaged) {
-    return path.resolve(app.getPath('userData'), SKILLS_DIR_NAME);
-  }
-  const projectRoot = path.resolve(__dirname, '..', '..');
-  return path.resolve(projectRoot, SKILLS_DIR_NAME);
+  return resolveWritableSkillsRoot();
 }
 
 function getConfigPath(): string {
