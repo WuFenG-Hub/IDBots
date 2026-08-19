@@ -20,6 +20,9 @@ export type DshStreamSlot = 'text' | 'thinking'
  * after streaming: DeepSeek Responses commentary-phase text streams as text
  * (the wire marks the phase only in the assembled replay state) and is
  * finalized as thinking so it collapses exactly like Claude-kernel thinking.
+ * Official DeepSeek (no phase tags) uses the same finalize metadata when a
+ * leaked text placeholder has to be closed; tool-step commentary otherwise
+ * stays in the thinking slot without a second message.
  */
 export type DshFinalizeMetadata = { isThinking?: boolean }
 
