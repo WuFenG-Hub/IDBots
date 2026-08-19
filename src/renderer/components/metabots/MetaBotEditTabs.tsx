@@ -15,7 +15,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PhotoIcon, PlusIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { PhotoIcon, PlusIcon, QuestionMarkCircleIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { configService } from '../../services/config';
 import { isLlmEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
@@ -479,6 +479,8 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const rowClass = 'grid grid-cols-1 md:grid-cols-[132px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
   const labelClass = 'pt-2 text-sm font-medium dark:text-claude-darkText text-claude-text';
   const hintClass = 'text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1';
+  // Keep primary and fallback brain pickers the same half-column width.
+  const llmPickerWidthClass = 'w-1/2 min-w-0 shrink-0';
   const inputChromeClass = 'px-3 py-2 text-sm rounded-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text border dark:border-claude-darkBorder border-claude-border focus:outline-none focus:ring-2 focus:ring-claude-accent';
   const inputClass = `w-full ${inputChromeClass}`;
   const clearActionClass = 'shrink-0 px-3 py-2 text-xs rounded-xl border dark:border-claude-darkBorder border-claude-border text-red-500 dark:text-red-400 dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors whitespace-nowrap';
@@ -732,21 +734,41 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
                 )}
               </div>
             ) : (
-              <ModelEffortPicker
-                id="metabot-llm"
-                variant="field"
-                value={{
-                  modelId: values.llm_id || null,
-                  providerKey: values.llm_provider || null,
-                  effort: brainEffortOf(values.llm_effort),
-                }}
-                onChange={(selection) => {
-                  handleChange('llm_id', selection.modelId ?? '');
-                  handleChange('llm_provider', selection.providerKey ?? '');
-                  handleChange('llm_effort', selection.effort ?? '');
-                }}
-                globalDefaultModel={globalDefaultModel}
-              />
+              <div className="flex items-center gap-2">
+                <div className={llmPickerWidthClass}>
+                  <ModelEffortPicker
+                    id="metabot-llm"
+                    variant="field"
+                    value={{
+                      modelId: values.llm_id || null,
+                      providerKey: values.llm_provider || null,
+                      effort: brainEffortOf(values.llm_effort),
+                    }}
+                    onChange={(selection) => {
+                      handleChange('llm_id', selection.modelId ?? '');
+                      handleChange('llm_provider', selection.providerKey ?? '');
+                      handleChange('llm_effort', selection.effort ?? '');
+                    }}
+                    globalDefaultModel={globalDefaultModel}
+                    onManageModels={onRequestModelSettings}
+                  />
+                </div>
+                <span className="relative inline-flex shrink-0 group">
+                  <button
+                    type="button"
+                    className="rounded-full p-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-accent dark:hover:text-claude-accent transition-colors"
+                    aria-label={i18nService.t('metabotPrimaryLlmHint')}
+                  >
+                    <QuestionMarkCircleIcon className="h-4 w-4" />
+                  </button>
+                  <span
+                    role="tooltip"
+                    className="pointer-events-none absolute left-0 bottom-full mb-1.5 z-50 w-56 rounded-md border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-2.5 py-1.5 text-[11px] leading-relaxed dark:text-claude-darkText text-claude-text shadow-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 whitespace-normal"
+                  >
+                    {i18nService.t('metabotPrimaryLlmHint')}
+                  </span>
+                </span>
+              </div>
             )}
           </div>
         </div>
@@ -758,8 +780,8 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
             </label>
             <div className="min-w-0">
               {values.fallback_llm_id.trim() ? (
-                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                  <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <div className={llmPickerWidthClass}>
                     <ModelEffortPicker
                       id="metabot-fallback-llm"
                       variant="field"
@@ -774,6 +796,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
                         handleChange('fallback_llm_effort', selection.effort ?? '');
                       }}
                       globalDefaultModel={globalDefaultModel}
+                      onManageModels={onRequestModelSettings}
                     />
                   </div>
                   <button
