@@ -976,9 +976,33 @@ export class SkillManager {
     return String(skillId || '').trim().startsWith(SUPERPOWERS_SKILL_PREFIX);
   }
 
+  /**
+   * Cap routing-list descriptions: the router only needs the leading trigger
+   * clauses, and a handful of skills carry 700-900-char descriptions that
+   * bloat every first-turn prompt on both kernels. Truncate at the last
+   * sentence/clause boundary before the cap (falling back to a hard cut when
+   * no boundary sits in the last 40%) so trailing keywords are not half-cut.
+   */
+  private truncateSkillDescriptionForListing(description: string, maxChars = 500): string {
+    const text = String(description ?? '').trim();
+    if (text.length <= maxChars) return text;
+    const window = text.slice(0, maxChars);
+    const boundary = Math.max(
+      window.lastIndexOf('。'),
+      window.lastIndexOf('！'),
+      window.lastIndexOf('？'),
+      window.lastIndexOf('. '),
+      window.lastIndexOf('; '),
+      window.lastIndexOf('；'),
+      window.lastIndexOf('\n')
+    );
+    const cut = boundary >= maxChars * 0.6 ? boundary + 1 : maxChars;
+    return `${text.slice(0, cut).trim()}…`;
+  }
+
   private buildSkillEntries(skills: SkillRecord[]): string {
     return skills
-      .map((skill) => `  <skill><id>${skill.id}</id><name>${skill.name}</name><description>${skill.description}</description><location>${skill.skillPath}</location></skill>`)
+      .map((skill) => `  <skill><id>${skill.id}</id><name>${skill.name}</name><description>${this.truncateSkillDescriptionForListing(skill.description)}</description><location>${skill.skillPath}</location></skill>`)
       .join('\n');
   }
 
