@@ -24,6 +24,13 @@ import { enqueuePendingConsent, dequeuePendingConsent } from './store/slices/age
 import { scheduledTaskService } from './services/scheduledTask';
 import { groupTaskService } from './services/groupTaskService';
 import { checkForAppUpdate, type AppUpdateInfo, type AppUpdateDownloadProgress, type ChangeLogEntry, UPDATE_POLL_INTERVAL_MS, UPDATE_HEARTBEAT_INTERVAL_MS } from './services/appUpdate';
+import {
+  type UpdatePhase,
+  modalStateForUpdatePhase,
+  resolveCancelDownloadFollowUp,
+  resolveConfirmUpdateAction,
+  shouldPreserveDownloadProgress,
+} from './services/appUpdateUi';
 import { defaultConfig, type ModelOptions } from './config';
 import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice';
 import { setPreferredMetabotId } from './store/slices/coworkSlice';
@@ -67,9 +74,9 @@ const normalizeFocusedOrderTxid = (value: unknown): string | null => {
   return /^[0-9a-f]{64}$/.test(normalized) ? normalized : null;
 };
 
-// 应用更新阶段：idle=无更新或静默下载失败（徽章保底可见）；downloading/applying=静默后台处理中（无 UI）；
-// ready=已下载待安装；restartReady=macOS 已静默替换待重启
-type UpdatePhase = 'idle' | 'downloading' | 'ready' | 'applying' | 'restartReady';
+// Update phases: idle = none / silent download failed; downloading / applying =
+// silent background work (badge + modal stay in sync); ready = downloaded,
+// waiting for install; restartReady = macOS silent apply done, waiting restart.
 
 const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
@@ -95,6 +102,9 @@ const App: React.FC = () => {
   // 静默下载失败（非用户取消）时置位，徽章给出可见提示；新一轮下载开始或手动下载成功后清除
   const [silentDownloadFailed, setSilentDownloadFailed] = useState(false);
   const downloadedUpdateFileRef = useRef<{ version: string; filePath: string } | null>(null);
+  // User clicked Install while silent download/apply still owns the file.
+  const userRequestedInstallRef = useRef(false);
+  const installInFlightRef = useRef(false);
   const changeUpdatePhase = useCallback((phase: UpdatePhase) => {
     updatePhaseRef.current = phase;
     setUpdatePhaseState(phase);
@@ -564,12 +574,43 @@ const App: React.FC = () => {
     showToast(i18nService.t('featureInDevelopment'));
   }, [showToast]);
 
+  const resolveDownloadedFilePath = useCallback((): string | null => {
+    if (!updateInfo) return null;
+    return downloadedUpdateFileRef.current?.version === updateInfo.latestVersion
+      ? downloadedUpdateFileRef.current.filePath
+      : null;
+  }, [updateInfo]);
+
+  const installDownloadedUpdate = useCallback(async (filePath?: string) => {
+    if (installInFlightRef.current) return;
+    const downloadedFile = filePath || resolveDownloadedFilePath();
+    if (!downloadedFile) {
+      setUpdateModalState('error');
+      setUpdateError(i18nService.t('updateInstallFailed'));
+      return;
+    }
+    installInFlightRef.current = true;
+    setUpdateModalState('installing');
+    setUpdateError(null);
+    try {
+      const installResult = await window.electron.appUpdate.install(downloadedFile);
+      if (!installResult.success) {
+        setUpdateModalState('error');
+        setUpdateError(installResult.error || i18nService.t('updateInstallFailed'));
+      }
+    } catch (error) {
+      setUpdateModalState('error');
+      setUpdateError(error instanceof Error ? error.message : i18nService.t('updateInstallFailed'));
+    } finally {
+      installInFlightRef.current = false;
+    }
+  }, [resolveDownloadedFilePath]);
+
   const startSilentDownload = useCallback(async (info: AppUpdateInfo) => {
+    userRequestedInstallRef.current = false;
     changeUpdatePhase('downloading');
     setDownloadProgress(null);
-    // 新一轮下载开始，清除之前的失败标记
     setSilentDownloadFailed(false);
-    // 静默下载也订阅进度，徽章以非打扰方式展示后台下载状态
     const unsubscribe = window.electron.appUpdate.onDownloadProgress((progress) => {
       setDownloadProgress(progress);
     });
@@ -577,7 +618,6 @@ const App: React.FC = () => {
       const downloadResult = await window.electron.appUpdate.download(info.url, info.latestVersion, info.sha256);
       unsubscribe();
       if (!downloadResult.success || !downloadResult.filePath) {
-        // 静默下载失败：部分文件保留在本地，徽章给出可见提示，下次检查会自动续传
         console.warn('[AppUpdate] Silent download failed:', downloadResult.error);
         if (downloadResult.error !== 'Download cancelled') {
           setSilentDownloadFailed(true);
@@ -592,23 +632,27 @@ const App: React.FC = () => {
         try {
           const applyResult = await window.electron.appUpdate.applySilent(downloadResult.filePath);
           if (applyResult.success) {
+            userRequestedInstallRef.current = false;
             changeUpdatePhase('restartReady');
             return;
           }
-          // 权限不足等原因：保留本地下载文件，回退为点击安装（提权）流程
           console.warn('[AppUpdate] Silent apply failed:', applyResult.error);
         } catch (applyError) {
           console.warn('[AppUpdate] Silent apply error:', applyError);
         }
       }
       changeUpdatePhase('ready');
+      if (userRequestedInstallRef.current) {
+        userRequestedInstallRef.current = false;
+        void installDownloadedUpdate(downloadResult.filePath);
+      }
     } catch (error) {
       unsubscribe();
       console.warn('[AppUpdate] Silent download error:', error);
       setSilentDownloadFailed(true);
       changeUpdatePhase('idle');
     }
-  }, [changeUpdatePhase]);
+  }, [changeUpdatePhase, installDownloadedUpdate]);
 
   const runUpdateCheck = useCallback(async () => {
     if (mockUpdateModeRef.current) {
@@ -642,14 +686,53 @@ const App: React.FC = () => {
 
   const handleOpenUpdateModal = useCallback(() => {
     if (!updateInfo) return;
-    // 下载中打开模态框时展示实时进度（可取消）；其余情况按阶段展示
-    setUpdateModalState(
-      updatePhase === 'restartReady' ? 'restart' : updatePhase === 'downloading' ? 'downloading' : 'info',
-    );
+    setUpdateModalState(modalStateForUpdatePhase(updatePhase));
     setUpdateError(null);
-    setDownloadProgress(null);
+    if (!shouldPreserveDownloadProgress(updatePhase)) {
+      setDownloadProgress(null);
+    }
     setShowUpdateModal(true);
   }, [updateInfo, updatePhase]);
+
+  // Keep an already-open modal in lockstep with silent download/apply so it
+  // never sits at 100% with only Cancel after the background flow has moved on.
+  useEffect(() => {
+    if (!showUpdateModal) return;
+
+    if (updatePhase === 'restartReady') {
+      userRequestedInstallRef.current = false;
+      setUpdateModalState((current) => (current === 'error' ? current : 'restart'));
+      return;
+    }
+
+    if (updatePhase === 'applying') {
+      setUpdateModalState((current) => (current === 'error' ? current : 'installing'));
+      return;
+    }
+
+    if (updatePhase === 'ready') {
+      if (userRequestedInstallRef.current) {
+        userRequestedInstallRef.current = false;
+        void installDownloadedUpdate();
+        return;
+      }
+      setUpdateModalState((current) => {
+        if (current === 'error') return current;
+        if (installInFlightRef.current) return current;
+        if (current === 'downloading' || current === 'installing') return 'info';
+        return current;
+      });
+      return;
+    }
+
+    if (updatePhase === 'idle') {
+      userRequestedInstallRef.current = false;
+      setUpdateModalState((current) => {
+        if (current === 'downloading' || current === 'installing') return 'info';
+        return current;
+      });
+    }
+  }, [showUpdateModal, updatePhase, installDownloadedUpdate]);
 
   const handleConfirmUpdate = useCallback(async () => {
     if (!updateInfo) return;
@@ -659,34 +742,35 @@ const App: React.FC = () => {
       return;
     }
 
-    // macOS 静默替换已完成：用户确认后重启进入新版本
-    if (updateModalState === 'restart') {
+    const action = resolveConfirmUpdateAction({
+      phase: updatePhaseRef.current,
+      modalState: updateModalState,
+      downloadedFilePath: resolveDownloadedFilePath(),
+    });
+
+    if (action.type === 'relaunch') {
       await window.electron.appUpdate.relaunchNow();
       return;
     }
 
-    const downloadedFile = downloadedUpdateFileRef.current?.version === updateInfo.latestVersion
-      ? downloadedUpdateFileRef.current.filePath
-      : null;
-
-    if (downloadedFile) {
-      // 更新包已在本地：直接安装（mac 提权安装后自动重启 / Windows 退出后运行安装器）
-      setUpdateModalState('installing');
-      setUpdateError(null);
-      try {
-        const installResult = await window.electron.appUpdate.install(downloadedFile);
-        if (!installResult.success) {
-          setUpdateModalState('error');
-          setUpdateError(installResult.error || i18nService.t('updateInstallFailed'));
-        }
-      } catch (error) {
-        setUpdateModalState('error');
-        setUpdateError(error instanceof Error ? error.message : i18nService.t('updateInstallFailed'));
-      }
+    if (action.type === 'showRestart') {
+      userRequestedInstallRef.current = false;
+      setUpdateModalState('restart');
       return;
     }
 
-    // 保底路径：静默下载曾失败，走带进度提示的手动下载
+    if (action.type === 'waitForSilentApply') {
+      userRequestedInstallRef.current = true;
+      setUpdateModalState('installing');
+      return;
+    }
+
+    if (action.type === 'installLocal') {
+      userRequestedInstallRef.current = false;
+      await installDownloadedUpdate();
+      return;
+    }
+
     setUpdateModalState('downloading');
     setDownloadProgress(null);
     setUpdateError(null);
@@ -710,7 +794,6 @@ const App: React.FC = () => {
 
       if (downloadResult.filePath) {
         downloadedUpdateFileRef.current = { version: updateInfo.latestVersion, filePath: downloadResult.filePath };
-        // 手动下载成功，清除静默下载失败的提示
         setSilentDownloadFailed(false);
       }
 
@@ -730,12 +813,24 @@ const App: React.FC = () => {
       setUpdateModalState('error');
       setUpdateError(msg || i18nService.t('updateDownloadFailed'));
     }
-  }, [updateInfo, updateModalState]);
+  }, [updateInfo, updateModalState, resolveDownloadedFilePath, installDownloadedUpdate]);
 
   const handleCancelDownload = useCallback(async () => {
-    await window.electron.appUpdate.cancelDownload();
-    setUpdateModalState('info');
-    setDownloadProgress(null);
+    const result = await window.electron.appUpdate.cancelDownload();
+    const followUp = resolveCancelDownloadFollowUp({
+      phase: updatePhaseRef.current,
+      downloadWasActive: Boolean(result?.success),
+    });
+    if (followUp.type === 'resetToInfo') {
+      userRequestedInstallRef.current = false;
+      setUpdateModalState('info');
+      setDownloadProgress(null);
+      return;
+    }
+    setUpdateModalState(followUp.modalState);
+    if (followUp.modalState !== 'downloading') {
+      setDownloadProgress(null);
+    }
   }, []);
 
   const handleRetryUpdate = useCallback(() => {
@@ -1246,6 +1341,7 @@ const App: React.FC = () => {
           errorMessage={updateError}
           onCancelDownload={handleCancelDownload}
           onRetry={handleRetryUpdate}
+          installingHint={updatePhase === 'applying' ? i18nService.t('updateInstallingSilentHint') : undefined}
         />
       )}
       {permissionModal}

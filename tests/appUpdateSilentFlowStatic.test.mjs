@@ -43,8 +43,9 @@ test('Preload and renderer typings expose the new appUpdate APIs', () => {
 
 test('Renderer runs silent download flow gated by update phase', () => {
   const source = read('src/renderer/App.tsx');
+  const ui = read('src/renderer/services/appUpdateUi.ts');
 
-  assert.match(source, /type UpdatePhase = 'idle' \| 'downloading' \| 'ready' \| 'applying' \| 'restartReady';/);
+  assert.match(ui, /export type UpdatePhase = 'idle' \| 'downloading' \| 'ready' \| 'applying' \| 'restartReady';/);
   assert.match(source, /const startSilentDownload = useCallback\(async \(info: AppUpdateInfo\)/);
   assert.match(source, /await window\.electron\.appUpdate\.applySilent\(downloadResult\.filePath\)/);
   assert.match(source, /changeUpdatePhase\('restartReady'\)/);
@@ -175,6 +176,27 @@ test('Update modal supports restart state and ready-to-install copy', () => {
   assert.match(source, /i18nService\.t\('updateRestartNow'\)/);
   assert.match(source, /i18nService\.t\('updateDownloadedTitle'\)/);
   assert.match(source, /i18nService\.t\('updateInstallNow'\)/);
+  // At 100% the Cancel button becomes Install so the open-modal path can join silent apply
+  assert.match(source, /const downloadComplete = isDownloadComplete\(downloadProgress\)/);
+  assert.match(source, /downloadComplete \? i18nService\.t\('updateDownloadedTitle'\) : i18nService\.t\('updateDownloading'\)/);
+  assert.match(source, /downloadComplete \? \([\s\S]*?onClick=\{onConfirm\}[\s\S]*?updateInstallNow[\s\S]*?\) : \([\s\S]*?onClick=\{onCancelDownload\}/);
+});
+
+test('Open update modal stays in sync with silent download/apply and does not race install', () => {
+  const source = read('src/renderer/App.tsx');
+
+  assert.match(source, /modalStateForUpdatePhase\(updatePhase\)/);
+  assert.match(source, /shouldPreserveDownloadProgress\(updatePhase\)/);
+  assert.match(source, /resolveConfirmUpdateAction\(/);
+  assert.match(source, /resolveCancelDownloadFollowUp\(/);
+  assert.match(source, /userRequestedInstallRef/);
+  assert.match(source, /installInFlightRef/);
+  assert.match(source, /action\.type === 'waitForSilentApply'/);
+  assert.match(source, /action\.type === 'showRestart'/);
+  assert.match(source, /updatePhase === 'restartReady'/);
+  assert.match(source, /updatePhase === 'applying'/);
+  assert.match(source, /void installDownloadedUpdate\(\)/);
+  assert.match(source, /installingHint=\{updatePhase === 'applying' \? i18nService\.t\('updateInstallingSilentHint'\) : undefined\}/);
 });
 
 test('Update badge supports a phase-aware label', () => {
@@ -187,7 +209,7 @@ test('Update badge supports a phase-aware label', () => {
 test('i18n contains silent-update copy in zh and en', () => {
   const source = read('src/renderer/services/i18n.ts');
 
-  for (const key of ['updateReadyPill', 'updateDownloadedTitle', 'updateInstallNow', 'updateRestartTitle', 'updateRestartMessage', 'updateRestartNow', 'updateLater', 'updateDownloadingPill', 'updateResumingPill', 'updateDownloadFailedPill', 'updateDownloadFailedTitle']) {
+  for (const key of ['updateReadyPill', 'updateDownloadedTitle', 'updateInstallNow', 'updateRestartTitle', 'updateRestartMessage', 'updateRestartNow', 'updateLater', 'updateDownloadingPill', 'updateResumingPill', 'updateDownloadFailedPill', 'updateDownloadFailedTitle', 'updateInstallingSilentHint']) {
     const occurrences = source.split(`${key}:`).length - 1;
     assert.ok(occurrences >= 2, `i18n key ${key} should exist in both zh and en dictionaries`);
   }
