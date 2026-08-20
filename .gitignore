@@ -96,6 +96,7 @@ tests/*
 !tests/openTeamInviteA2ADisplay.test.mjs
 !tests/privateChatAllowChatSkillsPrompt.test.mjs
 !tests/skillManagerOrderSkillPrompt.test.mjs
+!tests/skillPromptMarkers.test.mjs
 !tests/gigSquareOrderMessageBuilder.test.mjs
 !tests/gigSquareOnlineState.test.mjs
 !tests/gigSquareSkillOptions.test.mjs

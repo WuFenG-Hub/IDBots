@@ -57,6 +57,7 @@ import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
+import { hasEmbeddedSkillCatalog } from './skillPromptMarkers';
 import { buildMetabotPersonaPrompt } from './metabotPersonaPrompt';
 import { readBootstrapDoc } from './welcomeBootstrap';
 import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
@@ -4716,8 +4717,11 @@ export class CoworkRunner extends EventEmitter {
     activeSession: ActiveSession,
     baseSystemPrompt: string
   ): { skillsSection: string | null; skillsCatalogMode: 'volatile' | 'inline' | 'legacy' } {
-    const hasInlineSkills = /## Skills \(mandatory\)|<available_skills>|<skill_context>/.test(baseSystemPrompt ?? '');
-    if (hasInlineSkills) {
+    // Only an actually-EMBEDDED catalog counts as legacy — a prose mention
+    // (e.g. the default system prompt's web-search rule referencing the
+    // skills catalog) must not suppress the split, or every default session
+    // would lose skills entirely.
+    if (hasEmbeddedSkillCatalog(baseSystemPrompt)) {
       return { skillsSection: null, skillsCatalogMode: 'legacy' };
     }
     const parts = this.coworkSkillPromptsProvider?.() ?? null;
