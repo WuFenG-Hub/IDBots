@@ -51,3 +51,11 @@ test('opening a Bot Browser URI selects the browser pane inside Bot Internet', (
   assert.match(src, /const openBrowserHome[\s\S]*setInternetPane\('browser'\)/);
   assert.match(src, /const controlTabs[\s\S]*setInternetPane\('browser'\)/);
 });
+
+test('Bot Internet keeps the Co-Work panel visible for Hub and Meta Apps', () => {
+  const src = fs.readFileSync(path.join(root, 'src/renderer/components/Sidebar.tsx'), 'utf8');
+  const internetBranch = src.slice(src.indexOf("mode === 'home'"));
+  assert.match(internetBranch, /<BotBrowserCoworkPanel onShowSkills=\{onShowSkills\} \/>/);
+  assert.doesNotMatch(internetBranch, /internetPane === 'browser'/);
+  assert.doesNotMatch(internetBranch, /internetPane !== 'browser'/);
+});
