@@ -2,6 +2,18 @@ function compact(parts) {
   return parts.filter(Boolean).join(' ');
 }
 
+/**
+ * Twin identity is scarce and sticky. Show the Twin switch when:
+ * - this bot already is the Twin (so the user can turn that identity off), or
+ * - this bot is a Worker and no other Twin exists yet.
+ * The Welcome Bot never shows the switch and can never become Twin.
+ */
+export function canShowMetabotTwinSwitch({ metabotType, hasOtherTwin }) {
+  if (metabotType === 'welcome') return false;
+  if (metabotType === 'twin') return true;
+  return !hasOtherTwin;
+}
+
 export function buildMetaBotToggleViewModel({ enabled, variant = 'enable', disabled = false }) {
   const trackClass = compact([
     'w-9 h-5',

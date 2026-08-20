@@ -174,7 +174,7 @@ function formatDeleteResult(id: number, result: DeleteMetaBotResult): string {
   if (!result.success) {
     return `MetaBot deletion failed (id=${id}): ${result.error ?? 'unknown error'}`;
   }
-  return `MetaBot (id=${id}) deleted. If the deleted bot was the Twin, Twin status was transferred to the earliest remaining bot.`;
+  return `MetaBot (id=${id}) deleted. If the deleted bot was the Twin, Twin status was transferred to the earliest remaining non-welcome bot (if any).`;
 }
 
 export type ChatSkillOp = { action: 'add' | 'remove'; skill: string };
@@ -374,7 +374,7 @@ export function buildMetabotManageAgentTools(deps: {
       : [
           'Update ONE existing local MetaBot: rename, persona, LLM, enabled, chat skills, homepage, a2a. Twin Bot only.',
           'metabot_id required (resolve names via metabot_list); pass only changed fields; omitted keep values.',
-          'metabot_type "twin" demotes the current Twin. chat_skill_op adds/removes one skill (no confirmation); allow_chat_skills replaces the list — never pass both. homepage null or "default" resets.',
+          'metabot_type "twin" is allowed only when no Twin currently exists; the Welcome Bot can never become Twin. The current Twin may demote itself to "worker". chat_skill_op adds/removes one skill (no confirmation); allow_chat_skills replaces the list — never pass both. homepage null or "default" resets.',
           'Owner (boss_global_metaid) NOT settable here — user sets it in My Bots > Edit; never attempt. Info-pin edits re-publish on-chain (best-effort, reports txids/partial); a2a/enabled/type stay local.',
         ].join(' '),
     {
@@ -386,7 +386,7 @@ export function buildMetabotManageAgentTools(deps: {
       metabot_type: z
         .enum(['twin', 'worker'])
         .optional()
-        .describe('Promote to Twin (demotes the current Twin) or demote to Worker.'),
+        .describe('Promote to Twin only when none exists, or demote the current Twin to Worker. The Welcome Bot cannot become Twin.'),
       role: z.string().optional().describe('New role/title.'),
       soul: z.string().optional().describe('New persona/soul description.'),
       goal: z.string().optional().describe('New goal statement.'),
@@ -534,7 +534,7 @@ export function buildMetabotManageAgentTools(deps: {
     [
       'Permanently delete ONE local MetaBot (DB row removed; on-chain identity abandoned; wallet record kept). Twin Bot only.',
       'Use only when the user clearly asks to delete/remove a specific bot; resolve via metabot_list and CONFIRM the exact name first — irreversible.',
-      'metabot_id required. Do not delete yourself (the Twin) unless the user insists; deleting the last remaining bot is refused. Twin deletion transfers Twin status to the earliest remaining bot; experience/memory rows are preserved.',
+      'metabot_id required. Do not delete yourself (the Twin) unless the user insists; deleting the last remaining bot is refused. Twin deletion transfers Twin status to the earliest remaining non-welcome bot (if any); experience/memory rows are preserved.',
     ].join(' '),
     {
       metabot_id: z.number().int().positive().describe('id of the bot to delete (from metabot_list).'),

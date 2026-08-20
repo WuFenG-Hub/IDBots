@@ -201,6 +201,42 @@ export class MetabotStore {
     );
   }
 
+  /**
+   * Twin identity is scarce and sticky:
+   * - the Welcome Bot can never become Twin (its type is otherwise immutable)
+   * - a Worker can become Twin only when no other Twin exists
+   * - the current Twin may demote itself to Worker
+   * Steal-by-promotion (auto-demoting the current Twin from another bot) is refused.
+   */
+  private resolveNextMetabotType(
+    existingType: Metabot['metabot_type'],
+    requested: Metabot['metabot_type'] | undefined,
+    selfId: number,
+  ): Metabot['metabot_type'] {
+    if (requested === undefined) return existingType;
+    if (existingType === 'welcome') {
+      if (requested === 'twin') {
+        throw new Error('WELCOME_CANNOT_BE_TWIN');
+      }
+      return 'welcome';
+    }
+    if (requested === 'welcome') {
+      return existingType === 'twin' ? 'twin' : 'worker';
+    }
+    if (requested === 'twin') {
+      if (existingType === 'twin') return 'twin';
+      const otherTwin = this.getOne<{ id: number }>(
+        "SELECT id FROM metabots WHERE metabot_type = 'twin' AND id != ? LIMIT 1",
+        [selfId]
+      );
+      if (otherTwin) {
+        throw new Error('TWIN_ALREADY_EXISTS');
+      }
+      return 'twin';
+    }
+    return 'worker';
+  }
+
   private getOne<T>(sql: string, params: (string | number | null)[] = []): T | undefined {
     const result = this.db.exec(sql, params);
     if (!result[0]?.values[0]) return undefined;
@@ -564,8 +600,8 @@ export class MetabotStore {
         ? (normalizeA2AAutoReplyEnabled(input.a2a_auto_reply_enabled) ? 1 : 0)
         : (existing.a2a_auto_reply_enabled == null ? null : (existing.a2a_auto_reply_enabled ? 1 : 0));
 
-    if (input.metabot_type === 'twin' && existing.metabot_type !== 'twin') {
-      // Machine-wide unique Twin: promoting this bot first demotes the old twin.
+    const nextMetabotType = this.resolveNextMetabotType(existing.metabot_type, input.metabot_type, id);
+    if (nextMetabotType === 'twin' && existing.metabot_type !== 'twin') {
       this.demoteOtherTwins(id);
     }
 
@@ -590,7 +626,7 @@ export class MetabotStore {
           input.metaid ?? existing.metaid,
           input.globalmetaid !== undefined ? input.globalmetaid : existing.globalmetaid,
           input.metabot_info_pinid !== undefined ? input.metabot_info_pinid : existing.metabot_info_pinid,
-          input.metabot_type ?? existing.metabot_type,
+          nextMetabotType,
           input.created_by ?? existing.created_by,
           input.role ?? existing.role,
           input.soul ?? existing.soul,
@@ -638,7 +674,7 @@ export class MetabotStore {
           input.metaid ?? existing.metaid,
           input.globalmetaid !== undefined ? input.globalmetaid : existing.globalmetaid,
           input.metabot_info_pinid !== undefined ? input.metabot_info_pinid : existing.metabot_info_pinid,
-          input.metabot_type ?? existing.metabot_type,
+          nextMetabotType,
           input.created_by ?? existing.created_by,
           input.role ?? existing.role,
           input.soul ?? existing.soul,
@@ -683,10 +719,10 @@ export class MetabotStore {
   }
 
   /**
-   * Restore the machine-wide "exactly one Twin" invariant after events that can
-   * leave zero Twins (mnemonic restore hardcodes 'worker'; deleting the Twin).
-   * No-op when a Twin already exists or no bots remain; otherwise promotes the
-   * earliest-created bot (lowest id on ties), mirroring the one-shot backfill.
+   * Restore a Twin after events that can leave zero Twins (mnemonic restore
+   * hardcodes 'worker'; deleting the Twin). No-op when a Twin already exists
+   * or no eligible bots remain; otherwise promotes the earliest-created
+   * non-welcome bot (lowest id on ties). The Welcome Bot is never promoted.
    */
   ensureTwinExists(): void {
     const twin = this.getOne<{ id: number }>(
@@ -695,7 +731,12 @@ export class MetabotStore {
     if (twin) return;
     this.db.run(
       `UPDATE metabots SET metabot_type = 'twin', updated_at = ?
-       WHERE id = (SELECT id FROM metabots ORDER BY created_at ASC, id ASC LIMIT 1)`,
+       WHERE id = (
+         SELECT id FROM metabots
+         WHERE metabot_type != 'welcome'
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1
+       )`,
       [Date.now()]
     );
     this.saveDb();

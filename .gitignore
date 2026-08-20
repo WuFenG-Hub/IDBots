@@ -153,6 +153,7 @@ tests/*
 !tests/metabotWikiMetafileUri.test.mjs
 !tests/noteAttachmentsMetafile.test.mjs
 !tests/metabotHomepageInlineLayout.test.tsx
+!tests/metabotTwinSwitch.test.mjs
 !tests/metaAppProtocol.test.mjs
 
 # Local DB (never commit)

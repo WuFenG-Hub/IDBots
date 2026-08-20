@@ -3043,7 +3043,8 @@ export class SqliteStore {
    * One-shot backfill for the machine-wide unique-Twin rule:
    * a) normalize missing/unknown metabot_type values to 'worker';
    * b) when several twins exist, keep the earliest-created one (lowest id on ties);
-   * c) when no twin exists, promote the earliest-created bot (lowest id on ties).
+   * c) when no twin exists, promote the earliest-created non-welcome bot
+   *    (lowest id on ties). The Welcome Bot is never auto-promoted.
    * Guarded by a kv flag so a user's later manual twin transfer is never
    * overwritten by a re-run.
    */
@@ -3069,7 +3070,9 @@ export class SqliteStore {
       this.db.run(`
         UPDATE metabots SET metabot_type = 'twin'
         WHERE id = (
-          SELECT id FROM metabots ORDER BY created_at ASC, id ASC LIMIT 1
+          SELECT id FROM metabots
+          WHERE metabot_type != 'welcome'
+          ORDER BY created_at ASC, id ASC LIMIT 1
         )
           AND NOT EXISTS (SELECT 1 FROM metabots WHERE metabot_type = 'twin')
       `);

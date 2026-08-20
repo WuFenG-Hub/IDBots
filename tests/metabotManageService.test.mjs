@@ -373,6 +373,67 @@ test('updateMetaBotCore: local-only change (metabot_type) skips chain sync', asy
   assert.equal(syncCalls, 0);
 });
 
+test('applyMetabotUpdateLocal: refuses to promote a Worker while a Twin exists', async () => {
+  const store = await openStore();
+  const twin = seedMetabot(store, { name: 'Twin', type: 'twin', n: 1 });
+  const worker = seedMetabot(store, { name: 'Worker', type: 'worker', n: 2 });
+  const res = applyMetabotUpdateLocal(store, worker.id, { metabot_type: 'twin' }, {});
+  assert.equal(res.success, false);
+  assert.equal(res.error, 'TWIN_ALREADY_EXISTS');
+  assert.equal(store.getMetabotById(twin.id).metabot_type, 'twin');
+  assert.equal(store.getMetabotById(worker.id).metabot_type, 'worker');
+});
+
+test('applyMetabotUpdateLocal: promotes a Worker to Twin when none exists', async () => {
+  const store = await openStore();
+  const worker = seedMetabot(store, { name: 'Worker', type: 'worker', n: 1 });
+  const res = applyMetabotUpdateLocal(store, worker.id, { metabot_type: 'twin' }, {});
+  assert.equal(res.success, true);
+  assert.equal(res.metabot.metabot_type, 'twin');
+  assert.equal(store.getMetabotById(worker.id).metabot_type, 'twin');
+});
+
+test('applyMetabotUpdateLocal: Twin can demote itself without promoting another bot', async () => {
+  const store = await openStore();
+  const twin = seedMetabot(store, { name: 'Twin', type: 'twin', n: 1 });
+  const worker = seedMetabot(store, { name: 'Worker', type: 'worker', n: 2 });
+  const res = applyMetabotUpdateLocal(store, twin.id, { metabot_type: 'worker' }, {});
+  assert.equal(res.success, true);
+  assert.equal(res.metabot.metabot_type, 'worker');
+  assert.equal(store.getMetabotById(twin.id).metabot_type, 'worker');
+  assert.equal(store.getMetabotById(worker.id).metabot_type, 'worker');
+});
+
+test('applyMetabotUpdateLocal: Welcome Bot cannot become Twin', async () => {
+  const store = await openStore();
+  const welcome = seedMetabot(store, { name: 'I.D', type: 'welcome', n: 1 });
+  const res = applyMetabotUpdateLocal(store, welcome.id, { metabot_type: 'twin' }, {});
+  assert.equal(res.success, false);
+  assert.equal(res.error, 'WELCOME_CANNOT_BE_TWIN');
+  assert.equal(store.getMetabotById(welcome.id).metabot_type, 'welcome');
+});
+
+test('deleteMetaBotCore: deleting Twin does not promote the Welcome Bot', async () => {
+  const store = await openStore();
+  const welcome = seedMetabot(store, { name: 'I.D', type: 'welcome', n: 1 });
+  const twin = seedMetabot(store, { name: 'Twin', type: 'twin', n: 2 });
+  const res = await deleteMetaBotCore(twin.id, { store, onAfterMutation: async () => {} });
+  assert.equal(res.success, true);
+  assert.equal(store.getMetabotById(welcome.id).metabot_type, 'welcome');
+  assert.equal(store.listMetabots().some((m) => m.metabot_type === 'twin'), false);
+});
+
+test('deleteMetaBotCore: deleting Twin promotes the earliest remaining non-welcome bot', async () => {
+  const store = await openStore();
+  const welcome = seedMetabot(store, { name: 'I.D', type: 'welcome', n: 1 });
+  const twin = seedMetabot(store, { name: 'Twin', type: 'twin', n: 2 });
+  const worker = seedMetabot(store, { name: 'Worker', type: 'worker', n: 3 });
+  const res = await deleteMetaBotCore(twin.id, { store, onAfterMutation: async () => {} });
+  assert.equal(res.success, true);
+  assert.equal(store.getMetabotById(welcome.id).metabot_type, 'welcome');
+  assert.equal(store.getMetabotById(worker.id).metabot_type, 'twin');
+});
+
 test('updateMetaBotCore: name change triggers edit sync with syncName', async () => {
   const store = await openStore();
   const m = seedMetabot(store, { name: 'Gio' });
