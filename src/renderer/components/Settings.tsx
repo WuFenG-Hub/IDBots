@@ -9,7 +9,7 @@ import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
 import FreeQuotaCard from './FreeQuotaCard';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, OpenCodeIcon } from './icons/providers';
 import { useDispatch, useSelector } from 'react-redux';
@@ -436,8 +436,9 @@ const generateCustomProviderKey = (name: string, existingKeys: string[]): string
 
 const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const dispatch = useDispatch();
-  // 状态
-  const [activeTab, setActiveTab] = useState<TabType>(initialTab ?? 'general');
+  // Sandbox settings are temporarily hidden; fall back to general.
+  const resolvedInitialTab: TabType = initialTab === 'coworkSandbox' ? 'general' : (initialTab ?? 'general');
+  const [activeTab, setActiveTab] = useState<TabType>(resolvedInitialTab);
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
   const [language, setLanguage] = useState<LanguageType>(i18nService.getLanguage());
   const [autoLaunch, setAutoLaunchState] = useState(false);
@@ -529,7 +530,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const coworkConfig = useSelector((state: RootState) => state.cowork.config);
   const imConfig = useSelector((state: RootState) => state.im.config);
 
-  const [coworkExecutionMode, setCoworkExecutionMode] = useState<CoworkExecutionMode>(coworkConfig.executionMode || 'local');
+  const [coworkExecutionMode, setCoworkExecutionMode] = useState<CoworkExecutionMode>('local');
   // Shared MetaBot list — also used by the Archived Chats tab.
   const [coworkMemoryMetabots, setCoworkMemoryMetabots] = useState<MemoryMetabotOption[]>([]);
   const [coworkSandboxStatus, setCoworkSandboxStatus] = useState<CoworkSandboxStatus | null>(null);
@@ -569,7 +570,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   }, []);
 
   useEffect(() => {
-    setCoworkExecutionMode(coworkConfig.executionMode || 'local');
+    setCoworkExecutionMode('local');
   }, [coworkConfig.executionMode]);
 
   const loadCoworkSandboxStatus = useCallback(async () => {
@@ -779,9 +780,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   }, [notice]);
 
   useEffect(() => {
-    if (initialTab) {
-      setActiveTab(initialTab);
+    if (!initialTab || initialTab === 'coworkSandbox') {
+      if (initialTab === 'coworkSandbox') {
+        setActiveTab('general');
+      }
+      return;
     }
+    setActiveTab(initialTab);
   }, [initialTab]);
 
   // Subscribe to language changes
@@ -1884,7 +1889,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     { key: 'im',             label: i18nService.t('imBot'),          icon: <ChatBubbleLeftIcon className="h-5 w-5" /> },
     { key: 'coworkMemory',   label: i18nService.t('coworkMemoryTitle'), icon: <BrainIcon className="h-5 w-5" /> },
     { key: 'archivedChats',  label: i18nService.t('archivedChatsTab'),  icon: <ArchiveBoxIcon className="h-5 w-5" /> },
-    { key: 'coworkSandbox',  label: i18nService.t('coworkSandbox'),  icon: <ShieldCheckIcon className="h-5 w-5" /> },
     { key: 'paramsConfig',    label: i18nService.t('paramsAndConfig'), icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" /></svg> },
     { key: 'traffic',         label: i18nService.t('trafficTab'),     icon: <BoltIcon className="h-5 w-5" /> },
     { key: 'p2p',             label: 'P2P',                           icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" /></svg> },
@@ -2114,25 +2118,18 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
               <label className="block text-sm font-medium dark:text-claude-darkText text-claude-text">
                 {i18nService.t('coworkExecutionMode')}
               </label>
+              <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('coworkSandboxTemporarilyUnavailable')}
+              </div>
               <div className="space-y-2">
                 {([
-                  {
-                    value: 'auto',
-                    label: i18nService.t('coworkExecutionModeAuto'),
-                    hint: i18nService.t('coworkExecutionModeAutoHint'),
-                  },
                   {
                     value: 'local',
                     label: i18nService.t('coworkExecutionModeLocal'),
                     hint: i18nService.t('coworkExecutionModeLocalHint'),
                   },
-                  {
-                    value: 'sandbox',
-                    label: i18nService.t('coworkExecutionModeSandbox'),
-                    hint: i18nService.t('coworkExecutionModeSandboxHint'),
-                  },
                 ] as Array<{ value: CoworkExecutionMode; label: string; hint: string }>).map((option) => {
-                  const isDisabled = option.value === 'sandbox' && coworkSandboxDisabled;
+                  const isDisabled = false;
                   return (
                     <label
                       key={option.value}

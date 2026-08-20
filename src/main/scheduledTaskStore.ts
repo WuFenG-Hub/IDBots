@@ -1,6 +1,7 @@
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import { v4 as uuidv4 } from 'uuid';
 import { CronExpressionParser } from 'cron-parser';
+import { resolveCoworkExecutionMode } from './libs/coworkExecutionMode';
 
 // Types for scheduled tasks (main process side)
 export type TaskLastStatus = 'success' | 'error' | 'running' | null;
@@ -343,7 +344,7 @@ export class ScheduledTaskStore {
       input.enabled ? 1 : 0,
       JSON.stringify(input.schedule),
       input.prompt,
-      input.workingDirectory, input.systemPrompt, input.executionMode,
+      input.workingDirectory, input.systemPrompt, resolveCoworkExecutionMode(input.executionMode),
       input.metabotId ?? null,
       input.expiresAt ?? null,
       JSON.stringify(input.notifyPlatforms ?? []),
@@ -367,7 +368,7 @@ export class ScheduledTaskStore {
     const prompt = input.prompt ?? existing.prompt;
     const workingDirectory = input.workingDirectory ?? existing.workingDirectory;
     const systemPrompt = input.systemPrompt ?? existing.systemPrompt;
-    const executionMode = input.executionMode ?? existing.executionMode;
+    const executionMode = resolveCoworkExecutionMode(input.executionMode ?? existing.executionMode);
     const metabotId = input.metabotId !== undefined ? input.metabotId : existing.metabotId;
     const shouldResetCoworkSession = input.metabotId !== undefined && metabotId !== existing.metabotId;
     const expiresAt = input.expiresAt !== undefined ? input.expiresAt : existing.expiresAt;
@@ -683,7 +684,7 @@ export class ScheduledTaskStore {
       prompt: row.prompt,
       workingDirectory: row.working_directory,
       systemPrompt: row.system_prompt,
-      executionMode: row.execution_mode as 'auto' | 'local' | 'sandbox',
+      executionMode: resolveCoworkExecutionMode(row.execution_mode),
       metabotId: row.metabot_id ?? null,
       coworkSessionId: row.cowork_session_id ?? null,
       expiresAt: row.expires_at,

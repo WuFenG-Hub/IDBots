@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
 import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, isDshKernelEnabled, resolveDshProviderRoute } from './claudeSettings';
+import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
 import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
@@ -8834,7 +8835,9 @@ export class CoworkRunner extends EventEmitter {
     }
     const config = this.store.getConfig();
     const sessionExecutionMode = this.store.getSession(sessionId)?.executionMode;
-    const executionMode: CoworkExecutionMode = sessionExecutionMode || config.executionMode || 'local';
+    const executionMode: CoworkExecutionMode = resolveCoworkExecutionMode(
+      sessionExecutionMode || config.executionMode
+    );
     const resolvedCwd = path.resolve(cwd);
 
     if (!fs.existsSync(resolvedCwd)) {

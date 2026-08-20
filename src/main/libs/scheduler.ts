@@ -3,6 +3,7 @@ import { ScheduledTaskStore, ScheduledTask, ScheduledTaskRun, Schedule, NotifyPl
 import type { CoworkStore } from '../coworkStore';
 import type { CoworkRunner } from './coworkRunner';
 import { resolveSessionWorkingDirectory } from './botWorkspace';
+import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import type { IMGatewayManager } from '../im/imGatewayManager';
 
 interface SchedulerDeps {
@@ -304,7 +305,7 @@ export class Scheduler {
     const systemPrompt = [skillsPrompt, baseSystemPrompt]
       .filter((prompt): prompt is string => Boolean(prompt?.trim()))
       .join('\n\n');
-    const executionMode = task.executionMode || config.executionMode || 'auto';
+    const executionMode = resolveCoworkExecutionMode(task.executionMode || config.executionMode);
 
     const session = this.coworkStore.createSession(
       `[定时] ${task.name}`,

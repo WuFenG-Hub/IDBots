@@ -9267,10 +9267,9 @@ if (!gotTheLock) {
     memoryUserMemoriesMaxItems?: number;
   }) => {
     try {
-      const normalizedExecutionMode =
-        config.executionMode && String(config.executionMode) === 'container'
-          ? 'sandbox'
-          : config.executionMode;
+      const normalizedExecutionMode = config.executionMode !== undefined
+        ? 'local' as const
+        : undefined;
       const normalizedMemoryEnabled = typeof config.memoryEnabled === 'boolean'
         ? config.memoryEnabled
         : undefined;
