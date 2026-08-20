@@ -79,15 +79,20 @@ test('runner soft-threshold branch tries tool-result snipping before hard compac
   // Hard compaction starts a fresh SDK session; the old boundary no longer applies.
   assert.ok(localBody.includes('resetCoworkSnipHeadTokens(sessionId)'));
 
-  // The overflow-retry compaction path must stay free of snip-boundary writes:
-  // exactly one call site each, both inside the soft-threshold branch above.
-  // (Match full call strings: 'resetCoworkSnipHeadTokens(' contains
+  // The overflow-retry compaction path must stay free of snip-boundary writes.
+  // Call sites: Claude manual compact, Claude automatic compact, DSH manual
+  // compact. (Match full call strings: 'resetCoworkSnipHeadTokens(' contains
   // 'setCoworkSnipHeadTokens(' as a substring.)
   assert.equal(source.split('setCoworkSnipHeadTokens(sessionId, snipHeadTokens)').length - 1, 1);
-  assert.equal(source.split('resetCoworkSnipHeadTokens(sessionId)').length - 1, 2);
+  assert.equal(source.split('resetCoworkSnipHeadTokens(sessionId)').length - 1, 3);
   assert.ok(
     localBody.indexOf('resetCoworkSnipHeadTokens(sessionId)') < localBody.indexOf("activeSession.pendingCacheBreakReason = 'manual_compact'"),
     'manual-compaction branch must reset the snip boundary before starting the compacted session'
+  );
+  const dshBody = methodBody(source, 'private async runDshSessionLocal(');
+  assert.ok(
+    dshBody.includes('resetCoworkSnipHeadTokens(sessionId)'),
+    'DSH manual compaction must reset the snip boundary when starting a new DSH session'
   );
 });
 

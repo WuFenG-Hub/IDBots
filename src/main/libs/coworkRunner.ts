@@ -6237,7 +6237,39 @@ export class CoworkRunner extends EventEmitter {
     }
     const apiFormat = route.apiFormat === 'responses' ? 'responses' : 'openai';
     const modelLimits = resolveCurrentModelLimits(route.model);
-    const dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
+    let dshUserPrompt = prompt;
+    let dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
+    // Same consume path as runClaudeCodeLocal: the header button queues
+    // pendingManualCompact while idle; the next DSH turn starts a new DSH
+    // session id with a synthetic compacted prompt (the runtime persists
+    // history per session id, so reuse would ignore the compact).
+    const sessionSnapshotForBudget = this.store.getSession(sessionId);
+    const manualCompactQueued = activeSession.pendingManualCompact || this.pendingManualCompactSessions.has(sessionId);
+    if (manualCompactQueued) {
+      activeSession.pendingManualCompact = false;
+      this.pendingManualCompactSessions.delete(sessionId);
+      resetCoworkSnipHeadTokens(sessionId);
+      const compacted = buildCoworkCompactedPrompt({
+        messages: sessionSnapshotForBudget?.messages ?? [],
+        currentPrompt: prompt,
+        modelLimits,
+      });
+      dshUserPrompt = compacted.prompt;
+      dshSessionId = `cw-${sessionId}-${Date.now()}`;
+      activeSession.claudeSessionId = makeDshSessionHandle(dshSessionId);
+      this.store.updateSession(sessionId, { claudeSessionId: activeSession.claudeSessionId });
+      coworkLog('INFO', 'runDshSessionLocal', 'Manual compaction requested; starting compacted DSH session', {
+        sessionId,
+        modelId: modelLimits.modelId,
+        compactedEstimatedTokens: compacted.estimatedTokens,
+        compactedRecentMessages: compacted.recentMessages,
+        compactedSummarizedMessages: compacted.summarizedMessages,
+      });
+      this.addSystemMessage(
+        sessionId,
+        '已手动压缩历史并重置底层模型会话，本次输入从压缩后的上下文继续。'
+      );
+    }
     const hub = this.ensureDshTurnHub();
     // Same billing/upstream bookkeeping the Claude path records: the usage
     // chip's cost/balance rows key off billingSource, the upstream row off
@@ -6286,7 +6318,7 @@ export class CoworkRunner extends EventEmitter {
       const volatileHead = [localTimePrompt, volatileBlocks]
         .filter((section) => section?.trim())
         .join('\n\n')
-      const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${prompt}` : prompt
+      const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${dshUserPrompt}` : dshUserPrompt
       // Prompt attachments: collected from the ORIGINAL prompt (marker lines
       // reference user files, not the volatile context head).
       const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);

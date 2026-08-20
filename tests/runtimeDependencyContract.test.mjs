@@ -296,6 +296,11 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
     /loadClaudeSdk/,
     'generateSessionTitle must not spawn the sunset Claude Agent SDK',
   );
+  assert.match(
+    coworkRunnerSource,
+    /Manual compaction requested; starting compacted DSH session/,
+    'runDshSessionLocal must consume pendingManualCompact instead of ignoring it',
+  );
 });
 test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.js patching', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
