@@ -6072,23 +6072,13 @@ export class CoworkRunner extends EventEmitter {
 
   // ---- DSH kernel (Phase 1 M5) ---------------------------------------------
 
-  /**
-   * Per-turn kernel routing: the `dsh:` session-handle prefix pins an existing
-   * session to the DSH runtime; otherwise the opt-in flag plus an
-   * OpenAI-compatible provider route makes a new session DSH-eligible.
-   */
-  private shouldRunDshKernel(activeSession: ActiveSession): boolean {
-    try {
-      const route = this.resolveSessionDshRoute(activeSession.sessionId);
-      const choice = resolveKernelChoice({
-        enabled: isDshKernelEnabled(),
-        apiType: route?.apiFormat ?? null,
-        sessionHandle: activeSession.claudeSessionId,
-      });
-      return choice === 'dsh';
-    } catch {
-      return false;
-    }
+  private resolveSessionKernelChoice(activeSession: ActiveSession): ReturnType<typeof resolveKernelChoice> {
+    const route = this.resolveSessionDshRoute(activeSession.sessionId);
+    return resolveKernelChoice({
+      enabled: isDshKernelEnabled(),
+      apiType: route?.apiFormat ?? null,
+      sessionHandle: activeSession.claudeSessionId,
+    });
   }
 
   /**
@@ -6197,7 +6187,25 @@ export class CoworkRunner extends EventEmitter {
     cwd: string,
     systemPrompt: string
   ): Promise<void> {
-    if (this.shouldRunDshKernel(activeSession)) {
+    let kernelChoice: ReturnType<typeof resolveKernelChoice> = 'claude';
+    try {
+      kernelChoice = this.resolveSessionKernelChoice(activeSession);
+    } catch {
+      kernelChoice = 'claude';
+    }
+    if (kernelChoice === 'unavailable') {
+      this.handleError(
+        activeSession.sessionId,
+        tApp(
+          'Anthropic Messages 协议暂时不可用。请将供应商切换为 OpenAI-compatible 或 Responses。',
+          'The Anthropic Messages API format is temporarily unavailable. Switch the provider to OpenAI-compatible or Responses.'
+        )
+      );
+      this.clearPendingPermissions(activeSession.sessionId);
+      this.removeActiveSession(activeSession.sessionId, activeSession);
+      return;
+    }
+    if (kernelChoice === 'dsh') {
       await this.runDshSessionLocal(activeSession, prompt, cwd, systemPrompt);
       return;
     }

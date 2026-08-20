@@ -1,16 +1,16 @@
 // Kernel routing for the DSH cutover (Phase 1 M5): decides, per turn, whether
-// a cowork session runs on the Claude kernel (today's path, untouched) or the
-// DSH kernel (dsh-runtime subprocess via DshKernel).
+// a cowork session runs on the Claude kernel (sunset path) or the DSH kernel
+// (dsh-runtime subprocess via DshKernel).
 //
-// Rollout shape (per the Phase 1 plan): opt-in flag + OpenAI-compatible
-// providers first; anthropic-direct stays on the Claude kernel; a session that
-// has already run on DSH stays on DSH (its session handle is stored with the
-// `dsh:` prefix in cowork_sessions.claudeSessionId — no schema migration, the
-// prefix is the kernel marker and the rest is the DSH session id).
+// OpenAI-compatible providers go to DSH. Anthropic Messages (`apiType:
+// 'anthropic'`) is temporarily unavailable — DSH does not speak that wire,
+// and we do not fall back to the Claude SDK. A session that already ran on
+// DSH stays on DSH (its handle is stored with the `dsh:` prefix in
+// cowork_sessions.claudeSessionId).
 
 export const DSH_SESSION_PREFIX = 'dsh:'
 
-export type CoworkKernelChoice = 'claude' | 'dsh'
+export type CoworkKernelChoice = 'claude' | 'dsh' | 'unavailable'
 
 export interface KernelRoutingInput {
   /** Feature flag from app config (dshKernelEnabled). */
@@ -34,11 +34,15 @@ export function makeDshSessionHandle(dshSessionId: string): string {
 }
 
 /**
- * OpenAI-compatible apiTypes are DSH-eligible; 'anthropic' (direct Anthropic
- * protocol) stays on the Claude kernel during rollout.
+ * OpenAI-compatible apiTypes are DSH-eligible. Anthropic Messages is not.
  */
 export function isDshEligibleApiType(apiType?: string | null): boolean {
   return apiType === 'openai' || apiType === 'responses';
+}
+
+/** Anthropic Messages protocol — no DSH adapter, Claude SDK fallback retired. */
+export function isAnthropicDirectUnavailable(apiType?: string | null): boolean {
+  return apiType === 'anthropic';
 }
 
 export function resolveKernelChoice(input: KernelRoutingInput): CoworkKernelChoice {
@@ -46,6 +50,7 @@ export function resolveKernelChoice(input: KernelRoutingInput): CoworkKernelChoi
   // if the flag is later disabled mid-conversation (its handle only makes
   // sense to the DSH runtime).
   if (isDshSessionHandle(input.sessionHandle)) return 'dsh';
+  if (isAnthropicDirectUnavailable(input.apiType)) return 'unavailable';
   if (!input.enabled) return 'claude';
   return isDshEligibleApiType(input.apiType) ? 'dsh' : 'claude';
 }

@@ -265,7 +265,10 @@ const normalizeApiFormat = (value: unknown): 'anthropic' | 'openai' | 'responses
   if (value === 'responses') {
     return 'responses';
   }
-  return value === 'openai' ? 'openai' : 'anthropic';
+  if (value === 'anthropic') {
+    return 'anthropic';
+  }
+  return 'openai';
 };
 const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' | null => {
   if (provider === 'openai' || provider === 'gemini') {
@@ -280,9 +283,21 @@ const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' 
   }
   return null;
 };
-const getEffectiveApiFormat = (provider: string, value: unknown): 'anthropic' | 'openai' | 'responses' => (
-  getFixedApiFormatForProvider(provider) ?? normalizeApiFormat(value)
-);
+const getEffectiveApiFormat = (provider: string, value: unknown): 'anthropic' | 'openai' | 'responses' => {
+  const fixed = getFixedApiFormatForProvider(provider);
+  if (fixed) {
+    return fixed;
+  }
+  const normalized = normalizeApiFormat(value);
+  // Managed providers hide the format selector and pin chat-completions.
+  // Coerce leftover Anthropic Messages so they are not stuck unavailable.
+  if (normalized === 'anthropic' && isManagedProvider(provider)) {
+    return 'openai';
+  }
+  return normalized;
+};
+
+const isAnthropicDirectProvider = (provider: string): boolean => provider === 'anthropic';
 // DeepSeek hides the selector (official harness pins the key-only chat-completions
 // setup); the stored format still drives requests so legacy endpoints keep working.
 const shouldShowApiFormatSelector = (provider: string): boolean => (
@@ -521,7 +536,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [customProviderName, setCustomProviderName] = useState('');
   const [customProviderBaseUrl, setCustomProviderBaseUrl] = useState('');
   const [customProviderApiKey, setCustomProviderApiKey] = useState('');
-  const [customProviderApiFormat, setCustomProviderApiFormat] = useState<'anthropic' | 'openai' | 'responses'>('anthropic');
+  const [customProviderApiFormat, setCustomProviderApiFormat] = useState<'anthropic' | 'openai' | 'responses'>('openai');
   const [customProviderModels, setCustomProviderModels] = useState<Model[]>([]);
   const [customModelName, setCustomModelName] = useState('');
   const [customModelId, setCustomModelId] = useState('');
@@ -1393,7 +1408,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     setCustomProviderName('');
     setCustomProviderBaseUrl('');
     setCustomProviderApiKey('');
-    setCustomProviderApiFormat('anthropic');
+    setCustomProviderApiFormat('openai');
     setCustomProviderModels([]);
     setCustomModelName('');
     setCustomModelId('');
@@ -2586,7 +2601,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
               {Object.entries(visibleProviders).map(([provider, config]) => {
                 const providerKey = provider as ProviderType;
                 const missingApiKey = providerRequiresApiKey(providerKey) && !config.apiKey.trim();
-                const canToggleProvider = config.enabled || !missingApiKey;
+                const canToggleProvider = !isAnthropicDirectProvider(providerKey)
+                  && (config.enabled || !missingApiKey);
                 return (
                   <div
                     key={provider}
@@ -2595,7 +2611,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                       activeProvider === provider
                         ? 'bg-claude-accent/10 dark:bg-claude-accent/20 border border-claude-accent/30 shadow-subtle'
                         : 'dark:bg-claude-darkSurface/50 bg-claude-surface hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover border border-transparent'
-                    }`}
+                    } ${isAnthropicDirectProvider(providerKey) ? 'opacity-70' : ''}`}
                   >
                     <div className="flex flex-1 items-center">
                       <div className="mr-2 flex h-7 w-7 items-center justify-center">
@@ -2615,6 +2631,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                           {i18nService.t('providerRecommendedBadge')}
                         </span>
                       )}
+                      {isAnthropicDirectProvider(providerKey) && (
+                        <span className="ml-1.5 shrink-0 text-[10px] px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 font-medium">
+                          {i18nService.t('apiFormatTemporarilyUnavailable')}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center ml-2">
                       {isCustomProviderKey(providerKey) && (
@@ -2631,7 +2652,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                         </button>
                       )}
                       <div
-                        title={!canToggleProvider ? i18nService.t('configureApiKey') : undefined}
+                        title={
+                          isAnthropicDirectProvider(providerKey)
+                            ? i18nService.t('apiFormatAnthropicUnavailableHint')
+                            : (!canToggleProvider ? i18nService.t('configureApiKey') : undefined)
+                        }
                         className={`w-7 h-4 rounded-full flex items-center transition-colors ${
                           config.enabled ? 'bg-claude-accent' : 'dark:bg-claude-darkBorder bg-claude-border'
                         } ${
@@ -2639,7 +2664,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                         }`}
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (!canToggleProvider) {
+                          if (!canToggleProvider || isAnthropicDirectProvider(providerKey)) {
                             return;
                           }
                           toggleProviderEnabled(providerKey);
@@ -2659,6 +2684,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
 
             {/* Provider Settings - Right Side */}
             <div className="w-3/5 pl-4 space-y-4 overflow-y-auto">
+              {isAnthropicDirectProvider(activeProvider) && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                  {i18nService.t('apiFormatAnthropicUnavailableHint')}
+                </div>
+              )}
               <div className="flex items-center justify-between pb-2 border-b dark:border-claude-darkBorder border-claude-border">
                 <h3 className="text-base font-medium dark:text-claude-darkText text-claude-text">
                   {getProviderDisplayLabel(activeProvider, providers[activeProvider])} {i18nService.t('providerSettings')}
@@ -2741,17 +2771,20 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     {i18nService.t('apiFormat')}
                   </label>
                   <div className="flex items-center space-x-4 flex-wrap gap-y-1.5">
-                    <label className="flex items-center">
+                    <label className="flex items-center opacity-60 cursor-not-allowed">
                       <input
                         type="radio"
                         name={`${activeProvider}-apiFormat`}
                         value="anthropic"
                         checked={getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) === 'anthropic'}
-                        onChange={() => handleProviderConfigChange(activeProvider, 'apiFormat', 'anthropic')}
+                        disabled
                         className="h-3.5 w-3.5 text-claude-accent focus:ring-claude-accent dark:bg-claude-darkSurface bg-claude-surface"
                       />
                       <span className="ml-2 text-xs dark:text-claude-darkText text-claude-text">
                         {i18nService.t('apiFormatNative')}
+                        <span className="ml-1.5 text-[10px] text-amber-600 dark:text-amber-400">
+                          {i18nService.t('apiFormatTemporarilyUnavailable')}
+                        </span>
                       </span>
                     </label>
                     <label className="flex items-center">
@@ -2782,7 +2815,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     </label>
                   </div>
                   <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('apiFormatHint')}
+                    {getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) === 'anthropic'
+                      ? i18nService.t('apiFormatAnthropicUnavailableHint')
+                      : i18nService.t('apiFormatHint')}
                   </p>
                 </div>
               )}
@@ -3345,7 +3380,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                       }}
                       className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
                     >
-                      <option value="anthropic">{i18nService.t('apiFormatNative')}</option>
                       <option value="openai">{i18nService.t('apiFormatOpenAI')}</option>
                       <option value="responses">{i18nService.t('apiFormatResponses')}</option>
                     </select>
