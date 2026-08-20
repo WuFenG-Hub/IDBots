@@ -229,9 +229,36 @@ export interface DshHubOptions {
    *  plugin directory feeds entries here, so an install/uninstall applies on
    *  the next turn — config-change restart waits for quiescence as usual. */
   extraEntriesProvider?: () => Array<Record<string, unknown>>
+  /** Global skill-script host env (IDBOTS_API_BASE_URL, SKILLS_ROOT, …).
+   *  Re-read every ensure: the DSH bash tool does not receive per-session
+   *  env from getSkillSessionEnvOverrides, so scheduled-task and similar
+   *  scripts only see these values if they ride the shared child env. */
+  skillHostEnvProvider?: () => Record<string, string>
   /** Quiescence budget before a NON-deferrable config change restarts the
    *  shared runtime while turns are in flight (default 90s; tests shrink it). */
   configRestartQuiescenceMs?: number
+}
+
+/** Child-env map for the shared DSH runtime. Route credentials and the RPC
+ *  token stay first-class; skillHostEnv (IDBOTS_API_BASE_URL, SKILLS_ROOT)
+ *  is merged last so bash-launched SKILL scripts inherit the same host
+ *  channels as Claude subprocesses. */
+export function buildDshChildEnv(parts: {
+  routeApiKeys: Iterable<{ envName: string; apiKey: string }>
+  webSearchApiKey?: string
+  rpcToken: string
+  rpcAuthFile: string
+  skillHostEnv?: Record<string, string>
+}): Record<string, string> {
+  return {
+    ...Object.fromEntries(
+      [...parts.routeApiKeys].map(({ envName, apiKey }) => [envName, apiKey])
+    ),
+    ...(parts.webSearchApiKey ? { [DSH_WEBSEARCH_API_KEY_ENV]: parts.webSearchApiKey } : {}),
+    IDBOTS_RPC_TOKEN: parts.rpcToken,
+    [METAID_RPC_AUTHFILE_ENV]: parts.rpcAuthFile,
+    ...(parts.skillHostEnv ?? {}),
+  }
 }
 
 export class DshTurnHub {
@@ -455,31 +482,30 @@ export class DshTurnHub {
         },
       } : {}),
       extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
-      env: {
+      env: buildDshChildEnv({
         // Every seen route's credential rides the child env under ITS OWN
         // name (credentials never enter the generated config file on disk).
         // Accumulating all of them — not just the current turn's — keeps the
         // shared runtime able to serve every unioned route no matter which
         // provider last triggered the (re)spawn.
-        ...Object.fromEntries(
-          [...this.routeApiKeys.values()].map(({ envName, apiKey }) => [envName, apiKey])
-        ),
+        routeApiKeys: this.routeApiKeys.values(),
         // The web-search credential rides a DEDICATED name so it survives
         // provider switches (the route key above is swapped on every ensure).
-        ...(this.webSearchSeen ? { [DSH_WEBSEARCH_API_KEY_ENV]: this.webSearchSeen.apiKey } : {}),
+        webSearchApiKey: this.webSearchSeen?.apiKey,
         // The per-launch local RPC bearer token (S1 hardening) must ride the
         // runtime env too, or every bundled SKILL RPC client (group-task /
         // post-buzz / metaapp / omni-caster / upload) fails with 401 from DSH
         // sessions. Mirrors skillManager.ts runSkillById injection.
-        IDBOTS_RPC_TOKEN: getMetaidRpcToken(),
+        rpcToken: getMetaidRpcToken(),
         // Layer 2: the DSH bash tool scrubs env names matching
         // /KEY|PASSWORD|SECRET|TOKEN/i before model-visible subprocesses
         // inherit them, so the token above never reaches SKILL scripts run via
         // bash. Its mirror file (written per launch by the MetaID RPC server)
         // carries the credential instead; this env name must stay free of
         // KEY/PASSWORD/SECRET/TOKEN to survive the same scrub.
-        [METAID_RPC_AUTHFILE_ENV]: getMetaidRpcTokenFilePath(app.getPath('userData')),
-      },
+        rpcAuthFile: getMetaidRpcTokenFilePath(app.getPath('userData')),
+        skillHostEnv: this.opts.skillHostEnvProvider?.(),
+      }),
     }
     if (!this.workspaceSeen && input.workspace) this.workspaceSeen = input.workspace
     if (!this.kernel) {
