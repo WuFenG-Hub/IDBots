@@ -17,6 +17,7 @@ import {
   type ToolCallResult,
 } from './cognitiveChatCompletion';
 import { toLlmEffortLevel } from '../libs/llmEffort';
+import { copyRespondingPlaceholder } from '../libs/groupTaskCopy';
 import { getMetaidRpcBase, getMetaidRpcToken } from './metaidRpcEndpoint';
 import { getEnhancedEnv } from '../libs/coworkUtil';
 import { buildMetabotPersonaPrompt } from '../libs/metabotPersonaPrompt';
@@ -687,7 +688,7 @@ async function runReplyPipeline(
       const cwdForCowork = allowedRoots.length > 1 ? allowedRoots[allowedRoots.length - 1]! : allowedRoots[0]!;
       try {
         if (isLatestFromPrivileged) {
-          await broadcastGroupChat(task.metabot_id, task.group_id, metabot.name, '响应中…');
+          await broadcastGroupChat(task.metabot_id, task.group_id, metabot.name, copyRespondingPlaceholder());
         }
         console.log('[Orchestrator] Using Cowork for skill turn');
         replyText = await runSkillTurnViaCowork({
