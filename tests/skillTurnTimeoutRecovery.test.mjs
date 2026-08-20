@@ -28,8 +28,7 @@ const require = createRequire(import.meta.url);
 // the binary path string, so `app` is undefined and every bridge-level test
 // dies with a TypeError instead of exercising the watchdog/recovery flow.
 // Mock electron (same shape as groupTaskDaemon.test.mjs) and stub
-// generateSessionTitle (it would otherwise fire a real SDK query — the
-// session-title fallback is not what these tests cover).
+// generateSessionTitle (the session-title helper is not what these tests cover).
 const originalLoad = Module._load;
 Module._load = function patchedLoad(request, ...rest) {
   if (request === 'electron') {

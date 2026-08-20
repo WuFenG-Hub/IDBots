@@ -2,9 +2,7 @@ import { app, session } from 'electron';
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'fs';
 import { delimiter, dirname, join, resolve } from 'path';
-import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
-import { loadClaudeSdk } from './claudeSdk';
-import { buildEnvForConfig, getClaudeCodePath, getCurrentApiConfig } from './claudeSettings';
+import { buildEnvForConfig, getCurrentApiConfig } from './claudeSettings';
 import type { OpenAICompatProxyTarget } from './coworkOpenAICompatProxy';
 import { getInternalApiBaseURL } from './coworkOpenAICompatProxy';
 import { coworkLog } from './coworkLogger';
@@ -1156,58 +1154,24 @@ export async function getEnhancedEnvWithTmpdir(
   return env;
 }
 
+/** First-line, same-language title. DSH is the only kernel; do not spawn Claude SDK. */
+export function deriveSessionTitle(userIntent: string, maxChars = 50): string {
+  const collapsed = userIntent.replace(/\s+/g, ' ').trim();
+  if (!collapsed) return 'New Session';
+  if (collapsed.length <= maxChars) return collapsed;
+  return `${collapsed.slice(0, maxChars).trimEnd()}...`;
+}
+
 export async function generateSessionTitle(userIntent: string | null): Promise<string> {
   if (!userIntent) return 'New Session';
 
-  const claudeCodePath = getClaudeCodePath();
-  const currentEnv = await getEnhancedEnv();
-
   try {
-    const { query } = await loadClaudeSdk();
-    const promptOptions: Record<string, unknown> = {
-      model: getCurrentApiConfig()?.model || 'claude-sonnet',
-      env: currentEnv,
-      pathToClaudeCodeExecutable: claudeCodePath,
-      permissionMode: 'bypassPermissions',
-      // Isolate from user Claude Code settings (their env blocks would override ours).
-      settingSources: [],
-    };
-
-    // unstable_v2_prompt was removed in SDK 0.3.x; run a single-turn query and
-    // take the final result message instead.
-    let result: SDKResultMessage | null = null;
-    for await (const message of query({
-      prompt: `Generate a short, clear title (max 50 chars) for this conversation based on the user input below.
-IMPORTANT: The title MUST be in the SAME language as the user input. If user writes in Chinese, output Chinese title. If user writes in English, output English title.
-User input: ${userIntent}
-Output only the title, nothing else.`,
-      options: promptOptions as any,
-    })) {
-      if ((message as { type?: string })?.type === 'result') {
-        result = message as SDKResultMessage;
-      }
-    }
-
-    if (result && result.subtype === 'success') {
-      return result.result;
-    }
-
-    console.error('Claude SDK returned non-success result:', result);
-    return 'New Session';
+    return deriveSessionTitle(userIntent);
   } catch (error) {
     if (isSqliteWasmBoundsError(error)) {
       throw error;
     }
     console.error('Failed to generate session title:', error);
-    console.error('Claude Code path:', claudeCodePath);
-    console.error('Is packaged:', app.isPackaged);
-    console.error('Resources path:', process.resourcesPath);
-
-    if (userIntent) {
-      const words = userIntent.trim().split(/\s+/).slice(0, 5);
-      return words.join(' ').toUpperCase() + (userIntent.trim().split(/\s+/).length > 5 ? '...' : '');
-    }
-
     return 'New Session';
   }
 }

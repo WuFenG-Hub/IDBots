@@ -291,6 +291,11 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
     /private async runLocalKernel/,
     'Local sandbox fallbacks must dispatch through runLocalKernel so DSH stays the default',
   );
+  assert.doesNotMatch(
+    coworkUtilSource,
+    /loadClaudeSdk/,
+    'generateSessionTitle must not spawn the sunset Claude Agent SDK',
+  );
 });
 test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.js patching', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
@@ -338,10 +343,6 @@ test('cowork subprocess env disables Claude Code nonessential external traffic',
 
 test('SDK query call sites isolate from user Claude Code settings sources', () => {
   const coworkRunnerSource = fs.readFileSync(coworkRunnerPath, 'utf8');
-  const coworkUtilSource = fs.readFileSync(
-    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkUtil.ts'),
-    'utf8',
-  );
   const sandboxRunnerSource = fs.readFileSync(
     path.join(process.cwd(), 'sandbox', 'agent-runner', 'index.js'),
     'utf8',
@@ -351,11 +352,6 @@ test('SDK query call sites isolate from user Claude Code settings sources', () =
     coworkRunnerSource,
     /settingSources:\s*\[\]/,
     'CoworkRunner must pass settingSources: [] so user settings env blocks cannot override the session provider env',
-  );
-  assert.match(
-    coworkUtilSource,
-    /settingSources:\s*\[\]/,
-    'Session title generation must pass settingSources: [] for the same isolation',
   );
   assert.match(
     sandboxRunnerSource,
