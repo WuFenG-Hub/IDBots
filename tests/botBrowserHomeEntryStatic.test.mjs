@@ -132,3 +132,16 @@ test('Chain Community MetaApps run in Bot Browser instead of installing locally'
   assert.doesNotMatch(chainCommunitySource, /handleInstallCommunityMetaApp/);
   assert.match(chainCommunitySource, /handleRunCommunityMetaApp\(app\)/);
 });
+
+test('Meta Apps opens on chain community and lists that tab before My Apps', () => {
+  const managerSource = read('src/renderer/components/metaapps/MetaAppsManager.tsx');
+  assert.match(
+    managerSource,
+    /useState<'local' \| 'myApps' \| 'chainCommunity'>\('chainCommunity'\)/,
+  );
+
+  const tabsStart = managerSource.indexOf('{i18nService.t(\'chainCommunityMetaApps\')}');
+  const myAppsTab = managerSource.indexOf('{i18nService.t(\'myAppsTab\')');
+  assert.ok(tabsStart > 0, 'Chain community tab should exist');
+  assert.ok(myAppsTab > tabsStart, 'My Apps tab should render after chain community');
+});

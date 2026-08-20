@@ -48,7 +48,7 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
   onOpenBotInBrowser,
   onPreviewMetaAppByPin,
 }) => {
-  const [activeTab, setActiveTab] = useState<'local' | 'myApps' | 'chainCommunity'>('myApps');
+  const [activeTab, setActiveTab] = useState<'local' | 'myApps' | 'chainCommunity'>('chainCommunity');
   const [apps, setApps] = useState<MetaAppRecord[]>([]);
   const [communityApps, setCommunityApps] = useState<CommunityMetaAppRecord[]>([]);
   const [communityCursor, setCommunityCursor] = useState(COMMUNITY_ROOT_CURSOR);
@@ -693,17 +693,6 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
       <div className="flex items-center gap-2 border-b dark:border-claude-darkBorder border-claude-border -mx-1 px-1">
         <button
           type="button"
-          onClick={() => setActiveTab('myApps')}
-          className={`px-3 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-            activeTab === 'myApps'
-              ? 'dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text border-b-2 border-transparent -mb-[1px]'
-              : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
-          }`}
-        >
-          {i18nService.t('myAppsTab') || 'My Apps'}
-        </button>
-        <button
-          type="button"
           onClick={() => setActiveTab('chainCommunity')}
           className={`px-3 py-2 text-sm font-medium rounded-t-lg transition-colors ${
             activeTab === 'chainCommunity'
@@ -712,6 +701,17 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
           }`}
         >
           {i18nService.t('chainCommunityMetaApps')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('myApps')}
+          className={`px-3 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+            activeTab === 'myApps'
+              ? 'dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text border-b-2 border-transparent -mb-[1px]'
+              : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
+          }`}
+        >
+          {i18nService.t('myAppsTab') || 'My Apps'}
         </button>
       </div>
 

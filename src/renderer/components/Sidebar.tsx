@@ -466,18 +466,9 @@ const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
       ) : (
-        <>
-          <div
-            className={
-              internetPane === 'browser'
-                ? 'flex-1 min-h-0 px-2.5 pb-3 pt-2 mt-1 flex flex-col'
-                : 'hidden'
-            }
-          >
-            <BotBrowserCoworkPanel onShowSkills={onShowSkills} />
-          </div>
-          {internetPane !== 'browser' ? <div className="flex-1 min-h-0" /> : null}
-        </>
+        <div className="flex-1 min-h-0 px-2.5 pb-3 pt-2 mt-1 flex flex-col">
+          <BotBrowserCoworkPanel onShowSkills={onShowSkills} />
+        </div>
       )}
       <CoworkSearchModal
         isOpen={isSearchOpen}
