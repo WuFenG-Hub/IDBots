@@ -73,6 +73,33 @@ test('buildModelGroupsFromConfig skips providers without models', () => {
   assert.equal(groups.length, 0);
 });
 
+test('resolveBrainModelInGroups prefers the provider hint when OpenCode and DeepSeek share a model id', () => {
+  const groups = buildModelGroupsFromConfig({
+    providers: {
+      deepseek: {
+        enabled: true,
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.deepseek.com',
+        models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
+      },
+      opencode: {
+        enabled: true,
+        apiKey: 'sk-oc',
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+        name: 'OpenCode',
+        models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
+      },
+    },
+  });
+
+  const byOrder = resolveBrainModelInGroups(groups, 'deepseek-v4-flash');
+  assert.equal(byOrder!.providerKey, 'deepseek', 'without a hint, catalog order wins');
+
+  const hinted = resolveBrainModelInGroups(groups, 'deepseek-v4-flash', 'opencode');
+  assert.equal(hinted!.providerKey, 'opencode');
+  assert.equal(hinted!.model.id, 'deepseek-v4-flash');
+});
+
 test('resolveBrainModelInGroups matches exact model ids and prefers the provider hint', () => {
   const groups = buildModelGroupsFromConfig(configWithCustomProvider);
   const hit = resolveBrainModelInGroups(groups, 'deepseek-v4-pro');

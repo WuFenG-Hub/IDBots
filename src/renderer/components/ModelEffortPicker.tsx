@@ -101,6 +101,16 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
   const currentModelName = resolved
     ? resolved.model.name
     : value.modelId ?? placeholder ?? i18nService.t('modelPickerChooseModel');
+  const collidingModel = Boolean(
+    resolved
+    && groups.filter((group) => group.models.some((model) => model.id === resolved.model.id)).length > 1,
+  );
+  const currentProviderName = collidingModel
+    ? groups.find((group) => group.id === resolved?.providerKey)?.name
+    : null;
+  const currentModelLabel = currentProviderName
+    ? `${currentModelName} · ${currentProviderName}`
+    : currentModelName;
   const currentEffort = value.effort ?? null;
 
   React.useEffect(() => {
@@ -182,16 +192,16 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
         onClick={openPicker}
         disabled={disabled}
         className={triggerClassName}
-        title={`${currentModelName} · ${effortLabel(currentEffort)}`}
+        title={`${currentModelLabel} · ${effortLabel(currentEffort)}`}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
-        aria-label={`${i18nService.t('modelPickerModelLabel')}: ${currentModelName}, ${i18nService.t('modelPickerEffortLabel')}: ${effortLabel(currentEffort)}`}
+        aria-label={`${i18nService.t('modelPickerModelLabel')}: ${currentModelLabel}, ${i18nService.t('modelPickerEffortLabel')}: ${effortLabel(currentEffort)}`}
       >
         {compact ? (
           <CpuChipIcon className="h-4 w-4" />
         ) : isField ? (
           <>
-            <span className="min-w-0 flex-1 text-left font-medium truncate">{currentModelName}</span>
+            <span className="min-w-0 flex-1 text-left font-medium truncate">{currentModelLabel}</span>
             {!resolved && value.modelId && (
               <span className="text-xs dark:text-red-400 text-red-500 shrink-0">{i18nService.t('modelPickerUnavailable')}</span>
             )}
@@ -202,7 +212,7 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
           </>
         ) : (
           <>
-            <span className="font-medium text-sm truncate max-w-44">{currentModelName}</span>
+            <span className="font-medium text-sm truncate max-w-44">{currentModelLabel}</span>
             {!resolved && value.modelId && (
               <span className="text-xs dark:text-red-400 text-red-500">{i18nService.t('modelPickerUnavailable')}</span>
             )}
@@ -245,7 +255,7 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
                 <div className="flex flex-col min-w-0">
                   <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('modelPickerModelLabel')}</span>
                   <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
-                    {currentModelName}
+                    {currentModelLabel}
                     {!resolved && value.modelId && (
                       <span className="ml-1 text-xs dark:text-red-400 text-red-500">{i18nService.t('modelPickerUnavailable')}</span>
                     )}

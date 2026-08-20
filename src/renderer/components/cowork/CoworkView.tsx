@@ -413,6 +413,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         // Pending picker selection from the home composer; empty pick falls
         // back to the selected bot's brain (its model and effort).
         model: pendingModelEffort?.modelId ?? undefined,
+        modelProvider: pendingModelEffort?.providerKey ?? undefined,
         effort: pendingModelEffort?.effort ?? undefined,
       });
 

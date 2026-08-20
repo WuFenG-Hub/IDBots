@@ -148,6 +148,7 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
     } else {
       await browserCoworkService.start(prompt, effectiveMetabotId, workingDirectory || undefined, {
         model: pendingModelEffort?.modelId ?? undefined,
+        modelProvider: pendingModelEffort?.providerKey ?? undefined,
         effort: pendingModelEffort?.effort ?? undefined,
       });
       setPendingModelEffort(null);

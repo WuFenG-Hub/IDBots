@@ -2391,12 +2391,21 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const currentModelId = useSelector((state: RootState) => state.model.selectedModel?.id);
   // Per-session model override (picked in this conversation's model selector).
   // Optimistic local state on top of the persisted currentSession.model; reset
-  // when switching sessions.
-  const [sessionModelOverride, setSessionModelOverride] = useState<string | null>(null);
+  // when switching sessions. Provider rides along so colliding model ids
+  // (OpenCode vs DeepSeek both serving deepseek-v4-flash) stay disambiguated.
+  const [sessionModelOverride, setSessionModelOverride] = useState<{
+    modelId: string | null;
+    providerKey: string | null;
+  } | null>(null);
   useEffect(() => {
     setSessionModelOverride(null);
   }, [currentSession?.id]);
-  const sessionModelId = sessionModelOverride ?? currentSession?.model ?? null;
+  const sessionModelId = sessionModelOverride
+    ? sessionModelOverride.modelId
+    : (currentSession?.model ?? null);
+  const sessionModelProvider = sessionModelOverride
+    ? sessionModelOverride.providerKey
+    : (currentSession?.modelProvider ?? null);
   // Per-session effort picked in the composer's model+effort picker. Optimistic
   // local state on top of the persisted currentSession.effort; reset when
   // switching sessions.
@@ -2406,12 +2415,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   }, [currentSession?.id]);
   const handleSessionModelEffortChange = async (value: ModelEffortValue) => {
     if (!currentSession) return;
-    setSessionModelOverride(value.modelId);
+    setSessionModelOverride({
+      modelId: value.modelId,
+      providerKey: value.providerKey ?? null,
+    });
     setSessionEffortOverride(value.effort ?? '');
     try {
       await window.electron?.cowork?.setSessionModel({
         sessionId: currentSession.id,
         model: value.modelId,
+        modelProvider: value.providerKey ?? null,
         effort: value.effort ?? '',
       });
     } catch (modelError) {
@@ -2459,7 +2472,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const sessionUsesBrainModel = sessionModelId == null && Boolean(sessionMetabot?.llm_id);
   const sessionModelEffortValue: ModelEffortValue = {
     modelId: sessionModelId ?? sessionMetabot?.llm_id ?? null,
-    providerKey: sessionUsesBrainModel ? (sessionMetabot?.llm_provider ?? null) : null,
+    providerKey: sessionUsesBrainModel
+      ? (sessionMetabot?.llm_provider ?? null)
+      : sessionModelProvider,
     effort: (() => {
       if (sessionEffortOverride != null) return (sessionEffortOverride || null) as ModelEffortValue['effort'];
       if (currentSession?.effort) return convertLegacyEffortLevel(currentSession.effort);
