@@ -4,6 +4,14 @@ const path = require('path');
 const { existsSync } = require('fs');
 const { spawnSync } = require('child_process');
 const { ensurePortableGit } = require('./setup-mingit.js');
+const { ensureFfmpeg } = require('./setup-ffmpeg.js');
+const {
+  resolveFfmpegPlatformKey,
+  verifySourceFfmpeg,
+  verifySourceRuntimes,
+  verifyPackagedFfmpeg,
+  verifyPackagedRuntimes,
+} = require('./packagedRuntimes.cjs');
 
 function isWindowsTarget(context) {
   return context?.electronPlatformName === 'win32';
@@ -92,30 +100,19 @@ function verifyReleaseInputs() {
   }
 }
 
-function verifyDshRuntimeInputs() {
-  const sdkClientEntry = path.join(
-    __dirname,
-    '..',
-    'dsh-runtime',
-    'node_modules',
-    '@deepseek-ai',
-    'dsh-sdk-client',
-    'lib',
-    'index.js',
-  );
-  if (!existsSync(sdkClientEntry)) {
-    throw new Error(
-      'Release packaging requires dsh-runtime dependencies to be installed '
-      + '(dsh-runtime/node_modules/@deepseek-ai/dsh-sdk-client/lib/index.js is missing). '
-      + 'Run npm ci in dsh-runtime/ before packaging.',
-    );
-  }
-  console.log('[electron-builder-hooks] DSH runtime dependencies present');
-}
-
 async function beforePack(context) {
   verifyReleaseInputs();
-  verifyDshRuntimeInputs();
+
+  const ffmpegPlatform = resolveFfmpegPlatformKey(context);
+  if (ffmpegPlatform) {
+    console.log(`[electron-builder-hooks] Ensuring bundled ffmpeg for ${ffmpegPlatform}...`);
+    await ensureFfmpeg({ required: true, platforms: [ffmpegPlatform] });
+    verifySourceFfmpeg(context);
+    console.log('[electron-builder-hooks] Bundled ffmpeg present on disk');
+  }
+
+  verifySourceRuntimes();
+  console.log('[electron-builder-hooks] Nested packaged runtime dependencies present');
 
   if (!isWindowsTarget(context)) {
     return;
@@ -126,6 +123,13 @@ async function beforePack(context) {
 }
 
 async function afterPack(context) {
+  verifyPackagedRuntimes(context);
+  console.log('[electron-builder-hooks] Nested packaged runtimes present in Resources');
+  verifyPackagedFfmpeg(context);
+  if (resolveFfmpegPlatformKey(context)) {
+    console.log('[electron-builder-hooks] Bundled ffmpeg present in Resources');
+  }
+
   if (isWindowsTarget(context)) {
     const bashPath = findPackagedBash(context.appOutDir);
     if (!bashPath) {
