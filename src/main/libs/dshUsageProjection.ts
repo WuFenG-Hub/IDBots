@@ -47,6 +47,18 @@ export interface DshUsageStatsRow {
     cacheCreationTokens: number
   }>
   thinkingTokensEstimate?: number
+  /**
+   * Heuristic composition of the CURRENT context (token-meter
+   * contextBreakdown projection: system prompt + tool schemas from the
+   * newest request header, conversation from the live surface; chars/4-style
+   * estimator, so treat as approximate). NOT cumulative — the sum tracks the
+   * context ring, unlike the billing counters above.
+   */
+  contextBreakdown?: {
+    systemTokens: number
+    toolsTokens: number
+    messageTokens: number
+  } | null
   /** Real context snapshot for the ring after the active session is cleaned up. */
   lastRealContextUsage?: CoworkContextUsage | null
   /** Private: last raw projection buckets seen (delta baseline; survives restarts via the persisted row). */
@@ -165,6 +177,17 @@ export function foldDshUsageProjection(input: DshUsageFoldInput): DshUsageFoldRe
     : raw.uncachedInputTokens + raw.cacheWriteTokens
 
   const prev = input.prev
+  // Heuristic current-context composition from the token-meter breakdown
+  // projection (system/tools from the newest request header, messages from
+  // the live surface). Carried forward when this projection lacks it.
+  const breakdown = projection.contextBreakdown
+  const contextBreakdown = breakdown
+    ? {
+      systemTokens: finiteOrZero(breakdown.systemTokens),
+      toolsTokens: finiteOrZero(breakdown.toolsTokens),
+      messageTokens: finiteOrZero(breakdown.messageTokens),
+    }
+    : prev?.contextBreakdown
   // Delta baseline: the previous fold's raw buckets. A session with NO
   // previous row at all (fresh DSH session, first settlement) baselines at
   // zero — the whole cumulative snapshot is turn 1, which a fresh session's
@@ -244,6 +267,7 @@ export function foldDshUsageProjection(input: DshUsageFoldInput): DshUsageFoldRe
     cacheMissEvents,
     turnStats,
     perModelUsage: prev?.perModelUsage,
+    contextBreakdown,
     dshRawBuckets: raw,
   }
   return {

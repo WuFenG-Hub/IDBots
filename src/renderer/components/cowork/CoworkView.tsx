@@ -7,7 +7,6 @@ import { setActions, selectAction, clearSelection } from '../../store/slices/qui
 import { coworkService } from '../../services/cowork';
 import { configService } from '../../services/config';
 import { metaAppService } from '../../services/metaApp';
-import { skillService } from '../../services/skill';
 import { quickActionService } from '../../services/quickAction';
 import { i18nService } from '../../services/i18n';
 import { convertLegacyEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
@@ -308,11 +307,11 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   }, [dispatch]);
 
   const buildCombinedSystemPrompt = async (skillPrompt?: string) => {
-    const [metaAppPrompt, effectiveSkillPrompt] = await Promise.all([
-      metaAppService.getAutoRoutingPrompt(),
-      skillPrompt ? Promise.resolve(skillPrompt) : skillService.getAutoRoutingPrompt(),
-    ]);
-    return [metaAppPrompt, effectiveSkillPrompt, config.systemPrompt]
+    // Skill routing rules and the live skill catalog are composed main-side
+    // now (SKILLS system-prompt section + volatile per-turn catalog tail);
+    // the renderer only embeds explicitly pinned skills (`## Skill:` blocks).
+    const metaAppPrompt = await metaAppService.getAutoRoutingPrompt();
+    return [metaAppPrompt, skillPrompt, config.systemPrompt]
       .filter(p => p?.trim())
       .join('\n\n') || undefined;
   };

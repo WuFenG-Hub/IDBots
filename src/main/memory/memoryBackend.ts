@@ -124,6 +124,8 @@ export interface MemoryEffectivePolicy {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: CoworkMemoryGuardLevel;
   memoryUserMemoriesMaxItems: number;
+  /** Combined char budget for injected memory blocks (oldest-first eviction; global-only). */
+  memoryPromptMaxChars: number;
   dreamEnabled: boolean;
   source: 'global' | 'metabot';
 }

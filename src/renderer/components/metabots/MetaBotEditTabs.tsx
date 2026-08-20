@@ -50,6 +50,8 @@ export const normalizeA2AAutoReplyEnabledOption = (value: unknown): boolean =>
 
 // Keep in sync with OPENTEAM_ALLOW_REMOTE_COLLAB_KEY in src/main/services/openTeamGuestService.ts.
 const OPENTEAM_ALLOW_REMOTE_COLLAB_KEY = 'openteam.allowRemoteCollab';
+// Keep in sync with COWORK_MOUNT_MCP_TOOLS_KEY in src/main/services/coworkMcpToolsPreference.ts.
+const COWORK_MOUNT_MCP_TOOLS_KEY = 'cowork.mountMcpTools';
 
 export interface MetaBotEditValues {
   name: string;
@@ -238,6 +240,11 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const [openTeamRemoteCollab, setOpenTeamRemoteCollab] = useState(true);
   const [openTeamRemoteCollabLoaded, setOpenTeamRemoteCollabLoaded] = useState(false);
   const [openTeamRemoteCollabSaving, setOpenTeamRemoteCollabSaving] = useState(false);
+  // Cowork MCP-tools switch: same metabot_settings kv channel as OpenTeam,
+  // but the default (no record) is OFF — MCP mounting is per-bot opt-in.
+  const [coworkMcpTools, setCoworkMcpTools] = useState(false);
+  const [coworkMcpToolsLoaded, setCoworkMcpToolsLoaded] = useState(false);
+  const [coworkMcpToolsSaving, setCoworkMcpToolsSaving] = useState(false);
 
   // Re-initialize when a different bot is loaded into the same mounted editor.
   // Saves only update the baseline (see handleSaveTab), so unsaved edits in
@@ -272,6 +279,27 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
         if (cancelled) return;
         setOpenTeamRemoteCollab(true);
         setOpenTeamRemoteCollabLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, [metabotId]);
+
+  // Load the cowork MCP-tools switch for the bot being edited. A missing or
+  // failed read falls back to off, matching the main-process default.
+  useEffect(() => {
+    let cancelled = false;
+    setCoworkMcpTools(false);
+    setCoworkMcpToolsLoaded(false);
+    setCoworkMcpToolsSaving(false);
+    window.electron.metabot.getSetting(metabotId, COWORK_MOUNT_MCP_TOOLS_KEY)
+      .then((result) => {
+        if (cancelled) return;
+        setCoworkMcpTools(result.success ? result.value === '1' : false);
+        setCoworkMcpToolsLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCoworkMcpTools(false);
+        setCoworkMcpToolsLoaded(true);
       });
     return () => { cancelled = true; };
   }, [metabotId]);
@@ -398,6 +426,24 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
       .finally(() => setOpenTeamRemoteCollabSaving(false));
   };
 
+  // Same immediate-effect pattern as the OpenTeam toggle above.
+  const handleCoworkMcpToolsToggle = () => {
+    if (!coworkMcpToolsLoaded || coworkMcpToolsSaving) return;
+    const next = !coworkMcpTools;
+    setCoworkMcpTools(next);
+    setCoworkMcpToolsSaving(true);
+    const revertWithToast = () => {
+      setCoworkMcpTools(!next);
+      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotCoworkMcpToolsSaveFailed') }));
+    };
+    window.electron.metabot.setSetting(metabotId, COWORK_MOUNT_MCP_TOOLS_KEY, next ? '1' : '0')
+      .then((result) => {
+        if (!result.success) revertWithToast();
+      })
+      .catch(revertWithToast)
+      .finally(() => setCoworkMcpToolsSaving(false));
+  };
+
   const handleSaveTab = async (tab: MetaBotEditTabKey) => {
     if (savingTab) return;
     if (tab === 'basic') {
@@ -475,6 +521,10 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const openTeamRemoteCollabToggleView = buildMetaBotToggleViewModel({
     enabled: openTeamRemoteCollab,
     disabled: !openTeamRemoteCollabLoaded || openTeamRemoteCollabSaving,
+  });
+  const coworkMcpToolsToggleView = buildMetaBotToggleViewModel({
+    enabled: coworkMcpTools,
+    disabled: !coworkMcpToolsLoaded || coworkMcpToolsSaving,
   });
   const rowClass = 'grid grid-cols-1 md:grid-cols-[132px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
   const labelClass = 'pt-2 text-sm font-medium dark:text-claude-darkText text-claude-text';
@@ -954,6 +1004,31 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
             </div>
             <p className={hintClass}>
               {i18nService.t('metabotOpenTeamRemoteCollabHint')}
+            </p>
+          </div>
+        </div>
+
+        {/* Cowork MCP tools: immediate-effect kv switch, default off (per-bot opt-in). */}
+        <div className={rowClass}>
+          <label id="metabot-cowork-mcp-tools-label" className={labelClass}>
+            {i18nService.t('metabotCoworkMcpTools')}
+          </label>
+          <div className="min-w-0">
+            <div className="flex items-center gap-3 pt-1">
+              <div
+                role="switch"
+                aria-checked={coworkMcpTools}
+                aria-labelledby="metabot-cowork-mcp-tools-label"
+                data-slot="metabot-cowork-mcp-tools-switch"
+                title={i18nService.t('metabotCoworkMcpToolsHint')}
+                className={coworkMcpToolsToggleView.trackClass}
+                onClick={handleCoworkMcpToolsToggle}
+              >
+                <div className={coworkMcpToolsToggleView.knobClass} />
+              </div>
+            </div>
+            <p className={hintClass}>
+              {i18nService.t('metabotCoworkMcpToolsHint')}
             </p>
           </div>
         </div>

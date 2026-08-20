@@ -192,6 +192,7 @@ import {
   getRendererMetabotSetting,
   setRendererMetabotSetting,
 } from './services/metabotSettingsService';
+import { isCoworkMcpMountEnabled } from './services/coworkMcpToolsPreference';
 import {
   resumeOpenTeamInviteWatchers,
   setOpenTeamServiceDeps,
@@ -4794,7 +4795,20 @@ const getCoworkRunner = () => {
       experienceStore: getDreamStore(),
       knowledgeStore: getMetaIDKnowledgeStore(),
       episodeTimelineProvider: getMetaIDExperienceStore(),
-      mcpServerProvider: () => getMcpStore().getEnabledServers(),
+      // Per-bot opt-in (default off): mounted MCP tool schemas ride every
+      // LLM request, so only sessions whose bot explicitly enables MCP pay
+      // the cost. See services/coworkMcpToolsPreference.ts.
+      mcpServerProvider: (coworkSessionId: string) => {
+        const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
+        if (!isCoworkMcpMountEnabled(getMetabotStore(), metabotId)) return [];
+        return getMcpStore().getEnabledServers();
+      },
+      // Skill prompt parts are composed main-side: rules join the system
+      // prompt's SKILLS section, the live catalog rides the volatile tail,
+      // and sandbox sessions get the legacy inline-catalog section for
+      // guest-path rewriting. The renderer no longer bakes the catalog into
+      // the stored session prompt.
+      coworkSkillPromptsProvider: () => getSkillManager().buildCoworkSkillPromptParts(),
       // User-managed DSH plugin directory (userData/dsh-plugins): entries are
       // re-resolved every turn, so an install applies on the next turn and a
       // config change restarts the runtime only after in-flight turns settle.
@@ -5100,6 +5114,7 @@ const getCoworkRunner = () => {
         listInstalledSkills: () => listInstalledSkillPackages({
           getSkillsRoot: () => getSkillManager().getSkillsRoot(),
         }),
+        readSkill: (nameOrId) => getSkillManager().readSkillCatalogEntry(nameOrId),
       },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
         const coworkStoreInstance = getCoworkStore();

@@ -231,13 +231,11 @@ export function buildMetabotManageAgentTools(deps: {
   const metabotList = tool(
     'metabot_list',
     [
-      `List every local MetaBot with its editable fields (id, name, Twin/Worker type, enabled, llm, role, bio, goal, chat skills) plus the LLM providers available for new/edited bots. ${audience}`,
-      'Use BEFORE creating a bot (to show the user which LLM brains they can pick from) and to resolve a bot the user names by its display name into a metabot_id before updating or deleting it.',
-      'When NOT to use: do not call this just to identify yourself (you already know your own identity); and do not call it in a tight loop — call once, then act on the returned ids.',
+      `List local MetaBots (id, name, twin/worker type, enabled, llm, role, chat skills) and available LLM providers/models. ${audience}`,
+      'Call before metabot_create to pick llm_id, or to map a display name to the metabot_id metabot_update/metabot_delete need. Call once; do not loop or self-identify.',
       isWelcomeViewer
-        ? 'Rules: model ids in the available-provider list are the values metabot_create expects as llm_id (optionally with llm_provider set to the provider id when the same model id exists under several providers). While you are the Welcome Bot no Twin Bot exists yet — the first bot you create becomes the user\'s Twin Bot.'
-        : 'Rules: the metabot_id returned here is the exact value metabot_update and metabot_delete expect. The Twin is the single bot whose type is "twin". Model ids in the available-provider list are the values metabot_create expects as llm_id (optionally with llm_provider set to the provider id when the same model id exists under several providers).',
-      'Returns one line per bot plus the available LLM provider list.',
+        ? 'Provider-list model ids are the llm_id values metabot_create expects; add llm_provider when a model id appears under several providers. The first bot you create becomes the user\'s Twin Bot.'
+        : 'The Twin is the single bot whose type is "twin". Provider-list model ids are the llm_id values metabot_create expects; add llm_provider when a model id appears under several providers.',
     ].join(' '),
     {},
     async () => {
@@ -256,18 +254,14 @@ export function buildMetabotManageAgentTools(deps: {
     'metabot_create',
     isWelcomeViewer
       ? [
-          `Create the user's first local MetaBot end-to-end: generate its on-chain wallet, register its identity on-chain, and add it to My Bots. ${audience}`,
-          'Use when the user asks to create / set up their first Bot or Twin (e.g. "帮我创建第一个 Bot", "create my first bot", "帮我建一个数字分身"). While no Twin Bot exists the new bot automatically becomes the user\'s first Twin Bot (their personal on-chain digital twin); if a Twin already exists the new bot is a Worker.',
-          'When NOT to use: do not create a bot without first collecting a name from the user — ask what they want to call their Bot if they did not say; and do not create a bot with an llm_id you made up — call metabot_list first and use one of the reported model ids (optionally with llm_provider set to the provider id; when several are configured, confirm the choice with the user briefly; when only the free MetaID provider exists, just use its model).',
-          'Rules: name and llm_id are required; everything else (fallback_llm_id, role, soul, goal, bio, avatar) is optional — the user can fill persona details in later by hand in My Bots. Creation is chain-first — it can take a few seconds and may publish partially; the result reports txids and any partial status.',
-          'Returns the created bot id/name/type, its on-chain globalMetaID, and any partial-publish or subsidy notes.',
+          `Create the user's first local MetaBot: on-chain wallet + identity, My Bots entry. ${audience}`,
+          'Use when the user asks to create/set up their first Bot or Twin. While no Twin exists it becomes the first Twin Bot, else a Worker.',
+          'Ask for a name if none given. llm_id must come from metabot_list — never invent one (confirm if several providers; just use the free MetaID one if alone). Other fields optional (persona later in My Bots). Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, partial/subsidy notes.',
         ].join(' ')
       : [
-          'Create ONE new local MetaBot (a Worker by default) end-to-end: generate its on-chain wallet, register its identity on-chain, and add it to My Bots. Twin Bot only.',
-          'Use when the user asks to create / add / hire a new bot, assistant, employee, agent, or AI (e.g. "帮我创建一个新员工", "add a new assistant").',
-          'When NOT to use: do not create a bot without first collecting a name AND an llm_id from the user (both are required) — call metabot_list to show the available llm_id choices and ask; and do not use this to edit an existing bot (use metabot_update) or to restore a bot from a mnemonic.',
-          'Rules: name and llm_id are required; everything else (fallback_llm_id, role, soul, goal, bio, avatar) is optional and can be set later via metabot_update. Creation is chain-first — it can take a few seconds and may publish partially; the result reports txids and any partial status. The new bot is always a Worker (the machine keeps exactly one Twin).',
-          'Returns the created bot id/name/type, its on-chain globalMetaID, and any partial-publish or subsidy notes.',
+          'Create ONE new local MetaBot (always a Worker) end-to-end: wallet, on-chain identity, My Bots entry. Twin Bot only.',
+          'Use when the user asks to create/add a bot, assistant, employee, or agent. Not for editing an existing bot (use metabot_update) or restoring from a mnemonic.',
+          'Rules: name and llm_id required; never invent llm_id — pick a model id from metabot_list (add llm_provider if listed under several providers). Other fields optional, settable later via metabot_update. Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, and partial/subsidy notes.',
         ].join(' '),
     {
       name: z.string().min(1).describe('Display name for the new bot (required).'),
@@ -373,17 +367,15 @@ export function buildMetabotManageAgentTools(deps: {
     'metabot_update',
     isStandardViewer
       ? [
-          'Update ONE existing local MetaBot\'s chat-skill whitelist. Available in ordinary Chat sessions.',
-          'Use chat_skill_op to add or remove a SINGLE skill without replacing the rest of the list (action "add" | "remove", skill = the skill name from list_installed_skills). metabot_id is required.',
-          'When NOT to use: do not pass allow_chat_skills (full replacement) unless you intend to replace the entire list; prefer chat_skill_op. Do not use this to rename, re-persona, or delete a bot.',
-          'Does not prompt for confirmation. Returns the updated bot name/id and the on-chain sync outcome.',
+          'Update ONE local MetaBot\'s chat-skill whitelist only. Available in ordinary Chat sessions.',
+          'metabot_id required. chat_skill_op adds/removes ONE skill (action "add"|"remove", skill = name from list_installed_skills) without replacing the list; allow_chat_skills replaces the whole list — prefer chat_skill_op. No other fields: not for rename, persona, or delete.',
+          'No confirmation prompt. Returns updated bot name/id and on-chain sync outcome.',
         ].join(' ')
       : [
-          'Update ONE existing local MetaBot\'s editable fields: basic info (name, avatar, bio, enabled, Twin/Worker type), persona (role, soul, goal), LLM (llm_id, fallback_llm_id), chat skills, homepage, and A2A auto-reply knobs. Twin Bot only.',
-          'Use when the user asks to rename, re-describe, re-persona, enable/disable, switch the LLM brain of, change the homepage of, or otherwise edit an existing bot. Resolve the target with metabot_list first (the user usually names it by display name). To add or remove a single chat skill without replacing the list, pass chat_skill_op instead of allow_chat_skills.',
-          'When NOT to use: do not update without a confirmed metabot_id; do not edit fields the user did not ask to change (pass only the fields to change); and signed owner-binding is NOT supported by this tool — for security the user must set a bot\'s owner (boss_global_metaid) themselves in My Bots > Edit, so never attempt to change owner via this tool.',
-          'Rules: metabot_id is required. Pass only the fields that should change; omitted fields keep their current value. Transferring Twin status (metabot_type="twin") demotes the current Twin automatically. Changed info pins are re-published on-chain (best-effort); the result reports txids and any partial status. A2A knobs and enabled/type are local-only (no on-chain publish). Homepage takes a structured object (see schema); pass null or source "default" to reset to the default template. chat_skill_op does not prompt for confirmation.',
-          'Returns the updated bot name/id and the on-chain sync outcome.',
+          'Update ONE existing local MetaBot: rename, persona, LLM, enabled, chat skills, homepage, a2a. Twin Bot only.',
+          'metabot_id required (resolve names via metabot_list); pass only changed fields; omitted keep values.',
+          'metabot_type "twin" demotes the current Twin. chat_skill_op adds/removes one skill (no confirmation); allow_chat_skills replaces the list — never pass both. homepage null or "default" resets.',
+          'Owner (boss_global_metaid) NOT settable here — user sets it in My Bots > Edit; never attempt. Info-pin edits re-publish on-chain (best-effort, reports txids/partial); a2a/enabled/type stay local.',
         ].join(' '),
     {
       metabot_id: z.number().int().positive().describe('id of the bot to update (from metabot_list, or the current bot\'s id).'),
@@ -540,11 +532,9 @@ export function buildMetabotManageAgentTools(deps: {
   const metabotDelete = tool(
     'metabot_delete',
     [
-      'Permanently delete ONE local MetaBot (DB row + on-chain identity is abandoned; the append-only wallet record is retained). Twin Bot only.',
-      'Use when the user clearly asks to delete / remove / fire a specific bot. Resolve the target via metabot_list first, and CONFIRM the exact bot name with the user before calling this — deletion is irreversible.',
-      'When NOT to use: do not delete without explicit user confirmation of the exact bot; do not delete yourself (the Twin) unless the user insists and understands another bot will be promoted to Twin; and never delete the last remaining bot (the tool refuses that to keep the machine usable).',
-      'Rules: metabot_id is required. If the deleted bot was the Twin, Twin status transfers automatically to the earliest remaining bot. Experience/memory rows produced by the deleted bot are preserved as historical record.',
-      'Returns a confirmation, or an error (e.g. last-bot guard, not found).',
+      'Permanently delete ONE local MetaBot (DB row removed; on-chain identity abandoned; wallet record kept). Twin Bot only.',
+      'Use only when the user clearly asks to delete/remove a specific bot; resolve via metabot_list and CONFIRM the exact name first — irreversible.',
+      'metabot_id required. Do not delete yourself (the Twin) unless the user insists; deleting the last remaining bot is refused. Twin deletion transfers Twin status to the earliest remaining bot; experience/memory rows are preserved.',
     ].join(' '),
     {
       metabot_id: z.number().int().positive().describe('id of the bot to delete (from metabot_list).'),

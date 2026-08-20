@@ -1090,6 +1090,15 @@ interface ActiveSession {
    */
   emptyTerminalTurnDetected: boolean;
   executionMode: CoworkExecutionMode;
+  /**
+   * Where this turn's skill catalog lives: 'volatile' = injected into the
+   * per-turn user-message tail; 'inline' = embedded in the system prompt
+   * (sandbox-planned sessions); 'legacy' = the base prompt already carries
+   * skill content (old inline catalog or pinned `## Skill:` blocks), so
+   * neither channel adds anything. Set at every (re)compose in
+   * startSession/continueSession.
+   */
+  skillsCatalogMode?: 'volatile' | 'inline' | 'legacy';
   /** Latest DSH usage snapshot for context reporting (DSH-kernel turns). */
   lastDshUsage?: DshUsageSnapshot;
   localInputChannel?: CoworkSteerChannel;
@@ -1477,7 +1486,18 @@ export interface CoworkRunnerOptions {
   twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
   twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   /** When set, returns enabled user-configured MCP servers for local execution. */
-  mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
+  mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
+  /**
+   * Cowork skill prompt parts (rules section / volatile catalog / sandbox
+   * inline section), composed main-side so the live skill catalog never gets
+   * baked into the stored session prompt. Re-read per turn: skill installs
+   * apply on the next turn without restarting the session.
+   */
+  coworkSkillPromptsProvider?: () => {
+    rules: string | null;
+    catalog: string | null;
+    sandboxSection: string | null;
+  } | null;
   /** Re-read every turn: the user-managed DSH plugin directory feeds runtime
    * composition entries here (installs apply on the next turn). */
   dshExtraEntriesProvider?: () => Array<{ id: string; name: string; config: Record<string, unknown> }>;
@@ -1612,7 +1632,12 @@ export class CoworkRunner extends EventEmitter {
   private twinTaskStatus?: (sessionId: string, taskId: string) => TwinTaskStatusResult;
   private twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
   private twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
-  private mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
+  private mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
+  private coworkSkillPromptsProvider?: () => {
+    rules: string | null;
+    catalog: string | null;
+    sandboxSection: string | null;
+  } | null;
   dshExtraEntriesProvider?: () => Array<{ id: string; name: string; config: Record<string, unknown> }>;
   private openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private resolveMetaAppUrl?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
@@ -1713,6 +1738,7 @@ export class CoworkRunner extends EventEmitter {
     this.twinTaskCancel = options?.twinTaskCancel;
     this.twinTaskReassign = options?.twinTaskReassign;
     this.mcpServerProvider = options?.mcpServerProvider;
+    this.coworkSkillPromptsProvider = options?.coworkSkillPromptsProvider;
     // Optional-chained like every other option — a bare `new CoworkRunner(store)`
     // (tests, minimal embedders) used to crash here on the missing `?.`.
     this.dshExtraEntriesProvider = options?.dshExtraEntriesProvider;
@@ -2476,6 +2502,7 @@ export class CoworkRunner extends EventEmitter {
     memoryLlmJudgeEnabled: boolean;
     memoryGuardLevel: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems: number;
+    memoryPromptMaxChars: number;
   } {
     const effective = this.getMemoryBackend().getEffectiveMemoryPolicyForSession(sessionId);
     return {
@@ -2484,6 +2511,7 @@ export class CoworkRunner extends EventEmitter {
       memoryLlmJudgeEnabled: effective.memoryLlmJudgeEnabled,
       memoryGuardLevel: effective.memoryGuardLevel,
       memoryUserMemoriesMaxItems: effective.memoryUserMemoriesMaxItems,
+      memoryPromptMaxChars: effective.memoryPromptMaxChars,
     };
   }
 
@@ -2681,6 +2709,7 @@ export class CoworkRunner extends EventEmitter {
       maxOwnerEntries: memoryPolicy.memoryUserMemoriesMaxItems,
       maxScopedEntries: memoryPolicy.memoryUserMemoriesMaxItems,
       maxOwnerOperationalPreferences: Math.min(3, memoryPolicy.memoryUserMemoriesMaxItems),
+      maxTotalChars: memoryPolicy.memoryPromptMaxChars,
     });
 
     coworkLog('INFO', 'memory:promptBlocks', 'Built scoped memory prompt blocks', {
@@ -4639,7 +4668,8 @@ export class CoworkRunner extends EventEmitter {
     memoryEnabled: boolean,
     personaBlock?: string,
     profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE,
-    implicitMemoryUpdateEnabled = false
+    implicitMemoryUpdateEnabled = false,
+    skillsSection?: string | null
   ): string {
     return composePromptSections([
       { name: 'persona:metabot', order: PROMPT_SECTION_ORDER.PERSONA, text: personaBlock },
@@ -4657,8 +4687,49 @@ export class CoworkRunner extends EventEmitter {
         order: PROMPT_SECTION_ORDER.MEMORY_STRATEGY,
         text: this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy, implicitMemoryUpdateEnabled),
       },
+      // Skill routing rules WITHOUT the live catalog (that rides the volatile
+      // user-message tail). Null/empty for legacy prompts that still carry
+      // their own inline skills block, and for sandbox-planned sessions the
+      // caller passes the full catalog-inline section instead.
+      { name: 'idbots:skills', order: PROMPT_SECTION_ORDER.SKILLS, text: skillsSection ?? '' },
       { name: 'idbots:base', order: PROMPT_SECTION_ORDER.BASE, text: baseSystemPrompt?.trim() },
     ]);
+  }
+
+  /**
+   * Decide where this turn's skill prompt content lives:
+   * - 'legacy': the base prompt already carries skill content (an old
+   *   inline-catalog prompt, or user-pinned `## Skill:` / <skill_context>
+   *   blocks) — compose adds nothing and the volatile tail stays empty,
+   *   exactly the pre-split behavior.
+   * - 'inline': sandbox-planned sessions embed the full rules+catalog section
+   *   in the system prompt so resolveAutoRoutingForSandbox can rewrite skill
+   *   locations to guest paths (the sandbox flow never reads the volatile
+   *   tail).
+   * - 'volatile': the normal path — the rules section joins the system prompt
+   *   (the cacheable head stays byte-stable across skill installs) and the
+   *   catalog rides the per-turn user-message tail via
+   *   buildVolatileContextPrompt.
+   */
+  private resolveSkillsPromptForTurn(
+    sessionId: string,
+    activeSession: ActiveSession,
+    baseSystemPrompt: string
+  ): { skillsSection: string | null; skillsCatalogMode: 'volatile' | 'inline' | 'legacy' } {
+    const hasInlineSkills = /## Skills \(mandatory\)|<available_skills>|<skill_context>/.test(baseSystemPrompt ?? '');
+    if (hasInlineSkills) {
+      return { skillsSection: null, skillsCatalogMode: 'legacy' };
+    }
+    const parts = this.coworkSkillPromptsProvider?.() ?? null;
+    const config = this.store.getConfig();
+    const plannedMode: CoworkExecutionMode = this.store.getSession(sessionId)?.executionMode
+      || config.executionMode
+      || 'local';
+    const sandboxPlanned = plannedMode !== 'local' || activeSession.executionMode === 'sandbox';
+    if (sandboxPlanned) {
+      return { skillsSection: parts?.sandboxSection ?? null, skillsCatalogMode: 'inline' };
+    }
+    return { skillsSection: parts?.rules ?? null, skillsCatalogMode: 'volatile' };
   }
 
   /**
@@ -4745,6 +4816,18 @@ export class CoworkRunner extends EventEmitter {
       sections.push({
         key: 'remote-services',
         text: this.getRemoteServicesPrompt?.() ?? '',
+      });
+    }
+    // Skill catalog: the per-turn tail counterpart of the 'idbots:skills'
+    // rules section. Deduped by content hash, so a stable catalog costs
+    // nothing after its first injection and a skill install/update simply
+    // re-injects the changed block — the cacheable system-prompt head never
+    // moves. Sessions in 'inline' (sandbox) or 'legacy' mode already carry
+    // their catalog in the system prompt and skip this entirely.
+    if (this.activeSessions.get(sessionId)?.skillsCatalogMode === 'volatile') {
+      sections.push({
+        key: 'skills-catalog',
+        text: this.coworkSkillPromptsProvider?.()?.catalog ?? '',
       });
     }
 
@@ -5280,6 +5363,8 @@ export class CoworkRunner extends EventEmitter {
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
+    const { skillsSection, skillsCatalogMode } = this.resolveSkillsPromptForTurn(sessionId, activeSession, baseSystemPrompt);
+    activeSession.skillsCatalogMode = skillsCatalogMode;
     const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
       baseSystemPrompt,
       this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
@@ -5288,7 +5373,8 @@ export class CoworkRunner extends EventEmitter {
       sessionMemoryEnabled,
       personaWithExperience,
       systemPromptProfile,
-      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled
+      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
+      skillsSection
     );
     this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
@@ -5399,6 +5485,8 @@ export class CoworkRunner extends EventEmitter {
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
+    const { skillsSection, skillsCatalogMode } = this.resolveSkillsPromptForTurn(sessionId, activeSession, baseSystemPrompt);
+    activeSession.skillsCatalogMode = skillsCatalogMode;
     const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
       baseSystemPrompt,
       this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
@@ -5407,7 +5495,8 @@ export class CoworkRunner extends EventEmitter {
       sessionMemoryEnabled,
       personaWithExperience,
       systemPromptProfile,
-      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled
+      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
+      skillsSection
     );
     this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
@@ -6041,10 +6130,11 @@ export class CoworkRunner extends EventEmitter {
         extraEntriesProvider: this.dshExtraEntriesProvider,
         executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
         evaluatePolicy: (coworkSessionId, name, args) => this.evaluateDshToolPolicy(coworkSessionId, name, args),
-        // Same user MCP store the Claude path mounts (mcpServerProvider returns
-        // the enabled definitions); the runtime mounts each as a dsh-mcp-client
-        // entry exposing mcp__<name>__<tool> tools.
-        mcpServersProvider: () => this.mcpServerProvider?.() ?? [],
+        // Same user MCP store the Claude path mounts, gated per session by
+        // the bot's cowork.mountMcpTools opt-in (default off — MCP schemas
+        // ride every request). The runtime mounts each returned server as a
+        // dsh-mcp-client entry exposing mcp__<name>__<tool> tools.
+        mcpServersProvider: (coworkSessionId) => this.mcpServerProvider?.(coworkSessionId) ?? [],
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
@@ -6941,7 +7031,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'local_worker_delegate',
-          'Delegate ONE concrete, acceptance-tested step to a persistent local Worker Bot. The host creates durable task/step/attempt records and returns only after the Worker handoff is collected. Twin Bot only. Use when a step is well-defined enough to hand off (clear objective + acceptance criteria); call local_workers_list first to choose by capability evidence. When NOT to use: do not delegate vague or multi-step blobs (break them down first), and do not delegate trivial steps you can do faster yourself — delegation has overhead. Provide workerMetabotId + objective at minimum; acceptanceCriteria/context/permissionScope make the handoff verifiable. Returns the attempt/handoff result; verify the Worker actual output via twin_task_status before reporting done.',
+          'Delegate ONE concrete, acceptance-tested step to a persistent local Worker Bot; returns after the Worker handoff is collected. Twin Bot only. Call local_workers_list first to choose by capability evidence. Do not delegate vague/multi-step blobs (break them down first) or trivial steps you can do faster yourself. workerMetabotId + objective required; acceptanceCriteria/context/permissionScope make the handoff verifiable. Verify the Worker actual output via twin_task_status before reporting done.',
           {
             workerMetabotId: z.number().int().positive(),
             objective: z.string().min(1),
@@ -7006,7 +7096,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'worker_session_stop',
-          'Stop ONE running local Worker Bot session by session id — aborts its in-flight turn and any pending tool confirmation, then settles the session to a terminal stopped state. Twin Bot only. Use to unwind a Worker session that is stuck (wedged tool call, hanging confirmation) after checking twin_task_status, so the Worker is freed and the step can be reassigned. When NOT to use: do not stop sessions merely because work is slow (check twin_task_status first); do not use it to cancel a task record (use twin_task_cancel — it stops the sessions AND settles the task); and never stop a session twice. Requires sessionId; returns { ok, sessionId, status }. Errors: SESSION_NOT_FOUND / NOT_A_WORKER_SESSION.',
+          'Stop ONE running local Worker Bot session by sessionId: aborts its in-flight turn and pending tool confirmation, settling it to a terminal stopped state. Twin Bot only. Use to unwind a stuck Worker session (wedged tool call, hanging confirmation) after checking twin_task_status, so the step can be reassigned. Not for slow work (check twin_task_status first); not for cancelling the task record (use twin_task_cancel); never stop the same session twice. Returns { ok, sessionId, status }; errors SESSION_NOT_FOUND / NOT_A_WORKER_SESSION.',
           { sessionId: z.string().min(1) },
           async (args) => {
             const result = await this.handleHostToolExecution({ toolName: 'worker_session_stop', toolInput: args }, sessionId);
@@ -7025,7 +7115,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'memory_user_edits',
-          `Manage the current user's long-term memories — durable facts about them (role, preferences, ongoing projects) that persist across sessions. Writes are high-signal: record only non-obvious, durable facts, never ephemeral chat state. action=list (optionally filter by query/status/limit) returns stored memories; action=add stores a new memory (requires text); action=update changes an existing memory by id (requires text); action=delete removes a memory by id. ${memoryWritesInvitation} When NOT to use: do not record ephemeral/task state ("the user just asked about Z"); list first to avoid duplicates; do not write every turn — memories must outlive this conversation. When unsure whether a fact is durable, ASK rather than guess. Returns the affected memory object(s) or a confirmation; writes are persistent state.`,
+          `Manage the current user's long-term memories — durable facts about them (role, preferences, ongoing projects) persisting across sessions. Record only non-obvious, durable facts, never ephemeral chat/task state. action=list (filter by query/status/limit); add (requires text); update by id (requires text); delete by id. ${memoryWritesInvitation} List first to avoid duplicates; do not write every turn; when unsure whether a fact is durable, ASK rather than guess. Writes are persistent state.`,
           {
             action: z.enum(['list', 'add', 'update', 'delete']),
             id: z.string().optional(),
@@ -7078,7 +7168,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'experience_recall',
-          'Recall YOUR OWN past experiences as daily summaries — what you learned and did on past days. A bare call returns the last 30 days; a query does a full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; granularity groups results by day (default), week, or month to compress a long range ("what happened last month"); limit caps the count (1-30). Use when reflecting on past work to inform the current task ("have I dealt with this before?", "what did I learn last week", "what did I do last month"). When NOT to use: this is your OWN experience log, not user memories (use memory_user_edits for facts about the user) and not chat history (use conversation_search). Returns daily summary blocks (grouped when granularity is set); for a pinned range with no summary yet it falls back to the raw activity timeline; an empty result means nothing was recorded for the range/query.',
+          'Recall YOUR OWN past experiences as daily summaries — what you did and learned on past days. Bare call: last 30 days; query: full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; granularity day (default) / week / month compresses a long range; limit caps the count (1-30). Use to let past work inform the current task. Not facts about the user (memory_user_edits), not chat history (conversation_search). A pinned range with no summary yet falls back to the raw activity timeline; an empty result means nothing was recorded for the range/query.',
           {
             query: z.string().optional(),
             date_from: z.string().optional(),
@@ -7100,7 +7190,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'knowledge_recall',
-          'Recall YOUR OWN reusable knowledge points (经验/知识点) — distilled know-how, pitfalls (坑) and principles from your past work that will help the current task. A query does a keyword search over topic+summary; kind filters to know_how/pitfall/principle; category filters a grouping; limit caps the count (1-50). Use before starting a task that resembles something you have done before, to reuse what worked and avoid traps you already hit. When NOT to use: this is your reusable TASK know-how, not facts about the user (use memory_user_edits) and not a log of past days (use experience_recall). Returns labeled knowledge entries; an empty result means you have not distilled a point about this yet.',
+          'Recall YOUR OWN reusable knowledge points (经验/知识点) — distilled know-how, pitfalls (坑) and principles from your past work. query keyword-searches topic+summary; kind filters know_how/pitfall/principle; category filters a grouping; limit caps the count (1-50). Use before starting a task that resembles past work, to reuse what worked and avoid traps you already hit. Not facts about the user (memory_user_edits), not a log of past days (experience_recall). An empty result means you have not distilled a point about this yet.',
           {
             query: z.string().optional(),
             kind: z.enum(['know_how', 'pitfall', 'principle']).optional(),
@@ -7119,7 +7209,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'knowledge_upsert',
-          'Save or update ONE reusable knowledge point (经验/知识点) you want to apply to future tasks. topic is a reusable theme written so it can be found again (e.g. "fastest path to a high-quality web 3D game", "design style this user likes", "SSR build crashes on window access"); summary is the actionable conclusion; kind is know_how (do this) / pitfall (坑, do NOT do this) / principle; category and tags are optional grouping. Reusing an existing topic REWRITES it (version bump, prior text archived) — so update a point when you learn something better, do not create near-duplicates. Use when the human asks you to remember something reusable, or you distill a generalizable lesson from an article/task. When NOT to use: do not save one-off ephemeral facts, user-profile facts (use memory_user_edits), or conduct rules. Returns the saved topic with its new version.',
+          'Save or update ONE reusable knowledge point (经验/知识点) for future tasks. topic is a reusable theme written so it can be found again; summary is the actionable conclusion; kind is know_how (do this) / pitfall (坑, do NOT do this) / principle; category and tags are optional grouping. Reusing an existing topic REWRITES it (version bump, prior text archived) — update a point when you learn something better, do not create near-duplicates. Use when the human asks you to remember something reusable, or you distill a generalizable lesson from an article/task. Not for one-off ephemeral facts, user-profile facts (memory_user_edits), or conduct rules. Returns the saved topic with its new version.',
           {
             topic: z.string().min(1),
             summary: z.string().min(1),
@@ -8230,7 +8320,7 @@ export class CoworkRunner extends EventEmitter {
       if (this.mcpServerProvider) {
         try {
           const configuredServers = buildUserConfiguredMcpServerConfigs(
-            this.mcpServerProvider(),
+            this.mcpServerProvider(sessionId),
             new Set(Object.keys(options.mcpServers as Record<string, unknown>)),
           );
           const configuredServerCount = Object.keys(configuredServers).length;

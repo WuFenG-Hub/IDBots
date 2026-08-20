@@ -420,6 +420,8 @@ interface CoworkConfig {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: 'strict' | 'standard' | 'relaxed';
   memoryUserMemoriesMaxItems: number;
+  /** Combined char budget for injected memory blocks (oldest-first eviction; global-only). */
+  memoryPromptMaxChars: number;
 }
 
 type CoworkConfigUpdate = Partial<Pick<
@@ -431,6 +433,7 @@ type CoworkConfigUpdate = Partial<Pick<
   | 'memoryLlmJudgeEnabled'
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
+  | 'memoryPromptMaxChars'
 >>;
 
 interface CoworkUserMemoryEntry {
@@ -463,6 +466,7 @@ interface CoworkMemoryPolicy {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: 'strict' | 'standard' | 'relaxed';
   memoryUserMemoriesMaxItems: number;
+  memoryPromptMaxChars: number;
   source: 'global' | 'metabot';
 }
 
