@@ -759,9 +759,9 @@ export async function updateMetaBotCore(
 // ---------------------------------------------------------------------------
 
 /**
- * Delete a metabot, then restore the machine-wide "exactly one Twin"
- * invariant and refresh the P2P runtime config. Refuses to delete the last
- * remaining bot so the machine is never left botless.
+ * Delete a metabot, then restore a Twin from the earliest remaining
+ * non-welcome bot (if any) and refresh the P2P runtime config. Refuses to
+ * delete the last remaining bot so the machine is never left botless.
  */
 export async function deleteMetaBotCore(
   id: number,
@@ -777,7 +777,8 @@ export async function deleteMetaBotCore(
   }
   const ok = store.deleteMetabot(id);
   if (ok) {
-    // Deleting the Twin must transfer Twin status to the earliest remaining bot.
+    // Deleting the Twin transfers Twin status to the earliest remaining
+    // non-welcome bot when one exists; the Welcome Bot is never promoted.
     store.ensureTwinExists();
     await onAfterMutation?.();
     await onAfterDelete?.(existing);

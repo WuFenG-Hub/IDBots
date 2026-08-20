@@ -30,7 +30,7 @@ import {
 } from './allowChatSkills.ts';
 import MetaBotAdvancedActionsSection from './MetaBotAdvancedActionsSection';
 import MetaBotHomepageSection, { composeHomepageForSave } from './MetaBotHomepageSection';
-import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
+import { buildMetaBotToggleViewModel, canShowMetabotTwinSwitch } from './metaBotCardPresentation.js';
 
 const AVATAR_MAX_SIZE_BYTES = 200 * 1024; // 200KB
 
@@ -189,8 +189,8 @@ interface MetaBotEditTabsProps {
   onRequestModelSettings?: () => void;
   /** Check if name already exists (for uniqueness). Returns true if duplicate. */
   onCheckNameExists?: (name: string, excludeId?: number) => Promise<boolean>;
-  /** Name of the bot that currently holds the Twin role (excluding the one being edited); null when none. */
-  currentTwinName?: string | null;
+  /** True when some other bot already holds the Twin role (not the one being edited). */
+  hasOtherTwin?: boolean;
   /** Signed /info/owner binding pin id of the bot being edited. */
   ownerBindingPinId?: string | null;
   /** Open the current Bot's default template homepage in Bot Browser. */
@@ -218,7 +218,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   skillOptions,
   onRequestModelSettings,
   onCheckNameExists,
-  currentTwinName,
+  hasOtherTwin = false,
   ownerBindingPinId,
   onOpenDefaultHomepage,
   onPreviewMetaAppHomepage,
@@ -245,6 +245,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const [coworkMcpTools, setCoworkMcpTools] = useState(false);
   const [coworkMcpToolsLoaded, setCoworkMcpToolsLoaded] = useState(false);
   const [coworkMcpToolsSaving, setCoworkMcpToolsSaving] = useState(false);
+  const [twinDemoteConfirmOpen, setTwinDemoteConfirmOpen] = useState(false);
 
   // Re-initialize when a different bot is loaded into the same mounted editor.
   // Saves only update the baseline (see handleSaveTab), so unsaved edits in
@@ -258,8 +259,8 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
     setTabErrors({});
     setNameDuplicate(false);
     setSelectedAllowChatSkillId('');
+    setTwinDemoteConfirmOpen(false);
     // initialValues is re-created by the parent on every list refresh; key off metabotId only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [metabotId]);
 
   // Load the OpenTeam remote-collab switch for the bot being edited. The kv
@@ -463,15 +464,6 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
           return;
         }
       }
-      // Transferring the Twin role demotes the current Twin; confirm first.
-      if (
-        values.metabot_type === 'twin' &&
-        baseline.metabot_type !== 'twin' &&
-        currentTwinName
-      ) {
-        const message = i18nService.t('metabotTwinTransferConfirm').replace('{name}', currentTwinName);
-        if (!window.confirm(message)) return;
-      }
     }
     let homepageForSave: string | null = null;
     if (tab === 'advanced') {
@@ -513,10 +505,14 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const globalDefaultModel = configService.getConfig().model?.defaultModel ?? null;
   const brainEffortOf = (value: string): LlmEffortLevel | null =>
     isLlmEffortLevel(value) ? value : null;
-  // Twin switch: the bot that currently holds the Twin role is locked on —
-  // the only Twin cannot be turned off here, transfer it from another Bot.
+  // Twin switch: the current Twin can turn itself off; Workers see it only
+  // when no Twin exists. The Welcome Bot never gets this control.
   const isTwin = values.metabot_type === 'twin';
-  const twinToggleView = buildMetaBotToggleViewModel({ enabled: isTwin, disabled: isTwin });
+  const showTwinSwitch = canShowMetabotTwinSwitch({
+    metabotType: baseline.metabot_type,
+    hasOtherTwin,
+  });
+  const twinToggleView = buildMetaBotToggleViewModel({ enabled: isTwin, disabled: false });
   const a2aAutoReplyToggleView = buildMetaBotToggleViewModel({ enabled: values.a2a_auto_reply_enabled, disabled: false });
   const openTeamRemoteCollabToggleView = buildMetaBotToggleViewModel({
     enabled: openTeamRemoteCollab,
@@ -686,32 +682,37 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
           </div>
         </div>
 
-        <div className={rowClass}>
-          <label id="metabot-twin-switch-label" className={labelClass}>
-            {i18nService.t('metabotTwinSwitchLabel')}
-          </label>
-          <div className="min-w-0">
-            <div className="flex items-center gap-3 pt-1">
-              <div
-                role="switch"
-                aria-checked={isTwin}
-                aria-disabled={isTwin}
-                aria-labelledby="metabot-twin-switch-label"
-                data-slot="metabot-twin-switch"
-                title={isTwin ? i18nService.t('metabotTwinSwitchHintCurrent') : i18nService.t('metabotTwinSwitchHint')}
-                className={twinToggleView.trackClass}
-                onClick={() => {
-                  if (!isTwin) handleChange('metabot_type', 'twin');
-                }}
-              >
-                <div className={twinToggleView.knobClass} />
+        {showTwinSwitch && (
+          <div className={rowClass} data-slot="metabot-twin-switch-row">
+            <label id="metabot-twin-switch-label" className={labelClass}>
+              {i18nService.t('metabotTwinSwitchLabel')}
+            </label>
+            <div className="min-w-0">
+              <div className="flex items-center gap-3 pt-1">
+                <div
+                  role="switch"
+                  aria-checked={isTwin}
+                  aria-labelledby="metabot-twin-switch-label"
+                  data-slot="metabot-twin-switch"
+                  title={isTwin ? i18nService.t('metabotTwinSwitchHintCurrent') : i18nService.t('metabotTwinSwitchHint')}
+                  className={twinToggleView.trackClass}
+                  onClick={() => {
+                    if (isTwin) {
+                      setTwinDemoteConfirmOpen(true);
+                      return;
+                    }
+                    handleChange('metabot_type', 'twin');
+                  }}
+                >
+                  <div className={twinToggleView.knobClass} />
+                </div>
               </div>
+              <p className={hintClass}>
+                {isTwin ? i18nService.t('metabotTwinSwitchHintCurrent') : i18nService.t('metabotTwinSwitchHint')}
+              </p>
             </div>
-            <p className={hintClass}>
-              {isTwin ? i18nService.t('metabotTwinSwitchHintCurrent') : i18nService.t('metabotTwinSwitchHint')}
-            </p>
           </div>
-        </div>
+        )}
 
         <div className={rowClass}>
           <label htmlFor="metabot-boss-metaid" className={labelClass}>
@@ -1175,6 +1176,49 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
           <MetaBotAdvancedActionsSection metabot={metabot} onDelete={onDelete} />
         )}
       </div>
+
+      {showTwinSwitch && twinDemoteConfirmOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          data-slot="metabot-twin-demote-confirm"
+        >
+          <div
+            className="absolute inset-0 bg-black/50 dark:bg-black/60"
+            onClick={() => setTwinDemoteConfirmOpen(false)}
+            role="presentation"
+          />
+          <div className="relative w-full max-w-md rounded-2xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg shadow-xl overflow-hidden">
+            <div className="px-6 py-6">
+              <h2 className="text-lg font-semibold dark:text-claude-darkText text-claude-text">
+                {i18nService.t('metabotTwinDemoteConfirmTitle')}
+              </h2>
+              <p className="mt-2 text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('metabotTwinDemoteConfirm')}
+              </p>
+              <div className="mt-6 flex gap-3 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setTwinDemoteConfirmOpen(false)}
+                  className="px-4 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text hover:opacity-90"
+                >
+                  {i18nService.t('cancel')}
+                </button>
+                <button
+                  type="button"
+                  data-slot="metabot-twin-demote-confirm-action"
+                  onClick={() => {
+                    handleChange('metabot_type', 'worker');
+                    setTwinDemoteConfirmOpen(false);
+                  }}
+                  className="btn-idchat-primary-filled px-4 py-2 text-sm"
+                >
+                  {i18nService.t('metabotTwinDemoteConfirmAction')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

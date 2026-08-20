@@ -154,6 +154,8 @@ const resolveMetabotActionError = (error?: string): string => {
   if (error === METABOT_LIMIT_REACHED_ERROR) return formatMetabotLimitReached();
   if (error === 'OWNER_IDENTITY_MISSING') return i18nService.t('metabotErrorOwnerIdentityMissing');
   if (error === 'OWNER_IDENTITY_MISMATCH') return i18nService.t('metabotErrorOwnerMismatch');
+  if (error === 'WELCOME_CANNOT_BE_TWIN') return i18nService.t('metabotErrorWelcomeCannotBeTwin');
+  if (error === 'TWIN_ALREADY_EXISTS') return i18nService.t('metabotErrorTwinAlreadyExists');
   return error || i18nService.t('metabotSaveFailed');
 };
 
@@ -373,7 +375,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const nextHomepage = scopedValues.homepage ?? null;
 
     // metabot_type is a local-only change (never published on-chain); a Twin
-    // transfer alone still counts as a save-worthy edit.
+    // identity change alone still counts as a save-worthy edit.
     const metabotTypeChanged = scopedValues.metabot_type !== current.metabot_type;
 
     // No-op guard: nothing at all changed for this tab. The on-chain sync
@@ -610,7 +612,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
           skillOptions={skillOptions}
           onRequestModelSettings={onRequestModelSettings}
           onCheckNameExists={handleCheckNameExists}
-          currentTwinName={list.find((m) => m.metabot_type === 'twin' && m.id !== editMetabot.id)?.name ?? null}
+          hasOtherTwin={list.some((m) => m.metabot_type === 'twin' && m.id !== editMetabot.id)}
           onOpenDefaultHomepage={onOpenMetabotInBrowser ? () => onOpenMetabotInBrowser(editMetabot) : undefined}
           onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
           onRequestMetaApps={onRequestMetaApps}
