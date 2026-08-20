@@ -101,3 +101,28 @@ test('detail view: card carries the decision; header Accept/Rework stay visible 
     'header rework button must not hide when a summary record exists',
   );
 });
+
+test('detail view: Accept & Close cannot white-screen on a close payload without members', () => {
+  const source = read('GroupTaskDetailView.tsx');
+
+  // The owner view used to write the close IPC result into detail state and
+  // then call detail.members.find — a bare GroupTask row (no members) threw
+  // and unmounted the whole renderer.
+  assert.ok(
+    source.includes('Array.isArray(detail.members)'),
+    'members is coerced to an array before render',
+  );
+  assert.ok(
+    source.includes('Array.isArray(detail.deliverables)'),
+    'deliverables is coerced to an array before render',
+  );
+  assert.doesNotMatch(
+    source,
+    /detail\.members\.find\(/,
+    'must not call members.find on the raw detail payload',
+  );
+  assert.ok(
+    source.includes('Array.isArray(updated?.members)'),
+    'close handler refuses to install a payload that lacks members',
+  );
+});

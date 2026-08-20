@@ -122,7 +122,7 @@ const AcceptanceSummaryCard: React.FC<{
           <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary space-y-1">
             <PreviewableField
               label={i18nService.t('groupTasksAcceptanceGoal')}
-              text={summary.goal.trim()}
+              text={(summary.goal ?? '').trim()}
             />
             <PreviewableField
               label={i18nService.t('groupTasksAcceptanceCriteria')}
@@ -173,17 +173,17 @@ const AcceptanceSummaryCard: React.FC<{
             </div>
           )}
 
-          {summary.members.length > 0 && (
+          {(summary.members ?? []).length > 0 && (
             <div className="text-[11px] dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80">
               <span className="font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 {i18nService.t('groupTasksAcceptanceMembers')}:
               </span>{' '}
-              {summary.members.map((member) => member.name ?? 'unknown').join('、')}
+              {(summary.members ?? []).map((member) => member.name ?? 'unknown').join('、')}
             </div>
           )}
 
           <pre className="whitespace-pre-wrap text-[11px] leading-relaxed dark:text-claude-darkTextSecondary text-claude-textSecondary font-sans">
-            {summary.guidance.trim()}
+            {(summary.guidance ?? '').trim()}
           </pre>
 
           {summary.publishedGroupPinId && (

@@ -112,6 +112,8 @@ test('closeGroupTask persists the owner rating on done; unrated close stays null
     assert.equal(done.rating, 4);
     assert.equal(done.ratingComment, '排版不错');
     assert.ok(done.ratedAt);
+    assert.ok(Array.isArray(done.members), 'rated accept returns detail.members for the owner view');
+    assert.ok(Array.isArray(done.deliverables), 'rated accept returns detail.deliverables for the owner view');
     assert.equal(groupTaskStore.getTaskById(rated.id)?.rating, 4);
 
     const unrated = groupTaskStore.createTask({
@@ -120,6 +122,7 @@ test('closeGroupTask persists the owner rating on done; unrated close stays null
     const closed = await closeGroupTask(unrated.id, { status: 'done' });
     assert.equal(closed.status, 'done');
     assert.equal(closed.rating, null, 'no fabricated rating for automated closes');
+    assert.ok(Array.isArray(closed.members), 'unrated close also returns full detail');
 
     // rating rejected out of range even at the service layer
     const invalid = groupTaskStore.createTask({

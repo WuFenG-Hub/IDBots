@@ -443,6 +443,8 @@ test('closeGroupTask: state machine transitions and terminal lock', async () => 
     const done = await closeGroupTask(detail.id, { status: 'done', reason: 'goal met' });
     assert.equal(done.status, 'done');
     assert.ok(done.closedAt);
+    assert.ok(Array.isArray(done.members), 'close returns full detail (members) so Accept & Close cannot white-screen');
+    assert.ok(Array.isArray(done.deliverables), 'close returns full detail (deliverables)');
 
     // same-status close is a no-op by design (updateTaskStatus early-returns)
     const noop = await closeGroupTask(detail.id, { status: 'done' });

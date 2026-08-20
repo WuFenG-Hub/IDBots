@@ -455,7 +455,14 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     setCloseError(null);
     try {
       const updated = await groupTaskService.closeTask({ taskId, status: confirmAction, rating, ratingComment });
-      setDetail(updated);
+      // Accept used to return a bare GroupTask row (no members/deliverables).
+      // Writing that into detail state crashed the view (`members.find`).
+      // Prefer the close payload when it is already a full detail; otherwise
+      // refetch so the post-accept render cannot white-screen.
+      const nextDetail = Array.isArray(updated?.members)
+        ? updated
+        : await groupTaskService.getTask(taskId);
+      setDetail(nextDetail);
       setConfirmAction(null);
     } catch (err) {
       setCloseError(err instanceof Error ? err.message : String(err));
@@ -530,6 +537,10 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   }
 
   const isTerminal = !isActiveGroupTaskStatus(detail.status);
+  // Nested collections can be missing on a stale/partial close payload.
+  // Always coerce to arrays so Accept & Close cannot white-screen the view.
+  const members = Array.isArray(detail.members) ? detail.members : [];
+  const deliverables = Array.isArray(detail.deliverables) ? detail.deliverables : [];
   // HITL: the currently open human checkpoint, if any (drives the pause banner).
   const openCheckpoint = detail.checkpoints?.find((checkpoint) => checkpoint.status === 'open') ?? null;
   // HITL: what the owner must decide, shown under the banner topic — the
@@ -540,7 +551,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     && openCheckpointSummary.length > CHECKPOINT_SUMMARY_MAX_LEN
     ? `${openCheckpointSummary.slice(0, CHECKPOINT_SUMMARY_MAX_LEN).trimEnd()}…`
     : openCheckpointSummary;
-  const chairMember = detail.members.find((member) => member.role === 'chair');
+  const chairMember = members.find((member) => member.role === 'chair');
   const memberDisplayName = (member: GroupTaskDetail['members'][number]): string =>
     member.name ?? (member.metabotId != null
       ? `bot-${member.metabotId}`
@@ -550,7 +561,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   // Remote members (metabotId == null) joined via OpenTeam; their messages are
   // matched by globalmetaid so the transcript can flag them.
   const remoteMemberGlobalMetaIds = new Set(
-    detail.members
+    members
       .filter((member) => member.metabotId == null && member.globalmetaid)
       .map((member) => member.globalmetaid as string),
   );
@@ -559,7 +570,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   // delivery as "claude bot"), while senderGlobalMetaId always points at the
   // registered member — resolve transcript author names through this map.
   const memberNameByGmid = new Map<string, string>();
-  for (const member of detail.members) {
+  for (const member of members) {
     const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
     const name = (member.name ?? member.displayName ?? '').trim();
     if (gmid && name) memberNameByGmid.set(gmid, name);
@@ -573,7 +584,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   };
   const deliverableAuthorName = (authorGlobalMetaId: string | null): string => {
     if (!authorGlobalMetaId) return '—';
-    const member = detail.members.find((candidate) => candidate.globalmetaid === authorGlobalMetaId);
+    const member = members.find((candidate) => candidate.globalmetaid === authorGlobalMetaId);
     if (member?.name) return member.name;
     if (ownerGlobalMetaId && authorGlobalMetaId === ownerGlobalMetaId) {
       return i18nService.t('groupTasksOwnerBadge');
@@ -881,7 +892,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               {i18nService.t('groupTasksMembers')}
             </h3>
             <div className="space-y-1.5">
-              {detail.members.map((member) => (
+              {members.map((member) => (
                 <>
                 <div key={member.id} className="group flex items-center gap-2">
                   <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
@@ -1043,13 +1054,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             <h3 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary mb-2">
               {i18nService.t('groupTasksDeliverables')}
             </h3>
-            {detail.deliverables.length === 0 ? (
+            {deliverables.length === 0 ? (
               <p className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
                 {i18nService.t('groupTasksNoDeliverables')}
               </p>
             ) : (
               <div className="space-y-2">
-                {detail.deliverables.map((deliverable) => {
+                {deliverables.map((deliverable) => {
                   const kindBadge = deliverableKindBadge(deliverable.kind);
                   const statusKey = deliverable.status === 'accepted'
                     ? 'groupTasksDeliverableStatusAccepted'
