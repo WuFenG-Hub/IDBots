@@ -67,8 +67,9 @@ interface BotBrowserCoworkPanelProps {
 }
 
 /**
- * Co-Work chat panel embedded in the sidebar under the "New Tab" button when
- * the Bot Browser surface is active. Talks to the local Agent through
+ * Co-Work chat panel embedded in the Bot Internet sidebar. Stays mounted for
+ * Bot Browser, Bot Hub, and Meta Apps so the same panel can drive those pages.
+ * Talks to the local Agent through
  * `browserCoworkService`; the Agent controls the browser via bot_browser_*
  * tools. Rendering is intentionally minimal: user messages and final agent
  * answers only — tool calls, thinking, and system noise stay out of view.

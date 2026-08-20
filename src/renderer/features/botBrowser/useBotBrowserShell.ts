@@ -15,6 +15,7 @@ import type {
   BotBrowserSurfaceMode,
   BotBrowserTabCommand,
   BotBrowserTabCommandResult,
+  BotInternetPane,
 } from './types';
 
 interface UseBotBrowserShellInput {
@@ -26,6 +27,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
   const browserRef = useRef<BotBrowserSurfaceHandle | null>(null);
   const pendingOpenUriRef = useRef<BotBrowserOpenUriInput | null>(null);
   const [surfaceMode, setSurfaceMode] = useState<BotBrowserSurfaceMode>('home');
+  const [internetPane, setInternetPane] = useState<BotInternetPane>('browser');
   const [hasMountedBrowser, setHasMountedBrowser] = useState(true);
 
   const messageFromError = (error: unknown, fallback: string): string => {
@@ -58,6 +60,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     if (!await ensureLocalBot()) return false;
     setHasMountedBrowser(true);
     setSurfaceMode('browser');
+    setInternetPane('browser');
     return true;
   }, [ensureLocalBot]);
 
@@ -79,6 +82,13 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
   const openBrowserHome = useCallback(async () => {
     setHasMountedBrowser(true);
     setSurfaceMode('browser');
+    setInternetPane('browser');
+  }, []);
+
+  const selectInternetPane = useCallback((pane: BotInternetPane) => {
+    setHasMountedBrowser(true);
+    setSurfaceMode('browser');
+    setInternetPane(pane);
   }, []);
 
   const waitForBrowserSurface = useCallback(async (): Promise<BotBrowserSurfaceHandle> => {
@@ -97,6 +107,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
   ): Promise<BotBrowserTabCommandResult> => {
     setHasMountedBrowser(true);
     setSurfaceMode('browser');
+    setInternetPane('browser');
     const browser = await waitForBrowserSurface();
     return browser.controlTabs(command);
   }, [waitForBrowserSurface]);
@@ -172,9 +183,12 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
   return {
     browserRef,
     surfaceMode,
+    internetPane,
+    isBrowserPaneVisible: surfaceMode === 'browser' && internetPane === 'browser',
     hasMountedBrowser,
     onBrowserReady,
     openBrowserHome,
+    selectInternetPane,
     openNewTab,
     controlTabs,
     openLocalMetabot,

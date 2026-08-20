@@ -81,7 +81,7 @@ const normalizeFocusedOrderTxid = (value: unknown): string | null => {
 const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [settingsOptions, setSettingsOptions] = useState<SettingsOpenOptions>({});
-  const [mainView, setMainView] = useState<'cowork' | 'metaapps' | 'skills' | 'scheduledTasks' | 'groupTasks' | 'metabots' | 'gigSquare'>('cowork');
+  const [mainView, setMainView] = useState<'cowork' | 'skills' | 'scheduledTasks' | 'groupTasks' | 'metabots'>('cowork');
   const [isInitialized, setIsInitialized] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -397,10 +397,6 @@ const App: React.FC = () => {
     handleShowSettings({ initialTab: 'skills' });
   }, [handleShowSettings]);
 
-  const handleShowMetaApps = useCallback(() => {
-    setMainView('metaapps');
-  }, []);
-
   const handleShowCowork = useCallback(() => {
     setMainView('cowork');
   }, []);
@@ -422,10 +418,6 @@ const App: React.FC = () => {
     setMainView('groupTasks');
     dispatch(selectGroupTask(task.id));
   }, [dispatch]);
-
-  const handleShowGigSquare = useCallback(() => {
-    setMainView('gigSquare');
-  }, []);
 
   const handleShowMetabots = useCallback(() => {
     setMainView('metabots');
@@ -507,6 +499,10 @@ const App: React.FC = () => {
     showToast,
   });
 
+  const handleShowMetaApps = useCallback(() => {
+    botBrowserShell.selectInternetPane('metaapps');
+  }, [botBrowserShell.selectInternetPane]);
+
   const handleSidebarResizeStart = useCallback((event: React.MouseEvent) => {
     event.preventDefault();
     sidebarResizeRef.current = {
@@ -524,7 +520,7 @@ const App: React.FC = () => {
     window.localStorage.setItem(sidebarWidthStorageKey(mode), String(width));
   }, [botBrowserShell.surfaceMode]);
 
-  // Bot Home and Bot Browser keep independent widths: restore the surface's own
+  // Bot Home and Bot Internet keep independent widths: restore the surface's own
   // comfortable width on every mode switch.
   useEffect(() => {
     setSidebarWidth(loadSidebarWidth((key) => window.localStorage.getItem(key), botBrowserShell.surfaceMode));
@@ -1173,20 +1169,7 @@ const App: React.FC = () => {
     return <Onboarding onComplete={handleOnboardingComplete} onClose={handleCloseOnboarding} />;
   }
 
-  const homeContent = mainView === 'gigSquare' ? (
-    <GigSquareView onOpenRemoteBotInBrowser={botBrowserShell.openRemoteBot} />
-  ) : mainView === 'metaapps' ? (
-    <MetaAppsView
-      isSidebarCollapsed={isSidebarCollapsed}
-      onToggleSidebar={handleToggleSidebar}
-      onNewChat={handleNewChat}
-      onOpenMetaAppInBrowser={botBrowserShell.openMetaApp}
-      onPreviewMetaAppByPin={botBrowserShell.openMetaAppByPin}
-      onStartTaskWithMetaApp={handleStartTaskWithMetaApp}
-      onOpenBotInBrowser={botBrowserShell.openRemoteBot}
-      updateBadge={isSidebarCollapsed ? updateBadge : null}
-    />
-  ) : mainView === 'scheduledTasks' ? (
+  const homeContent = mainView === 'scheduledTasks' ? (
     <ScheduledTasksView
       isSidebarCollapsed={isSidebarCollapsed}
       onToggleSidebar={handleToggleSidebar}
@@ -1228,6 +1211,24 @@ const App: React.FC = () => {
     />
   );
 
+  const internetCatalogContent = botBrowserShell.internetPane === 'gigSquare' ? (
+    <GigSquareView onOpenRemoteBotInBrowser={botBrowserShell.openRemoteBot} />
+  ) : botBrowserShell.internetPane === 'metaapps' ? (
+    <MetaAppsView
+      isSidebarCollapsed={isSidebarCollapsed}
+      onToggleSidebar={handleToggleSidebar}
+      onNewChat={handleNewChat}
+      onOpenMetaAppInBrowser={botBrowserShell.openMetaApp}
+      onPreviewMetaAppByPin={botBrowserShell.openMetaAppByPin}
+      onStartTaskWithMetaApp={handleStartTaskWithMetaApp}
+      onOpenBotInBrowser={botBrowserShell.openRemoteBot}
+      updateBadge={isSidebarCollapsed ? updateBadge : null}
+    />
+  ) : null;
+
+  const showHomeSurface = botBrowserShell.surfaceMode === 'home';
+  const showInternetCatalog = botBrowserShell.surfaceMode === 'browser' && !botBrowserShell.isBrowserPaneVisible;
+
   return (
     <div className="relative h-screen overflow-hidden flex dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted">
       {toastMessage && (
@@ -1243,22 +1244,19 @@ const App: React.FC = () => {
         onShowLogin={handleShowLogin}
         onShowSettings={handleShowSettings}
         activeView={mainView}
-        onShowMetaApps={handleShowMetaApps}
         onShowSkills={handleShowSkills}
         onShowCowork={handleShowCowork}
         onShowScheduledTasks={handleShowScheduledTasks}
         onShowGroupTasks={handleShowGroupTasks}
-        onShowGigSquare={handleShowGigSquare}
         onShowMetabots={handleShowMetabots}
         onNewChat={handleBlankNewChat}
         mode={botBrowserShell.surfaceMode}
+        internetPane={botBrowserShell.internetPane}
         onSelectHome={botBrowserShell.switchToHome}
         onSelectBrowser={() => {
           void botBrowserShell.openBrowserHome();
         }}
-        onNewBrowserTab={() => {
-          void botBrowserShell.openNewTab();
-        }}
+        onSelectInternetPane={botBrowserShell.selectInternetPane}
         isCollapsed={isSidebarCollapsed}
         onToggleCollapse={handleToggleSidebar}
         width={sidebarWidth}
@@ -1281,15 +1279,15 @@ const App: React.FC = () => {
         <div className="fixed inset-0 z-50 cursor-col-resize" />
       ) : null}
       <div className="relative flex flex-1 min-w-0 min-h-0 overflow-hidden">
-        {botBrowserShell.surfaceMode === 'home' ? (
+        {showHomeSurface || showInternetCatalog ? (
           <div className={`flex-1 min-w-0 py-1.5 pr-1.5 ${isSidebarCollapsed ? 'pl-1.5' : ''}`}>
             <div className="h-full rounded-xl dark:bg-claude-darkBg bg-claude-bg overflow-hidden">
-              {homeContent}
+              {showHomeSurface ? homeContent : internetCatalogContent}
             </div>
           </div>
         ) : null}
         {botBrowserShell.hasMountedBrowser ? (
-          <div className={botBrowserShell.surfaceMode === 'browser' ? 'relative flex flex-1 min-w-0 flex-col' : 'hidden'}>
+          <div className={botBrowserShell.isBrowserPaneVisible ? 'relative flex flex-1 min-w-0 flex-col' : 'hidden'}>
             {isWindows ? (
               <div className="draggable relative h-9 shrink-0 dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted">
                 <WindowTitleBar isOverlayActive={isOverlayActive} />
@@ -1298,7 +1296,7 @@ const App: React.FC = () => {
             <div className="flex-1 min-h-0">
               <BotBrowserSurface
                 ref={botBrowserShell.browserRef}
-                visible={botBrowserShell.surfaceMode === 'browser'}
+                visible={botBrowserShell.isBrowserPaneVisible}
                 onOpenConversation={handleBrowserOpenConversation}
                 onError={showToast}
                 onReady={botBrowserShell.onBrowserReady}

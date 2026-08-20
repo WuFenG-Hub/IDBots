@@ -27,7 +27,7 @@ const BotBrowserModeSwitch: React.FC<BotBrowserModeSwitchProps> = ({
       <div
         data-slot="bot-browser-mode-segments"
         role="group"
-        aria-label="Bot Browser display mode"
+        aria-label="Bot Internet display mode"
         className="non-draggable grid w-full grid-cols-2 gap-1 rounded-lg border border-claude-border/70 bg-claude-bg/80 p-1 dark:border-claude-darkBorder/70 dark:bg-claude-darkBg/80"
       >
         <button
@@ -36,7 +36,7 @@ const BotBrowserModeSwitch: React.FC<BotBrowserModeSwitchProps> = ({
           className={tabClass(mode === 'browser')}
           onClick={onSelectBrowser}
         >
-          Bot Browser
+          Bot Internet
         </button>
         <button
           type="button"

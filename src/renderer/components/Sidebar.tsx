@@ -8,34 +8,33 @@ import CoworkSessionList from './cowork/CoworkSessionList';
 import CoworkSearchModal from './cowork/CoworkSearchModal';
 import GroupTaskSidebarList from './groupTasks/GroupTaskSidebarList';
 import { selectTask as selectGroupTask } from '../store/slices/groupTasksSlice';
-import { MagnifyingGlassIcon, PlusIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon, UserGroupIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon, UserGroupIcon, GlobeAltIcon } from '@heroicons/react/24/outline';
 import ComposeIcon from './icons/ComposeIcon';
 import SidebarToggleIcon from './icons/SidebarToggleIcon';
 import { P2PStatusBadge } from './p2p/P2PStatusBadge';
 import BackgroundTasksBadge from './cowork/BackgroundTasksBadge';
-import { getSidebarPrimaryNavModel } from './sidebar/sidebarNavigation.js';
+import { getSidebarInternetNavModel, getSidebarPrimaryNavModel } from './sidebar/sidebarNavigation.js';
 import BotBrowserModeSwitch from '../features/botBrowser/BotBrowserModeSwitch';
 import BotBrowserCoworkPanel from '../features/botBrowser/BotBrowserCoworkPanel';
 import { defaultSidebarWidth } from '../utils/sidebarWidth';
-import type { BotBrowserSurfaceMode } from '../features/botBrowser/types';
+import type { BotBrowserSurfaceMode, BotInternetPane } from '../features/botBrowser/types';
 import type { CoworkSessionSummary } from '../types/cowork';
 
 interface SidebarProps {
   onShowSettings: () => void;
   onShowLogin?: () => void;
-  activeView: 'cowork' | 'metaapps' | 'skills' | 'scheduledTasks' | 'groupTasks' | 'metabots' | 'gigSquare';
-  onShowMetaApps: () => void;
+  activeView: 'cowork' | 'skills' | 'scheduledTasks' | 'groupTasks' | 'metabots';
   onShowSkills: () => void;
   onShowCowork: () => void;
   onShowScheduledTasks: () => void;
   onShowGroupTasks: () => void;
-  onShowGigSquare: () => void;
   onShowMetabots: () => void;
   onNewChat: () => void;
   mode: BotBrowserSurfaceMode;
+  internetPane: BotInternetPane;
   onSelectHome: () => void;
   onSelectBrowser: () => void;
-  onNewBrowserTab: () => void;
+  onSelectInternetPane: (pane: BotInternetPane) => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   /** Expanded sidebar width in px (resizable by the user). */
@@ -75,18 +74,17 @@ const loadTaskRecordTab = (): TaskRecordTab => {
 const Sidebar: React.FC<SidebarProps> = ({
   onShowSettings,
   activeView,
-  onShowMetaApps,
   onShowSkills,
   onShowCowork,
   onShowScheduledTasks,
   onShowGroupTasks,
-  onShowGigSquare,
   onShowMetabots,
   onNewChat,
   mode,
+  internetPane,
   onSelectHome,
   onSelectBrowser,
-  onNewBrowserTab,
+  onSelectInternetPane,
   isCollapsed,
   onToggleCollapse,
   width = defaultSidebarWidth('home'),
@@ -149,6 +147,9 @@ const Sidebar: React.FC<SidebarProps> = ({
     t: (key) => i18nService.t(key),
     hasRunningScheduledTask,
   }).filter((item) => !item.hidden);
+  const internetNavItems = getSidebarInternetNavModel({
+    t: (key) => i18nService.t(key),
+  });
 
   useEffect(() => {
     const handleSearch = () => {
@@ -222,14 +223,6 @@ const Sidebar: React.FC<SidebarProps> = ({
       onShowGroupTasks();
       return;
     }
-    if (itemId === 'gigSquare') {
-      onShowGigSquare();
-      return;
-    }
-    if (itemId === 'metaapps') {
-      onShowMetaApps();
-      return;
-    }
     if (itemId === 'metabots') {
       onShowMetabots();
     }
@@ -239,11 +232,17 @@ const Sidebar: React.FC<SidebarProps> = ({
     if (icon === 'clock') return <ClockIcon className="h-4 w-4" />;
     if (icon === 'userGroup') return <UserGroupIcon className="h-4 w-4" />;
     if (icon === 'shoppingBag') return <ShoppingBagIcon className="h-4 w-4 shrink-0" />;
+    if (icon === 'globe') return <GlobeAltIcon className="h-4 w-4" />;
     if (icon === 'squares2x2') return <MagnifyingGlassIcon className="h-4 w-4 opacity-0 absolute pointer-events-none" />;
     return <CpuChipIcon className="h-4 w-4" />;
   };
 
-  const renderNavContent = (item: ReturnType<typeof getSidebarPrimaryNavModel>[number]) => {
+  const renderNavContent = (item: {
+    id: string;
+    label: string;
+    hasIndicator?: boolean;
+    badge?: string;
+  }) => {
     if (item.id === 'scheduledTasks') {
       return (
         <span className="inline-flex min-w-0 items-center gap-2">
@@ -275,7 +274,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     return <span className="truncate">{item.label}</span>;
   };
 
-  const renderPrimaryNavIcon = (item: ReturnType<typeof getSidebarPrimaryNavModel>[number]) => {
+  const renderPrimaryNavIcon = (item: { icon: string }) => {
     if (item.icon === 'squares2x2') {
       return (
         <svg
@@ -330,18 +329,26 @@ const Sidebar: React.FC<SidebarProps> = ({
           />
         </div>
         {mode === 'browser' ? (
-          <nav aria-label="Bot Browser" className="mt-3 space-y-1 px-3">
-            <button
-              type="button"
-              onClick={onNewBrowserTab}
-              className="w-full inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-            >
-              <PlusIcon className="h-4 w-4" />
-              <span>New Tab</span>
-            </button>
+          <nav aria-label={i18nService.t('botInternet')} className="mt-3 space-y-1 px-3">
+            {internetNavItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                aria-pressed={internetPane === item.id}
+                onClick={() => onSelectInternetPane(item.id as BotInternetPane)}
+                className={`w-full inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors ${
+                  internetPane === item.id
+                    ? 'dark:text-claude-darkText text-claude-text dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover'
+                    : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
+                }`}
+              >
+                {renderPrimaryNavIcon(item)}
+                {renderNavContent(item)}
+              </button>
+            ))}
           </nav>
         ) : (
-          <nav aria-label="Bot Home" className="mt-3 space-y-1 px-3">
+          <nav aria-label={i18nService.t('botHome')} className="mt-3 space-y-1 px-3">
             <div className="flex items-center gap-1">
               <button
                 type="button"
