@@ -234,6 +234,36 @@ test('model id with provider hint resolves to the hinted provider on id collisio
   assert.equal(staleHint.config?.provider, 'custom-relay');
 });
 
+test('OpenCode vs DeepSeek colliding model id uses the provider hint', () => {
+  const config = {
+    model: { defaultModel: 'deepseek-v4-flash', availableModels: [] },
+    providers: {
+      deepseek: {
+        enabled: true,
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        apiFormat: 'anthropic',
+        models: [{ id: 'deepseek-v4-flash' }],
+      },
+      opencode: {
+        enabled: true,
+        apiKey: 'sk-oc',
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+        apiFormat: 'anthropic',
+        models: [{ id: 'deepseek-v4-flash' }],
+      },
+    },
+  };
+
+  const byOrder = withAppConfig(config, () => resolveApiConfigForModel('deepseek-v4-flash'));
+  assert.equal(byOrder.config?.provider, 'deepseek');
+
+  const byHint = withAppConfig(config, () =>
+    resolveApiConfigForModel('deepseek-v4-flash', 'local', null, 'opencode'));
+  assert.equal(byHint.config?.provider, 'opencode');
+  assert.equal(byHint.config?.model, 'deepseek-v4-flash');
+});
+
 test('getPersistedCoworkEffortLevel converts legacy five-step values onto the four-step ladder', () => {
   const { getPersistedCoworkEffortLevel } = claudeSettings;
   const read = (coworkEffortLevel) =>

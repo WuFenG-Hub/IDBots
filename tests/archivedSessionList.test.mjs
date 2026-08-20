@@ -53,6 +53,49 @@ test('setSessionModel stores a per-session model without touching other sessions
     // Clearing the override falls back to the global default again.
     store.setSessionModel(arch1.id, null);
     assert.equal(store.getSession(arch1.id).model, null, 'cleared override');
+    assert.equal(store.getSession(arch1.id).modelProvider, null, 'cleared provider');
+  } finally {
+    cleanup();
+  }
+});
+
+test('setSessionModel stores the provider key so colliding model ids stay disambiguated', async () => {
+  const { cleanup, store, arch1, arch2 } = await seed();
+  try {
+    store.setSessionModel(arch1.id, 'deepseek-v4-flash', null, 'opencode');
+    const session = store.getSession(arch1.id);
+    assert.equal(session.model, 'deepseek-v4-flash');
+    assert.equal(session.modelProvider, 'opencode');
+    assert.equal(store.getSession(arch2.id).modelProvider, null, 'other session untouched');
+
+    const listed = store.listArchivedSessions().find((row) => row.id === arch1.id);
+    assert.equal(listed?.modelProvider, 'opencode');
+
+    const live = store.createSession(
+      'live collision',
+      '/tmp/e',
+      '',
+      'local',
+      [],
+      5,
+      'standard',
+      null,
+      null,
+      null,
+      'default',
+      'deepseek-v4-flash',
+      null,
+      'opencode',
+    );
+    assert.equal(live.modelProvider, 'opencode');
+    assert.equal(store.getSession(live.id).modelProvider, 'opencode');
+    assert.equal(
+      store.listSessions().find((row) => row.id === live.id)?.modelProvider,
+      'opencode',
+    );
+
+    store.setSessionModel(arch1.id, null);
+    assert.equal(store.getSession(arch1.id).modelProvider, null, 'cleared provider with model');
   } finally {
     cleanup();
   }

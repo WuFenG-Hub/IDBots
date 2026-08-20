@@ -948,7 +948,7 @@ interface IElectronAPI {
     onStateChanged: (callback: (state: WindowState) => void) => () => void;
   };
   cowork: {
-    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; effort?: string | null }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
+    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; modelProvider?: string | null; effort?: string | null }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     submitInput: (input: CoworkSubmitInput) => Promise<CoworkSubmitInputResult>;
     stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
@@ -977,6 +977,8 @@ interface IElectronAPI {
       model: string | null;
       /** Optional per-session effort (off/low/high/max); undefined leaves it unchanged. */
       effort?: string | null;
+      /** Provider key the model was picked from; required when model ids collide. */
+      modelProvider?: string | null;
     }) => Promise<{ success: boolean; model?: string | null; error?: string }>;
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;

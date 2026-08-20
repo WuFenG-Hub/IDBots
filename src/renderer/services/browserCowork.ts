@@ -36,7 +36,7 @@ class BrowserCoworkService {
     prompt: string,
     metabotId?: number | null,
     cwd?: string,
-    modelEffort?: { model?: string | null; effort?: string | null },
+    modelEffort?: { model?: string | null; modelProvider?: string | null; effort?: string | null },
   ): Promise<CoworkSession | null> {
     if (this.starting) return null;
     const cowork = window.electron?.cowork;
@@ -57,6 +57,7 @@ class BrowserCoworkService {
         ...(typeof metabotId === 'number' ? { metabotId } : {}),
         ...(cwd?.trim() ? { cwd: cwd.trim() } : {}),
         ...(modelEffort?.model ? { model: modelEffort.model } : {}),
+        ...(modelEffort?.modelProvider ? { modelProvider: modelEffort.modelProvider } : {}),
         ...(modelEffort && modelEffort.effort !== undefined ? { effort: modelEffort.effort } : {}),
       });
       if (result?.success && result.session) {

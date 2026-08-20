@@ -6092,14 +6092,16 @@ export class CoworkRunner extends EventEmitter {
    * llm_id does not resolve (matching runClaudeCodeLocal's fallback).
    */
   private resolveSessionDshRoute(sessionId: string): ReturnType<typeof resolveDshProviderRoute> {
-    const sessionModel = this.store.getSession(sessionId)?.model?.trim() || null
+    const sessionRow = this.store.getSession(sessionId)
+    const sessionModel = sessionRow?.model?.trim() || null
+    const sessionModelProvider = sessionRow?.modelProvider?.trim() || null
     const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId)
     const automationModelOverride = sessionModel || brain?.modelId || null
     // Bot context lets the resolution last-resort warning name the offending bot.
     const brainContext = brain ? { botId: brain.metabotId, botName: brain.botName } : undefined
     let route = resolveDshProviderRoute(
       automationModelOverride,
-      sessionModel ? null : (brain?.providerKey ?? null),
+      sessionModel ? sessionModelProvider : (brain?.providerKey ?? null),
       brainContext,
     )
     if (!route && automationModelOverride) {
@@ -7546,14 +7548,22 @@ export class CoworkRunner extends EventEmitter {
     // key); otherwise the global default config. The session override only
     // affects this conversation. `brainEffort` rides along so the effort tier
     // below can apply the bot brain's reasoning effort.
-    const sessionModel = this.store.getSession(sessionId)?.model?.trim() || null;
+    const sessionRow = this.store.getSession(sessionId);
+    const sessionModel = sessionRow?.model?.trim() || null;
+    const sessionModelProvider = sessionRow?.modelProvider?.trim() || null;
     const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId);
     const automationModelOverride = sessionModel || brain?.modelId || null;
     let brainEffort: LlmEffortLevel | null = brain?.effort ?? null;
     // Bot context lets the resolution last-resort warning name the offending bot.
     const brainContext = brain ? { botId: brain.metabotId, botName: brain.botName } : undefined;
     let apiConfigResolution = automationModelOverride
-      ? resolveApiConfigForModel(automationModelOverride, 'local', sessionId, brain?.providerKey ?? null, brainContext)
+      ? resolveApiConfigForModel(
+        automationModelOverride,
+        'local',
+        sessionId,
+        sessionModel ? sessionModelProvider : (brain?.providerKey ?? null),
+        brainContext,
+      )
       : { config: getCurrentApiConfig('local') };
     let apiConfig = apiConfigResolution.config;
     if (!apiConfig && automationModelOverride) {

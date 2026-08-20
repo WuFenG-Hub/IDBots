@@ -331,6 +331,11 @@ export interface CoworkSession {
   permissionMode?: CoworkPermissionMode;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /**
+   * Provider key the session model was picked from. Disambiguates colliding
+   * model ids (e.g. deepseek vs opencode both serving deepseek-v4-flash).
+   */
+  modelProvider?: string | null;
   /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
   effort?: string | null;
   /** Accumulated token/cost usage (computed by the main process, not persisted). */
@@ -625,6 +630,8 @@ export interface CoworkSessionSummary {
   browserTitle?: string | null;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /** Provider key for the session model override. */
+  modelProvider?: string | null;
   /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
   effort?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
@@ -644,6 +651,8 @@ export interface CoworkStartOptions {
   permissionMode?: CoworkPermissionMode;
   /** Pending model picked in the home composer; undefined = bot brain / defaults. */
   model?: string | null;
+  /** Provider key the pending model was picked from (disambiguates colliding model ids). */
+  modelProvider?: string | null;
   /** Pending effort (off/low/high/max); undefined = tiered defaults, '' = model default. */
   effort?: string | null;
 }

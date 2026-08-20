@@ -631,6 +631,12 @@ export interface CoworkSession {
   permissionMode?: CoworkPermissionMode;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /**
+   * Provider key the session model was picked from. Disambiguates colliding
+   * model ids (e.g. deepseek and opencode both serve deepseek-v4-flash).
+   * Null on legacy rows and when the session inherits the bot/global default.
+   */
+  modelProvider?: string | null;
   /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
   effort?: string | null;
   /** Source session id when this session was created by forking another session. */
@@ -678,6 +684,8 @@ export interface CoworkSessionSummary {
   browserTitle?: string | null;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /** Provider key for the session model override (see CoworkSession.modelProvider). */
+  modelProvider?: string | null;
   /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
   effort?: string | null;
   hiddenFromSessionList?: boolean;
@@ -1113,6 +1121,14 @@ export class CoworkStore implements MemoryBackend {
       if (!sessionColumns.includes('model')) {
         // Per-session model override (NULL = inherit the global default model).
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN model TEXT;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('model_provider')) {
+        // Provider key that owns the session model id. Model ids collide
+        // across gateways (opencode listing deepseek-v4-flash next to the
+        // official deepseek catalog); without this column the picker and
+        // runtime both first-match the earlier provider.
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN model_provider TEXT;');
         changed = true;
       }
       if (!sessionColumns.includes('effort')) {
@@ -2798,15 +2814,16 @@ export class CoworkStore implements MemoryBackend {
     peerAvatar: string | null = null,
     permissionMode: CoworkPermissionMode = 'default',
     model: string | null = null,
-    effort: string | null = null
+    effort: string | null = null,
+    modelProvider: string | null = null
   ): CoworkSession {
     const id = uuidv4();
     const now = Date.now();
 
     this.db.run(`
-      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, model, effort, created_at, updated_at)
-      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [id, title, cwd, systemPrompt, executionMode, JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, model, effort, now, now]);
+      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, model, effort, model_provider, created_at, updated_at)
+      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, title, cwd, systemPrompt, executionMode, JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, model, effort, modelProvider, now, now]);
 
     this.upsertConversationMapping({
       channel: 'cowork_ui',
@@ -2839,6 +2856,7 @@ export class CoworkStore implements MemoryBackend {
       permissionMode,
       model,
       effort,
+      modelProvider,
     };
   }
 
@@ -2895,6 +2913,7 @@ export class CoworkStore implements MemoryBackend {
       parent_session_id?: string | null;
       fork_point_message_id?: string | null;
       model?: string | null;
+      model_provider?: string | null;
       effort?: string | null;
       created_at: number;
       updated_at: number;
@@ -2902,7 +2921,7 @@ export class CoworkStore implements MemoryBackend {
 
     const row = this.getOne<SessionRow>(`
       SELECT id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id,
-             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, parent_session_id, fork_point_message_id, model, effort, created_at, updated_at
+             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, parent_session_id, fork_point_message_id, model, model_provider, effort, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `, [id]);
@@ -2955,6 +2974,7 @@ export class CoworkStore implements MemoryBackend {
       parentSessionId: row.parent_session_id ?? null,
       forkPointMessageId: row.fork_point_message_id ?? null,
       model: row.model ?? null,
+      modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
       metabotName,
       metabotAvatar,
@@ -3153,17 +3173,22 @@ export class CoworkStore implements MemoryBackend {
    * session — other (running or idle) cowork sessions are untouched.
    * `effort` (optional) updates the per-session reasoning effort in the same
    * write; undefined leaves the stored effort untouched.
+   * `modelProvider` is the provider key the model was picked from and is
+   * required to disambiguate colliding model ids across providers.
    */
-  setSessionModel(id: string, model: string | null, effort?: string | null): void {
+  setSessionModel(id: string, model: string | null, effort?: string | null, modelProvider?: string | null): void {
+    const provider = model == null ? null : (modelProvider?.trim() || null);
     if (effort === undefined) {
-      this.db.run('UPDATE cowork_sessions SET model = ?, updated_at = ? WHERE id = ?', [
+      this.db.run('UPDATE cowork_sessions SET model = ?, model_provider = ?, updated_at = ? WHERE id = ?', [
         model,
+        provider,
         Date.now(),
         id,
       ]);
     } else {
-      this.db.run('UPDATE cowork_sessions SET model = ?, effort = ?, updated_at = ? WHERE id = ?', [
+      this.db.run('UPDATE cowork_sessions SET model = ?, model_provider = ?, effort = ?, updated_at = ? WHERE id = ?', [
         model,
+        provider,
         effort,
         Date.now(),
         id,
@@ -3243,6 +3268,7 @@ export class CoworkStore implements MemoryBackend {
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
       model?: string | null;
+      model_provider?: string | null;
       effort?: string | null;
       created_at: number;
       updated_at: number;
@@ -3267,6 +3293,7 @@ export class CoworkStore implements MemoryBackend {
         s.browser_title,
         s.hidden_from_session_list,
         s.model,
+        s.model_provider,
         s.effort,
         s.created_at,
         s.updated_at,
@@ -3313,6 +3340,7 @@ export class CoworkStore implements MemoryBackend {
       browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       model: row.model ?? null,
+      modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
     }));
   }
@@ -3411,6 +3439,7 @@ export class CoworkStore implements MemoryBackend {
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
       model?: string | null;
+      model_provider?: string | null;
       effort?: string | null;
       archived_at: number;
       created_at: number;
@@ -3424,7 +3453,7 @@ export class CoworkStore implements MemoryBackend {
     const rows = this.getAll<ArchivedSessionRow>(`
       SELECT
         s.id, s.title, s.status, s.pinned, s.metabot_id, s.session_type, s.peer_name,
-        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.model, s.effort,
+        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.model, s.model_provider, s.effort,
         s.archived_at, s.created_at, s.updated_at
       FROM cowork_sessions s
       WHERE ${clauses.join(' AND ')}
@@ -3447,6 +3476,7 @@ export class CoworkStore implements MemoryBackend {
       browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       model: row.model ?? null,
+      modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
     }));
   }
@@ -4364,7 +4394,10 @@ export class CoworkStore implements MemoryBackend {
       source.peerGlobalMetaId ?? null,
       source.peerName ?? null,
       source.peerAvatar ?? null,
-      source.permissionMode ?? 'default'
+      source.permissionMode ?? 'default',
+      source.model ?? null,
+      source.effort ?? null,
+      source.modelProvider ?? null
     );
 
     // Batch-copy messages preserving ids/timestamps/sequences with one flush.

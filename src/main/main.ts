@@ -7380,6 +7380,8 @@ if (!gotTheLock) {
     permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
     /** Pending model+effort picked in the home composer; undefined = bot brain / defaults. */
     model?: string | null;
+    /** Provider key the pending model was picked from (disambiguates colliding model ids). */
+    modelProvider?: string | null;
     effort?: string | null;
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
@@ -7436,7 +7438,8 @@ if (!gotTheLock) {
         options.model?.trim() || null,
         // undefined effort keeps the tiered defaults (bot brain → global);
         // an explicit '' pick means "model default" and is persisted as null.
-        options.effort === undefined ? null : (options.effort?.trim() || null)
+        options.effort === undefined ? null : (options.effort?.trim() || null),
+        options.modelProvider?.trim() || null
       );
       const runner = getCoworkRunner();
 
@@ -8407,13 +8410,16 @@ if (!gotTheLock) {
     model: string | null;
     /** Optional per-session effort (off/low/high/max); undefined leaves it unchanged. */
     effort?: string | null;
+    /** Provider key the model was picked from; required when model ids collide. */
+    modelProvider?: string | null;
   }) => {
     return withSqliteRecovery('cowork:session:setModel', async () => {
       try {
         const model = options.model?.trim() || null;
         const effort = options.effort === undefined ? undefined : (options.effort?.trim() || null);
+        const modelProvider = options.modelProvider?.trim() || null;
         const coworkStoreInstance = getCoworkStore();
-        coworkStoreInstance.setSessionModel(options.sessionId, model, effort);
+        coworkStoreInstance.setSessionModel(options.sessionId, model, effort, modelProvider);
         if (effort !== undefined) {
           // Live-switch the in-flight session's effort so the next turn uses
           // it without waiting for a session reload (mirrors setEffortOverride).
