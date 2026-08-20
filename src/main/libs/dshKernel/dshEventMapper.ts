@@ -19,8 +19,12 @@
 //    calls) is reclassified into the thinking slot at finalize
 //  - Official DeepSeek on dsh-llm-deepseek has no phase tags: text that
 //    accompanies tool calls is treated as commentary, and the thinking slot
-//    stays open across those tool rounds so the transcript does not bounce
-//    (expand → tiny summary → collapse → expand) on every step
+//    stays open across those tool rounds. Live tokens arrive as
+//    `reasoning-chunks` (the DSH web UI stream); assistant/chunk
+//    reasoning-delta is a sparse echo and must not double-count once chunks
+//    have started. A native reasoning block already live this step must not
+//    open the visible text slot — that is the "thinking flashes as body
+//    copy, then folds into a Think row" failure.
 
 import type { DshMapperAction, DshSessionEventEnvelope, DshUsageSnapshot } from './types'
 import { splitThinkTaggedContent } from './thinkTags'
@@ -93,6 +97,13 @@ export class DshEventMapper {
   private rawTextBuf = ''
   /** True once a native reasoning-delta opened the thinking slot this step. */
   private reasoningFromDeltas = false
+  /** True once `reasoning-chunks` streamed this step (skip sparse deltas). */
+  private reasoningFromChunks = false
+  /**
+   * Native reasoning block is in flight this step (block-start / chunks /
+   * deltas). Distinct from think-tag splits inside text-delta.
+   */
+  private reasoningBlockLive = false
   private lastUsage: DshUsageSnapshot | null = null
   private provider: string | undefined
   private model: string | undefined
@@ -132,6 +143,7 @@ export class DshEventMapper {
       case 'assistant/chunk': {
         const chunk = data.chunk
         if (chunk?.type === 'block-start' && chunk.blockType === 'reasoning') {
+          this.reasoningBlockLive = true
           this.openThinking(actions)
         } else if (chunk?.type === 'text-delta') {
           this.rawTextBuf += chunk.text ?? ''
@@ -141,31 +153,43 @@ export class DshEventMapper {
             this.thinkingBuf = this.prefixHeld(split.thinking)
             actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
           }
-          // Native reasoning already live this turn: hold text until
-          // assistant/message proves it is the final answer, not commentary.
-          if (split.text.length > 0 && !this.reasoningFromDeltas && !this.thinkingHeld) {
+          // Native reasoning already live: hold text until assistant/message
+          // proves it is the final answer. Opening a body bubble here is the
+          // flash the DSH web UI never does (Think row from the first token).
+          if (split.text.length > 0 && !this.reasoningBlockLive && !this.thinkingHeld) {
             this.openText(actions)
             this.textBuf = split.text
             this.turnSawStreamedText = true
             actions.push({ kind: 'messageUpdate', slot: 'text', content: this.textBuf })
           }
         } else if (chunk?.type === 'reasoning-delta') {
-          this.reasoningFromDeltas = true
-          this.openThinking(actions)
-          if (this.thinkingHeld && this.thinkingBuf === this.thinkingHeld) {
-            this.thinkingBuf = `${this.thinkingHeld}\n\n`
+          if (!this.reasoningFromChunks) {
+            this.reasoningBlockLive = true
+            this.reasoningFromDeltas = true
+            this.appendReasoning(actions, chunk.text ?? '')
           }
-          this.thinkingBuf += chunk.text ?? ''
-          actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
         } else if (chunk?.type === 'block-end' && chunk.block?.type === 'reasoning') {
           const assembled = typeof chunk.block.text === 'string' ? chunk.block.text : ''
           if (assembled.length > 0) {
+            this.reasoningBlockLive = true
             this.openThinking(actions)
             this.thinkingBuf = this.prefixHeld(assembled)
             actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
           }
         } else if (chunk?.type === 'usage') {
           this.lastUsage = this.withRoute(chunk.usage)
+        }
+        break
+      }
+
+      case 'reasoning-chunks': {
+        const texts = Array.isArray(data.texts) ? data.texts : []
+        const piece = texts.filter((part: unknown) => typeof part === 'string').join('')
+        if (piece.length > 0) {
+          this.reasoningBlockLive = true
+          this.reasoningFromChunks = true
+          this.reasoningFromDeltas = true
+          this.appendReasoning(actions, piece)
         }
         break
       }
@@ -310,6 +334,17 @@ export class DshEventMapper {
     })
   }
 
+  /** Append live reasoning tokens onto the open thinking slot (DSH web stream). */
+  private appendReasoning(actions: DshMapperAction[], piece: string): void {
+    if (!piece) return
+    this.openThinking(actions)
+    if (this.thinkingHeld && this.thinkingBuf === this.thinkingHeld) {
+      this.thinkingBuf = `${this.thinkingHeld}\n\n`
+    }
+    this.thinkingBuf += piece
+    actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
+  }
+
   /** Prefix this step's reasoning with thinking already held from earlier tool rounds. */
   private prefixHeld(stepText: string): string {
     return joinThinking([this.thinkingHeld, stepText])
@@ -328,6 +363,9 @@ export class DshEventMapper {
       actions.push({ kind: 'messageFinalize', slot: 'text', content: this.textBuf })
       this.textBuf = ''
     }
+    this.reasoningFromDeltas = false
+    this.reasoningFromChunks = false
+    this.reasoningBlockLive = false
   }
 
   private finalizeAssistantMessage(
@@ -427,6 +465,8 @@ export class DshEventMapper {
 
     this.rawTextBuf = ''
     this.reasoningFromDeltas = false
+    this.reasoningFromChunks = false
+    this.reasoningBlockLive = false
     this.turnSawStreamedText = false
   }
 
