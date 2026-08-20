@@ -227,3 +227,70 @@ test('an unreadable image file fails fast with a clear error', async () => {
   await assert.rejects(() => recognizeImageViaRelay({ imagePath: '/tmp/missing.png' }), /could not read image file/);
   assert.equal(calls.fetches.length, 0, 'no relay call for unreadable files');
 });
+
+// ---------------------------------------------------------------------------
+// Regression: nativeImage cannot re-encode alpha-channel macOS screenshots
+// (toJPEG returns 0 bytes); the encoder must fall back to the bundled ffmpeg
+// so a non-empty base64 still reaches the relay.
+// ---------------------------------------------------------------------------
+
+test('integration: alpha-channel screenshot encodes via ffmpeg fallback and reaches the wire', { timeout: 60_000 }, async (t) => {
+  const fs = await import('node:fs');
+  const screenshot = '/tmp/ss2.png';
+  if (!fs.existsSync(screenshot)) {
+    t.skip('fixture /tmp/ss2.png not present');
+    return;
+  }
+  let capturedBody = null;
+  initVisionRelayService({
+    getStore: () => ({
+      get: (key) =>
+        key === VISION_RELAY_API_KEY_KV
+          ? 'mrk_test'
+          : key === VISION_RELAY_BASE_URL_KV
+            ? CHAT_BASE
+            : null,
+    }),
+    fetchImpl: async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          data: {
+            content: 'encoded-ok',
+            model: 'metaid-free-vision',
+            remainingToday: -1,
+            usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, imageTokens: 1 },
+          },
+        }),
+        { status: 200 },
+      );
+    },
+    // NOTE: no loadImageBase64Impl — the electron stub has no nativeImage, so
+    // this exercises the exact fallback path the bug report hit.
+  });
+
+  try {
+    const result = await recognizeImageViaRelay({ imagePath: screenshot });
+    assert.equal(result.content, 'encoded-ok');
+    assert.ok(capturedBody, 'request reached the wire');
+    assert.ok(capturedBody.imageBase64.length > 1000, 'non-empty base64 payload');
+    assert.equal(capturedBody.mimeType, 'image/jpeg');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/ffmpeg (is not available|failed to start)/.test(message)) {
+      t.skip(`no local ffmpeg: ${message}`);
+      return;
+    }
+    throw error;
+  }
+});
+
+test('buildImageEncodeArgs targets a 1280px single-frame jpeg', () => {
+  const { buildImageEncodeArgs } = service;
+  const args = buildImageEncodeArgs({ inputPath: '/tmp/in.png', outputPath: '/tmp/out.jpg' });
+  const joined = args.join(' ');
+  assert.ok(joined.includes("scale='min(1280,iw)':-2"));
+  assert.ok(args.includes('-frames:v'));
+  assert.equal(args[args.indexOf('-q:v') + 1], '5');
+});
