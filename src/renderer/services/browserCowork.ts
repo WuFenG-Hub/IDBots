@@ -5,7 +5,6 @@ import {
   clearBrowserSession,
 } from '../store/slices/browserCoworkSlice';
 import { coworkService } from './cowork';
-import { skillService } from './skill';
 import type { CoworkSession } from '../types/cowork';
 
 /**
@@ -25,8 +24,10 @@ class BrowserCoworkService {
     // NOTE: the local MetaApp auto-routing prompt (<available_metaapps> →
     // open_metaapp) is deliberately excluded for browser sessions — in this
     // surface apps are opened on-chain via search_metaapps + metaapp:// URIs.
-    const skillPrompt = await skillService.getAutoRoutingPrompt();
-    return [skillPrompt, config.systemPrompt]
+    // Skill routing rules/catalog are composed main-side (SKILLS prompt
+    // section + volatile catalog tail), so only the user's custom prompt is
+    // embedded here.
+    return [config.systemPrompt]
       .filter((part) => part?.trim())
       .join('\n\n') || undefined;
   }

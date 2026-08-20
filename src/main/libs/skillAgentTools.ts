@@ -16,6 +16,18 @@ export type SkillToolControl = {
   extractMetaApp(input: { pinId: string; workspaceDir: string }): Promise<ExtractMetaAppResult>;
   installSkill(input: InstallSkillSource): Promise<InstallSkillResult>;
   listInstalledSkills(): InstalledSkillInfo[];
+  /**
+   * Load one enabled skill's full SKILL.md plus its directory (for relative
+   * path resolution). Backs the read_skill action; null when the name/id
+   * does not resolve to an enabled skill.
+   */
+  readSkill(nameOrId: string): {
+    id: string;
+    name: string;
+    directory: string;
+    skillPath: string;
+    content: string;
+  } | null;
 };
 
 type SdkToolFactory = (
@@ -59,11 +71,13 @@ export function buildSkillAgentTools(deps: {
         'Use action "extract_metaapp" with pinId (or metaapp://<pinId>) after search_metaapps: downloads the app zip, unpacks it into the workspace temp dir, and returns the file list plus APP.md (install instructions live there).',
         'Use action "install_skill" to install a skill into the user-data SKILLs directory (the same folder the packaged app uses; never the source tree). Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). The package must contain SKILL.md; it is installed as SKILLs/<name from SKILL.md>/. Size limit 4MB.',
         'Use action "list_installed_skills" to verify a skill is on disk (name + version) after install.',
+        'Use action "read_skill" with name (id or name from the <available_skills> catalog) to load a skill\'s full SKILL.md plus its on-disk directory; resolve the SKILL.md\'s relative paths against that directory.',
         'When NOT to use: do not call extract_metaapp just to open an app in the Bot Browser; this is for reading APP.md / installing the skill it describes. Chat-skill whitelist changes belong on metabot_update (chat_skill_op), not here.',
         'Returns JSON. extract_metaapp returns {ok, files, appMd, extractedDir} or {ok:false, reason:"not-a-zip"} when the pin is not a zip. install_skill returns {ok, name, version, dest} or {ok:false, error}.',
       ].join(' '),
       {
-        action: z.enum(['extract_metaapp', 'install_skill', 'list_installed_skills']),
+        action: z.enum(['extract_metaapp', 'install_skill', 'list_installed_skills', 'read_skill']),
+        name: z.string().optional().describe('Skill id or name for read_skill.'),
         pinId: z.string().optional().describe('MetaApp pin id or metaapp://<pinId> for extract_metaapp.'),
         zip: z.string().optional().describe('Local path, http(s) URL, or metafile:// pin for a skill zip.'),
         github: z.string().optional().describe('GitHub owner/repo or a github.com tree/blob URL.'),
@@ -71,7 +85,8 @@ export function buildSkillAgentTools(deps: {
         npm: z.string().optional().describe('npm package name whose tarball contains SKILL.md.'),
       },
       async (args: {
-        action: 'extract_metaapp' | 'install_skill' | 'list_installed_skills';
+        action: 'extract_metaapp' | 'install_skill' | 'list_installed_skills' | 'read_skill';
+        name?: string;
         pinId?: string;
         zip?: string;
         github?: string;
@@ -87,6 +102,30 @@ export function buildSkillAgentTools(deps: {
           return textResult(
             [`Installed skills (${skills.length}):`, ...lines].join('\n'),
           );
+        }
+
+        if (args.action === 'read_skill') {
+          const name = asString(args.name);
+          if (!name) {
+            return textResult('skill_tool read_skill requires name (skill id or name).', true);
+          }
+          const entry = control.readSkill(name);
+          if (!entry) {
+            return textResult(
+              `Skill "${name}" not found or not enabled. Use action list_installed_skills to see what is installed.`,
+              true,
+            );
+          }
+          return textResult([
+            `## Skill: ${entry.name}`,
+            '',
+            `Skill directory: ${entry.directory}`,
+            'Resolve relative paths in this SKILL.md against that directory.',
+            '',
+            '---',
+            '',
+            entry.content,
+          ].join('\n'));
         }
 
         if (args.action === 'extract_metaapp') {

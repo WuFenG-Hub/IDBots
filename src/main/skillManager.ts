@@ -1006,14 +1006,38 @@ export class SkillManager {
       .join('\n');
   }
 
+  /**
+   * Compact per-skill lines for the cowork volatile catalog: `- \`name\`:
+   * description`, one skill per line, no <location>. Host absolute paths add
+   * ~50-80 chars per skill to every carried turn and the model does not need
+   * them — it loads the full SKILL.md on demand via skill_tool read_skill,
+   * which returns the skill directory for relative-path resolution.
+   */
+  private buildSkillCatalogLines(skills: SkillRecord[]): string {
+    return skills
+      .map((skill) => `- \`${skill.name}\`: ${this.truncateSkillDescriptionForListing(skill.description)}`)
+      .join('\n');
+  }
+
   private buildRoutingPromptFromSkills(
     skills: SkillRecord[],
     options?: {
       introBlocks?: string[];
       extraRules?: string[];
+      /**
+       * 'inline' appends the <available_skills> catalog to this prompt section
+       * (IM/scheduler/sandbox surfaces). 'volatile' leaves the catalog out:
+       * cowork sessions inject it into the per-turn user-message tail instead
+       * (see buildVolatileContextPrompt in coworkRunner), keeping the
+       * cacheable system-prompt head byte-stable when skills are installed or
+       * updated mid-session.
+       */
+      catalogPlacement?: 'inline' | 'volatile';
     }
   ): string | null {
     if (skills.length === 0) return null;
+
+    const catalogInline = (options?.catalogPlacement ?? 'inline') === 'inline';
 
     // Token-diet rewrite (Phase 3): 17 rule lines -> 7. Every hard-won
     // semantic guard survives (selection discipline, Read+Bash-only
@@ -1023,18 +1047,26 @@ export class SkillManager {
     // block that immediately precedes this one when MetaApps exist.
     const promptBody = [
       '## Skills (mandatory)',
-      'Before replying: scan <available_skills> <description> entries.',
-      '- If the current turn explicitly asks to open/use/start a local app or MetaApp, prefer app routing over skill routing; generic confirmations ("好的" / "确定" / "继续") are not app requests.',
-      '- Select the one clearly-applicable skill (the most specific if several), read its SKILL.md at <location>, and follow it; if none clearly applies, do not read any SKILL.md.',
+      ...(catalogInline
+        ? [
+          'Before replying: scan <available_skills> <description> entries.',
+          '- If the current turn explicitly asks to open/use/start a local app or MetaApp, prefer app routing over skill routing; generic confirmations ("好的" / "确定" / "继续") are not app requests.',
+          '- Select the one clearly-applicable skill (the most specific if several), read its SKILL.md at <location>, and follow it; if none clearly applies, do not read any SKILL.md.',
+        ]
+        : [
+          'Before replying: scan the <available_skills> catalog carried in this conversation\'s context messages (a user-role block listing each skill\'s name and description).',
+          '- If the current turn explicitly asks to open/use/start a local app or MetaApp, prefer app routing over skill routing; generic confirmations ("好的" / "确定" / "继续") are not app requests.',
+          '- Select the one clearly-applicable skill (the most specific if several), load it with skill_tool (action read_skill), and follow it; if none clearly applies, do not load any skill.',
+          '- If no <available_skills> catalog is visible in the conversation (e.g. after context compaction), call skill_tool with action list_installed_skills to rediscover the available skills.',
+        ]),
       '- Execute skills only via the file-read and shell tools as documented in each SKILL.md; never call a "Skill" tool — it is not wired to this registry.',
       '- A skill command that exits with code 0 is successful: do not bypass it with ad-hoc fallback logic. If it fails, diagnose and retry within the same skill workflow before considering alternatives.',
-      '- Resolve relative paths in a SKILL.md against its own directory (dirname(<location>)), not the workspace root; prefer precompiled JavaScript entrypoints (scripts/*.js or scripts/dist/*.js) over npx ts-node unless absolutely required.',
+      '- Resolve relative paths in a SKILL.md against that skill\'s own directory (the <location> dirname, or the directory returned by read_skill), not the workspace root; prefer precompiled JavaScript entrypoints (scripts/*.js or scripts/dist/*.js) over npx ts-node unless absolutely required.',
       '- Never read more than one skill up front; read another only if the first one explicitly references it.',
       ...(options?.extraRules ?? []).filter(Boolean),
-      '',
-      '<available_skills>',
-      this.buildSkillEntries(skills),
-      '</available_skills>',
+      ...(catalogInline
+        ? ['', '<available_skills>', this.buildSkillEntries(skills), '</available_skills>']
+        : []),
     ].join('\n');
 
     const introBlocks = (options?.introBlocks ?? []).filter((block): block is string => Boolean(block?.trim()));
@@ -1182,6 +1214,69 @@ export class SkillManager {
     return this.buildRoutingPromptFromSkills(enabled, {
       introBlocks: [this.buildCoworkSuperpowersBootstrap(enabled)].filter(Boolean),
     });
+  }
+
+  /**
+   * Cowork skill-prompt parts from a single listSkills scan:
+   * - rules: the `## Skills (mandatory)` rules section WITHOUT the catalog;
+   *   composed into the system prompt (promptComposer SKILLS slot).
+   * - catalog: the bare <available_skills> block in compact one-line-per-skill
+   *   form (no <location>; the model loads full SKILL.md files via skill_tool
+   *   read_skill). Cowork sessions inject it into the per-turn volatile
+   *   user-message tail so skill installs/updates never rewrite the cacheable
+   *   system-prompt head.
+   * - sandboxSection: the legacy combined section (rules + inline catalog)
+   *   for sandbox sessions, whose prompt must carry the catalog inline so
+   *   resolveAutoRoutingForSandbox can rewrite locations to guest paths.
+   */
+  buildCoworkSkillPromptParts(): {
+    rules: string | null;
+    catalog: string | null;
+    sandboxSection: string | null;
+  } {
+    const enabled = this.listSkills().filter((skill) => skill.enabled && skill.prompt);
+    const introBlocks = [this.buildCoworkSuperpowersBootstrap(enabled)].filter(Boolean);
+    return {
+      rules: this.buildRoutingPromptFromSkills(enabled, { introBlocks, catalogPlacement: 'volatile' }),
+      catalog: enabled.length > 0
+        ? ['<available_skills>', this.buildSkillCatalogLines(enabled), '</available_skills>'].join('\n')
+        : null,
+      sandboxSection: this.buildRoutingPromptFromSkills(enabled, { introBlocks, catalogPlacement: 'inline' }),
+    };
+  }
+
+  /**
+   * Load one enabled skill's full SKILL.md on demand, backing the cowork
+   * skill_tool read_skill action. Accepts an id or a (case-insensitive) name.
+   * Returns the skill directory so the caller can tell the model where to
+   * resolve the relative paths SKILL.md files routinely contain. Disabled
+   * skills are not routed and are not loadable through this path.
+   */
+  readSkillCatalogEntry(nameOrId: string): {
+    id: string;
+    name: string;
+    directory: string;
+    skillPath: string;
+    content: string;
+  } | null {
+    const trimmed = String(nameOrId ?? '').trim();
+    if (!trimmed) return null;
+    const enabled = this.listSkills().filter((skill) => skill.enabled && skill.prompt);
+    const match = this.resolveSkillById(trimmed, enabled) ?? this.resolveSkillByName(trimmed, enabled);
+    if (!match) return null;
+    let content: string;
+    try {
+      content = fs.readFileSync(match.skillPath, 'utf-8');
+    } catch {
+      return null;
+    }
+    return {
+      id: match.id,
+      name: match.name,
+      directory: path.dirname(match.skillPath),
+      skillPath: match.skillPath,
+      content,
+    };
   }
 
   buildRemoteServicesPrompt(availableServices: any[]): string | null {

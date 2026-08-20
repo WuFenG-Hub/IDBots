@@ -1090,6 +1090,15 @@ interface ActiveSession {
    */
   emptyTerminalTurnDetected: boolean;
   executionMode: CoworkExecutionMode;
+  /**
+   * Where this turn's skill catalog lives: 'volatile' = injected into the
+   * per-turn user-message tail; 'inline' = embedded in the system prompt
+   * (sandbox-planned sessions); 'legacy' = the base prompt already carries
+   * skill content (old inline catalog or pinned `## Skill:` blocks), so
+   * neither channel adds anything. Set at every (re)compose in
+   * startSession/continueSession.
+   */
+  skillsCatalogMode?: 'volatile' | 'inline' | 'legacy';
   /** Latest DSH usage snapshot for context reporting (DSH-kernel turns). */
   lastDshUsage?: DshUsageSnapshot;
   localInputChannel?: CoworkSteerChannel;
@@ -1478,6 +1487,17 @@ export interface CoworkRunnerOptions {
   twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   /** When set, returns enabled user-configured MCP servers for local execution. */
   mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
+  /**
+   * Cowork skill prompt parts (rules section / volatile catalog / sandbox
+   * inline section), composed main-side so the live skill catalog never gets
+   * baked into the stored session prompt. Re-read per turn: skill installs
+   * apply on the next turn without restarting the session.
+   */
+  coworkSkillPromptsProvider?: () => {
+    rules: string | null;
+    catalog: string | null;
+    sandboxSection: string | null;
+  } | null;
   /** Re-read every turn: the user-managed DSH plugin directory feeds runtime
    * composition entries here (installs apply on the next turn). */
   dshExtraEntriesProvider?: () => Array<{ id: string; name: string; config: Record<string, unknown> }>;
@@ -1613,6 +1633,11 @@ export class CoworkRunner extends EventEmitter {
   private twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
   private twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   private mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
+  private coworkSkillPromptsProvider?: () => {
+    rules: string | null;
+    catalog: string | null;
+    sandboxSection: string | null;
+  } | null;
   dshExtraEntriesProvider?: () => Array<{ id: string; name: string; config: Record<string, unknown> }>;
   private openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private resolveMetaAppUrl?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
@@ -1713,6 +1738,7 @@ export class CoworkRunner extends EventEmitter {
     this.twinTaskCancel = options?.twinTaskCancel;
     this.twinTaskReassign = options?.twinTaskReassign;
     this.mcpServerProvider = options?.mcpServerProvider;
+    this.coworkSkillPromptsProvider = options?.coworkSkillPromptsProvider;
     // Optional-chained like every other option — a bare `new CoworkRunner(store)`
     // (tests, minimal embedders) used to crash here on the missing `?.`.
     this.dshExtraEntriesProvider = options?.dshExtraEntriesProvider;
@@ -4639,7 +4665,8 @@ export class CoworkRunner extends EventEmitter {
     memoryEnabled: boolean,
     personaBlock?: string,
     profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE,
-    implicitMemoryUpdateEnabled = false
+    implicitMemoryUpdateEnabled = false,
+    skillsSection?: string | null
   ): string {
     return composePromptSections([
       { name: 'persona:metabot', order: PROMPT_SECTION_ORDER.PERSONA, text: personaBlock },
@@ -4657,8 +4684,49 @@ export class CoworkRunner extends EventEmitter {
         order: PROMPT_SECTION_ORDER.MEMORY_STRATEGY,
         text: this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy, implicitMemoryUpdateEnabled),
       },
+      // Skill routing rules WITHOUT the live catalog (that rides the volatile
+      // user-message tail). Null/empty for legacy prompts that still carry
+      // their own inline skills block, and for sandbox-planned sessions the
+      // caller passes the full catalog-inline section instead.
+      { name: 'idbots:skills', order: PROMPT_SECTION_ORDER.SKILLS, text: skillsSection ?? '' },
       { name: 'idbots:base', order: PROMPT_SECTION_ORDER.BASE, text: baseSystemPrompt?.trim() },
     ]);
+  }
+
+  /**
+   * Decide where this turn's skill prompt content lives:
+   * - 'legacy': the base prompt already carries skill content (an old
+   *   inline-catalog prompt, or user-pinned `## Skill:` / <skill_context>
+   *   blocks) — compose adds nothing and the volatile tail stays empty,
+   *   exactly the pre-split behavior.
+   * - 'inline': sandbox-planned sessions embed the full rules+catalog section
+   *   in the system prompt so resolveAutoRoutingForSandbox can rewrite skill
+   *   locations to guest paths (the sandbox flow never reads the volatile
+   *   tail).
+   * - 'volatile': the normal path — the rules section joins the system prompt
+   *   (the cacheable head stays byte-stable across skill installs) and the
+   *   catalog rides the per-turn user-message tail via
+   *   buildVolatileContextPrompt.
+   */
+  private resolveSkillsPromptForTurn(
+    sessionId: string,
+    activeSession: ActiveSession,
+    baseSystemPrompt: string
+  ): { skillsSection: string | null; skillsCatalogMode: 'volatile' | 'inline' | 'legacy' } {
+    const hasInlineSkills = /## Skills \(mandatory\)|<available_skills>|<skill_context>/.test(baseSystemPrompt ?? '');
+    if (hasInlineSkills) {
+      return { skillsSection: null, skillsCatalogMode: 'legacy' };
+    }
+    const parts = this.coworkSkillPromptsProvider?.() ?? null;
+    const config = this.store.getConfig();
+    const plannedMode: CoworkExecutionMode = this.store.getSession(sessionId)?.executionMode
+      || config.executionMode
+      || 'local';
+    const sandboxPlanned = plannedMode !== 'local' || activeSession.executionMode === 'sandbox';
+    if (sandboxPlanned) {
+      return { skillsSection: parts?.sandboxSection ?? null, skillsCatalogMode: 'inline' };
+    }
+    return { skillsSection: parts?.rules ?? null, skillsCatalogMode: 'volatile' };
   }
 
   /**
@@ -4745,6 +4813,18 @@ export class CoworkRunner extends EventEmitter {
       sections.push({
         key: 'remote-services',
         text: this.getRemoteServicesPrompt?.() ?? '',
+      });
+    }
+    // Skill catalog: the per-turn tail counterpart of the 'idbots:skills'
+    // rules section. Deduped by content hash, so a stable catalog costs
+    // nothing after its first injection and a skill install/update simply
+    // re-injects the changed block — the cacheable system-prompt head never
+    // moves. Sessions in 'inline' (sandbox) or 'legacy' mode already carry
+    // their catalog in the system prompt and skip this entirely.
+    if (this.activeSessions.get(sessionId)?.skillsCatalogMode === 'volatile') {
+      sections.push({
+        key: 'skills-catalog',
+        text: this.coworkSkillPromptsProvider?.()?.catalog ?? '',
       });
     }
 
@@ -5280,6 +5360,8 @@ export class CoworkRunner extends EventEmitter {
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
+    const { skillsSection, skillsCatalogMode } = this.resolveSkillsPromptForTurn(sessionId, activeSession, baseSystemPrompt);
+    activeSession.skillsCatalogMode = skillsCatalogMode;
     const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
       baseSystemPrompt,
       this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
@@ -5288,7 +5370,8 @@ export class CoworkRunner extends EventEmitter {
       sessionMemoryEnabled,
       personaWithExperience,
       systemPromptProfile,
-      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled
+      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
+      skillsSection
     );
     this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
@@ -5399,6 +5482,8 @@ export class CoworkRunner extends EventEmitter {
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
+    const { skillsSection, skillsCatalogMode } = this.resolveSkillsPromptForTurn(sessionId, activeSession, baseSystemPrompt);
+    activeSession.skillsCatalogMode = skillsCatalogMode;
     const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
       baseSystemPrompt,
       this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
@@ -5407,7 +5492,8 @@ export class CoworkRunner extends EventEmitter {
       sessionMemoryEnabled,
       personaWithExperience,
       systemPromptProfile,
-      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled
+      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
+      skillsSection
     );
     this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
