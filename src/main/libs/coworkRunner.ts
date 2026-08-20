@@ -16,6 +16,11 @@ import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/type
 import { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressure } from './dshUsageProjection';
 import type { DshUsageStatsRow } from './dshUsageProjection';
 import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
+import {
+  copyDshSkillSessionEnvFile,
+  ensureDshSkillEnvChannel,
+  writeDshSkillSessionEnvFile,
+} from './dshSkillSessionEnv';
 import { mapDshReasoningEffort } from './dshReasoningEffort';
 import { effortForClaudeSdk, toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
 import { loadClaudeSdk } from './claudeSdk';
@@ -26,7 +31,7 @@ import {
   buildCoworkSteerSdkMessage,
   buildCoworkSteerText,
 } from './coworkSteerChannel';
-import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillHostEnv, getSkillsRoot } from './coworkUtil';
+import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillHostEnv, getSkillsRoot, ensureCoworkTempDir } from './coworkUtil';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult } from './coworkAssistantReply';
@@ -6136,8 +6141,13 @@ export class CoworkRunner extends EventEmitter {
         extraEntriesProvider: this.dshExtraEntriesProvider,
         // Shared DSH runtime: bash skill scripts never see Claude's
         // per-session env. Inject the global host channels (proxy URL,
-        // SKILLS_ROOT, RPC authfile) so scheduled-task create-task.sh works.
-        skillHostEnvProvider: () => getSkillHostEnv(),
+        // SKILLS_ROOT, RPC authfile) plus the BASH_ENV loader so each turn's
+        // DSH_SESSION_ID-keyed env file (identity, image keys, TMPDIR) is
+        // sourced after the KEY/TOKEN scrub.
+        skillHostEnvProvider: () => ({
+          ...getSkillHostEnv(),
+          ...ensureDshSkillEnvChannel(app.getPath('userData')),
+        }),
         executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
         evaluatePolicy: (coworkSessionId, name, args) => this.evaluateDshToolPolicy(coworkSessionId, name, args),
         // Same user MCP store the Claude path mounts, gated per session by
@@ -6152,12 +6162,47 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
-   * One cowork turn on the DSH runtime: resolve the provider route from the
-   * current API config, run the turn through the shared hub, and land every
-   * event through the same store writes and runner events the Claude path
-   * emits. Approvals reuse the pendingPermissions machinery verbatim, so the
-   * renderer permission dialog works unchanged.
+   * Write the per-DSH-session env file that BASH_ENV sources inside skill
+   * bash. Must run before hub.runTurn so the file exists when the first
+   * bash tool starts. Keyed by DSH session id so concurrent cowork sessions
+   * never share identity.
    */
+  private async syncDshSkillSessionEnv(
+    dshSessionId: string,
+    coworkSessionId: string,
+    cwd: string
+  ): Promise<void> {
+    const userData = app.getPath('userData');
+    ensureDshSkillEnvChannel(userData);
+    const overrides = await this.getSkillSessionEnvOverrides?.(coworkSessionId) ?? {};
+    const tempDir = ensureCoworkTempDir(cwd);
+    writeDshSkillSessionEnvFile(userData, dshSessionId, {
+      ...overrides,
+      TMPDIR: tempDir,
+      TMP: tempDir,
+      TEMP: tempDir,
+    });
+  }
+
+  /**
+   * Local kernel dispatch: DSH is the default for openai/responses; Claude
+   * remains only for anthropic-direct (and sessions already pinned to it).
+   * Sandbox-unavailable / outside-cwd fallbacks must use this — never
+   * hard-wire runClaudeCodeLocal, which would skip DSH.
+   */
+  private async runLocalKernel(
+    activeSession: ActiveSession,
+    prompt: string,
+    cwd: string,
+    systemPrompt: string
+  ): Promise<void> {
+    if (this.shouldRunDshKernel(activeSession)) {
+      await this.runDshSessionLocal(activeSession, prompt, cwd, systemPrompt);
+      return;
+    }
+    await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt);
+  }
+
   /** Subagent panel: child agent ids of a DSH session (post-hoc safe). */
   dshListSubagents(sessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
     if (!this.dshTurnHub) return Promise.resolve([])
@@ -6169,6 +6214,13 @@ export class CoworkRunner extends EventEmitter {
     return this.dshTurnHub.getSubagentMessages(sessionId, agentId, limit)
   }
 
+  /**
+   * One cowork turn on the DSH runtime: resolve the provider route from the
+   * current API config, run the turn through the shared hub, and land every
+   * event through the same store writes and runner events the Claude path
+   * emits. Approvals reuse the pendingPermissions machinery verbatim, so the
+   * renderer permission dialog works unchanged.
+   */
   private async runDshSessionLocal(
     activeSession: ActiveSession,
     prompt: string,
@@ -6187,7 +6239,39 @@ export class CoworkRunner extends EventEmitter {
     }
     const apiFormat = route.apiFormat === 'responses' ? 'responses' : 'openai';
     const modelLimits = resolveCurrentModelLimits(route.model);
-    const dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
+    let dshUserPrompt = prompt;
+    let dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
+    // Same consume path as runClaudeCodeLocal: the header button queues
+    // pendingManualCompact while idle; the next DSH turn starts a new DSH
+    // session id with a synthetic compacted prompt (the runtime persists
+    // history per session id, so reuse would ignore the compact).
+    const sessionSnapshotForBudget = this.store.getSession(sessionId);
+    const manualCompactQueued = activeSession.pendingManualCompact || this.pendingManualCompactSessions.has(sessionId);
+    if (manualCompactQueued) {
+      activeSession.pendingManualCompact = false;
+      this.pendingManualCompactSessions.delete(sessionId);
+      resetCoworkSnipHeadTokens(sessionId);
+      const compacted = buildCoworkCompactedPrompt({
+        messages: sessionSnapshotForBudget?.messages ?? [],
+        currentPrompt: prompt,
+        modelLimits,
+      });
+      dshUserPrompt = compacted.prompt;
+      dshSessionId = `cw-${sessionId}-${Date.now()}`;
+      activeSession.claudeSessionId = makeDshSessionHandle(dshSessionId);
+      this.store.updateSession(sessionId, { claudeSessionId: activeSession.claudeSessionId });
+      coworkLog('INFO', 'runDshSessionLocal', 'Manual compaction requested; starting compacted DSH session', {
+        sessionId,
+        modelId: modelLimits.modelId,
+        compactedEstimatedTokens: compacted.estimatedTokens,
+        compactedRecentMessages: compacted.recentMessages,
+        compactedSummarizedMessages: compacted.summarizedMessages,
+      });
+      this.addSystemMessage(
+        sessionId,
+        '已手动压缩历史并重置底层模型会话，本次输入从压缩后的上下文继续。'
+      );
+    }
     const hub = this.ensureDshTurnHub();
     // Same billing/upstream bookkeeping the Claude path records: the usage
     // chip's cost/balance rows key off billingSource, the upstream row off
@@ -6214,6 +6298,7 @@ export class CoworkRunner extends EventEmitter {
     };
 
     try {
+      await this.syncDshSkillSessionEnv(dshSessionId, sessionId, cwd);
       const hostTools = this.buildDshHostTools(sessionId, modelLimits?.supportsVision)
       // Per-session registry: a concurrent turn of ANOTHER session must not
       // clobber this session's tool set (Twin-only tools would intermittently
@@ -6235,7 +6320,7 @@ export class CoworkRunner extends EventEmitter {
       const volatileHead = [localTimePrompt, volatileBlocks]
         .filter((section) => section?.trim())
         .join('\n\n')
-      const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${prompt}` : prompt
+      const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${dshUserPrompt}` : dshUserPrompt
       // Prompt attachments: collected from the ORIGINAL prompt (marker lines
       // reference user files, not the volatile context head).
       const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
@@ -6540,6 +6625,9 @@ export class CoworkRunner extends EventEmitter {
           // Claude path emits — the panel's Redux consumes them unchanged.
           onSubagentEvent: (event) => {
             if (event.kind === 'started') {
+              if (event.sessionId && event.sessionId !== dshSessionId) {
+                copyDshSkillSessionEnvFile(app.getPath('userData'), dshSessionId, event.sessionId);
+              }
               this.emitSubagentEvent(sessionId, {
                 event: 'task_started',
                 taskId: event.agentId,
@@ -8796,7 +8884,7 @@ export class CoworkRunner extends EventEmitter {
       );
       activeSession.executionMode = 'local';
       this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runClaudeCodeLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
       return;
     }
 
@@ -8814,17 +8902,10 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
 
-    if (executionMode === 'local' && this.shouldRunDshKernel(activeSession)) {
-      activeSession.executionMode = 'local';
-      this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runDshSessionLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
-      return;
-    }
-
     if (executionMode === 'local') {
       activeSession.executionMode = 'local';
       this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runClaudeCodeLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
       return;
     }
 
@@ -8849,7 +8930,7 @@ export class CoworkRunner extends EventEmitter {
       }
       activeSession.executionMode = 'local';
       this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runClaudeCodeLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
       return;
     }
 
@@ -8887,7 +8968,7 @@ export class CoworkRunner extends EventEmitter {
       activeSession.executionMode = 'local';
       this.store.updateSession(sessionId, { executionMode: 'local' });
       this.activeSessions.set(sessionId, activeSession);
-      await this.runClaudeCodeLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
     }
   }
 

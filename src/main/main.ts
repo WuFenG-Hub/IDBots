@@ -4695,9 +4695,9 @@ const getCoworkRunner = () => {
         const overrides: Record<string, string> = {};
         // P1/P4 (v1.1): the session's own id rides the subprocess env so skill
         // scripts (metabot-group-task create) can stamp source_session_id and
-        // the task close-out acceptance relay lands back in THIS session. The
-        // DSH bash plugin does not receive per-session env (shared runtime);
-        // there the "Current CoWork session id" prompt line carries it.
+        // the task close-out acceptance relay lands back in THIS session.
+        // DSH bash cannot inherit this from the shared child env; CoworkRunner
+        // writes it into the per-DSH_SESSION_ID env file sourced via BASH_ENV.
         if (sessionId?.trim()) {
           overrides.IDBOTS_COWORK_SESSION_ID = sessionId.trim();
         }

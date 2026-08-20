@@ -240,8 +240,66 @@ test('DSH shared runtime injects skill host env including IDBOTS_API_BASE_URL', 
   );
   assert.match(
     coworkRunnerSource,
-    /skillHostEnvProvider:\s*\(\)\s*=>\s*getSkillHostEnv\(\)/,
-    'CoworkRunner must wire getSkillHostEnv into the shared DSH runtime',
+    /skillHostEnvProvider:\s*\(\)\s*=>\s*\(\{[\s\S]*getSkillHostEnv\(\)[\s\S]*ensureDshSkillEnvChannel/,
+    'CoworkRunner must wire getSkillHostEnv plus the BASH_ENV skill-session channel into the shared DSH runtime',
+  );
+});
+
+test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
+  const coworkRunnerSource = fs.readFileSync(coworkRunnerPath, 'utf8');
+  const coworkUtilSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkUtil.ts'),
+    'utf8',
+  );
+  const dshSkillEnvSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'dshSkillSessionEnv.ts'),
+    'utf8',
+  );
+
+  assert.match(
+    dshSkillEnvSource,
+    /export const DSH_SKILL_ENV_LOADER_ENV = 'BASH_ENV'/,
+    'Loader must use BASH_ENV so it survives DSH KEY/TOKEN scrub',
+  );
+  assert.match(
+    dshSkillEnvSource,
+    /DSH_SESSION_ID/,
+    'Loader must select the env file by per-execution DSH_SESSION_ID',
+  );
+  assert.match(
+    coworkUtilSource,
+    /IDBOTS_RPC_URL:\s*getMetaidRpcBase\(\)/,
+    'getSkillHostEnv must set IDBOTS_RPC_URL for skill scripts (global, not per-bot)',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /private async syncDshSkillSessionEnv/,
+    'CoworkRunner must write a per-DSH-session env file before the turn',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /writeDshSkillSessionEnvFile/,
+    'CoworkRunner must persist getSkillSessionEnvOverrides into the DSH session env file',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /copyDshSkillSessionEnvFile/,
+    'Subagent DSH sessions must inherit the parent skill env file',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /private async runLocalKernel/,
+    'Local sandbox fallbacks must dispatch through runLocalKernel so DSH stays the default',
+  );
+  assert.doesNotMatch(
+    coworkUtilSource,
+    /loadClaudeSdk/,
+    'generateSessionTitle must not spawn the sunset Claude Agent SDK',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /Manual compaction requested; starting compacted DSH session/,
+    'runDshSessionLocal must consume pendingManualCompact instead of ignoring it',
   );
 });
 test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.js patching', () => {
@@ -290,10 +348,6 @@ test('cowork subprocess env disables Claude Code nonessential external traffic',
 
 test('SDK query call sites isolate from user Claude Code settings sources', () => {
   const coworkRunnerSource = fs.readFileSync(coworkRunnerPath, 'utf8');
-  const coworkUtilSource = fs.readFileSync(
-    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkUtil.ts'),
-    'utf8',
-  );
   const sandboxRunnerSource = fs.readFileSync(
     path.join(process.cwd(), 'sandbox', 'agent-runner', 'index.js'),
     'utf8',
@@ -303,11 +357,6 @@ test('SDK query call sites isolate from user Claude Code settings sources', () =
     coworkRunnerSource,
     /settingSources:\s*\[\]/,
     'CoworkRunner must pass settingSources: [] so user settings env blocks cannot override the session provider env',
-  );
-  assert.match(
-    coworkUtilSource,
-    /settingSources:\s*\[\]/,
-    'Session title generation must pass settingSources: [] for the same isolation',
   );
   assert.match(
     sandboxRunnerSource,

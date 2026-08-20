@@ -229,10 +229,10 @@ export interface DshHubOptions {
    *  plugin directory feeds entries here, so an install/uninstall applies on
    *  the next turn — config-change restart waits for quiescence as usual. */
   extraEntriesProvider?: () => Array<Record<string, unknown>>
-  /** Global skill-script host env (IDBOTS_API_BASE_URL, SKILLS_ROOT, …).
-   *  Re-read every ensure: the DSH bash tool does not receive per-session
-   *  env from getSkillSessionEnvOverrides, so scheduled-task and similar
-   *  scripts only see these values if they ride the shared child env. */
+  /** Global skill-script host env (IDBOTS_API_BASE_URL, SKILLS_ROOT, BASH_ENV, …).
+   *  Re-read every ensure. Per-session identity cannot live here (shared
+   *  runtime); those values are written to a DSH_SESSION_ID-keyed env file
+   *  that bash sources via BASH_ENV after the KEY/TOKEN scrub. */
   skillHostEnvProvider?: () => Record<string, string>
   /** Quiescence budget before a NON-deferrable config change restarts the
    *  shared runtime while turns are in flight (default 90s; tests shrink it). */
