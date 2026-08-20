@@ -972,7 +972,8 @@ export async function getGroupTask(
     // P1-5: status transition history (who/when/from->to).
     statusEvents: store.listStatusEvents(id),
     // P2-8: current driving daemon instance (kv heartbeat claim).
-    driver: readGroupTaskDriver(getKvStore(), id),
+    // Driver is optional annotation — skip when kv is not wired (unit tests).
+    driver: kvStoreGetter ? readGroupTaskDriver(getKvStore(), id) : null,
     // HITL: human checkpoints (open + past), oldest first.
     checkpoints,
     // R1: latest host-generated acceptance summary (single source of truth).
@@ -1753,11 +1754,16 @@ export function notifySourceSessionReview(
  * When closing as 'done', the owner's acceptance rating (1-5 + optional
  * comment) is persisted alongside; automated callers (RPC) may omit it.
  * `actor` is recorded on the status-transition event (P1-5).
+ *
+ * Returns the full detail payload (members, deliverables, acceptance summary),
+ * matching reopenGroupTask. The owner detail view writes this object into
+ * React state after Accept & Close; a bare GroupTask row lacks `members` and
+ * whitescreens the renderer on `detail.members.find(...)`.
  */
 export async function closeGroupTask(
   taskId: number,
   opts: { status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string; actor?: GroupTaskStatusEventActor },
-): Promise<GroupTask> {
+): Promise<GroupTaskDetail> {
   if (opts.status !== 'done' && opts.status !== 'cancelled') {
     throw new Error(`closeGroupTask status must be 'done' or 'cancelled'`);
   }
@@ -1789,7 +1795,7 @@ export async function closeGroupTask(
     // (best-effort; never throws into the close flow). Done after the rating is
     // persisted so the notification carries the final rating.
     notifySourceSession(rated, opts.status, opts.rating, opts.ratingComment);
-    return rated;
+    return getGroupTask(taskId);
   }
   // OpenTeam M3: the chair sediments one participation impression per REMOTE
   // teammate (recorded for cancelled tasks too). Best-effort: the task is
@@ -1798,7 +1804,7 @@ export async function closeGroupTask(
   // R2: relay the acceptance result back to the originating CoWork session
   // (covers cancelled and automated/RPC closes without a rating).
   notifySourceSession(closed, opts.status, opts.rating, opts.ratingComment);
-  return closed;
+  return getGroupTask(taskId);
 }
 
 /**
