@@ -5025,7 +5025,7 @@ export class CoworkRunner extends EventEmitter {
     toolInput: Record<string, unknown>
   ): Promise<PermissionResult | null> {
     if (this.isDeleteOperation(toolName, toolInput)) {
-      const commandPreview = toolName === 'Bash'
+      const commandPreview = toolName.toLowerCase() === 'bash'
         ? this.truncateCommandPreview(this.extractToolCommand(toolInput))
         : '';
       const deleteDetail = commandPreview ? tApp(` 命令: ${commandPreview}`, ` Command: ${commandPreview}`) : '';
@@ -6818,13 +6818,13 @@ export class CoworkRunner extends EventEmitter {
 
   /**
    * Host permission chain for DSH tool calls — the port of canUseTool's
-   * kernel-specific decisions: plan-mode blocking, delete-class human
-   * confirmation ('default' mode only — acceptEdits/bypassPermissions skip
-   * it exactly like the Claude path, so unattended worker sessions never
-   * block on a confirmation no human will answer), and permission-mode/
-   * auto-approve allowances. Skill authorization is prompt-side (skillManager
-   * filters available_skills per session) and carries over through the
-   * composed system prompt unchanged.
+   * kernel-specific decisions: plan-mode blocking, read-image guards,
+   * then the shared enforceToolSafetyPolicy (delete confirmation in
+   * 'default' mode only — acceptEdits/bypassPermissions skip it exactly
+   * like the Claude path, so unattended worker sessions never block on a
+   * confirmation no human will answer), plus auto-approve allowances.
+   * Skill authorization is prompt-side (skillManager filters available_skills
+   * per session) and carries over through the composed system prompt unchanged.
    */
   private async evaluateDshToolPolicy(
     sessionId: string,
@@ -6841,26 +6841,6 @@ export class CoworkRunner extends EventEmitter {
         return {
           decision: 'deny',
           reason: `Tool "${toolName}" is blocked in plan mode (read-only). Switch to default or acceptEdits mode to execute it.`,
-        }
-      }
-      // Delete-class confirmation, Claude-path parity (canUseTool skips the
-      // delete-safety question under acceptEdits/bypassPermissions — the mode
-      // already answers it): only 'default' mode asks. Unconditional asking
-      // hung unattended sessions forever — a background worker (acceptEdits)
-      // executing `rm -rf` on its own temp files blocked on a confirmation no
-      // human would ever see.
-      if (this.isDeleteOperation(normalized, toolInput)
-        && (!activeSession || activeSession.permissionMode === 'default')) {
-        const commandPreview = normalized === 'bash'
-          ? this.truncateCommandPreview(this.extractToolCommand(toolInput))
-          : ''
-        const deleteDetail = commandPreview ? tApp(` 命令: ${commandPreview}`, ` Command: ${commandPreview}`) : ''
-        return {
-          decision: 'ask',
-          reason: tApp(
-            `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`,
-            `Tool "${toolName}" will delete files. Safety policy requires a human confirmation. Allow this operation?${deleteDetail}`
-          ),
         }
       }
       // Read guards (GT#12 parity with the Claude path's canUseTool block):
@@ -6903,6 +6883,44 @@ export class CoworkRunner extends EventEmitter {
             });
           }
         }
+      }
+      // Claude-path workspace-safety: canUseTool calls enforceToolSafetyPolicy
+      // after plan/read-image. Same skip as Claude — acceptEdits/bypassPermissions
+      // do not ask, so unattended workers are not blocked on a human. Default
+      // mode prompts through the shared AskUserQuestion confirmation.
+      const permissionMode = activeSession?.permissionMode ?? 'default'
+      if (permissionMode === 'default' && activeSession) {
+        const policyResult = await this.enforceToolSafetyPolicy(
+          sessionId,
+          activeSession.abortController.signal,
+          activeSession,
+          toolName,
+          toolInput
+        )
+        if (policyResult?.behavior === 'deny') {
+          return { decision: 'deny', reason: policyResult.message ?? 'denied by safety policy' }
+        }
+      } else if (
+        permissionMode === 'default'
+        && this.isDeleteOperation(normalized, toolInput)
+      ) {
+        const commandPreview = normalized === 'bash'
+          ? this.truncateCommandPreview(this.extractToolCommand(toolInput))
+          : ''
+        const deleteDetail = commandPreview ? tApp(` 命令: ${commandPreview}`, ` Command: ${commandPreview}`) : ''
+        return {
+          decision: 'ask',
+          reason: tApp(
+            `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`,
+            `Tool "${toolName}" will delete files. Safety policy requires a human confirmation. Allow this operation?${deleteDetail}`
+          ),
+        }
+      }
+      if (activeSession?.autoApprove) {
+        return { decision: 'allow' }
+      }
+      if (activeSession?.autoApproveTools.has(normalized)) {
+        return { decision: 'allow' }
       }
       return { decision: 'allow' }
     } catch (error) {
