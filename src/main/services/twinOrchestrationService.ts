@@ -13,6 +13,7 @@ import {
   type CoworkSessionActivityMessage,
 } from '../libs/coworkSessionActivity';
 import type { CoworkRunner } from '../libs/coworkRunner';
+import { buildOrchNotifyCompleted, buildOrchNotifyFailed } from '../libs/groupTaskCopy';
 import type { CoworkStore } from '../coworkStore';
 import {
   authorizeTwinSession,
@@ -182,8 +183,8 @@ export class TwinOrchestrationService {
       if (this.deps.kv?.get<string>(guardKey) === '1') return; // one notify per terminal state
       if (!workerSessionId) return; // no worker session identity to attribute the message to
       const text = outcome === 'completed'
-        ? `[ORCH-NOTIFY] worker ${workerName} 已完成 task ${task.id} → review，请验收`
-        : `[ORCH-NOTIFY] worker ${workerName} 未完成 task ${task.id}：${(detail ?? '').trim() || 'WORKER_ATTEMPT_FAILED'}（failed）`;
+        ? buildOrchNotifyCompleted(workerName, task.id)
+        : buildOrchNotifyFailed(workerName, task.id, (detail ?? '').trim() || 'WORKER_ATTEMPT_FAILED');
       const result = this.insertCrossSession({
         sourceSessionId: workerSessionId,
         targetSessionId,

@@ -205,6 +205,14 @@ test('extractChairConclusion: 【结论】 first line is captured, cleaned, capp
     '验收通过，理由见验收卡',
   );
   assert.equal(
+    extractChairConclusion('Conclusion: accept and close\n\nBody…'),
+    'accept and close',
+  );
+  assert.equal(
+    extractChairConclusion('**Conclusion**: rework the images'),
+    'rework the images',
+  );
+  assert.equal(
     extractChairConclusion('目标回顾：……\n结论：建议验收通过'),
     '建议验收通过',
   );
@@ -237,7 +245,9 @@ test('Improvement #1: the group message leads with the stored conclusion when pr
     'T',
   );
   const lines = withConclusion.split('\n');
-  assert.equal(lines[1], '结论：验收通过并结项', 'conclusion is the first content line after the header');
+  assert.equal(lines[0], '[GROUP_TASK_NOTICE:review_summary]');
+  assert.match(lines[1], /已进入验收阶段/);
+  assert.equal(lines[2], '结论：验收通过并结项', 'conclusion is the first content line after the header');
   const withoutConclusion = buildAcceptanceSummaryMessageText({ ...base }, 'T');
   assert.ok(!withoutConclusion.includes('结论：'), 'no fabricated conclusion line');
 });

@@ -352,7 +352,14 @@ export function hasStandbyMarker(content: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** True when the message publicly declares a correction or honest report. */
+const CORRECTION_RE = /更正|修正|纠正|补正|勘误|以…?为准|以此为准|请以此为准|\bcorrection\b|\berrata\b|\bcorrigendum\b|\brevised\b|\bsupersede[sd]?\b|take this as (?:the )?(?:canonical|correct)|this is the correct/i;
+const HONEST_REPORT_RE = /诚实|如实|\bhonest report\b|\bto be clear\b|\bhonestly\b/i;
 export function isIntegrityDeclaration(content: string): boolean {
   const text = String(content ?? '');
-  return /更正|修正|诚实|如实|纠正|以…?为准|以此为准|补正|勘误/.test(text);
+  return CORRECTION_RE.test(text) || HONEST_REPORT_RE.test(text);
+}
+
+/** True when the message is a correction (not merely an honest failure report). */
+export function isCorrectionText(content: string): boolean {
+  return CORRECTION_RE.test(String(content ?? ''));
 }

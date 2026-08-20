@@ -118,14 +118,13 @@ function longDeliverableSummary(content: string): string {
 }
 
 /**
- * P12 (v1.1): the host-posted acceptance summary is a >2000-char checklist
- * (goal + criteria + all deliverables + guidance). Detect it by its
- * deterministic opening so the transcript can fold it by default — one click
- * expands the full checklist. The opening line is generated verbatim by
- * buildAcceptanceSummaryMessageText, so this match is stable.
+ * P12 (v1.1): the host-posted acceptance summary is a long checklist.
+ * Detect it by the language-neutral notice prefix (or the pre-i18n Chinese
+ * opening) so the transcript can fold it by default.
  */
 function isAcceptanceSummaryMessage(content: string): boolean {
   const text = content.trimStart();
+  if (text.startsWith('[GROUP_TASK_NOTICE:review_summary]')) return true;
   return text.startsWith('📦 任务「') && text.includes('已进入验收阶段');
 }
 

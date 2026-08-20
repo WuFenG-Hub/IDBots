@@ -1599,6 +1599,7 @@ test('prompts: chair playbook carries lifecycle-autonomy and user-language rules
   assert.match(chairPrompt, /NEVER sit in executing asking the owner "what next\?"/);
   assert.match(chairPrompt, /User language: refer to the task by its title, never by `#id`/);
   assert.match(chairPrompt, /Lead every report with the conclusion/);
+  assert.match(chairPrompt, /OWNER LANGUAGE is Chinese \(Simplified\)/);
 
   const workerPrompt = buildGroupTaskSystemPrompt({
     metabot: { name: 'Coder Bot' },
@@ -1608,6 +1609,24 @@ test('prompts: chair playbook carries lifecycle-autonomy and user-language rules
   });
   assert.ok(!workerPrompt.includes('Lifecycle autonomy'), 'lifecycle ownership stays out of the worker playbook');
   assert.ok(!workerPrompt.includes('User language: refer to the task by its title'), 'user-language rule stays out of the worker playbook');
+});
+
+test('prompts: English owner language uses English WORKING/STANDBY examples and no CJK', () => {
+  const members = [
+    { name: 'Twin Bot', role: 'chair' },
+    { name: 'Coder Bot', role: 'worker' },
+  ];
+  const workerPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Coder Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'worker',
+    language: 'en',
+  });
+  assert.match(workerPrompt, /OWNER LANGUAGE is English/);
+  assert.match(workerPrompt, /\[WORKING\] On it: X, ETA N min/);
+  assert.match(workerPrompt, /\[STANDBY\] observing \/ on standby \/ can exit/);
+  assert.equal(/[\u4e00-\u9fff]/.test(workerPrompt), false);
 });
 
 // ---------------------------------------------------------------------------

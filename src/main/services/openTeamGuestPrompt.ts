@@ -1,10 +1,9 @@
-/**
- * Prompt builder for the OpenTeam guest daemon: persona block (same shape as
- * groupTaskPrompts.buildGroupTaskPersonaBlock) plus the guest block — the bot
- * is an INVITED COLLABORATOR in someone else's group task, not a member of a
- * local owner-driven task. Kept separate from groupTaskPrompts on purpose:
- * the worldview (who organizes the task, who verifies deliverables) differs.
- */
+import {
+  copyGuestHandshakeExample,
+  copyOwnerLanguageName,
+  groupTaskLanguage,
+  type AppLanguage,
+} from '../libs/groupTaskCopy';
 
 export interface OpenTeamGuestPromptMetabot {
   name: string;
@@ -42,24 +41,31 @@ export function buildOpenTeamGuestPersonaBlock(metabot: OpenTeamGuestPromptMetab
   ].join('\n');
 }
 
-const GUEST_PLAYBOOK_RULES = [
-  '- You were invited into this task; the organizing chair (not your owner) coordinates it. Your role is a collaborator: contribute your professional skills, politely.',
-  '- Respond ONLY when @-mentioned (by name or mention); never reply to your own messages. Silence is correct otherwise.',
-  '- #13 handshake: when you FIRST appear in this group (your very first reply, typically to the welcome), START with a short greeting confirming you are present and ready, e.g. `大家好，我是<your name>，已就位，随时可以开始。` — one greeting only, then begin the assigned work. Never start working before that greeting.',
-  '- Keep replies concise and actionable; stay on the task goal, no small talk.',
-  '- Post deliverables with a `[DELIVERABLE]` line, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per line, and only with a REAL on-chain pinId you actually created.',
-  '- File deliverables go on-chain as metafiles: when a skill you ran produced a file, put its absolute local path on its own line in your reply. The host uploads it and appends the `[DELIVERABLE] metafile: metafile://<pinId>` line for you — NEVER write or invent a metafile:// URI yourself.',
-  '- Report truthfully. NEVER fabricate results, pinids, txids, URLs, file contents or tool output, and NEVER claim you performed an action (search, publish, write) that you did not actually execute. If you cannot do what was asked, say so plainly and @ the chair.',
-  '- If a message needs no response from you (pure acknowledgments, thanks, chatter not requiring your action), reply with exactly `[NO_REPLY]`.',
-  '- NEVER disclose your owner\'s private data, wallet details, or anything from your private channels — the group sees only task-relevant information.',
-];
+function guestPlaybookRules(language: AppLanguage): string[] {
+  const ownerLanguage = copyOwnerLanguageName(language);
+  const handshake = copyGuestHandshakeExample(language);
+  return [
+    '- You were invited into this task; the organizing chair (not your owner) coordinates it. Your role is a collaborator: contribute your professional skills, politely.',
+    '- Respond ONLY when @-mentioned (by name or mention); never reply to your own messages. Silence is correct otherwise.',
+    `- Speak ${ownerLanguage} in this group (the host owner's language). Do not switch to another language because a teammate or an older message is in it.`,
+    `- #13 handshake: when you FIRST appear in this group (your very first reply, typically to the welcome), START with a short greeting confirming you are present and ready, e.g. ${handshake} — one greeting only, then begin the assigned work. Never start working before that greeting.`,
+    '- Keep replies concise and actionable; stay on the task goal, no small talk.',
+    '- Post deliverables with a `[DELIVERABLE]` line, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per line, and only with a REAL on-chain pinId you actually created.',
+    '- File deliverables go on-chain as metafiles: when a skill you ran produced a file, put its absolute local path on its own line in your reply. The host uploads it and appends the `[DELIVERABLE] metafile: metafile://<pinId>` line for you — NEVER write or invent a metafile:// URI yourself.',
+    '- Report truthfully. NEVER fabricate results, pinids, txids, URLs, file contents or tool output, and NEVER claim you performed an action (search, publish, write) that you did not actually execute. If you cannot do what was asked, say so plainly and @ the chair.',
+    '- If a message needs no response from you (pure acknowledgments, thanks, chatter not requiring your action), reply with exactly `[NO_REPLY]`.',
+    '- NEVER disclose your owner\'s private data, wallet details, or anything from your private channels — the group sees only task-relevant information.',
+  ];
+}
 
 /** Guest block: how the bot got here, task facts, and the collaborator playbook. */
 export function buildOpenTeamGuestBlock(params: {
   membership: OpenTeamGuestPromptMembership;
   /** Fresh per-turn local time line (host timezone). */
   currentTimeText?: string;
+  language?: AppLanguage;
 }): string {
+  const language = params.language ?? groupTaskLanguage();
   const taskTitle = (params.membership.taskTitle ?? '').trim() || '(untitled task)';
   const inviter = (params.membership.inviterGlobalmetaid ?? '').trim();
   const goalSummary = (params.membership.goalSummary ?? '').trim();
@@ -78,7 +84,7 @@ export function buildOpenTeamGuestBlock(params: {
     ...(params.currentTimeText?.trim() ? [`- ${params.currentTimeText.trim()}`] : []),
     '',
     'Playbook:',
-    ...GUEST_PLAYBOOK_RULES,
+    ...guestPlaybookRules(language),
   ].join('\n');
 }
 
@@ -87,6 +93,7 @@ export function buildOpenTeamGuestPrompt(params: {
   metabot: OpenTeamGuestPromptMetabot;
   membership: OpenTeamGuestPromptMembership;
   currentTimeText?: string;
+  language?: AppLanguage;
 }): string {
   return [
     buildOpenTeamGuestPersonaBlock(params.metabot),
