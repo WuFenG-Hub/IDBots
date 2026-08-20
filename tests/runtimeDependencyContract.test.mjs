@@ -312,6 +312,11 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
     /sessionUsesDshSubagents/,
     'Subagent panel IPC must route dsh: sessions away from loadClaudeSdk',
   );
+  assert.doesNotMatch(
+    mainProcessSource,
+    /prewarmClaudeSdk/,
+    'App startup must not pre-load the sunset Claude Agent SDK',
+  );
 });
 test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.js patching', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
