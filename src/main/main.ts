@@ -32,7 +32,7 @@ import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
 import { getOsLocale, setAppLanguageStoreGetter, tApp } from './libs/appLanguage';
 import { loadClaudeSdk, prewarmClaudeSdk } from './libs/claudeSdk';
-import { flattenSubagentTranscriptMessages } from './libs/coworkSubagentTranscript';
+import { flattenSubagentTranscriptMessages, mapDshSubagentList, mapDshSubagentMessages, sessionUsesDshSubagents } from './libs/coworkSubagentTranscript';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
@@ -7751,6 +7751,10 @@ if (!gotTheLock) {
       if (!session?.claudeSessionId) {
         return { success: true, agents: [] };
       }
+      if (sessionUsesDshSubagents(session.claudeSessionId)) {
+        const rows = await getCoworkRunner().dshListSubagents(sessionId);
+        return { success: true, agents: mapDshSubagentList(rows) };
+      }
       const sdk = await loadClaudeSdk();
       const agents = await sdk.listSubagents(session.claudeSessionId, { dir: session.cwd });
       return { success: true, agents: Array.isArray(agents) ? agents : [] };
@@ -7774,6 +7778,10 @@ if (!gotTheLock) {
       const session = getCoworkStore().getSession(sessionId);
       if (!session?.claudeSessionId) {
         return { success: true, messages: [] };
+      }
+      if (sessionUsesDshSubagents(session.claudeSessionId)) {
+        const rows = await getCoworkRunner().dshGetSubagentMessages(sessionId, agentId, limit);
+        return { success: true, messages: mapDshSubagentMessages(rows) };
       }
       const sdk = await loadClaudeSdk();
       const transcript = await sdk.getSubagentMessages(session.claudeSessionId, agentId, {

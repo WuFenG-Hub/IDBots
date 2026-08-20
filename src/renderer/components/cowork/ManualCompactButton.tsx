@@ -17,8 +17,9 @@ interface ManualCompactButtonProps {
  * Manual context-compaction trigger shown next to the usage panel in the
  * Cowork header (Phase 3). It only appears once context usage is high enough
  * (default 40%) so it never clutters early conversations, and it queues the
- * compaction for the next local-mode turn — the user keeps chatting and the
- * next message continues from a compacted summary.
+ * compaction for the next local-mode turn on leftover Claude sessions; DSH
+ * sessions compact immediately via native compactNow. The user keeps chatting
+ * from the compacted history.
  */
 const ManualCompactButton: React.FC<ManualCompactButtonProps> = ({
   sessionId,

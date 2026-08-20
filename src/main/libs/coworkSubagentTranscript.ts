@@ -1,4 +1,5 @@
-import type { CoworkMessage } from '../coworkStore';
+import type { CoworkMessage, CoworkMessageType } from '../coworkStore';
+import { isDshSessionHandle } from './coworkKernelRouting';
 
 /**
  * Defensive flattening of a Claude Code subagent transcript message into
@@ -147,4 +148,34 @@ export function flattenSubagentTranscriptMessages(
   }
 
   return result;
+}
+
+const COWORK_MESSAGE_TYPES = new Set<CoworkMessageType>([
+  'user',
+  'assistant',
+  'tool_use',
+  'tool_result',
+  'system',
+]);
+
+/** True when the session handle belongs to the DSH runtime, not Claude SDK. */
+export function sessionUsesDshSubagents(sessionHandle: string | null | undefined): boolean {
+  return isDshSessionHandle(sessionHandle);
+}
+
+export function mapDshSubagentList(rows: Array<{ agentId: string }>): string[] {
+  return rows.map((row) => row.agentId).filter((id) => id.length > 0);
+}
+
+export function mapDshSubagentMessages(
+  rows: Array<{ id: string; type: string; content: string; timestamp: number }>
+): CoworkMessage[] {
+  return rows.map((row, index) => ({
+    id: row.id || `dsh-subagent-${index}`,
+    type: COWORK_MESSAGE_TYPES.has(row.type as CoworkMessageType)
+      ? (row.type as CoworkMessageType)
+      : 'assistant',
+    content: row.content ?? '',
+    timestamp: Number.isFinite(row.timestamp) ? row.timestamp : 0,
+  }));
 }
