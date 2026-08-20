@@ -518,3 +518,9 @@ test('packaged runtime gates fail closed on missing source and packaged markers'
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });
+
+test('ffmpeg Windows download maps the extension-less release asset to the local .exe target', () => {
+  const setupFfmpeg = require(path.join(process.cwd(), 'scripts', 'setup-ffmpeg.js'));
+  assert.equal(setupFfmpeg.PLATFORM_ASSETS['win32-x64'], 'ffmpeg-win32-x64.exe');
+  assert.equal(setupFfmpeg.REMOTE_ASSETS['win32-x64'], 'ffmpeg-win32-x64');
+});

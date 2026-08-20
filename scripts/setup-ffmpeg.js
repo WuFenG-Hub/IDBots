@@ -36,6 +36,17 @@ const PLATFORM_ASSETS = {
   'win32-x64': 'ffmpeg-win32-x64.exe',
 };
 
+/**
+ * Remote asset name per platform. ffmpeg-static releases ship the Windows
+ * binary as an extension-less file (ffmpeg-win32-x64), while the local target
+ * and electron-builder extraResources expect ffmpeg-win32-x64.exe.
+ */
+const REMOTE_ASSETS = {
+  'darwin-arm64': 'ffmpeg-darwin-arm64',
+  'darwin-x64': 'ffmpeg-darwin-x64',
+  'win32-x64': 'ffmpeg-win32-x64',
+};
+
 function parseArgs(argv) {
   const platformFlag = argv.find((a) => a.startsWith('--platform='));
   const platforms = platformFlag
@@ -124,7 +135,7 @@ async function ensureFfmpeg(options = {}) {
         : '';
       const url = urlFromEnv
         ? urlFromEnv.replace('{{platform}}', platform)
-        : `${DEFAULT_FFMPEG_BASE_URL}/${asset}`;
+        : `${DEFAULT_FFMPEG_BASE_URL}/${REMOTE_ASSETS[platform] || asset}`;
       try {
         console.log(`[setup-ffmpeg] ${platform}: downloading from ${url}`);
         await downloadBinary(url, target);
@@ -164,4 +175,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { ensureFfmpeg, PLATFORM_ASSETS };
+module.exports = { ensureFfmpeg, PLATFORM_ASSETS, REMOTE_ASSETS };
