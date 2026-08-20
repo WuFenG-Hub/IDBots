@@ -25,7 +25,7 @@ export function clampSidebarWidth(width: number): number {
 }
 
 /**
- * Load the persisted width for a surface mode. Bot Home and Bot Browser keep
+ * Load the persisted width for a surface mode. Bot Home and Bot Internet keep
  * independent widths so each surface restores its own comfortable size on
  * switch. A legacy single-key value (pre per-mode) seeds the home width.
  */

@@ -126,6 +126,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     collapse: '收起',
     expand: '展开',
     featureInDevelopment: '正在开发中',
+    botInternet: 'Bot Internet',
+    botBrowser: 'Bot Browser',
+    botHome: 'Bot Home',
     
     // 错误信息
     failedToLoadSettings: '加载设置失败',
@@ -2238,6 +2241,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     collapse: 'Collapse',
     expand: 'Expand',
     featureInDevelopment: 'In development',
+    botInternet: 'Bot Internet',
+    botBrowser: 'Bot Browser',
+    botHome: 'Bot Home',
     
     // Error Messages
     failedToLoadSettings: 'Failed to load settings',
