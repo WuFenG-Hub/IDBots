@@ -93,18 +93,25 @@ export function formatVisionRelayError(message: string): string {
 }
 
 /**
- * Inline MCP tool that describes one local image through the IDBots vision
+ * Inline MCP tools that describe local media through the IDBots vision
  * relay. Registered for every cowork surface when the host provides
  * VisionRelayControl (see coworkRunner). Works regardless of whether the
- * session's model is multimodal — the relay's VLM reads the image and the
+ * session's model is multimodal — the relay's VLM reads the media and the
  * tool returns plain text, so non-vision models (e.g. the DeepSeek V4 family)
- * gain image understanding without base64 ever entering the session.
+ * gain media understanding without base64 ever entering the session.
+ *
+ * `includeDescribeImage` (default true) gates describe_image: vision-capable
+ * sessions omit it so the model always reaches for native image blocks
+ * (read_image / prompt attachments) — a strictly better path that keeps the
+ * quota-metered relay out of the loop. describe_video always registers:
+ * native vision cannot watch video on any route.
  */
 export function buildVisionRelayAgentTools(deps: {
   tool: SdkToolFactory;
   visionRelay: VisionRelayControl;
+  includeDescribeImage?: boolean;
 }): unknown[] {
-  const { tool, visionRelay } = deps;
+  const { tool, visionRelay, includeDescribeImage = true } = deps;
 
   const describeImage = tool(
     'describe_image',
@@ -209,5 +216,5 @@ export function buildVisionRelayAgentTools(deps: {
     }
   );
 
-  return [describeImage, describeVideo];
+  return includeDescribeImage ? [describeImage, describeVideo] : [describeVideo];
 }

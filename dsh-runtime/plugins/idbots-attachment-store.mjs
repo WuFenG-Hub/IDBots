@@ -2,13 +2,18 @@
 // IDBots runtime.
 //
 // DSH's ImageBlock carries an ImageAttachmentRef whose bytes live in an
-// `attachments` service (ctx.get('attachments')); the @deepseek-ai/dsh-attachment
-// package ships only the abstract seam — no concrete store in the rc package
-// set. This plugin provides the minimal durable implementation the host tool
-// bridge needs: images are validated from their bytes (magic signature +
-// intrinsic dimensions), stored under `<root>/<sha256>.bin` with a JSON
-// sidecar, and read back with hash re-verification. Content addressing makes
-// identical images dedupe naturally and gives `readImage` its integrity check.
+// `attachments` service (ctx.get('attachments')). We ship this minimal durable
+// implementation instead of upstream @deepseek-ai/dsh-attachment-local
+// (available since rc.7) because refs logged by this store must stay readable
+// for sessions recorded before that package existed: images are validated
+// from their bytes (magic signature + intrinsic dimensions), stored under
+// `<root>/<sha256>.bin` with a JSON sidecar, and read back with hash
+// re-verification. Content addressing makes identical images dedupe
+// naturally and gives `readImage` its integrity check.
+//
+// Error codes follow the @deepseek-ai/dsh-attachment AttachmentErrorCode
+// vocabulary so upstream routing (isImageAdmissionError, read_image's
+// recoverable-error mapping) recognizes them.
 //
 // Config: { root } — directory under the versioned session root, so
 // attachments live exactly as long as the session logs that reference them.
@@ -27,12 +32,16 @@ const LIMITS = Object.freeze({
   maxImagesPerMessage: 10,
   maxMessageImageBytes: 50 * 1024 * 1024,
   maxImagePixels: 33_400_000,
+  // Per-side bound required by ImageAttachmentLimits since dsh-attachment
+  // rc.8; 2000 matches upstream dsh-attachment-local's default, which sits
+  // below the strictest deployed model-route dimension bound.
+  maxImageDimension: 2000,
   mediaTypes: MEDIA_TYPES,
 })
 
 /** Decode intrinsic dimensions from encoded bytes; throws AttachmentError on malformed input. */
 export function inspectImage(data, declaredMediaType) {
-  const fail = (why) => { throw new AttachmentError(why, 'invalid-image') }
+  const fail = (why) => { throw new AttachmentError(why, 'INVALID_IMAGE') }
   if (!(data instanceof Uint8Array) || data.length < 12) fail('image bytes are missing or too short')
   const mediaType = MEDIA_TYPES.includes(declaredMediaType) ? declaredMediaType : undefined
   if (mediaType === undefined) fail(`unsupported media type ${JSON.stringify(String(declaredMediaType))}`)
@@ -107,11 +116,17 @@ export default class IdbotsAttachmentStore extends AttachmentStore {
   async validateImage(input) {
     const { data } = input
     if (data.byteLength > LIMITS.maxImageBytes) {
-      throw new AttachmentError(`image is ${data.byteLength} bytes; the limit is ${LIMITS.maxImageBytes}`, 'too-large')
+      throw new AttachmentError(`image is ${data.byteLength} bytes; the limit is ${LIMITS.maxImageBytes}`, 'IMAGE_TOO_LARGE')
     }
     const dims = inspectImage(data, input.mediaType)
     if (dims.width * dims.height > LIMITS.maxImagePixels) {
-      throw new AttachmentError(`image is ${dims.width}x${dims.height}; the pixel limit is ${LIMITS.maxImagePixels}`, 'too-large')
+      throw new AttachmentError(`image is ${dims.width}x${dims.height}; the pixel limit is ${LIMITS.maxImagePixels}`, 'IMAGE_TOO_MANY_PIXELS')
+    }
+    if (dims.width > LIMITS.maxImageDimension || dims.height > LIMITS.maxImageDimension) {
+      throw new AttachmentError(
+        `image side ${Math.max(dims.width, dims.height)}px exceeds the per-side limit of ${LIMITS.maxImageDimension}px`,
+        'IMAGE_DIMENSION_TOO_LARGE',
+      )
     }
   }
 
@@ -142,7 +157,7 @@ export default class IdbotsAttachmentStore extends AttachmentStore {
   async readImage(ref, signal) {
     const id = String(ref?.attachmentId ?? '')
     if (!/^[0-9a-f]{64}$/.test(id)) {
-      throw new AttachmentError('attachment id is not a content hash', 'not-found')
+      throw new AttachmentError('attachment id is not a content hash', 'INVALID_ATTACHMENT_REF')
     }
     if (signal?.aborted) throw signal.reason ?? new Error('aborted')
     const bin = path.join(this.root, `${id}.bin`)
@@ -152,12 +167,12 @@ export default class IdbotsAttachmentStore extends AttachmentStore {
       bytes = await fs.readFile(bin)
       meta = JSON.parse(await fs.readFile(path.join(this.root, `${id}.json`), 'utf8'))
     } catch {
-      throw new AttachmentError(`attachment ${id.slice(0, 12)} is not in the store`, 'not-found')
+      throw new AttachmentError(`attachment ${id.slice(0, 12)} is not in the store`, 'ATTACHMENT_NOT_FOUND')
     }
     if (signal?.aborted) throw signal.reason ?? new Error('aborted')
     const actual = createHash('sha256').update(bytes).digest('hex')
     if (actual !== id) {
-      throw new AttachmentError(`attachment ${id.slice(0, 12)} failed content verification`, 'corrupt')
+      throw new AttachmentError(`attachment ${id.slice(0, 12)} failed content verification`, 'ATTACHMENT_CORRUPT')
     }
     const canonical = {
       attachmentId: id,
@@ -168,7 +183,7 @@ export default class IdbotsAttachmentStore extends AttachmentStore {
       ...(typeof meta.name === 'string' ? { name: meta.name } : {}),
     }
     if (canonical.bytes !== ref.bytes || canonical.width !== ref.width || canonical.height !== ref.height) {
-      throw new AttachmentError(`attachment ${id.slice(0, 12)} no longer matches its logged metadata`, 'corrupt')
+      throw new AttachmentError(`attachment ${id.slice(0, 12)} no longer matches its logged metadata`, 'ATTACHMENT_CORRUPT')
     }
     return { ref: canonical, data: new Uint8Array(bytes) }
   }

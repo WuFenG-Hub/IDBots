@@ -33,25 +33,32 @@ const record = (name, pass, detail = '') => {
 const unit = generateRuntimeConfig({
   sessionRoot: '/tmp/x',
   providers: [
-    { key: 'deepseek-gw', apiFormat: 'openai', baseUrl: 'https://a.example/v1', apiKeyEnv: 'K1', thinkingFormat: 'deepseek', models: [{ id: 'm1', contextWindow: 64000 }] },
+    { key: 'openai-gw', apiFormat: 'openai', baseUrl: 'https://a.example/v1', apiKeyEnv: 'K1', models: [{ id: 'm1', contextWindow: 64000 }] },
     { key: 'opencode', apiFormat: 'responses', baseUrl: 'https://b.example/v1', apiKeyEnv: 'K2', models: [{ id: 'm2', contextWindow: 128000, maxOutputTokens: 8192 }] },
     { key: 'claude-direct', apiFormat: 'anthropic', baseUrl: 'https://c.example', apiKeyEnv: 'K3', models: [{ id: 'm3', contextWindow: 200000 }] },
+    { key: 'deepseek', native: true, apiFormat: 'responses', baseUrl: 'https://api.deepseek.com/anthropic/v1', apiKeyEnv: 'K4', models: [{ id: 'deepseek-v4-pro', contextWindow: 128000 }] },
   ],
   sections: [{ name: 'persona:metabot', order: 0, text: 'You are Alice.' }],
 })
 const piEntry = unit.find((e) => e.name === '@deepseek-ai/dsh-llm-pi-ai')
 record('generator: three apiFormats map to three pi-ai protocols',
-  piEntry.config.providers['deepseek-gw'].api === 'openai-completions'
+  piEntry.config.providers['openai-gw'].api === 'openai-completions'
   && piEntry.config.providers.opencode.api === 'openai-responses'
   && piEntry.config.providers['claude-direct'].api === 'anthropic-messages')
-record('generator: thinkingFormat compat + model caps pass through',
-  piEntry.config.providers['deepseek-gw'].compat.thinkingFormat === 'deepseek'
-  && piEntry.config.providers['deepseek-gw'].compat.supportsReasoningEffort === true
-  && piEntry.config.providers['deepseek-gw'].reasoning === 'high'
-  && piEntry.config.providers['deepseek-gw'].models[0].reasoningEfforts.max === 'max'
-  && piEntry.config.providers['deepseek-gw'].models[0].reasoningEfforts.off === null
-  && piEntry.config.providers.opencode.models[0].maxTokens === 8192
-  && piEntry.config.providers.opencode.models[0].reasoningEfforts === undefined)
+// Since f80b128e the official DeepSeek route rides the first-party
+// dsh-llm-deepseek adapter (native off/low/high/max effort ladder) and never
+// enters the pi-ai providers dict; the generator normalizes any DeepSeek base
+// URL onto the bare origin the adapter expects.
+const nativeEntry = unit.find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek')
+record('generator: native DeepSeek route rides dsh-llm-deepseek (never pi-ai)',
+  nativeEntry !== undefined
+  && piEntry.config.providers.deepseek === undefined
+  && nativeEntry.config.apiKeyEnv === 'K4'
+  && nativeEntry.config.baseURL === 'https://api.deepseek.com'
+  && nativeEntry.config.thinking === 'enabled'
+  && nativeEntry.config.reasoningEffort === 'high'
+  && nativeEntry.config.models[0].maxTokens === 32768
+  && piEntry.config.providers.opencode.models[0].maxTokens === 8192)
 record('generator: sections config emitted', unit.some((e) => e.config?.sections?.[0]?.name === 'persona:metabot'))
 record('generator: plugin paths are absolute (config location-independent)',
   unit.every((e) => !String(e.name).startsWith('./')))
