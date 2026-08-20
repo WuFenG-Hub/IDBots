@@ -693,6 +693,10 @@ export function apply(ctx, config = {}) {
   }
 
   transport.onRequest(async (method, params) => {
+    // Mirror the rc.8 stock server: `initialize` is the readiness boundary, so
+    // do not answer it until async sibling Loader entries (e.g. an MCP
+    // client's initial tool discovery) have settled.
+    if (method === 'initialize') await ctx.get('loader')?.await()
     const result = await server.handleRequest(method, params)
     if (method === 'shutdown') {
       setImmediate(() => { void disposeAndExit() })

@@ -14,9 +14,10 @@
 //     apiFormat: 'openai' | 'responses' | 'anthropic',
 //     baseUrl: string,
 //     apiKeyEnv: string,               // env var name the app fills when spawning (never the key)
-//     thinkingFormat?: string,         // pi-ai compat.thinkingFormat ('deepseek' for DeepSeek-dialect gateways)
-//                                      // deepseek also declares reasoningEfforts + supportsReasoningEffort
-//                                      // so the host effort selector can reach the wire.
+//     native?: true,                   // official DeepSeek: rides the first-party
+//                                      // dsh-llm-deepseek adapter (chat-completions wire,
+//                                      // native off/low/high/max effort ladder) instead
+//                                      // of pi-ai; baseUrl is normalized to the bare origin
 //     models: [{ id, contextWindow, maxOutputTokens? }],
 //   }],
 //   sections: [{ name, order, text }], // stable prompt layers (promptComposer)
