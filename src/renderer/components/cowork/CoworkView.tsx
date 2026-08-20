@@ -326,6 +326,11 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       const pending = pendingStartRef.current;
       return !pending || pending.requestId !== requestId || pending.cancelled;
     };
+    // Snapshot the composer pick before any await / setState. Clearing
+    // pendingModelEffort and swapping to the temp session would otherwise
+    // drop an explicit Off/Low choice and let the session fall through to
+    // the model default (DeepSeek: max).
+    const pendingPick = pendingModelEffort;
 
     try {
       try {
@@ -362,6 +367,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         systemPrompt: '',
         executionMode: config.executionMode || 'local',
         activeSkillIds: sessionSkillIds,
+        model: pendingPick?.modelId ?? undefined,
+        modelProvider: pendingPick?.providerKey ?? undefined,
+        effort: pendingPick?.effort ?? undefined,
         messages: [
           {
             id: `msg-${now}`,
@@ -412,9 +420,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         permissionMode,
         // Pending picker selection from the home composer; empty pick falls
         // back to the selected bot's brain (its model and effort).
-        model: pendingModelEffort?.modelId ?? undefined,
-        modelProvider: pendingModelEffort?.providerKey ?? undefined,
-        effort: pendingModelEffort?.effort ?? undefined,
+        model: pendingPick?.modelId ?? undefined,
+        modelProvider: pendingPick?.providerKey ?? undefined,
+        effort: pendingPick?.effort ?? undefined,
       });
 
       // Stop immediately if user cancelled while startup request was in flight.

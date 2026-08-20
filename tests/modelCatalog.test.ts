@@ -133,8 +133,11 @@ test('resolveBrainModelInGroups returns null for unknown values', () => {
 
 test('convertLegacyEffortLevel mirrors the main-process ladder', () => {
   assert.equal(convertLegacyEffortLevel(null), null);
-  assert.equal(convertLegacyEffortLevel('low'), 'off');
+  assert.equal(convertLegacyEffortLevel('off'), 'off');
+  assert.equal(convertLegacyEffortLevel('low'), 'low');
   assert.equal(convertLegacyEffortLevel('medium'), 'low');
   assert.equal(convertLegacyEffortLevel('high'), 'high');
   assert.equal(convertLegacyEffortLevel('max'), 'max');
+  assert.equal(convertLegacyEffortLevel('minimal'), 'off');
+  assert.equal(convertLegacyEffortLevel('xhigh'), 'max');
 });

@@ -7,9 +7,8 @@
 // ('deepseek-official' route), which owns a native off/low/high/max ladder on
 // the chat-completions wire and validates it itself. Since 2026-08-19 the
 // app-wide effort vocabulary IS that ladder (see llmEffort.ts), so the four
-// canonical values pass through one-to-one. Legacy five-step values
-// (快速=low, 标准=medium, xhigh) can still arrive here from older stores and
-// keep their historical alignment: low/minimal→off, medium→low, xhigh→max.
+// canonical values pass through one-to-one. Legacy five-step tokens that are
+// not in the current ladder (minimal, medium, xhigh) still convert here.
 //
 // Everything else stays on the pi-ai route, where effort is NOT passed:
 // pi-ai models' thinking keeps the provider default (the historical behavior
@@ -38,10 +37,8 @@ export function mapDshReasoningEffort(
   if (!normalized) return undefined;
   if (normalized === 'none' || normalized === 'disabled') return 'off';
   if (dialect === 'deepseek-native') {
-    // Canonical ladder (llmEffort.ts): identity mapping —
-    //   off → off, low → low, high → high, max → max.
-    // Legacy five-step values keep their historical alignment:
-    //   minimal → off, medium → low, xhigh → max.
+    // Canonical ladder (llmEffort.ts): identity mapping.
+    // Legacy-only tokens: minimal → off, medium → low, xhigh → max.
     if (normalized === 'off' || normalized === 'low' || normalized === 'high' || normalized === 'max') {
       return normalized;
     }

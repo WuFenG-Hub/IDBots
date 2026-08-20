@@ -296,7 +296,9 @@ export class DshTurnHub {
         provider: input.provider.key,
         model: input.provider.model,
         ...Number.isFinite(input.provider.maxOutputTokens) ? { maxTokens: input.provider.maxOutputTokens } : {},
-        ...(input.provider.reasoningEffort ? { reasoningEffort: input.provider.reasoningEffort } : {}),
+        ...(input.provider.reasoningEffort != null && input.provider.reasoningEffort !== ''
+          ? { reasoningEffort: input.provider.reasoningEffort }
+          : {}),
         sections: input.sections,
         hostTools: input.hostTools,
       })

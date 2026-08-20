@@ -647,9 +647,9 @@ export function getPersistedCoworkPermissionMode(): CoworkPermissionMode {
 
 /**
  * Global default effort level for cowork sessions, normalized onto the
- * app-wide off/low/high/max ladder (see llmEffort.ts). Values written by the
- * pre-2026-08 five-step selector (low=快速, medium=标准) are converted at
- * this read boundary; null means auto / model default. Persisted in
+ * app-wide off/low/high/max ladder (see llmEffort.ts). Leftover five-step
+ * tokens (medium, xhigh) convert at this read boundary; canonical values
+ * including `low` pass through. Null means auto / model default. Persisted in
  * app_config like permission mode.
  */
 export function getPersistedCoworkEffortLevel(): string | null {
@@ -708,7 +708,8 @@ export function resolveModelOptions(modelId?: string | null): {
     const model = provider.models.find((m) => m.id === modelId);
     if (model?.options) {
       // Normalize the stored default onto the app-wide off/low/high/max ladder
-      // so legacy five-step values (low=快速, medium=标准) keep their meaning.
+      // (leftover five-step tokens such as medium/xhigh convert; canonical
+      // off/low/high/max pass through).
       return {
         ...model.options,
         ...(model.options.reasoningEffort !== undefined
