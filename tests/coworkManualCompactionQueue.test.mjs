@@ -160,7 +160,7 @@ test('requestManualCompaction queues for an idle local session (no activeSession
   assert.match(duplicate.error, /already queued/);
 });
 
-test('requestManualCompaction rejects unknown sessions and sandbox sessions', async () => {
+test('requestManualCompaction rejects unknown sessions; sandbox is coerced to local', async () => {
   const store = new FakeCoworkStore();
   store.createSession('sandbox-1', {
     executionMode: 'sandbox',
@@ -175,8 +175,47 @@ test('requestManualCompaction rejects unknown sessions and sandbox sessions', as
   assert.match(missing.error, /Session is not active/);
 
   const sandbox = await runner.requestManualCompaction('sandbox-1');
-  assert.equal(sandbox.success, false);
-  assert.match(sandbox.error, /only available in local mode/);
+  assert.equal(sandbox.success, true);
+  assert.equal(runner.pendingManualCompactSessions.has('sandbox-1'), true);
+});
+
+test('requestManualCompaction on a DSH session calls native compactNow and does not queue', async () => {
+  const store = new FakeCoworkStore();
+  store.createSession('dsh-1', {
+    claudeSessionId: 'dsh:cw-dsh-1',
+    messages: [
+      { id: 'm1', type: 'user', content: 'hello', timestamp: 1 },
+      { id: 'm2', type: 'assistant', content: 'hi', timestamp: 2 },
+    ],
+  });
+  const runner = new CoworkRunner(store);
+
+  const withoutHub = await runner.requestManualCompaction('dsh-1');
+  assert.equal(withoutHub.success, false);
+  assert.match(withoutHub.error, /Send a message first/);
+  assert.equal(runner.pendingManualCompactSessions.has('dsh-1'), false);
+
+  let compactCalls = 0;
+  runner.dshTurnHub = {
+    compact: async (sessionId) => {
+      compactCalls += 1;
+      assert.equal(sessionId, 'dsh-1');
+      return { ok: true, compacted: true, shadowedItemCount: 2, shadowedTokenCount: 40 };
+    },
+  };
+  const compacted = await runner.requestManualCompaction('dsh-1');
+  assert.equal(compacted.success, true);
+  assert.equal(compactCalls, 1);
+  assert.equal(runner.pendingManualCompactSessions.has('dsh-1'), false);
+  const last = store.getSession('dsh-1').messages.at(-1);
+  assert.equal(last.type, 'assistant');
+
+  runner.dshTurnHub = {
+    compact: async () => ({ ok: false, code: 'busy', message: 'agent is not idle' }),
+  };
+  const busy = await runner.requestManualCompaction('dsh-1');
+  assert.equal(busy.success, false);
+  assert.match(busy.error, /Wait for the current turn/);
 });
 
 test('requestManualCompaction rejects sessions without compressible history', async () => {

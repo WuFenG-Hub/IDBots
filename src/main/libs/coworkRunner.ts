@@ -16,7 +16,7 @@ import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
 import { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressure } from './dshUsageProjection';
 import type { DshUsageStatsRow } from './dshUsageProjection';
-import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
+import { dshSessionIdOf, isDshSessionHandle, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
 import {
   copyDshSkillSessionEnvFile,
   ensureDshSkillEnvChannel,
@@ -1261,9 +1261,9 @@ interface ActiveSession {
    */
   pendingCacheBreakReason?: string | null;
   /**
-   * Set by requestManualCompaction() while the session is idle. The next
-   * local-mode turn resets the SDK session and sends a synthetic compacted
-   * prompt instead of resuming (same path as automatic tier-2 compaction).
+   * Claude-kernel leftover: queued while idle so the next turn can reset the
+   * SDK session with a synthetic compacted prompt. DSH sessions compact
+   * immediately via native compactNow and do not set this flag.
    * In-memory only: if the app restarts before the next message, the user
    * simply clicks the button again.
    */
@@ -1675,15 +1675,8 @@ export class CoworkRunner extends EventEmitter {
    */
   private usageStatsBySessionId: Map<string, NonNullable<ActiveSession['usageStats']>> = new Map();
   /**
-   * User-initiated manual compaction requests queued while the session is
-   * IDLE (no activeSession in memory). Local-mode sessions remove their
-   * activeSession at the end of every turn, so the classic
-   * activeSession.pendingManualCompact flag could never be set between turns —
-   * the button always failed with "Session is not active". This queue bridges
-   * the idle gap: requestManualCompaction records the session here and the
-   * next local-mode turn consumes it (same compacted-prompt path). In-memory
-   * only; if the app restarts before the next message, the user just clicks
-   * the button again.
+   * Claude-kernel leftover queue for idle sessions (no activeSession). DSH
+   * sessions compact immediately and skip this set. In-memory only.
    */
   private pendingManualCompactSessions: Set<string> = new Set();
   /**
@@ -5535,25 +5528,29 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
-   * Queues a user-initiated manual compaction for the next local-mode turn.
+   * User-initiated compaction (header button).
    *
-   * The SDK session is reset and the next submitted message is sent with a
-   * synthetic compacted prompt (the same path the automatic tier-2 compaction
-   * uses), so the user keeps chatting seamlessly from a summarized history.
+   * DSH sessions (`dsh:` handle) call native compactNow immediately — in-place
+   * history replace on the live agent, same seam as the DSH web UI `/compact`.
+   * Auto compaction already runs inside the runtime at agent/pre-step; this
+   * method is the idle-session manual path. Events (compaction/summary) land
+   * as system messages via the mapper.
    *
-   * Guards: the session must be active, in local mode, idle (no turn running),
-   * with actual conversation history, and no compaction already queued.
+   * Claude-kernel leftovers still queue a host-side compact for the next turn.
+   *
+   * Guards: local mode, idle, compressible history. DSH compact is also busy
+   * when a turn is in flight (native ManualCompactionError `busy`).
    */
   async requestManualCompaction(sessionId: string): Promise<{ success: boolean; error?: string }> {
     const activeSession = this.activeSessions.get(sessionId);
     if (activeSession) {
-      if (activeSession.executionMode !== 'local') {
+      if (resolveCoworkExecutionMode(activeSession.executionMode) !== 'local') {
         return { success: false, error: 'Manual compaction is only available in local mode.' };
       }
       if (activeSession.localTurnState !== 'none') {
         return { success: false, error: 'Wait for the current turn to finish before compacting.' };
       }
-      if (activeSession.pendingManualCompact) {
+      if (activeSession.pendingManualCompact && !isDshSessionHandle(activeSession.claudeSessionId)) {
         return { success: false, error: 'Manual compaction is already queued for the next message.' };
       }
     } else {
@@ -5565,14 +5562,17 @@ export class CoworkRunner extends EventEmitter {
         return { success: false, error: 'Wait for the current turn to finish before compacting.' };
       }
       if (this.pendingManualCompactSessions.has(sessionId)) {
-        return { success: false, error: 'Manual compaction is already queued for the next message.' };
+        const persisted = this.store.getSession(sessionId);
+        if (!isDshSessionHandle(persisted?.claudeSessionId)) {
+          return { success: false, error: 'Manual compaction is already queued for the next message.' };
+        }
       }
     }
     const session = this.store.getSession(sessionId);
     if (!session) {
       return { success: false, error: 'Session is not active. Send a message first, then try again.' };
     }
-    const executionMode = session.executionMode || this.store.getConfig().executionMode || 'local';
+    const executionMode = resolveCoworkExecutionMode(session.executionMode || this.store.getConfig().executionMode);
     if (executionMode !== 'local') {
       return { success: false, error: 'Manual compaction is only available in local mode.' };
     }
@@ -5582,6 +5582,41 @@ export class CoworkRunner extends EventEmitter {
     );
     if (!hasCompressibleHistory) {
       return { success: false, error: 'No conversation history to compact yet.' };
+    }
+
+    const dshHandle = activeSession?.claudeSessionId ?? session.claudeSessionId;
+    if (isDshSessionHandle(dshHandle)) {
+      const hub = this.dshTurnHub;
+      if (!hub) {
+        return { success: false, error: 'Session is not active. Send a message first, then try again.' };
+      }
+      let compactResult: Awaited<ReturnType<DshTurnHub['compact']>>;
+      try {
+        compactResult = await hub.compact(sessionId);
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      if (!compactResult.ok) {
+        return {
+          success: false,
+          error: this.dshManualCompactErrorMessage(compactResult.code, compactResult.message ?? ''),
+        };
+      }
+      if (!compactResult.compacted) {
+        this.addSystemMessage(sessionId, tApp('还没有可压缩的历史。', 'No compactable history yet.'));
+      }
+      if (activeSession) activeSession.pendingManualCompact = false;
+      this.pendingManualCompactSessions.delete(sessionId);
+      coworkLog('INFO', 'requestManualCompaction', 'Native DSH compactNow finished', {
+        sessionId,
+        compacted: compactResult.compacted === true,
+        shadowedItemCount: compactResult.shadowedItemCount,
+        shadowedTokenCount: compactResult.shadowedTokenCount,
+      });
+      return { success: true };
     }
 
     if (activeSession) {
@@ -5599,6 +5634,30 @@ export class CoworkRunner extends EventEmitter {
       queuedWhileIdle: !activeSession,
     });
     return { success: true };
+  }
+
+  private dshManualCompactErrorMessage(code: string | undefined, fallback: string): string {
+    switch (code) {
+      case 'busy':
+        return 'Wait for the current turn to finish before compacting.';
+      case 'cancelled':
+        return 'Compaction cancelled.';
+      case 'changed':
+        return 'The history selected for compaction changed before it could be replaced. The conversation is unchanged.';
+      case 'summary':
+        return 'Compaction could not produce a useful summary. The conversation is unchanged.';
+      case 'commit':
+        return 'Compaction did not finish cleanly; some session history may have changed.';
+      case 'persistence':
+        return 'Compaction finished, but the session could not be saved.';
+      case 'no-runtime':
+      case 'no-agent':
+        return 'Session is not active. Send a message first, then try again.';
+      case 'unavailable':
+        return 'Native compaction is not available in this runtime.';
+      default:
+        return fallback.trim() || 'Compaction failed.';
+    }
   }
 
   /**
@@ -6146,6 +6205,11 @@ export class CoworkRunner extends EventEmitter {
         // ride every request). The runtime mounts each returned server as a
         // dsh-mcp-client entry exposing mcp__<name>__<tool> tools.
         mcpServersProvider: (coworkSessionId) => this.mcpServerProvider?.(coworkSessionId) ?? [],
+        onIdleSessionMessage: (coworkSessionId, message) => {
+          const stored = this.store.addMessage(coworkSessionId, message as Omit<CoworkMessage, 'id' | 'timestamp'>);
+          this.emit('message', coworkSessionId, stored);
+          return stored.id;
+        },
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
@@ -6248,40 +6312,33 @@ export class CoworkRunner extends EventEmitter {
     }
     const apiFormat = route.apiFormat === 'responses' ? 'responses' : 'openai';
     const modelLimits = resolveCurrentModelLimits(route.model);
-    let dshUserPrompt = prompt;
-    let dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
-    // Same consume path as runClaudeCodeLocal: the header button queues
-    // pendingManualCompact while idle; the next DSH turn starts a new DSH
-    // session id with a synthetic compacted prompt (the runtime persists
-    // history per session id, so reuse would ignore the compact).
-    const sessionSnapshotForBudget = this.store.getSession(sessionId);
+    const dshUserPrompt = prompt;
+    const dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
+    const hub = this.ensureDshTurnHub();
+    // Claude-path leftover queue: DSH sessions compact immediately from the
+    // header button. If a queue entry still exists (pre-handle first turn, or
+    // a session that just switched kernels), compact in place before prompt —
+    // never mint a new DSH session id.
     const manualCompactQueued = activeSession.pendingManualCompact || this.pendingManualCompactSessions.has(sessionId);
     if (manualCompactQueued) {
       activeSession.pendingManualCompact = false;
       this.pendingManualCompactSessions.delete(sessionId);
       resetCoworkSnipHeadTokens(sessionId);
-      const compacted = buildCoworkCompactedPrompt({
-        messages: sessionSnapshotForBudget?.messages ?? [],
-        currentPrompt: prompt,
-        modelLimits,
-      });
-      dshUserPrompt = compacted.prompt;
-      dshSessionId = `cw-${sessionId}-${Date.now()}`;
-      activeSession.claudeSessionId = makeDshSessionHandle(dshSessionId);
-      this.store.updateSession(sessionId, { claudeSessionId: activeSession.claudeSessionId });
-      coworkLog('INFO', 'runDshSessionLocal', 'Manual compaction requested; starting compacted DSH session', {
-        sessionId,
-        modelId: modelLimits.modelId,
-        compactedEstimatedTokens: compacted.estimatedTokens,
-        compactedRecentMessages: compacted.recentMessages,
-        compactedSummarizedMessages: compacted.summarizedMessages,
-      });
-      this.addSystemMessage(
-        sessionId,
-        '已手动压缩历史并重置底层模型会话，本次输入从压缩后的上下文继续。'
-      );
+      try {
+        const compactResult = await hub.compact(sessionId);
+        coworkLog('INFO', 'runDshSessionLocal', 'Consumed queued manual compact via native DSH compactNow', {
+          sessionId,
+          ok: compactResult.ok,
+          compacted: compactResult.compacted === true,
+          code: compactResult.code,
+        });
+      } catch (error) {
+        coworkLog('WARN', 'runDshSessionLocal', 'Queued native compact failed; continuing with original prompt', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
-    const hub = this.ensureDshTurnHub();
     // Same billing/upstream bookkeeping the Claude path records: the usage
     // chip's cost/balance rows key off billingSource, the upstream row off
     // these identity fields.

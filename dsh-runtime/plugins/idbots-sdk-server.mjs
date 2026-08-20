@@ -23,6 +23,8 @@
 //   idbots/ask/respond       { id, answers } → answer a pending user question
 //   idbots/usage             { sessionId } → token-meter session projections
 //                           (tokenUsage / contextPressure / contextBreakdown)
+//   idbots/compact           { sessionId } → idle-session native compactNow
+//                           (in-place history replace; no new session id)
 //   idbots/ping            → extension presence canary
 //
 // Notifications we emit (beyond the stock session.event / session.status /
@@ -148,6 +150,13 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       this.idbotsProjections = projectionCtx.sessionProjections
       return () => { this.idbotsProjections = null }
     })
+    // Compaction-basic is in the default composition; inject reactively so
+    // this plugin still mounts in test compositions that omit it.
+    this.idbotsCompaction = null
+    ctx.inject(['compaction'], (compactionCtx) => {
+      this.idbotsCompaction = compactionCtx.compaction
+      return () => { this.idbotsCompaction = null }
+    })
   }
 
   liveAgent(sessionId) {
@@ -171,10 +180,11 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'idbots/subagents/list': return this.idbotsSubagentsList(params)
       case 'idbots/subagents/messages': return this.idbotsSubagentsMessages(params)
       case 'idbots/usage': return this.idbotsUsage(params)
+      case 'idbots/compact': return this.idbotsCompact(params)
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/usage'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/usage', 'idbots/compact'],
         }
       }
       default: return super.handleRequest(method, params)
@@ -637,6 +647,46 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       tokenUsage: snapshot.values.tokenUsage ?? null,
       contextPressure: snapshot.values.contextPressure ?? null,
       contextBreakdown: snapshot.values.contextBreakdown ?? null,
+    }
+  }
+
+  /**
+   * Idle-session native compaction (same seam as DSH /compact). compactNow
+   * replaces a history span in place; expected failures return `{ ok: false,
+   * code }` so the host can surface busy/summary/commit without a JSON-RPC
+   * exception. Returns compacted:false when no useful range exists.
+   */
+  async idbotsCompact({ sessionId } = {}) {
+    const id = String(sessionId ?? '')
+    if (id.length === 0) {
+      return { ok: false, code: 'no-agent', message: 'idbots/compact requires sessionId' }
+    }
+    if (this.idbotsCompaction === null) {
+      return { ok: false, code: 'unavailable', message: 'compaction service is not mounted' }
+    }
+    let agent
+    try {
+      agent = this.liveAgent(id)
+    } catch (error) {
+      return { ok: false, code: 'no-agent', message: error instanceof Error ? error.message : String(error) }
+    }
+    const controller = new AbortController()
+    try {
+      const result = await this.idbotsCompaction.compactNow(agent, controller.signal)
+      if (result === null) {
+        return { ok: true, compacted: false }
+      }
+      return {
+        ok: true,
+        compacted: true,
+        shadowedItemCount: Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0,
+        shadowedTokenCount: result.shadowedTokenCount ?? 0,
+      }
+    } catch (error) {
+      const code = error?.name === 'ManualCompactionError' && typeof error.code === 'string'
+        ? error.code
+        : 'error'
+      return { ok: false, code, message: error instanceof Error ? error.message : String(error) }
     }
   }
 

@@ -229,6 +229,8 @@ export interface DshHubOptions {
    *  plugin directory feeds entries here, so an install/uninstall applies on
    *  the next turn — config-change restart waits for quiescence as usual. */
   extraEntriesProvider?: () => Array<Record<string, unknown>>
+  /** Idle-session events (native compact checkpoints) when no turn controller is live. */
+  onIdleSessionMessage?: (coworkSessionId: string, message: { type: string; content: string; metadata?: Record<string, unknown> }) => string
   /** Global skill-script host env (IDBOTS_API_BASE_URL, SKILLS_ROOT, BASH_ENV, …).
    *  Re-read every ensure. Per-session identity cannot live here (shared
    *  runtime); those values are written to a DSH_SESSION_ID-keyed env file
@@ -305,6 +307,44 @@ export class DshTurnHub {
       this.dshByCowork.delete(input.sessionId)
       this.coworkByDsh.delete(input.dshSessionId)
     }
+  }
+
+  private coworkOfDsh(dshSessionId: string): string | undefined {
+    const live = this.coworkByDsh.get(dshSessionId)
+    if (live) return live
+    for (const [coworkId, dshId] of this.pinnedDshIds) {
+      if (dshId === dshSessionId) return coworkId
+    }
+    return undefined
+  }
+
+  /**
+   * Idle-session native compact (DSH /compact). Requires a live runtime and a
+   * pinned DSH session from a previous turn. Busy when a turn is in flight.
+   */
+  async compact(coworkSessionId: string): Promise<{
+    ok: boolean
+    compacted?: boolean
+    code?: string
+    message?: string
+    shadowedItemCount?: number
+    shadowedTokenCount?: number
+  }> {
+    if (!this.kernel) {
+      return { ok: false, code: 'no-runtime', message: 'DSH runtime is not running' }
+    }
+    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
+    if (!dshId) {
+      return { ok: false, code: 'no-agent', message: 'no DSH session to compact' }
+    }
+    if (this.controllersByDsh.has(dshId)) {
+      return {
+        ok: false,
+        code: 'busy',
+        message: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
+      }
+    }
+    return this.kernel.compact(dshId)
   }
 
   private controllerOfCowork(sessionId: string): DshTurnController | undefined {
@@ -559,8 +599,12 @@ export class DshTurnHub {
     return {
       onMessage: (sessionId, message, slot) => {
         const controller = controllerOf(sessionId)
-        if (!controller) return `dsh-orphan-${sessionId}`
-        return controller.cb.onMessage(message, slot)
+        if (controller) return controller.cb.onMessage(message, slot)
+        const coworkId = this.coworkOfDsh(sessionId)
+        if (coworkId && this.opts.onIdleSessionMessage) {
+          return this.opts.onIdleSessionMessage(coworkId, message)
+        }
+        return `dsh-orphan-${sessionId}`
       },
       onMessageUpdate: (sessionId, messageId, content) => {
         controllerOf(sessionId)?.cb.onMessageUpdate(messageId, content)
