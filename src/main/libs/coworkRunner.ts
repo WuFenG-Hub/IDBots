@@ -16,6 +16,11 @@ import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/type
 import { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressure } from './dshUsageProjection';
 import type { DshUsageStatsRow } from './dshUsageProjection';
 import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
+import {
+  copyDshSkillSessionEnvFile,
+  ensureDshSkillEnvChannel,
+  writeDshSkillSessionEnvFile,
+} from './dshSkillSessionEnv';
 import { mapDshReasoningEffort } from './dshReasoningEffort';
 import { effortForClaudeSdk, toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
 import { loadClaudeSdk } from './claudeSdk';
@@ -26,7 +31,7 @@ import {
   buildCoworkSteerSdkMessage,
   buildCoworkSteerText,
 } from './coworkSteerChannel';
-import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillHostEnv, getSkillsRoot } from './coworkUtil';
+import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillHostEnv, getSkillsRoot, ensureCoworkTempDir } from './coworkUtil';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult } from './coworkAssistantReply';
@@ -6134,8 +6139,13 @@ export class CoworkRunner extends EventEmitter {
         extraEntriesProvider: this.dshExtraEntriesProvider,
         // Shared DSH runtime: bash skill scripts never see Claude's
         // per-session env. Inject the global host channels (proxy URL,
-        // SKILLS_ROOT, RPC authfile) so scheduled-task create-task.sh works.
-        skillHostEnvProvider: () => getSkillHostEnv(),
+        // SKILLS_ROOT, RPC authfile) plus the BASH_ENV loader so each turn's
+        // DSH_SESSION_ID-keyed env file (identity, image keys, TMPDIR) is
+        // sourced after the KEY/TOKEN scrub.
+        skillHostEnvProvider: () => ({
+          ...getSkillHostEnv(),
+          ...ensureDshSkillEnvChannel(app.getPath('userData')),
+        }),
         executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
         evaluatePolicy: (coworkSessionId, name, args) => this.evaluateDshToolPolicy(coworkSessionId, name, args),
         // Same user MCP store the Claude path mounts, gated per session by
@@ -6150,12 +6160,28 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
-   * One cowork turn on the DSH runtime: resolve the provider route from the
-   * current API config, run the turn through the shared hub, and land every
-   * event through the same store writes and runner events the Claude path
-   * emits. Approvals reuse the pendingPermissions machinery verbatim, so the
-   * renderer permission dialog works unchanged.
+   * Write the per-DSH-session env file that BASH_ENV sources inside skill
+   * bash. Must run before hub.runTurn so the file exists when the first
+   * bash tool starts. Keyed by DSH session id so concurrent cowork sessions
+   * never share identity.
    */
+  private async syncDshSkillSessionEnv(
+    dshSessionId: string,
+    coworkSessionId: string,
+    cwd: string
+  ): Promise<void> {
+    const userData = app.getPath('userData');
+    ensureDshSkillEnvChannel(userData);
+    const overrides = await this.getSkillSessionEnvOverrides?.(coworkSessionId) ?? {};
+    const tempDir = ensureCoworkTempDir(cwd);
+    writeDshSkillSessionEnvFile(userData, dshSessionId, {
+      ...overrides,
+      TMPDIR: tempDir,
+      TMP: tempDir,
+      TEMP: tempDir,
+    });
+  }
+
   /** Subagent panel: child agent ids of a DSH session (post-hoc safe). */
   dshListSubagents(sessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
     if (!this.dshTurnHub) return Promise.resolve([])
@@ -6167,6 +6193,13 @@ export class CoworkRunner extends EventEmitter {
     return this.dshTurnHub.getSubagentMessages(sessionId, agentId, limit)
   }
 
+  /**
+   * One cowork turn on the DSH runtime: resolve the provider route from the
+   * current API config, run the turn through the shared hub, and land every
+   * event through the same store writes and runner events the Claude path
+   * emits. Approvals reuse the pendingPermissions machinery verbatim, so the
+   * renderer permission dialog works unchanged.
+   */
   private async runDshSessionLocal(
     activeSession: ActiveSession,
     prompt: string,
@@ -6212,6 +6245,7 @@ export class CoworkRunner extends EventEmitter {
     };
 
     try {
+      await this.syncDshSkillSessionEnv(dshSessionId, sessionId, cwd);
       const hostTools = this.buildDshHostTools(sessionId, modelLimits?.supportsVision)
       // Per-session registry: a concurrent turn of ANOTHER session must not
       // clobber this session's tool set (Twin-only tools would intermittently
@@ -6538,6 +6572,9 @@ export class CoworkRunner extends EventEmitter {
           // Claude path emits — the panel's Redux consumes them unchanged.
           onSubagentEvent: (event) => {
             if (event.kind === 'started') {
+              if (event.sessionId && event.sessionId !== dshSessionId) {
+                copyDshSkillSessionEnvFile(app.getPath('userData'), dshSessionId, event.sessionId);
+              }
               this.emitSubagentEvent(sessionId, {
                 event: 'task_started',
                 taskId: event.agentId,

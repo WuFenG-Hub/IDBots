@@ -10,7 +10,7 @@ import { getInternalApiBaseURL } from './coworkOpenAICompatProxy';
 import { coworkLog } from './coworkLogger';
 import { resolveElectronExecutablePath } from './runtimePaths';
 import { resolveWritableSkillsRoot } from './skillRoots';
-import { getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
+import { getMetaidRpcBase, getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 
 function appendEnvPath(current: string | undefined, additions: string[]): string | undefined {
@@ -1033,8 +1033,10 @@ export function getSkillsRoot(): string {
  * Global (not per-session) host env that skill scripts need.
  *
  * Claude subprocesses get this via getEnhancedEnv(). The DSH kernel is a
- * shared runtime, so per-session env from getSkillSessionEnvOverrides never
- * reaches bash; this map is merged into the DSH child env instead.
+ * shared runtime, so this map is merged into the DSH child env. Per-session
+ * identity (metabot id, mnemonic, image KEY/TOKEN names) rides a separate
+ * BASH_ENV channel — see dshSkillSessionEnv.ts — because a shared env would
+ * cross-leak between concurrent sessions and DSH scrubs KEY/TOKEN names.
  * IDBOTS_API_BASE_URL is the local cowork proxy (scheduled-task create/list/…).
  */
 export function getSkillHostEnv(): Record<string, string> {
@@ -1045,6 +1047,10 @@ export function getSkillHostEnv(): Record<string, string> {
     IDBOTS_ELECTRON_PATH: resolveElectronExecutablePath(),
     IDBOTS_APP_DATA_PATH: app.getPath('appData'),
     IDBOTS_USER_DATA_PATH: app.getPath('userData'),
+    // Global RPC base (no token). Per-session IDBOTS_RPC_TOKEN still rides
+    // the BASH_ENV session file / AUTHFILE; scripts default to 127.0.0.1:31200
+    // when this is missing.
+    IDBOTS_RPC_URL: getMetaidRpcBase(),
     // Scrub-proof fallback channel for the local RPC bearer token: DSH bash
     // erases *TOKEN* env names, so SKILL scripts read the token from this
     // mirror file (written per launch by the MetaID RPC server) when the
