@@ -7,6 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - If you notice unfamiliar or unrelated file changes, continue working and stay focused on your own scoped edits unless the user asks you to inspect them.
 - All IDBots-related edits must stay within this IDBots project directory; modifying files outside the IDBots project is strictly forbidden.
 - Unless the user explicitly asks to work on `main`, make every change on a new branch paired with a same-named worktree (path and name following project convention — e.g. branch `fix/foo` or `feat/foo` uses worktree `.worktrees/foo`); you do not need to ask for confirmation before creating it. Edit directly on `main` only when the user explicitly says so.
+- If the task is a new change request or a new feature, and the current checkout is `main`, do not start editing in that working directory. Create a new branch named for the task together with a matching local worktree, then implement the work in that worktree. Skip this only when the user explicitly instructs you to make the change on `main`.
 - Every new branch must be created together with a dedicated local worktree; use one worktree working directory per branch, and do not create or switch branches in the main working directory.
 - All feature or temporary branches must branch directly from `main`; never create a new branch from another branch. Branch depth is capped at 1.
 - When the user says "commit", stage and commit only the files you changed and understand.
