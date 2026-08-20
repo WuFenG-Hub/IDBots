@@ -9,7 +9,7 @@ import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
 import FreeQuotaCard from './FreeQuotaCard';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, OpenCodeIcon } from './icons/providers';
 import { useDispatch, useSelector } from 'react-redux';
@@ -265,7 +265,10 @@ const normalizeApiFormat = (value: unknown): 'anthropic' | 'openai' | 'responses
   if (value === 'responses') {
     return 'responses';
   }
-  return value === 'openai' ? 'openai' : 'anthropic';
+  if (value === 'anthropic') {
+    return 'anthropic';
+  }
+  return 'openai';
 };
 const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' | null => {
   if (provider === 'openai' || provider === 'gemini') {
@@ -280,9 +283,21 @@ const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' 
   }
   return null;
 };
-const getEffectiveApiFormat = (provider: string, value: unknown): 'anthropic' | 'openai' | 'responses' => (
-  getFixedApiFormatForProvider(provider) ?? normalizeApiFormat(value)
-);
+const getEffectiveApiFormat = (provider: string, value: unknown): 'anthropic' | 'openai' | 'responses' => {
+  const fixed = getFixedApiFormatForProvider(provider);
+  if (fixed) {
+    return fixed;
+  }
+  const normalized = normalizeApiFormat(value);
+  // Managed providers hide the format selector and pin chat-completions.
+  // Coerce leftover Anthropic Messages so they are not stuck unavailable.
+  if (normalized === 'anthropic' && isManagedProvider(provider)) {
+    return 'openai';
+  }
+  return normalized;
+};
+
+const isAnthropicDirectProvider = (provider: string): boolean => provider === 'anthropic';
 // DeepSeek hides the selector (official harness pins the key-only chat-completions
 // setup); the stored format still drives requests so legacy endpoints keep working.
 const shouldShowApiFormatSelector = (provider: string): boolean => (
@@ -436,8 +451,9 @@ const generateCustomProviderKey = (name: string, existingKeys: string[]): string
 
 const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const dispatch = useDispatch();
-  // 状态
-  const [activeTab, setActiveTab] = useState<TabType>(initialTab ?? 'general');
+  // Sandbox settings are temporarily hidden; fall back to general.
+  const resolvedInitialTab: TabType = initialTab === 'coworkSandbox' ? 'general' : (initialTab ?? 'general');
+  const [activeTab, setActiveTab] = useState<TabType>(resolvedInitialTab);
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
   const [language, setLanguage] = useState<LanguageType>(i18nService.getLanguage());
   const [autoLaunch, setAutoLaunchState] = useState(false);
@@ -520,7 +536,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [customProviderName, setCustomProviderName] = useState('');
   const [customProviderBaseUrl, setCustomProviderBaseUrl] = useState('');
   const [customProviderApiKey, setCustomProviderApiKey] = useState('');
-  const [customProviderApiFormat, setCustomProviderApiFormat] = useState<'anthropic' | 'openai' | 'responses'>('anthropic');
+  const [customProviderApiFormat, setCustomProviderApiFormat] = useState<'anthropic' | 'openai' | 'responses'>('openai');
   const [customProviderModels, setCustomProviderModels] = useState<Model[]>([]);
   const [customModelName, setCustomModelName] = useState('');
   const [customModelId, setCustomModelId] = useState('');
@@ -529,7 +545,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const coworkConfig = useSelector((state: RootState) => state.cowork.config);
   const imConfig = useSelector((state: RootState) => state.im.config);
 
-  const [coworkExecutionMode, setCoworkExecutionMode] = useState<CoworkExecutionMode>(coworkConfig.executionMode || 'local');
+  const [coworkExecutionMode, setCoworkExecutionMode] = useState<CoworkExecutionMode>('local');
   // Shared MetaBot list — also used by the Archived Chats tab.
   const [coworkMemoryMetabots, setCoworkMemoryMetabots] = useState<MemoryMetabotOption[]>([]);
   const [coworkSandboxStatus, setCoworkSandboxStatus] = useState<CoworkSandboxStatus | null>(null);
@@ -569,7 +585,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   }, []);
 
   useEffect(() => {
-    setCoworkExecutionMode(coworkConfig.executionMode || 'local');
+    setCoworkExecutionMode('local');
   }, [coworkConfig.executionMode]);
 
   const loadCoworkSandboxStatus = useCallback(async () => {
@@ -779,9 +795,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   }, [notice]);
 
   useEffect(() => {
-    if (initialTab) {
-      setActiveTab(initialTab);
+    if (!initialTab || initialTab === 'coworkSandbox') {
+      if (initialTab === 'coworkSandbox') {
+        setActiveTab('general');
+      }
+      return;
     }
+    setActiveTab(initialTab);
   }, [initialTab]);
 
   // Subscribe to language changes
@@ -1388,7 +1408,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     setCustomProviderName('');
     setCustomProviderBaseUrl('');
     setCustomProviderApiKey('');
-    setCustomProviderApiFormat('anthropic');
+    setCustomProviderApiFormat('openai');
     setCustomProviderModels([]);
     setCustomModelName('');
     setCustomModelId('');
@@ -1884,7 +1904,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     { key: 'im',             label: i18nService.t('imBot'),          icon: <ChatBubbleLeftIcon className="h-5 w-5" /> },
     { key: 'coworkMemory',   label: i18nService.t('coworkMemoryTitle'), icon: <BrainIcon className="h-5 w-5" /> },
     { key: 'archivedChats',  label: i18nService.t('archivedChatsTab'),  icon: <ArchiveBoxIcon className="h-5 w-5" /> },
-    { key: 'coworkSandbox',  label: i18nService.t('coworkSandbox'),  icon: <ShieldCheckIcon className="h-5 w-5" /> },
     { key: 'paramsConfig',    label: i18nService.t('paramsAndConfig'), icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" /></svg> },
     { key: 'traffic',         label: i18nService.t('trafficTab'),     icon: <BoltIcon className="h-5 w-5" /> },
     { key: 'p2p',             label: 'P2P',                           icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" /></svg> },
@@ -2114,25 +2133,18 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
               <label className="block text-sm font-medium dark:text-claude-darkText text-claude-text">
                 {i18nService.t('coworkExecutionMode')}
               </label>
+              <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('coworkSandboxTemporarilyUnavailable')}
+              </div>
               <div className="space-y-2">
                 {([
-                  {
-                    value: 'auto',
-                    label: i18nService.t('coworkExecutionModeAuto'),
-                    hint: i18nService.t('coworkExecutionModeAutoHint'),
-                  },
                   {
                     value: 'local',
                     label: i18nService.t('coworkExecutionModeLocal'),
                     hint: i18nService.t('coworkExecutionModeLocalHint'),
                   },
-                  {
-                    value: 'sandbox',
-                    label: i18nService.t('coworkExecutionModeSandbox'),
-                    hint: i18nService.t('coworkExecutionModeSandboxHint'),
-                  },
                 ] as Array<{ value: CoworkExecutionMode; label: string; hint: string }>).map((option) => {
-                  const isDisabled = option.value === 'sandbox' && coworkSandboxDisabled;
+                  const isDisabled = false;
                   return (
                     <label
                       key={option.value}
@@ -2589,7 +2601,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
               {Object.entries(visibleProviders).map(([provider, config]) => {
                 const providerKey = provider as ProviderType;
                 const missingApiKey = providerRequiresApiKey(providerKey) && !config.apiKey.trim();
-                const canToggleProvider = config.enabled || !missingApiKey;
+                const canToggleProvider = !isAnthropicDirectProvider(providerKey)
+                  && (config.enabled || !missingApiKey);
                 return (
                   <div
                     key={provider}
@@ -2598,7 +2611,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                       activeProvider === provider
                         ? 'bg-claude-accent/10 dark:bg-claude-accent/20 border border-claude-accent/30 shadow-subtle'
                         : 'dark:bg-claude-darkSurface/50 bg-claude-surface hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover border border-transparent'
-                    }`}
+                    } ${isAnthropicDirectProvider(providerKey) ? 'opacity-70' : ''}`}
                   >
                     <div className="flex flex-1 items-center">
                       <div className="mr-2 flex h-7 w-7 items-center justify-center">
@@ -2618,6 +2631,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                           {i18nService.t('providerRecommendedBadge')}
                         </span>
                       )}
+                      {isAnthropicDirectProvider(providerKey) && (
+                        <span className="ml-1.5 shrink-0 text-[10px] px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400 font-medium">
+                          {i18nService.t('apiFormatTemporarilyUnavailable')}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center ml-2">
                       {isCustomProviderKey(providerKey) && (
@@ -2634,7 +2652,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                         </button>
                       )}
                       <div
-                        title={!canToggleProvider ? i18nService.t('configureApiKey') : undefined}
+                        title={
+                          isAnthropicDirectProvider(providerKey)
+                            ? i18nService.t('apiFormatAnthropicUnavailableHint')
+                            : (!canToggleProvider ? i18nService.t('configureApiKey') : undefined)
+                        }
                         className={`w-7 h-4 rounded-full flex items-center transition-colors ${
                           config.enabled ? 'bg-claude-accent' : 'dark:bg-claude-darkBorder bg-claude-border'
                         } ${
@@ -2642,7 +2664,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                         }`}
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (!canToggleProvider) {
+                          if (!canToggleProvider || isAnthropicDirectProvider(providerKey)) {
                             return;
                           }
                           toggleProviderEnabled(providerKey);
@@ -2662,6 +2684,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
 
             {/* Provider Settings - Right Side */}
             <div className="w-3/5 pl-4 space-y-4 overflow-y-auto">
+              {isAnthropicDirectProvider(activeProvider) && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                  {i18nService.t('apiFormatAnthropicUnavailableHint')}
+                </div>
+              )}
               <div className="flex items-center justify-between pb-2 border-b dark:border-claude-darkBorder border-claude-border">
                 <h3 className="text-base font-medium dark:text-claude-darkText text-claude-text">
                   {getProviderDisplayLabel(activeProvider, providers[activeProvider])} {i18nService.t('providerSettings')}
@@ -2744,17 +2771,20 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     {i18nService.t('apiFormat')}
                   </label>
                   <div className="flex items-center space-x-4 flex-wrap gap-y-1.5">
-                    <label className="flex items-center">
+                    <label className="flex items-center opacity-60 cursor-not-allowed">
                       <input
                         type="radio"
                         name={`${activeProvider}-apiFormat`}
                         value="anthropic"
                         checked={getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) === 'anthropic'}
-                        onChange={() => handleProviderConfigChange(activeProvider, 'apiFormat', 'anthropic')}
+                        disabled
                         className="h-3.5 w-3.5 text-claude-accent focus:ring-claude-accent dark:bg-claude-darkSurface bg-claude-surface"
                       />
                       <span className="ml-2 text-xs dark:text-claude-darkText text-claude-text">
                         {i18nService.t('apiFormatNative')}
+                        <span className="ml-1.5 text-[10px] text-amber-600 dark:text-amber-400">
+                          {i18nService.t('apiFormatTemporarilyUnavailable')}
+                        </span>
                       </span>
                     </label>
                     <label className="flex items-center">
@@ -2785,7 +2815,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     </label>
                   </div>
                   <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('apiFormatHint')}
+                    {getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) === 'anthropic'
+                      ? i18nService.t('apiFormatAnthropicUnavailableHint')
+                      : i18nService.t('apiFormatHint')}
                   </p>
                 </div>
               )}
@@ -3348,7 +3380,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                       }}
                       className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
                     >
-                      <option value="anthropic">{i18nService.t('apiFormatNative')}</option>
                       <option value="openai">{i18nService.t('apiFormatOpenAI')}</option>
                       <option value="responses">{i18nService.t('apiFormatResponses')}</option>
                     </select>

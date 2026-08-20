@@ -222,6 +222,22 @@ export class DshKernel {
     return this.client.request('idbots/usage', { sessionId: dshSessionId })
   }
 
+  /**
+   * Idle-session native compaction (DSH /compact). Replaces a history span
+   * in place on the live agent; does not mint a new session id.
+   */
+  async compact(dshSessionId: string): Promise<{
+    ok: boolean
+    compacted?: boolean
+    code?: string
+    message?: string
+    shadowedItemCount?: number
+    shadowedTokenCount?: number
+  }> {
+    this.requireClient()
+    return this.client.request('idbots/compact', { sessionId: dshSessionId })
+  }
+
   /** Answer a pending ask_user_question bridged from the runtime. */
   async respondAsk(
     id: string,

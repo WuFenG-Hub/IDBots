@@ -145,7 +145,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
         prompt: prompt.trim(),
         workingDirectory: workingDirectory.trim() || defaultWorkingDirectory,
         systemPrompt: '',
-        executionMode: task?.executionMode ?? 'auto',
+        executionMode: 'local',
         metabotId: selectedMetabotId,
         expiresAt: expiresAt || null,
         notifyPlatforms,

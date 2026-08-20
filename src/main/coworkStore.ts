@@ -38,6 +38,7 @@ import {
 import { resolveMemoryScopes, type ResolveMemoryScopesInput } from './memory/memoryScopeResolver';
 import { clampMemoryPromptMaxChars } from './memory/memoryPromptBlocks';
 import { BOT_WORKSPACE_DIR_NAME } from './libs/botWorkspace';
+import { resolveCoworkExecutionMode } from './libs/coworkExecutionMode';
 import {
   buildA2AChainMetadata,
   extractTxidFromA2AChainPinId,
@@ -2823,7 +2824,7 @@ export class CoworkStore implements MemoryBackend {
     this.db.run(`
       INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, model, effort, model_provider, created_at, updated_at)
       VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [id, title, cwd, systemPrompt, executionMode, JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, model, effort, modelProvider, now, now]);
+    `, [id, title, cwd, systemPrompt, resolveCoworkExecutionMode(executionMode), JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, model, effort, modelProvider, now, now]);
 
     this.upsertConversationMapping({
       channel: 'cowork_ui',
@@ -2843,7 +2844,7 @@ export class CoworkStore implements MemoryBackend {
       pinned: false,
       cwd,
       systemPrompt,
-      executionMode,
+      executionMode: resolveCoworkExecutionMode(executionMode),
       activeSkillIds,
       messages: [],
       createdAt: now,
@@ -2957,7 +2958,7 @@ export class CoworkStore implements MemoryBackend {
       pinned: Boolean(row.pinned),
       cwd: row.cwd,
       systemPrompt: row.system_prompt,
-      executionMode: (row.execution_mode as CoworkExecutionMode) || 'local',
+      executionMode: resolveCoworkExecutionMode(row.execution_mode),
       activeSkillIds,
       messages: [],
       createdAt: row.created_at,
@@ -3050,7 +3051,7 @@ export class CoworkStore implements MemoryBackend {
     }
     if (updates.executionMode !== undefined) {
       setClauses.push('execution_mode = ?');
-      values.push(updates.executionMode);
+      values.push(resolveCoworkExecutionMode(updates.executionMode));
     }
     if (updates.browserUri !== undefined) {
       setClauses.push('browser_uri = ?');
@@ -5513,13 +5514,10 @@ export class CoworkStore implements MemoryBackend {
     const memoryUserMemoriesMaxItemsRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryUserMemoriesMaxItems']);
     const memoryPromptMaxCharsRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryPromptMaxChars']);
 
-    const normalizedExecutionMode =
-      executionModeRow?.value === 'container' ? 'sandbox' : (executionModeRow?.value as CoworkExecutionMode);
-
     return {
       workingDirectory: workingDirRow?.value || getDefaultWorkingDirectory(),
       systemPrompt: getDefaultSystemPrompt(),
-      executionMode: normalizedExecutionMode || 'local',
+      executionMode: resolveCoworkExecutionMode(executionModeRow?.value),
       memoryEnabled: parseBooleanConfig(memoryEnabledRow?.value, DEFAULT_MEMORY_ENABLED),
       memoryImplicitUpdateEnabled: parseBooleanConfig(
         memoryImplicitUpdateEnabledRow?.value,
@@ -5555,7 +5553,7 @@ export class CoworkStore implements MemoryBackend {
         ON CONFLICT(key) DO UPDATE SET
           value = excluded.value,
           updated_at = excluded.updated_at
-      `, [config.executionMode, now]);
+      `, [resolveCoworkExecutionMode(config.executionMode), now]);
     }
 
     if (config.memoryEnabled !== undefined) {

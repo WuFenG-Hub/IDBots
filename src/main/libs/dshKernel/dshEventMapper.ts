@@ -245,6 +245,38 @@ export class DshEventMapper {
         break
       }
 
+      case 'compaction/summary': {
+        const summaryBlocks = Array.isArray(data.summary) ? data.summary : []
+        const summaryText = textOf(summaryBlocks).trim()
+        const items = Array.isArray(data.shadowedSeqs) ? data.shadowedSeqs.length : 0
+        const tokens = typeof data.shadowedTokenCount === 'number' ? data.shadowedTokenCount : 0
+        const header = `Compacted ${items} history items (~${tokens} tokens).`
+        actions.push({
+          kind: 'message',
+          message: {
+            type: 'system',
+            content: summaryText.length > 0 ? `${header}\n\n${summaryText}` : header,
+            metadata: { compaction: true },
+          },
+        })
+        break
+      }
+
+      case 'compaction/end': {
+        if (data.error) {
+          const detail = typeof data.error === 'string' ? data.error : JSON.stringify(data.error)
+          actions.push({
+            kind: 'message',
+            message: {
+              type: 'system',
+              content: `Compaction failed: ${detail}`,
+              metadata: { compaction: true, isError: true },
+            },
+          })
+        }
+        break
+      }
+
       default:
         break
     }

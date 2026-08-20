@@ -506,6 +506,37 @@ test('native DeepSeek keeps one thinking slot across tool rounds and only finali
   assert.equal(textDone.metadata, undefined)
 })
 
+test('compaction/summary maps to a system checkpoint with counts and summary text', () => {
+  const mapper = new DshEventMapper()
+  const actions = mapper.consume({
+    type: 'compaction/summary',
+    data: {
+      summary: [{ type: 'text', text: 'Earlier turns discussed the install path.' }],
+      shadowedSeqs: [1, 2, 3],
+      shadowedTokenCount: 420,
+    },
+  })
+  assert.equal(actions.length, 1)
+  assert.equal(actions[0].kind, 'message')
+  assert.equal(actions[0].message.type, 'system')
+  assert.equal(actions[0].message.metadata.compaction, true)
+  assert.match(actions[0].message.content, /Compacted 3 history items \(~420 tokens\)/)
+  assert.match(actions[0].message.content, /Earlier turns discussed the install path/)
+})
+
+test('compaction/start is silent; compaction/end only reports failures', () => {
+  const mapper = new DshEventMapper()
+  assert.deepEqual(mapper.consume({ type: 'compaction/start', data: { turn: null } }), [])
+  assert.deepEqual(mapper.consume({ type: 'compaction/end', data: { turn: null } }), [])
+  const failed = mapper.consume({
+    type: 'compaction/end',
+    data: { turn: null, error: 'summary unavailable' },
+  })
+  assert.equal(failed[0].message.type, 'system')
+  assert.equal(failed[0].message.metadata.isError, true)
+  assert.match(failed[0].message.content, /Compaction failed: summary unavailable/)
+})
+
 test('splitThinkTaggedContent extracts think and thinking tags', () => {
   assert.deepEqual(splitThinkTaggedContent('plain reply'), { thinking: '', text: 'plain reply' })
   assert.deepEqual(

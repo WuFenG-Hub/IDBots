@@ -35,10 +35,11 @@ test('apiType eligibility: openai-compatible routes only', () => {
 test('flag gates new sessions; handle pins existing ones', () => {
   assert.equal(resolveKernelChoice({ enabled: false, apiType: 'openai' }), 'claude')
   assert.equal(resolveKernelChoice({ enabled: true, apiType: 'openai' }), 'dsh')
-  assert.equal(resolveKernelChoice({ enabled: true, apiType: 'anthropic' }), 'claude')
+  assert.equal(resolveKernelChoice({ enabled: true, apiType: 'anthropic' }), 'unavailable')
+  assert.equal(resolveKernelChoice({ enabled: false, apiType: 'anthropic' }), 'unavailable')
   // Stickiness wins over the flag: a DSH session keeps its kernel even when
   // the flag is later switched off (its handle only exists in the DSH runtime).
   assert.equal(resolveKernelChoice({ enabled: false, apiType: 'openai', sessionHandle: 'dsh:cw-1' }), 'dsh')
-  // …and a claude session is never hijacked by the flag alone.
-  assert.equal(resolveKernelChoice({ enabled: true, apiType: 'anthropic', sessionHandle: 'sdk-123' }), 'claude')
+  // Anthropic-direct is not routed back to Claude.
+  assert.equal(resolveKernelChoice({ enabled: true, apiType: 'anthropic', sessionHandle: 'sdk-123' }), 'unavailable')
 })
