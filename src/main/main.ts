@@ -32,7 +32,7 @@ import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
 import { getOsLocale, getPersistedAppLanguage, setAppLanguageStoreGetter, tApp } from './libs/appLanguage';
 import { setGroupTaskCopyLanguageGetter } from './libs/groupTaskCopy';
-import { loadClaudeSdk, prewarmClaudeSdk } from './libs/claudeSdk';
+import { loadClaudeSdk } from './libs/claudeSdk';
 import { flattenSubagentTranscriptMessages, mapDshSubagentList, mapDshSubagentMessages, sessionUsesDshSubagents } from './libs/coworkSubagentTranscript';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
@@ -13252,10 +13252,6 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     // Sweep stale app-update download artifacts from previous sessions
     // (best effort; partial files younger than the TTL are kept for resume).
     void cleanupStaleDownloads().catch(() => {});
-
-    // Pre-warm the Claude Agent SDK (module import + binary path resolution)
-    // so the first cowork session doesn't pay the cold-import cost.
-    prewarmClaudeSdk();
 
     // Note: Calendar permission is checked on-demand when calendar operations are requested
     // We don't trigger permission dialogs at startup to avoid annoying users
