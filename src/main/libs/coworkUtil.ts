@@ -1030,6 +1030,35 @@ export function getSkillsRoot(): string {
 }
 
 /**
+ * Global (not per-session) host env that skill scripts need.
+ *
+ * Claude subprocesses get this via getEnhancedEnv(). The DSH kernel is a
+ * shared runtime, so per-session env from getSkillSessionEnvOverrides never
+ * reaches bash; this map is merged into the DSH child env instead.
+ * IDBOTS_API_BASE_URL is the local cowork proxy (scheduled-task create/list/…).
+ */
+export function getSkillHostEnv(): Record<string, string> {
+  const skillsRoot = getSkillsRoot();
+  const env: Record<string, string> = {
+    SKILLS_ROOT: skillsRoot,
+    IDBOTS_SKILLS_ROOT: skillsRoot,
+    IDBOTS_ELECTRON_PATH: resolveElectronExecutablePath(),
+    IDBOTS_APP_DATA_PATH: app.getPath('appData'),
+    IDBOTS_USER_DATA_PATH: app.getPath('userData'),
+    // Scrub-proof fallback channel for the local RPC bearer token: DSH bash
+    // erases *TOKEN* env names, so SKILL scripts read the token from this
+    // mirror file (written per launch by the MetaID RPC server) when the
+    // env-borne IDBOTS_RPC_TOKEN is missing.
+    [METAID_RPC_AUTHFILE_ENV]: getMetaidRpcTokenFilePath(app.getPath('userData')),
+  };
+  const internalApiBaseURL = getInternalApiBaseURL();
+  if (internalApiBaseURL) {
+    env.IDBOTS_API_BASE_URL = internalApiBaseURL;
+  }
+  return env;
+}
+
+/**
  * Get enhanced environment variables (including proxy configuration)
  * Async function to fetch system proxy and inject into environment variables
  */
@@ -1053,24 +1082,7 @@ export async function getEnhancedEnv(
   env.DISABLE_AUTOUPDATER = '1';
   env.DISABLE_BUG_COMMAND = '1';
 
-  // Inject SKILLs directory path for skill scripts
-  const skillsRoot = getSkillsRoot();
-  env.SKILLS_ROOT = skillsRoot;
-  env.IDBOTS_SKILLS_ROOT = skillsRoot; // Alternative name for clarity
-  env.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
-  env.IDBOTS_APP_DATA_PATH = app.getPath('appData');
-  env.IDBOTS_USER_DATA_PATH = app.getPath('userData');
-  // Scrub-proof fallback channel for the local RPC bearer token: DSH bash
-  // erases *TOKEN* env names, so SKILL scripts read the token from this
-  // mirror file (written per launch by the MetaID RPC server) when the
-  // env-borne IDBOTS_RPC_TOKEN is missing.
-  env[METAID_RPC_AUTHFILE_ENV] = getMetaidRpcTokenFilePath(app.getPath('userData'));
-
-  // Inject internal API base URL for skill scripts (e.g. scheduled-task creation)
-  const internalApiBaseURL = getInternalApiBaseURL();
-  if (internalApiBaseURL) {
-    env.IDBOTS_API_BASE_URL = internalApiBaseURL;
-  }
+  Object.assign(env, getSkillHostEnv());
 
   const mergedNoProxy = mergeNoProxyList(
     env.NO_PROXY || env.no_proxy,

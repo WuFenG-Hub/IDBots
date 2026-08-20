@@ -26,7 +26,7 @@ import {
   buildCoworkSteerSdkMessage,
   buildCoworkSteerText,
 } from './coworkSteerChannel';
-import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
+import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillHostEnv, getSkillsRoot } from './coworkUtil';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult } from './coworkAssistantReply';
@@ -6132,6 +6132,10 @@ export class CoworkRunner extends EventEmitter {
         sessionRoot: dshSessionRootFor(app.getPath('userData')),
         extraEntries: this.dshRuntimeExtraEntries,
         extraEntriesProvider: this.dshExtraEntriesProvider,
+        // Shared DSH runtime: bash skill scripts never see Claude's
+        // per-session env. Inject the global host channels (proxy URL,
+        // SKILLS_ROOT, RPC authfile) so scheduled-task create-task.sh works.
+        skillHostEnvProvider: () => getSkillHostEnv(),
         executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
         evaluatePolicy: (coworkSessionId, name, args) => this.evaluateDshToolPolicy(coworkSessionId, name, args),
         // Same user MCP store the Claude path mounts, gated per session by

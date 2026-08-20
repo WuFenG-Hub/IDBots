@@ -206,6 +206,44 @@ test('CoworkRunner uses MetaBot DeepSeek automation model for local service exec
     'CoworkRunner should pass the resolved API config into the child process environment',
   );
 });
+
+test('DSH shared runtime injects skill host env including IDBOTS_API_BASE_URL', () => {
+  const coworkDshTurnSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkDshTurn.ts'),
+    'utf8',
+  );
+  const coworkUtilSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkUtil.ts'),
+    'utf8',
+  );
+  const coworkRunnerSource = fs.readFileSync(coworkRunnerPath, 'utf8');
+
+  assert.match(
+    coworkUtilSource,
+    /export function getSkillHostEnv/,
+    'Skill host env must be a shared helper so Claude and DSH inject the same channels',
+  );
+  assert.match(
+    coworkUtilSource,
+    /env\.IDBOTS_API_BASE_URL = internalApiBaseURL/,
+    'getSkillHostEnv must set IDBOTS_API_BASE_URL from the local cowork proxy',
+  );
+  assert.match(
+    coworkDshTurnSource,
+    /skillHostEnvProvider/,
+    'DshTurnHub must accept a skill-host env provider for the shared child env',
+  );
+  assert.match(
+    coworkDshTurnSource,
+    /export function buildDshChildEnv/,
+    'DSH child env merge must stay a testable helper',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /skillHostEnvProvider:\s*\(\)\s*=>\s*getSkillHostEnv\(\)/,
+    'CoworkRunner must wire getSkillHostEnv into the shared DSH runtime',
+  );
+});
 test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.js patching', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
 
