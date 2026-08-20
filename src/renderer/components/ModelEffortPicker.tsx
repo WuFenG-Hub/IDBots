@@ -14,9 +14,10 @@ import {
  *
  * A three-pane popover: the root pane holds a Model row and an Effort row;
  * each drills into its own list. The model list groups every usable provider
- * from app_config — built-in AND custom-* providers — but the user only ever
- * picks a model; the provider rides along implicitly. The effort ladder is
- * the app-wide off/low/high/max vocabulary (null = model default).
+ * from app_config — built-in AND custom-* providers. The selected provider is
+ * shown as a quiet subtitle under the model name on the root pane so colliding
+ * model ids (same name, different vendors) stay distinguishable. The effort
+ * ladder is the app-wide off/low/high/max vocabulary (null = model default).
  */
 
 export interface ModelEffortValue {
@@ -101,14 +102,17 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
   const currentModelName = resolved
     ? resolved.model.name
     : value.modelId ?? placeholder ?? i18nService.t('modelPickerChooseModel');
+  const currentProviderName = resolved
+    ? groups.find((group) => group.id === resolved.providerKey)?.name ?? null
+    : null;
   const collidingModel = Boolean(
     resolved
     && groups.filter((group) => group.models.some((model) => model.id === resolved.model.id)).length > 1,
   );
-  const currentProviderName = collidingModel
-    ? groups.find((group) => group.id === resolved?.providerKey)?.name
-    : null;
-  const currentModelLabel = currentProviderName
+  // Compact trigger still needs an inline suffix when the same model id is
+  // offered by more than one provider; the popover root pane shows the
+  // vendor as its own muted line instead.
+  const currentModelLabel = collidingModel && currentProviderName
     ? `${currentModelName} · ${currentProviderName}`
     : currentModelName;
   const currentEffort = value.effort ?? null;
@@ -255,11 +259,16 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
                 <div className="flex flex-col min-w-0">
                   <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('modelPickerModelLabel')}</span>
                   <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
-                    {currentModelLabel}
+                    {currentModelName}
                     {!resolved && value.modelId && (
                       <span className="ml-1 text-xs dark:text-red-400 text-red-500">{i18nService.t('modelPickerUnavailable')}</span>
                     )}
                   </span>
+                  {currentProviderName ? (
+                    <span className="text-[11px] leading-tight dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
+                      {currentProviderName}
+                    </span>
+                  ) : null}
                 </div>
                 <ChevronRightIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
               </button>
