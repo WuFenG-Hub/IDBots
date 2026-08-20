@@ -6182,6 +6182,25 @@ export class CoworkRunner extends EventEmitter {
     });
   }
 
+  /**
+   * Local kernel dispatch: DSH is the default for openai/responses; Claude
+   * remains only for anthropic-direct (and sessions already pinned to it).
+   * Sandbox-unavailable / outside-cwd fallbacks must use this — never
+   * hard-wire runClaudeCodeLocal, which would skip DSH.
+   */
+  private async runLocalKernel(
+    activeSession: ActiveSession,
+    prompt: string,
+    cwd: string,
+    systemPrompt: string
+  ): Promise<void> {
+    if (this.shouldRunDshKernel(activeSession)) {
+      await this.runDshSessionLocal(activeSession, prompt, cwd, systemPrompt);
+      return;
+    }
+    await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt);
+  }
+
   /** Subagent panel: child agent ids of a DSH session (post-hoc safe). */
   dshListSubagents(sessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
     if (!this.dshTurnHub) return Promise.resolve([])
@@ -8823,7 +8842,7 @@ export class CoworkRunner extends EventEmitter {
       );
       activeSession.executionMode = 'local';
       this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runClaudeCodeLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
       return;
     }
 
@@ -8841,17 +8860,10 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
 
-    if (executionMode === 'local' && this.shouldRunDshKernel(activeSession)) {
-      activeSession.executionMode = 'local';
-      this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runDshSessionLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
-      return;
-    }
-
     if (executionMode === 'local') {
       activeSession.executionMode = 'local';
       this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runClaudeCodeLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
       return;
     }
 
@@ -8876,7 +8888,7 @@ export class CoworkRunner extends EventEmitter {
       }
       activeSession.executionMode = 'local';
       this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runClaudeCodeLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
       return;
     }
 
@@ -8914,7 +8926,7 @@ export class CoworkRunner extends EventEmitter {
       activeSession.executionMode = 'local';
       this.store.updateSession(sessionId, { executionMode: 'local' });
       this.activeSessions.set(sessionId, activeSession);
-      await this.runClaudeCodeLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
     }
   }
 

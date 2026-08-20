@@ -286,6 +286,11 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
     /copyDshSkillSessionEnvFile/,
     'Subagent DSH sessions must inherit the parent skill env file',
   );
+  assert.match(
+    coworkRunnerSource,
+    /private async runLocalKernel/,
+    'Local sandbox fallbacks must dispatch through runLocalKernel so DSH stays the default',
+  );
 });
 test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.js patching', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
