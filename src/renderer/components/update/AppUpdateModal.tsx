@@ -1,13 +1,14 @@
 import React from 'react';
 import { i18nService } from '../../services/i18n';
 import type { AppUpdateInfo, AppUpdateDownloadProgress } from '../../services/appUpdate';
+import { isDownloadComplete } from '../../services/appUpdateUi';
 import { formatBytes, formatSpeed } from './format';
 
 export type UpdateModalState = 'info' | 'downloading' | 'installing' | 'error' | 'restart';
 
 interface AppUpdateModalProps {
   updateInfo: AppUpdateInfo;
-  /** true 表示更新包已静默下载到本地，点击确认后直接本地安装 */
+  /** true when the package is already on disk; Confirm installs locally */
   readyToInstall?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -16,6 +17,8 @@ interface AppUpdateModalProps {
   errorMessage: string | null;
   onCancelDownload: () => void;
   onRetry: () => void;
+  /** Override the installing-state hint (silent apply does not auto-relaunch). */
+  installingHint?: string;
 }
 
 const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
@@ -28,11 +31,13 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
   errorMessage,
   onCancelDownload,
   onRetry,
+  installingHint,
 }) => {
   const { latestVersion, date, changeLog } = updateInfo;
   const lang = i18nService.getLanguage();
   const currentLog = changeLog?.[lang] ?? { title: '', content: [] };
   const isDismissible = modalState === 'info' || modalState === 'error' || modalState === 'restart';
+  const downloadComplete = isDownloadComplete(downloadProgress);
 
   const handleBackdropClick = () => {
     if (isDismissible) {
@@ -135,7 +140,7 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
         {modalState === 'downloading' && (
           <div className="px-5 py-5">
             <h3 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
-              {i18nService.t('updateDownloading')}
+              {downloadComplete ? i18nService.t('updateDownloadedTitle') : i18nService.t('updateDownloading')}
             </h3>
             <p className="mt-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
               v{latestVersion}
@@ -175,13 +180,23 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
             </div>
 
             <div className="mt-4 flex items-center justify-end">
-              <button
-                type="button"
-                onClick={onCancelDownload}
-                className="px-3 py-1.5 text-sm rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
-              >
-                {i18nService.t('updateDownloadCancel')}
-              </button>
+              {downloadComplete ? (
+                <button
+                  type="button"
+                  onClick={onConfirm}
+                  className="btn-idchat-primary-filled px-3 py-1.5 text-sm"
+                >
+                  {i18nService.t('updateInstallNow')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onCancelDownload}
+                  className="px-3 py-1.5 text-sm rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+                >
+                  {i18nService.t('updateDownloadCancel')}
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -203,7 +218,7 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
                 {i18nService.t('updateInstalling')}
               </h3>
               <p className="mt-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary text-center">
-                {i18nService.t('updateInstallingHint')}
+                {installingHint ?? i18nService.t('updateInstallingHint')}
               </p>
             </div>
           </div>

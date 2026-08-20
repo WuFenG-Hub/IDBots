@@ -260,6 +260,7 @@ man_base_data_pebble/
 !tests/archivedSessionList.test.mjs
 !tests/appUpdateSilentFlowStatic.test.mjs
 !tests/appUpdateResumableDownload.test.mjs
+!tests/appUpdateUi.test.mjs
 !tests/deepseekResponses.test.mjs
 !tests/deepseekReasoningRoundtrip.test.mjs
 !tests/llmEffort.test.mjs
