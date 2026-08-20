@@ -240,18 +240,75 @@ function invalidateCredentials(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Image loading (downscale via Electron nativeImage by default)
+// Image loading: Electron nativeImage fast path, bundled-ffmpeg fallback
 // ---------------------------------------------------------------------------
 
+/**
+ * Build the ffmpeg argument list that re-encodes one image to a ≤1280px JPEG.
+ * Pure; exported for tests. Mirrors the nativeImage pipeline's output shape.
+ */
+export function buildImageEncodeArgs(input: { inputPath: string; outputPath: string }): string[] {
+  return [
+    '-y',
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-i', input.inputPath,
+    '-frames:v', '1',
+    '-vf', "scale='min(1280,iw)':-2",
+    '-q:v', '5',
+    input.outputPath,
+  ];
+}
+
+const VISION_IMAGE_ENCODE_TIMEOUT_MS = 60_000;
+
+/**
+ * Re-encode one image via the bundled ffmpeg (temp file beside the temp dir).
+ * Covers formats/profiles nativeImage mis-encodes — notably macOS screenshots:
+ * RGB PNGs with an alpha channel decode to a correct size but re-encode to a
+ * ZERO-byte JPEG, which used to surface as a confusing backend rejection.
+ */
+async function encodeImageViaFfmpeg(imagePath: string): Promise<{ base64: string; bytes: number } | null> {
+  const fsMod = await import('fs');
+  const osMod = await import('os');
+  const tempDir = fsMod.mkdtempSync(path.join(osMod.tmpdir(), 'idbots-vision-img-'));
+  const outputPath = path.join(tempDir, 'image.jpg');
+  try {
+    const run = await runFfmpegProcess(buildImageEncodeArgs({ inputPath: imagePath, outputPath }), VISION_IMAGE_ENCODE_TIMEOUT_MS);
+    if (run.code !== 0) return null;
+    const buffer = await fsMod.promises.readFile(outputPath);
+    if (buffer.length === 0) return null;
+    return { base64: buffer.toString('base64'), bytes: buffer.length };
+  } catch {
+    return null;
+  } finally {
+    try {
+      fsMod.promises.rm(tempDir, { recursive: true, force: true });
+    } catch {
+      // best-effort temp cleanup
+    }
+  }
+}
+
 async function defaultLoadImageBase64(imagePath: string): Promise<{ base64: string; bytes: number } | null> {
-  const { nativeImage } = await import('electron');
-  const image = nativeImage.createFromPath(imagePath);
-  if (image.isEmpty()) return null;
-  const size = image.getSize();
-  const longest = Math.max(size.width, size.height);
-  const resized = longest > 1280 ? image.resize({ width: size.width >= size.height ? 1280 : 0, height: size.height > size.width ? 1280 : 0 }) : image;
-  const buffer = resized.toJPEG(80);
-  return { base64: buffer.toString('base64'), bytes: buffer.length };
+  try {
+    const { nativeImage } = await import('electron');
+    const image = nativeImage.createFromPath(imagePath);
+    if (!image.isEmpty()) {
+      const size = image.getSize();
+      const longest = Math.max(size.width, size.height);
+      const resized = longest > 1280 ? image.resize({ width: size.width >= size.height ? 1280 : 0, height: size.height > size.width ? 1280 : 0 }) : image;
+      const buffer = resized.toJPEG(80);
+      if (buffer.length > 0) {
+        return { base64: buffer.toString('base64'), bytes: buffer.length };
+      }
+      // nativeImage produced nothing (alpha-channel screenshots do this);
+      // fall through to the ffmpeg encoder.
+    }
+  } catch {
+    // electron/nativeImage unavailable or threw — fall through to ffmpeg.
+  }
+  return encodeImageViaFfmpeg(imagePath);
 }
 
 async function loadImageBase64(imagePath: string): Promise<{ base64: string; bytes: number } | null> {
