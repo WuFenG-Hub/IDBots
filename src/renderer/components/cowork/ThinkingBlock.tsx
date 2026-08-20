@@ -1,12 +1,7 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
 import { ChevronRightIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { CoworkMessage } from '../../types/cowork';
-
-const pinScrollToBottom = (element: HTMLElement | null): void => {
-  if (!element) return;
-  element.scrollTop = element.scrollHeight;
-};
 
 const OPEN_RE = /<think(?:ing)?>/i;
 const CLOSE_RE = /<\/think(?:ing)?>/i;
@@ -17,8 +12,23 @@ export type SplitThinkTaggedContent = {
 };
 
 /**
+ * Collapsed Think-row summary, matching DSH web `ReasoningRow`:
+ * streaming → latest non-blank line; settled → first line.
+ */
+export function thinkingSummaryLine(text: string, running: boolean): string {
+  const visible = (text || '').trimEnd();
+  if (!visible) return '';
+  if (running) {
+    const newline = visible.lastIndexOf('\n');
+    return newline === -1 ? visible : visible.slice(newline + 1);
+  }
+  const newline = visible.indexOf('\n');
+  return newline === -1 ? visible : visible.slice(0, newline);
+}
+
+/**
  * Split assistant text that embeds chain-of-thought in <think>/<thinking>
- * tags so the visible reply can reuse Claude's ThinkingBlock chrome.
+ * tags so the visible reply can reuse the Think row chrome.
  */
 export function splitThinkTaggedContent(input: string): SplitThinkTaggedContent {
   if (!input) return { thinking: '', text: '' };
@@ -59,27 +69,28 @@ export function splitThinkTaggedContent(input: string): SplitThinkTaggedContent 
   return { thinking, text };
 }
 
+/**
+ * DSH-kernel Think row (parity with deepseek-harness ReasoningRow).
+ * Stays collapsed unless the user opens it — never auto-expands the full
+ * chain of thought as body copy, never auto-collapses after a dump.
+ * While streaming, the collapsed summary follows the latest line.
+ */
 export const ThinkingBlock: React.FC<{
   message: CoworkMessage;
   mapDisplayText?: (value: string) => string;
 }> = ({ message, mapDisplayText }) => {
   const isCurrentlyStreaming = Boolean(message.metadata?.isStreaming);
-  const [isExpanded, setIsExpanded] = useState(isCurrentlyStreaming);
-  const bodyRef = useRef<HTMLDivElement>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const summaryRef = useRef<HTMLSpanElement>(null);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
-
-  useEffect(() => {
-    if (isCurrentlyStreaming) {
-      setIsExpanded(true);
-    } else {
-      setIsExpanded(false);
-    }
-  }, [isCurrentlyStreaming]);
+  const summary = thinkingSummaryLine(displayContent, isCurrentlyStreaming);
 
   useLayoutEffect(() => {
-    if (!isCurrentlyStreaming) return;
-    pinScrollToBottom(bodyRef.current);
-  }, [isCurrentlyStreaming, displayContent]);
+    if (!isCurrentlyStreaming || isExpanded) return;
+    const element = summaryRef.current;
+    if (!element) return;
+    element.scrollLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+  }, [isCurrentlyStreaming, isExpanded, summary]);
 
   return (
     <div className="rounded-lg border dark:border-claude-darkBorder/50 border-claude-border/50 overflow-hidden">
@@ -93,15 +104,30 @@ export const ThinkingBlock: React.FC<{
             isExpanded ? 'rotate-90' : ''
           }`}
         />
-        <span className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+        <span className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary flex-shrink-0">
           {i18nService.t('reasoning')}
         </span>
         {isCurrentlyStreaming && (
-          <span className="w-1.5 h-1.5 rounded-full bg-claude-accent animate-pulse" />
+          <span className="w-1.5 h-1.5 rounded-full bg-claude-accent animate-pulse flex-shrink-0" />
         )}
+        {!isExpanded && summary ? (
+          <>
+            <span
+              className="w-0.5 h-0.5 rounded-full flex-shrink-0 dark:bg-claude-darkTextSecondary/50 bg-claude-textSecondary/50"
+              aria-hidden
+            />
+            <span
+              ref={summaryRef}
+              className="min-w-0 flex-1 text-xs dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 whitespace-nowrap"
+              style={{ overflow: 'hidden', textOverflow: isCurrentlyStreaming ? 'clip' : 'ellipsis' }}
+            >
+              {summary}
+            </span>
+          </>
+        ) : null}
       </button>
       {isExpanded && (
-        <div ref={bodyRef} className="px-3 pb-3 max-h-64 overflow-y-auto overflow-anchor-none">
+        <div className="px-3 pb-3 max-h-64 overflow-y-auto overflow-anchor-none">
           <div className="text-xs leading-relaxed dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 whitespace-pre-wrap">
             {displayContent}
           </div>

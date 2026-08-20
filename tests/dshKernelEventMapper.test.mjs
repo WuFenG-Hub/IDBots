@@ -506,6 +506,47 @@ test('native DeepSeek keeps one thinking slot across tool rounds and only finali
   assert.equal(textDone.metadata, undefined)
 })
 
+test('reasoning-chunks stream into the thinking slot like the DSH web UI', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+  })
+  const first = mapper.consume({
+    type: 'reasoning-chunks',
+    data: { turn: 1, step: 1, index: 0, texts: ['The', ' user', ' wants'] },
+  })
+  assert.equal(first.some((a) => a.kind === 'message' && a.slot === 'thinking'), false, 'block-start already opened the slot')
+  assert.equal(first[0].kind, 'messageUpdate')
+  assert.equal(first[0].slot, 'thinking')
+  assert.equal(first[0].content, 'The user wants')
+
+  const more = mapper.consume({
+    type: 'reasoning-chunks',
+    data: { turn: 1, step: 1, index: 0, texts: [' a', ' tool'] },
+  })
+  assert.equal(more[0].content, 'The user wants a tool')
+
+  const echoed = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'reasoning-delta', index: 0, text: ' a' } },
+  })
+  assert.deepEqual(echoed, [], 'sparse reasoning-delta must not double-count after chunks')
+})
+
+test('text-delta after a native reasoning block does not open a body bubble', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+  })
+  const leaked = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 1, text: '本地没装 tsx，用 npx 临时拉一个跑：' } },
+  })
+  assert.equal(leaked.some((a) => a.slot === 'text'), false)
+})
+
 test('compaction/summary maps to a system checkpoint with counts and summary text', () => {
   const mapper = new DshEventMapper()
   const actions = mapper.consume({
