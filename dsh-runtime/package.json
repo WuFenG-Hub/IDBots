@@ -8,7 +8,7 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "test": "node test/wire-extension.test.mjs && node test/attachment-store.test.mjs && node test/approval-channel.test.mjs && node test/m3-config.test.mjs && node test/host-tool-bridge.test.mjs && node test/mcp-bridge.test.mjs && node test/ask-bridge.test.mjs && node test/plugin-mount.test.mjs && node test/llm-retry.test.mjs && node test/policy-bridge.test.mjs && node test/compaction.test.mjs && node test/subagent.test.mjs && node test/usage-projection.test.mjs"
+    "test": "node test/wire-extension.test.mjs && node test/attachment-store.test.mjs && node test/approval-channel.test.mjs && node test/m3-config.test.mjs && node test/host-tool-bridge.test.mjs && node test/mcp-bridge.test.mjs && node test/ask-bridge.test.mjs && node test/plugin-mount.test.mjs && node test/llm-retry.test.mjs && node test/policy-bridge.test.mjs && node test/compaction.test.mjs && node test/subagent.test.mjs && node test/usage-projection.test.mjs && node test/session-model-switch.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-agent": "0.1.0-rc.7",

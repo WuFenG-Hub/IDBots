@@ -401,7 +401,8 @@ export class DshTurnHub {
   private workspaceSeen: DshRuntimeConfigInput['workspace']
   private lastConfigJson: string | undefined
   /** Provider routes accumulated across sessions — the runtime serves a UNION
-   * so a new provider never rewrites (and restarts over) an existing one. */
+   *  of providers AND of models on each provider so a mid-conversation model
+   *  switch never rewrites (and restarts over) an already-served route. */
   private providersSeen = new Map<string, DshProviderRoute>()
   /** Credential for every seen provider route, keyed by route key: the child
    * env must carry EACH route's key under its own env name, not just the
@@ -420,7 +421,10 @@ export class DshTurnHub {
   private webSearchSeen: { apiKey: string; baseURL: string } | null = null
 
   private async ensureKernel(input: DshTurnInput): Promise<DshKernel> {
-    this.providersSeen.set(input.provider.key, providerRouteOf(input.provider))
+    this.providersSeen.set(
+      input.provider.key,
+      mergeProviderRoute(this.providersSeen.get(input.provider.key), providerRouteOf(input.provider)),
+    )
     this.routeApiKeys.set(input.provider.key, {
       envName: dshProviderApiKeyEnv(input.provider.key),
       apiKey: input.provider.apiKey,
@@ -612,6 +616,26 @@ function providerRouteOf(provider: DshTurnProviderRoute): DshProviderRoute {
         : {}),
     }],
   }
+}
+
+/**
+ * Union models onto an already-seen provider route instead of replacing it.
+ * Replacing dropped the original model and forced a runtime restart on every
+ * same-provider switch; the live agent then ignored the new ensure() route
+ * (effort-only bind) so only the cowork's first model kept working.
+ */
+export function mergeProviderRoute(
+  existing: DshProviderRoute | undefined,
+  next: DshProviderRoute,
+): DshProviderRoute {
+  if (!existing) return next
+  const models = [...existing.models]
+  for (const model of next.models) {
+    const index = models.findIndex((candidate) => candidate.id === model.id)
+    if (index >= 0) models[index] = model
+    else models.push(model)
+  }
+  return { ...next, models }
 }
 
 /** Top-level config keys whose serialized value differs between two configs
