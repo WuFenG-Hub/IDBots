@@ -7028,7 +7028,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'local_worker_delegate',
-          'Delegate ONE concrete, acceptance-tested step to a persistent local Worker Bot. The host creates durable task/step/attempt records and returns only after the Worker handoff is collected. Twin Bot only. Use when a step is well-defined enough to hand off (clear objective + acceptance criteria); call local_workers_list first to choose by capability evidence. When NOT to use: do not delegate vague or multi-step blobs (break them down first), and do not delegate trivial steps you can do faster yourself — delegation has overhead. Provide workerMetabotId + objective at minimum; acceptanceCriteria/context/permissionScope make the handoff verifiable. Returns the attempt/handoff result; verify the Worker actual output via twin_task_status before reporting done.',
+          'Delegate ONE concrete, acceptance-tested step to a persistent local Worker Bot; returns after the Worker handoff is collected. Twin Bot only. Call local_workers_list first to choose by capability evidence. Do not delegate vague/multi-step blobs (break them down first) or trivial steps you can do faster yourself. workerMetabotId + objective required; acceptanceCriteria/context/permissionScope make the handoff verifiable. Verify the Worker actual output via twin_task_status before reporting done.',
           {
             workerMetabotId: z.number().int().positive(),
             objective: z.string().min(1),
@@ -7093,7 +7093,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'worker_session_stop',
-          'Stop ONE running local Worker Bot session by session id — aborts its in-flight turn and any pending tool confirmation, then settles the session to a terminal stopped state. Twin Bot only. Use to unwind a Worker session that is stuck (wedged tool call, hanging confirmation) after checking twin_task_status, so the Worker is freed and the step can be reassigned. When NOT to use: do not stop sessions merely because work is slow (check twin_task_status first); do not use it to cancel a task record (use twin_task_cancel — it stops the sessions AND settles the task); and never stop a session twice. Requires sessionId; returns { ok, sessionId, status }. Errors: SESSION_NOT_FOUND / NOT_A_WORKER_SESSION.',
+          'Stop ONE running local Worker Bot session by sessionId: aborts its in-flight turn and pending tool confirmation, settling it to a terminal stopped state. Twin Bot only. Use to unwind a stuck Worker session (wedged tool call, hanging confirmation) after checking twin_task_status, so the step can be reassigned. Not for slow work (check twin_task_status first); not for cancelling the task record (use twin_task_cancel); never stop the same session twice. Returns { ok, sessionId, status }; errors SESSION_NOT_FOUND / NOT_A_WORKER_SESSION.',
           { sessionId: z.string().min(1) },
           async (args) => {
             const result = await this.handleHostToolExecution({ toolName: 'worker_session_stop', toolInput: args }, sessionId);
@@ -7112,7 +7112,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'memory_user_edits',
-          `Manage the current user's long-term memories — durable facts about them (role, preferences, ongoing projects) that persist across sessions. Writes are high-signal: record only non-obvious, durable facts, never ephemeral chat state. action=list (optionally filter by query/status/limit) returns stored memories; action=add stores a new memory (requires text); action=update changes an existing memory by id (requires text); action=delete removes a memory by id. ${memoryWritesInvitation} When NOT to use: do not record ephemeral/task state ("the user just asked about Z"); list first to avoid duplicates; do not write every turn — memories must outlive this conversation. When unsure whether a fact is durable, ASK rather than guess. Returns the affected memory object(s) or a confirmation; writes are persistent state.`,
+          `Manage the current user's long-term memories — durable facts about them (role, preferences, ongoing projects) persisting across sessions. Record only non-obvious, durable facts, never ephemeral chat/task state. action=list (filter by query/status/limit); add (requires text); update by id (requires text); delete by id. ${memoryWritesInvitation} List first to avoid duplicates; do not write every turn; when unsure whether a fact is durable, ASK rather than guess. Writes are persistent state.`,
           {
             action: z.enum(['list', 'add', 'update', 'delete']),
             id: z.string().optional(),
@@ -7165,7 +7165,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'experience_recall',
-          'Recall YOUR OWN past experiences as daily summaries — what you learned and did on past days. A bare call returns the last 30 days; a query does a full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; granularity groups results by day (default), week, or month to compress a long range ("what happened last month"); limit caps the count (1-30). Use when reflecting on past work to inform the current task ("have I dealt with this before?", "what did I learn last week", "what did I do last month"). When NOT to use: this is your OWN experience log, not user memories (use memory_user_edits for facts about the user) and not chat history (use conversation_search). Returns daily summary blocks (grouped when granularity is set); for a pinned range with no summary yet it falls back to the raw activity timeline; an empty result means nothing was recorded for the range/query.',
+          'Recall YOUR OWN past experiences as daily summaries — what you did and learned on past days. Bare call: last 30 days; query: full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; granularity day (default) / week / month compresses a long range; limit caps the count (1-30). Use to let past work inform the current task. Not facts about the user (memory_user_edits), not chat history (conversation_search). A pinned range with no summary yet falls back to the raw activity timeline; an empty result means nothing was recorded for the range/query.',
           {
             query: z.string().optional(),
             date_from: z.string().optional(),
@@ -7187,7 +7187,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'knowledge_recall',
-          'Recall YOUR OWN reusable knowledge points (经验/知识点) — distilled know-how, pitfalls (坑) and principles from your past work that will help the current task. A query does a keyword search over topic+summary; kind filters to know_how/pitfall/principle; category filters a grouping; limit caps the count (1-50). Use before starting a task that resembles something you have done before, to reuse what worked and avoid traps you already hit. When NOT to use: this is your reusable TASK know-how, not facts about the user (use memory_user_edits) and not a log of past days (use experience_recall). Returns labeled knowledge entries; an empty result means you have not distilled a point about this yet.',
+          'Recall YOUR OWN reusable knowledge points (经验/知识点) — distilled know-how, pitfalls (坑) and principles from your past work. query keyword-searches topic+summary; kind filters know_how/pitfall/principle; category filters a grouping; limit caps the count (1-50). Use before starting a task that resembles past work, to reuse what worked and avoid traps you already hit. Not facts about the user (memory_user_edits), not a log of past days (experience_recall). An empty result means you have not distilled a point about this yet.',
           {
             query: z.string().optional(),
             kind: z.enum(['know_how', 'pitfall', 'principle']).optional(),
@@ -7206,7 +7206,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'knowledge_upsert',
-          'Save or update ONE reusable knowledge point (经验/知识点) you want to apply to future tasks. topic is a reusable theme written so it can be found again (e.g. "fastest path to a high-quality web 3D game", "design style this user likes", "SSR build crashes on window access"); summary is the actionable conclusion; kind is know_how (do this) / pitfall (坑, do NOT do this) / principle; category and tags are optional grouping. Reusing an existing topic REWRITES it (version bump, prior text archived) — so update a point when you learn something better, do not create near-duplicates. Use when the human asks you to remember something reusable, or you distill a generalizable lesson from an article/task. When NOT to use: do not save one-off ephemeral facts, user-profile facts (use memory_user_edits), or conduct rules. Returns the saved topic with its new version.',
+          'Save or update ONE reusable knowledge point (经验/知识点) for future tasks. topic is a reusable theme written so it can be found again; summary is the actionable conclusion; kind is know_how (do this) / pitfall (坑, do NOT do this) / principle; category and tags are optional grouping. Reusing an existing topic REWRITES it (version bump, prior text archived) — update a point when you learn something better, do not create near-duplicates. Use when the human asks you to remember something reusable, or you distill a generalizable lesson from an article/task. Not for one-off ephemeral facts, user-profile facts (memory_user_edits), or conduct rules. Returns the saved topic with its new version.',
           {
             topic: z.string().min(1),
             summary: z.string().min(1),

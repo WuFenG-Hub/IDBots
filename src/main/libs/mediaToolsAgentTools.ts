@@ -111,11 +111,9 @@ export function buildMediaToolsAgentTools(deps: {
   const mediaInfo = tool(
     'media_info',
     [
-      'Inspect ONE local media file (audio/video/image) and return its metadata: container format, duration, video codec/resolution/fps, audio codec/sample rate/channels, bitrate, and file size. Fully local — instant, free, uses no image-reading quota.',
-      'Use when the user asks basic questions about a media file ("how long is this video?", "what resolution?", "does it have sound?", "what format is this?"), or before spending describe_image/describe_video quota — probe first when only metadata is needed.',
-      'When NOT to use: when the user asks what a file SHOWS or SAYS, use describe_image / describe_video instead; do not use it for plain text/code files (use your file tools).',
-      'Rules: pass the absolute local path only (copy it from the attachment info); no file contents.',
-      'Returns a metadata sheet as plain text.',
+      'Inspect ONE local media file (audio/video/image); returns metadata as plain text: container, duration, video codec/resolution/fps, audio codec/rate/channels, bitrate, size. Local and free — no image-reading quota.',
+      'Use for metadata questions, or probe before spending describe_image/describe_video quota.',
+      'Not for what a file SHOWS or SAYS (use describe_image/describe_video); not for text/code files. Pass the absolute local path only.',
     ].join(' '),
     {
       file_path: z.string().min(1).describe('Absolute local path to the media file.'),
@@ -137,11 +135,9 @@ export function buildMediaToolsAgentTools(deps: {
   const convertMedia = tool(
     'convert_media',
     [
-      'Convert ONE local media file with the bundled ffmpeg and return the absolute path of the new file (written beside the input, never overwriting it). Targets: mp4 (any video, H.264, audio kept), mp3 (audio track extracted/encoded), jpg (first video frame or a re-encoded image). Quality presets: high / balanced (default) / small.',
-      'Use when the user asks to convert or compress a file ("转成 mp4", "compress this video", "make it smaller", "extract the audio as mp3"), or before uploading a file that needs a more portable/smaller format (chain with upload_file).',
-      'When NOT to use: do not convert files the user did not ask to change; do not use it to READ content (describe_image/describe_video); one conversion per call — no batch processing.',
-      `Rules: absolute input path only; output lands in the same directory as <name>.converted.<ext>; videos longer than 10 minutes are cut at 10 minutes; oversized conversions time out.`,
-      'Returns the output absolute path plus size and duration, or a clear error.',
+      'Convert ONE local media file with ffmpeg: mp4 (H.264, audio kept), mp3 (audio track), jpg (first frame or re-encoded image). Output <name>.converted.<ext> beside input, never overwriting.',
+      'Use for convert/compress asks or to shrink before upload_file; do not convert unrequested files; not for reading content (describe_image/describe_video); one conversion per call, no batch.',
+      'Absolute input path only. Videos >10 min are cut at 10 min; oversized jobs time out. Returns output path, size, duration.',
     ].join(' '),
     {
       file_path: z.string().min(1).describe('Absolute local path to the source media file.'),
@@ -174,11 +170,9 @@ export function buildMediaToolsAgentTools(deps: {
   const grabVideoFrame = tool(
     'grab_video_frame',
     [
-      'Extract ONE frame from a local video as an image file (jpg by default, png optional) and return its absolute path. Fully local and free — it does not use the image-reading quota.',
-      'Use when the user wants a specific moment as a still ("截图第30秒", "grab the frame at 0:45"), or to capture a frame cheaply before deciding whether to spend describe_image quota on it (describe the extracted frame with describe_image afterwards).',
-      'When NOT to use: when the user asks what the WHOLE video shows, use describe_video instead; do not grab many frames one by one when a summary suffices.',
-      'Rules: absolute video path only; time must be within the video duration; output lands beside the input as <name>@<t>s.jpg and never overwrites.',
-      'Returns the output absolute path and size.',
+      'Extract ONE frame from a local video as an image. Local, free — no image-reading quota.',
+      'Use for a specific moment as a still, or to grab one cheaply before spending describe_image quota. Not for what the WHOLE video shows (use describe_video); do not grab many frames when a summary suffices.',
+      'Absolute video path only; time_seconds must be within video duration. Output: <name>@<t>s.jpg beside input, never overwrites. Returns output path and size.',
     ].join(' '),
     {
       video_path: z.string().min(1).describe('Absolute local path to the video file.'),

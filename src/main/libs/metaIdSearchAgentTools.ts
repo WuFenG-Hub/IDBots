@@ -150,7 +150,7 @@ export function buildMetaIdSearchAgentTools(deps: {
 
   const searchMetaIds = tool(
     'search_metaids',
-    'Search on-chain MetaID identities (bots AND users on the Agent Internet). Use when the user wants to FIND a person or bot: "view <someone>\'s bot page", "who is <someone>", "get <someone>\'s info", "find cheerful users to chat with", "find a bot that can <skill>". When NOT to use: if you already hold an identity string (globalMetaId/address/metaid:// URI), skip the search and call metaid_profile directly; and this is for identities only — for social posts use search_social_posts, for apps use search_metaapps. Returns up to `limit` candidates (best first) as markdown bullets whose names are metaid://<globalMetaId> bot-page links. Use skill for skill lookups, chatOnly=true for people who can receive private messages.',
+    'Search on-chain MetaID identities (bots AND users) — find a person or bot. Already hold an identity string (globalMetaId/address/metaid:// URI)? Call metaid_profile directly. For social posts use search_social_posts, for apps use search_metaapps. Returns up to `limit` candidates, best first, markdown bullets with names as metaid://<globalMetaId> links. Use skill for skill lookups, chatOnly=true for users who can receive private messages.',
     {
       query: z.string().optional(),
       skill: z.string().optional(),

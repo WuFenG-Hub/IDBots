@@ -67,13 +67,12 @@ export function buildSkillAgentTools(deps: {
     tool(
       'skill_tool',
       [
-        'Install, inspect, and list on-device skills (and extract a MetaApp package to read its APP.md).',
-        'Use action "extract_metaapp" with pinId (or metaapp://<pinId>) after search_metaapps: downloads the app zip, unpacks it into the workspace temp dir, and returns the file list plus APP.md (install instructions live there).',
-        'Use action "install_skill" to install a skill into the user-data SKILLs directory (the same folder the packaged app uses; never the source tree). Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). The package must contain SKILL.md; it is installed as SKILLs/<name from SKILL.md>/. Size limit 4MB.',
+        'Install, read, and list on-device skills; also extract a MetaApp package to read its APP.md.',
+        'Use action "extract_metaapp" with pinId (or metaapp://<pinId>) after search_metaapps: unpacks the app zip into the workspace temp dir, returns the file list plus APP.md (install instructions live there). Not for just opening an app in the Bot Browser.',
+        'Use action "install_skill" to install one skill into the user-data SKILLs directory (never the source tree). Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). Package must contain SKILL.md; installed as SKILLs/<name from SKILL.md>/; 4MB limit.',
         'Use action "list_installed_skills" to verify a skill is on disk (name + version) after install.',
         'Use action "read_skill" with name (id or name from the <available_skills> catalog) to load a skill\'s full SKILL.md plus its on-disk directory; resolve the SKILL.md\'s relative paths against that directory.',
-        'When NOT to use: do not call extract_metaapp just to open an app in the Bot Browser; this is for reading APP.md / installing the skill it describes. Chat-skill whitelist changes belong on metabot_update (chat_skill_op), not here.',
-        'Returns JSON. extract_metaapp returns {ok, files, appMd, extractedDir} or {ok:false, reason:"not-a-zip"} when the pin is not a zip. install_skill returns {ok, name, version, dest} or {ok:false, error}.',
+        'Chat-skill whitelist changes belong on metabot_update (chat_skill_op), not here. Returns JSON per action.',
       ].join(' '),
       {
         action: z.enum(['extract_metaapp', 'install_skill', 'list_installed_skills', 'read_skill']),

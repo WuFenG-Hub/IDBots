@@ -109,12 +109,9 @@ export function buildVisionRelayAgentTools(deps: {
   const describeImage = tool(
     'describe_image',
     [
-      'Read ONE local image file and return what it shows: a detailed description plus every piece of text visible in the image (OCR), as plain text. The runtime sends the file to the IDBots vision relay — never pass image contents, only the absolute local path.',
-      'Use when the user shares an image (chat attachments arrive as "[附件信息] 路径: <path>" lines) and asks what is in it, what text it contains, or anything requiring the image content. Works even when your own model cannot see images.',
-      'When NOT to use: do not use it for image files the user only asked to upload or move (use the file tools); do not call it twice on the same unchanged path in one turn; and never pass file contents into the tool — only the absolute local path.',
-      'Pass `question` only when the user asks something specific about the image; omit it to get the default full description + OCR.',
-      'Limits: one image per call; jpeg/png/webp/gif; oversized files are rejected. Daily quota per user applies — reading the same path repeatedly wastes it.',
-      'Returns the image description/answer text, the remaining reads today, and token usage metadata.',
+      'Read ONE local image via the IDBots vision relay: returns a description plus OCR of all visible text. Pass only the absolute local path, never file contents; works for non-vision models.',
+      'Use when the user shares an image (attachment line "[附件信息] 路径: <path>") and asks about it. Not for upload/move-only tasks (use file tools); never twice on the same unchanged path per turn.',
+      'Omit `question` for the default full description + OCR. jpeg/png/webp/gif; oversized rejected; daily quota applies. Result includes remaining reads today.',
     ].join(' '),
     {
       image_path: z
@@ -163,12 +160,9 @@ export function buildVisionRelayAgentTools(deps: {
   const describeVideo = tool(
     'describe_video',
     [
-      'Watch ONE local video file and return what happens in it as plain text: content summary, timeline of notable moments, and any text visible in frames. The runtime compresses the clip locally (ffmpeg) and sends it to the IDBots vision relay — never pass video contents, only the absolute local path.',
-      'Use when the user shares a video (chat attachments arrive as "[附件信息] 类型: video, 路径: <path>" lines) and asks what is in it, what happens, or anything requiring the video content. Works even when your own model cannot watch videos.',
-      'When NOT to use: do not use it for video files the user only asked to upload or move (use the file tools); one call per clip — do not call it twice on the same unchanged path in one turn; and never pass file contents into the tool — only the absolute local path.',
-      'Pass `question` only when the user asks something specific; omit it for the default full description.',
-      'Limits: clips longer than ~3 minutes are truncated to the first 3 minutes (the result says so); very large videos may fail compression. Videos cost 5× the daily image quota — one call per clip.',
-      'Returns the video description text, a truncation note when applicable, and the remaining quota units today.',
+      'Watch ONE local video via the IDBots vision relay: returns a summary, timeline, and visible frame text. Pass only the absolute local path, never file contents; works for non-vision models.',
+      'Use when the user shares a video (attachment line "[附件信息] 类型: video, 路径: <path>") and asks what happens in it. Not for upload/move-only tasks (use file tools); never twice on the same unchanged path per turn.',
+      'Omit `question` for the default full description. Clips over ~3 minutes are truncated to the first 3; very large videos may fail; each call costs 5× the daily image quota.',
     ].join(' '),
     {
       video_path: z

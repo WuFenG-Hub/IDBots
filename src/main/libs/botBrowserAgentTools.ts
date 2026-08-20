@@ -155,17 +155,15 @@ export function buildSearchMetaAppsAgentTools(deps: {
     ? 'Pick the single best match for the user\'s intent and call skill_tool with action="extract_metaapp" and its pinId to read APP.md / install instructions. When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best one might not be what they meant; if nothing fits, say so instead of inventing an app.'
     : 'Pick the single best match for the user\'s intent and open it with bot_browser_open_uri (prefer newTab=true). When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best one might not be what they meant; if nothing fits, say so instead of opening a random app.';
   const whenNotToUse = nextStep === 'install'
-    ? 'When NOT to use: if you already have an app pinId, skip the search and call skill_tool extract_metaapp directly; and this is for apps only — for social posts use search_social_posts, for identities use search_metaids.'
-    : 'When NOT to use: if you already have an app pinId, skip the search and open it directly with bot_browser_open_uri (metaapp://<pinId>); and this is for apps only — for social posts use search_social_posts, for identities use search_metaids.';
-  const useLine = nextStep === 'install'
-    ? 'Returns up to `limit` candidates (best first); pick the best match and call skill_tool action="extract_metaapp" with its pinId. For remix children of a known app, use mode="forks" with its pinId.'
-    : 'Returns up to `limit` candidates (best first); pick the best match and open it with bot_browser_open_uri using metaapp://<pinId>. For remix children of a known app, use mode="forks" with its pinId.';
+    ? 'With a known app pinId, skip this and call skill_tool extract_metaapp directly. Apps only — for posts use search_social_posts, for identities search_metaids.'
+    : 'With a known app pinId, skip this and open metaapp://<pinId> directly with bot_browser_open_uri. Apps only — for posts use search_social_posts, for identities search_metaids.';
+  const useLine = 'Returns up to `limit` candidates, best first. For remix children of a known app, use mode="forks" with its pinId.';
 
   return [
     tool(
       'search_metaapps',
       [
-        'Search on-chain MetaApps (HTML mini-apps published via /protocols/metaapp on the Agent Internet). Use when the user wants to FIND or DISCOVER an app by intent, topic, capability, time range, or publisher — rather than open a known app.',
+        'Search on-chain MetaApps (HTML mini-apps on /protocols/metaapp). Use to find an app by intent, tag, recency, or publisher — not to open a known one.',
         whenNotToUse,
         useLine,
       ].join(' '),
@@ -481,7 +479,7 @@ export function buildBotBrowserAgentTools(deps: {
     extraTools.push(
       tool(
         'bot_browser_publish_app',
-        'Publish a local MetaApp directory (one forked by bot_browser_fork_current_app, or a new app you built in the workspace) on-chain under the user\'s MetaID. Before publishing an app you created, write an APP.md at the directory root: a natural-language self-description for other agents (what it does, structure map, params/outputs, subpages, protocols used, remix notes — no schema, facts only). This writes to the blockchain, COSTS fees, and is IRREVERSIBLE — always show the user a preview first (bot_browser_preview_local) and explicitly confirm they want to publish before calling. When NOT to use: never publish without a preview AND explicit user confirmation, and never publish an app that has no APP.md. The host shows a final native confirmation dialog; if the user cancels there, the publish is aborted. forkedFrom provenance is recorded automatically for forked apps.',
+        'Publish a local MetaApp directory (from bot_browser_fork_current_app or built in the workspace) on-chain under the user\'s MetaID. Requires APP.md at the directory root: a natural-language doc for other agents (what it does, structure, params/outputs, subpages, protocols, remix notes — facts only). Writes on-chain, COSTS fees, IRREVERSIBLE: always preview first with bot_browser_preview_local AND get explicit user confirmation; never publish without both or without APP.md. Host shows a final native confirmation dialog; cancel aborts. forkedFrom provenance is recorded automatically for forks.',
         {
           dir: z.string().min(1),
           title: z.string().optional(),
@@ -552,16 +550,11 @@ export function buildBotBrowserScreenshotTool(deps: {
     tool(
       'bot_browser_screenshot',
       [
-        'Capture a screenshot of the active Bot Browser tab as an image you can see.',
-        'The Bot Browser is the built-in on-chain browser shown on the right of the app; a MetaApp renders inside it.',
-        'By default the ACTIVE tab is captured (cropped to the MetaApp content area); pass `uri` to navigate first (metaapp://<pinId>, metaid://<globalMetaId>, or preview-metaapp:// for a local app you are building) or `tabId` to switch tabs first.',
-        'Use this to SEE how a MetaApp renders — verify layout, debug visual issues, or confirm an app looks right before/after publishing — instead of guessing from source files.',
-        'When NOT to use: do not screenshot to READ the text on a page — use bot_browser_read_page for text; reserve screenshots for visual/layout verification you cannot get from source.',
-        'After navigation the tool waits briefly for the page to paint; pass `waitMs` (0–10000) to override the default.',
-        '`clip` ({x,y,width,height} in CSS px) narrows the capture to a region within the resolved target (the content area by default, or the whole surface when fullSurface=true); it is clamped to the target bounds.',
-        '`format` defaults to "png"; pass "jpeg" for a smaller image (better when sending to the model), with optional `quality` 0–100 (default 80, png ignores quality).',
-        'The Bot Browser surface must be open and visible; if it is hidden the tool returns an error asking the user to switch to Bot Browser mode.',
-        'Pass `savePath` (absolute) to also write the image to disk (e.g. into the workspace); otherwise the image is returned inline only.',
+        'Screenshot the active Bot Browser tab as an inline image; use for visual/layout checks, NOT reading text (use bot_browser_read_page).',
+        '`uri` (metaapp://<pinId>, metaid://<globalMetaId>, preview-metaapp://) navigates first, `tabId` switches first; then it waits briefly for paint (`waitMs` 0–10000 overrides).',
+        '`clip` ({x,y,width,height}, CSS px) crops the target (content area; whole surface if fullSurface=true).',
+        '`format` png default, jpeg smaller; `quality` 0–100 (default 80, png ignores). Absolute `savePath` also saves to disk.',
+        'Bot Browser surface must be open and visible, else it errors.',
       ].join(' '),
       {
         uri: z.string().optional(),
