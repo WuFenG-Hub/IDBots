@@ -61,7 +61,7 @@ interface UsageStatsChipProps {
 
 /**
  * Per-session token/cost indicator. Shows a compact chip in the session
- * header with token total; hover reveals the breakdown: input / output /
+ * header with token total; hover reveals current context size, output /
  * cache hit / cache miss tokens, cache-hit rates, and — matching the ACTUAL
  * billing account — a CNY estimate at DeepSeek rates (DeepSeek-billed proxy
  * sessions), the SDK-priced USD cost (Anthropic direct), or no cost at all
@@ -200,42 +200,13 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
           })()}
           <div className="mt-2 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
             {/* Current context size (provider-reported total input of the most
-                recent turn) — the same quantity the context ring shows. The
-                rows below are SESSION-CUMULATIVE billing totals: every request
-                re-sends the full context, so the cumulative input grows far
-                beyond the live context size as the conversation goes on. */}
+                recent turn) — the same quantity the context ring shows. */}
             {typeof usageStats.lastTurnInputTokens === 'number' && usageStats.lastTurnInputTokens > 0 && (
               <div className="flex justify-between">
                 <span className="font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('coworkUsageCurrentContext')}</span>
                 <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">{formatTokens(usageStats.lastTurnInputTokens)}</span>
               </div>
             )}
-            {(() => {
-              // Heuristic composition of the CURRENT context (DSH token-meter
-              // contextBreakdown; chars/4-style estimate). The three parts sum
-              // to roughly the ring value — the direct answer to "what makes
-              // up my current context", in contrast to the cumulative billing
-              // rows below.
-              const breakdown = usageStats.contextBreakdown;
-              if (!breakdown) return null;
-              const rows: Array<[string, number]> = [
-                [i18nService.t('coworkUsageBreakdownSystem'), breakdown.systemTokens],
-                [i18nService.t('coworkUsageBreakdownTools'), breakdown.toolsTokens],
-                [i18nService.t('coworkUsageBreakdownMessages'), breakdown.messageTokens],
-              ];
-              return (
-                <div className="space-y-0.5">
-                  <div className="opacity-60">{i18nService.t('coworkUsageBreakdownTitle')}</div>
-                  {rows.map(([label, value]) => (
-                    <div key={label} className="flex justify-between pl-2">
-                      <span>{label}</span>
-                      <span className="font-mono">~{formatTokens(value)}</span>
-                    </div>
-                  ))}
-                </div>
-              );
-            })()}
-            <div className="flex justify-between"><span>{i18nService.t('coworkUsageInput')}</span><span className="font-mono">{formatTokens(usageStats.inputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageOutput')}</span><span className="font-mono">{formatTokens(usageStats.outputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheHit')}</span><span className="font-mono">{formatTokens(usageStats.cacheReadTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheMiss')}</span><span className="font-mono">{formatTokens(usageStats.cacheCreationTokens)}</span></div>
@@ -245,7 +216,6 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
                 <span className="font-mono">{formatTokens(usageStats.thinkingTokensEstimate)}</span>
               </div>
             )}
-            <div className="opacity-60 leading-snug">{i18nService.t('coworkUsageCumulativeHint')}</div>
           </div>
           {(() => {
             // Cache-hit rates, three meanings:
