@@ -9,6 +9,7 @@ import { coworkLog } from './coworkLogger';
 import { resolveElectronExecutablePath } from './runtimePaths';
 import { resolveWritableSkillsRoot } from './skillRoots';
 import { getMetaidRpcBase, getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
+import { chatCompletionWithTools } from '../services/cognitiveChatCompletion';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 
 function appendEnvPath(current: string | undefined, additions: string[]): string | undefined {
@@ -1154,7 +1155,7 @@ export async function getEnhancedEnvWithTmpdir(
   return env;
 }
 
-/** First-line, same-language title. DSH is the only kernel; do not spawn Claude SDK. */
+/** First-line, same-language fallback when the title model call fails. */
 export function deriveSessionTitle(userIntent: string, maxChars = 50): string {
   const collapsed = userIntent.replace(/\s+/g, ' ').trim();
   if (!collapsed) return 'New Session';
@@ -1162,16 +1163,55 @@ export function deriveSessionTitle(userIntent: string, maxChars = 50): string {
   return `${collapsed.slice(0, maxChars).trimEnd()}...`;
 }
 
+/** Strip quotes/newlines and cap length so a model title is list-safe. */
+export function sanitizeGeneratedSessionTitle(raw: string, fallback: string, maxChars = 50): string {
+  const line = raw
+    .split('\n')[0]
+    ?.replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^["'`«»「」『』]+|["'`«»「」『』]+$/g, '')
+    .trim() ?? '';
+  if (!line || /^new session$/i.test(line)) return fallback;
+  if (line.length <= maxChars) return line;
+  return line.slice(0, maxChars).trimEnd();
+}
+
+/**
+ * One-shot title via the configured provider (OpenAI-compatible / Responses).
+ * Does not spawn the Claude Agent SDK and does not start a cowork DSH turn.
+ */
 export async function generateSessionTitle(userIntent: string | null): Promise<string> {
   if (!userIntent) return 'New Session';
+  const fallback = deriveSessionTitle(userIntent);
 
   try {
-    return deriveSessionTitle(userIntent);
+    const result = await chatCompletionWithTools(
+      [
+        {
+          role: 'system',
+          content:
+            'You name a chat session. Reply with ONLY the title. Max 50 characters. Same language as the user input. No quotes, no explanation.',
+        },
+        {
+          role: 'user',
+          content: `User input:\n${userIntent.slice(0, 2000)}`,
+        },
+      ],
+      {
+        thinking: 'disabled',
+        effort: 'off',
+        maxTokens: 64,
+        temperature: 0.2,
+        throwOnEmptyContent: true,
+        signal: AbortSignal.timeout(12_000),
+      }
+    );
+    return sanitizeGeneratedSessionTitle(result.content ?? '', fallback);
   } catch (error) {
     if (isSqliteWasmBoundsError(error)) {
       throw error;
     }
     console.error('Failed to generate session title:', error);
-    return 'New Session';
+    return fallback;
   }
 }
