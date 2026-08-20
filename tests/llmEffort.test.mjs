@@ -30,27 +30,32 @@ test('isLlmEffortLevel accepts exactly the four canonical levels', () => {
   assert.equal(isLlmEffortLevel(undefined), false);
 });
 
-test('convertLegacyEffortLevel maps the old five-step ladder', () => {
+test('convertLegacyEffortLevel maps leftover five-step tokens only', () => {
   assert.equal(convertLegacyEffortLevel(null), null);
   assert.equal(convertLegacyEffortLevel(undefined), null);
   assert.equal(convertLegacyEffortLevel(''), null);
-  // 快速(low) historically meant thinking-off.
-  assert.equal(convertLegacyEffortLevel('low'), 'off');
-  assert.equal(convertLegacyEffortLevel('minimal'), 'off');
-  assert.equal(convertLegacyEffortLevel('medium'), 'low');
+  // Canonical rungs pass through, including `low` (light thinking).
+  assert.equal(convertLegacyEffortLevel('off'), 'off');
+  assert.equal(convertLegacyEffortLevel('low'), 'low');
   assert.equal(convertLegacyEffortLevel('high'), 'high');
   assert.equal(convertLegacyEffortLevel('max'), 'max');
+  // Legacy-only tokens.
+  assert.equal(convertLegacyEffortLevel('minimal'), 'off');
+  assert.equal(convertLegacyEffortLevel('none'), 'off');
+  assert.equal(convertLegacyEffortLevel('disabled'), 'off');
+  assert.equal(convertLegacyEffortLevel('medium'), 'low');
   assert.equal(convertLegacyEffortLevel('xhigh'), 'max');
   assert.equal(convertLegacyEffortLevel('MAX'), 'max');
   assert.equal(convertLegacyEffortLevel('turbo'), null);
 });
 
-test('toLlmEffortLevel passes canonical values through and converts legacy ones', () => {
+test('toLlmEffortLevel passes canonical values through and converts leftover tokens', () => {
   assert.equal(toLlmEffortLevel('off'), 'off');
+  assert.equal(toLlmEffortLevel('low'), 'low');
   assert.equal(toLlmEffortLevel('high'), 'high');
   assert.equal(toLlmEffortLevel('max'), 'max');
-  assert.equal(toLlmEffortLevel('low'), 'off', 'legacy low converts to off');
   assert.equal(toLlmEffortLevel('medium'), 'low');
+  assert.equal(toLlmEffortLevel('minimal'), 'off');
   assert.equal(toLlmEffortLevel(null), null);
 });
 

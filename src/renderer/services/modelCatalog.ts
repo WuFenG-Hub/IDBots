@@ -116,13 +116,17 @@ export function resolveBrainModelInGroups(
   return null;
 }
 
-/** Map a legacy five-step effort value onto the current four-step ladder. */
+/**
+ * Map a leftover five-step effort token onto the current four-step ladder.
+ * Canonical off/low/high/max pass through; `low` is the current "light
+ * thinking" rung and must not be rewritten to `off`.
+ */
 export function convertLegacyEffortLevel(value: unknown): LlmEffortLevel | null {
   if (value == null) return null;
   const normalized = String(value).trim().toLowerCase();
   if (!normalized) return null;
-  if (normalized === 'off' || normalized === 'high' || normalized === 'max') return normalized;
-  if (normalized === 'low' || normalized === 'minimal') return 'off';
+  if (isLlmEffortLevel(normalized)) return normalized;
+  if (normalized === 'minimal' || normalized === 'none' || normalized === 'disabled') return 'off';
   if (normalized === 'medium') return 'low';
   if (normalized === 'xhigh') return 'max';
   return null;

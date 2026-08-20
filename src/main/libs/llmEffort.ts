@@ -10,10 +10,10 @@
 // sync when the ladder changes.
 //
 // History: the pre-2026-08 effort selector used a five-value ladder
-// (null/low/medium/high/max labelled 自动/快速/标准/深度/极限) with a
-// provider-dependent meaning. Those legacy values are converted onto this
-// ladder at their read boundaries (see convertLegacyEffortLevel), so nothing
-// downstream ever sees the old semantics.
+// (null/low/medium/high/max). Unambiguous leftover tokens (medium / minimal /
+// xhigh) still convert at read boundaries. Canonical `low` must NOT convert
+// to `off`: the current picker uses `low` for light thinking, and rewriting
+// it as `off` made the Low choice display and run as Off.
 
 export type LlmEffortLevel = 'off' | 'low' | 'high' | 'max';
 
@@ -27,34 +27,28 @@ export function isLlmEffortLevel(value: unknown): value is LlmEffortLevel {
 }
 
 /**
- * Map a legacy five-step effort value (自动/快速/标准/深度/极限 ladder) onto
- * the current four-step ladder. Applies at read boundaries of legacy stores
- * (app_config.coworkEffortLevel, per-model options.reasoningEffort) so the
- * old 快速(low) keeps meaning "thinking off":
+ * Map a leftover five-step effort token onto the current four-step ladder.
+ * Canonical off/low/high/max pass through unchanged — `low` is a current
+ * picker rung ("light thinking"), not a synonym for "thinking off".
  *
  *   null → null (auto / model default)
- *   low / minimal → 'off'
+ *   off / low / high / max → themselves
+ *   minimal / none / disabled → 'off'
  *   medium → 'low'
- *   high → 'high'
- *   max / xhigh → 'max'
+ *   xhigh → 'max'
  */
 export function convertLegacyEffortLevel(value: unknown): LlmEffortLevel | null {
   if (value == null) return null;
   const normalized = String(value).trim().toLowerCase();
   if (!normalized) return null;
-  if (isLlmEffortLevel(normalized) && normalized !== 'low') {
-    // off/high/max keep their meaning across ladders.
-    return normalized;
-  }
+  if (isLlmEffortLevel(normalized)) return normalized;
   switch (normalized) {
-    case 'low':
     case 'minimal':
+    case 'none':
+    case 'disabled':
       return 'off';
     case 'medium':
       return 'low';
-    case 'high':
-      return 'high';
-    case 'max':
     case 'xhigh':
       return 'max';
     default:
@@ -64,18 +58,10 @@ export function convertLegacyEffortLevel(value: unknown): LlmEffortLevel | null 
 
 /**
  * Accept either vocabulary at a persistence boundary and normalize onto the
- * four-step ladder. Values already in the new vocabulary pass through.
+ * four-step ladder. Canonical values (including `low`) pass through.
  */
 export function toLlmEffortLevel(value: unknown): LlmEffortLevel | null {
-  if (value == null) return null;
-  const normalized = String(value).trim().toLowerCase();
-  if (!normalized) return null;
-  // Values that mean the same thing in both ladders.
-  if (normalized === 'off' || normalized === 'high' || normalized === 'max') {
-    return normalized;
-  }
-  // Remaining strings are legacy-shaped; convert them.
-  return convertLegacyEffortLevel(normalized);
+  return convertLegacyEffortLevel(value);
 }
 
 /**

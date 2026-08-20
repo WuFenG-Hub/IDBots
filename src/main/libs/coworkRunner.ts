@@ -6518,7 +6518,7 @@ export class CoworkRunner extends EventEmitter {
           // ladder). pi-ai routes get no effort: their models' thinking stays
           // at the provider default, matching the pre-selector behavior for
           // non-deepseek providers.
-          ...(officialDeepSeekNative && dshReasoningEffort
+          ...(officialDeepSeekNative && dshReasoningEffort != null
             ? { reasoningEffort: dshReasoningEffort }
             : {}),
           // Vision declaration rides the route (same knowledge source the
