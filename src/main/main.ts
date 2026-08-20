@@ -30,7 +30,8 @@ import { SkillManager } from './skillManager';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
-import { getOsLocale, setAppLanguageStoreGetter, tApp } from './libs/appLanguage';
+import { getOsLocale, getPersistedAppLanguage, setAppLanguageStoreGetter, tApp } from './libs/appLanguage';
+import { setGroupTaskCopyLanguageGetter } from './libs/groupTaskCopy';
 import { loadClaudeSdk, prewarmClaudeSdk } from './libs/claudeSdk';
 import { flattenSubagentTranscriptMessages, mapDshSubagentList, mapDshSubagentMessages, sessionUsesDshSubagents } from './libs/coworkSubagentTranscript';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
@@ -3834,6 +3835,7 @@ const getSqliteRecoveryCoordinator = (): SQLiteRecoveryCoordinator<SqliteStore> 
         storeInitPromise = null;
         setStoreGetter(() => store);
         setAppLanguageStoreGetter(() => store);
+        setGroupTaskCopyLanguageGetter(getPersistedAppLanguage);
       },
       closeStore: (storeToClose) => {
         try {
@@ -3853,6 +3855,7 @@ const getSqliteRecoveryCoordinator = (): SQLiteRecoveryCoordinator<SqliteStore> 
         store = nextStore;
         setStoreGetter(() => store);
         setAppLanguageStoreGetter(() => store);
+        setGroupTaskCopyLanguageGetter(getPersistedAppLanguage);
       },
       stopServices: async () => {
         sqliteRecoveryRestartState = await stopSqliteBackedServicesForRecovery();
@@ -13314,6 +13317,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('setStoreGetter begin');
     setStoreGetter(() => store);
     setAppLanguageStoreGetter(() => store);
+    setGroupTaskCopyLanguageGetter(getPersistedAppLanguage);
     startupLog('setStoreGetter done');
 
     // One-time legacy llm_id value migration (provider ids -> model ids) so

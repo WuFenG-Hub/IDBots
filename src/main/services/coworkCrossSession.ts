@@ -5,6 +5,7 @@ import type {
   CoworkSessionMetadata as CoworkStoreSessionMetadata,
   CoworkSessionType,
 } from '../coworkStore';
+import { wrapCrossSessionMessage } from '../libs/groupTaskCopy';
 
 export const CROSS_SESSION_INSERT_MAX_CHARS = 12000;
 
@@ -252,7 +253,7 @@ export class CoworkCrossSessionService {
 
     const message = this.store.addMessage(targetId.sessionId, {
       type: 'user',
-      content: `来自${sourceId.sessionId} 的信息：${trimmedMessage}`,
+      content: wrapCrossSessionMessage(sourceId.sessionId, trimmedMessage),
       metadata: {
         sourceChannel: 'idbots_cross_session',
         sourceSessionId: sourceId.sessionId,

@@ -6,6 +6,7 @@
 
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import type { MetabotStore } from '../metabotStore';
+import { copyMetabotNotFound } from '../libs/groupTaskCopy';
 
 export interface AssignGroupChatTaskParams {
   target_metabot_name: string;
@@ -54,7 +55,7 @@ export function assignGroupChatTask(
 ): AssignGroupChatTaskResult {
   const metabotId = resolveMetabotIdByName(metabotStore, params.target_metabot_name);
   if (metabotId == null) {
-    return { success: false, message: '', error: '未找到指定的 MetaBot' };
+    return { success: false, message: '', error: copyMetabotNotFound() };
   }
 
   const group_id = params.group_id?.trim() ?? '';

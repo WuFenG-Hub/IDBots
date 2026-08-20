@@ -11,12 +11,18 @@
  * (no LLM in the loop), which makes it testable and auditable. The LLM only
  * narrates this record downstream — it never re-organizes the deliverable list.
  *
- * Message wording stays Chinese to match the existing review closing line
- * (`buildReviewClosingLine`) and the chair's group-task playbook, preserving
- * continuity for existing users; verification badges reuse the renderer's
- * English labels (on-chain ✓ / pending sync / unverified).
+ * Host wording follows the owner app language (zh/en). Verification badges
+ * reuse the renderer's English labels (on-chain ✓ / pending sync / unverified).
  */
 
+import type { AppLanguage } from '../libs/inferLanguageFromLocale';
+import {
+  GROUP_TASK_NOTICE,
+  acceptanceSummaryCopy,
+  buildAcceptanceGuidanceText,
+  groupTaskLanguage,
+  withGroupTaskNotice,
+} from '../libs/groupTaskCopy';
 import type {
   GroupTask,
   GroupTaskDeliverable,
@@ -148,13 +154,11 @@ export function buildAcceptanceSummaryMembers(
  * restated verbatim every time. Worded to never end on an open question (the
  * owner only confirms acceptance, requests rework, or replies in-group).
  */
-export function buildAcceptanceGuidance(task: Pick<GroupTask, 'title'>): string {
-  return [
-    `你可以：`,
-    `① 在 Tasks 面板的验收卡点「Accept & Close」并评分（1-5 星 + 可选评语）——任务关闭；`,
-    `② 在验收卡点「Back to work / Rework」——返回执行，chair 会补派工作；`,
-    `③ 在群内直接回复意见——chair 会按你的意见处理。`,
-  ].join('\n');
+export function buildAcceptanceGuidance(
+  _task: Pick<GroupTask, 'title'>,
+  language: AppLanguage = groupTaskLanguage(),
+): string {
+  return buildAcceptanceGuidanceText(language);
 }
 
 /**
@@ -194,8 +198,9 @@ export const CHAIR_CONCLUSION_MAX_CHARS = 120;
 const CHAIR_CONCLUSION_HEAD_LINES = 6;
 
 const CONCLUSION_TAGGED_RE = /【结论】[ \t]*([^\n\r]+)/;
-const CONCLUSION_BOLD_RE = /\*\*结论\*\*[ \t]*[：:]?[ \t]*([^\n\r]+)/;
-const CONCLUSION_PLAIN_RE = /^[ \t]*结论[：:][ \t]*([^\n\r]+)/m;
+const CONCLUSION_BOLD_RE = /\*\*(?:结论|Conclusion)\*\*[ \t]*[：:]?[ \t]*([^\n\r]+)/i;
+const CONCLUSION_PLAIN_RE = /^[ \t]*(?:结论|Conclusion)[：:][ \t]*([^\n\r]+)/im;
+const CONCLUSION_BRACKET_EN_RE = /【Conclusion】[ \t]*([^\n\r]+)/i;
 
 /**
  * Improvement #1: extract the chair's one-line conclusion from the owner-report
@@ -211,6 +216,7 @@ export function extractChairConclusion(report: string): string | null {
   if (!text) return null;
   const head = text.split(/\r?\n/, CHAIR_CONCLUSION_HEAD_LINES).join('\n');
   const match = CONCLUSION_TAGGED_RE.exec(head)
+    ?? CONCLUSION_BRACKET_EN_RE.exec(head)
     ?? CONCLUSION_BOLD_RE.exec(head)
     ?? CONCLUSION_PLAIN_RE.exec(head);
   if (!match) return null;
@@ -233,28 +239,31 @@ export function buildAcceptanceSummaryMessageText(
     'goal' | 'acceptanceCriteria' | 'deliverables' | 'members' | 'guidance'
   > & { planChanges?: string[] } & Partial<Pick<GroupTaskAcceptanceSummary, 'conclusion'>>,
   taskTitle: string,
+  language: AppLanguage = groupTaskLanguage(),
 ): string {
+  const copy = acceptanceSummaryCopy(language);
   const lines: string[] = [];
-  lines.push(`📦 任务「${taskTitle}」已进入验收阶段，以下为成果汇总。`);
-  // Improvement #1: the chair's one-line conclusion leads the message when it
-  // was captured before posting — the SAME stored string headlines the Tasks
-  // acceptance card and the source-session notice (one authoritative copy).
+  lines.push(copy.header(taskTitle));
   const conclusion = (summary.conclusion ?? '').trim();
   if (conclusion) {
-    lines.push(`结论：${conclusion}`);
+    lines.push(copy.conclusion(conclusion));
   }
   lines.push('');
-  lines.push(`目标：${acceptancePreview(summary.goal)}`);
-  lines.push(`验收标准：${(summary.acceptanceCriteria ?? '').trim() ? acceptancePreview(summary.acceptanceCriteria ?? '') : '（未填写）'}`);
+  lines.push(copy.goal(acceptancePreview(summary.goal)));
+  lines.push(copy.criteria(
+    (summary.acceptanceCriteria ?? '').trim()
+      ? acceptancePreview(summary.acceptanceCriteria ?? '')
+      : copy.criteriaEmpty,
+  ));
   lines.push('');
   const checklist = selectAcceptanceChecklist(summary.deliverables);
   if (checklist.items.length === 0) {
-    lines.push('成果清单：无已核验交付物。');
+    lines.push(copy.emptyChecklist);
     if (checklist.omittedProcessCount > 0) {
-      lines.push(`（另有 ${checklist.omittedProcessCount} 项过程记录，见群内报告）`);
+      lines.push(copy.omittedProcess(checklist.omittedProcessCount));
     }
   } else {
-    lines.push('成果清单：');
+    lines.push(copy.checklistTitle);
     for (const deliverable of checklist.items) {
       const kind = (deliverable.kind ?? 'text').trim();
       const uri = (deliverable.uri ?? '').trim();
@@ -264,41 +273,37 @@ export function buildAcceptanceSummaryMessageText(
       const author = (deliverable.authorName ?? '').trim() || 'unknown';
       if (uri) {
         const verification = deliverableVerificationLabel({
-          // Reconstruct just enough for the label helper (confirmation + verification JSON).
           confirmation: deliverable.confirmation,
           verification: null,
         } as GroupTaskDeliverable);
-        // P3 (v1.1): surface the ledger status when it moved past 'pending' —
-        // a verified deliverable must not read as still awaiting.
         const statusNote = deliverable.status === 'pending' ? '' : ` · ${deliverable.status}`;
         lines.push(`- [${kind}] ${body} (${verification}${statusNote}) — ${author}`);
       } else {
-        // Text-only outcome: print the body, never "（见消息原文）(unverified)".
         lines.push(`- [${kind}] ${body} — ${author}`);
       }
     }
     if (checklist.omittedProcessCount > 0) {
-      lines.push(`（另有 ${checklist.omittedProcessCount} 项过程记录，见群内报告）`);
+      lines.push(copy.omittedProcess(checklist.omittedProcessCount));
     }
   }
   const planChanges = (summary.planChanges ?? []).map((line) => line.trim()).filter(Boolean);
   if (planChanges.length > 0) {
     lines.push('');
-    lines.push('方案变更：');
+    lines.push(copy.planChangesTitle);
     for (const change of planChanges.slice(0, PLAN_CHANGE_MAX_RENDER_LINES)) {
       lines.push(`- ${acceptancePreview(change, PLAN_CHANGE_LINE_MAX_CHARS)}`);
     }
     if (planChanges.length > PLAN_CHANGE_MAX_RENDER_LINES) {
-      lines.push(`（另有 ${planChanges.length - PLAN_CHANGE_MAX_RENDER_LINES} 项变更，见群内记录）`);
+      lines.push(copy.omittedPlanChanges(planChanges.length - PLAN_CHANGE_MAX_RENDER_LINES));
     }
   }
   lines.push('');
   if (summary.members.length > 0) {
-    lines.push(`成员：${summary.members.map((member) => member.name ?? 'unknown').join('、')}`);
+    lines.push(copy.members(summary.members.map((member) => member.name ?? 'unknown').join(copy.memberJoin)));
     lines.push('');
   }
   lines.push(summary.guidance.trim());
-  return lines.join('\n');
+  return withGroupTaskNotice(GROUP_TASK_NOTICE.reviewSummary, lines.join('\n'));
 }
 
 /**
@@ -317,6 +322,7 @@ export function buildAcceptanceSummary(input: {
   deliverables: GroupTaskDeliverable[];
   members: GroupTaskMember[];
   planChanges?: string[];
+  language?: AppLanguage;
 }): {
   goal: string;
   acceptanceCriteria: string | null;
@@ -326,9 +332,10 @@ export function buildAcceptanceSummary(input: {
   guidance: string;
   messageText: string;
 } {
+  const language = input.language ?? groupTaskLanguage();
   const deliverables = buildAcceptanceSummaryDeliverables(input.deliverables, input.members);
   const members = buildAcceptanceSummaryMembers(input.members);
-  const guidance = buildAcceptanceGuidance(input.task);
+  const guidance = buildAcceptanceGuidance(input.task, language);
   const planChanges = (input.planChanges ?? []).map((line) => line.trim()).filter(Boolean);
   const summaryShape = {
     goal: input.task.goal,
@@ -338,6 +345,6 @@ export function buildAcceptanceSummary(input: {
     planChanges,
     guidance,
   };
-  const messageText = buildAcceptanceSummaryMessageText(summaryShape, input.task.title);
+  const messageText = buildAcceptanceSummaryMessageText(summaryShape, input.task.title, language);
   return { ...summaryShape, messageText };
 }

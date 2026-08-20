@@ -10,6 +10,18 @@
 import type { CoworkStore } from '../coworkStore';
 import type { MetabotStore } from '../metabotStore';
 import {
+  buildSourceSessionAcceptanceNotice,
+  buildSourceSessionReviewFallback,
+  buildSourceSessionReviewNotice,
+  copyAcceptanceCommentLine,
+  copyAcceptanceRatingLine,
+  copyDefaultObserverExpectation,
+  copyObserverLine,
+  copyObserverSectionHeader,
+  copyReviewReportTruncated,
+  copyReviewVersionTag,
+} from '../libs/groupTaskCopy';
+import {
   GroupTaskStore,
   type GroupTask,
   type GroupTaskMember,
@@ -451,11 +463,11 @@ function buildKickoffMessage(input: {
     for (const name of input.memberNames) {
       if (assigned.has(name)) continue;
       if (!hasActiveList && !input.observerRoles?.[name]) continue;
-      const expectation = input.observerRoles?.[name]?.trim() || '静默观察 / 待命接手 / 可退出';
-      observerLines.push(`- ${name}：${expectation}`);
+      const expectation = input.observerRoles?.[name]?.trim() || copyDefaultObserverExpectation();
+      observerLines.push(copyObserverLine(name, expectation));
     }
     if (observerLines.length > 0) {
-      lines.push('', '未派活成员预期（observer/standby）：', ...observerLines);
+      lines.push('', copyObserverSectionHeader(), ...observerLines);
     }
   }
   return lines.join('\n');
@@ -1633,15 +1645,18 @@ function notifySourceSession(
     );
   }
 
-  const ratingLine = outcome === 'done' && rating != null ? `｜评分 ${rating}/5` : '';
-  const commentLine = ratingComment?.trim() ? `（${ratingComment.trim()}）` : '';
+  const ratingLine = outcome === 'done' && rating != null ? copyAcceptanceRatingLine(rating) : '';
+  const commentLine = ratingComment?.trim() ? copyAcceptanceCommentLine(ratingComment.trim()) : '';
   const summary = getGroupTaskStore().getLatestAcceptanceSummary(task.id);
   const deliverableCount = summary?.deliverables.length ?? 0;
-  const message = [
-    `[GROUP_TASK_ACCEPTANCE] 任务「${task.title}」已完成验收：`,
-    `结果：${outcome}${ratingLine}${commentLine}`,
-    `成果：${deliverableCount} 项${summary ? `（详见验收总结 v${summary.version}）` : '，详见 Tasks 面板'}`,
-  ].join('\n');
+  const message = buildSourceSessionAcceptanceNotice({
+    title: task.title,
+    outcome,
+    ratingLine,
+    commentLine,
+    deliverableCount,
+    summaryVersion: summary?.version ?? null,
+  });
 
   try {
     const result = acceptanceNotifier({ taskId: task.id, targetSessionId, message });
@@ -1708,25 +1723,23 @@ export function notifySourceSessionReview(
     let versionTag = '';
     try {
       const summary = getGroupTaskStore().getLatestAcceptanceSummary(task.id);
-      if (summary) versionTag = `（验收摘要 v${summary.version}）`;
+      if (summary) versionTag = copyReviewVersionTag(summary.version);
     } catch {
       // Version tag is decorative — never blocks the notice.
     }
-    message = [
-      `[GROUP_TASK_REVIEW] 任务「${task.title}」已进入验收${versionTag}。`,
-      `结论：${conclusion}`,
-      `完整验收清单与 Accept & Close / Rework 操作见 Tasks 面板的验收卡。`,
-    ].join('\n');
+    message = buildSourceSessionReviewNotice({
+      title: task.title,
+      versionTag,
+      conclusion,
+    });
   } else {
     const capped = body.length > REVIEW_REPORT_MAX_CHARS
-      ? `${body.slice(0, REVIEW_REPORT_MAX_CHARS).trimEnd()}…\n（报告过长已截断——完整验收摘要见 Tasks 面板与群内 chair 摘要消息）`
+      ? copyReviewReportTruncated(body.slice(0, REVIEW_REPORT_MAX_CHARS).trimEnd())
       : body;
-    message = [
-      // Improvement #5 (task #25): the body is an AI-drafted narration of the
-      // host acceptance summary — it must never be labeled as the chair's ruling.
-      `[GROUP_TASK_REVIEW] 任务「${task.title}」已进入验收（系统生成验收汇总，chair 一手核验结论见群内）：`,
-      capped,
-    ].join('\n');
+    message = buildSourceSessionReviewFallback({
+      title: task.title,
+      body: capped,
+    });
   }
 
   try {
