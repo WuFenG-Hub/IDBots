@@ -116,6 +116,17 @@ export interface CoworkUsageStats {
   thinkingTokensEstimate?: number;
   /** Total input tokens (cached + uncached) of the most recent LLM turn (provider-reported real context size). */
   lastTurnInputTokens?: number;
+  /**
+   * Heuristic composition of the CURRENT context (DSH token-meter
+   * contextBreakdown: system prompt + tool schemas from the newest request,
+   * conversation from the live surface; approximate estimator). NOT
+   * cumulative — the sum tracks the context ring. DSH sessions only.
+   */
+  contextBreakdown?: {
+    systemTokens: number;
+    toolsTokens: number;
+    messageTokens: number;
+  } | null;
   /** Per-turn cache-miss attribution trail (diagnostics). */
   cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
   /** Per-turn cache hit/miss breakdown for every turn (drives per-turn hit rate). */

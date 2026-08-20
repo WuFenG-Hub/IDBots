@@ -210,6 +210,31 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
                 <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">{formatTokens(usageStats.lastTurnInputTokens)}</span>
               </div>
             )}
+            {(() => {
+              // Heuristic composition of the CURRENT context (DSH token-meter
+              // contextBreakdown; chars/4-style estimate). The three parts sum
+              // to roughly the ring value — the direct answer to "what makes
+              // up my current context", in contrast to the cumulative billing
+              // rows below.
+              const breakdown = usageStats.contextBreakdown;
+              if (!breakdown) return null;
+              const rows: Array<[string, number]> = [
+                [i18nService.t('coworkUsageBreakdownSystem'), breakdown.systemTokens],
+                [i18nService.t('coworkUsageBreakdownTools'), breakdown.toolsTokens],
+                [i18nService.t('coworkUsageBreakdownMessages'), breakdown.messageTokens],
+              ];
+              return (
+                <div className="space-y-0.5">
+                  <div className="opacity-60">{i18nService.t('coworkUsageBreakdownTitle')}</div>
+                  {rows.map(([label, value]) => (
+                    <div key={label} className="flex justify-between pl-2">
+                      <span>{label}</span>
+                      <span className="font-mono">~{formatTokens(value)}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageInput')}</span><span className="font-mono">{formatTokens(usageStats.inputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageOutput')}</span><span className="font-mono">{formatTokens(usageStats.outputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheHit')}</span><span className="font-mono">{formatTokens(usageStats.cacheReadTokens)}</span></div>
