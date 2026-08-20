@@ -18,6 +18,21 @@ export function getSidebarPrimaryNavModel({ t, hasRunningScheduledTask }) {
       hidden: !GROUP_TASKS_NAV_ENABLED,
     },
     {
+      id: 'metabots',
+      label: t('metabots'),
+      icon: 'cpuChip',
+    },
+  ];
+}
+
+export function getSidebarInternetNavModel({ t }) {
+  return [
+    {
+      id: 'browser',
+      label: t('botBrowser'),
+      icon: 'globe',
+    },
+    {
       id: 'gigSquare',
       label: t('gigSquare'),
       icon: 'shoppingBag',
@@ -28,10 +43,9 @@ export function getSidebarPrimaryNavModel({ t, hasRunningScheduledTask }) {
       label: t('metaApps'),
       icon: 'squares2x2',
     },
-    {
-      id: 'metabots',
-      label: t('metabots'),
-      icon: 'cpuChip',
-    },
   ];
+}
+
+export function isBotBrowserPaneVisible(surfaceMode, internetPane) {
+  return surfaceMode === 'browser' && internetPane === 'browser';
 }

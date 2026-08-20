@@ -103,6 +103,7 @@ tests/*
 !tests/gigSquareServiceCard.test.tsx
 !tests/a2aMessageItem.test.tsx
 !tests/botBrowserModeSwitch.test.tsx
+!tests/sidebarNavigation.test.mjs
 !tests/botBrowserBridgeService.test.mjs
 !tests/botBrowserHostService.test.mjs
 !tests/privateChatOrderCoworkTimeout.test.mjs
