@@ -14,7 +14,11 @@
 //                           session: create fresh, or RESUME when a persisted log exists
 //                           (the stock server only lazily creates and would fail on an
 //                           existing log after a runtime restart). Also the per-session
-//                           provider/model/effort override the stock wire lacks.
+//                           provider/model/effort override the stock wire lacks — a live
+//                           ensure reapplies the route through the agent/request
+//                           waterfall so a mid-conversation model switch actually
+//                           reaches the next LLM call (the loop otherwise keeps
+//                           seeding from the first-turn session header).
 //   idbots/approval/respond { id, outcome } → answer a pending approval ask (M2)
 //   idbots/ask/respond       { id, answers } → answer a pending user question
 //   idbots/usage             { sessionId } → token-meter session projections
@@ -59,9 +63,13 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsPolicySeq = 0
     this.idbotsAsks = new Map() // id → { resolve, reject }
     this.idbotsAskSeq = 0
-    // Per-agent reasoning effort for the agent/request waterfall (UI selector).
-    this.idbotsReasoningEffort = new Map()
-    this.idbotsReasoningBound = new WeakSet()
+    // Per-agent route for the agent/request waterfall (UI model+effort selector).
+    // Mid-session model switches MUST override provider/model here — after the
+    // first turn the loop seeds every request from the persisted session
+    // header, so ensure() updating only effort left the live agent on the
+    // original model (qwen + DeepSeek's "max" → UNSUPPORTED_REASONING_EFFORT).
+    this.idbotsRoute = new Map()
+    this.idbotsRouteBound = new WeakSet()
     // Subagent lineage for the panel: parent dsh id → [{agentId, status, startedAt}]
     this.idbotsSubagentChildren = new Map()
     // Ring buffers of child session events for transcript viewing.
@@ -123,7 +131,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     })
     ctx.on('agent/disposed', ({ agent }) => {
       this.idbotsAgents.delete(String(agent.id))
-      this.idbotsReasoningEffort.delete(String(agent.id))
+      this.idbotsRoute.delete(String(agent.id))
     }, { global: true })
 
     ctx.on('approval/request', (req, next) => this.idbotsBridgeApproval(req, next), { global: true })
@@ -178,7 +186,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     const id = String(sessionId ?? '')
     if (id.length === 0) throw new Error('idbots-sdk-server: session/ensure requires sessionId')
     if (this.idbotsAgents.has(id)) {
-      this.idbotsBindReasoning(this.idbotsAgents.get(id), reasoningEffort)
+      this.idbotsBindRoute(this.idbotsAgents.get(id), { provider, model, maxTokens, reasoningEffort })
       return { ensured: true, resumed: false }
     }
 
@@ -204,7 +212,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     // agent's scoped context (shadowing globals, unwound on disposal).
     this.idbotsRegisterSections(hostParams.sections, handle.agent?.ctx)
     this.idbotsRegisterHostTools(hostParams.hostTools, handle.agent?.ctx)
-    this.idbotsBindReasoning(handle.agent, reasoningEffort)
+    this.idbotsBindRoute(handle.agent, { provider, model, maxTokens, reasoningEffort })
     // Register with the stock server's bookkeeping (private at the type level,
     // present at runtime) so its lazy session/prompt create reuses this agent
     // instead of colliding on the registry id.
@@ -213,27 +221,44 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   }
 
   /**
-   * Pin this agent's next LLM request to the host's effort selector. The
-   * agent/request waterfall is the same seam installModelSelection uses:
-   * an explicit value wins, and an absent value strips inherited effort so
-   * the adapter falls back to the route default (DeepSeek: high).
+   * Pin this agent's next LLM request to the host's model+effort selector.
+   * Same seam installModelSelection uses: after the first turn the loop seeds
+   * every request from the persisted session header, so a live ensure() that
+   * only touched effort left provider/model stuck on the original pick.
+   * An explicit effort wins; an absent effort strips the inherited value so
+   * the adapter falls back to the route default (DeepSeek: high; pi-ai: none).
    */
-  idbotsBindReasoning(agent, reasoningEffort) {
+  idbotsBindRoute(agent, route) {
     if (!agent) return
     const id = String(agent.id)
-    if (typeof reasoningEffort === 'string' && reasoningEffort.trim().length > 0) {
-      this.idbotsReasoningEffort.set(id, reasoningEffort.trim())
-    } else {
-      this.idbotsReasoningEffort.delete(id)
-    }
-    if (this.idbotsReasoningBound.has(agent) || !agent.ctx?.on) return
-    this.idbotsReasoningBound.add(agent)
+    const provider = typeof route?.provider === 'string' ? route.provider.trim() : ''
+    const model = typeof route?.model === 'string' ? route.model.trim() : ''
+    const effort = typeof route?.reasoningEffort === 'string' ? route.reasoningEffort.trim() : ''
+    this.idbotsRoute.set(id, {
+      ...(provider.length > 0 ? { provider } : {}),
+      ...(model.length > 0 ? { model } : {}),
+      ...Number.isFinite(route?.maxTokens) ? { maxTokens: route.maxTokens } : {},
+      ...(effort.length > 0 ? { reasoningEffort: effort } : {}),
+    })
+    if (this.idbotsRouteBound.has(agent) || !agent.ctx?.on) return
+    this.idbotsRouteBound.add(agent)
     agent.ctx.on('agent/request', async (_payload, next) => {
       const resolved = await next()
-      const effort = this.idbotsReasoningEffort.get(String(agent.id))
-      const { reasoningEffort: _inherited, ...withoutInherited } = resolved ?? {}
-      if (effort === undefined) return withoutInherited
-      return { ...withoutInherited, reasoningEffort: effort }
+      const bound = this.idbotsRoute.get(String(agent.id))
+      if (bound === undefined) return resolved
+      const {
+        reasoningEffort: _inheritedEffort,
+        provider: _inheritedProvider,
+        model: _inheritedModel,
+        ...rest
+      } = resolved ?? {}
+      return {
+        ...rest,
+        provider: bound.provider || resolved?.provider,
+        model: bound.model || resolved?.model,
+        ...Number.isFinite(bound.maxTokens) ? { maxTokens: bound.maxTokens } : {},
+        ...(bound.reasoningEffort ? { reasoningEffort: bound.reasoningEffort } : {}),
+      }
     })
   }
 
