@@ -36,6 +36,7 @@ import {
   type MemoryVisibility,
 } from './memory/memoryScope';
 import { resolveMemoryScopes, type ResolveMemoryScopesInput } from './memory/memoryScopeResolver';
+import { clampMemoryPromptMaxChars } from './memory/memoryPromptBlocks';
 import { BOT_WORKSPACE_DIR_NAME } from './libs/botWorkspace';
 import {
   buildA2AChainMetadata,
@@ -749,6 +750,8 @@ export interface CoworkConfig {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: CoworkMemoryGuardLevel;
   memoryUserMemoriesMaxItems: number;
+  /** Combined char budget for the injected memory blocks (oldest-first eviction). Global-only: no per-bot column to avoid a metabot_memory_policies migration. */
+  memoryPromptMaxChars: number;
 }
 
 export interface CoworkMemoryPolicy {
@@ -769,6 +772,7 @@ export interface CoworkEffectiveMemoryPolicy {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: CoworkMemoryGuardLevel;
   memoryUserMemoriesMaxItems: number;
+  memoryPromptMaxChars: number;
   dreamEnabled: boolean;
   source: 'global' | 'metabot';
 }
@@ -792,6 +796,7 @@ export type CoworkConfigUpdate = Partial<Pick<
   | 'memoryLlmJudgeEnabled'
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
+  | 'memoryPromptMaxChars'
 >>;
 
 export interface ApplyTurnMemoryUpdatesOptions {
@@ -2201,6 +2206,7 @@ export class CoworkStore implements MemoryBackend {
         memoryLlmJudgeEnabled: config.memoryLlmJudgeEnabled,
         memoryGuardLevel: config.memoryGuardLevel,
         memoryUserMemoriesMaxItems: config.memoryUserMemoriesMaxItems,
+        memoryPromptMaxChars: config.memoryPromptMaxChars,
         dreamEnabled: true,
         source: 'global',
       };
@@ -2222,6 +2228,7 @@ export class CoworkStore implements MemoryBackend {
         memoryLlmJudgeEnabled: config.memoryLlmJudgeEnabled,
         memoryGuardLevel: config.memoryGuardLevel,
         memoryUserMemoriesMaxItems: config.memoryUserMemoriesMaxItems,
+        memoryPromptMaxChars: config.memoryPromptMaxChars,
         dreamEnabled: true,
         source: 'global',
       };
@@ -2239,6 +2246,9 @@ export class CoworkStore implements MemoryBackend {
       memoryUserMemoriesMaxItems: clampMemoryUserMemoriesMaxItems(
         Number(row.memory_user_memories_max_items ?? config.memoryUserMemoriesMaxItems)
       ),
+      // Global-only knob (no per-bot column): the metabot override merges the
+      // count limit, the prompt budget stays the global value either way.
+      memoryPromptMaxChars: config.memoryPromptMaxChars,
       dreamEnabled: normalizeDbBoolean(row.dream_enabled, true),
       source: 'metabot',
     };
@@ -5468,6 +5478,7 @@ export class CoworkStore implements MemoryBackend {
     const memoryLlmJudgeEnabledRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryLlmJudgeEnabled']);
     const memoryGuardLevelRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryGuardLevel']);
     const memoryUserMemoriesMaxItemsRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryUserMemoriesMaxItems']);
+    const memoryPromptMaxCharsRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryPromptMaxChars']);
 
     const normalizedExecutionMode =
       executionModeRow?.value === 'container' ? 'sandbox' : (executionModeRow?.value as CoworkExecutionMode);
@@ -5487,6 +5498,7 @@ export class CoworkStore implements MemoryBackend {
       ),
       memoryGuardLevel: normalizeMemoryGuardLevel(memoryGuardLevelRow?.value),
       memoryUserMemoriesMaxItems: clampMemoryUserMemoriesMaxItems(Number(memoryUserMemoriesMaxItemsRow?.value)),
+      memoryPromptMaxChars: clampMemoryPromptMaxChars(Number(memoryPromptMaxCharsRow?.value)),
     };
   }
 
@@ -5561,6 +5573,16 @@ export class CoworkStore implements MemoryBackend {
           value = excluded.value,
           updated_at = excluded.updated_at
       `, [String(clampMemoryUserMemoriesMaxItems(config.memoryUserMemoriesMaxItems)), now]);
+    }
+
+    if (config.memoryPromptMaxChars !== undefined) {
+      this.db.run(`
+        INSERT INTO cowork_config (key, value, updated_at)
+        VALUES ('memoryPromptMaxChars', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = excluded.updated_at
+      `, [String(clampMemoryPromptMaxChars(config.memoryPromptMaxChars)), now]);
     }
 
     this.saveDb();

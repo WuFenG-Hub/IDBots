@@ -347,6 +347,8 @@ export interface CoworkConfig {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: 'strict' | 'standard' | 'relaxed';
   memoryUserMemoriesMaxItems: number;
+  /** Combined char budget for injected memory blocks (oldest-first eviction; global-only). */
+  memoryPromptMaxChars: number;
 }
 
 export type CoworkConfigUpdate = Partial<Pick<
@@ -358,6 +360,7 @@ export type CoworkConfigUpdate = Partial<Pick<
   | 'memoryLlmJudgeEnabled'
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
+  | 'memoryPromptMaxChars'
 >>;
 
 export interface CoworkApiConfig {

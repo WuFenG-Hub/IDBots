@@ -2502,6 +2502,7 @@ export class CoworkRunner extends EventEmitter {
     memoryLlmJudgeEnabled: boolean;
     memoryGuardLevel: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems: number;
+    memoryPromptMaxChars: number;
   } {
     const effective = this.getMemoryBackend().getEffectiveMemoryPolicyForSession(sessionId);
     return {
@@ -2510,6 +2511,7 @@ export class CoworkRunner extends EventEmitter {
       memoryLlmJudgeEnabled: effective.memoryLlmJudgeEnabled,
       memoryGuardLevel: effective.memoryGuardLevel,
       memoryUserMemoriesMaxItems: effective.memoryUserMemoriesMaxItems,
+      memoryPromptMaxChars: effective.memoryPromptMaxChars,
     };
   }
 
@@ -2707,6 +2709,7 @@ export class CoworkRunner extends EventEmitter {
       maxOwnerEntries: memoryPolicy.memoryUserMemoriesMaxItems,
       maxScopedEntries: memoryPolicy.memoryUserMemoriesMaxItems,
       maxOwnerOperationalPreferences: Math.min(3, memoryPolicy.memoryUserMemoriesMaxItems),
+      maxTotalChars: memoryPolicy.memoryPromptMaxChars,
     });
 
     coworkLog('INFO', 'memory:promptBlocks', 'Built scoped memory prompt blocks', {
