@@ -71,6 +71,19 @@ test('factory registers describe_image and describe_video tools with zod schemas
   assert.ok(image.schema.question && video.schema.question, 'question parameter present');
 });
 
+test('includeDescribeImage: false omits describe_image but keeps describe_video', () => {
+  const tools = buildVisionRelayAgentTools({
+    tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
+    visionRelay: {
+      recognize: async () => ({}),
+      recognizeVideo: async () => ({}),
+    },
+    includeDescribeImage: false,
+  });
+  assert.deepEqual(tools.map((t) => t.name), ['describe_video'],
+    'vision routes keep only describe_video — native image blocks replace the relay for images');
+});
+
 test('happy path returns the description plus the remaining-quota line', async () => {
   const seen = [];
   const { captured } = buildTool(async (input) => {

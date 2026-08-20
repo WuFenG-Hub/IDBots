@@ -6204,7 +6204,7 @@ export class CoworkRunner extends EventEmitter {
     };
 
     try {
-      const hostTools = this.buildDshHostTools(sessionId)
+      const hostTools = this.buildDshHostTools(sessionId, modelLimits?.supportsVision)
       // Per-session registry: a concurrent turn of ANOTHER session must not
       // clobber this session's tool set (Twin-only tools would intermittently
       // go missing while a worker turn ran, and vice versa).
@@ -6675,7 +6675,7 @@ export class CoworkRunner extends EventEmitter {
    * passthrough factory — schemas travel to the runtime, execution
    * round-trips back to the host bridge.
    */
-  private buildDshHostTools(sessionId: string): Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> {
+  private buildDshHostTools(sessionId: string, modelSupportsVision?: boolean): Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> {
     const isZodValue = (value: unknown): boolean =>
       Boolean(value) && typeof value === 'object'
       && (Object.hasOwn(value as object, '_def') || Object.hasOwn(value as object, 'def')
@@ -6714,7 +6714,7 @@ export class CoworkRunner extends EventEmitter {
       parameters: Record<string, unknown>,
       execute: (args: any) => Promise<unknown>
     ) => ({ name, description, parameters: normalizeToolSchema(parameters), execute })
-    return this.buildSessionInlineTools(sessionId, passthrough)
+    return this.buildSessionInlineTools(sessionId, passthrough, undefined, modelSupportsVision)
   }
 
   /**
@@ -6916,8 +6916,13 @@ export class CoworkRunner extends EventEmitter {
    * twin orchestration, upload, search, browser, metabot manage). Shared by
    * both kernels: the Claude path passes the SDK tool() factory, the DSH path
    * passes a passthrough that also normalizes zod schemas to JSON schema.
+   *
+   * `modelSupportsVision` (resolved by the caller from the SAME model-limits
+   * source the Read-image guard uses) gates describe_image: vision routes
+   * omit it so the model uses native image blocks instead of burning the
+   * quota-metered relay; undefined keeps it (safe fallback).
    */
-  private buildSessionInlineTools(sessionId: string, tool: any, activeSession?: ActiveSession): any[] {
+  private buildSessionInlineTools(sessionId: string, tool: any, activeSession?: ActiveSession, modelSupportsVision?: boolean): any[] {
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
     const memoryTools: any[] = [
       tool(
@@ -7442,16 +7447,19 @@ export class CoworkRunner extends EventEmitter {
         })
       );
     }
-    // Image understanding for every cowork surface: the relay VLM turns a
-    // local image file into a text description + OCR, which matters most for
-    // non-vision models (the Read-image guard denies their raw file reads),
-    // but also gives vision models a cheap path that keeps base64 out of the
-    // session history.
+    // Image understanding: the relay VLM turns a local image file into a
+    // text description + OCR, which is the ONLY read-image path for
+    // non-vision models (the Read-image guard denies their raw file reads).
+    // Vision routes omit describe_image so the model uses native image
+    // blocks (read_image / prompt attachments) — better quality, one less
+    // hop, and no relay quota spend. describe_video stays on every route:
+    // native vision cannot watch video.
     if (this.visionRelay) {
       memoryTools.push(
         ...buildVisionRelayAgentTools({
           tool,
           visionRelay: this.visionRelay,
+          includeDescribeImage: modelSupportsVision !== true,
         })
       );
     }
@@ -8307,7 +8315,7 @@ export class CoworkRunner extends EventEmitter {
       coworkLog('INFO', 'runClaudeCodeLocal', 'Claude SDK loaded successfully');
 
       const memoryServerName = `user-memory-${sessionId.slice(0, 8)}`;
-      const memoryTools: any[] = this.buildSessionInlineTools(sessionId, tool, activeSession);
+      const memoryTools: any[] = this.buildSessionInlineTools(sessionId, tool, activeSession, modelLimits?.supportsVision);
 
       options.mcpServers = {
         ...(options.mcpServers as Record<string, unknown> | undefined),
