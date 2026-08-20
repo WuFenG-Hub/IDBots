@@ -64,6 +64,10 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Install DSH runtime dependencies
+        working-directory: dsh-runtime
+        run: npm ci
+
       - name: Build renderer (Vite)
         run: npm run build
 

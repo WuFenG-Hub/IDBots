@@ -92,8 +92,30 @@ function verifyReleaseInputs() {
   }
 }
 
+function verifyDshRuntimeInputs() {
+  const sdkClientEntry = path.join(
+    __dirname,
+    '..',
+    'dsh-runtime',
+    'node_modules',
+    '@deepseek-ai',
+    'dsh-sdk-client',
+    'lib',
+    'index.js',
+  );
+  if (!existsSync(sdkClientEntry)) {
+    throw new Error(
+      'Release packaging requires dsh-runtime dependencies to be installed '
+      + '(dsh-runtime/node_modules/@deepseek-ai/dsh-sdk-client/lib/index.js is missing). '
+      + 'Run npm ci in dsh-runtime/ before packaging.',
+    );
+  }
+  console.log('[electron-builder-hooks] DSH runtime dependencies present');
+}
+
 async function beforePack(context) {
   verifyReleaseInputs();
+  verifyDshRuntimeInputs();
 
   if (!isWindowsTarget(context)) {
     return;

@@ -382,3 +382,24 @@ test('Twin orchestration tools have a host-side gate and trusted sandbox registr
   }
   assert.match(source, /twinOrchestrationEnabled: Boolean\(this\.listLocalWorkers && this\.isTwinSession\(sessionId\)\)/);
 });
+
+test('packaged DSH runtime dependencies are installed before release packaging', () => {
+  const runtimeDir = path.join(process.cwd(), 'dsh-runtime');
+  const sdkClientEntry = path.join(
+    runtimeDir,
+    'node_modules',
+    '@deepseek-ai',
+    'dsh-sdk-client',
+    'lib',
+    'index.js',
+  );
+
+  assert.ok(
+    fs.existsSync(path.join(runtimeDir, 'bin.mjs')),
+    'dsh-runtime/bin.mjs must exist for the packaged DSH kernel entry',
+  );
+  assert.ok(
+    fs.existsSync(sdkClientEntry),
+    'dsh-runtime/node_modules/@deepseek-ai/dsh-sdk-client/lib/index.js must be installed before packaging - run npm ci in dsh-runtime/',
+  );
+});
