@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -383,23 +384,137 @@ test('Twin orchestration tools have a host-side gate and trusted sandbox registr
   assert.match(source, /twinOrchestrationEnabled: Boolean\(this\.listLocalWorkers && this\.isTwinSession\(sessionId\)\)/);
 });
 
-test('packaged DSH runtime dependencies are installed before release packaging', () => {
-  const runtimeDir = path.join(process.cwd(), 'dsh-runtime');
-  const sdkClientEntry = path.join(
-    runtimeDir,
-    'node_modules',
-    '@deepseek-ai',
-    'dsh-sdk-client',
-    'lib',
-    'index.js',
-  );
+test('release packaging wires nested DSH runtime install, extraResources, and pack gates', () => {
+  const workflow = fs.readFileSync(path.join(process.cwd(), '.github/workflows/build.yml'), 'utf8');
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+  const builder = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'electron-builder.json'), 'utf8'));
+  const hooks = fs.readFileSync(path.join(process.cwd(), 'scripts/electron-builder-hooks.cjs'), 'utf8');
+  const runtimePkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'dsh-runtime/package.json'), 'utf8'));
+  const dshResource = (builder.extraResources || []).find((entry) => entry && entry.from === 'dsh-runtime');
 
+  assert.match(
+    workflow,
+    /working-directory:\s*dsh-runtime[\s\S]*?run:\s*npm ci/,
+    'CI must npm ci in dsh-runtime so extraResources can copy node_modules',
+  );
+  assert.match(
+    packageJson.scripts.postinstall,
+    /npm install --prefix dsh-runtime/,
+    'postinstall must install dsh-runtime so local dist:mac also ships node_modules',
+  );
+  assert.ok(dshResource, 'electron-builder extraResources must copy dsh-runtime');
   assert.ok(
-    fs.existsSync(path.join(runtimeDir, 'bin.mjs')),
+    !(dshResource.filter || []).some((pattern) => typeof pattern === 'string' && pattern.startsWith('!') && pattern.includes('node_modules')),
+    'dsh-runtime extraResources filter must not exclude node_modules',
+  );
+  assert.match(hooks, /verifySourceRuntimes\(\)/, 'beforePack must fail closed if nested runtime deps are missing');
+  assert.match(hooks, /verifyPackagedRuntimes\(context\)/, 'afterPack must fail closed if the copied app Resources omit runtime deps');
+  assert.match(
+    workflow,
+    /node scripts\/setup-ffmpeg\.js --required/,
+    'CI must download gitignored ffmpeg binaries; electron-builder only warns when the extraResource is missing',
+  );
+  assert.match(hooks, /ensureFfmpeg\(/, 'beforePack must download ffmpeg for the current target if the binary is absent');
+  assert.match(hooks, /verifySourceFfmpeg\(context\)/, 'beforePack must fail closed if ffmpeg was not prepared');
+  assert.match(hooks, /verifyPackagedFfmpeg\(context\)/, 'afterPack must fail closed if the copied app Resources omit ffmpeg');
+  assert.ok(
+    (builder.mac?.extraResources || []).some((entry) => entry && entry.from === 'resources/ffmpeg/ffmpeg-darwin-${arch}'),
+    'mac extraResources must copy the arch-specific ffmpeg binary',
+  );
+  assert.ok(
+    (builder.win?.extraResources || []).some((entry) => entry && entry.from === 'resources/ffmpeg/ffmpeg-win32-x64.exe'),
+    'win extraResources must copy the Windows ffmpeg binary',
+  );
+  assert.equal(
+    runtimePkg.dependencies['@deepseek-ai/dsh-sdk-client'],
+    '0.1.0-rc.7',
+    'dsh-sdk-client is a packaged runtime dependency of the Electron host, not a test-only devDependency',
+  );
+  assert.equal(
+    runtimePkg.devDependencies?.['@deepseek-ai/dsh-sdk-client'],
+    undefined,
+    'dsh-sdk-client must not live in dsh-runtime devDependencies (NODE_ENV=production would omit it)',
+  );
+  assert.ok(
+    fs.existsSync(path.join(process.cwd(), 'dsh-runtime', 'bin.mjs')),
     'dsh-runtime/bin.mjs must exist for the packaged DSH kernel entry',
   );
-  assert.ok(
-    fs.existsSync(sdkClientEntry),
-    'dsh-runtime/node_modules/@deepseek-ai/dsh-sdk-client/lib/index.js must be installed before packaging - run npm ci in dsh-runtime/',
-  );
+});
+
+test('packaged runtime gates fail closed on missing source and packaged markers', () => {
+  const {
+    missingMarkers,
+    verifySourceRuntimes,
+    verifyPackagedRuntimes,
+    verifySourceFfmpeg,
+    verifyPackagedFfmpeg,
+    resolvePackagedResourcesDir,
+    resolveFfmpegPlatformKey,
+    extraResourceFilterExcludesNodeModules,
+  } = require('../scripts/packagedRuntimes.cjs');
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-packaged-runtimes-'));
+
+  try {
+    assert.deepEqual(
+      missingMarkers(tmpRoot, ['bin.mjs', path.join('node_modules', 'missing.js')]),
+      ['bin.mjs', path.join('node_modules', 'missing.js')],
+    );
+    fs.writeFileSync(path.join(tmpRoot, 'bin.mjs'), 'ok');
+    assert.deepEqual(missingMarkers(tmpRoot, ['bin.mjs']), []);
+
+    assert.throws(
+      () => verifySourceRuntimes(tmpRoot),
+      /dsh-runtime\/bin\.mjs/,
+    );
+
+    const macResources = resolvePackagedResourcesDir({
+      appOutDir: path.join(tmpRoot, 'mac-out'),
+      electronPlatformName: 'darwin',
+      packager: { appInfo: { productFilename: 'IDBots' } },
+    });
+    assert.equal(
+      macResources,
+      path.join(tmpRoot, 'mac-out', 'IDBots.app', 'Contents', 'Resources'),
+    );
+    assert.throws(
+      () => verifyPackagedRuntimes({
+        appOutDir: path.join(tmpRoot, 'mac-out'),
+        electronPlatformName: 'darwin',
+        packager: { appInfo: { productFilename: 'IDBots' } },
+      }),
+      /dsh-runtime\/bin\.mjs/,
+    );
+
+    assert.equal(
+      resolveFfmpegPlatformKey({ electronPlatformName: 'darwin', arch: 3 }),
+      'darwin-arm64',
+    );
+    assert.equal(
+      resolveFfmpegPlatformKey({ electronPlatformName: 'win32', arch: 1 }),
+      'win32-x64',
+    );
+    assert.equal(
+      resolveFfmpegPlatformKey({ electronPlatformName: 'linux', arch: 1 }),
+      null,
+    );
+    const macFfmpegContext = {
+      appOutDir: path.join(tmpRoot, 'mac-out'),
+      electronPlatformName: 'darwin',
+      arch: 'arm64',
+      packager: { appInfo: { productFilename: 'IDBots' } },
+    };
+    assert.throws(
+      () => verifySourceFfmpeg(macFfmpegContext, tmpRoot),
+      /bundled ffmpeg for darwin-arm64/,
+    );
+    assert.throws(
+      () => verifyPackagedFfmpeg(macFfmpegContext),
+      /missing bundled ffmpeg/,
+    );
+
+    assert.equal(extraResourceFilterExcludesNodeModules(['**/*', '!**/node_modules/**']), true);
+    assert.equal(extraResourceFilterExcludesNodeModules(['**/*', '!**/.test-sessions/**']), false);
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
 });

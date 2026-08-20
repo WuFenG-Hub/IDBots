@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const crypto = require('crypto');
+const { PACKAGED_RUNTIMES, extraResourceFilterExcludesNodeModules } = require('./packagedRuntimes.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 
@@ -222,6 +223,35 @@ function runStaticChecks() {
         return extraResources.some((r) => r && r.from === 'resources/man-p2p/config.toml');
       };
       addCheck('electron-builder bundles SKILLs', hasSkills, hasSkills ? 'ok' : 'missing extraResources.from=SKILLs');
+      for (const runtime of PACKAGED_RUNTIMES) {
+        const bundled = resources.find((r) => r && r.from === runtime.extraResourceFrom);
+        addCheck(
+          `electron-builder extraResources covers ${runtime.id}`,
+          Boolean(bundled),
+          bundled ? runtime.extraResourceFrom : `missing extraResources.from=${runtime.extraResourceFrom}`
+        );
+        if (bundled) {
+          const dropsNodeModules = extraResourceFilterExcludesNodeModules(bundled.filter);
+          addCheck(
+            `electron-builder ${runtime.id} extraResources keeps node_modules`,
+            !dropsNodeModules,
+            dropsNodeModules ? 'filter excludes node_modules' : 'ok'
+          );
+        }
+      }
+      const macResources = Array.isArray(builder.mac?.extraResources) ? builder.mac.extraResources : [];
+      const hasMacFfmpeg = macResources.some((r) => r && r.from === 'resources/ffmpeg/ffmpeg-darwin-${arch}');
+      const hasWinFfmpeg = winResources.some((r) => r && r.from === 'resources/ffmpeg/ffmpeg-win32-x64.exe');
+      addCheck(
+        'electron-builder bundles ffmpeg on mac',
+        hasMacFfmpeg,
+        hasMacFfmpeg ? 'ok' : 'missing mac.extraResources.from=resources/ffmpeg/ffmpeg-darwin-${arch}'
+      );
+      addCheck(
+        'electron-builder bundles ffmpeg on win',
+        hasWinFfmpeg,
+        hasWinFfmpeg ? 'ok' : 'missing win.extraResources.from=resources/ffmpeg/ffmpeg-win32-x64.exe'
+      );
       addCheck('electron-builder bundles mingit for win', hasMinGit, hasMinGit ? 'ok' : 'missing win.extraResources.from=resources/mingit');
       addCheck(
         'electron-builder bundles man-p2p config on mac',

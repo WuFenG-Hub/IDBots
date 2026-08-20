@@ -125,6 +125,10 @@ jobs:
         shell: bash
         run: mkdir -p resources/mingit
 
+      # ffmpeg is gitignored; electron-builder only warns and skips a missing extraResource.
+      - name: Setup bundled ffmpeg
+        run: node scripts/setup-ffmpeg.js --required
+
       # 根据平台启用签名配置（避免 Windows 缺少 bash）
       - name: Configure code signing (macOS)
         if: runner.os == 'macOS'
