@@ -10,6 +10,7 @@
 
 import type { MetabotStore } from '../metabotStore';
 import { OPENTEAM_ALLOW_REMOTE_COLLAB_KEY } from './openTeamGuestService';
+import { COWORK_MOUNT_MCP_TOOLS_KEY } from './coworkMcpToolsPreference';
 
 /** Boolean toggle settings are persisted as '1' (on) / '0' (off). */
 const normalizeToggleValue = (value: unknown): string | null => {
@@ -26,6 +27,7 @@ interface RendererSettingDef {
 /** Per-metabot settings the renderer may read/write over IPC. */
 const RENDERER_SETTING_DEFS: Record<string, RendererSettingDef> = {
   [OPENTEAM_ALLOW_REMOTE_COLLAB_KEY]: { normalizeValue: normalizeToggleValue },
+  [COWORK_MOUNT_MCP_TOOLS_KEY]: { normalizeValue: normalizeToggleValue },
 };
 
 export const RENDERER_METABOT_SETTING_KEYS: readonly string[] = Object.keys(RENDERER_SETTING_DEFS);

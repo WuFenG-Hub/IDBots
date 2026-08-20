@@ -220,7 +220,7 @@ export interface DshHubOptions {
   evaluatePolicy?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ decision: 'allow' | 'deny' | 'ask'; reason?: string }>
   /** User-configured MCP servers, read fresh each turn (additions mount on the
    * next turn; the config union never removes until restart, same as providers). */
-  mcpServersProvider?: () => DshMcpServerDefinition[]
+  mcpServersProvider?: (coworkSessionId: string) => DshMcpServerDefinition[]
   log?: DshKernelOptions['log']
   /** Extra composition entries for the runtime (test fixtures; later the
    * idbots tools/policy plugins mount here). */
@@ -425,7 +425,7 @@ export class DshTurnHub {
       envName: dshProviderApiKeyEnv(input.provider.key),
       apiKey: input.provider.apiKey,
     })
-    for (const server of this.opts.mcpServersProvider?.() ?? []) {
+    for (const server of this.opts.mcpServersProvider?.(input.sessionId) ?? []) {
       const name = String(server?.name ?? '').trim()
       if (name) this.mcpServersSeen.set(name, server)
     }

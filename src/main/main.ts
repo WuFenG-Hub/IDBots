@@ -192,6 +192,7 @@ import {
   getRendererMetabotSetting,
   setRendererMetabotSetting,
 } from './services/metabotSettingsService';
+import { isCoworkMcpMountEnabled } from './services/coworkMcpToolsPreference';
 import {
   resumeOpenTeamInviteWatchers,
   setOpenTeamServiceDeps,
@@ -4794,7 +4795,14 @@ const getCoworkRunner = () => {
       experienceStore: getDreamStore(),
       knowledgeStore: getMetaIDKnowledgeStore(),
       episodeTimelineProvider: getMetaIDExperienceStore(),
-      mcpServerProvider: () => getMcpStore().getEnabledServers(),
+      // Per-bot opt-in (default off): mounted MCP tool schemas ride every
+      // LLM request, so only sessions whose bot explicitly enables MCP pay
+      // the cost. See services/coworkMcpToolsPreference.ts.
+      mcpServerProvider: (coworkSessionId: string) => {
+        const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
+        if (!isCoworkMcpMountEnabled(getMetabotStore(), metabotId)) return [];
+        return getMcpStore().getEnabledServers();
+      },
       // User-managed DSH plugin directory (userData/dsh-plugins): entries are
       // re-resolved every turn, so an install applies on the next turn and a
       // config change restarts the runtime only after in-flight turns settle.

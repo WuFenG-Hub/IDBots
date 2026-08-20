@@ -1477,7 +1477,7 @@ export interface CoworkRunnerOptions {
   twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
   twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   /** When set, returns enabled user-configured MCP servers for local execution. */
-  mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
+  mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
   /** Re-read every turn: the user-managed DSH plugin directory feeds runtime
    * composition entries here (installs apply on the next turn). */
   dshExtraEntriesProvider?: () => Array<{ id: string; name: string; config: Record<string, unknown> }>;
@@ -1612,7 +1612,7 @@ export class CoworkRunner extends EventEmitter {
   private twinTaskStatus?: (sessionId: string, taskId: string) => TwinTaskStatusResult;
   private twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
   private twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
-  private mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
+  private mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
   dshExtraEntriesProvider?: () => Array<{ id: string; name: string; config: Record<string, unknown> }>;
   private openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private resolveMetaAppUrl?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
@@ -6041,10 +6041,11 @@ export class CoworkRunner extends EventEmitter {
         extraEntriesProvider: this.dshExtraEntriesProvider,
         executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
         evaluatePolicy: (coworkSessionId, name, args) => this.evaluateDshToolPolicy(coworkSessionId, name, args),
-        // Same user MCP store the Claude path mounts (mcpServerProvider returns
-        // the enabled definitions); the runtime mounts each as a dsh-mcp-client
-        // entry exposing mcp__<name>__<tool> tools.
-        mcpServersProvider: () => this.mcpServerProvider?.() ?? [],
+        // Same user MCP store the Claude path mounts, gated per session by
+        // the bot's cowork.mountMcpTools opt-in (default off — MCP schemas
+        // ride every request). The runtime mounts each returned server as a
+        // dsh-mcp-client entry exposing mcp__<name>__<tool> tools.
+        mcpServersProvider: (coworkSessionId) => this.mcpServerProvider?.(coworkSessionId) ?? [],
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
@@ -8230,7 +8231,7 @@ export class CoworkRunner extends EventEmitter {
       if (this.mcpServerProvider) {
         try {
           const configuredServers = buildUserConfiguredMcpServerConfigs(
-            this.mcpServerProvider(),
+            this.mcpServerProvider(sessionId),
             new Set(Object.keys(options.mcpServers as Record<string, unknown>)),
           );
           const configuredServerCount = Object.keys(configuredServers).length;
