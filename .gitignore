@@ -292,5 +292,9 @@ man_base_data_pebble/
 # dev-only isolated user-data dirs for "npm run electron:dev:fresh" (new-user simulation)
 .dev-userdata-fresh/
 .dev-appdata-fresh/
+
+# dev DSH instance user-data/app-data dirs ("npm run electron:dev:dsh")
+.dev-userdata-dsh/
+.dev-appdata-dsh/
 !tests/metabotLlmBrainMigration.test.mjs
 !tests/sqliteStoreMetabotsRebuildExtras.test.mjs
