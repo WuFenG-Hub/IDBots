@@ -1,14 +1,23 @@
 import React, { useEffect, useState } from 'react';
-import { ClipboardDocumentIcon, CheckIcon } from '@heroicons/react/24/outline';
+import { DocumentDuplicateIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { resolveMetaidAvatarSource } from '../../services/metabotInfoService';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
 import { isRenderableAvatarSource as isSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import MarkdownContent from '../MarkdownContent';
+import {
+  messengerBubbleClassName,
+  messengerColumnClassName,
+  messengerMarkdownClassName,
+  messengerMetaClassName,
+  messengerRowClassName,
+  messengerTxidRowClassName,
+} from '../chat/messengerBubble';
 import type { GroupChatTranscriptMessage } from '../../types/groupTask';
-import { formatGroupTaskTime } from './groupTaskUtils';
+import { formatGroupTaskMessengerTime } from './groupTaskUtils';
 
 const DEFAULT_AVATAR = getDefaultMetabotAvatarUrl();
+const TXID_RE = /^[0-9a-f]{64}$/i;
 
 /** Module-level resolution cache so the 5s transcript polling never re-resolves. */
 const avatarResolutionCache = new Map<string, string | null>();
@@ -61,39 +70,33 @@ function resolveTxId(message: GroupChatTranscriptMessage): string | null {
   return pin.endsWith('i0') ? pin.slice(0, -2) : pin;
 }
 
-const TxIdBadge: React.FC<{ txId: string }> = ({ txId }) => {
-  const [copied, setCopied] = useState(false);
-  const short = txId.length > 12 ? `${txId.slice(0, 6)}…${txId.slice(-4)}` : txId;
+function formatTxidPreview(txId: string): string {
+  const normalized = txId.trim().toLowerCase();
+  if (TXID_RE.test(normalized) || normalized.length > 12) {
+    return `${normalized.slice(0, 8)}....`;
+  }
+  return normalized;
+}
 
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(txId);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // clipboard unavailable (permissions) — the title tooltip still shows the full id
-    }
-  };
-
-  return (
-    <span className="inline-flex shrink-0 items-center gap-0.5" title={txId}>
-      <span className="font-mono text-[10px] dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60">
-        {short}
-      </span>
-      <button
-        type="button"
-        onClick={() => void handleCopy()}
-        title={i18nService.t(copied ? 'groupTasksTxidCopied' : 'groupTasksCopyTxid')}
-        aria-label={i18nService.t(copied ? 'groupTasksTxidCopied' : 'groupTasksCopyTxid')}
-        className="rounded p-0.5 dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover hover:text-claude-text dark:hover:text-claude-darkText transition-colors"
-      >
-        {copied
-          ? <CheckIcon className="h-3 w-3 text-emerald-500" />
-          : <ClipboardDocumentIcon className="h-3 w-3" />}
-      </button>
-    </span>
-  );
+const copyTextToClipboard = (value: string): void => {
+  if (!value || typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
+    return;
+  }
+  void navigator.clipboard.writeText(value).catch(() => {});
 };
+
+const RoleBadge: React.FC<{ className: string; children: React.ReactNode; title?: string }> = ({
+  className,
+  children,
+  title,
+}) => (
+  <span
+    title={title}
+    className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${className}`}
+  >
+    {children}
+  </span>
+);
 
 /**
  * P0-1: fold over-long [DELIVERABLE] lines (eleven's long delivery was
@@ -170,99 +173,99 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   // source. A message whose sender is neither a task member nor the owner is
   // flagged SUSPECT — never attributed by senderName.
   const isSuspectSender = message.senderSuspect === true;
+  const isOutgoing = Boolean(isOwnerSender || isOwnBotSender);
   const senderName = senderDisplayName?.trim() || message.senderName?.trim() || 'Unknown';
-  const timestamp = formatGroupTaskTime(message.chainTimestamp);
+  const timestamp = formatGroupTaskMessengerTime(message.chainTimestamp);
   const avatarSrc = useSenderAvatar(message);
   const txId = resolveTxId(message);
+  const txidPreview = txId ? formatTxidPreview(txId) : '';
   const rawContent = message.content ?? '';
   const longDeliverable = hasLongDeliverableLine(rawContent);
   const acceptanceSummaryFold = isAcceptanceSummaryMessage(rawContent);
   const [deliverableExpanded, setDeliverableExpanded] = useState(false);
-
+  const markdownClassName = messengerMarkdownClassName(isOutgoing);
+  const foldLabelClass = isOutgoing
+    ? 'text-white'
+    : 'dark:text-claude-darkText text-claude-text';
+  const collapseClass = isOutgoing
+    ? 'mt-1 text-xs text-white/80 hover:underline'
+    : 'mt-1 text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary/70 hover:underline';
+  const replyClass = isOutgoing
+    ? 'mb-1.5 flex w-full max-w-full items-center gap-1 rounded-lg border-l-2 border-white/40 bg-white/10 px-2 py-1 text-left text-[11px] leading-4 text-white/85 hover:bg-white/15 transition-colors'
+    : 'mb-1.5 flex w-full max-w-full items-center gap-1 rounded-lg border-l-2 border-claude-accent/50 bg-black/[0.03] dark:bg-white/[0.04] px-2 py-1 text-left text-[11px] leading-4 text-claude-textSecondary dark:text-claude-darkTextSecondary/80 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors';
 
   return (
     <div
       data-pin-id={message.pinId ?? undefined}
-      className={`flex items-start gap-2.5 px-4 py-2.5 transition-colors ${
-        highlight ? 'ring-2 ring-claude-accent/60 rounded-lg bg-claude-accent/5' : ''
+      data-outgoing={isOutgoing ? 'true' : 'false'}
+      className={`${messengerRowClassName(isOutgoing)} transition-colors ${
+        highlight ? 'rounded-lg bg-claude-accent/5 ring-2 ring-claude-accent/60' : ''
       }`}
     >
-      {/* Avatar */}
       <img
         src={avatarSrc}
         alt={senderName}
-        className="h-8 w-8 shrink-0 rounded-full object-cover dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover"
+        style={{ width: 32, height: 32 }}
+        className="rounded-full object-cover flex-shrink-0"
         onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_AVATAR; }}
       />
 
-      {/* Body */}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
-          <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">
+      <div className={messengerColumnClassName(isOutgoing)}>
+        <div className={`mb-0.5 flex max-w-full flex-wrap items-center gap-1 px-1 ${isOutgoing ? 'flex-row-reverse' : 'flex-row'}`}>
+          <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
             {senderName}
           </span>
           {isSuspectSender && (
-            <span
-              className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-amber-500/15 text-amber-600 dark:text-amber-400"
+            <RoleBadge
+              className="bg-amber-500/15 text-amber-600 dark:text-amber-400"
               title="Sender GlobalMetaID is not a task member — not attributed by display name"
             >
               SUSPECT
-            </span>
+            </RoleBadge>
           )}
           {isChairSender && (
-            <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-claude-accent/15 text-claude-accent">
+            <RoleBadge className="bg-claude-accent/15 text-claude-accent">
               {i18nService.t('groupTasksChairBadge')}
-            </span>
+            </RoleBadge>
           )}
           {isOwnerSender && (
-            <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+            <RoleBadge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
               {i18nService.t('groupTasksOwnerBadge')}
-            </span>
+            </RoleBadge>
           )}
           {isRemoteSender && (
-            <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-green-500/15 text-green-600 dark:text-green-400">
+            <RoleBadge className="bg-green-500/15 text-green-600 dark:text-green-400">
               {i18nService.t('groupTasksRemoteBadge')}
-            </span>
+            </RoleBadge>
           )}
           {isOwnBotSender && (
-            <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+            <RoleBadge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
               {i18nService.t('openTeamCollabOwnBotBadge')}
-            </span>
+            </RoleBadge>
           )}
-          {timestamp && (
-            <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
-              {timestamp}
-            </span>
-          )}
-          {txId && <TxIdBadge txId={txId} />}
         </div>
-        {message.replyPin && (
-          <button
-            type="button"
-            onClick={() => onJumpToReply?.(message.replyPin!)}
-            className="mt-1 flex max-w-full items-center gap-1 rounded-md border-l-2 border-claude-accent/50 bg-claude-surfaceHover/40 dark:bg-claude-darkSurfaceHover/40 px-2 py-1 text-left text-[11px] text-claude-textSecondary dark:text-claude-darkTextSecondary/80 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-            title={message.replyPin}
-          >
-            <span className="shrink-0 text-claude-accent">↩</span>
-            <span className="truncate">
-              {replyTarget
-                ? `${i18nService.t('groupTasksReplyTo')} ${replyTarget.senderName}: ${replyTarget.preview || i18nService.t('groupTasksReplyEmpty')}`
-                : `${i18nService.t('groupTasksReplyTo')} ${i18nService.t('groupTasksReplyNotLoaded')}`}
-            </span>
-          </button>
-        )}
-        <div
-          className={`mt-1 rounded-lg px-3 py-2 text-sm ${
-            isOwnerSender
-              ? 'dark:bg-emerald-900/20 bg-emerald-50 dark:text-claude-darkText text-claude-text'
-              : 'dark:bg-claude-darkSurfaceHover/60 bg-claude-surfaceHover/60 dark:text-claude-darkText text-claude-text'
-          }`}
-        >
+
+        <div className={messengerBubbleClassName(isOutgoing)}>
+          {message.replyPin && (
+            <button
+              type="button"
+              onClick={() => onJumpToReply?.(message.replyPin!)}
+              className={replyClass}
+              title={message.replyPin}
+            >
+              <span className={`shrink-0 ${isOutgoing ? 'text-white/90' : 'text-claude-accent'}`}>↩</span>
+              <span className="truncate">
+                {replyTarget
+                  ? `${i18nService.t('groupTasksReplyTo')} ${replyTarget.senderName}: ${replyTarget.preview || i18nService.t('groupTasksReplyEmpty')}`
+                  : `${i18nService.t('groupTasksReplyTo')} ${i18nService.t('groupTasksReplyNotLoaded')}`}
+              </span>
+            </button>
+          )}
           {acceptanceSummaryFold && !deliverableExpanded ? (
             <button
               type="button"
               onClick={() => setDeliverableExpanded(true)}
-              className="block w-full text-left text-sm dark:text-claude-darkText text-claude-text"
+              className={`block w-full text-left text-sm ${foldLabelClass}`}
               title="Click to expand the full acceptance checklist"
             >
               <span className="inline-flex items-center gap-1.5 rounded bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
@@ -273,7 +276,7 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
             <button
               type="button"
               onClick={() => setDeliverableExpanded(true)}
-              className="block w-full text-left text-sm dark:text-claude-darkText text-claude-text"
+              className={`block w-full text-left text-sm ${foldLabelClass}`}
               title="Click to expand the full delivery"
             >
               <span className="inline-flex items-center gap-1.5 rounded bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-600 dark:text-amber-400">
@@ -281,13 +284,13 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
               </span>
             </button>
           ) : (
-            <MarkdownContent content={rawContent} className="text-sm" />
+            <MarkdownContent content={rawContent} className={markdownClassName} />
           )}
           {(longDeliverable || acceptanceSummaryFold) && deliverableExpanded && (
             <button
               type="button"
               onClick={() => setDeliverableExpanded(false)}
-              className="mt-1 text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary/70 hover:underline"
+              className={collapseClass}
             >
               {acceptanceSummaryFold
                 ? i18nService.t('groupTasksAcceptanceCollapse')
@@ -295,6 +298,26 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
             </button>
           )}
         </div>
+
+        {txidPreview && txId && (
+          <div className={messengerTxidRowClassName(isOutgoing)}>
+            <span className="font-mono">txid: {txidPreview}</span>
+            <button
+              type="button"
+              onClick={() => copyTextToClipboard(txId)}
+              className="inline-flex h-4 w-4 items-center justify-center rounded text-current hover:bg-black/10 dark:hover:bg-white/10"
+              title={i18nService.t('groupTasksCopyTxid')}
+              aria-label={i18nService.t('groupTasksCopyTxid')}
+            >
+              <DocumentDuplicateIcon className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+        {timestamp && (
+          <span className={messengerMetaClassName}>
+            {timestamp}
+          </span>
+        )}
       </div>
     </div>
   );

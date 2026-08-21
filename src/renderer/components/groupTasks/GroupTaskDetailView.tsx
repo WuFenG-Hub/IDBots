@@ -784,7 +784,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           <div
             ref={scrollRef}
             onScroll={handleTranscriptScroll}
-            className="flex-1 overflow-y-auto py-2"
+            className="flex-1 overflow-y-auto pt-3"
           >
             {/* Scroll-up pagination status (top of the transcript window). */}
             {messages.length > 0 && (loadingOlder || !hasMore) && (
@@ -863,7 +863,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     }
                   }}
                   rows={2}
-                  className="flex-1 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-white px-3 py-2 text-sm dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent/50 resize-none"
+                  className="flex-1 rounded-2xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3 py-2 text-sm leading-relaxed dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent/50 resize-none"
                   placeholder={i18nService.t('groupTasksSendPlaceholder')}
                 />
                 <button

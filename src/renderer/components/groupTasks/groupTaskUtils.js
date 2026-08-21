@@ -191,6 +191,30 @@ export function formatGroupTaskTime(value) {
 }
 
 /**
+ * Compact transcript timestamp matching A2A private-chat bubbles (`HH:mm`,
+ * `MM-DD HH:mm`, or `YYYY-MM-DD HH:mm`). Pass `now` in tests.
+ */
+export function formatGroupTaskMessengerTime(value, now = Date.now()) {
+  const date = toGroupTaskDate(value);
+  if (!date) return '';
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  const timeStr = `${hh}:${mm}`;
+  const nowDate = new Date(now);
+  if (date.getFullYear() < nowDate.getFullYear()) {
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${date.getFullYear()}-${month}-${day} ${timeStr}`;
+  }
+  if (nowDate.getTime() - date.getTime() > 24 * 60 * 60 * 1000) {
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${month}-${day} ${timeStr}`;
+  }
+  return timeStr;
+}
+
+/**
  * Compact relative time matching the local/A2A chat list (`19h`, `2d`).
  * `unit`/`count` let the UI build an i18n tooltip. Pass `now` in tests.
  */
