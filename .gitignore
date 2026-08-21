@@ -43,6 +43,7 @@ docs/*
 !docs/analysis/**
 tests/*
 !tests/runtimeDependencyContract.test.mjs
+!tests/dshRuntimeDepsCheck.test.mjs
 !tests/dshKernelEventMapper.test.mjs
 !tests/dshKernelRuntime.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs

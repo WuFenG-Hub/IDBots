@@ -34,6 +34,12 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - Windows NSIS uninstall policy is to preserve user data (`electron-builder.json` -> `nsis.deleteAppDataOnUninstall=false`); do not flip this unless a release explicitly requires destructive uninstall behavior.
 - The team preference is `main` as the only long-lived shared branch. Temporary branches should be short-lived and deleted after merge.
 
+## DSH Runtime Dependencies
+
+- `dsh-runtime/` is a nested npm package with its own `package.json` / lockfile / `node_modules`; the root `npm install` only reinstalls it via `postinstall`, and a plain `git pull` or merge does NOT reinstall it.
+- After pulling, merging, or switching to any commit that touches `dsh-runtime/package.json` or `dsh-runtime/package-lock.json`, immediately run `npm install --prefix dsh-runtime` (or `npm ci --prefix dsh-runtime`). A stale `dsh-runtime/node_modules` crashes the spawned DSH runtime process at plugin-load time (`ERR_MODULE_NOT_FOUND` / "JSON-RPC input closed").
+- `npm run check:dsh-deps` (scripts/check-dsh-runtime-deps.cjs) verifies installed dsh-runtime packages match `package.json`; it is wired as a pre-hook of `electron:dev` / `electron:dev:dsh`. Any commit that bumps dsh-runtime dependencies must keep this gate green.
+
 ## Database Upgrade Safety
 
 - Treat user-directory SQLite databases as persistent upgrade state. Auto-update does not replace or reset them.
