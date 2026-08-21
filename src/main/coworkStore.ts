@@ -522,6 +522,8 @@ export interface CoworkMessageMetadata {
   isFinal?: boolean;
   isDelegationInternal?: boolean;
   skillIds?: string[];
+  /** Marks a user turn filled verbatim from a quick action (建议操作) entry. */
+  source?: 'quick_action';
   suppressRunningStatus?: boolean;
   [key: string]: unknown;
 }

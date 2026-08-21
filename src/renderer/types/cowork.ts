@@ -655,6 +655,8 @@ export interface CoworkStartOptions {
   modelProvider?: string | null;
   /** Pending effort (off/low/high/max); undefined = tiered defaults, '' = model default. */
   effort?: string | null;
+  /** Set when the prompt was filled verbatim from a quick action (建议操作) entry. */
+  source?: 'quick_action';
 }
 
 // Continue session options
@@ -673,6 +675,8 @@ export interface CoworkSubmitInput {
   text: string;
   systemPrompt?: string;
   activeSkillIds?: string[];
+  /** Set when the text was filled verbatim from a quick action (建议操作) entry. */
+  source?: 'quick_action';
 }
 
 export type CoworkSubmitInputErrorCode =

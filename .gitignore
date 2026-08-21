@@ -277,6 +277,7 @@ man_base_data_pebble/
 !tests/coworkToolResultFold.test.mjs
 !tests/messageFeedback.test.mjs
 !tests/metaAppOwnerIdempotency.test.mjs
+!tests/metaAppGuard.test.mjs
 
 # dev-only isolated user-data dirs for "npm run electron:dev:fresh" (new-user simulation)
 .dev-userdata-fresh/

@@ -12,6 +12,8 @@ export type CoworkSubmitInput = {
   text: string;
   systemPrompt?: string;
   activeSkillIds?: string[];
+  /** Set when the text was filled verbatim from a quick action (建议操作) entry. */
+  source?: 'quick_action';
 };
 
 export type CoworkSubmitInputErrorCode =
@@ -321,11 +323,13 @@ export class CoworkTurnSubmissionController {
     const interactionKind = steerAdmission || capability === 'closing-local'
       ? 'steer'
       : undefined;
+    const sourceMetadata = input.source ? { source: input.source } : {};
     const message = existing ?? this.store.addMessageWithId(sessionId, submissionId, {
       type: 'user',
       content: requestedText,
       metadata: interactionKind
         ? {
+            ...sourceMetadata,
             interactionKind,
             submissionId,
             submissionMode: 'steer',
@@ -333,6 +337,7 @@ export class CoworkTurnSubmissionController {
             steerStatus: 'queued',
           }
         : {
+            ...sourceMetadata,
             submissionId,
             submissionMode: 'continue',
             submissionResult: 'pending',
