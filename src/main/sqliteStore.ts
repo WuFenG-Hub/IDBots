@@ -787,6 +787,25 @@ export class SqliteStore {
     `);
     this.migrateGroupChatTasksSupervisorGlobalmetaid();
 
+    // PR-1 (post-0.4.7): pending group-chat replies. Records replies generated at
+    // round end that failed to land on-chain, so they can be retried with the same
+    // content or surfaced as "generated-not-on-chain" state — never silently dropped.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS pending_group_replies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        task_id INTEGER NOT NULL,
+        metabot_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+
     // Group Task (任务导向群聊): task entity + members + deliverables (M1)
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_tasks (

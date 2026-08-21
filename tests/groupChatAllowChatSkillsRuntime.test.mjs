@@ -58,6 +58,10 @@ function makeDb(senderGlobalMetaId, overrides = {}) {
           values: [[1, 'group-1', messageContent, 'Sender', senderGlobalMetaId]],
         }];
       }
+      if (/FROM pending_group_replies/.test(sql)) {
+        // PR-1: no pending replies in these runtime cases — retry loop finds nothing.
+        return [{ columns: ['id', 'group_id', 'task_id', 'metabot_id', 'content', 'attempts'], values: [] }];
+      }
       throw new Error(`Unexpected SQL: ${sql} ${JSON.stringify(params)}`);
     },
     run(sql, params) {

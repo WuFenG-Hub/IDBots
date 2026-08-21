@@ -789,7 +789,16 @@ async function runReplyPipeline(
     await broadcastGroupChat(task.metabot_id, task.group_id, metabot.name, trimmed);
   } catch (err) {
     rethrowSqliteWasmBoundsError(err);
-    console.error('[Orchestrator] Broadcast failed:', err instanceof Error ? err.message : err);
+    // PR-1: never drop a generated reply silently. Record "generated-not-on-chain"
+    // so the same content can be retried (tick) or backfilled instead of silence.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[Orchestrator] Broadcast failed, recorded as pending for retry/backfill:', msg);
+    db.run(
+      `INSERT INTO pending_group_replies (group_id, task_id, metabot_id, content, status, last_error)
+       VALUES (?, ?, ?, ?, 'pending', ?)`,
+      [task.group_id, task.id, task.metabot_id, trimmed, msg]
+    );
+    saveDb();
     return;
   }
 
@@ -814,6 +823,64 @@ export interface OrchestratorOptions {
   runSkillTurnViaCowork?: RunSkillTurnViaCoworkFn;
 }
 
+/** Max retry attempts for a pending group-chat reply before it is marked discarded (kept for audit). */
+const MAX_PENDING_REPLY_ATTEMPTS = 5;
+
+/**
+ * PR-1: retry pending group-chat replies that failed to land on-chain.
+ * Re-broadcasts the SAME generated content; on repeated failure the row is marked
+ * discarded but kept for audit — "generated-not-on-chain" state instead of silence.
+ */
+async function retryPendingReplies(
+  db: Database,
+  saveDb: SaveDbFn,
+  getMetabotById: GetMetabotByIdFn,
+  broadcastGroupChat: BroadcastGroupChatFn
+): Promise<void> {
+  const rows = db.exec(
+    "SELECT id, group_id, task_id, metabot_id, content, attempts FROM pending_group_replies WHERE status = 'pending'"
+  );
+  if (!rows[0]) return;
+  const columns = rows[0].columns as string[];
+  for (const values of rows[0].values as unknown[][]) {
+    const row = columns.reduce((acc, col, i) => {
+      acc[col] = values[i];
+      return acc;
+    }, {} as Record<string, unknown>);
+    const id = Number(row.id);
+    const content = String(row.content ?? '');
+    const groupId = String(row.group_id);
+    const metabotId = Number(row.metabot_id);
+    const attempts = Number(row.attempts ?? 0);
+    const metabot = getMetabotById(metabotId);
+    const nickName = metabot?.name ?? '';
+    try {
+      await broadcastGroupChat(metabotId, groupId, nickName, content);
+      db.run(
+        "UPDATE pending_group_replies SET status = 'committed', updated_at = datetime('now') WHERE id = ?",
+        [id]
+      );
+      saveDb();
+    } catch (err) {
+      rethrowSqliteWasmBoundsError(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      const nextAttempts = attempts + 1;
+      if (nextAttempts >= MAX_PENDING_REPLY_ATTEMPTS) {
+        db.run(
+          "UPDATE pending_group_replies SET attempts = ?, status = 'discarded', last_error = ?, updated_at = datetime('now') WHERE id = ?",
+          [nextAttempts, msg, id]
+        );
+      } else {
+        db.run(
+          "UPDATE pending_group_replies SET attempts = ?, last_error = ?, updated_at = datetime('now') WHERE id = ?",
+          [nextAttempts, msg, id]
+        );
+      }
+      saveDb();
+    }
+  }
+}
+
 async function tick(
   db: Database,
   saveDb: SaveDbFn,
@@ -823,6 +890,8 @@ async function tick(
   options?: OrchestratorOptions
 ): Promise<void> {
   tickCount += 1;
+  // PR-1: first retry replies that failed to land on-chain (same content), bounded by attempts.
+  await retryPendingReplies(db, saveDb, getMetabotById, broadcastGroupChat);
   const taskRows = db.exec(
     'SELECT * FROM group_chat_tasks WHERE is_active = 1'
   );
