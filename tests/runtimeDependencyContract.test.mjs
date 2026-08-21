@@ -243,6 +243,29 @@ test('DSH shared runtime injects skill host env including IDBOTS_API_BASE_URL', 
     /skillHostEnvProvider:\s*\(\)\s*=>\s*\(\{[\s\S]*getSkillHostEnv\(\)[\s\S]*ensureDshSkillEnvChannel/,
     'CoworkRunner must wire getSkillHostEnv plus the BASH_ENV skill-session channel into the shared DSH runtime',
   );
+  const skillHostFn = coworkUtilSource.match(
+    /export function getSkillHostEnv\(\)[\s\S]*?export async function getEnhancedEnv/,
+  );
+  assert.ok(skillHostFn, 'getSkillHostEnv must remain a bounded helper before getEnhancedEnv');
+  assert.match(
+    skillHostFn[0],
+    /applyPackagedEnvOverrides\(env\)/,
+    'DSH skill host env must reuse Claude PATH/mingit injection so Windows bash is findable',
+  );
+  assert.match(
+    skillHostFn[0],
+    /PATH:\s*process\.env\.PATH/,
+    'getSkillHostEnv must seed PATH before mingit prepend',
+  );
+  const dshKernelSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'dshKernel', 'dshKernel.ts'),
+    'utf8',
+  );
+  assert.match(
+    dshKernelSource,
+    /mergeDshRuntimeProcessEnv\(\{\s*configEnv:\s*config\.env\s*\}\)/,
+    'DSH runtime spawn must collapse Windows Path/PATH so injected mingit wins',
+  );
 });
 
 test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
@@ -268,7 +291,7 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
   );
   assert.match(
     coworkUtilSource,
-    /IDBOTS_RPC_URL:\s*getMetaidRpcBase\(\)/,
+    /IDBOTS_RPC_URL\s*[:=]\s*getMetaidRpcBase\(\)/,
     'getSkillHostEnv must set IDBOTS_RPC_URL for skill scripts (global, not per-bot)',
   );
   assert.match(

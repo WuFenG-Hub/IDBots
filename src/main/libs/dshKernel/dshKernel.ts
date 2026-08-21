@@ -21,6 +21,7 @@ import { app } from 'electron'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
+import { mergeDshRuntimeProcessEnv } from '../windowsPathEnv'
 import { DshEventMapper } from './dshEventMapper'
 import type {
   DshApprovalAsk,
@@ -123,7 +124,7 @@ export class DshKernel {
     const client = new HarnessClient({
       command: this.opts.nodePath ?? process.execPath,
       args: [binPath, configPath],
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(config.env ?? {}) },
+      env: mergeDshRuntimeProcessEnv({ configEnv: config.env }),
     })
     client.start()
     const first = config.providers[0]
