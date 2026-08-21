@@ -48,6 +48,10 @@ test('deepseek web search: URL normalization + route detection', () => {
   assert.equal(deepSeekWebSearchBaseURL('https://api.deepseek.com/anthropic'), 'https://api.deepseek.com/anthropic/v1')
   assert.equal(deepSeekWebSearchBaseURL('https://api.deepseek.com/anthropic/v1'), 'https://api.deepseek.com/anthropic/v1')
   assert.equal(deepSeekWebSearchBaseURL('https://api.deepseek.com/responses'), 'https://api.deepseek.com/anthropic/v1')
+  // OpenAI-format `.../v1` bases must NOT nest the anthropic path under them
+  // (`/v1/anthropic/v1/messages` is an upstream 404 — the Windows report).
+  assert.equal(deepSeekWebSearchBaseURL('https://api.deepseek.com/v1'), 'https://api.deepseek.com/anthropic/v1')
+  assert.equal(deepSeekWebSearchBaseURL('https://api.deepseek.com/v1/'), 'https://api.deepseek.com/anthropic/v1')
   assert.equal(isOfficialDeepSeekRoute({ key: 'deepseek', baseUrl: 'http://relay.example/v1' }), true)
   assert.equal(isOfficialDeepSeekRoute({ key: 'opencode', baseUrl: 'https://api.deepseek.com/anthropic' }), true)
   assert.equal(isOfficialDeepSeekRoute({ key: 'opencode', baseUrl: 'http://127.0.0.1:48795/v1' }), false)

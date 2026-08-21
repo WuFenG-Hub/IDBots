@@ -81,14 +81,18 @@ export function isOfficialDeepSeekRoute(provider: Pick<DshTurnProviderRoute, 'ke
 /**
  * Normalize any DeepSeek provider base URL onto the Anthropic-compatible root
  * the web-search provider expects (`/messages` is appended by the package):
- * `https://api.deepseek.com` / `.../anthropic` / `.../responses`-style bases
- * all resolve to `<root>/anthropic/v1`.
+ * `https://api.deepseek.com` / `.../v1` / `.../anthropic` / `.../responses`-style
+ * bases all resolve to `<root>/anthropic/v1`.
  */
 export function deepSeekWebSearchBaseURL(baseUrl: string): string {
   let base = baseUrl.trim().replace(/\/+$/, '')
   base = base.replace(/\/responses$/, '')
   if (/\/anthropic\/v\d+$/.test(base)) return base
   if (/\/anthropic$/.test(base)) return `${base}/v1`
+  // A chat-completions-style `.../v1` base (the common OpenAI-format DeepSeek
+  // config) must collapse to the host root first — the Anthropic-compatible
+  // endpoint is NOT nested under it, so `/v1/anthropic/v1/messages` 404s.
+  base = base.replace(/\/v\d+$/, '')
   return `${base}/anthropic/v1`
 }
 
