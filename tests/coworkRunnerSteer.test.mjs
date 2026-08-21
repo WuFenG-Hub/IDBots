@@ -32,6 +32,7 @@ const { CoworkRunner } = loadCompiledModule('../dist-electron/main/libs/coworkRu
 const { CoworkTurnSubmissionController } = loadCompiledModule('../dist-electron/main/services/coworkTurnSubmission.js');
 const { setStoreGetter } = loadCompiledModule('../dist-electron/main/libs/claudeSettings.js');
 const hasSteerApi = typeof CoworkRunner.prototype.trySubmitSteer === 'function';
+const skipClaudeLocalKernel = 'Claude Agent SDK local kernel retired; local cowork is DSH-only';
 
 class FakeCoworkStore {
   constructor(cwd = process.cwd()) {
@@ -406,7 +407,7 @@ test('exposes synchronous live steer admission', () => {
   assert.equal(typeof CoworkRunner.prototype.trySubmitSteer, 'function');
 });
 
-test('initial input and steer share one SDK query and settle in FIFO order', { skip: !hasSteerApi }, async () => {
+test('initial input and steer share one SDK query and settle in FIFO order', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness();
   const settled = [];
   runner.on('steerSettled', (_sessionId, submissionId) => settled.push(submissionId));
@@ -437,7 +438,7 @@ test('initial input and steer share one SDK query and settle in FIFO order', { s
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('mid-turn steer interrupts the running turn and is flushed immediately', { skip: !hasSteerApi }, async () => {
+test('mid-turn steer interrupts the running turn and is flushed immediately', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness({
     sdkOptions: { interruptBehavior: 'success', resultAfterInputClose: true },
   });
@@ -475,7 +476,7 @@ test('mid-turn steer interrupts the running turn and is flushed immediately', { 
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('interrupt failure falls back to next turn boundary delivery', { skip: !hasSteerApi }, async () => {
+test('interrupt failure falls back to next turn boundary delivery', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness({
     sdkOptions: { interruptBehavior: 'fail' },
   });
@@ -506,7 +507,7 @@ test('interrupt failure falls back to next turn boundary delivery', { skip: !has
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('result before delivery acknowledgement still closes the local turn', async () => {
+test('result before delivery acknowledgement still closes the local turn', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness({
     sdkOptions: { resultBeforeFirstAck: true },
   });
@@ -526,7 +527,7 @@ test('result before delivery acknowledgement still closes the local turn', async
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('two top-level streaming end turns settle two delivered inputs before one result', async () => {
+test('two top-level streaming end turns settle two delivered inputs before one result', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness({
     sdkOptions: { resultAfterInputClose: true },
   });
@@ -561,7 +562,7 @@ test('two top-level streaming end turns settle two delivered inputs before one r
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('late delivery acknowledgement waits for a new terminal assistant boundary', async () => {
+test('late delivery acknowledgement waits for a new terminal assistant boundary', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness({
     sdkOptions: { terminalBeforeSecondAck: true, resultAfterInputClose: true },
   });
@@ -601,7 +602,7 @@ test('late delivery acknowledgement waits for a new terminal assistant boundary'
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('nested and non-end-turn streaming deltas are not local input boundaries', async () => {
+test('nested and non-end-turn streaming deltas are not local input boundaries', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness({
     sdkOptions: { resultAfterInputClose: true },
   });
@@ -628,7 +629,7 @@ test('nested and non-end-turn streaming deltas are not local input boundaries', 
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('result after a top-level terminal assistant boundary does not settle another input', async () => {
+test('result after a top-level terminal assistant boundary does not settle another input', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness({
     sdkOptions: { resultAfterInputClose: true },
   });
@@ -660,7 +661,7 @@ test('result after a top-level terminal assistant boundary does not settle anoth
   assert.deepEqual(settled, ['steer-after-result']);
 });
 
-test('result consumes one assistant credit before a later result-only steer settles', async () => {
+test('result consumes one assistant credit before a later result-only steer settles', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness();
   const settled = [];
   runner.on('steerSettled', (_sessionId, submissionId) => settled.push(submissionId));
@@ -693,7 +694,7 @@ test('result consumes one assistant credit before a later result-only steer sett
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('delivered steer with no further terminal boundary is settled by the stall watchdog', async () => {
+test('delivered steer with no further terminal boundary is settled by the stall watchdog', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, store, sessionId } = createRunnerHarness({
     runnerOptions: { localTurnStallTimeoutMs: 40 },
   });
@@ -729,7 +730,7 @@ test('delivered steer with no further terminal boundary is settled by the stall 
   assert.equal(store.getSession(sessionId).status, 'completed');
 });
 
-test('high-level assistant end turn does not double count a streaming boundary', async () => {
+test('high-level assistant end turn does not double count a streaming boundary', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness({
     sdkOptions: { resultAfterInputClose: true },
   });
@@ -762,7 +763,7 @@ test('high-level assistant end turn does not double count a streaming boundary',
   assert.deepEqual(settled, ['steer-dual-provider']);
 });
 
-test('generic runtime failure rejects an unacknowledged steer and allows explicit UUID retry', async () => {
+test('generic runtime failure rejects an unacknowledged steer and allows explicit UUID retry', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, store, sessionId } = createRunnerHarness({
     sdkOptions: { pauseBeforeSecondAck: true },
   });
@@ -812,7 +813,7 @@ test('generic runtime failure rejects an unacknowledged steer and allows explici
   }
 });
 
-test('generic runtime failure marks a delivered but unsettled steer failed', async () => {
+test('generic runtime failure marks a delivered but unsettled steer failed', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, store, sessionId } = createRunnerHarness();
   runner.on('error', () => undefined);
   const controller = new CoworkTurnSubmissionController({
@@ -848,7 +849,7 @@ test('generic runtime failure marks a delivered but unsettled steer failed', asy
   }
 });
 
-test('automatic retry fails pending steers and closes the superseded input channel', async () => {
+test('automatic retry fails pending steers and closes the superseded input channel', { skip: skipClaudeLocalKernel }, async () => {
   const sdk = createRetrySdk();
   let releaseSecondLoader;
   let enterSecondLoader;
@@ -902,7 +903,7 @@ test('automatic retry fails pending steers and closes the superseded input chann
   assert.equal(sdk.activeInputConsumers, 0);
 });
 
-test('continueSession refuses to start a concurrent runner while live input is open', { skip: !hasSteerApi }, async () => {
+test('continueSession refuses to start a concurrent runner while live input is open', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness();
   const run = runner.startSession(sessionId, 'initial task');
   await sdk.waitForInputCount(1);
@@ -976,7 +977,7 @@ test('sandbox and auto sessions report sandbox capability during setup', async (
   }
 });
 
-test('stop aborts the live channel and query without an unhandled rejection', { skip: !hasSteerApi }, async () => {
+test('stop aborts the live channel and query without an unhandled rejection', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness();
   const unhandled = [];
   const onUnhandled = (reason) => unhandled.push(reason);
@@ -997,7 +998,7 @@ test('stop aborts the live channel and query without an unhandled rejection', { 
   }
 });
 
-test('Stop cancels in-flight and queued controller steers within a bounded time', async () => {
+test('Stop cancels in-flight and queued controller steers within a bounded time', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, store, sessionId } = createRunnerHarness({
     sdkOptions: { pauseBeforeSecondAck: true },
   });
@@ -1057,7 +1058,7 @@ test('Stop cancels in-flight and queued controller steers within a bounded time'
   }
 });
 
-test('Stop preserves a delivered but unsettled runner steer', async () => {
+test('Stop preserves a delivered but unsettled runner steer', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, store, sessionId } = createRunnerHarness();
   const controller = new CoworkTurnSubmissionController({
     store,
@@ -1091,7 +1092,7 @@ test('Stop preserves a delivered but unsettled runner steer', async () => {
   }
 });
 
-test('Stop while controller waits for a closing local turn cancels without restarting Continue', async () => {
+test('Stop while controller waits for a closing local turn cancels without restarting Continue', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, store, sessionId } = createRunnerHarness();
   const controller = new CoworkTurnSubmissionController({
     store,
@@ -1127,7 +1128,7 @@ test('Stop while controller waits for a closing local turn cancels without resta
   }
 });
 
-test('reports sandbox only for an active sandbox turn and inactive for a retained idle VM', { skip: !hasSteerApi }, () => {
+test('reports sandbox only for an active sandbox turn and inactive for a retained idle VM', () => {
   const { runner, sessionId } = createRunnerHarness({ session: { executionMode: 'sandbox' } });
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
   runner.activeSessions.set(sessionId, { executionMode: 'sandbox', localTurnState: 'open' });
@@ -1141,7 +1142,7 @@ test('reports sandbox only for an active sandbox turn and inactive for a retaine
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('waitForActiveTurnSettlement resolves after the active turn cleanup', { skip: !hasSteerApi }, async () => {
+test('waitForActiveTurnSettlement resolves after the active turn cleanup', { skip: skipClaudeLocalKernel }, async () => {
   const { runner, sdk, sessionId } = createRunnerHarness();
   const run = runner.startSession(sessionId, 'initial task');
   await sdk.waitForInputCount(1);

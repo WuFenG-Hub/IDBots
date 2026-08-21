@@ -7,9 +7,9 @@ import path from 'path';
 import type { Readable } from 'stream';
 import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
-import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionResult } from './coworkPermissionTypes';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, isDshKernelEnabled, resolveDshProviderRoute } from './claudeSettings';
+import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
 import { DshStreamUiGate } from './dshStreamUiGate';
@@ -23,16 +23,14 @@ import {
   writeDshSkillSessionEnvFile,
 } from './dshSkillSessionEnv';
 import { mapDshReasoningEffort } from './dshReasoningEffort';
-import { effortForClaudeSdk, toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
-import { loadClaudeSdk } from './claudeSdk';
+import { toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
 import {
   CoworkDshSteerWindowClosedError,
   CoworkSteerChannel,
-  buildCoworkSdkUserMessage,
   buildCoworkSteerSdkMessage,
   buildCoworkSteerText,
 } from './coworkSteerChannel';
-import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillHostEnv, getSkillsRoot, ensureCoworkTempDir } from './coworkUtil';
+import { getEnhancedEnv, getSkillHostEnv, getSkillsRoot, ensureCoworkTempDir } from './coworkUtil';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult } from './coworkAssistantReply';
@@ -58,31 +56,20 @@ import {
   type KnowledgePromptEntry,
 } from './knowledgePromptBlocks';
 import { tApp } from './appLanguage';
-import { COWORK_CONTEXT_SAFETY_NET_RATIO, getCoworkContextBudget, isContextWindowExceededError, shouldIncludeCoworkContextMessage } from './coworkContextBudget';
+import { isContextWindowExceededError } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
-import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
 import { hasEmbeddedSkillCatalog } from './skillPromptMarkers';
 import { buildMetabotPersonaPrompt } from './metabotPersonaPrompt';
 import { readBootstrapDoc } from './welcomeBootstrap';
-import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
-import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import {
   clearCoworkSessionUpstream,
   getCoworkOpenAICompatProxyBaseURL,
   getCoworkOpenAICompatProxyStatus,
-  getCoworkSnipHeadTokens,
   resetCoworkSnipHeadTokens,
   resolveCoworkBillingSource,
-  setCoworkSnipHeadTokens,
 } from './coworkOpenAICompatProxy';
-import {
-  COWORK_TOOL_RESULT_SNIP_HYSTERESIS_TOKENS,
-  COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS,
-  snipStaleToolResultBlocks,
-  type AnthropicMessageLike,
-} from './coworkToolResultSnip';
 import {
   buildUserConfiguredMcpServerConfigs,
   type UserConfiguredMcpServerDefinition,
@@ -385,10 +372,6 @@ function isStaleConversationSessionError(message: string): boolean {
   return /No conversation found with session ID/i.test(message);
 }
 
-function isDeepSeekMissingReasoningContentError(message: string): boolean {
-  return isDeepSeekProviderMissingReasoningContentError(message);
-}
-
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -431,6 +414,16 @@ export function shouldBlockBuiltinWebTool(toolName: string): boolean {
   }
 
   return false;
+}
+
+/** Leftover sandbox VM agent-override shape (Claude Agent SDK no longer imported). */
+interface AgentDefinition {
+  description: string;
+  prompt: string;
+  disallowedTools?: string[];
+  tools?: string[] | string;
+  model?: string;
+  criticalSystemReminder_EXPERIMENTAL?: string;
 }
 
 export function buildCoworkSdkAgentOverrides(model?: string | null): Record<string, AgentDefinition> {
@@ -634,53 +627,6 @@ function extractHostFromUrl(rawValue: string | undefined): string | null {
   } catch {
     return null;
   }
-}
-
-function shouldForceTextOnlyAttachmentMode(
-  anthropicBaseUrl: string | undefined,
-  anthropicModel: string | undefined
-): boolean {
-  const host = extractHostFromUrl(anthropicBaseUrl)?.toLowerCase();
-  const normalizedModel = String(anthropicModel ?? '').trim().toLowerCase();
-
-  // DeepSeek Anthropic-compatible endpoint currently rejects image/document
-  // content blocks in some flows. Force text-only file references.
-  if (host && (host === 'api.deepseek.com' || host.endsWith('.deepseek.com'))) {
-    return true;
-  }
-  return normalizedModel.startsWith('deepseek');
-}
-
-/**
- * Estimate the token savings a snip boundary would buy for a session, by
- * projecting its cowork store messages into Anthropic-shaped messages and
- * running the same deterministic snip the proxy will run on the wire. The
- * store truncates tool results for display, so this is a lower bound — the
- * same is true of the budget estimate it is compared against.
- */
-function estimateCoworkStoreToolResultSnipSavings(
-  messages: CoworkMessage[],
-  headTokenBudget: number
-): number {
-  const projected: AnthropicMessageLike[] = [];
-  for (const message of messages) {
-    if (!shouldIncludeCoworkContextMessage(message)) {
-      continue;
-    }
-    if (message.type === 'tool_result') {
-      const toolUseId = typeof message.metadata?.toolUseId === 'string' ? message.metadata.toolUseId : message.id;
-      projected.push({
-        role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: toolUseId, content: message.content }],
-      });
-      continue;
-    }
-    projected.push({
-      role: message.type === 'user' ? 'user' : 'assistant',
-      content: message.content,
-    });
-  }
-  return snipStaleToolResultBlocks(projected, headTokenBudget).stats.savedTokens;
 }
 
 function isImageFilePath(filePath: string): boolean {
@@ -1093,7 +1039,7 @@ interface ActiveSession {
    * the signature of a DeepSeek thinking turn that ended after emitting only
    * the `[reasoning unavailable]` placeholder (or otherwise no handoff). When
    * set, the turn must NOT be falsely reported as `completed` — see the
-   * completion guard in runClaudeCodeLocal.
+   * completion guard in runDshSessionLocal.
    */
   emptyTerminalTurnDetected: boolean;
   executionMode: CoworkExecutionMode;
@@ -1470,8 +1416,6 @@ export interface CoworkEpisodeTimeline {
 }
 
 export interface CoworkRunnerOptions {
-  /** Test seam for the runtime-loaded ESM SDK; production uses the standard loader. */
-  loadClaudeSdk?: typeof loadClaudeSdk;
   /** When set, env overrides (e.g. Twin wallet for metabot-basic) are merged into session env for tool execution. */
   getSkillSessionEnvOverrides?: (sessionId: string) => Promise<Record<string, string>>;
   /** When set, fetches MetaBot by id for persona injection into system prompt. */
@@ -1665,7 +1609,6 @@ export class CoworkRunner extends EventEmitter {
   private skillTools?: SkillToolControl;
   private readonly localTurnStallTimeoutMs: number;
   private readonly dshTurnStallTimeoutMs: number;
-  private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
   /**
    * Per-session accumulated usage stats, keyed by sessionId. Independent of the
@@ -1767,7 +1710,6 @@ export class CoworkRunner extends EventEmitter {
       0,
       options?.dshTurnStallTimeoutMs ?? DSH_TURN_STALL_TIMEOUT_MS
     );
-    this.loadClaudeSdk = options?.loadClaudeSdk ?? loadClaudeSdk;
   }
 
 
@@ -2135,7 +2077,7 @@ export class CoworkRunner extends EventEmitter {
         }
       }
     } catch (usageError) {
-      coworkLog('DEBUG', 'runClaudeCodeLocal', 'getContextUsage() unavailable or failed, keeping estimator', {
+      coworkLog('DEBUG', 'captureRealContextUsageFromSdk', 'getContextUsage() unavailable or failed, keeping estimator', {
         sessionId,
         error: usageError instanceof Error ? usageError.message : String(usageError),
       });
@@ -5554,8 +5496,8 @@ export class CoworkRunner extends EventEmitter {
         return { success: false, error: 'Manual compaction is already queued for the next message.' };
       }
     } else {
-      // Idle local sessions have no activeSession in memory (runClaudeCodeLocal
-      // removes it in its finally block), but the user must still be able to
+      // Idle local sessions have no activeSession in memory (the local kernel
+      // removes it after each turn), but the user must still be able to
       // queue a manual compaction from the header button. Validate against the
       // persisted session and the cross-session turn guard instead.
       if (this.isCrossSessionTurnRunning(sessionId)) {
@@ -6134,17 +6076,29 @@ export class CoworkRunner extends EventEmitter {
   private resolveSessionKernelChoice(activeSession: ActiveSession): ReturnType<typeof resolveKernelChoice> {
     const route = this.resolveSessionDshRoute(activeSession.sessionId);
     return resolveKernelChoice({
-      enabled: isDshKernelEnabled(),
       apiType: route?.apiFormat ?? null,
       sessionHandle: activeSession.claudeSessionId,
     });
   }
 
   /**
+   * True when this session's next local turn runs on DSH. Public so tests
+   * (and any leftover callers) can inspect routing without going through
+   * a retired Claude fallback.
+   */
+  shouldRunDshKernel(activeSession: ActiveSession): boolean {
+    try {
+      return this.resolveSessionKernelChoice(activeSession) === 'dsh';
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * Session-scoped DSH provider route — the same three-tier model resolution
    * the Claude path uses: the session's own model selector, then the metabot's
    * llm_id, then the global default. Falls back to the default when an
-   * llm_id does not resolve (matching runClaudeCodeLocal's fallback).
+   * llm_id does not resolve (matching the DSH route fallback).
    */
   private resolveSessionDshRoute(sessionId: string): ReturnType<typeof resolveDshProviderRoute> {
     const sessionRow = this.store.getSession(sessionId)
@@ -6240,10 +6194,9 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
-   * Local kernel dispatch: DSH is the default for openai/responses; Claude
-   * remains only for anthropic-direct (and sessions already pinned to it).
-   * Sandbox-unavailable / outside-cwd fallbacks must use this — never
-   * hard-wire runClaudeCodeLocal, which would skip DSH.
+   * Local kernel dispatch: DSH only. Anthropic Messages is unavailable (no
+   * Claude SDK fallback). Sandbox-unavailable / outside-cwd fallbacks must
+   * use this — never hard-wire a retired kernel.
    */
   private async runLocalKernel(
     activeSession: ActiveSession,
@@ -6251,11 +6204,15 @@ export class CoworkRunner extends EventEmitter {
     cwd: string,
     systemPrompt: string
   ): Promise<void> {
-    let kernelChoice: ReturnType<typeof resolveKernelChoice> = 'claude';
+    let kernelChoice: ReturnType<typeof resolveKernelChoice> = 'dsh';
     try {
       kernelChoice = this.resolveSessionKernelChoice(activeSession);
-    } catch {
-      kernelChoice = 'claude';
+    } catch (error) {
+      coworkLog('WARN', 'runLocalKernel', 'Kernel routing failed; continuing on DSH so the turn error is visible', {
+        sessionId: activeSession.sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      kernelChoice = 'dsh';
     }
     if (kernelChoice === 'unavailable') {
       this.handleError(
@@ -6269,11 +6226,7 @@ export class CoworkRunner extends EventEmitter {
       this.removeActiveSession(activeSession.sessionId, activeSession);
       return;
     }
-    if (kernelChoice === 'dsh') {
-      await this.runDshSessionLocal(activeSession, prompt, cwd, systemPrompt);
-      return;
-    }
-    await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt);
+    await this.runDshSessionLocal(activeSession, prompt, cwd, systemPrompt);
   }
 
   /** Subagent panel: child agent ids of a DSH session (post-hoc safe). */
@@ -6339,12 +6292,18 @@ export class CoworkRunner extends EventEmitter {
         });
       }
     }
-    // Same billing/upstream bookkeeping the Claude path records: the usage
-    // chip's cost/balance rows key off billingSource, the upstream row off
-    // these identity fields.
+    // Same billing/upstream bookkeeping the usage chip reads: cost/balance
+    // rows key off billingSource, the upstream row off these identity fields.
     activeSession.billingSource = resolveCoworkBillingSource(route.provider, route.baseUrl);
     activeSession.upstreamProvider = route.provider;
     activeSession.upstreamBaseURL = route.baseUrl;
+    coworkLog('INFO', 'runDshSessionLocal', 'Resolved API config for session', {
+      sessionId,
+      provider: route.provider,
+      upstreamBaseURL: route.baseUrl,
+      model: route.model,
+      apiFormat,
+    });
     // Re-register: steer/cancel plumbing looks the session up in
     // activeSessions, and turn N+1 arrives after turn N's teardown removed it.
     this.activeSessions.set(sessionId, activeSession);
@@ -6371,9 +6330,7 @@ export class CoworkRunner extends EventEmitter {
       // go missing while a worker turn ran, and vice versa).
       this.dshHostToolRegistry.set(sessionId, new Map(hostTools.map((tool) => [tool.name, tool])))
       // Volatile context (memory projections, time, browser tabs, remote
-      // services) rides the user-message tail on BOTH kernels — the claude
-      // path builds it inside runClaudeCodeLocal; replicate here so DSH
-      // sessions get the same proactive injection.
+      // services) rides the user-message tail on DSH turns.
       const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId)
       const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId)
       const volatileBlocks = await this.buildVolatileContextPrompt(
@@ -6954,7 +6911,7 @@ export class CoworkRunner extends EventEmitter {
       // do not ask, so unattended workers are not blocked on a human. Default
       // mode prompts through the shared AskUserQuestion confirmation.
       const permissionMode = activeSession?.permissionMode ?? 'default'
-      if (permissionMode === 'default' && activeSession) {
+      if (permissionMode === 'default' && activeSession?.abortController) {
         const policyResult = await this.enforceToolSafetyPolicy(
           sessionId,
           activeSession.abortController.signal,
@@ -6984,7 +6941,7 @@ export class CoworkRunner extends EventEmitter {
       if (activeSession?.autoApprove) {
         return { decision: 'allow' }
       }
-      if (activeSession?.autoApproveTools.has(normalized)) {
+      if (activeSession?.autoApproveTools?.has(normalized)) {
         return { decision: 'allow' }
       }
       return { decision: 'allow' }
@@ -7682,1227 +7639,6 @@ export class CoworkRunner extends EventEmitter {
     return memoryTools;
   }
 
-  private async runClaudeCodeLocal(
-    activeSession: ActiveSession,
-    prompt: string,
-    cwd: string,
-    systemPrompt: string,
-    isRetry: boolean = false
-  ): Promise<void> {
-    const { sessionId, abortController } = activeSession;
-    const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
-
-    if (this.isSessionStopRequested(sessionId, activeSession)) {
-      this.store.updateSession(sessionId, { status: 'idle' });
-      this.clearPendingPermissions(sessionId);
-      this.removeActiveSession(sessionId, activeSession);
-      return;
-    }
-
-    // Reset per-turn output dedupe flags.
-    activeSession.hasAssistantTextOutput = false;
-    activeSession.hasAssistantThinkingOutput = false;
-    activeSession.currentStreamingTextSuppressed = false;
-    activeSession.currentStreamingTextTruncated = false;
-    activeSession.currentStreamingThinkingTruncated = false;
-    activeSession.currentStreamingDisplayContent = '';
-    activeSession.lastStreamingTextUpdateAt = 0;
-    activeSession.lastStreamingThinkingUpdateAt = 0;
-    activeSession.delegationRequestEmitted = false;
-    activeSession.staleResumeDetected = false;
-    activeSession.staleResumeRetryAllowed = !isRetry;
-    activeSession.contextOverflowDetected = false;
-    activeSession.contextOverflowRetryAllowed = false;
-    activeSession.emptyTerminalTurnDetected = false;
-
-    // Per-session model override (chosen in the session's own model selector)
-    // takes precedence; then the metabot's brain (model id, or legacy provider
-    // key); otherwise the global default config. The session override only
-    // affects this conversation. `brainEffort` rides along so the effort tier
-    // below can apply the bot brain's reasoning effort.
-    const sessionRow = this.store.getSession(sessionId);
-    const sessionModel = sessionRow?.model?.trim() || null;
-    const sessionModelProvider = sessionRow?.modelProvider?.trim() || null;
-    const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId);
-    const automationModelOverride = sessionModel || brain?.modelId || null;
-    let brainEffort: LlmEffortLevel | null = brain?.effort ?? null;
-    // Bot context lets the resolution last-resort warning name the offending bot.
-    const brainContext = brain ? { botId: brain.metabotId, botName: brain.botName } : undefined;
-    let apiConfigResolution = automationModelOverride
-      ? resolveApiConfigForModel(
-        automationModelOverride,
-        'local',
-        sessionId,
-        sessionModel ? sessionModelProvider : (brain?.providerKey ?? null),
-        brainContext,
-      )
-      : { config: getCurrentApiConfig('local') };
-    let apiConfig = apiConfigResolution.config;
-    if (!apiConfig && automationModelOverride) {
-      // The primary brain did not resolve (provider disabled/removed, or the
-      // model was deleted). The bot's fallback brain (model+effort) takes over
-      // before the global default — A2A/group-task sessions follow the metabot
-      // edit page's brain pair wherever possible.
-      const fallbackResolution = brain?.fallbackModelId
-        ? resolveApiConfigForModel(brain.fallbackModelId, 'local', sessionId, brain.fallbackProviderKey, brainContext)
-        : null;
-      if (fallbackResolution?.config) {
-        coworkLog('INFO', 'runClaudeCodeLocal', 'Primary brain did not resolve; using the fallback brain', {
-          sessionId,
-          primary: automationModelOverride,
-          fallback: brain?.fallbackModelId,
-          reason: apiConfigResolution.error ?? null,
-        });
-        apiConfigResolution = fallbackResolution;
-        apiConfig = fallbackResolution.config;
-        brainEffort = brain?.fallbackEffort ?? null;
-      } else {
-        coworkLog('WARN', 'runClaudeCodeLocal', 'Metabot brain did not resolve to an enabled provider; falling back to the default model config', {
-          sessionId,
-          llmId: automationModelOverride,
-          reason: apiConfigResolution.error ?? null,
-        });
-        apiConfigResolution = { config: getCurrentApiConfig('local') };
-        apiConfig = apiConfigResolution.config;
-        brainEffort = null;
-      }
-    }
-    if (!apiConfig) {
-      this.handleError(sessionId, apiConfigResolution.error ?? 'API configuration not found. Please configure model settings.');
-      this.clearPendingPermissions(sessionId);
-      this.removeActiveSession(sessionId, activeSession);
-      return;
-    }
-    const modelLimits = resolveCurrentModelLimits(apiConfig.model);
-    // Record who actually bills this session: only a deepseek provider key or
-    // deepseek host gets the DeepSeek balance/CNY treatment in the usage chip.
-    // Gateway providers (opencode plans, custom gateways, ...) serving deepseek
-    // models are 'other' — tokens only, no account balance, no rate estimate.
-    activeSession.billingSource = resolveCoworkBillingSource(apiConfig.provider, apiConfig.upstreamBaseURL);
-    // Remember the REAL upstream for observability: the usage panel and logs
-    // show which provider this session actually hits (metabot llm_id override,
-    // defaultProvider preference, or config-order fallback — whatever won).
-    activeSession.upstreamProvider = apiConfig.provider;
-    activeSession.upstreamBaseURL = apiConfig.upstreamBaseURL;
-    coworkLog('INFO', 'runClaudeCodeLocal', 'Resolved API config for session', {
-      sessionId,
-      provider: apiConfig.provider ?? null,
-      upstreamBaseURL: apiConfig.upstreamBaseURL ?? null,
-      model: apiConfig.model,
-      apiType: apiConfig.apiType,
-      billingSource: activeSession.billingSource,
-    });
-
-    const claudeCodePath = getClaudeCodePath();
-    const envVars = await getEnhancedEnvWithTmpdir(cwd, 'local', apiConfig);
-    // Disable Claude Code's per-spawn git-status injection into the system
-    // prompt. Every turn spawns a fresh subprocess, and if the workspace is a
-    // git repo the injected git status/log changes as the agent edits files —
-    // which changes the first bytes of the system prompt and invalidates
-    // DeepSeek's entire cacheable prefix on every turn (~hundreds of k tokens
-    // of cache miss). This flag only stops the PROMPT injection; Claude Code
-    // can still run git commands as tools. Mirrors the cache-first principle:
-    // keep the system-prompt head byte-stable across turns.
-    envVars.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS = '1';
-    // So the SDK's forked process uses the correct Electron exe on Windows (avoids process.execPath returning e.g. lDBots.exe)
-    envVars.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
-
-    // Enable the SDK/CLI built-in auto-compact for non-Claude models with
-    // known context windows (DeepSeek V4 1M, Qwen, GLM, ...). The native CLI
-    // falls back to a 200K window for unknown models and skips its auto-compact
-    // gate when no window override is configured, which is why sessions used to
-    // grow until the provider rejected them. CLAUDE_CODE_MAX_CONTEXT_TOKENS is
-    // only honored by the CLI for non-claude-* model ids. The SDK then owns
-    // proactive (segmented/reactive) compaction in-session; IDBots' own tier
-    // compaction demotes to a safety net (see getCoworkContextBudget below).
-    const sdkAutoCompactEnv = buildCoworkSdkAutoCompactEnv(modelLimits);
-    if (sdkAutoCompactEnv) {
-      Object.assign(envVars, sdkAutoCompactEnv.env);
-      coworkLog('INFO', 'runClaudeCodeLocal', 'Enabled SDK built-in auto-compact', {
-        sessionId,
-        modelId: modelLimits.modelId,
-        contextWindow: modelLimits.contextWindow,
-        maxOutputTokens: modelLimits.maxOutputTokens,
-        limitSource: modelLimits.source,
-        autoCompactWindow: sdkAutoCompactEnv.autoCompactWindow,
-      });
-    }
-    const skillEnvOverrides = await this.getSkillSessionEnvOverrides?.(sessionId);
-    if (skillEnvOverrides && Object.keys(skillEnvOverrides).length > 0) {
-      Object.assign(envVars, skillEnvOverrides);
-    }
-    // Route this session's Anthropic traffic through the session-scoped proxy
-    // path (/s/<coworkSessionId>/v1/messages) so the proxy can apply the
-    // per-session tool-result snip boundary (tiered compaction tier 1). The
-    // Anthropic SDK joins baseURL + path via plain string concat, so appending
-    // the segment here suffices. Use the CoWork session id — it survives SDK
-    // session resets and hard compactions, unlike claudeSessionId. Local mode
-    // only: sandbox envs come from buildSandboxEnv and stay untouched.
-    //
-    // IMPORTANT: this session path only exists on the local cowork proxy. For
-    // anthropic-direct providers the resolved ANTHROPIC_BASE_URL is the remote
-    // provider endpoint, and appending /s/<sessionId> makes the upstream return
-    // 404 — which the Claude Agent SDK then surfaces as "There's an issue with
-    // the selected model". So only splice the segment in when the base URL is
-    // actually the proxy (openai/responses providers). See resolveMatchedProvider:
-    // anthropic apiFormat keeps the remote baseURL, every other format routes via
-    // the proxy (baseURL = http://127.0.0.1:<port>).
-    const proxyBaseURL = getCoworkOpenAICompatProxyBaseURL('local');
-    const isProxyRouted = !!(proxyBaseURL && envVars.ANTHROPIC_BASE_URL?.startsWith(proxyBaseURL));
-    if (isProxyRouted && envVars.ANTHROPIC_BASE_URL) {
-      envVars.ANTHROPIC_BASE_URL = `${envVars.ANTHROPIC_BASE_URL.replace(/\/+$/, '')}/s/${encodeURIComponent(sessionId)}`;
-    }
-    let stderrTail = '';
-
-    // Kept for child processes spawned down the tool chain (node/npx shims run
-    // Electron as Node). SDK 0.3.x spawns the native Claude binary directly, so
-    // the CLI itself no longer depends on this flag.
-    if (app.isPackaged) {
-      envVars.ELECTRON_RUN_AS_NODE = '1';
-    }
-
-    // On Windows, check that git-bash is available before attempting to start.
-    // Claude Code CLI requires git-bash for shell tool execution.
-    if (process.platform === 'win32' && !envVars.CLAUDE_CODE_GIT_BASH_PATH) {
-      const errorMsg = 'Windows local execution requires a bundled Git Bash runtime, but this installation is missing it. '
-        + 'This is a packaging issue in this app build (PortableGit was not bundled). '
-        + 'Please reinstall or upgrade to a correctly built version that includes resources/mingit. '
-        + 'Advanced fallback: set CLAUDE_CODE_GIT_BASH_PATH to your bash.exe path '
-        + '(e.g. C:\\Program Files\\Git\\bin\\bash.exe).';
-      coworkLog('ERROR', 'runClaudeCodeLocal', errorMsg);
-      this.handleError(sessionId, errorMsg);
-      this.clearPendingPermissions(sessionId);
-      this.removeActiveSession(sessionId, activeSession);
-      return;
-    }
-
-    let effectivePrompt = prompt;
-    const sessionSnapshotForBudget = this.store.getSession(sessionId);
-    // User-initiated manual compaction (Phase 3): the button queues this flag
-    // while the session is idle; the next turn resets the SDK session and
-    // folds the conversation into a synthetic compacted prompt (same path as
-    // the automatic tier-2 compaction). Consumed once; retries never re-run it.
-    let manualCompactApplied = false;
-    // Consume the user-initiated manual compaction: either queued on the live
-    // active session (button pressed mid-session) or in the idle queue
-    // (button pressed between turns, when no activeSession exists). The idle
-    // queue entry is consumed exactly once and never re-applied.
-    const manualCompactQueued = activeSession.pendingManualCompact || this.pendingManualCompactSessions.has(sessionId);
-    if (manualCompactQueued && !isRetry) {
-      activeSession.pendingManualCompact = false;
-      this.pendingManualCompactSessions.delete(sessionId);
-      resetCoworkSnipHeadTokens(sessionId);
-      const compacted = buildCoworkCompactedPrompt({
-        messages: sessionSnapshotForBudget?.messages ?? [],
-        currentPrompt: prompt,
-        modelLimits,
-      });
-      effectivePrompt = compacted.prompt;
-      this.store.updateSession(sessionId, { claudeSessionId: null });
-      activeSession.claudeSessionId = null;
-      activeSession.pendingCacheBreakReason = 'manual_compact';
-      manualCompactApplied = true;
-      coworkLog('INFO', 'runClaudeCodeLocal', 'Manual compaction requested; starting compacted SDK session instead of resume', {
-        sessionId,
-        modelId: modelLimits.modelId,
-        compactedEstimatedTokens: compacted.estimatedTokens,
-        compactedRecentMessages: compacted.recentMessages,
-        compactedSummarizedMessages: compacted.summarizedMessages,
-      });
-      this.addSystemMessage(
-        sessionId,
-        '已手动压缩历史并重置底层模型会话，本次输入从压缩后的上下文继续。'
-      );
-    }
-    // N4 (GT#12): budget evaluation must not depend on claudeSessionId being
-    // present. DeepSeek reasoning-history resets clear claudeSessionId and
-    // start a fresh SDK session while the cowork store history keeps growing;
-    // gating on claudeSessionId there skipped snip/compact until the next
-    // successful resume, letting sessions balloon to the window limit (the
-    // 2026-08-09 diagnosed session reached 605K chars with no Tier-1/Tier-2
-    // intervention). Evaluate whenever there is history to evaluate — a brand
-    // new session with zero messages still skips the first run — and keep
-    // skipping automatic error-retry re-runs (isRetry) so a retry never
-    // double-compacts the same turn. The manual-compaction branch above
-    // already compacted this turn, so it takes precedence over the automatic
-    // budget (no re-evaluation on top of an explicit compaction).
-    if (!manualCompactApplied && shouldEvaluateCoworkContextBudget({
-      claudeSessionId: activeSession.claudeSessionId,
-      isRetry,
-      messageCount: sessionSnapshotForBudget?.messages?.length ?? 0,
-    })) {
-      const lastTurnInputTokens = this.getSessionLastTurnInputTokens(sessionId);
-      if (
-        lastTurnInputTokens !== undefined
-        && modelLimits.contextWindow > 0
-        && lastTurnInputTokens > modelLimits.contextWindow
-      ) {
-        // Some gateways serving DeepSeek report per-turn totals far above the
-        // model window (observed 1.5M-3.9M on a 1M model). These are NOT the
-        // current per-request context size, so they must not drive compaction
-        // or the ring. getCoworkContextBudget already ignores such values;
-        // log here so the phenomenon stays observable.
-        coworkLog('WARN', 'runClaudeCodeLocal', 'Provider-reported last-turn input exceeds model window; ignoring it for context budget', {
-          sessionId,
-          modelId: modelLimits.modelId,
-          contextWindow: modelLimits.contextWindow,
-          lastTurnInputTokens,
-        });
-      }
-      const budget = getCoworkContextBudget({
-        messages: sessionSnapshotForBudget?.messages ?? [],
-        currentPrompt: prompt,
-        systemPrompt,
-        modelLimits,
-        // When the SDK owns proactive compaction, IDBots' tier-1/tier-2
-        // compaction stays as a safety net near the real ceiling so the two
-        // mechanisms don't double-compact at the same threshold.
-        ...(sdkAutoCompactEnv ? { softThresholdRatio: COWORK_CONTEXT_SAFETY_NET_RATIO } : {}),
-        // Real provider-reported context size from the last turn (Phase 2);
-        // the heuristic estimate stays as the floor when unavailable. Values
-        // above the model window are ignored inside the budget (gateway
-        // per-turn totals are not per-request context).
-        realUsageTokens: lastTurnInputTokens,
-      });
-
-      if (budget.shouldCompact) {
-        // Tiered compaction tier 1 (Reasonix-style tool-result snipping):
-        // raise this session's persisted snip boundary so the proxy shortens
-        // stale tool_result blocks in the head region while keeping a
-        // COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS tail byte-stable. The SDK
-        // session survives; only the prefix after the first newly snipped
-        // block breaks. Hysteresis: the boundary only advances in big steps,
-        // so ordinary turns never re-break the prefix.
-        const snipHeadTokens = Math.max(0, budget.estimatedTokens - COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS);
-        const persistedSnipHeadTokens = getCoworkSnipHeadTokens(sessionId);
-        let snipApplied = false;
-        if (snipHeadTokens >= persistedSnipHeadTokens + COWORK_TOOL_RESULT_SNIP_HYSTERESIS_TOKENS) {
-          const snipSavedTokens = estimateCoworkStoreToolResultSnipSavings(
-            sessionSnapshotForBudget?.messages ?? [],
-            snipHeadTokens
-          );
-          const effectiveEstimatedTokens = budget.estimatedTokens - snipSavedTokens;
-          if (effectiveEstimatedTokens < budget.softThresholdTokens) {
-            setCoworkSnipHeadTokens(sessionId, snipHeadTokens);
-            activeSession.pendingCacheBreakReason = 'snip';
-            snipApplied = true;
-            coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; snipping stale tool results instead of compacting the SDK session', {
-              sessionId,
-              modelId: modelLimits.modelId,
-              estimatedTokens: budget.estimatedTokens,
-              softThresholdTokens: budget.softThresholdTokens,
-              usableInputTokens: budget.usableInputTokens,
-              snipHeadTokens,
-              previousSnipHeadTokens: persistedSnipHeadTokens,
-              snipSavedTokens,
-              effectiveEstimatedTokens,
-            });
-          }
-        }
-
-        if (!snipApplied) {
-          // Tier 2 (existing behavior): flatten history into one synthetic
-          // message and reset the SDK session — a full cold start. The fresh
-          // session rebuilds history from scratch, so the old snip boundary
-          // no longer applies.
-          resetCoworkSnipHeadTokens(sessionId);
-          const compacted = buildCoworkCompactedPrompt({
-            messages: sessionSnapshotForBudget?.messages ?? [],
-            currentPrompt: prompt,
-            modelLimits,
-          });
-          effectivePrompt = compacted.prompt;
-          this.store.updateSession(sessionId, { claudeSessionId: null });
-          activeSession.claudeSessionId = null;
-          activeSession.pendingCacheBreakReason = 'compaction';
-          coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; starting compacted SDK session instead of resume', {
-            sessionId,
-            modelId: modelLimits.modelId,
-            contextWindow: modelLimits.contextWindow,
-            maxOutputTokens: modelLimits.maxOutputTokens,
-            limitSource: modelLimits.source,
-            estimatedTokens: budget.estimatedTokens,
-            softThresholdTokens: budget.softThresholdTokens,
-            usableInputTokens: budget.usableInputTokens,
-            compactedEstimatedTokens: compacted.estimatedTokens,
-            compactedRecentMessages: compacted.recentMessages,
-            compactedSummarizedMessages: compacted.summarizedMessages,
-          });
-          this.addSystemMessage(
-            sessionId,
-            '当前 cowork 会话已接近模型上下文上限，已自动压缩历史并重置底层模型会话继续。'
-          );
-        }
-      }
-    }
-
-    // Inject ALL volatile context into the CURRENT user message (Reasonix
-    // pattern) instead of the system prompt. The system prompt is the first
-    // thing in DeepSeek's cacheable prefix; any per-turn change there (a ms
-    // timestamp, memory entries re-ranked by the current user text, live
-    // browser tabs, live remote-services discovery) collapses the prefix and
-    // causes a ~200k-token cache miss on every turn. Volatile context is only
-    // relevant when answering the current turn, so it belongs in the user
-    // message (the tail, which is new each turn) — the system prompt stays
-    // byte-stable and the prefix keeps hitting.
-    const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
-    const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId);
-    const volatileBlocks = await this.buildVolatileContextPrompt(
-      sessionId,
-      prompt,
-      sessionMemoryEnabled,
-      systemPromptProfile,
-      activeSession.disableRemoteServicesPrompt
-    );
-    const volatileHead = [localTimePrompt, volatileBlocks]
-      .filter((section) => section?.trim())
-      .join('\n\n');
-    effectivePrompt = volatileHead ? `${volatileHead}\n\n${effectivePrompt}` : effectivePrompt;
-
-    const forceTextOnlyAttachments = shouldForceTextOnlyAttachmentMode(
-      envVars.ANTHROPIC_BASE_URL,
-      envVars.ANTHROPIC_MODEL
-    );
-    const promptAttachmentPaths = new Set<string>();
-    if (forceTextOnlyAttachments) {
-      const attachmentEntries = this.parseAttachmentEntries(prompt);
-      for (const entry of attachmentEntries) {
-        const resolved = this.resolveAttachmentPath(entry.rawPath, cwd);
-        promptAttachmentPaths.add(path.resolve(resolved));
-      }
-    }
-    const promptForQuery = forceTextOnlyAttachments
-      ? this.rewriteAttachmentLinesAsTextReferences(effectivePrompt)
-      : effectivePrompt;
-    if (forceTextOnlyAttachments && promptForQuery !== effectivePrompt) {
-      coworkLog('INFO', 'runClaudeCodeLocal', 'Force text-only attachment references for provider compatibility', {
-        sessionId,
-        anthropicBaseUrl: summarizeEndpointForLog(envVars.ANTHROPIC_BASE_URL),
-        anthropicModel: envVars.ANTHROPIC_MODEL ?? null,
-      });
-      this.addSystemMessage(
-        sessionId,
-        '当前模型不支持原生图片/文档输入，附件将按“文件路径文本引用”处理。'
-      );
-    }
-
-    // Resolve per-model effort/thinking options from app_config. These reach
-    // the SDK directly (previously they only went through the OpenAI-compat
-    // proxy for the renderer's direct API calls, never the cowork session).
-    // Effort tiering: session-level override (composer picker) > bot brain
-    // effort (already swapped to the fallback brain's effort when the fallback
-    // took over) > persisted global default > per-model default.
-    const modelOptions = resolveModelOptions(apiConfig.model);
-    const effectiveEffort: LlmEffortLevel | null = toLlmEffortLevel(
-      activeSession.effortOverride ?? brainEffort ?? getPersistedCoworkEffortLevel() ?? modelOptions?.reasoningEffort,
-    );
-    // The four-step ladder maps onto the SDK's effort/thinking options
-    // (off disables thinking; max pairs effort max with thinking enabled).
-    const sdkEffort = effortForClaudeSdk(effectiveEffort);
-    const effectiveThinking = activeSession.thinkingOverride ?? sdkEffort.thinking ?? modelOptions?.thinking;
-
-    const options: Record<string, unknown> = {
-      cwd,
-      abortController,
-      env: envVars,
-      pathToClaudeCodeExecutable: claudeCodePath,
-      permissionMode: activeSession.permissionMode,
-      includePartialMessages: true,
-      // Explicitly enable the SDK's todo/task tracking panel. The CLI binary
-      // defaults it to on, but passing it keeps the behavior deterministic and
-      // lets the model emit TaskCreate/TaskUpdate (headless) or TodoWrite so
-      // the renderer can surface the live step list.
-      todoFeatureEnabled: true,
-      ...(apiConfig.fallbackModel
-        ? { fallbackModel: apiConfig.fallbackModel }
-        : {}),
-      ...(sdkEffort.effort ? { effort: sdkEffort.effort } : {}),
-      ...(effectiveThinking
-        ? { thinking: effectiveThinking }
-        : {}),
-      // Request context-aware follow-up prompt suggestions (one per turn,
-      // emitted as a prompt_suggestion event after the result message).
-      promptSuggestions: true,
-      // Periodic AI-generated progress summaries for running subagents, emitted
-      // on task_progress events via the `summary` field. Drives the live
-      // subagent panel. forwardSubagentText stays off to avoid flooding the
-      // main message stream; full transcripts are read post-hoc via
-      // getSubagentMessages.
-      agentProgressSummaries: true,
-      // Restrict the built-in tool set to what cowork sessions actually use
-      // (see COWORK_BUILTIN_TOOLS): the preset default registers ~27 schemas
-      // (~21k tokens) on every request, most of it CLI-autonomy features.
-      tools: isSdkBuiltinWebToolsEnabled()
-        ? [...COWORK_BUILTIN_TOOLS, 'WebFetch', 'WebSearch']
-        : [...COWORK_BUILTIN_TOOLS],
-      // Hide the user's ~/.claude plugin skills from the model's listing: the
-      // Skill tool is policy-denied in cowork sessions, so the injected
-      // "skills available for the Skill tool" block (~6k chars with plugins
-      // installed) is dead weight. IDBots skills route via <available_skills>.
-      skills: [],
-      // Isolate from the user's Claude Code settings files: their env blocks
-      // (e.g. ANTHROPIC_BASE_URL in ~/.claude/settings.json) would otherwise
-      // override the provider environment we pass per session.
-      settingSources: [],
-      stderr: (message: string) => {
-        stderrTail += message;
-        if (stderrTail.length > STDERR_TAIL_MAX_CHARS) {
-          stderrTail = stderrTail.slice(-STDERR_TAIL_MAX_CHARS);
-        }
-        coworkLog('WARN', 'ClaudeCodeProcess', 'stderr output', { stderr: message });
-      },
-      canUseTool: async (
-        toolName: string,
-        toolInput: unknown,
-        { signal }: { signal: AbortSignal }
-      ): Promise<PermissionResult> => {
-        if (abortController.signal.aborted || signal.aborted) {
-          return { behavior: 'deny', message: 'Session aborted' };
-        }
-
-        const resolvedName = String(toolName ?? 'unknown');
-        const resolvedInput =
-          toolInput && typeof toolInput === 'object'
-            ? (toolInput as Record<string, unknown>)
-            : { value: toolInput };
-
-        if (forceTextOnlyAttachments) {
-          const normalizedToolName = resolvedName.trim().toLowerCase();
-          if (normalizedToolName === 'read' || normalizedToolName === 'view') {
-            const toolFilePath = this.resolveToolFilePathFromInput(resolvedInput, cwd);
-            if (!toolFilePath && promptAttachmentPaths.size > 0) {
-              coworkLog('WARN', 'runClaudeCodeLocal', 'Blocked Read/View due to unresolved attachment path in text-only provider mode', {
-                sessionId,
-                toolName: resolvedName,
-                toolInputKeys: Object.keys(resolvedInput),
-                anthropicBaseUrl: summarizeEndpointForLog(envVars.ANTHROPIC_BASE_URL),
-                anthropicModel: envVars.ANTHROPIC_MODEL ?? null,
-              });
-              return {
-                behavior: 'deny',
-                message: '当前模型不支持原生文档/图片块，且本次附件路径未能从工具参数中安全解析。请切换支持多模态输入的模型，或先将附件转成纯文本后再处理。',
-              };
-            }
-            if (toolFilePath) {
-              const absoluteToolPath = path.resolve(toolFilePath);
-              const isPromptAttachment = promptAttachmentPaths.has(absoluteToolPath);
-              const isLikelyBinary = this.isLikelyBinaryAttachmentPath(absoluteToolPath);
-              if (isPromptAttachment || isLikelyBinary) {
-                coworkLog('WARN', 'runClaudeCodeLocal', 'Blocked binary file Read/View for text-only provider mode', {
-                  sessionId,
-                  toolName: resolvedName,
-                  filePath: absoluteToolPath,
-                  isPromptAttachment,
-                  isLikelyBinary,
-                  anthropicBaseUrl: summarizeEndpointForLog(envVars.ANTHROPIC_BASE_URL),
-                  anthropicModel: envVars.ANTHROPIC_MODEL ?? null,
-                });
-                return {
-                  behavior: 'deny',
-                  message: `当前模型不支持原生文档/图片块，无法直接 ${resolvedName} 二进制附件：${absoluteToolPath}。请切换支持多模态输入的模型，或先将文件转成纯文本后再读取。`,
-                };
-              }
-            }
-          }
-        }
-
-        // --- N1/N2: vision capability gate + same-file read dedupe (GT#12) ---
-        // Both guards key off Read/View tool parameters BEFORE the SDK executes
-        // the tool, so a denied read never produces a tool_result and never
-        // enters session history. This is the same real execution path the
-        // text-only attachment mode above uses; the guards are capability-driven
-        // (modelLimits.supportsVision) and session-state driven
-        // (activeSession.readFiles), complementing the URL/model-string
-        // heuristics of forceTextOnlyAttachments. Decision logic lives in the
-        // pure evaluateReadImageGuard (unit-tested); this block only assembles
-        // inputs and applies the outcome.
-        if (resolvedName.trim().toLowerCase() === 'read' || resolvedName.trim().toLowerCase() === 'view') {
-          const guardFilePath = this.resolveToolFilePathFromInput(resolvedInput, cwd);
-          if (guardFilePath) {
-            const absoluteGuardPath = path.resolve(guardFilePath);
-            const guardStat = safeFileStat(absoluteGuardPath);
-            const guardDecision = evaluateReadImageGuard({
-              toolName: resolvedName,
-              absolutePath: absoluteGuardPath,
-              fileStat: guardStat,
-              supportsVision: modelLimits.supportsVision,
-              priorReads: activeSession.readFiles,
-            });
-            if (guardDecision.action === 'deny') {
-              coworkLog(
-                guardDecision.reason === 'no-vision-image' ? 'WARN' : 'INFO',
-                'runClaudeCodeLocal',
-                guardDecision.reason === 'no-vision-image'
-                  ? 'Blocked Read/View image for non-vision model'
-                  : 'Deduplicated repeated Read/View of unchanged file',
-                {
-                  sessionId,
-                  toolName: resolvedName,
-                  filePath: absoluteGuardPath,
-                  modelId: modelLimits.modelId,
-                  supportsVision: modelLimits.supportsVision,
-                  fileSize: guardStat?.size ?? null,
-                  fileMtimeMs: guardStat?.mtimeMs ?? null,
-                }
-              );
-              return { behavior: 'deny', message: guardDecision.message };
-            }
-            if (guardDecision.register) {
-              activeSession.readFiles?.set(guardDecision.register.path, {
-                mtimeMs: guardDecision.register.mtimeMs,
-                size: guardDecision.register.size,
-              });
-            }
-          }
-        }
-
-        const blockedToolResult = this.denyBlockedBuiltinWebTool(sessionId, 'local', resolvedName);
-        if (blockedToolResult) {
-          return blockedToolResult;
-        }
-        const skillToolResult = this.denyUnsupportedSkillTool(sessionId, 'local', resolvedName);
-        if (skillToolResult) {
-          return skillToolResult;
-        }
-
-        // Auto-approve mode (kept for compatibility with legacy callers).
-        if (activeSession.autoApprove) {
-          return { behavior: 'allow', updatedInput: resolvedInput };
-        }
-
-        const permissionMode = activeSession.permissionMode;
-
-        // Plan mode: read-only enforcement. Deny all mutating tools; allow only
-        // known read-only tools. AskUserQuestion is allowed (it's interactive, not
-        // a filesystem mutation).
-        if (permissionMode === 'plan' && resolvedName !== 'AskUserQuestion') {
-          if (!this.isReadOnlyTool(resolvedName)) {
-            coworkLog('INFO', 'canUseTool', 'Blocked mutating tool in plan mode', {
-              sessionId,
-              toolName: resolvedName,
-              permissionMode,
-            });
-            return {
-              behavior: 'deny',
-              message: `Tool "${resolvedName}" is blocked in plan mode (read-only). Switch to default or acceptEdits mode to execute it.`,
-            };
-          }
-          return { behavior: 'allow', updatedInput: resolvedInput };
-        }
-
-        // Risk-tiered auto-approval under full trust: AskUserQuestion payloads
-        // whose questions are all explicitly marked low-risk (header
-        // LOW_RISK_QUESTION_HEADER) are answered automatically with their first
-        // option, so routine low-risk deletions (merged branches, worktrees)
-        // never open the confirmation modal. Anything unmarked or multi-select
-        // still routes to the interactive flow below.
-        if (permissionMode === 'bypassPermissions' && resolvedName === 'AskUserQuestion') {
-          const autoAnswers = tryAutoAnswerLowRiskQuestion(resolvedInput);
-          if (autoAnswers) {
-            coworkLog('INFO', 'canUseTool', 'Auto-approved low-risk question under full trust', {
-              sessionId,
-              questionCount: Object.keys(autoAnswers).length,
-            });
-            return { behavior: 'allow', updatedInput: { ...resolvedInput, answers: autoAnswers } };
-          }
-        }
-
-        // acceptEdits / bypassPermissions: skip the delete-safety confirmation.
-        // AskUserQuestion is always routed to the interactive confirmation flow,
-        // so delete-safety prompts stay reachable even under full trust.
-        if (permissionMode === 'acceptEdits' || permissionMode === 'bypassPermissions') {
-          if (resolvedName !== 'AskUserQuestion') {
-            return { behavior: 'allow', updatedInput: resolvedInput };
-          }
-          // acceptEdits / bypassPermissions + AskUserQuestion: fall through to the prompt below.
-        }
-
-        if (resolvedName !== 'AskUserQuestion') {
-          const policyResult = await this.enforceToolSafetyPolicy(
-            sessionId,
-            signal,
-            activeSession,
-            resolvedName,
-            resolvedInput
-          );
-          if (policyResult) {
-            return policyResult;
-          }
-        }
-
-        if (resolvedName !== 'AskUserQuestion') {
-          return { behavior: 'allow', updatedInput: resolvedInput };
-        }
-
-        const request: PermissionRequest = {
-          requestId: uuidv4(),
-          toolName: resolvedName,
-          toolInput: this.sanitizeToolPayload(resolvedInput) as Record<string, unknown>,
-        };
-
-        activeSession.pendingPermission = request;
-        this.emit('permissionRequest', sessionId, request);
-
-        const result = await this.waitForPermissionResponse(sessionId, request.requestId, signal);
-        if (abortController.signal.aborted || signal.aborted) {
-          return { behavior: 'deny', message: 'Session aborted' };
-        }
-
-        if (result.behavior === 'deny') {
-          return result.message
-            ? result
-            : { behavior: 'deny', message: 'Permission denied' };
-        }
-
-        const updatedInput = result.updatedInput ?? resolvedInput;
-        const hasAnswers = updatedInput && typeof updatedInput === 'object' && 'answers' in updatedInput;
-        if (!hasAnswers) {
-          return { behavior: 'deny', message: 'No answers provided' };
-        }
-
-        return { behavior: 'allow', updatedInput };
-      },
-    };
-    // PreToolUse hook: auto-approve whitelisted tools (user-configured rules)
-    // before the SDK asks. Returns empty output for everything else so
-    // canUseTool's full policy chain still applies. This is the SDK-level
-    // enforcement layer; canUseTool remains the source of truth for hard
-    // denials (blocked web tools, plan mode, delete safety).
-    options.hooks = {
-      PreToolUse: [
-        {
-          hooks: [
-            async (input: unknown): Promise<Record<string, unknown>> => {
-              const hookInput = input as {
-                tool_name?: string;
-                tool_use_id?: string;
-              };
-              const toolName = String(hookInput.tool_name ?? '');
-              const normalized = toolName.trim().toLowerCase();
-              if (!normalized || !activeSession.autoApproveTools.has(normalized)) {
-                return {};
-              }
-              coworkLog('INFO', 'PreToolUse', 'Auto-approved tool via rule', {
-                sessionId,
-                toolName,
-                toolUseId: hookInput.tool_use_id,
-              });
-              return {
-                hookEventName: 'PreToolUse',
-                permissionDecision: 'allow',
-                permissionDecisionReason: 'Auto-approved by user rule',
-              };
-            },
-          ],
-        },
-      ],
-    };
-    options.agents = {
-      ...(options.agents as Record<string, AgentDefinition> | undefined),
-      ...buildCoworkSdkAgentOverrides(apiConfig.model),
-    };
-
-    const usedResumeForThisRun = Boolean(activeSession.claudeSessionId);
-    if (usedResumeForThisRun) {
-      options.resume = activeSession.claudeSessionId;
-    } else {
-      // Hand the CLI the host-generated session title so it skips its own
-      // AI title-generation request for new sessions (one less LLM round-trip
-      // per cowork session; the renderer already generates the UI title).
-      const sessionTitle = this.store.getSession(sessionId)?.title?.trim();
-      if (sessionTitle) {
-        options.title = sessionTitle;
-      }
-    }
-    activeSession.contextOverflowRetryAllowed = !isRetry && usedResumeForThisRun;
-    let contextOverflowExceptionRetryAllowed = !isRetry && usedResumeForThisRun;
-
-    if (systemPrompt) {
-      // Use Claude Code's battle-tested default system prompt and APPEND
-      // IDBots' custom identity/safety/response-style prompt, instead of
-      // fully replacing the default. Passing a plain string replaces the
-      // SDK's preset prompt, which drops the entire coding-quality behavioral
-      // layer that the default carries (prefer editing existing files,
-      // proactive TodoWrite for complex tasks, parallel tool calls, minimal
-      // edits, run tests before reporting done, file_path:line refs). Appended
-      // text comes last, so IDBots' identity/safety rules still take
-      // precedence over any conflicting default guidance. See SDK option docs:
-      // systemPrompt string = custom (replace); preset+append = keep default.
-      options.systemPrompt = {
-        type: 'preset',
-        preset: 'claude_code',
-        append: systemPrompt,
-      };
-    }
-
-    const retryWithCompactedContext = async (
-      reason: 'result-event' | 'exception',
-      errorMessage?: string
-    ): Promise<void> => {
-      this.transitionLocalTurnForRetry(activeSession, `automatic context retry (${reason})`);
-      const sessionSnapshot = this.store.getSession(sessionId);
-      const compacted = buildCoworkCompactedPrompt({
-        messages: sessionSnapshot?.messages ?? [],
-        currentPrompt: prompt,
-        modelLimits,
-      });
-      this.store.updateSession(sessionId, { claudeSessionId: null });
-      activeSession.claudeSessionId = null;
-      activeSession.contextOverflowRetryAllowed = false;
-      activeSession.contextOverflowDetected = false;
-      activeSession.pendingCacheBreakReason = 'overflow_retry';
-      coworkLog('WARN', 'runClaudeCodeLocal', 'Context window exceeded while resuming; retrying with compacted fresh SDK session', {
-        sessionId,
-        reason,
-        errorMessage,
-        modelId: modelLimits.modelId,
-        contextWindow: modelLimits.contextWindow,
-        maxOutputTokens: modelLimits.maxOutputTokens,
-        limitSource: modelLimits.source,
-        compactedEstimatedTokens: compacted.estimatedTokens,
-        compactedRecentMessages: compacted.recentMessages,
-        compactedSummarizedMessages: compacted.summarizedMessages,
-      });
-      this.addSystemMessage(
-        sessionId,
-        '模型提示上下文超限，已自动压缩历史并重置底层模型会话重试当前输入。'
-      );
-      await this.runClaudeCodeLocal(activeSession, compacted.prompt, cwd, systemPrompt, true);
-    };
-
-    const hasAvailableSkillsInPrompt = typeof systemPrompt === 'string' && systemPrompt.includes('<available_skills>');
-    console.log('[Orchestrator] [CoworkRunner] runClaudeCodeLocal: systemPrompt length=', systemPrompt?.length ?? 0, 'has <available_skills>=', hasAvailableSkillsInPrompt);
-
-    // Hoisted so the catch block can also disarm the watchdog: the timer is
-    // (re)assigned inside the channel setup within the try block below.
-    let localTurnStallTimer: NodeJS.Timeout | null = null;
-    const clearLocalTurnStallWatchdog = () => {
-      if (localTurnStallTimer) {
-        clearTimeout(localTurnStallTimer);
-        localTurnStallTimer = null;
-      }
-    };
-
-    try {
-      coworkLog('INFO', 'runClaudeCodeLocal', 'Starting local Claude Code session', {
-        sessionId,
-        cwd,
-        claudeCodePath,
-        claudeCodePathExists: fs.existsSync(claudeCodePath),
-        isPackaged: app.isPackaged,
-        resourcesPath: process.resourcesPath,
-        processExecPath: process.execPath,
-        platform: process.platform,
-        arch: process.arch,
-        nodeVersion: process.version,
-        ANTHROPIC_BASE_URL: envVars.ANTHROPIC_BASE_URL,
-        ANTHROPIC_MODEL: envVars.ANTHROPIC_MODEL,
-        NODE_PATH: envVars.NODE_PATH,
-        logFile: getCoworkLogPath(),
-      });
-
-      const { query, createSdkMcpServer, tool } = await this.loadClaudeSdk();
-      coworkLog('INFO', 'runClaudeCodeLocal', 'Claude SDK loaded successfully');
-
-      const memoryServerName = `user-memory-${sessionId.slice(0, 8)}`;
-      const memoryTools: any[] = this.buildSessionInlineTools(sessionId, tool, activeSession, modelLimits?.supportsVision);
-
-      options.mcpServers = {
-        ...(options.mcpServers as Record<string, unknown> | undefined),
-        [memoryServerName]: createSdkMcpServer({
-          name: memoryServerName,
-          tools: memoryTools,
-        }),
-      };
-
-      if (this.mcpServerProvider) {
-        try {
-          const configuredServers = buildUserConfiguredMcpServerConfigs(
-            this.mcpServerProvider(sessionId),
-            new Set(Object.keys(options.mcpServers as Record<string, unknown>)),
-          );
-          const configuredServerCount = Object.keys(configuredServers).length;
-          if (configuredServerCount > 0) {
-            options.mcpServers = {
-              ...(options.mcpServers as Record<string, unknown>),
-              ...configuredServers,
-            };
-          }
-          coworkLog('INFO', 'runClaudeCodeLocal', `Injected ${configuredServerCount} user-configured MCP servers`);
-        } catch (error) {
-          coworkLog('WARN', 'runClaudeCodeLocal', `Failed to load user MCP servers: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-
-      const channel = new CoworkSteerChannel();
-      activeSession.localInputChannel = channel;
-      activeSession.localAcceptedInputs = 0;
-      activeSession.localSettledInputs = 0;
-      activeSession.localPendingSteerIds = [];
-      activeSession.localDeliveredSteerIds = new Set();
-      activeSession.localBufferedSteers = [];
-      activeSession.localTurnState = 'open';
-      let unmatchedTopLevelAssistantBoundaries = 0;
-      const settleNextLocalInput = (requireDelivery: boolean) => {
-        const settlementLimit = requireDelivery ? channel.deliveredCount : channel.acceptedCount;
-        if (activeSession.localSettledInputs >= settlementLimit) return;
-        activeSession.localSettledInputs += 1;
-        if (activeSession.localSettledInputs > 1) {
-          const settledSubmissionId = activeSession.localPendingSteerIds.shift();
-          if (settledSubmissionId) {
-            activeSession.localDeliveredSteerIds.delete(settledSubmissionId);
-            this.emit('steerSettled', sessionId, settledSubmissionId);
-          }
-        }
-      };
-      // Accepted steers are held in localBufferedSteers while the CLI is
-      // mid-turn. Writing them mid-turn (while a tool is running) is unreliable
-      // on the SDK 0.3.x native runtime: the CLI records an enqueue and then a
-      // queue remove when the in-flight tool result arrives, so the model never
-      // sees the correction. interruptLocalTurnForSteers aborts the current
-      // turn via the SDK Query control surface and flushes the buffered steers
-      // immediately; this boundary flush remains as the fallback for steers
-      // that arrive during the interrupt or when no interrupt is available.
-      const flushBufferedSteers = (): void => {
-        this.flushBufferedLocalSteers(activeSession, channel);
-      };
-      // Stall watchdog: a steered (interrupted) turn can end without any
-      // terminal assistant boundary or result event, leaving a delivered input
-      // unsettled forever — the channel never closes, the query never ends, and
-      // the session stays `running`. When no SDK event arrives within the grace
-      // period while delivered inputs remain unsettled, settle the remainder so
-      // the channel closes and the query drains. Firing early is safe: closing
-      // the channel never aborts in-flight work, it only stops new inputs.
-      // localTurnStallTimer/clearLocalTurnStallWatchdog are hoisted above the
-      // enclosing try block so the catch path can disarm the timer too.
-      const armLocalTurnStallWatchdog = () => {
-        clearLocalTurnStallWatchdog();
-        if (this.localTurnStallTimeoutMs <= 0) return;
-        if (activeSession.localInputChannel !== channel) return;
-        if (activeSession.localTurnState !== 'open' || !channel.isOpen) return;
-        if (activeSession.pendingPermission) return;
-        if (channel.deliveredCount < channel.acceptedCount) return;
-        if (activeSession.localSettledInputs >= channel.acceptedCount) return;
-        localTurnStallTimer = setTimeout(() => {
-          localTurnStallTimer = null;
-          if (activeSession.localInputChannel !== channel) return;
-          if (activeSession.localTurnState !== 'open' || !channel.isOpen) return;
-          if (activeSession.pendingPermission) return;
-          if (channel.deliveredCount < channel.acceptedCount) return;
-          if (activeSession.localSettledInputs >= channel.acceptedCount) return;
-          coworkLog(
-            'WARN',
-            'runClaudeCodeLocal',
-            'Local turn stalled with delivered inputs still unsettled; settling them so the turn can close',
-            { sessionId }
-          );
-          while (activeSession.localSettledInputs < channel.acceptedCount) {
-            settleNextLocalInput(false);
-          }
-          maybeCloseLocalTurn();
-        }, this.localTurnStallTimeoutMs);
-        localTurnStallTimer.unref?.();
-      };
-      const maybeCloseLocalTurn = () => {
-        if (activeSession.localInputChannel !== channel) return;
-        // Keep the channel open while accepted steers are still buffered; they
-        // are written at the next boundary and need a live channel.
-        if ((activeSession.localBufferedSteers?.length ?? 0) > 0) {
-          armLocalTurnStallWatchdog();
-          return;
-        }
-        if (
-          activeSession.localSettledInputs >= channel.acceptedCount
-          && channel.deliveredCount >= channel.acceptedCount
-        ) {
-          clearLocalTurnStallWatchdog();
-          activeSession.localTurnState = 'closing';
-          channel.close();
-          return;
-        }
-        armLocalTurnStallWatchdog();
-      };
-      activeSession.maybeCloseLocalTurn = maybeCloseLocalTurn;
-      const initial = channel.enqueue(buildCoworkSdkUserMessage(promptForQuery));
-      void initial.delivered.then(maybeCloseLocalTurn, () => undefined);
-      activeSession.localAcceptedInputs = channel.acceptedCount;
-
-      const result = await query({ prompt: channel, options } as any);
-      // Expose the live Query control surface so the subagent panel can stop a
-      // task or background a foreground task mid-run (local mode only).
-      activeSession.sdkTaskControl = result as unknown as NonNullable<ActiveSession['sdkTaskControl']>;
-      coworkLog('INFO', 'runClaudeCodeLocal', 'Claude Code process started, iterating events');
-      for await (const event of result as AsyncIterable<unknown>) {
-        if (this.isSessionStopRequested(sessionId, activeSession)) {
-          break;
-        }
-        this.handleClaudeEvent(sessionId, event);
-        armLocalTurnStallWatchdog();
-        if (isSdkTerminalAssistantTurnEvent(event)) {
-          // The SDK's query-level result can wait for the streaming prompt to close.
-          // Each top-level end_turn settles at most one delivered user input.
-          unmatchedTopLevelAssistantBoundaries += 1;
-          settleNextLocalInput(true);
-          maybeCloseLocalTurn();
-          // The turn has reached a safe boundary (CLI idle at the input
-          // prompt): flush buffered steers so the CLI processes them as the
-          // next turn instead of dropping them mid-tool.
-          flushBufferedSteers();
-          maybeCloseLocalTurn();
-          // The CLI is idle at the input prompt here and its transport is
-          // still writable — the ONLY reliable moment to ask it for real
-          // context usage. Once the result event arrives, the SDK closes
-          // stdin for single-turn queries and getContextUsage() fails with
-          // "ProcessTransport is not ready for writing".
-          if (!isRetry) {
-            void this.captureRealContextUsageFromSdk(
-              sessionId,
-              activeSession,
-              result as { getContextUsage?: () => Promise<unknown> }
-            ).catch(() => undefined);
-          }
-        }
-        if (isSdkResultEvent(event)) {
-          if (unmatchedTopLevelAssistantBoundaries > 0) {
-            unmatchedTopLevelAssistantBoundaries -= 1;
-          } else {
-            settleNextLocalInput(false);
-          }
-          maybeCloseLocalTurn();
-          flushBufferedSteers();
-          maybeCloseLocalTurn();
-        }
-      }
-      clearLocalTurnStallWatchdog();
-
-      // Fallback capture after the loop. The reliable capture happens at the
-      // end_turn boundary above (CLI idle, transport still writable); by the
-      // time the result event arrives the SDK has already closed stdin for
-      // single-turn queries, so this normally no-ops with "ProcessTransport
-      // is not ready for writing". Failures are non-fatal — the estimator
-      // remains the fallback.
-      if (!isRetry) {
-        await this.captureRealContextUsageFromSdk(
-          sessionId,
-          activeSession,
-          result as { getContextUsage?: () => Promise<unknown> }
-        );
-      }
-
-      if (activeSession.staleResumeDetected && !isRetry) {
-        this.store.updateSession(sessionId, { claudeSessionId: null });
-        activeSession.claudeSessionId = null;
-        activeSession.pendingCacheBreakReason = 'stale_session_retry';
-        coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after result-event stale session, retrying once without resume', { sessionId });
-        contextOverflowExceptionRetryAllowed = false;
-        this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
-        await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
-        return;
-      }
-
-      if (activeSession.contextOverflowDetected && !isRetry) {
-        await retryWithCompactedContext('result-event');
-        return;
-      }
-
-      if (this.isSessionStopRequested(sessionId, activeSession)) {
-        this.store.updateSession(sessionId, { status: 'idle' });
-        return;
-      }
-
-      // Empty terminal turn auto-continue: DeepSeek occasionally ends a turn
-      // after emitting only a reasoning block (the `[reasoning unavailable]`
-      // placeholder) with no text and no tool_use — a transient ~1/10 behavior
-      // of the upstream, not a real "done". The task is still in progress, so
-      // resume the session (claudeSessionId kept -> full history preserved,
-      // exactly like the normal continue path) with a minimal continue cue,
-      // mirroring the manual "继续" workaround. Guarded by `!isRetry` so this
-      // fires at most once: a second consecutive empty turn falls through to
-      // the idle + diagnostic path below instead of looping.
-      if (activeSession.emptyTerminalTurnDetected && !isRetry) {
-        coworkLog(
-          'INFO',
-          'runClaudeCodeLocal',
-          'Empty terminal turn (DeepSeek reasoning-only end_turn) — auto-continuing once via resume',
-          { sessionId }
-        );
-        this.transitionLocalTurnForRetry(activeSession, 'automatic empty-terminal-turn continue');
-        await this.runClaudeCodeLocal(
-          activeSession,
-          EMPTY_TERMINAL_TURN_CONTINUE_PROMPT,
-          cwd,
-          systemPrompt,
-          true
-        );
-        return;
-      }
-
-      // Ensure any remaining streaming content is saved to database
-      this.finalizeStreamingContent(activeSession);
-
-      const session = this.store.getSession(sessionId);
-      if (session?.status !== 'error') {
-        // Empty terminal turn fallback: reached only when the auto-continue
-        // above already ran once (isRetry=true) AND the resumed turn was again
-        // empty, i.e. DeepSeek returned an empty result twice in a row. Do NOT
-        // falsely report `completed` — surface a clear diagnostic and leave the
-        // session `idle` so the user can re-send the last message to continue.
-        // Still emit `complete` so any automation waiter resolves (the
-        // orchestrator bridge already treats an empty reply as a non-answer via
-        // isNonAnswerAssistantReply).
-        if (activeSession.emptyTerminalTurnDetected) {
-          this.reportEmptyTerminalTurn(sessionId);
-          this.store.updateSession(sessionId, { status: 'idle' });
-        } else {
-          this.store.updateSession(sessionId, { status: 'completed' });
-        }
-        this.applyTurnMemoryUpdatesForSession(sessionId);
-        this.emit('complete', sessionId, activeSession.claudeSessionId);
-      }
-    } catch (error) {
-      clearLocalTurnStallWatchdog();
-      if (this.isSessionStopRequested(sessionId, activeSession)) {
-        this.store.updateSession(sessionId, { status: 'idle' });
-        return;
-      }
-
-      let runtimeError: unknown = error;
-      let errorMessage = runtimeError instanceof Error ? runtimeError.message : 'Unknown error';
-      const getProxyLastErrorForCurrentRun = (): string | null => {
-        const proxyStatus = getCoworkOpenAICompatProxyStatus();
-        if (!proxyStatus.lastError || apiConfig.baseURL !== proxyStatus.baseURL) {
-          return null;
-        }
-        return proxyStatus.lastError;
-      };
-      const buildProviderErrorSignalForMessage = (message: string, includeStderr = true): string => (
-        buildCoworkProviderErrorSignal(message, {
-          proxyLastError: getProxyLastErrorForCurrentRun(),
-          stderr: includeStderr ? stderrTail : '',
-        })
-      );
-      let providerErrorSignal = buildProviderErrorSignalForMessage(errorMessage);
-      const isStaleResumeError = isStaleConversationSessionError(providerErrorSignal);
-      if (isStaleResumeError && !isRetry) {
-        this.store.updateSession(sessionId, { claudeSessionId: null });
-        activeSession.claudeSessionId = null;
-        activeSession.pendingCacheBreakReason = 'stale_session_retry';
-        coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after "No conversation found", retrying once without resume', { sessionId });
-        try {
-          this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
-          await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
-          return;
-        } catch (retryError) {
-          contextOverflowExceptionRetryAllowed = false;
-          runtimeError = retryError;
-          errorMessage = runtimeError instanceof Error ? runtimeError.message : 'Unknown error';
-          providerErrorSignal = buildProviderErrorSignalForMessage(errorMessage);
-        }
-      }
-
-      const isDeepSeekReasoningHistoryError = isDeepSeekMissingReasoningContentError(providerErrorSignal);
-      if (isDeepSeekReasoningHistoryError && !isRetry) {
-        this.store.updateSession(sessionId, { claudeSessionId: null });
-        activeSession.claudeSessionId = null;
-        activeSession.pendingCacheBreakReason = 'reasoning_history_retry';
-        coworkLog('WARN', 'runClaudeCodeLocal', 'DeepSeek thinking history lost reasoning_content; retrying with fresh session', {
-          sessionId,
-          errorMessage: providerErrorSignal,
-          anthropicBaseUrl: summarizeEndpointForLog(envVars.ANTHROPIC_BASE_URL),
-          anthropicModel: envVars.ANTHROPIC_MODEL ?? null,
-        });
-        this.addSystemMessage(
-          sessionId,
-          'DeepSeek thinking 历史缺少 reasoning_content，已自动重置底层模型会话并重试当前输入。'
-        );
-        try {
-          this.transitionLocalTurnForRetry(activeSession, 'automatic DeepSeek history retry');
-          await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
-          return;
-        } catch (retryError) {
-          contextOverflowExceptionRetryAllowed = false;
-          runtimeError = retryError;
-          errorMessage = runtimeError instanceof Error ? runtimeError.message : 'Unknown error';
-          providerErrorSignal = buildProviderErrorSignalForMessage(errorMessage);
-        }
-      }
-
-      const isContextOverflowError = isContextWindowExceededError(providerErrorSignal);
-      if (isContextOverflowError && contextOverflowExceptionRetryAllowed) {
-        try {
-          await retryWithCompactedContext('exception', providerErrorSignal);
-          return;
-        } catch (retryError) {
-          runtimeError = retryError;
-          errorMessage = runtimeError instanceof Error ? runtimeError.message : 'Unknown error';
-          providerErrorSignal = buildProviderErrorSignalForMessage(errorMessage);
-        }
-      }
-
-      const isMultimodalCompatError = isUnsupportedMultimodalContentError(providerErrorSignal);
-      if (isMultimodalCompatError && !isRetry) {
-        this.store.updateSession(sessionId, { claudeSessionId: null });
-        activeSession.claudeSessionId = null;
-        activeSession.pendingCacheBreakReason = 'multimodal_retry';
-        coworkLog('WARN', 'runClaudeCodeLocal', 'Provider rejected image/document content block; retrying with fresh text-only session', {
-          sessionId,
-          errorMessage: providerErrorSignal,
-          anthropicBaseUrl: summarizeEndpointForLog(envVars.ANTHROPIC_BASE_URL),
-          anthropicModel: envVars.ANTHROPIC_MODEL ?? null,
-        });
-        this.addSystemMessage(
-          sessionId,
-          '模型端拒绝了图片/文档内容块，已自动重置本轮会话并改为文本路径模式重试。'
-        );
-        try {
-          this.transitionLocalTurnForRetry(activeSession, 'automatic multimodal compatibility retry');
-          await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
-          return;
-        } catch (retryError) {
-          runtimeError = retryError;
-          errorMessage = runtimeError instanceof Error ? runtimeError.message : 'Unknown error';
-          providerErrorSignal = buildProviderErrorSignalForMessage(errorMessage);
-        }
-      }
-
-      const localSteerFailure = runtimeError instanceof Error
-        ? runtimeError
-        : new Error(errorMessage);
-      this.failPendingLocalSteers(activeSession, localSteerFailure, errorMessage);
-
-      if (isUnsupportedMultimodalContentError(providerErrorSignal)) {
-        coworkLog('WARN', 'runClaudeCodeLocal', 'Provider still rejected multimodal content after fallback', {
-          sessionId,
-          errorMessage: providerErrorSignal,
-          anthropicBaseUrl: summarizeEndpointForLog(envVars.ANTHROPIC_BASE_URL),
-          anthropicModel: envVars.ANTHROPIC_MODEL ?? null,
-        });
-        this.handleError(sessionId, buildUnsupportedMultimodalUserHint(providerErrorSignal));
-        throw runtimeError;
-      }
-
-      const stderrOutput = stderrTail;
-      coworkLog('ERROR', 'runClaudeCodeLocal', 'Claude Code process failed', {
-        errorMessage,
-        providerErrorSignal,
-        errorStack: runtimeError instanceof Error ? runtimeError.stack : undefined,
-        stderr: stderrOutput || '(no stderr captured)',
-        claudeCodePath,
-        claudeCodePathExists: fs.existsSync(claudeCodePath),
-      });
-
-      const detailedError = stderrOutput
-        ? `${buildProviderErrorSignalForMessage(errorMessage, false)}\n\nProcess stderr:\n${stderrOutput.slice(-2000)}\n\nLog file: ${getCoworkLogPath()}`
-        : `${providerErrorSignal}\n\nLog file: ${getCoworkLogPath()}`;
-      this.handleError(sessionId, detailedError);
-      throw runtimeError;
-    } finally {
-      activeSession.sdkTaskControl = null;
-      this.clearPendingPermissions(sessionId);
-      this.removeActiveSession(sessionId, activeSession);
-    }
-  }
-
   private async runClaudeCode(
     activeSession: ActiveSession,
     prompt: string,
@@ -8916,11 +7652,6 @@ export class CoworkRunner extends EventEmitter {
       this.removeActiveSession(sessionId, activeSession);
       return;
     }
-    const config = this.store.getConfig();
-    const sessionExecutionMode = this.store.getSession(sessionId)?.executionMode;
-    const executionMode: CoworkExecutionMode = resolveCoworkExecutionMode(
-      sessionExecutionMode || config.executionMode
-    );
     const resolvedCwd = path.resolve(cwd);
 
     if (!fs.existsSync(resolvedCwd)) {
@@ -8930,132 +7661,36 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
 
-    const shouldPrepareSandboxPrompt = executionMode !== 'local' || activeSession.executionMode === 'sandbox';
-    let effectivePrompt = this.augmentPromptWithReferencedWorkspaceFiles(
+    // Sandbox VM + Claude Agent SDK are retired. Leftover sandbox sessions
+    // (and any still-running guest) fall through to the DSH local kernel.
+    this.retireSandboxVm(activeSession);
+
+    const effectivePrompt = this.augmentPromptWithReferencedWorkspaceFiles(
       this.normalizeAttachmentPromptLabels(prompt),
       resolvedCwd
     );
-    let unresolvedSandboxAttachments: string[] = [];
-    if (shouldPrepareSandboxPrompt) {
-      const prepared = this.preparePromptForSandbox(effectivePrompt, resolvedCwd, sessionId);
-      effectivePrompt = prepared.prompt;
-      unresolvedSandboxAttachments = prepared.unresolved;
-    }
+    activeSession.executionMode = 'local';
+    this.store.updateSession(sessionId, { executionMode: 'local' });
+    await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+  }
 
-    const outsideAttachments = Array.from(new Set([
-      ...this.findAttachmentsOutsideCwd(effectivePrompt, resolvedCwd),
-      ...unresolvedSandboxAttachments,
-    ]));
-    const hasActiveSandboxVm = (
-      activeSession.executionMode === 'sandbox'
-      && activeSession.sandboxProcess
-      && !activeSession.sandboxProcess.killed
-      && activeSession.ipcBridge
-    );
-    if (outsideAttachments.length > 0 && (executionMode !== 'local' || hasActiveSandboxVm)) {
-      const detail = outsideAttachments.join(', ');
-      if (executionMode === 'sandbox' || hasActiveSandboxVm) {
-        this.handleError(
-          sessionId,
-          `Attachment paths outside working directory are not available in sandbox mode: ${detail}`
-        );
-        this.clearPendingPermissions(sessionId);
-        this.removeActiveSession(sessionId, activeSession);
-        return;
-      }
-
-      this.addSystemMessage(
-        sessionId,
-        `Attachments outside the working directory are not available in the Sandbox VM. Falling back to local execution.`
-      );
-      activeSession.executionMode = 'local';
-      this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
-      return;
-    }
-
-    // If there's already a running sandbox VM with IPC bridge, send a
-    // continuation request to the same VM instead of spawning a new one.
-    if (hasActiveSandboxVm) {
-      activeSession.localTurnState = 'starting';
+  private retireSandboxVm(activeSession: ActiveSession): void {
+    if (activeSession.ipcBridge) {
       try {
-        await this.continueSandboxTurn(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
-      } finally {
-        if (this.activeSessions.get(sessionId) === activeSession) {
-          activeSession.localTurnState = 'none';
-        }
+        activeSession.ipcBridge.close();
+      } catch (error) {
+        console.warn('Failed to close leftover sandbox IPC bridge:', error);
       }
-      return;
+      activeSession.ipcBridge = undefined;
     }
-
-    if (executionMode === 'local') {
-      activeSession.executionMode = 'local';
-      this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
-      return;
+    if (activeSession.sandboxProcess && !activeSession.sandboxProcess.killed) {
+      try {
+        activeSession.sandboxProcess.kill('SIGKILL');
+      } catch (error) {
+        console.warn('Failed to kill leftover sandbox process:', error);
+      }
     }
-
-    const sandboxReady = executionMode === 'auto'
-      ? getSandboxRuntimeInfoIfReady()
-      : await ensureSandboxReady();
-    if (!sandboxReady.ok) {
-      const errorMessage = 'error' in sandboxReady ? sandboxReady.error : 'Sandbox VM unavailable.';
-      coworkLog('WARN', 'runClaudeCode', 'Sandbox not ready', { errorMessage, executionMode });
-      if (executionMode === 'sandbox') {
-        this.handleError(sessionId, errorMessage);
-        this.clearPendingPermissions(sessionId);
-        this.removeActiveSession(sessionId, activeSession);
-        return;
-      }
-
-      if (executionMode !== 'auto') {
-        this.addSystemMessage(
-          sessionId,
-          this.getSandboxUnavailableFallbackNotice(errorMessage)
-        );
-      }
-      activeSession.executionMode = 'local';
-      this.store.updateSession(sessionId, { executionMode: 'local' });
-      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
-      return;
-    }
-
-    try {
-      const sandboxPrompt = this.injectSandboxHistoryPrompt(sessionId, prompt, effectivePrompt);
-      activeSession.executionMode = 'sandbox';
-      this.store.updateSession(sessionId, { executionMode: 'sandbox' });
-      coworkLog('INFO', 'runClaudeCode', 'Starting sandbox execution', {
-        sessionId,
-        runtimeBinary: sandboxReady.runtimeInfo.runtimeBinary,
-        imagePath: sandboxReady.runtimeInfo.imagePath,
-        platform: sandboxReady.runtimeInfo.platform,
-        arch: sandboxReady.runtimeInfo.arch,
-      });
-      await this.runClaudeCodeInSandbox(activeSession, sandboxPrompt, resolvedCwd, systemPrompt, sandboxReady.runtimeInfo);
-      // If the sandbox VM is still alive, keep the activeSession for multi-turn continuation.
-      // Otherwise (VM exited), clean up.
-      if (!activeSession.sandboxProcess || activeSession.sandboxProcess.killed) {
-        this.removeActiveSession(sessionId, activeSession);
-      } else {
-        activeSession.localTurnState = 'none';
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown sandbox error';
-      if (executionMode === 'sandbox') {
-        this.handleError(sessionId, message);
-        this.removeActiveSession(sessionId, activeSession);
-        return;
-      }
-
-      this.addSystemMessage(
-        sessionId,
-        `Sandbox VM execution failed. Falling back to local execution. (${message})`
-      );
-      activeSession.executionMode = 'local';
-      this.store.updateSession(sessionId, { executionMode: 'local' });
-      this.activeSessions.set(sessionId, activeSession);
-      await this.runLocalKernel(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
-    }
+    activeSession.sandboxProcess = undefined;
   }
 
   /**
@@ -10547,8 +9182,7 @@ export class CoworkRunner extends EventEmitter {
         // handoff) — intermediate progress notes may exist, but the final
         // synthesis is missing. `payload.result` is the SDK's authoritative
         // final-answer text, so an empty value reliably means no final reply
-        // was produced. Flag it so the completion guard in runClaudeCodeLocal
-        // (and the sandbox completion below) does NOT falsely report the
+        // was produced. Flag it so the DSH/sandbox completion guards
         // session as `completed`.
         activeSession.emptyTerminalTurnDetected = true;
         coworkLog(

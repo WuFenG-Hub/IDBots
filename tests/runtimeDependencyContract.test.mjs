@@ -172,28 +172,26 @@ test('SDK built-in web tools are gated by an explicit env flag', () => {
   );
 });
 
-test('DeepSeek missing reasoning_content failures reset stale resume state once', () => {
-  const source = fs.readFileSync(coworkRunnerPath, 'utf8');
+test('DeepSeek missing reasoning_content failures are classified for leftover sandbox retries', () => {
+  const source = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkProviderErrors.ts'),
+    'utf8',
+  );
 
   assert.match(
     source,
-    /function isDeepSeekMissingReasoningContentError\(message: string\): boolean/,
-    'CoworkRunner should classify DeepSeek thinking history failures explicitly',
-  );
-  assert.match(
-    source,
-    /DeepSeek thinking history lost reasoning_content; retrying with fresh session/,
-    'DeepSeek missing reasoning_content should trigger one fresh-session retry instead of leaving the run stuck',
+    /export function isDeepSeekMissingReasoningContentError\(message: string\): boolean/,
+    'DeepSeek thinking history failures stay classified explicitly',
   );
 });
 
-test('CoworkRunner uses MetaBot DeepSeek automation model for local service execution', () => {
+test('CoworkRunner uses MetaBot automation model for local DSH execution', () => {
   const source = fs.readFileSync(coworkRunnerPath, 'utf8');
 
   assert.match(
     source,
-    /resolveApiConfigForModel/,
-    'CoworkRunner should be able to resolve a MetaBot-scoped automation model',
+    /resolveDshProviderRoute/,
+    'CoworkRunner should resolve a MetaBot-scoped DSH provider route',
   );
   assert.match(
     source,
@@ -202,8 +200,8 @@ test('CoworkRunner uses MetaBot DeepSeek automation model for local service exec
   );
   assert.match(
     source,
-    /getEnhancedEnvWithTmpdir\(\s*cwd,\s*'local',\s*apiConfig\s*\)/,
-    'CoworkRunner should pass the resolved API config into the child process environment',
+    /writeDshSkillSessionEnvFile/,
+    'CoworkRunner should persist session env for DSH bash instead of Claude SDK child env',
   );
 });
 
@@ -330,10 +328,10 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
     'runDshSessionLocal must consume leftover queued compact via native compactNow',
   );
   const mainProcessSource = fs.readFileSync(mainProcessPath, 'utf8');
-  assert.match(
+  assert.doesNotMatch(
     mainProcessSource,
-    /sessionUsesDshSubagents/,
-    'Subagent panel IPC must route dsh: sessions away from loadClaudeSdk',
+    /loadClaudeSdk/,
+    'Subagent panel IPC must not load the retired Claude Agent SDK',
   );
   assert.doesNotMatch(
     mainProcessSource,
@@ -341,26 +339,71 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
     'App startup must not pre-load the sunset Claude Agent SDK',
   );
 });
-test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.js patching', () => {
+test('Claude Agent SDK is not a runtime dependency', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+  const builder = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'electron-builder.json'), 'utf8'));
+  const sandboxRunnerSource = fs.readFileSync(
+    path.join(process.cwd(), 'sandbox', 'agent-runner', 'index.js'),
+    'utf8',
+  );
+  const sandboxRunnerPackage = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), 'sandbox', 'agent-runner', 'package.json'), 'utf8'),
+  );
 
-  assert.match(
+  assert.equal(
     packageJson.dependencies['@anthropic-ai/claude-agent-sdk'],
-    /^0\.3\./,
-    'SDK 0.3.x ships the compiled native binary instead of cli.js',
+    undefined,
+    'Local cowork is DSH-only; the Claude Agent SDK package must be uninstalled',
+  );
+  assert.equal(
+    sandboxRunnerPackage.dependencies['@anthropic-ai/claude-agent-sdk'],
+    undefined,
+    'Sandbox agent-runner must not depend on the Claude Agent SDK',
   );
   assert.ok(
     packageJson.dependencies['@anthropic-ai/sdk'],
-    'SDK 0.3.x declares @anthropic-ai/sdk as a required peer dependency',
+    'Anthropic Messages API client remains for provider format transforms',
   );
   assert.ok(
     packageJson.dependencies['@modelcontextprotocol/sdk'],
-    'SDK 0.3.x declares @modelcontextprotocol/sdk as a required peer dependency',
+    'MCP SDK remains for user-configured MCP servers',
   );
   assert.doesNotMatch(
     packageJson.scripts.postinstall,
     /patch-claude-sdk-cli/,
     'postinstall must not patch the removed cli.js bundle anymore',
+  );
+  assert.ok(
+    !(builder.asarUnpack || []).some((entry) => String(entry).includes('claude-agent-sdk')),
+    'Packaged asarUnpack must not ship Claude Agent SDK natives',
+  );
+  assert.equal(
+    fs.existsSync(path.join(process.cwd(), 'src', 'main', 'libs', 'claudeSdk.ts')),
+    false,
+    'claudeSdk.ts must be deleted once the package is gone',
+  );
+  assert.doesNotMatch(
+    fs.readFileSync(coworkRunnerPath, 'utf8'),
+    /@anthropic-ai\/claude-agent-sdk/,
+    'CoworkRunner must not import the Claude Agent SDK',
+  );
+  assert.doesNotMatch(
+    sandboxRunnerSource,
+    /import\(['"]@anthropic-ai\/claude-agent-sdk['"]\)/,
+    'Sandbox agent-runner must not dynamically import the Claude Agent SDK',
+  );
+});
+
+test('sandbox agent-runner refuses to boot the retired Claude Agent SDK', () => {
+  const sandboxRunnerSource = fs.readFileSync(
+    path.join(process.cwd(), 'sandbox', 'agent-runner', 'index.js'),
+    'utf8',
+  );
+
+  assert.match(
+    sandboxRunnerSource,
+    /Claude Agent SDK has been removed/,
+    'Guest runner must fail closed instead of calling sdk.query',
   );
 });
 
@@ -380,28 +423,9 @@ test('cowork subprocess env disables Claude Code nonessential external traffic',
     assert.match(
       coworkUtilSource,
       new RegExp(`env\\.${flag} = '1'`),
-      `${flag} must be forced on so embedded Claude Code sessions never depend on Anthropic-operated endpoints`,
+      `${flag} must be forced on so leftover Claude Code subprocesses never depend on Anthropic-operated endpoints`,
     );
   }
-});
-
-test('SDK query call sites isolate from user Claude Code settings sources', () => {
-  const coworkRunnerSource = fs.readFileSync(coworkRunnerPath, 'utf8');
-  const sandboxRunnerSource = fs.readFileSync(
-    path.join(process.cwd(), 'sandbox', 'agent-runner', 'index.js'),
-    'utf8',
-  );
-
-  assert.match(
-    coworkRunnerSource,
-    /settingSources:\s*\[\]/,
-    'CoworkRunner must pass settingSources: [] so user settings env blocks cannot override the session provider env',
-  );
-  assert.match(
-    sandboxRunnerSource,
-    /settingSources:\s*\[\]/,
-    'Sandbox runner must pass settingSources: [] for the same isolation',
-  );
 });
 
 test('CoworkRunner injects SDK subagent overrides that inherit the main model', () => {
@@ -429,8 +453,8 @@ test('CoworkRunner injects SDK subagent overrides that inherit the main model', 
   );
   assert.match(
     source,
-    /options\.agents\s*=\s*\{[\s\S]*?buildCoworkSdkAgentOverrides\(apiConfig\.model\)/,
-    'CoworkRunner should pass the overrides through SDK options.agents',
+    /agents:\s*buildCoworkSdkAgentOverrides\(/,
+    'Sandbox Claude SDK path should pass the overrides through SDK options.agents',
   );
 });
 

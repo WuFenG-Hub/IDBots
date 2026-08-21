@@ -30,22 +30,21 @@ function methodBody(source, signature) {
 
 test('runner records and logs the resolved upstream provider in local mode', () => {
   const source = read('src/main/libs/coworkRunner.ts');
-  const body = methodBody(source, 'private async runClaudeCodeLocal(');
+  const body = methodBody(source, 'private async runDshSessionLocal(');
   assert.ok(
-    body.includes('activeSession.upstreamProvider = apiConfig.provider'),
-    'local run must record the provider key'
+    body.includes('activeSession.upstreamProvider = route.provider'),
+    'local DSH run must record the provider key'
   );
   assert.ok(
-    body.includes('activeSession.upstreamBaseURL = apiConfig.upstreamBaseURL'),
-    'local run must record the upstream base URL'
+    body.includes('activeSession.upstreamBaseURL = route.baseUrl'),
+    'local DSH run must record the upstream base URL'
   );
-  // A log line makes the upstream visible in cowork.log without the UI.
   assert.ok(
     body.includes("'Resolved API config for session'"),
-    'local run must log the resolved API config'
+    'local DSH run must log the resolved API config'
   );
   assert.ok(
-    body.includes('provider: apiConfig.provider') && body.includes('upstreamBaseURL: apiConfig.upstreamBaseURL'),
+    body.includes('provider: route.provider') && body.includes('upstreamBaseURL: route.baseUrl'),
     'the log must carry provider + upstream URL'
   );
 });

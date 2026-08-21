@@ -180,7 +180,7 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
     // Routing stickiness: the pinned handle keeps dsh even with the store gone.
     claudeSettings.setStoreGetter(() => null)
     assert.equal(runner.shouldRunDshKernel(activeSession), true, 'pinned session stays dsh')
-    assert.equal(runner.shouldRunDshKernel({ ...activeSession, claudeSessionId: 'sdk-legacy' }), false, 'no store → claude')
+    assert.equal(runner.shouldRunDshKernel({ ...activeSession, claudeSessionId: 'sdk-legacy' }), true, 'legacy Claude handle still runs DSH')
 
     // Steer + cancel through the runner surface (second turn, store restored).
     claudeSettings.setStoreGetter(() => fakeStore)

@@ -38,57 +38,29 @@ function methodBody(source, signature) {
 // Static wiring
 // ---------------------------------------------------------------------------
 
-test('runner appends /s/<coworkSessionId> to ANTHROPIC_BASE_URL in local mode only', () => {
+test('DSH local path does not scope ANTHROPIC_BASE_URL; sandbox stays unscoped', () => {
   const source = read('src/main/libs/coworkRunner.ts');
-  const localBody = methodBody(source, 'private async runClaudeCodeLocal(');
+  const localBody = methodBody(source, 'private async runDshSessionLocal(');
 
   assert.ok(
-    localBody.includes('/s/${encodeURIComponent(sessionId)}'),
-    'runClaudeCodeLocal must scope ANTHROPIC_BASE_URL with the CoWork session id'
+    !localBody.includes('/s/${encodeURIComponent(sessionId)}'),
+    'DSH talks to the provider directly and must not session-scope ANTHROPIC_BASE_URL'
   );
-  assert.match(localBody, /envVars\.ANTHROPIC_BASE_URL\.replace\(\/\\\/\+\$\/, ''\)/);
-  // The CoWork session id survives SDK session resets; claudeSessionId does not.
-  assert.ok(!localBody.includes('/s/${encodeURIComponent(claudeSessionId)}'));
+  assert.ok(
+    !localBody.includes('ANTHROPIC_BASE_URL'),
+    'DSH local turns must not inject the Claude SDK Anthropic proxy URL'
+  );
 
-  // Sandbox env handling must stay untouched by the session-scoping.
   const sandboxBody = methodBody(source, 'private buildSandboxEnv(');
   assert.ok(!sandboxBody.includes('/s/${encodeURIComponent'));
   assert.ok(!sandboxBody.includes('setCoworkSnipHeadTokens'));
   assert.ok(!sandboxBody.includes('snipStaleToolResultBlocks'));
 });
 
-test('runner soft-threshold branch tries tool-result snipping before hard compaction', () => {
+test('DSH manual compaction resets the leftover snip boundary', () => {
   const source = read('src/main/libs/coworkRunner.ts');
-  const localBody = methodBody(source, 'private async runClaudeCodeLocal(');
-
-  // Scope the ordering check to the automatic soft-threshold branch: the
-  // Phase 3 manual-compaction block (which also calls buildCoworkCompactedPrompt)
-  // runs before it and takes precedence by design.
-  const shouldCompactIdx = localBody.indexOf('if (budget.shouldCompact)');
-  assert.ok(shouldCompactIdx >= 0, 'soft-threshold branch must exist');
-  const snipIndex = localBody.indexOf('setCoworkSnipHeadTokens(sessionId, snipHeadTokens)', shouldCompactIdx);
-  const compactIndex = localBody.indexOf('buildCoworkCompactedPrompt({', shouldCompactIdx);
-  assert.ok(snipIndex >= 0, 'soft-threshold branch must call setCoworkSnipHeadTokens');
-  assert.ok(compactIndex >= 0, 'soft-threshold branch must keep the buildCoworkCompactedPrompt fallback');
-  assert.ok(snipIndex < compactIndex, 'snipping must be attempted before hard compaction');
-
-  assert.ok(localBody.includes('getCoworkSnipHeadTokens(sessionId)'), 'hysteresis reads the persisted boundary');
-  assert.ok(localBody.includes('COWORK_TOOL_RESULT_SNIP_HYSTERESIS_TOKENS'));
-  assert.ok(localBody.includes('COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS'));
-  assert.ok(localBody.includes("activeSession.pendingCacheBreakReason = 'snip'"), 'snip cache break must be attributed');
-  // Hard compaction starts a fresh SDK session; the old boundary no longer applies.
-  assert.ok(localBody.includes('resetCoworkSnipHeadTokens(sessionId)'));
-
-  // The overflow-retry compaction path must stay free of snip-boundary writes.
-  // Call sites: Claude manual compact, Claude automatic compact, DSH manual
-  // compact. (Match full call strings: 'resetCoworkSnipHeadTokens(' contains
-  // 'setCoworkSnipHeadTokens(' as a substring.)
-  assert.equal(source.split('setCoworkSnipHeadTokens(sessionId, snipHeadTokens)').length - 1, 1);
-  assert.equal(source.split('resetCoworkSnipHeadTokens(sessionId)').length - 1, 3);
-  assert.ok(
-    localBody.indexOf('resetCoworkSnipHeadTokens(sessionId)') < localBody.indexOf("activeSession.pendingCacheBreakReason = 'manual_compact'"),
-    'manual-compaction branch must reset the snip boundary before starting the compacted session'
-  );
+  assert.equal(source.split('setCoworkSnipHeadTokens(sessionId, snipHeadTokens)').length - 1, 0);
+  assert.equal(source.split('resetCoworkSnipHeadTokens(sessionId)').length - 1, 1);
   const dshBody = methodBody(source, 'private async runDshSessionLocal(');
   assert.ok(
     dshBody.includes('resetCoworkSnipHeadTokens(sessionId)'),

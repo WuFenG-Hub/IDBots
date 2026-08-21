@@ -1,6 +1,6 @@
-// Kernel default flip: isDshKernelEnabled treats UNSET app_config as DSH (the
-// shipping default) while an explicit false (the user switched the pill to
-// Claude) keeps the Claude kernel. Env override still wins for dev instances.
+// Local cowork is DSH-only: isDshKernelEnabled always returns true so a
+// leftover `dshKernelEnabled: false` in app_config cannot resurrect the
+// Claude Agent SDK kernel.
 //
 // Requires: npm run compile:electron.
 
@@ -31,39 +31,23 @@ function loadModules() {
   }
 }
 
-test('isDshKernelEnabled: unset config adopts the DSH default', () => {
+test('isDshKernelEnabled: always DSH regardless of persisted config', () => {
   const { claudeSettings } = loadModules()
   claudeSettings.setStoreGetter(() => ({ get: (key) => undefined }))
-  const prevEnv = process.env.IDBOTS_DSH_KERNEL
-  delete process.env.IDBOTS_DSH_KERNEL
-  try {
-    assert.equal(claudeSettings.isDshKernelEnabled(), true, 'no app_config / no key → DSH')
-    claudeSettings.setStoreGetter(() => ({ get: (key) => (key === 'app_config' ? {} : undefined) }))
-    assert.equal(claudeSettings.isDshKernelEnabled(), true, 'app_config without the key → DSH')
-  } finally {
-    if (prevEnv !== undefined) process.env.IDBOTS_DSH_KERNEL = prevEnv
-  }
+  assert.equal(claudeSettings.isDshKernelEnabled(), true, 'no app_config → DSH')
+  claudeSettings.setStoreGetter(() => ({ get: (key) => (key === 'app_config' ? {} : undefined) }))
+  assert.equal(claudeSettings.isDshKernelEnabled(), true, 'app_config without the key → DSH')
+  claudeSettings.setStoreGetter(() => ({ get: (key) => (key === 'app_config' ? { dshKernelEnabled: false } : undefined) }))
+  assert.equal(claudeSettings.isDshKernelEnabled(), true, 'leftover false cannot resurrect Claude')
+  claudeSettings.setStoreGetter(() => ({ get: (key) => (key === 'app_config' ? { dshKernelEnabled: true } : undefined) }))
+  assert.equal(claudeSettings.isDshKernelEnabled(), true, 'explicit true → DSH')
 })
 
-test('isDshKernelEnabled: explicit user choice sticks', () => {
-  const { claudeSettings } = loadModules()
-  const prevEnv = process.env.IDBOTS_DSH_KERNEL
-  delete process.env.IDBOTS_DSH_KERNEL
-  try {
-    claudeSettings.setStoreGetter(() => ({ get: (key) => (key === 'app_config' ? { dshKernelEnabled: false } : undefined) }))
-    assert.equal(claudeSettings.isDshKernelEnabled(), false, 'explicit false → Claude kernel')
-    claudeSettings.setStoreGetter(() => ({ get: (key) => (key === 'app_config' ? { dshKernelEnabled: true } : undefined) }))
-    assert.equal(claudeSettings.isDshKernelEnabled(), true, 'explicit true → DSH kernel')
-  } finally {
-    if (prevEnv !== undefined) process.env.IDBOTS_DSH_KERNEL = prevEnv
-  }
-})
-
-test('isDshKernelEnabled: env override still wins', () => {
+test('isDshKernelEnabled: env override is ignored because DSH is the only kernel', () => {
   const { claudeSettings } = loadModules()
   claudeSettings.setStoreGetter(() => ({ get: (key) => (key === 'app_config' ? { dshKernelEnabled: false } : undefined) }))
   const prevEnv = process.env.IDBOTS_DSH_KERNEL
-  process.env.IDBOTS_DSH_KERNEL = '1'
+  process.env.IDBOTS_DSH_KERNEL = '0'
   try {
     assert.equal(claudeSettings.isDshKernelEnabled(), true)
   } finally {

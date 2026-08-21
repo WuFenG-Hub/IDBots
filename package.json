@@ -58,7 +58,6 @@
     "electron:dev:dsh": "cross-env IDBOTS_USER_DATA_PATH=./.dev-userdata-dsh IDBOTS_APP_DATA_PATH=./.dev-appdata-dsh concurrently \"vite --host 127.0.0.1 --port 5185\" \"wait-on -v -t 120000 -d 10000 http://127.0.0.1:5185 && node scripts/wait-electron-dev-build.mjs dist-electron && cross-env NODE_ENV=development IDBOTS_DISABLE_SINGLE_INSTANCE_LOCK=1 ELECTRON_START_URL=http://127.0.0.1:5185 electron .\""
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.221",
     "@anthropic-ai/sdk": "^0.115.0",
     "@electron/remote": "^2.0.12",
     "@grammyjs/runner": "^2.0.0",

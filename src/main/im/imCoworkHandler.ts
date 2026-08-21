@@ -6,7 +6,7 @@
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
-import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionResult } from '../libs/coworkPermissionTypes';
 import type { CoworkRunner, PermissionRequest } from '../libs/coworkRunner';
 import type { CoworkStore, CoworkMessage } from '../coworkStore';
 import type { IMStore } from './imStore';
