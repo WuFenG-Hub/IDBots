@@ -1,5 +1,5 @@
-// DSH-only kernel routing: Anthropic Messages is unavailable (no Claude SDK
-// fallback); everything else including sticky `dsh:` handles runs on DSH.
+// DSH-only kernel routing: Anthropic Messages rides pi-ai; sticky `dsh:`
+// handles stay on DSH. Pre-DSH Claude UUID sessions get an honest handoff.
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -12,7 +12,10 @@ const {
   dshSessionIdOf,
   makeDshSessionHandle,
   isDshEligibleApiType,
+  isAnthropicDirectUnavailable,
+  dshApiFormatOf,
   resolveKernelChoice,
+  buildClaudeToDshHandoff,
 } = require('../dist-electron/main/libs/coworkKernelRouting.js')
 
 test('session handle helpers round-trip', () => {
@@ -25,20 +28,44 @@ test('session handle helpers round-trip', () => {
   assert.equal(dshSessionIdOf('classic'), null)
 })
 
-test('apiType eligibility: openai-compatible routes only', () => {
+test('apiType eligibility includes Anthropic Messages', () => {
   assert.equal(isDshEligibleApiType('openai'), true)
   assert.equal(isDshEligibleApiType('responses'), true)
-  assert.equal(isDshEligibleApiType('anthropic'), false)
+  assert.equal(isDshEligibleApiType('anthropic'), true)
   assert.equal(isDshEligibleApiType(undefined), false)
+  assert.equal(isAnthropicDirectUnavailable('anthropic'), false)
 })
 
-test('local cowork is DSH-only; Anthropic Messages is unavailable', () => {
+test('dshApiFormatOf preserves anthropic and responses', () => {
+  assert.equal(dshApiFormatOf('anthropic'), 'anthropic')
+  assert.equal(dshApiFormatOf('responses'), 'responses')
+  assert.equal(dshApiFormatOf('openai'), 'openai')
+  assert.equal(dshApiFormatOf(undefined), 'openai')
+})
+
+test('local cowork is DSH-only including Anthropic Messages', () => {
   assert.equal(resolveKernelChoice({ apiType: 'openai' }), 'dsh')
   assert.equal(resolveKernelChoice({ apiType: 'responses' }), 'dsh')
-  assert.equal(resolveKernelChoice({ apiType: 'anthropic' }), 'unavailable')
+  assert.equal(resolveKernelChoice({ apiType: 'anthropic' }), 'dsh')
   assert.equal(resolveKernelChoice({ apiType: undefined }), 'dsh')
-  // Stickiness: a DSH session keeps its kernel even on Anthropic-direct
-  // (its handle only exists in the DSH runtime).
   assert.equal(resolveKernelChoice({ apiType: 'anthropic', sessionHandle: 'dsh:cw-1' }), 'dsh')
-  assert.equal(resolveKernelChoice({ apiType: 'anthropic', sessionHandle: 'sdk-123' }), 'unavailable')
+  assert.equal(resolveKernelChoice({ apiType: 'anthropic', sessionHandle: 'sdk-123' }), 'dsh')
+})
+
+test('Claude-to-DSH handoff summarizes prior turns and stays bounded', () => {
+  assert.equal(buildClaudeToDshHandoff([]), '')
+  assert.equal(buildClaudeToDshHandoff([{ type: 'system', content: 'noise' }]), '')
+  const text = buildClaudeToDshHandoff([
+    { type: 'user', content: 'Remember the project is Twin.' },
+    { type: 'assistant', content: 'I will keep Twin in the Twin folder.' },
+    { type: 'tool_use', content: 'ignored' },
+  ])
+  assert.match(text, /previous kernel/)
+  assert.match(text, /User: Remember the project is Twin\./)
+  assert.match(text, /Assistant: I will keep Twin in the Twin folder\./)
+  assert.doesNotMatch(text, /ignored/)
+  const long = 'x'.repeat(800)
+  const clipped = buildClaudeToDshHandoff([{ type: 'user', content: long }])
+  assert.ok(clipped.length < 1200)
+  assert.match(clipped, /…/)
 })

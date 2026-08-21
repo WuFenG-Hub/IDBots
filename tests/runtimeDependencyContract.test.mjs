@@ -367,6 +367,87 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
     /pinWorkspace: false/,
     'Warmup must not pin the shared runtime cwd to a guessed workspace',
   );
+  assert.match(
+    coworkDshTurnSource,
+    /cwd: input\.workspace\.cwd/,
+    'Each DSH turn must pass the cowork workspace cwd on session/ensure so bash/fs do not share the first-pinned composition default',
+  );
+  const sdkServerSource = fs.readFileSync(
+    path.join(process.cwd(), 'dsh-runtime', 'plugins', 'idbots-sdk-server.mjs'),
+    'utf8',
+  );
+  assert.match(
+    sdkServerSource,
+    /idbotsBindWorkspace/,
+    'session/ensure must bind session.header.cwd so Twin and Worker keep separate workspaces',
+  );
+  const dshKernelSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'dshKernel', 'dshKernel.ts'),
+    'utf8',
+  );
+  assert.match(
+    dshKernelSource,
+    /resolveElectronExecutablePath\(\)/,
+    'DSH runtime spawn must use resolveElectronExecutablePath, not raw process.execPath',
+  );
+  const dshBinSource = fs.readFileSync(
+    path.join(process.cwd(), 'dsh-runtime', 'bin.mjs'),
+    'utf8',
+  );
+  assert.match(
+    dshBinSource,
+    /installWin32SpawnShim/,
+    'DSH bin must install the Windows spawn shim so bash gets windowsHide and an absolute bash.exe',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /Auto-allowed native DSH approval/,
+    'acceptEdits/bypass must skip native DSH onApprovalRequest so unattended workers are not 60s-denied',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /cancelAgent\(taskId/,
+    'Subagent Stop must cancel the child DSH agent id',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /'todo_write', 'todowrite'/,
+    'Plan-mode allow-list must include the DSH todo_write name',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /rewriteWin32McpStdioServer/,
+    'MCP stdio commands must be rewritten to npx.cmd/npm.cmd at the DSH boundary',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /appendPythonRuntimeToEnv|ensurePythonRuntimeReady/,
+    'Windows Python runtime must be wired into skill env or warmup',
+  );
+  const pluginManagerSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'dshPluginManager.ts'),
+    'utf8',
+  );
+  assert.match(
+    pluginManagerSource,
+    /rewriteWin32StdioCommand\('npm'\)/,
+    'DSH plugin install must spawn npm.cmd on Windows',
+  );
+  assert.match(
+    pluginManagerSource,
+    /fs\.cpSync/,
+    'DSH plugin peer linking must copy when a junction cannot be created',
+  );
+  assert.match(
+    coworkUtilSource,
+    /appendPythonRuntimeToEnv\(env\)/,
+    'getSkillHostEnv must merge the Windows Python runtime onto PATH',
+  );
+  const builder = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'electron-builder.json'), 'utf8'));
+  assert.ok(
+    (builder.win?.extraResources ?? []).some((entry) => entry && entry.to === 'python-win'),
+    'Windows extraResources must ship python-win next to mingit',
+  );
 });
 test('Claude Agent SDK is not a runtime dependency', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));

@@ -12,6 +12,7 @@ import { getMetaidRpcBase, getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } 
 import { chatCompletionWithTools } from '../services/cognitiveChatCompletion';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 import { assignPathValue, collapseWindowsPathKeys, pathValueOf } from './windowsPathEnv';
+import { appendPythonRuntimeToEnv } from './pythonRuntime';
 
 function appendEnvPath(current: string | undefined, additions: string[]): string | undefined {
   const items = new Set<string>();
@@ -1053,6 +1054,7 @@ export function getSkillHostEnv(): Record<string, string> {
     CLAUDE_CODE_GIT_BASH_PATH: process.env.CLAUDE_CODE_GIT_BASH_PATH,
   };
   applyPackagedEnvOverrides(env);
+  appendPythonRuntimeToEnv(env);
 
   env.SKILLS_ROOT = skillsRoot;
   env.IDBOTS_SKILLS_ROOT = skillsRoot;

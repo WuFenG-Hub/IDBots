@@ -10,7 +10,7 @@
 //   session/steer          { sessionId, contentBlocks } → step-boundary steering mid-turn
 //   session/cancel         { sessionId, cause?, keepInbox? } → abort active turn with cause
 //   session/ensure         { sessionId, provider?, model?, maxTokens?,
-//                           reasoningEffort? } → live agent for the
+//                           reasoningEffort?, cwd? } → live agent for the
 //                           session: create fresh, or RESUME when a persisted log exists
 //                           (the stock server only lazily creates and would fail on an
 //                           existing log after a runtime restart). Also the per-session
@@ -19,6 +19,11 @@
 //                           waterfall so a mid-conversation model switch actually
 //                           reaches the next LLM call (the loop otherwise keeps
 //                           seeding from the first-turn session header).
+//                           Optional absolute `cwd` is the cowork workspace:
+//                           bash/fs resolve relative paths from
+//                           session.header.cwd, NOT the composition-level
+//                           plugin default (which is pinned once so the
+//                           shared runtime does not restart per bot).
 //   idbots/approval/respond { id, outcome } → answer a pending approval ask (M2)
 //   idbots/ask/respond       { id, answers } → answer a pending user question
 //   idbots/usage             { sessionId } → token-meter session projections
@@ -44,6 +49,7 @@
 // forward each ask to the Electron host over the wire. The service itself
 // races the turn's AbortSignal against our answer and discards late replies.
 
+import { isAbsolute, resolve } from 'node:path'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '@deepseek-ai/dsh-sdk-jsonrpc-server'
 
@@ -192,11 +198,13 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   }
 
   async idbotsEnsureSession(hostParams) {
-    const { sessionId, provider, model, maxTokens, reasoningEffort } = hostParams ?? {}
+    const { sessionId, provider, model, maxTokens, reasoningEffort, cwd } = hostParams ?? {}
     const id = String(sessionId ?? '')
     if (id.length === 0) throw new Error('idbots-sdk-server: session/ensure requires sessionId')
     if (this.idbotsAgents.has(id)) {
-      this.idbotsBindRoute(this.idbotsAgents.get(id), { provider, model, maxTokens, reasoningEffort })
+      const agent = this.idbotsAgents.get(id)
+      this.idbotsBindRoute(agent, { provider, model, maxTokens, reasoningEffort })
+      this.idbotsBindWorkspace(agent, cwd)
       return { ensured: true, resumed: false }
     }
 
@@ -215,7 +223,13 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       handle = await this.ctx.agents.resume({ resumeSessionId: id, agentOptions })
     } catch (error) {
       if (!/not found/.test(String(error?.message ?? error))) throw error
-      handle = await this.ctx.agents.create({ sessionId: id, meta: { cwd: this.cwd }, agentOptions })
+      // Prefer the host cowork workspace over initialize's sessionRoot so
+      // bash/fs land in bots/<id>/<date>, not the shared JSONL directory.
+      handle = await this.ctx.agents.create({
+        sessionId: id,
+        meta: { cwd: this.idbotsResolvedCwd(cwd) ?? this.cwd },
+        agentOptions,
+      })
       resumed = false
     }
     // Per-session surface: prompt sections and host tools registered on the
@@ -223,11 +237,44 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsRegisterSections(hostParams.sections, handle.agent?.ctx)
     this.idbotsRegisterHostTools(hostParams.hostTools, handle.agent?.ctx)
     this.idbotsBindRoute(handle.agent, { provider, model, maxTokens, reasoningEffort })
+    this.idbotsBindWorkspace(handle.agent, cwd)
     // Register with the stock server's bookkeeping (private at the type level,
     // present at runtime) so its lazy session/prompt create reuses this agent
     // instead of colliding on the registry id.
     this.sessions.set(id, { handle })
     return { ensured: true, resumed }
+  }
+
+  /**
+   * Absolute cowork workspace for this ensure, or undefined when the host
+   * omitted cwd (stock tests / initialize default). Relative paths are
+   * rejected — session.header.cwd is a storage key and a bash/fs root.
+   */
+  idbotsResolvedCwd(cwd) {
+    if (typeof cwd !== 'string') return undefined
+    const next = cwd.trim()
+    if (next.length === 0) return undefined
+    if (!isAbsolute(next)) {
+      throw new Error(`idbots-sdk-server: session/ensure cwd must be an absolute path, got "${next}"`)
+    }
+    return resolve(next)
+  }
+
+  /**
+   * Point bash/fs at this session's cowork workspace. dsh-tool-bash and
+   * dsh-tool-fs resolve relative paths from session.header.cwd; the
+   * composition plugin cwd is only a fallback for non-agent calls and is
+   * pinned once so Twin/Worker cwd churn does not restart the shared
+   * runtime. The SessionHeader object is deep-frozen at create/resume, so
+   * a later ensure replaces the header object (every ensure reapplies,
+   * including resume-after-restart of pre-fix sessions that stored
+   * sessionRoot as cwd).
+   */
+  idbotsBindWorkspace(agent, cwd) {
+    const resolved = this.idbotsResolvedCwd(cwd)
+    if (!agent?.session || resolved === undefined) return
+    if (agent.session.header?.cwd === resolved) return
+    agent.session.header = Object.freeze({ ...agent.session.header, cwd: resolved })
   }
 
   /**

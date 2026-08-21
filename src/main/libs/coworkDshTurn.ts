@@ -280,8 +280,9 @@ const DSH_WARMUP_CALLBACKS: DshTurnCallbacks = {
 }
 
 interface DshEnsureKernelOptions {
-  /** Real turns pin the first workspace; warmup loads bash/fs plugins without
-   *  locking the shared runtime to a guessed cwd. */
+  /** Real turns pin composition bash/fs plugin load to the first workspace
+   *  (plugin default only). Per-session execution cwd rides session/ensure.
+   *  Warmup loads the plugins without locking that default to a guessed cwd. */
   pinWorkspace?: boolean
   /** Real turns union MCP servers into the composition; warmup does not spawn
    *  user MCP subprocesses at app start. */
@@ -319,7 +320,8 @@ export class DshTurnHub {
    * Spawn (or reuse) the shared runtime without opening a session or sending
    * a prompt. Used at app-ready so the first cowork turn does not pay process
    * boot + plugin load. Workspace is mounted for bash/fs plugin load but not
-   * pinned — the first real turn still owns the cwd lock.
+   * pinned — execution cwd is per-session on session/ensure, and the first
+   * real turn still owns the composition plugin-default lock.
    */
   async prewarm(input: {
     provider: DshTurnProviderRoute
@@ -358,6 +360,7 @@ export class DshTurnHub {
           : {}),
         sections: input.sections,
         hostTools: input.hostTools,
+        ...(input.workspace?.cwd ? { cwd: input.workspace.cwd } : {}),
       })
       await kernel.prompt(input.dshSessionId, input.prompt, input.promptImages)
       return await controller.done()
@@ -475,6 +478,12 @@ export class DshTurnHub {
     await this.kernel.cancel(controller.dshSessionId, cause)
   }
 
+  /** Cancel a live DSH agent by its runtime session id (subagent Stop). */
+  async cancelAgent(dshSessionId: string, cause?: string): Promise<void> {
+    if (!this.kernel || !dshSessionId) return
+    await this.kernel.cancel(dshSessionId, cause)
+  }
+
   /** Subagent panel (cowork session id in, DSH routing inside). */
   async listSubagents(coworkSessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
     if (!this.kernel) return []
@@ -522,8 +531,10 @@ export class DshTurnHub {
     this.dshByCowork.clear()
   }
 
-  /** First workspace seen pins the mounted fs/bash cwd (per-session cwd churn
-   * would restart the runtime; a follow-up mounts per-agent workspaces). */
+  /** First workspace seen keeps bash/fs plugins mounted at a stable
+   *  composition default. Execution cwd is per-session (session.header.cwd
+   *  via session/ensure). Updating this on every Twin/Worker folder would
+   *  restart the shared runtime and kill in-flight turns. */
   private workspaceSeen: DshRuntimeConfigInput['workspace']
   private lastConfigJson: string | undefined
   /** Provider routes accumulated across sessions — the runtime serves a UNION

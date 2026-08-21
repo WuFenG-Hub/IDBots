@@ -21,6 +21,7 @@ import { app } from 'electron'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
+import { resolveElectronExecutablePath } from '../runtimePaths'
 import { mergeDshRuntimeProcessEnv } from '../windowsPathEnv'
 import { DshEventMapper } from './dshEventMapper'
 import type {
@@ -44,7 +45,7 @@ export const DSH_PUMP_YIELD_EVERY = 8
 export interface DshKernelOptions {
   /** Directory containing bin.mjs + node_modules (defaults: repo dsh-runtime/). */
   runtimeDir?: string
-  /** Node executable override (tests). Defaults to process.execPath. */
+  /** Node executable override (tests). Defaults to resolveElectronExecutablePath(). */
   nodePath?: string
   handlers: DshKernelHandlers
   log?: (level: 'info' | 'warn' | 'error', message: string, detail?: unknown) => void
@@ -122,7 +123,7 @@ export class DshKernel {
     const clientUrl = pathToFileURL(join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-sdk-client', 'lib', 'index.js')).href
     const { HarnessClient } = await dynamicImport(clientUrl)
     const client = new HarnessClient({
-      command: this.opts.nodePath ?? process.execPath,
+      command: this.opts.nodePath ?? resolveElectronExecutablePath(),
       args: [binPath, configPath],
       env: mergeDshRuntimeProcessEnv({ configEnv: config.env }),
     })
@@ -150,6 +151,10 @@ export class DshKernel {
     reasoningEffort?: string
     sections?: Array<{ name: string; order: number; text: string }>
     hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
+    /** Per-session cowork workspace. Bash/fs resolve relative paths from this
+     *  cwd; composition-level plugin cwd stays pinned so cwd churn does not
+     *  restart the shared runtime. */
+    cwd?: string
   }): Promise<{ resumed: boolean }> {
     this.requireClient()
     return this.client.request('session/ensure', input)
