@@ -657,7 +657,7 @@ interface AssignGroupChatTaskParams {
   participation_goal?: string;
   /** Boss identity: use globalmetaid for user identification. */
   supervisor_globalmetaid?: string;
-  /** Allowed skill names for tool hook, e.g. ["metabot-omni-caster"]. */
+  /** Allowed skill names for tool hook, e.g. ["web-search"]. */
   allowed_skills?: string[] | string | null;
   /** Original user instruction for reference. */
   original_prompt?: string | null;

@@ -2,50 +2,8 @@
   "version": 1,
   "description": "Default skill configuration for IDBots",
   "defaults": {
-    "metabot-post-buzz": {
-      "order": 5,
-      "version": "1.0.3",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "metabot-chat-groupchat": {
-      "order": 8,
-      "version": "1.0.1",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "metabot-chat-privatechat": {
-      "order": 18,
-      "version": "1.0.1",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "metabot-browser-open": {
-      "order": 19,
-      "version": "1.0.1",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "metabot-omni-caster": {
-      "order": 10,
-      "version": "1.0.2",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
     "metabot-post-skillservice": {
       "order": 12,
-      "version": "1.0.1",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "metabot-omni-reader": {
-      "order": 15,
       "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
