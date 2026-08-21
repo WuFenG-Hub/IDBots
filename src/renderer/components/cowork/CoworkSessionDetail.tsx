@@ -57,6 +57,7 @@ import {
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
 import { configService } from '../../services/config';
+import { projectsService } from '../../services/projects';
 import { fetchMetaidInfoByGlobalId, resolveMetaidAvatarSource } from '../../services/metabotInfoService';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -2403,6 +2404,32 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   useEffect(() => {
     setSessionModelOverride(null);
   }, [currentSession?.id]);
+  // Current git branch of the session's working directory, shown next to the
+  // folder chip when the directory is inside a git repository.
+  const [gitBranch, setGitBranch] = useState<string | null>(null);
+  // Project display name for a project-bound session (looked up from Settings >
+  // Projects so the header can show the project name instead of its source dir).
+  const [boundProject, setBoundProject] = useState<{ name: string; icon?: string | null } | null>(null);
+  useEffect(() => {
+    let active = true;
+    setGitBranch(null);
+    setBoundProject(null);
+    if (!currentSession?.id) return;
+    if (currentSession.cwd) {
+      window.electron?.getGitBranch?.(currentSession.cwd)
+        .then((branch) => { if (active) setGitBranch(branch); })
+        .catch(() => { if (active) setGitBranch(null); });
+    }
+    if (currentSession.projectId) {
+      projectsService.loadProjects()
+        .then((list) => {
+          const project = list.find((p) => p.id === currentSession.projectId);
+          if (active && project) setBoundProject({ name: project.name, icon: project.icon });
+        })
+        .catch(() => { if (active) setBoundProject(null); });
+    }
+    return () => { active = false; };
+  }, [currentSession?.id, currentSession?.cwd, currentSession?.projectId]);
   const sessionModelId = sessionModelOverride
     ? sessionModelOverride.modelId
     : (currentSession?.model ?? null);
@@ -3599,10 +3626,19 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
             aria-label={i18nService.t('coworkOpenFolder')}
           >
-            <FolderIcon className="h-4 w-4" />
+            {boundProject?.icon ? (
+              <img src={boundProject.icon} alt="" className="h-4 w-4 rounded-sm object-cover" />
+            ) : (
+              <FolderIcon className="h-4 w-4" />
+            )}
             <span className="max-w-[120px] truncate text-xs">
-              {truncatePath(currentSession.cwd)}
+              {boundProject?.name ?? truncatePath(currentSession.cwd)}
             </span>
+            {gitBranch && (
+              <span className="max-w-[90px] truncate text-[10px] px-1.5 py-0.5 rounded-md dark:bg-claude-darkSurface bg-claude-surface border dark:border-claude-darkBorder border-claude-border text-claude-textSecondary dark:text-claude-darkTextSecondary">
+                {gitBranch}
+              </span>
+            )}
           </button>
 
           {/* Menu button */}

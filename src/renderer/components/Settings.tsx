@@ -42,6 +42,8 @@ type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSan
 export type SettingsOpenOptions = {
   initialTab?: TabType;
   notice?: string;
+  /** Auto-open the Settings > Projects "New Project" form. */
+  openNewProjectForm?: boolean;
 };
 
 interface SettingsProps extends SettingsOpenOptions {
@@ -448,7 +450,7 @@ const generateCustomProviderKey = (name: string, existingKeys: string[]): string
   return candidate;
 };
 
-const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
+const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNewProjectForm }) => {
   const dispatch = useDispatch();
   // Sandbox settings are temporarily hidden; fall back to general.
   const resolvedInitialTab: TabType = initialTab === 'coworkSandbox' ? 'general' : (initialTab ?? 'general');
@@ -2123,7 +2125,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         return <SkillMcpManager />;
 
       case 'projects':
-        return <ProjectsManager />;
+        return <ProjectsManager autoOpenCreateForm={openNewProjectForm === true} />;
 
       case 'coworkSandbox':
         return (

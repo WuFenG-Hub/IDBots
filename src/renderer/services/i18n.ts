@@ -958,6 +958,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     noRecentFolders: '暂无最近文件夹',
     coworkOpenCurrentFolder: '打开这个目录',
     coworkOpenFolder: '打开文件夹',
+    coworkNewProject: '新建项目',
+    coworkOpenFolderPicker: '打开文件夹',
+    coworkBotWorkspace: '在该 Bot 工作目录',
 
     // Skills
     skills: '技能',
@@ -3072,6 +3075,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     noRecentFolders: 'No recent folders',
     coworkOpenCurrentFolder: 'Open this folder',
     coworkOpenFolder: 'Open folder',
+    coworkNewProject: 'New Project',
+    coworkOpenFolderPicker: 'Open Folder',
+    coworkBotWorkspace: "In this Bot's workspace",
 
     // Skills
     skills: 'Skills',

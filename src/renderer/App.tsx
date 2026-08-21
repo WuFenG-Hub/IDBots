@@ -389,6 +389,7 @@ const App: React.FC = () => {
     setSettingsOptions({
       initialTab: options?.initialTab,
       notice: options?.notice,
+      openNewProjectForm: options?.openNewProjectForm,
     });
     setShowSettings(true);
   }, []);
@@ -1158,6 +1159,7 @@ const App: React.FC = () => {
               onClose={handleCloseSettings}
               initialTab={settingsOptions.initialTab}
               notice={settingsOptions.notice}
+              openNewProjectForm={settingsOptions.openNewProjectForm}
             />
           )}
         </div>
@@ -1322,6 +1324,7 @@ const App: React.FC = () => {
           onClose={handleCloseSettings}
           initialTab={settingsOptions.initialTab}
           notice={settingsOptions.notice}
+          openNewProjectForm={settingsOptions.openNewProjectForm}
         />
       )}
       {showUpdateModal && updateInfo && (
