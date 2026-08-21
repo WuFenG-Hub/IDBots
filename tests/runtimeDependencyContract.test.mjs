@@ -338,6 +338,35 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
     /prewarmClaudeSdk/,
     'App startup must not pre-load the sunset Claude Agent SDK',
   );
+  assert.match(
+    mainProcessSource,
+    /void getCoworkRunner\(\)\.prewarmDshRuntime\(\)/,
+    'App startup must fire-and-forget DSH runtime warmup after first paint',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /prewarmDshRuntime\(\): Promise<void>/,
+    'CoworkRunner must expose DSH runtime warmup for app-ready',
+  );
+  const coworkDshTurnSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkDshTurn.ts'),
+    'utf8',
+  );
+  assert.match(
+    coworkDshTurnSource,
+    /async prewarm\(input:/,
+    'DshTurnHub must expose a spawn-only prewarm that does not send a prompt',
+  );
+  assert.match(
+    coworkDshTurnSource,
+    /kernelEnsureChain/,
+    'Warmup and the first turn must serialize ensureRuntime so they cannot double-spawn',
+  );
+  assert.match(
+    coworkDshTurnSource,
+    /pinWorkspace: false/,
+    'Warmup must not pin the shared runtime cwd to a guessed workspace',
+  );
 });
 test('Claude Agent SDK is not a runtime dependency', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));

@@ -9,9 +9,9 @@ import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { PermissionResult } from './coworkPermissionTypes';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute } from './claudeSettings';
+import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
-import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
+import { DshTurnHub, dshSessionRootFor, type DshTurnProviderRoute } from './coworkDshTurn';
 import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
 import { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressure } from './dshUsageProjection';
@@ -1633,8 +1633,10 @@ export class CoworkRunner extends EventEmitter {
   /** Latest estimated thinking-token count from SDK thinking_tokens events. */
   private thinkingTokensBySessionId: Map<string, number> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
-  /** DSH runtime hub (M5): lazily created on the first DSH-routed session. */
+  /** DSH runtime hub (M5): lazily created on warmup or the first DSH-routed session. */
   private dshTurnHub: DshTurnHub | null = null;
+  /** Dedupes app-ready warmup; settles even when warmup is skipped or fails. */
+  private dshWarmupPromise: Promise<void> | null = null;
   /**
    * Throttles DSH renderer updates and defers SQLite writes until finalize —
    * the same performance contract the Claude stream path already uses.
@@ -6137,6 +6139,88 @@ export class CoworkRunner extends EventEmitter {
     return route
   }
 
+  /**
+   * Map a resolved provider row onto the hub's turn-route shape. Warmup and
+   * the first real turn must produce the same composition fields (key, model
+   * limits, vision flag) or the shared runtime restarts and the warmup is wasted.
+   */
+  private dshTurnProviderFromRoute(
+    route: DshProviderRouteInfo,
+    extras?: { reasoningEffort?: string | null }
+  ): DshTurnProviderRoute {
+    const apiFormat = route.apiFormat === 'responses' ? 'responses' : 'openai';
+    const modelLimits = resolveCurrentModelLimits(route.model);
+    const officialDeepSeekNative = route.provider === 'deepseek' && route.apiFormat !== 'anthropic';
+    const reasoningEffort = extras?.reasoningEffort;
+    return {
+      key: officialDeepSeekNative ? 'deepseek-official' : route.provider,
+      apiFormat,
+      baseUrl: route.baseUrl,
+      apiKey: route.apiKey,
+      model: route.model,
+      contextWindow: modelLimits?.contextWindow,
+      maxOutputTokens: modelLimits?.maxOutputTokens,
+      ...(officialDeepSeekNative && reasoningEffort != null && reasoningEffort !== ''
+        ? { reasoningEffort }
+        : {}),
+      ...(modelLimits?.supportsVision ? { inputModalities: ['text', 'image'] } : {}),
+    };
+  }
+
+  /**
+   * Best-effort DSH runtime spawn after app-ready. Mirrors the retired Claude
+   * SDK module pre-warm: overlap window-load with process boot + plugin load
+   * so the first cowork turn only pays session/ensure + the LLM round-trip.
+   * Skips when no provider/key is configured. Never throws.
+   */
+  prewarmDshRuntime(): Promise<void> {
+    if (!this.dshWarmupPromise) {
+      this.dshWarmupPromise = this.runDshRuntimeWarmup();
+    }
+    return this.dshWarmupPromise;
+  }
+
+  private async runDshRuntimeWarmup(): Promise<void> {
+    try {
+      const recent = this.store.listSessions?.()?.[0];
+      const sessionRoute = recent?.id ? this.resolveSessionDshRoute(recent.id) : null;
+      const defaultRoute = resolveDshProviderRoute();
+      const route = (sessionRoute?.baseUrl && sessionRoute.apiKey) ? sessionRoute : defaultRoute;
+      if (!route?.baseUrl || !route.apiKey) {
+        coworkLog('INFO', 'prewarmDshRuntime', 'Skipped: no configured DSH provider');
+        return;
+      }
+      let cwd = '';
+      try {
+        cwd = (this.store.getConfig?.()?.workingDirectory ?? '').trim();
+      } catch {
+        cwd = '';
+      }
+      if (recent?.id) {
+        try {
+          const row = this.store.getSessionWithoutMessages?.(recent.id) ?? this.store.getSession(recent.id);
+          if (row?.cwd?.trim()) cwd = row.cwd.trim();
+        } catch {
+          // Test fakes and partial stores still warm the default cwd.
+        }
+      }
+      const hub = this.ensureDshTurnHub();
+      await hub.prewarm({
+        provider: this.dshTurnProviderFromRoute(route),
+        ...(cwd ? { workspace: { cwd } } : {}),
+      });
+      coworkLog('INFO', 'prewarmDshRuntime', 'DSH runtime ready', {
+        provider: route.provider,
+        model: route.model,
+        cwd: cwd || null,
+      });
+    } catch (error) {
+      coworkLog('WARN', 'prewarmDshRuntime', 'Warmup failed; first turn will cold-start', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private ensureDshTurnHub(): DshTurnHub {
     if (!this.dshTurnHub) {
       this.dshTurnHub = new DshTurnHub({
@@ -6460,29 +6544,13 @@ export class CoworkRunner extends EventEmitter {
           // chats about tasks instead of acting on them.
           { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
         ],
-        provider: {
-          // Official DeepSeek rides the first-party dsh-llm-deepseek adapter,
-          // which owns the 'deepseek-official' route key in the runtime; all
-          // other providers keep their app-config key on the pi-ai route.
-          key: officialDeepSeekNative ? 'deepseek-official' : route.provider,
-          apiFormat,
-          baseUrl: route.baseUrl,
-          apiKey: route.apiKey,
-          model: route.model,
-          contextWindow: modelLimits?.contextWindow,
-          maxOutputTokens: modelLimits?.maxOutputTokens,
+        provider: this.dshTurnProviderFromRoute(route, {
           // Effort rides the native route (adapter-validated off/low/high/max
           // ladder). pi-ai routes get no effort: their models' thinking stays
           // at the provider default, matching the pre-selector behavior for
           // non-deepseek providers.
-          ...(officialDeepSeekNative && dshReasoningEffort != null
-            ? { reasoningEffort: dshReasoningEffort }
-            : {}),
-          // Vision declaration rides the route (same knowledge source the
-          // Claude path's read-image guard uses): pi-ai refuses image blocks
-          // on text-only routes, and read_image/host image results gate on it.
-          ...(modelLimits?.supportsVision ? { inputModalities: ['text', 'image'] } : {}),
-        },
+          reasoningEffort: officialDeepSeekNative ? dshReasoningEffort : null,
+        }),
         callbacks: {
           onMessage: (message, slot) => {
             // Every message is progress; tool_use/tool_result also maintain
