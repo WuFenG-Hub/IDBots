@@ -5,6 +5,15 @@ import { i18nService } from '../../services/i18n';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
 import { pickRenderableAvatarSource as pickSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import MarkdownContent from '../MarkdownContent';
+import {
+  messengerBubbleClassName,
+  messengerColumnClassName,
+  messengerMarkdownClassName,
+  messengerMetaClassName,
+  messengerNameClassName,
+  messengerRowClassName,
+  messengerTxidRowClassName,
+} from '../chat/messengerBubble';
 
 interface A2AMessageItemProps {
   message: CoworkMessage;
@@ -444,12 +453,6 @@ const Avatar: React.FC<{
   );
 };
 
-const getA2AMarkdownClassName = (isLocal: boolean): string => {
-  return isLocal
-    ? 'max-w-none whitespace-normal break-words text-white [&_a]:text-inherit [&_a]:underline [&_h1]:my-0 [&_h1]:text-inherit [&_h2]:my-0 [&_h2]:text-inherit [&_h3]:my-0 [&_h3]:text-inherit [&_h4]:my-0 [&_h4]:text-inherit [&_h5]:my-0 [&_h5]:text-inherit [&_h6]:my-0 [&_h6]:text-inherit [&_p]:my-0 [&_p]:text-inherit [&_ul]:my-1 [&_ul]:text-inherit [&_ol]:my-1 [&_ol]:text-inherit [&_li]:text-inherit [&_strong]:text-inherit [&_em]:text-inherit [&_pre]:my-2 [&_blockquote]:my-1 [&_blockquote]:text-inherit'
-    : 'max-w-none whitespace-normal break-words dark:text-claude-darkText text-claude-text [&_a]:text-inherit [&_a]:underline [&_h1]:my-0 [&_h1]:text-inherit [&_h2]:my-0 [&_h2]:text-inherit [&_h3]:my-0 [&_h3]:text-inherit [&_h4]:my-0 [&_h4]:text-inherit [&_h5]:my-0 [&_h5]:text-inherit [&_h6]:my-0 [&_h6]:text-inherit [&_p]:my-0 [&_p]:text-inherit [&_ul]:my-1 [&_ul]:text-inherit [&_ol]:my-1 [&_ol]:text-inherit [&_li]:text-inherit [&_strong]:text-inherit [&_em]:text-inherit [&_pre]:my-2 [&_blockquote]:my-1 [&_blockquote]:text-inherit';
-};
-
 /** Collapsible tool-call block — collapsed by default, compact single-line header */
 const ToolCallBlock: React.FC<{ message: CoworkMessage }> = ({ message }) => {
   const [open, setOpen] = useState(false);
@@ -790,11 +793,11 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
     ? deliveryResult
     : stripOrderProtocolTag(message.content);
   const metafileItems = extractMetafileItems(contentToRender);
-  const markdownClassName = getA2AMarkdownClassName(isLocal);
+  const markdownClassName = messengerMarkdownClassName(isLocal);
   const txidPreview = formatA2ATxidPreview(txid);
 
   return (
-    <div className={`flex items-end gap-2 px-4 py-1 ${isLocal ? 'flex-row-reverse' : 'flex-row'}`}>
+    <div className={messengerRowClassName(isLocal)}>
       <Avatar
         src={fromAvatar}
         name={fromName}
@@ -802,17 +805,11 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
         browserGlobalMetaId={fromGlobalMetaId}
         onOpenInBrowser={handleOpenSenderInBrowser}
       />
-      <div className={`flex flex-col max-w-[70%] ${isLocal ? 'items-end' : 'items-start'}`}>
-        <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mb-0.5 px-1">
+      <div className={messengerColumnClassName(isLocal)}>
+        <span className={messengerNameClassName}>
           {fromName}
         </span>
-        <div
-          className={`rounded-2xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words ${
-            isLocal
-              ? 'bg-blue-500 text-white rounded-br-sm'
-              : 'dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text rounded-bl-sm'
-          }`}
-        >
+        <div className={messengerBubbleClassName(isLocal)}>
           <MarkdownContent content={contentToRender} className={markdownClassName} />
         </div>
         {metafileItems.length > 0 && (
@@ -823,7 +820,7 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
           </div>
         )}
         {txidPreview && (
-          <div className={`mt-0.5 inline-flex max-w-full items-center gap-1 px-1 text-[10px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary opacity-70 ${isLocal ? 'justify-end' : 'justify-start'}`}>
+          <div className={messengerTxidRowClassName(isLocal)}>
             <span className="font-mono">txid: {txidPreview}</span>
             <button
               type="button"
@@ -837,7 +834,7 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
           </div>
         )}
         {renderResendAction()}
-        <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary mt-0.5 px-1">
+        <span className={messengerMetaClassName}>
           {formatTime(message.timestamp)}
         </span>
       </div>

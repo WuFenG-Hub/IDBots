@@ -8,6 +8,7 @@ import {
   filterGroupTasksByTab,
   groupTaskStatusBadgeClass,
   formatGroupTaskTime,
+  formatGroupTaskMessengerTime,
   formatGroupTaskRelativeTime,
   mergeTranscriptMessages,
   shortGroupId,
@@ -81,6 +82,21 @@ test('formatGroupTaskTime: sqlite UTC text, ms epoch, seconds epoch, null/garbag
   assert.equal(formatGroupTaskTime(null), '');
   assert.equal(formatGroupTaskTime(''), '');
   assert.equal(formatGroupTaskTime('not-a-date'), '');
+});
+
+test('formatGroupTaskMessengerTime: compact HH:mm matching A2A bubbles', () => {
+  const now = new Date(2026, 7, 19, 15, 30, 0).getTime();
+  const sameDay = new Date(2026, 7, 19, 9, 5, 0).getTime();
+  assert.equal(formatGroupTaskMessengerTime(sameDay, now), '09:05');
+
+  const yesterday = new Date(2026, 7, 18, 9, 5, 0).getTime();
+  assert.equal(formatGroupTaskMessengerTime(yesterday, now), '08-18 09:05');
+
+  const lastYear = new Date(2025, 11, 31, 23, 0, 0).getTime();
+  assert.equal(formatGroupTaskMessengerTime(lastYear, now), '2025-12-31 23:00');
+
+  assert.equal(formatGroupTaskMessengerTime(null, now), '');
+  assert.equal(formatGroupTaskMessengerTime('', now), '');
 });
 
 test('formatGroupTaskRelativeTime: compact 19h / 2d matching the chat list', () => {
