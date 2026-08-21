@@ -16,7 +16,7 @@ import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
 import { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressure } from './dshUsageProjection';
 import type { DshUsageStatsRow } from './dshUsageProjection';
-import { dshSessionIdOf, isDshSessionHandle, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
+import { buildClaudeToDshHandoff, dshApiFormatOf, dshSessionIdOf, isDshSessionHandle, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
 import { isExplicitMetaAppUserRequest, QUICK_ACTION_MESSAGE_SOURCE } from './metaAppGuard';
 import {
   copyDshSkillSessionEnvFile,
@@ -32,6 +32,8 @@ import {
   buildCoworkSteerText,
 } from './coworkSteerChannel';
 import { getEnhancedEnv, getSkillHostEnv, getSkillsRoot, ensureCoworkTempDir } from './coworkUtil';
+import { rewriteWin32McpStdioServer } from './win32StdioCommand';
+import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult } from './coworkAssistantReply';
@@ -298,10 +300,10 @@ const SUBAGENT_PROGRESS_THROTTLE_MS = 1_000;
 // permission mode to enforce read-only behavior. Bash is intentionally excluded
 // (it can do anything). AskUserQuestion is excluded (handled separately).
 const READ_ONLY_TOOL_NAMES = new Set([
-  'read', 'view', 'ls', 'glob', 'grep', 'list',
-  'todowrite', 'taskget', 'tasklist',
+  'read', 'read_image', 'view', 'ls', 'glob', 'grep', 'list',
+  'todo_write', 'todowrite', 'taskget', 'tasklist',
   'project_query',  // local Projects metadata lookup; no side effects
-  'websearch', 'webfetch',  // informational only; network policy handled separately
+  'web_search', 'websearch', 'webfetch',  // informational; network policy handled separately
   'search_metaapps',
   'metabot_getinfo',
   'metabot_list',
@@ -5663,7 +5665,7 @@ export class CoworkRunner extends EventEmitter {
   async stopSubagentTask(sessionId: string, taskId: string): Promise<{ success: boolean; error?: string }> {
     const control = this.activeSessions.get(sessionId)?.sdkTaskControl;
     if (!control) {
-      return { success: false, error: 'Task control unavailable (session not running or sandbox mode).' };
+      return { success: false, error: 'Task control unavailable (session not running).' };
     }
     const normalizedTaskId = taskId.trim();
     if (!normalizedTaskId) {
@@ -5688,7 +5690,7 @@ export class CoworkRunner extends EventEmitter {
   async backgroundSubagentTask(sessionId: string, toolUseId?: string): Promise<{ success: boolean; backgrounded?: boolean; error?: string }> {
     const control = this.activeSessions.get(sessionId)?.sdkTaskControl;
     if (!control) {
-      return { success: false, error: 'Task control unavailable (session not running or sandbox mode).' };
+      return { success: false, error: 'Task control unavailable (session not running).' };
     }
     const normalizedToolUseId = toolUseId?.trim() ? toolUseId.trim() : undefined;
     try {
@@ -6218,7 +6220,7 @@ export class CoworkRunner extends EventEmitter {
     route: DshProviderRouteInfo,
     extras?: { reasoningEffort?: string | null }
   ): DshTurnProviderRoute {
-    const apiFormat = route.apiFormat === 'responses' ? 'responses' : 'openai';
+    const apiFormat = dshApiFormatOf(route.apiFormat);
     const modelLimits = resolveCurrentModelLimits(route.model);
     const officialDeepSeekNative = route.provider === 'deepseek' && route.apiFormat !== 'anthropic';
     const reasoningEffort = extras?.reasoningEffort;
@@ -6252,6 +6254,13 @@ export class CoworkRunner extends EventEmitter {
 
   private async runDshRuntimeWarmup(): Promise<void> {
     try {
+      if (process.platform === 'win32') {
+        void ensurePythonRuntimeReady().then((result) => {
+          if (!result.success) {
+            coworkLog('WARN', 'prewarmDshRuntime', 'Windows Python runtime not ready', { error: result.error });
+          }
+        }).catch(() => undefined);
+      }
       const recent = this.store.listSessions?.()?.[0];
       const sessionRoute = recent?.id ? this.resolveSessionDshRoute(recent.id) : null;
       const defaultRoute = resolveDshProviderRoute();
@@ -6312,7 +6321,8 @@ export class CoworkRunner extends EventEmitter {
         // the bot's cowork.mountMcpTools opt-in (default off — MCP schemas
         // ride every request). The runtime mounts each returned server as a
         // dsh-mcp-client entry exposing mcp__<name>__<tool> tools.
-        mcpServersProvider: (coworkSessionId) => this.mcpServerProvider?.(coworkSessionId) ?? [],
+        mcpServersProvider: (coworkSessionId) =>
+          (this.mcpServerProvider?.(coworkSessionId) ?? []).map((server) => rewriteWin32McpStdioServer(server)),
         onIdleSessionMessage: (coworkSessionId, message) => {
           const stored = this.store.addMessage(coworkSessionId, message as Omit<CoworkMessage, 'id' | 'timestamp'>);
           this.emit('message', coworkSessionId, stored);
@@ -6348,9 +6358,9 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
-   * Local kernel dispatch: DSH only. Anthropic Messages is unavailable (no
-   * Claude SDK fallback). Sandbox-unavailable / outside-cwd fallbacks must
-   * use this — never hard-wire a retired kernel.
+   * Local kernel dispatch: DSH only, including Anthropic Messages via pi-ai.
+   * Sandbox-unavailable / outside-cwd fallbacks must use this — never
+   * hard-wire a retired kernel.
    */
   private async runLocalKernel(
     activeSession: ActiveSession,
@@ -6426,11 +6436,37 @@ export class CoworkRunner extends EventEmitter {
       this.removeActiveSession(sessionId, activeSession);
       return;
     }
-    const apiFormat = route.apiFormat === 'responses' ? 'responses' : 'openai';
+    const apiFormat = dshApiFormatOf(route.apiFormat);
     const modelLimits = resolveCurrentModelLimits(route.model);
-    const dshUserPrompt = prompt;
+    const migratingFromClaude = Boolean(activeSession.claudeSessionId)
+      && !isDshSessionHandle(activeSession.claudeSessionId);
+    let dshUserPrompt = prompt;
+    if (migratingFromClaude) {
+      const handoff = buildClaudeToDshHandoff(this.store.getSession(sessionId)?.messages ?? []);
+      if (handoff) {
+        dshUserPrompt = `${handoff}\n\n${prompt}`;
+        const notice = tApp(
+          '此会话的模型上下文无法从旧内核恢复，已把近期对话摘要交给当前内核。界面历史仍在。',
+          "This session's model transcript could not be resumed from the previous kernel. A recent-turn summary was handed to the current kernel. The UI history is unchanged."
+        );
+        const stored = this.store.addMessage(sessionId, { type: 'system', content: notice });
+        this.emit('message', sessionId, stored);
+        coworkLog('INFO', 'runDshSessionLocal', 'Injected Claude-to-DSH history handoff', {
+          sessionId,
+          priorHandle: activeSession.claudeSessionId,
+        });
+      }
+    }
     const dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
     const hub = this.ensureDshTurnHub();
+    activeSession.sdkTaskControl = {
+      stopTask: async (taskId: string) => {
+        await hub.cancelAgent(taskId, 'subagent-stop');
+      },
+      backgroundTasks: async () => {
+        throw new Error('DSH subagents run in the foreground; background is not available.');
+      },
+    };
     // Claude-path leftover queue: DSH sessions compact immediately from the
     // header button. If a queue entry still exists (pre-handle first turn, or
     // a session that just switched kernels), compact in place before prompt —
@@ -6689,6 +6725,22 @@ export class CoworkRunner extends EventEmitter {
             }).catch(() => undefined);
           },
           onApprovalRequest: (ask) => {
+            const tool = String(ask.toolName ?? '').toLowerCase();
+            const mode = activeSession.permissionMode;
+            const skipAsk = mode === 'acceptEdits'
+              || mode === 'bypassPermissions'
+              || activeSession.autoApprove === true
+              || activeSession.autoApproveTools?.has(tool);
+            if (skipAsk) {
+              coworkLog('INFO', 'runDshSessionLocal', 'Auto-allowed native DSH approval', {
+                sessionId,
+                tool: ask.toolName,
+                mode,
+              });
+              void hub.respondApproval(ask.id, 'allowed-once')
+                .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'approval respond failed', { error: String(error) }));
+              return;
+            }
             const request: PermissionRequest = {
               requestId: ask.id,
               toolName: ask.toolName,

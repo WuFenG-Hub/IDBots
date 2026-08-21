@@ -307,6 +307,8 @@ export function generateRuntimeConfig(input) {
       {
         id: 'bash',
         name: '@deepseek-ai/dsh-bash-local',
+        // Composition cwd is the plugin FALLBACK (non-agent calls). Per-session
+        // execution cwd is session.header.cwd, set by session/ensure.
         config: { cwd: input.workspace.cwd, timeoutMs: 60000 },
       },
       { id: 'fs-local', name: '@deepseek-ai/dsh-fs-local', config: { cwd: input.workspace.cwd } },

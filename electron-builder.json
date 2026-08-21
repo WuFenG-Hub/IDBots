@@ -107,6 +107,13 @@
         ]
       },
       {
+        "from": "resources/python-win",
+        "to": "python-win",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
         "from": "resources/man-p2p/man-p2p-win32-x64.exe",
         "to": "man-p2p-win32-x64.exe"
       },

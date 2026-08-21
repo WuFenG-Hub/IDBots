@@ -19,12 +19,14 @@
 // populated dir (no npm available — e.g. a packaged app) still works; the
 // registry only records how/when the app itself installed things.
 //
-// Windows note: symlinks need elevated privileges there — plugin installs are
-// darwin/linux for now (the Windows P2 item tracks the gap).
+// Windows note: spawn npm.cmd (not bare npm) and copy peers when a junction
+// cannot be created. Packaged users can still drop packages into the plugin
+// dir by hand (resolveDshPluginEntries does not need npm).
 
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { rewriteWin32StdioCommand } from './win32StdioCommand';
 
 export interface DshPluginRegistryEntry {
   version: string;
@@ -42,6 +44,25 @@ export interface DshPluginEntry {
 }
 
 const SCOPED = /^@[^/]+\/[^/]+$/;
+
+function spawnNpm(args: string[], cwd: string): Promise<void> {
+  const command = rewriteWin32StdioCommand('npm');
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let stderr = '';
+    child.stdout?.on('data', () => undefined);
+    child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`npm ${args.join(' ')} failed (exit ${code}): ${stderr.slice(-500)}`));
+    });
+  });
+}
 
 export function dshPluginsDirFor(userDataPath: string): string {
   return path.join(userDataPath, 'dsh-plugins');
@@ -117,12 +138,16 @@ export function linkDshPluginPeers(pluginsDir: string, runtimeNodeModules: strin
     if (fs.existsSync(localSlot) || fs.existsSync(`${localSlot}.broken`)) continue;
     fs.mkdirSync(path.dirname(localSlot), { recursive: true });
     try {
-      fs.symlinkSync(runtimeCopy, localSlot, 'junction');
+      fs.symlinkSync(runtimeCopy, localSlot, process.platform === 'win32' ? 'junction' : 'dir');
       linked.push(peer);
     } catch {
-      // Symlink unavailable (e.g. Windows without privileges): the package's
-      // own dependency resolution may still find nothing — surfaces as a boot
-      // error naming the missing module, not a silent wrong copy.
+      try {
+        fs.cpSync(runtimeCopy, localSlot, { recursive: true, dereference: true });
+        linked.push(peer);
+      } catch {
+        // Copy also failed: the package's own resolution may still miss the
+        // peer and surface as a boot error naming the missing module.
+      }
     }
   }
   return linked;
@@ -171,20 +196,7 @@ export async function installDshPlugin(
     fs.writeFileSync(manifest, JSON.stringify({ name: 'idbots-dsh-plugins', private: true, version: '0.0.1' }, null, 2));
   }
   const spec = version ? `${pkg}@${version}` : `${pkg}@latest`;
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn('npm', ['install', spec, '--legacy-peer-deps', '--no-audit', '--no-fund'], {
-      cwd: pluginsDir,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stderr = '';
-    child.stdout?.on('data', () => undefined);
-    child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
-    child.on('error', reject);
-    child.on('exit', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`npm install ${spec} failed (exit ${code}): ${stderr.slice(-500)}`));
-    });
-  });
+  await spawnNpm(['install', spec, '--legacy-peer-deps', '--no-audit', '--no-fund'], pluginsDir);
   const linkedPeers = linkDshPluginPeers(pluginsDir, runtimeNodeModules);
   const registry = readDshPluginRegistry(pluginsDir);
   const installed = readJson(path.join(pluginsDir, 'node_modules', pkg, 'package.json'));
@@ -201,20 +213,7 @@ export async function uninstallDshPlugin(
   pluginsDir: string,
   pkg: string
 ): Promise<DshPluginRegistry> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn('npm', ['uninstall', pkg, '--legacy-peer-deps', '--no-audit', '--no-fund'], {
-      cwd: pluginsDir,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stderr = '';
-    child.stdout?.on('data', () => undefined);
-    child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
-    child.on('error', reject);
-    child.on('exit', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`npm uninstall ${pkg} failed (exit ${code}): ${stderr.slice(-500)}`));
-    });
-  });
+  await spawnNpm(['uninstall', pkg, '--legacy-peer-deps', '--no-audit', '--no-fund'], pluginsDir);
   const registry = readDshPluginRegistry(pluginsDir);
   delete registry.plugins[pkg];
   writeDshPluginRegistry(pluginsDir, registry);

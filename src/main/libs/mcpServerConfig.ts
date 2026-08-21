@@ -1,3 +1,5 @@
+import { rewriteWin32StdioCommand } from './win32StdioCommand';
+
 export type UserConfiguredMcpServerDefinition = {
   name: string;
   transportType: string;
@@ -42,7 +44,7 @@ export function buildUserConfiguredMcpServerConfigs(
 
     switch (server.transportType) {
       case 'stdio': {
-        const command = String(server.command || '').trim();
+        const command = rewriteWin32StdioCommand(String(server.command || '').trim());
         if (!command) {
           continue;
         }

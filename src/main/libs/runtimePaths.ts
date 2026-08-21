@@ -36,7 +36,7 @@ export function findNearestExistingFile(startDir: string, relativeFilePath: stri
 export function resolveElectronExecutablePath(): string {
   try {
     const electronExe = app.getPath('exe');
-    if (electronExe && fs.existsSync(electronExe)) {
+    if (electronExe && fs.existsSync(electronExe) && fs.statSync(electronExe).isFile()) {
       return electronExe;
     }
   } catch {

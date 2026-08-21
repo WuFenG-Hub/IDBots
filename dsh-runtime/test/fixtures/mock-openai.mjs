@@ -94,6 +94,7 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_WEB_SEARCH') ? 'web_search'
         : lastUserText.includes('CALL_READ') ? 'read'
         : lastUserText.includes('RUN_LONG_BASH') ? 'bash'
+        : lastUserText.includes('RUN_BASH_WRITE') ? 'bash'
         : lastUserText.includes('RUN_BASH') ? 'bash'
         : lastUserText.includes('DELEGATE') ? 'subagent'
         : null
@@ -106,12 +107,15 @@ export function startMockServer(port = 48787) {
       }
       let reply = ''
       if (toolCallFor !== null && !alreadyHasToolResult) {
+        const writeMatch = /RUN_BASH_WRITE:([A-Za-z0-9_-]+)/.exec(lastUserText)
         const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
           : toolCallFor === 'ask_user_question' ? { questions: [{ id: 'q1', question: 'Pick a color', header: 'auto-confirm', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
           : toolCallFor === 'web_search' ? { queries: ['latest stable Node.js version'] }
           : toolCallFor === 'read' ? { file_path: 'readable.txt' } : toolCallFor === 'bash' ? (lastUserText.includes('RUN_LONG_BASH')
             ? { command: 'sleep 5 && echo LONG_BASH_DONE', description: 'long-running foreground command for the stall-watchdog test' }
-            : { command: 'echo BASH_WORKS && date', description: 'echo test' })
+            : writeMatch
+              ? { command: `echo ${writeMatch[1]} > marker.txt`, description: 'write workspace marker' }
+              : { command: 'echo BASH_WORKS && date', description: 'echo test' })
           : toolCallFor === 'subagent' ? { prompt: 'say SUBAGENT_DONE', description: 'delegation test' } : { note: 'please dump the big blob' })
         frame({
           ...base,

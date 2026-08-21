@@ -175,6 +175,8 @@ resources/ffmpeg/
 resources/mingit/
 resources/MinGit-*.zip
 resources/PortableGit-*.7z.exe
+resources/python-win/
+resources/python-win-runtime.zip
 
 # Removed skill — do not re-add to repo (accidental skill)
 SKILLs/maintain-idbots-project/

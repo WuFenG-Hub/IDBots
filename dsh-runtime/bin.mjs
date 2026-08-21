@@ -10,7 +10,10 @@
 // absolute path.
 
 import path from 'node:path'
+import { installWin32SpawnShim } from './lib/win32-spawn-shim.mjs'
 import { boot } from '@deepseek-ai/dsh-app-boot'
+
+installWin32SpawnShim()
 
 const configPath = process.argv[2]
 if (!configPath) {

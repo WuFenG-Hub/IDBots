@@ -61,17 +61,32 @@ export function posixSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function formatPosixEnvFile(env: Record<string, string>): string {
+/** Convert a host path into a Git-bash-readable form (`C:\\Users\\x` → `/c/Users/x`). */
+export function toGitBashPath(filePath: string, platform: NodeJS.Platform = process.platform): string {
+  const slash = String(filePath ?? '').replace(/\\/g, '/');
+  if (platform !== 'win32') return slash;
+  const drive = /^([A-Za-z]):(?:\/|$)/.exec(slash);
+  if (drive) return `/${drive[1].toLowerCase()}${slash.slice(2)}`;
+  return slash;
+}
+
+function looksLikeWindowsAbsPath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || /^\\\\/.test(value);
+}
+
+const BASH_PATH_ENV_KEYS = new Set(['TMPDIR', 'TMP', 'TEMP', DSH_SKILL_ENV_DIR_ENV]);
+
+export function formatPosixEnvFile(env: Record<string, string>, platform: NodeJS.Platform = process.platform): string {
   const lines: string[] = [];
   for (const [key, value] of Object.entries(env)) {
     if (!ENV_KEY_RE.test(key)) continue;
-    lines.push(`${key}=${posixSingleQuote(String(value))}`);
+    const raw = String(value);
+    const next = BASH_PATH_ENV_KEYS.has(key) || looksLikeWindowsAbsPath(raw)
+      ? toGitBashPath(raw, platform)
+      : raw;
+    lines.push(`${key}=${posixSingleQuote(next)}`);
   }
   return lines.length > 0 ? `${lines.join('\n')}\n` : '';
-}
-
-function toBashReadablePath(filePath: string): string {
-  return filePath.replace(/\\/g, '/');
 }
 
 function tryChmod(target: string, mode: number): void {
@@ -91,8 +106,8 @@ export function ensureDshSkillEnvChannel(userDataPath: string): Record<string, s
   writeFileSync(loaderPath, DSH_SKILL_ENV_LOADER_SCRIPT, { encoding: 'utf8' });
   tryChmod(loaderPath, 0o644);
   return {
-    [DSH_SKILL_ENV_DIR_ENV]: dir,
-    [DSH_SKILL_ENV_LOADER_ENV]: toBashReadablePath(loaderPath),
+    [DSH_SKILL_ENV_DIR_ENV]: toGitBashPath(dir),
+    [DSH_SKILL_ENV_LOADER_ENV]: toGitBashPath(loaderPath),
   };
 }
 

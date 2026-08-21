@@ -20,6 +20,25 @@ function loadModule() {
   return require('../dist-electron/main/libs/dshSkillSessionEnv.js')
 }
 
+test('toGitBashPath converts Windows drive paths for Git bash', () => {
+  const { toGitBashPath } = loadModule()
+  assert.equal(
+    toGitBashPath('C:\\Users\\John Doe\\AppData\\Roaming\\IDBots', 'win32'),
+    '/c/Users/John Doe/AppData/Roaming/IDBots',
+  )
+  assert.equal(toGitBashPath('/tmp/foo', 'darwin'), '/tmp/foo')
+})
+
+test('formatPosixEnvFile converts TMPDIR on Windows', () => {
+  const { formatPosixEnvFile } = loadModule()
+  const body = formatPosixEnvFile({
+    TMPDIR: 'C:\\Users\\John Doe\\.cowork-temp',
+    ARK_API_KEY: 'sk-secret',
+  }, 'win32')
+  assert.match(body, /TMPDIR='\/c\/Users\/John Doe\/\.cowork-temp'/)
+  assert.match(body, /ARK_API_KEY='sk-secret'/)
+})
+
 test('formatPosixEnvFile quotes KEY names and apostrophes', () => {
   const { formatPosixEnvFile, posixSingleQuote } = loadModule()
   assert.equal(posixSingleQuote("it's"), `'it'\\''s'`)
