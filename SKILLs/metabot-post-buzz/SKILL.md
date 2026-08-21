@@ -19,7 +19,7 @@ official: true
    - `metafile://...` URI：直接传给 `attachments` 或 `--attachment`，脚本会原样写入 SimpleBuzz 的 `attachments` 数组，不下载、不重新上传。
    - 注意：文件上链不支持 DOGE。若 buzz 的目标网络是 DOGE，附件会改走 MVC 上链，buzz 正文仍按 DOGE 发布。
 4. **优先使用请求文件执行**：调用 `scripts/post-buzz.js --request-file <request.json>`。只有很短、无特殊字符的纯文本，才建议直接使用 `--content`。
-5. **展示 MetaApp 路径**，调用 `resolve_metaapp_url` 获取本地buzz相关应用的URL，并在回复中输出可点击地址，例如 `[在Buzz MetaApp 查看](http://127.0.0.1:PORT/...)`。除非用户明确要求“打开 / 启动 / 进入” MetaApp，否则不要调用 `open_metaapp` 自动打开。
+5. **输出公开链接**：发布成功后，从脚本输出 JSON 中取 `pinId`，在回复中给出公开预览链接 `https://openagentinternet.org/browser/pin/<pinId>`，例如 `[在链上查看这条 Buzz](https://openagentinternet.org/browser/pin/<pinId>)`。不要主动调用 `resolve_metaapp_url` 获取本地应用地址（宿主会拦截非用户显式请求的调用）；只有当用户明确要求“打开 / 查看本地 Buzz 应用”时，才调用 `resolve_metaapp_url` 输出本地地址，或按用户要求用 `open_metaapp` 打开。
 
 ## 💻 命令语法 (Command)
 
