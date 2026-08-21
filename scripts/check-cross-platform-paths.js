@@ -144,8 +144,8 @@ function runStaticChecks() {
 
   checkFileContains(
     'src/main/libs/coworkRunner.ts',
-    ['resolveElectronExecutablePath(', 'isStaleConversationSessionError(', 'staleResumeDetected'],
-    'cowork runner uses resilient executable/session handling'
+    ['getEnhancedEnv(', 'isStaleConversationSessionError(', 'staleResumeDetected'],
+    'cowork runner uses resilient env + stale-session handling'
   );
 
   checkFileNotContains(

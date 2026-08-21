@@ -79,7 +79,7 @@ import {
 } from './mcpServerConfig';
 import { z } from 'zod';
 import { ensureSandboxReady, getSandboxRuntimeInfoIfReady, type SandboxRuntimeInfo } from './coworkSandboxRuntime';
-import { isPathWithin, resolveElectronExecutablePath } from './runtimePaths';
+import { isPathWithin } from './runtimePaths';
 import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import {
