@@ -391,14 +391,15 @@ const CoworkQuestionWizard: React.FC<CoworkQuestionWizardProps> = ({
               })}
             </div>
 
-            {/* Other input and Skip button in same row */}
-            <div className="mt-4 flex items-center gap-3">
-              <input
-                type="text"
+            {/* Other input and Skip button in same row. Multiline matches the
+                0.1.1 DSH Web ask_user_question Other field (wrap / Shift+Enter). */}
+            <div className="mt-4 flex items-start gap-3">
+              <textarea
                 value={otherInputs[currentStep] || ''}
                 onChange={(e) => handleOtherInputChange(e.target.value)}
-                placeholder={i18nService.t('coworkQuestionWizardOther')}
-                className="flex-1 px-3 py-2 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text placeholder:text-claude-textSecondary dark:placeholder:text-claude-darkTextSecondary focus:outline-none focus:ring-2 focus:ring-claude-accent/50 text-sm"
+                placeholder={i18nService.t('coworkQuestionWizardOtherPlaceholder')}
+                rows={3}
+                className="flex-1 px-3 py-2 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text placeholder:text-claude-textSecondary dark:placeholder:text-claude-darkTextSecondary focus:outline-none focus:ring-2 focus:ring-claude-accent/50 text-sm resize-y min-h-[4.5rem]"
               />
               <button
                 type="button"

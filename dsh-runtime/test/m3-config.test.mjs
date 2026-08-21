@@ -59,6 +59,21 @@ record('generator: native DeepSeek route rides dsh-llm-deepseek (never pi-ai)',
   && nativeEntry.config.reasoningEffort === 'high'
   && nativeEntry.config.models[0].maxTokens === 32768
   && piEntry.config.providers.opencode.models[0].maxTokens === 8192)
+const visionNative = generateRuntimeConfig({
+  sessionRoot: '/tmp/x',
+  providers: [{
+    key: 'deepseek', native: true, apiFormat: 'openai', baseUrl: 'https://api.deepseek.com',
+    apiKeyEnv: 'K4',
+    models: [{ id: 'deepseek-v4-flash-vision-exp', contextWindow: 1_000_000, input: ['text', 'image'] }],
+  }],
+}).find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek')
+record('generator: native vision catalog emits inputModalities + image budgets',
+  Array.isArray(visionNative?.config?.models?.[0]?.inputModalities)
+  && visionNative.config.models[0].inputModalities.includes('image')
+  && visionNative.config.models[0].imagePixelBudget === 640000
+  && visionNative.config.models[0].imageMaxBytes === 1048576)
+record('generator: dsh-authorization is never mounted',
+  !unit.some((e) => e.name === '@deepseek-ai/dsh-authorization'))
 record('generator: sections config emitted', unit.some((e) => e.config?.sections?.[0]?.name === 'persona:metabot'))
 record('generator: plugin paths are absolute (config location-independent)',
   unit.every((e) => !String(e.name).startsWith('./')))

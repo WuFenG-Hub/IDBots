@@ -26,7 +26,7 @@ export interface CoworkModelLimits {
    * Whether the model can consume image content blocks (vision). Unknown /
    * unlisted models default to `true` so the guard never blocks image input
    * for a model we simply have not catalogued; only models KNOWN to lack
-   * vision (e.g. the DeepSeek V4 family) are marked false.
+   * vision (e.g. DeepSeek V4 Flash / Pro) are marked false.
    */
   supportsVision: boolean;
   source: CoworkModelLimitSource;
@@ -37,6 +37,7 @@ type ModelLike = {
   contextWindow?: unknown;
   maxOutputTokens?: unknown;
   supportsVision?: unknown;
+  supportsImage?: unknown;
 };
 
 type ProviderLike = {
@@ -53,9 +54,10 @@ type AppConfigLike = {
 };
 
 const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>>> = {
-  // DeepSeek V4 family has NO vision capability (2026-08-09 diagnosis:
+  // DeepSeek V4 Flash / Pro have no vision (2026-08-09 diagnosis:
   // deepseek-v4-pro session ballooned to 60% context from Read image base64
-  // the model could never interpret). Read/View image guards key off this.
+  // the model could never interpret). 0.1.1 adds flash-vision-exp as the
+  // official vision SKU. Read/View image guards key off this.
   'deepseek-v4-pro': {
     contextWindow: DEEPSEEK_V4_PRO_CONTEXT_WINDOW,
     maxOutputTokens: DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS,
@@ -65,6 +67,11 @@ const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contex
     contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
     maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
     supportsVision: false,
+  },
+  'deepseek-v4-flash-vision-exp': {
+    contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+    maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
+    supportsVision: true,
   },
   // 与 src/renderer/config.ts 预设模型保持一致的大上下文模型（2026-07 向 LobsterAI 对齐）
   'gpt-5.6-sol': { contextWindow: 1_050_000, supportsVision: true },
@@ -119,10 +126,15 @@ function isModelLike(value: unknown): value is ModelLike {
 }
 
 function getModelLimits(model: ModelLike): Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>> {
+  const supportsVision = typeof model.supportsVision === 'boolean'
+    ? model.supportsVision
+    : typeof model.supportsImage === 'boolean'
+      ? model.supportsImage
+      : undefined;
   return {
     contextWindow: toPositiveInteger(model.contextWindow),
     maxOutputTokens: toPositiveInteger(model.maxOutputTokens),
-    supportsVision: typeof model.supportsVision === 'boolean' ? model.supportsVision : undefined,
+    supportsVision,
   };
 }
 
