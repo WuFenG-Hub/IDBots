@@ -106,6 +106,12 @@ import {
   normalizeA2AByeCooldownMs,
   normalizeA2AMaxIncomingTurns,
 } from './a2aChatLimits';
+import {
+  classifyPrivateChatSkillTurnError,
+  nextSkillTurnRetryAt,
+  PRIVATE_CHAT_SKILL_TURN_MAX_ATTEMPTS,
+  shouldRetryPrivateChatSkillTurn,
+} from './privateChatSkillTurnPolicy';
 
 const POLL_INTERVAL_MS = 5_000;
 /** Max recent messages of the active segment sent to the model per A2A private-chat turn. */
@@ -229,6 +235,8 @@ export interface PrivateChatA2AAnalysis {
 
 /** In-flight task keys to avoid duplicate processing */
 const thinkingTasks = new Set<string>();
+/** Backoff state for chat-skill turns that failed with a retryable error. */
+const privateChatSkillTurnRetries = new Map<string, { attempts: number; nextRetryAt: number }>();
 const interruptibleA2AGuidanceTurns = new Map<string, {
   sessionId: string;
   metabotId: number;
@@ -3096,6 +3104,10 @@ async function processOne(
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
+  const pendingRetry = privateChatSkillTurnRetries.get(taskKey);
+  if (pendingRetry && Date.now() < pendingRetry.nextRetryAt) {
+    return;
+  }
   thinkingTasks.add(taskKey);
   try {
     const toGlobalMetaId = (row.to_global_metaid ?? row.to_metaid ?? '').trim();
@@ -4577,8 +4589,23 @@ async function processOne(
         }
         emitLog(`[PrivateChat] LLM failed for message ${row.id}: ${errorMessage}`);
         if (canRunChatSkills) {
-          emitLog(`[PrivateChat] Keeping message ${row.id} unprocessed until a skill reply can be delivered.`);
-          return;
+          const previous = privateChatSkillTurnRetries.get(taskKey);
+          const attempts = (previous?.attempts ?? 0) + 1;
+          if (shouldRetryPrivateChatSkillTurn({ error: e, attempts })) {
+            const nextRetryAt = nextSkillTurnRetryAt(attempts);
+            privateChatSkillTurnRetries.set(taskKey, { attempts, nextRetryAt });
+            const waitMs = Math.max(0, nextRetryAt - Date.now());
+            emitLog(
+              `[PrivateChat] Keeping message ${row.id} unprocessed until a skill reply can be delivered ` +
+              `(attempt ${attempts}/${PRIVATE_CHAT_SKILL_TURN_MAX_ATTEMPTS}, next retry in ${waitMs}ms).`
+            );
+            return;
+          }
+          privateChatSkillTurnRetries.delete(taskKey);
+          emitLog(
+            `[PrivateChat] Skill turn failed permanently for message ${row.id} ` +
+            `(${classifyPrivateChatSkillTurnError(e)}); marking processed.`
+          );
         }
         markProcessed(db, row.id, saveDb);
         return;
@@ -4776,6 +4803,7 @@ async function processOne(
       });
       emitLog(`[PrivateChat] Sent "bye" to ${fromGlobalMetaId.slice(0, 12)}…, byeSent flag set.`);
     }
+    privateChatSkillTurnRetries.delete(taskKey);
     markProcessed(db, row.id, saveDb);
   } finally {
     thinkingTasks.delete(taskKey);
@@ -4932,6 +4960,7 @@ export async function stopPrivateChatDaemon(options?: { waitForTick?: boolean })
   privateChatPollTickRunning = false;
   orderCowork = null;
   thinkingTasks.clear();
+  privateChatSkillTurnRetries.clear();
   if (options?.waitForTick) {
     await activeTickPromise?.catch(() => undefined);
     await Promise.allSettled(detachedWork);

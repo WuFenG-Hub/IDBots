@@ -10289,9 +10289,16 @@ export class CoworkRunner extends EventEmitter {
     }
     coworkLog('ERROR', 'CoworkRunner', `Session error: ${sessionId}`, { error });
     this.store.updateSession(sessionId, { status: 'error' });
+    const content = `Error: ${error}`;
+    const latest = this.store.getSessionMessagesPage?.(sessionId, { limit: 1 });
+    const last = latest?.messages?.[latest.messages.length - 1];
+    if (last?.type === 'system' && last.content === content) {
+      this.emit('error', sessionId, error);
+      return;
+    }
     const message = this.store.addMessage(sessionId, {
       type: 'system',
-      content: `Error: ${error}`,
+      content,
       metadata: { error },
     });
     this.emit('message', sessionId, message);

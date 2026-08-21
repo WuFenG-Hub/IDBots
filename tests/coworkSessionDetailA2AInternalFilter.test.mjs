@@ -26,18 +26,25 @@ test('CoworkSessionDetail hides non-order internal states in A2A sessions', () =
 
 test('a2aInternalMessageFilter keeps order flows while hiding tool calls and reasoning', () => {
   const filterSource = fs.readFileSync(
-    path.join(projectRoot, 'src', 'renderer', 'components', 'cowork', 'a2aInternalMessageFilter.ts'),
+    path.join(projectRoot, 'src', 'main', 'shared', 'a2aInternalMessageFilter.ts'),
     'utf8',
   );
 
   // Internal states that are hidden for non-order messages.
   assert.match(filterSource, /message\.type === 'tool_use' \|\| message\.type === 'tool_result'/);
   assert.match(filterSource, /message\.type === 'system'/);
-  assert.match(filterSource, /message\.metadata\?\.isThinking === true/);
+  assert.match(filterSource, /isThinking === true/);
 
   // Order-related markers that keep internal states visible.
   assert.match(filterSource, /orderMappingExternalConversationId/);
   assert.match(filterSource, /orderExecutionTrace === true/);
   assert.match(filterSource, /simplemsgKind === 'order_protocol'/);
   assert.match(filterSource, /serviceOrderEvent/);
+});
+
+test('CoworkSessionDetail keeps A2A conversation readable during local work and errors', () => {
+  const source = fs.readFileSync(sourcePath, 'utf8');
+  assert.match(source, /coworkA2ABackgroundWorking/);
+  assert.match(source, /coworkA2ASessionErrorBanner/);
+  assert.match(source, /isStreaming \|\| currentSession\.status === 'running'/);
 });

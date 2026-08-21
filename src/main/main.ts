@@ -8551,12 +8551,14 @@ if (!gotTheLock) {
     return withSqliteRecovery('cowork:session:getMessagesPage', async () => {
       try {
         const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
-        if (!sessionId || !getCoworkStore().getSessionMetadata(sessionId)) {
+        const metadata = getCoworkStore().getSessionMetadata(sessionId);
+        if (!sessionId || !metadata) {
           return { success: false, error: 'Session not found' };
         }
         const page = getCoworkStore().getSessionMessagesPage(sessionId, {
           beforeSequence: typeof input?.beforeSequence === 'number' ? input.beforeSequence : null,
           limit: typeof input?.limit === 'number' ? input.limit : undefined,
+          displayWindow: metadata.sessionType === 'a2a',
         });
         return { success: true, page };
       } catch (error) {
