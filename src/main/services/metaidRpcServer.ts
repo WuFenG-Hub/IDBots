@@ -2146,13 +2146,21 @@ export function startMetaidRpcServer(
   });
 
   const rpcPort = resolveMetaidRpcPort();
-  // Layer 2 (DSH skill RPC 401): mirror the per-launch token into userData so
+  // Layer 2 (DSH skill RPC 401): mirror the bearer token into userData so
   // SKILL scripts can read it via IDBOTS_RPC_AUTHFILE when the DSH bash tool
-  // scrubs the IDBOTS_RPC_TOKEN env name from their environment.
+  // scrubs the IDBOTS_RPC_TOKEN env name from their environment. The token is
+  // stable per userData dir: an existing mirror from a previous launch (or a
+  // sibling instance currently owning the port) is adopted, never rotated out
+  // from under live clients.
   if (!writeMetaidRpcTokenFile(app.getPath('userData'))) {
     console.warn('[MetaID RPC] Failed to write the token mirror file; DSH SKILL RPC keeps env-only token injection');
   }
   listenWithRetry(server, rpcPort, RPC_HOST, {
+    // Never give up for good: a port conflict (sibling dev instance, zombie
+    // process) can clear at any time, and every local skill RPC channel stays
+    // dead until we bind. Fast retries for ~2 minutes, then a slow background
+    // rebind until the port frees up or the app quits.
+    rebindDelayMs: 15_000,
     onListening: () => {
       console.log(`[MetaID RPC] Gateway listening on ${getMetaidRpcBase()}`);
     },
