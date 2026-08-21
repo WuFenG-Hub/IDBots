@@ -41,6 +41,7 @@ import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/
 import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps } from './libs/coworkOpenAICompatProxy';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
+import { getGitBranch } from './libs/gitWorkspace';
 import { IMGatewayManager, IMPlatform, IMGatewayConfig } from './im';
 import { APP_NAME } from './appConstants';
 import { getSkillServiceManager } from './skillServices';
@@ -7523,6 +7524,8 @@ if (!gotTheLock) {
     effort?: string | null;
     /** Set when the prompt was filled verbatim from a quick action (建议操作) entry. */
     source?: 'quick_action';
+    /** FK to projects.id; binds the session to a Settings > Projects project. */
+    projectId?: string | null;
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
@@ -7552,16 +7555,20 @@ if (!gotTheLock) {
       // A folder the user deliberately picked (one that differs from the
       // configured default) always wins; the renderer pre-fills the default
       // into start requests, so "cwd equals the default" means no real pick —
-      // metabot sessions then run inside their per-bot dated workspace.
+      // metabot sessions then run inside their per-bot dated workspace. A
+      // project-bound session always uses the project's source directory as-is.
       const sessionMetabotId = isWorkspaceMetabotId(options.metabotId) ? options.metabotId : null;
-      const taskWorkingDirectory = sessionMetabotId != null
-        && shouldUseBotWorkspaceCwd({
-          explicitCwd: options.cwd,
-          defaultWorkingDirectory: config.workingDirectory,
-          metabotId: sessionMetabotId,
-        })
-        ? resolveBotWorkspaceCwd(selectedWorkspaceRoot, sessionMetabotId)
-        : resolveTaskWorkingDirectory(selectedWorkspaceRoot);
+      const projectBound = typeof options.projectId === 'string' && options.projectId.trim().length > 0;
+      const taskWorkingDirectory = projectBound
+        ? resolveTaskWorkingDirectory(selectedWorkspaceRoot)
+        : (sessionMetabotId != null
+          && shouldUseBotWorkspaceCwd({
+            explicitCwd: options.cwd,
+            defaultWorkingDirectory: config.workingDirectory,
+            metabotId: sessionMetabotId,
+          })
+          ? resolveBotWorkspaceCwd(selectedWorkspaceRoot, sessionMetabotId)
+          : resolveTaskWorkingDirectory(selectedWorkspaceRoot));
 
       const session = coworkStoreInstance.createSession(
         title,
@@ -7579,7 +7586,8 @@ if (!gotTheLock) {
         // undefined effort keeps the tiered defaults (bot brain → global);
         // an explicit '' pick means "model default" and is persisted as null.
         options.effort === undefined ? null : (options.effort?.trim() || null),
-        options.modelProvider?.trim() || null
+        options.modelProvider?.trim() || null,
+        options.projectId?.trim() || null
       );
       const runner = getCoworkRunner();
 
@@ -12063,6 +12071,12 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   ipcMain.handle('get-recent-cwds', async (_event, limit?: number) => {
     const boundedLimit = limit ? Math.min(Math.max(limit, 1), 20) : 8;
     return getCoworkStore().listRecentCwds(boundedLimit);
+  });
+
+  // Best-effort git branch detection for a workspace directory (used by the
+  // cowork header to show the active branch of a project-bound conversation).
+  ipcMain.handle('git:getBranch', async (_event, cwd?: string) => {
+    return getGitBranch(cwd);
   });
 
   ipcMain.handle('get-api-config', async () => {
