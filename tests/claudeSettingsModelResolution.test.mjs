@@ -101,7 +101,7 @@ test('ANY enabled provider key resolves to that provider first/default model (op
   assert.equal(defaultModel.config?.model, 'oc-pro');
 });
 
-test('unresolvable override falls back to the default route with a warning (never dead-ends)', () => {
+test('unresolvable override returns no match with a warning (caller fallbacks take over)', () => {
   const warnings = [];
   const originalWarn = console.warn;
   console.warn = (message) => warnings.push(String(message));
@@ -119,11 +119,14 @@ test('unresolvable override falls back to the default route with a warning (neve
       },
     }, () => resolveApiConfigForModel('removed-model-id'));
 
-    assert.equal(result.error, undefined, 'must not fail the turn');
-    assert.equal(result.config?.model, 'm-default', 'falls back to the global default route');
-    assert.equal(result.config?.provider, 'deepseek');
+    // The resolution layer must NOT silently substitute the default route:
+    // silently landing unattended bot turns on the default (free-quota)
+    // provider burned quota with no signal and skipped the bot's fallback
+    // brain. Callers own the fallback chain and log it explicitly.
+    assert.equal(result.config, null, 'must not silently fall back to the default route');
+    assert.match(result.error ?? '', /No enabled provider found/);
     assert.ok(
-      warnings.some((m) => m.includes("[llm-brain] unresolvable llm_id 'removed-model-id', using default route")),
+      warnings.some((m) => m.includes("[llm-brain] unresolvable llm_id 'removed-model-id'")),
       `warning missing: ${JSON.stringify(warnings)}`,
     );
   } finally {
@@ -149,7 +152,7 @@ test('unresolvable override with no enabled providers still errors', () => {
   assert.match(result.error ?? '', /No enabled provider found/);
 });
 
-test('resolveDshProviderRoute falls back to the default route and names the bot in the warning', () => {
+test('resolveDshProviderRoute returns null for an unresolvable override and names the bot in the warning', () => {
   const { resolveDshProviderRoute } = claudeSettings;
   const warnings = [];
   const originalWarn = console.warn;
@@ -168,11 +171,11 @@ test('resolveDshProviderRoute falls back to the default route and names the bot 
       },
     }, () => resolveDshProviderRoute('opencode-gone', null, { botId: 7, botName: 'Lucy' }));
 
-    assert.ok(route, 'DSH route must resolve (never null-without-fallback)');
-    assert.equal(route.model, 'm-default');
-    assert.equal(route.provider, 'deepseek');
+    // Null (not a silent default-route substitute) lets the caller run the
+    // explicit fallback chain: fallback brain first, then the default route.
+    assert.equal(route, null, 'unresolvable override must not silently resolve to the default route');
     assert.ok(
-      warnings.some((m) => m.includes("[llm-brain] bot 7 (Lucy): unresolvable llm_id 'opencode-gone', using default route")),
+      warnings.some((m) => m.includes("[llm-brain] bot 7 (Lucy): unresolvable llm_id 'opencode-gone'")),
       `bot-named warning missing: ${JSON.stringify(warnings)}`,
     );
   } finally {

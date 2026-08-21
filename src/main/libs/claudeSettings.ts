@@ -279,24 +279,22 @@ function resolveMatchedProvider(
   }
 
   if (!providerEntry) {
-    // Last-resort safety net: a legacy/unresolvable override (e.g. a stale
-    // provider key or a removed model id left in metabots.llm_id) must never
-    // dead-end a bot turn. Re-resolve with NO override — the same default
-    // route a session without an llm_id gets (default model -> first enabled
-    // provider's first model) — and warn. Only the genuine no-enabled-
-    // providers case keeps the hard error below.
+    // An explicit override (metabot llm_id / brain model) that matches no
+    // enabled provider must surface as an error HERE, not be silently
+    // substituted with the global default route. Callers own the fallback
+    // chain — the bot's fallback brain first, then the default route with an
+    // explicit log line (see CoworkRunner.resolveSessionDshRoute and
+    // llmFallback.runWithLlmFallback). Swallowing the failure at this layer
+    // skipped the bot's own fallback brain and routed unattended bot turns
+    // onto the default (free-quota) provider, burning quota with no signal.
     if (requestedOverride) {
-      const defaultRoute = resolveMatchedProvider(appConfig);
-      if (defaultRoute.matched) {
-        const botLabel = context?.botId != null
-          ? `bot ${context.botId}${context.botName ? ` (${context.botName})` : ''}: `
-          : '';
-        console.warn(
-          `[llm-brain] ${botLabel}unresolvable llm_id '${requestedOverride}', using default route ` +
-          `(model '${defaultRoute.matched.modelId}', provider '${defaultRoute.matched.providerName}')`
-        );
-        return defaultRoute;
-      }
+      const botLabel = context?.botId != null
+        ? `bot ${context.botId}${context.botName ? ` (${context.botName})` : ''}: `
+        : '';
+      console.warn(
+        `[llm-brain] ${botLabel}unresolvable llm_id '${requestedOverride}': no enabled provider offers it; ` +
+        `caller fallbacks (fallback brain, then default route) take over`
+      );
     }
     return { matched: null, error: `No enabled provider found for model: ${modelId}` };
   }
