@@ -356,6 +356,8 @@ export interface CoworkConfig {
   memoryUserMemoriesMaxItems: number;
   /** Combined char budget for injected memory blocks (oldest-first eviction; global-only). */
   memoryPromptMaxChars: number;
+  /** Last workspace choice in the New Task composer (null = fall back to bot workspace). */
+  lastWorkspaceSelection: CoworkWorkspaceSelection | null;
 }
 
 export type CoworkConfigUpdate = Partial<Pick<
@@ -368,6 +370,7 @@ export type CoworkConfigUpdate = Partial<Pick<
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
   | 'memoryPromptMaxChars'
+  | 'lastWorkspaceSelection'
 >>;
 
 export interface CoworkApiConfig {

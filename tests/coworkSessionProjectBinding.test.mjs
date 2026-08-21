@@ -95,3 +95,51 @@ test('getGitBranch returns the branch inside a git repo and null outside', async
   assert.equal(await getGitBranch(null), null);
   assert.equal(await getGitBranch(undefined), null);
 });
+
+test('lastWorkspaceSelection persists and round-trips through cowork config', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+
+    // New store with no record: falls back to null (renderer maps null -> bot workspace).
+    assert.equal(store.getConfig().lastWorkspaceSelection, null);
+
+    store.setConfig({
+      lastWorkspaceSelection: { kind: 'project', projectId: 'p1', name: 'IDBots', cwd: process.cwd() },
+    });
+    const projectSel = store.getConfig().lastWorkspaceSelection;
+    assert.equal(projectSel?.kind, 'project');
+    assert.equal(projectSel?.projectId, 'p1');
+    assert.equal(projectSel?.cwd, process.cwd());
+
+    store.setConfig({ lastWorkspaceSelection: { kind: 'botWorkspace' } });
+    assert.deepEqual(store.getConfig().lastWorkspaceSelection, { kind: 'botWorkspace' });
+
+    store.setConfig({ lastWorkspaceSelection: { kind: 'folder', cwd: process.cwd() } });
+    assert.deepEqual(store.getConfig().lastWorkspaceSelection, { kind: 'folder', cwd: process.cwd() });
+
+    store.setConfig({ lastWorkspaceSelection: null });
+    assert.equal(store.getConfig().lastWorkspaceSelection, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('lastWorkspaceSelection falls back to null when the cwd no longer exists', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+
+    store.setConfig({
+      lastWorkspaceSelection: { kind: 'folder', cwd: '/definitely/not/a/real/dir-xyz' },
+    });
+    assert.equal(store.getConfig().lastWorkspaceSelection, null);
+
+    store.setConfig({
+      lastWorkspaceSelection: { kind: 'project', projectId: 'p2', name: 'Ghost', cwd: '/also/not/real' },
+    });
+    assert.equal(store.getConfig().lastWorkspaceSelection, null);
+  } finally {
+    cleanup();
+  }
+});

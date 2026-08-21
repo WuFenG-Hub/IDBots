@@ -23,6 +23,7 @@ import type {
   CoworkKnowledgeEntry,
   CoworkMessageFeedbackRecord,
   CoworkPermissionMode,
+  CoworkWorkspaceSelection,
 } from './cowork';
 import type {
   CommunityMetaAppInstallResult,
@@ -424,6 +425,8 @@ interface CoworkConfig {
   memoryUserMemoriesMaxItems: number;
   /** Combined char budget for injected memory blocks (oldest-first eviction; global-only). */
   memoryPromptMaxChars: number;
+  /** Last workspace choice in the New Task composer (null = fall back to bot workspace). */
+  lastWorkspaceSelection: CoworkWorkspaceSelection | null;
 }
 
 type CoworkConfigUpdate = Partial<Pick<
@@ -436,6 +439,7 @@ type CoworkConfigUpdate = Partial<Pick<
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
   | 'memoryPromptMaxChars'
+  | 'lastWorkspaceSelection'
 >>;
 
 interface CoworkUserMemoryEntry {

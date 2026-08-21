@@ -474,6 +474,7 @@ contextBridge.exposeInMainWorld('electron', {
       memoryLlmJudgeEnabled?: boolean;
       memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
       memoryUserMemoriesMaxItems?: number;
+      lastWorkspaceSelection?: { kind: 'project' | 'folder' | 'botWorkspace'; projectId?: string; name?: string; cwd?: string } | null;
     }) =>
       ipcRenderer.invoke('cowork:config:set', config),
     listMemoryEntries: (input: {

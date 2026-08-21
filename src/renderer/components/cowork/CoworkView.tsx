@@ -6,6 +6,7 @@ import { clearActiveSkills, setActiveSkillIds } from '../../store/slices/skillSl
 import { setActions, selectAction, clearSelection } from '../../store/slices/quickActionSlice';
 import { coworkService } from '../../services/cowork';
 import { configService } from '../../services/config';
+import { projectsService } from '../../services/projects';
 import { metaAppService } from '../../services/metaApp';
 import { quickActionService } from '../../services/quickAction';
 import { i18nService } from '../../services/i18n';
@@ -87,8 +88,32 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     configService.getConfig().coworkPermissionMode ?? 'default'
   );
   // The New Task composer's workspace choice: a project, an explicit folder, or
-  // the default bot workspace. Persisted only into the session row on start.
+  // the default bot workspace. Seeded from the persisted last selection and
+  // persisted back whenever the user changes it.
   const [workspaceSelection, setWorkspaceSelection] = useState<CoworkWorkspaceSelection | null>(null);
+  const seedWorkspaceSelection = useCallback(async () => {
+    const persisted = store.getState().cowork.config.lastWorkspaceSelection;
+    if (!persisted) {
+      setWorkspaceSelection({ kind: 'botWorkspace' });
+      return;
+    }
+    if (persisted.kind === 'project') {
+      // A project default is only valid while the project still exists.
+      try {
+        const projects = await projectsService.loadProjects();
+        const stillExists = projects.some((p) => p.id === persisted.projectId);
+        setWorkspaceSelection(stillExists ? persisted : { kind: 'botWorkspace' });
+      } catch {
+        setWorkspaceSelection({ kind: 'botWorkspace' });
+      }
+      return;
+    }
+    setWorkspaceSelection(persisted);
+  }, []);
+  const handleWorkspaceSelectionChange = useCallback((selection: CoworkWorkspaceSelection) => {
+    setWorkspaceSelection(selection);
+    void coworkService.updateConfig({ lastWorkspaceSelection: selection });
+  }, []);
   const setPermissionMode = useCallback((mode: CoworkPermissionMode) => {
     setPermissionModeState(mode);
     void configService.updateConfig({ coworkPermissionMode: mode });
@@ -275,6 +300,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   useEffect(() => {
     const init = async () => {
       await coworkService.init();
+      // Seed the composer's workspace choice from the persisted last selection
+      // (or fall back to the bot workspace for new users / missing dirs).
+      await seedWorkspaceSelection();
       // Load quick actions with localization
       try {
         quickActionService.initialize();
@@ -311,7 +339,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     return () => {
       unsubscribe();
     };
-  }, [dispatch]);
+  }, [dispatch, seedWorkspaceSelection]);
 
   const buildCombinedSystemPrompt = async (skillPrompt?: string) => {
     // Skill routing rules and the live skill catalog are composed main-side
@@ -731,7 +759,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
               await coworkService.updateConfig({ workingDirectory: dir });
             }}
             workspaceSelection={workspaceSelection}
-            onWorkspaceSelectionChange={setWorkspaceSelection}
+            onWorkspaceSelectionChange={handleWorkspaceSelectionChange}
             onOpenNewProject={() => onRequestAppSettings?.({ initialTab: 'projects', openNewProjectForm: true })}
             showFolderSelector={true}
             showModelSelector={true}

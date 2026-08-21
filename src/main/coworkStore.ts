@@ -124,6 +124,43 @@ function clampMemoryUserMemoriesMaxItems(value: number): number {
   );
 }
 
+/**
+ * Parse and validate the persisted last-workspace choice. A missing/invalid
+ * record, or a folder/project whose cwd no longer exists, resolves to null so
+ * the renderer falls back to the per-bot dated workspace. `botWorkspace` is
+ * always valid (its cwd is computed at session start).
+ */
+function parseLastWorkspaceSelection(raw: string | undefined): CoworkWorkspaceSelection | null {
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const candidate = parsed as { kind?: unknown; cwd?: unknown; projectId?: unknown; name?: unknown };
+  if (candidate.kind === 'botWorkspace') {
+    return { kind: 'botWorkspace' };
+  }
+  if (candidate.kind === 'folder' && typeof candidate.cwd === 'string' && candidate.cwd.trim()) {
+    const cwd = candidate.cwd.trim();
+    return fs.existsSync(cwd) ? { kind: 'folder', cwd } : null;
+  }
+  if (
+    candidate.kind === 'project'
+    && typeof candidate.cwd === 'string' && candidate.cwd.trim()
+    && typeof candidate.projectId === 'string' && candidate.projectId.trim()
+    && typeof candidate.name === 'string' && candidate.name.trim()
+  ) {
+    const cwd = candidate.cwd.trim();
+    return fs.existsSync(cwd)
+      ? { kind: 'project', projectId: candidate.projectId.trim(), name: candidate.name.trim(), cwd }
+      : null;
+  }
+  return null;
+}
+
 function normalizeMemoryText(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
@@ -772,7 +809,15 @@ export interface CoworkConfig {
   memoryUserMemoriesMaxItems: number;
   /** Combined char budget for the injected memory blocks (oldest-first eviction). Global-only: no per-bot column to avoid a metabot_memory_policies migration. */
   memoryPromptMaxChars: number;
+  /** Last workspace choice in the New Task composer (null = fall back to bot workspace). */
+  lastWorkspaceSelection: CoworkWorkspaceSelection | null;
 }
+
+/** The New Task composer's persisted workspace choice (mirrors the renderer union). */
+export type CoworkWorkspaceSelection =
+  | { kind: 'project'; projectId: string; name: string; cwd: string }
+  | { kind: 'folder'; cwd: string }
+  | { kind: 'botWorkspace' };
 
 export interface CoworkMemoryPolicy {
   metabotId: number;
@@ -817,6 +862,7 @@ export type CoworkConfigUpdate = Partial<Pick<
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
   | 'memoryPromptMaxChars'
+  | 'lastWorkspaceSelection'
 >>;
 
 export interface ApplyTurnMemoryUpdatesOptions {
@@ -5653,6 +5699,7 @@ export class CoworkStore implements MemoryBackend {
     const memoryGuardLevelRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryGuardLevel']);
     const memoryUserMemoriesMaxItemsRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryUserMemoriesMaxItems']);
     const memoryPromptMaxCharsRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['memoryPromptMaxChars']);
+    const lastWorkspaceSelectionRow = this.getOne<ConfigRow>('SELECT value FROM cowork_config WHERE key = ?', ['lastWorkspaceSelection']);
 
     return {
       workingDirectory: workingDirRow?.value || getDefaultWorkingDirectory(),
@@ -5670,6 +5717,7 @@ export class CoworkStore implements MemoryBackend {
       memoryGuardLevel: normalizeMemoryGuardLevel(memoryGuardLevelRow?.value),
       memoryUserMemoriesMaxItems: clampMemoryUserMemoriesMaxItems(Number(memoryUserMemoriesMaxItemsRow?.value)),
       memoryPromptMaxChars: clampMemoryPromptMaxChars(Number(memoryPromptMaxCharsRow?.value)),
+      lastWorkspaceSelection: parseLastWorkspaceSelection(lastWorkspaceSelectionRow?.value),
     };
   }
 
@@ -5754,6 +5802,16 @@ export class CoworkStore implements MemoryBackend {
           value = excluded.value,
           updated_at = excluded.updated_at
       `, [String(clampMemoryPromptMaxChars(config.memoryPromptMaxChars)), now]);
+    }
+
+    if (config.lastWorkspaceSelection !== undefined) {
+      this.db.run(`
+        INSERT INTO cowork_config (key, value, updated_at)
+        VALUES ('lastWorkspaceSelection', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = excluded.updated_at
+      `, [config.lastWorkspaceSelection ? JSON.stringify(config.lastWorkspaceSelection) : '', now]);
     }
 
     this.saveDb();
