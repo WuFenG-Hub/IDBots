@@ -68,6 +68,7 @@ const initialState: CoworkState = {
     memoryGuardLevel: 'strict',
     memoryUserMemoriesMaxItems: 20,
     memoryPromptMaxChars: 12000,
+    lastWorkspaceSelection: null,
   },
 };
 

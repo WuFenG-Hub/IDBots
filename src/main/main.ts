@@ -16,6 +16,7 @@ import {
   CoworkStore,
   type CoworkMessage,
   type CoworkMessageMetadata,
+  type CoworkWorkspaceSelection,
 } from './coworkStore';
 import { McpStore, type McpServerFormData } from './mcpStore';
 import { ProjectStore, type ProjectFormData } from './projectStore';
@@ -9420,6 +9421,7 @@ if (!gotTheLock) {
     memoryLlmJudgeEnabled?: boolean;
     memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems?: number;
+    lastWorkspaceSelection?: { kind: 'project' | 'folder' | 'botWorkspace'; projectId?: string; name?: string; cwd?: string } | null;
   }) => {
     try {
       const normalizedExecutionMode = config.executionMode !== undefined
@@ -9446,14 +9448,35 @@ if (!gotTheLock) {
             Math.min(MAX_MEMORY_USER_MEMORIES_MAX_ITEMS, Math.floor(config.memoryUserMemoriesMaxItems))
           )
         : undefined;
+      const normalizedLastWorkspaceSelection = ((): CoworkWorkspaceSelection | null | undefined => {
+        const sel = config.lastWorkspaceSelection;
+        if (sel == null) return null;
+        if (sel.kind === 'botWorkspace') return { kind: 'botWorkspace' };
+        if (sel.kind === 'folder' && typeof sel.cwd === 'string' && sel.cwd.trim()) {
+          return { kind: 'folder', cwd: sel.cwd.trim() };
+        }
+        if (
+          sel.kind === 'project'
+          && typeof sel.projectId === 'string' && sel.projectId.trim()
+          && typeof sel.name === 'string' && sel.name.trim()
+          && typeof sel.cwd === 'string' && sel.cwd.trim()
+        ) {
+          return { kind: 'project', projectId: sel.projectId.trim(), name: sel.name.trim(), cwd: sel.cwd.trim() };
+        }
+        return undefined;
+      })();
+      const { lastWorkspaceSelection: _rawLastWorkspaceSelection, ...restConfig } = config;
       const normalizedConfig = {
-        ...config,
+        ...restConfig,
         executionMode: normalizedExecutionMode,
         memoryEnabled: normalizedMemoryEnabled,
         memoryImplicitUpdateEnabled: normalizedMemoryImplicitUpdateEnabled,
         memoryLlmJudgeEnabled: normalizedMemoryLlmJudgeEnabled,
         memoryGuardLevel: normalizedMemoryGuardLevel,
         memoryUserMemoriesMaxItems: normalizedMemoryUserMemoriesMaxItems,
+        ...(normalizedLastWorkspaceSelection !== undefined
+          ? { lastWorkspaceSelection: normalizedLastWorkspaceSelection }
+          : {}),
       };
       const previousWorkingDir = getCoworkStore().getConfig().workingDirectory;
       getCoworkStore().setConfig(normalizedConfig);
