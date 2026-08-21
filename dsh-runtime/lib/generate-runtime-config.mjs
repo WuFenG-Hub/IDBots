@@ -71,6 +71,13 @@ const deepSeekChatBaseURL = (baseUrl) => {
   return base
 }
 
+/** Official adapter request-image budgets (dsh-llm-deepseek 0.1.1 defaults). */
+const NATIVE_DEEPSEEK_IMAGE_PIXEL_BUDGET = 640_000
+const NATIVE_DEEPSEEK_IMAGE_MAX_BYTES = 1_048_576
+
+const modelDeclaresImageInput = (model) =>
+  Array.isArray(model.input) && model.input.includes('image')
+
 /** One native-route → one dsh-llm-deepseek plugin entry. Deployment defaults:
  *  thinking on at `high` when a turn carries no explicit effort (per-turn
  *  effort rides session/ensure; the off/low/high/max ladder is adapter-owned). */
@@ -88,6 +95,12 @@ const nativeDeepSeekEntry = (provider) => ({
       name: model.id,
       contextWindow: model.contextWindow,
       maxTokens: Number.isFinite(model.maxOutputTokens) ? model.maxOutputTokens : NATIVE_DEEPSEEK_DEFAULT_MAX_TOKENS,
+      // 0.1.1 rejects image blocks unless the catalog entry lists `image`.
+      ...(modelDeclaresImageInput(model) ? {
+        inputModalities: model.input,
+        imagePixelBudget: NATIVE_DEEPSEEK_IMAGE_PIXEL_BUDGET,
+        imageMaxBytes: NATIVE_DEEPSEEK_IMAGE_MAX_BYTES,
+      } : {}),
     })),
   },
 })
@@ -204,10 +217,13 @@ export function generateRuntimeConfig(input) {
     { id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop' },
     // Transient provider failures (timeouts, 5xx) retry instead of killing the turn.
     { id: 'llm-retry', name: '@deepseek-ai/dsh-llm-retry' },
+    // dsh-authorization (new 0.1.1 package) is intentionally NOT mounted:
+    // IDBots owns API keys in settings and injects them via apiKeyEnv.
+    // pi-ai registers OAuth flows only when ctx.authorization exists.
+    { id: 'session-projections', name: plugin('idbots-session-projections.mjs') },
     // Projection registry: token-meter (next entry) registers its tokenUsage /
     // contextPressure / contextBreakdown units onto it; idbots-sdk-server's
     // idbots/usage RPC reads them for the host's usage panel.
-    { id: 'session-projections', name: plugin('idbots-session-projections.mjs') },
     { id: 'token-meter', name: '@deepseek-ai/dsh-token-meter' },
     {
       id: 'compaction-basic',

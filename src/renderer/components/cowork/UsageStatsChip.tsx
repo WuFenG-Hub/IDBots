@@ -12,6 +12,7 @@ import type { CoworkUsageStats } from '../../types/cowork';
 const DEEPSEEK_RATES: Record<string, { cacheHitPerM: number; cacheMissPerM: number; outputPerM: number }> = {
   'deepseek-v4-pro': { cacheHitPerM: 0.025, cacheMissPerM: 3, outputPerM: 6 },
   'deepseek-v4-flash': { cacheHitPerM: 0.02, cacheMissPerM: 1, outputPerM: 2 },
+  'deepseek-v4-flash-vision-exp': { cacheHitPerM: 0.02, cacheMissPerM: 1, outputPerM: 2 },
 };
 
 /** Defaults to the cheapest tier when the model id is unknown. */

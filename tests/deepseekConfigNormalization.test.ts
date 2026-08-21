@@ -14,12 +14,13 @@ const legacyProviderModels = [
   { id: 'deepseek-chat', name: 'DeepSeek Chat', supportsImage: false },
 ];
 
-test('defaultConfig uses DeepSeek V4 Flash and Pro as the built-in DeepSeek defaults', () => {
+test('defaultConfig uses DeepSeek V4 Flash, Pro, and Flash Vision Exp as the built-in DeepSeek defaults', () => {
   assert.deepEqual(
     defaultConfig.model.availableModels.map(({ id, name }) => ({ id, name })),
     [
       { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
       { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+      { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision Exp' },
     ],
   );
   assert.equal(defaultConfig.model.defaultModel, 'deepseek-v4-flash');
@@ -43,7 +44,12 @@ test('defaultConfig uses DeepSeek V4 Flash and Pro as the built-in DeepSeek defa
     [
       { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
       { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+      { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision Exp' },
     ],
+  );
+  assert.equal(
+    defaultConfig.model.availableModels.find(({ id }) => id === 'deepseek-v4-flash-vision-exp')?.supportsImage,
+    true,
   );
   assert.deepEqual(
     defaultConfig.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-v4-pro')?.options,
@@ -82,7 +88,7 @@ test('normalizeDeepSeekAppConfig migrates legacy DeepSeek defaults in stored con
   assert.equal(normalized.model.defaultModel, 'deepseek-v4-flash');
   assert.deepEqual(
     normalized.model.availableModels.map(({ id }) => id),
-    ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
   );
   assert.deepEqual(
     normalized.model.availableModels.find(({ id }) => id === 'deepseek-v4-pro')?.options,
@@ -101,7 +107,11 @@ test('normalizeDeepSeekAppConfig migrates legacy DeepSeek defaults in stored con
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.map(({ id }) => id),
-    ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
+  );
+  assert.equal(
+    normalized.model.availableModels.find(({ id }) => id === 'deepseek-v4-flash-vision-exp')?.supportsImage,
+    true,
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-v4-pro')?.options,
@@ -150,7 +160,7 @@ test('normalizeDeepSeekAppConfig upgrades legacy ids without dropping custom Dee
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.map(({ id }) => id),
-    ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-v4-pro')?.options,
@@ -158,6 +168,69 @@ test('normalizeDeepSeekAppConfig upgrades legacy ids without dropping custom Dee
       reasoningEffort: 'max',
       thinking: { type: 'enabled' },
     },
+  );
+});
+
+test('normalizeDeepSeekAppConfig appends the 0.1.1 vision model onto a stored Flash+Pro catalog', () => {
+  const storedPair = [
+    { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false },
+    { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', supportsImage: false },
+  ];
+  const normalized = normalizeDeepSeekAppConfig({
+    ...defaultConfig,
+    model: {
+      ...defaultConfig.model,
+      availableModels: storedPair,
+      defaultModel: 'deepseek-v4-flash',
+    },
+    providers: {
+      ...defaultConfig.providers!,
+      deepseek: {
+        ...defaultConfig.providers!.deepseek,
+        models: storedPair,
+      },
+    },
+  });
+
+  assert.deepEqual(
+    normalized.model.availableModels.map(({ id }) => id),
+    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
+  );
+  assert.deepEqual(
+    normalized.providers?.deepseek.models?.map(({ id }) => id),
+    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
+  );
+  assert.equal(normalized.model.defaultModel, 'deepseek-v4-flash');
+});
+
+test('normalizeDeepSeekAppConfig leaves a custom DeepSeek catalog untouched', () => {
+  const normalized = normalizeDeepSeekAppConfig({
+    ...defaultConfig,
+    model: {
+      ...defaultConfig.model,
+      availableModels: [
+        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false },
+      ],
+      defaultModel: 'deepseek-v4-flash',
+    },
+    providers: {
+      ...defaultConfig.providers!,
+      deepseek: {
+        ...defaultConfig.providers!.deepseek,
+        models: [
+          { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    normalized.model.availableModels.map(({ id }) => id),
+    ['deepseek-v4-flash'],
+  );
+  assert.deepEqual(
+    normalized.providers?.deepseek.models?.map(({ id }) => id),
+    ['deepseek-v4-flash'],
   );
 });
 

@@ -2,14 +2,18 @@
 // IDBots runtime.
 //
 // DSH's ImageBlock carries an ImageAttachmentRef whose bytes live in an
-// `attachments` service (ctx.get('attachments')). We ship this minimal durable
-// implementation instead of upstream @deepseek-ai/dsh-attachment-local
-// (available since rc.7) because refs logged by this store must stay readable
-// for sessions recorded before that package existed: images are validated
-// from their bytes (magic signature + intrinsic dimensions), stored under
+// `attachments` service (ctx.get('attachments')). We keep this content-
+// addressed store (rather than swapping the composition onto
+// @deepseek-ai/dsh-attachment-local) so refs logged before 0.1.1 stay
+// readable: images are validated from their bytes, stored under
 // `<root>/<sha256>.bin` with a JSON sidecar, and read back with hash
-// re-verification. Content addressing makes identical images dedupe
-// naturally and gives `readImage` its integrity check.
+// re-verification.
+//
+// 0.1.1's native DeepSeek adapter (and pi-ai) call `readImageRequest` to
+// produce a deterministic model-request raster for the Files API / inline
+// fallback. The base AttachmentStore rejects that call; we delegate the
+// transform+cache to attachment-local's helper while still reading our own
+// stored bytes, so old hashes and new request versions coexist.
 //
 // Error codes follow the @deepseek-ai/dsh-attachment AttachmentErrorCode
 // vocabulary so upstream routing (isImageAdmissionError, read_image's
@@ -23,6 +27,7 @@ import fs from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { AttachmentError, AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { readRequestImageFile } from '@deepseek-ai/dsh-attachment-local'
 
 export const name = 'idbots-attachment-store'
 
@@ -186,5 +191,10 @@ export default class IdbotsAttachmentStore extends AttachmentStore {
       throw new AttachmentError(`attachment ${id.slice(0, 12)} no longer matches its logged metadata`, 'ATTACHMENT_CORRUPT')
     }
     return { ref: canonical, data: new Uint8Array(bytes) }
+  }
+
+  async readImageRequest(ref, policy, signal) {
+    const stored = await this.readImage(ref, signal)
+    return readRequestImageFile(this.root, stored, policy, signal)
   }
 }

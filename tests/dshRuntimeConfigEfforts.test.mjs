@@ -79,6 +79,36 @@ test('model entries without maxOutputTokens fall back to the default ceiling', (
   assert.equal(native.config.models[0].maxTokens, 32_768)
 })
 
+test('native vision catalog emits inputModalities and request-image budgets', () => {
+  const config = generateRuntimeConfig(baseInput([{
+    ...nativeDeepSeekRoute,
+    models: [
+      { id: 'deepseek-v4-flash', contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+      {
+        id: 'deepseek-v4-flash-vision-exp',
+        contextWindow: 1_000_000,
+        maxOutputTokens: 32_768,
+        input: ['text', 'image'],
+      },
+    ],
+  }]))
+  const native = entryById(config, 'llm-deepseek-deepseek-official')
+  assert.equal(native.config.models[0].inputModalities, undefined)
+  assert.deepEqual(native.config.models[1], {
+    id: 'deepseek-v4-flash-vision-exp',
+    name: 'deepseek-v4-flash-vision-exp',
+    contextWindow: 1_000_000,
+    maxTokens: 32_768,
+    inputModalities: ['text', 'image'],
+    imagePixelBudget: 640_000,
+    imageMaxBytes: 1_048_576,
+  })
+  assert.equal(
+    config.some((e) => e.name === '@deepseek-ai/dsh-authorization'),
+    false,
+  )
+})
+
 test('non-native routes mount nothing native', () => {
   const config = generateRuntimeConfig(baseInput([
     { key: 'mockgw', apiFormat: 'responses', baseUrl: 'http://127.0.0.1:48790/v1', apiKeyEnv: 'K', models: [{ id: 'mock-1', contextWindow: 32_768 }] },

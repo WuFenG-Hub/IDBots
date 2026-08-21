@@ -196,6 +196,7 @@ export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
 // usage ring falls back to the 128K default.
 export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
+export const DEEPSEEK_V4_FLASH_VISION_MODEL_ID = 'deepseek-v4-flash-vision-exp';
 
 const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
   {
@@ -222,6 +223,17 @@ const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
     supportsImage: false,
     contextWindow: DEEPSEEK_V4_PRO_CONTEXT_WINDOW,
     maxOutputTokens: DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS,
+    options: {
+      reasoningEffort: 'max',
+      thinking: { type: 'enabled' },
+    },
+  },
+  {
+    id: DEEPSEEK_V4_FLASH_VISION_MODEL_ID,
+    name: 'DeepSeek V4 Flash Vision Exp',
+    supportsImage: true,
+    contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+    maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
     options: {
       reasoningEffort: 'max',
       thinking: { type: 'enabled' },
@@ -297,11 +309,40 @@ function maybeCanonicalizeDeepSeekDefaults<T extends ModelLike>(models: T[]): T[
   );
 }
 
+/** Stored catalogs that are exactly Flash+Pro (the 0.1.0 default pair) pick up
+ *  the 0.1.1 vision model. Custom lists are left alone. */
+const PREVIOUS_DEEPSEEK_DEFAULT_IDS = Object.freeze(['deepseek-v4-flash', 'deepseek-v4-pro']);
+
+function cloneDefaultModel<T extends ModelLike>(model: ModelLike): T {
+  return {
+    ...model,
+    options: model.options
+      ? {
+          ...model.options,
+          thinking: model.options.thinking ? { ...model.options.thinking } : undefined,
+        }
+      : undefined,
+  } as T;
+}
+
+function ensureCanonicalDeepSeekCatalog<T extends ModelLike>(models: T[]): T[] {
+  const ids = new Set(models.map((model) => model.id));
+  const isPreviousDefaultPair = models.length === PREVIOUS_DEEPSEEK_DEFAULT_IDS.length
+    && PREVIOUS_DEEPSEEK_DEFAULT_IDS.every((id) => ids.has(id));
+  if (isPreviousDefaultPair) {
+    const vision = DEEPSEEK_DEFAULT_MODELS.find((entry) => entry.id === DEEPSEEK_V4_FLASH_VISION_MODEL_ID);
+    if (vision) {
+      return maybeCanonicalizeDeepSeekDefaults([...models, cloneDefaultModel<T>(vision)]);
+    }
+  }
+  return maybeCanonicalizeDeepSeekDefaults(models);
+}
+
 function normalizeDeepSeekModelList<T extends ModelLike>(models?: T[] | null): T[] | undefined {
   if (!models) {
     return undefined;
   }
-  return maybeCanonicalizeDeepSeekDefaults(dedupeModels(models.map((model) => normalizeDeepSeekModel(model) as T)));
+  return ensureCanonicalDeepSeekCatalog(dedupeModels(models.map((model) => normalizeDeepSeekModel(model) as T)));
 }
 
 function normalizeDeepSeekDefaultModel(defaultModel: string, availableModels: ModelLike[]): string {
