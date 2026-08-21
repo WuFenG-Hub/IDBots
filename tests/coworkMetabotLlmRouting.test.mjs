@@ -4,7 +4,8 @@
  *    'deepseek') so metabots configured for opencode (or other providers)
  *    actually route their CoWork traffic there;
  *  - when the llm_id fails to resolve (provider disabled/removed), the run
- *    falls back to the global default config instead of failing;
+ *    tries the bot's fallback brain, then the global default — except the
+ *    free-quota relay is never substituted for a non-free brain;
  *  - the billing source is resolved AFTER the fallback, from whichever
  *    config the session actually runs on.
  * Style: static source assertions (see coworkBillingSourceWiring.test.mjs).
@@ -49,20 +50,37 @@ test('metabot brain override honors any llm_id, not just deepseek', () => {
   assert.ok(body.includes('fallbackModelId:'), 'brain carries the fallback brain');
 });
 
-test('runDshSessionLocal falls back to the global default when llm_id does not resolve', () => {
+test('runDshSessionLocal tries the fallback brain before any default, and refuses the free-quota relay', () => {
   const source = read('src/main/libs/coworkRunner.ts');
   const body = methodBody(source, 'private resolveSessionDshRoute(');
   assert.ok(
-    body.includes('Model override did not resolve to an enabled provider; falling back to the default route'),
-    'failed override resolution must log the fallback so routing issues stay diagnosable'
+    body.includes('Primary brain did not resolve; using the fallback brain'),
+    'disabled primary brain must try the bot fallback before the app default'
   );
   assert.ok(
-    body.includes('route = resolveDshProviderRoute()'),
-    'the fallback must reuse the global default DSH route'
+    body.includes('Refusing to bill the free-quota relay for a non-free bot brain'),
+    'a paid bot brain must not be rewritten onto IDBots-Free'
+  );
+  assert.ok(
+    body.includes('const defaultRoute = resolveDshProviderRoute()'),
+    'non-free defaults may still reuse the global default DSH route'
   );
   const billingBody = methodBody(source, 'private async runDshSessionLocal(');
   const billingIndex = billingBody.indexOf('activeSession.billingSource = resolveCoworkBillingSource(');
   assert.ok(billingIndex >= 0, 'billingSource must be resolved from the DSH route the session actually runs on');
+});
+
+test('CoworkRunner getMetabotById wiring passes brain provider, effort, and fallback', () => {
+  const source = read('src/main/main.ts');
+  const start = source.indexOf('getMetabotById: (id: number) => {');
+  assert.ok(start >= 0, 'CoworkRunner getMetabotById mapper is missing');
+  const body = source.slice(start, start + 1200);
+  assert.ok(body.includes('llm_id: m.llm_id ?? null'), 'mapper must pass llm_id');
+  assert.ok(body.includes('llm_provider: m.llm_provider ?? null'), 'mapper must pass llm_provider so DSH can honor the hint');
+  assert.ok(body.includes('llm_effort: m.llm_effort ?? null'), 'mapper must pass llm_effort');
+  assert.ok(body.includes('fallback_llm_id: m.fallback_llm_id ?? null'), 'mapper must pass fallback_llm_id');
+  assert.ok(body.includes('fallback_llm_provider: m.fallback_llm_provider ?? null'), 'mapper must pass fallback_llm_provider');
+  assert.ok(body.includes('fallback_llm_effort: m.fallback_llm_effort ?? null'), 'mapper must pass fallback_llm_effort');
 });
 
 test('metabot llm_id stays the routing key in the store/UI contract', () => {

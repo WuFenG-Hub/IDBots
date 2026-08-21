@@ -131,6 +131,76 @@ test('unresolvable override falls back to the default route with a warning (neve
   }
 });
 
+test('unresolvable paid brain does not last-resort onto the free-quota relay', () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const result = withAppConfig({
+      model: { defaultModel: 'deepseek-chat', defaultProvider: 'metaid-free', availableModels: [] },
+      providers: {
+        'metaid-free': {
+          enabled: true,
+          apiKey: 'mrk-free',
+          baseUrl: 'https://relay.example/v1',
+          apiFormat: 'openai',
+          models: [{ id: 'deepseek-chat' }],
+        },
+        deepseek: {
+          enabled: false,
+          apiKey: 'sk-test',
+          baseUrl: 'https://api.deepseek.com/anthropic',
+          apiFormat: 'responses',
+          models: [{ id: 'deepseek-v4-pro' }, { id: 'deepseek-v4-flash' }],
+        },
+      },
+    }, () => resolveApiConfigForModel('deepseek-v4-pro', 'local', null, 'deepseek'));
+
+    assert.equal(result.config, null, 'must not rewrite a DeepSeek brain onto IDBots-Free');
+    assert.match(result.error ?? '', /No enabled provider found/);
+    assert.ok(
+      warnings.some((m) => m.includes('refusing to substitute the free-quota relay')),
+      `refuse warning missing: ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('fallback flash still resolves to an enabled paid provider when DeepSeek is disabled', () => {
+  const { resolveDshProviderRoute } = claudeSettings;
+  const route = withAppConfig({
+    model: { defaultModel: 'deepseek-chat', defaultProvider: 'metaid-free', availableModels: [] },
+    providers: {
+      'metaid-free': {
+        enabled: true,
+        apiKey: 'mrk-free',
+        baseUrl: 'https://relay.example/v1',
+        apiFormat: 'openai',
+        models: [{ id: 'deepseek-chat' }],
+      },
+      deepseek: {
+        enabled: false,
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.deepseek.com',
+        apiFormat: 'responses',
+        models: [{ id: 'deepseek-v4-pro' }, { id: 'deepseek-v4-flash' }],
+      },
+      opencode: {
+        enabled: true,
+        apiKey: 'sk-oc',
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+        apiFormat: 'responses',
+        models: [{ id: 'deepseek-v4-flash' }],
+      },
+    },
+  }, () => resolveDshProviderRoute('deepseek-v4-flash', 'deepseek'));
+
+  assert.ok(route, 'flash must resolve via another enabled provider, not fail closed');
+  assert.equal(route.provider, 'opencode');
+  assert.equal(route.model, 'deepseek-v4-flash');
+});
+
 test('unresolvable override with no enabled providers still errors', () => {
   const result = withAppConfig({
     model: { defaultModel: 'm-default', availableModels: [] },
