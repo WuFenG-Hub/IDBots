@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const { checkDshRuntimeDeps } = require('../scripts/check-dsh-runtime-deps.cjs');
@@ -80,7 +81,7 @@ test('ranged specs only require presence, not an exact version', () => {
 });
 
 test('the real repository checkout currently passes the gate', () => {
-  const projectRoot = path.resolve(new URL('..', import.meta.url).pathname);
+  const projectRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
   const result = checkDshRuntimeDeps(projectRoot);
   assert.equal(result.ok, true, result.problems.join('\n'));
 });
