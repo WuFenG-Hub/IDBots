@@ -131,6 +131,12 @@ function providerRequiresApiKey(providerName: string): boolean {
 
 const DEEPSEEK_PROVIDER_KEY = 'deepseek';
 const DEEPSEEK_AUTOMATION_MODEL_ID = 'deepseek-v4-flash';
+/** Built-in free-quota relay. Must not silently substitute for a paid bot brain. */
+export const LLM_FREE_PROVIDER_KEY = 'metaid-free';
+
+export function isFreeQuotaProvider(name?: string | null): boolean {
+  return (name ?? '').trim().toLowerCase() === LLM_FREE_PROVIDER_KEY;
+}
 
 /**
  * Defense-in-depth for pre-migration metabots.llm_id values, which held
@@ -291,6 +297,21 @@ function resolveMatchedProvider(
         const botLabel = context?.botId != null
           ? `bot ${context.botId}${context.botName ? ` (${context.botName})` : ''}: `
           : '';
+        // A paid/explicit brain (DeepSeek, OpenCode, ...) must never be
+        // rewritten onto the free-quota relay just because the chosen
+        // provider is disabled or the model id went stale. That silently
+        // burns IDBots-Free and surfaces as free_quota_exhausted.
+        if (
+          isFreeQuotaProvider(defaultRoute.matched.providerName)
+          && !isFreeQuotaProvider(requestedOverride)
+          && !isFreeQuotaProvider(providerHint)
+        ) {
+          console.warn(
+            `[llm-brain] ${botLabel}unresolvable llm_id '${requestedOverride}', refusing to substitute the free-quota relay ` +
+            `(default model '${defaultRoute.matched.modelId}', provider '${defaultRoute.matched.providerName}')`
+          );
+          return { matched: null, error: `No enabled provider found for model: ${modelId}` };
+        }
         console.warn(
           `[llm-brain] ${botLabel}unresolvable llm_id '${requestedOverride}', using default route ` +
           `(model '${defaultRoute.matched.modelId}', provider '${defaultRoute.matched.providerName}')`

@@ -9,7 +9,7 @@ import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { PermissionResult } from './coworkPermissionTypes';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute, type DshProviderRouteInfo } from './claudeSettings';
+import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute, isFreeQuotaProvider, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { DshTurnHub, dshSessionRootFor, type DshTurnProviderRoute } from './coworkDshTurn';
 import { DshStreamUiGate } from './dshStreamUiGate';
@@ -6100,7 +6100,8 @@ export class CoworkRunner extends EventEmitter {
    * Session-scoped DSH provider route — the same three-tier model resolution
    * the Claude path uses: the session's own model selector, then the metabot's
    * llm_id, then the global default. Falls back to the default when an
-   * llm_id does not resolve (matching the DSH route fallback).
+   * llm_id does not resolve (matching the DSH route fallback), except the
+   * free-quota relay is never substituted for a non-free bot brain.
    */
   private resolveSessionDshRoute(sessionId: string): ReturnType<typeof resolveDshProviderRoute> {
     const sessionRow = this.store.getSession(sessionId)
@@ -6108,11 +6109,12 @@ export class CoworkRunner extends EventEmitter {
     const sessionModelProvider = sessionRow?.modelProvider?.trim() || null
     const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId)
     const automationModelOverride = sessionModel || brain?.modelId || null
+    const requestedProvider = sessionModel ? sessionModelProvider : (brain?.providerKey ?? null)
     // Bot context lets the resolution last-resort warning name the offending bot.
     const brainContext = brain ? { botId: brain.metabotId, botName: brain.botName } : undefined
     let route = resolveDshProviderRoute(
       automationModelOverride,
-      sessionModel ? sessionModelProvider : (brain?.providerKey ?? null),
+      requestedProvider,
       brainContext,
     )
     if (!route && automationModelOverride) {
@@ -6129,11 +6131,28 @@ export class CoworkRunner extends EventEmitter {
         })
         route = fallbackRoute
       } else {
-        coworkLog('WARN', 'resolveSessionDshRoute', 'Model override did not resolve to an enabled provider; falling back to the default route', {
-          sessionId,
-          override: automationModelOverride,
-        })
-        route = resolveDshProviderRoute()
+        const defaultRoute = resolveDshProviderRoute()
+        if (
+          defaultRoute
+          && isFreeQuotaProvider(defaultRoute.provider)
+          && !isFreeQuotaProvider(requestedProvider)
+          && !isFreeQuotaProvider(automationModelOverride)
+        ) {
+          coworkLog('WARN', 'resolveSessionDshRoute', 'Refusing to bill the free-quota relay for a non-free bot brain', {
+            sessionId,
+            override: automationModelOverride,
+            requestedProvider,
+            defaultProvider: defaultRoute.provider,
+            defaultModel: defaultRoute.model,
+          })
+          route = null
+        } else {
+          coworkLog('WARN', 'resolveSessionDshRoute', 'Model override did not resolve to an enabled provider; falling back to the default route', {
+            sessionId,
+            override: automationModelOverride,
+          })
+          route = defaultRoute
+        }
       }
     }
     return route
@@ -6342,7 +6361,16 @@ export class CoworkRunner extends EventEmitter {
     // protocol (pi-ai) and bypasses the OpenAI-compat proxy entirely.
     const route = this.resolveSessionDshRoute(sessionId);
     if (!route?.baseUrl || !route.apiKey) {
-      this.handleError(sessionId, 'DSH kernel requires a configured API provider (base URL and key).');
+      const brain = this.getSessionAutomationBrain(sessionId);
+      this.handleError(
+        sessionId,
+        brain
+          ? tApp(
+              '本机 Bot 配置的模型供应商当前未启用，不会改走免费额度。请启用该供应商，或为 Bot 选择一个已启用的模型。',
+              "The bot's configured LLM provider is not enabled, and the free-quota relay will not be used as a substitute. Enable that provider, or pick an enabled model for this bot."
+            )
+          : 'DSH kernel requires a configured API provider (base URL and key).'
+      );
       this.clearPendingPermissions(sessionId);
       this.removeActiveSession(sessionId, activeSession);
       return;
