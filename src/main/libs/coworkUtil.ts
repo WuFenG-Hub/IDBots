@@ -1072,6 +1072,18 @@ export function getSkillHostEnv(): Record<string, string> {
   if (internalApiBaseURL) {
     env.IDBOTS_API_BASE_URL = internalApiBaseURL;
   }
+  // Local-gateway bypass for proxied environments (e.g. ClashX): proxy env
+  // vars inherited from the parent process reach the DSH runtime and its bash
+  // tool; without NO_PROXY they route the 127.0.0.1 MetaID RPC gateway (and
+  // other local relays) through the system proxy, which intercepts or rejects
+  // localhost traffic. Keep any inherited NO_PROXY entries and pin the local
+  // hosts. getEnhancedEnv re-merges the same list, so this stays idempotent.
+  const mergedNoProxy = mergeNoProxyList(
+    process.env.NO_PROXY || process.env.no_proxy,
+    LOCAL_NO_PROXY_HOSTS
+  );
+  env.NO_PROXY = mergedNoProxy;
+  env.no_proxy = mergedNoProxy;
   collapseWindowsPathKeys(env);
 
   const out: Record<string, string> = {};
