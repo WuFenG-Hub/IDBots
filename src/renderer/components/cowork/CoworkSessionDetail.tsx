@@ -1950,7 +1950,10 @@ const A2AGuidanceControls = React.memo(({
 });
 
 // Streaming activity bar shown between messages and input
-const StreamingActivityBar: React.FC<{ messages: CoworkMessage[] }> = ({ messages }) => {
+const StreamingActivityBar: React.FC<{ messages: CoworkMessage[]; fallbackText?: string }> = ({
+  messages,
+  fallbackText,
+}) => {
   // Walk messages backwards to find the latest tool_use without a paired tool_result
   const getStatusText = (): string => {
     // SDK runtime-status signals (api_retry / requesting) take precedence over
@@ -1999,7 +2002,7 @@ const StreamingActivityBar: React.FC<{ messages: CoworkMessage[] }> = ({ message
         }
       }
     }
-    return `${i18nService.t('coworkToolRunning')}`;
+    return fallbackText || `${i18nService.t('coworkToolRunning')}`;
   };
 
   return (
@@ -3188,6 +3191,23 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
   }, [currentSession?.id, currentSession?.sessionType, currentSession?.messageHistory]);
 
+  useEffect(() => {
+    if (
+      !isA2ASession
+      || !currentSession?.id
+      || visibleA2AMessages.length > 0
+      || !currentSession.messageHistory?.hasMoreBefore
+    ) {
+      return;
+    }
+    void coworkService.loadEarlierMessages(currentSession.id);
+  }, [
+    isA2ASession,
+    currentSession?.id,
+    currentSession?.messageHistory?.hasMoreBefore,
+    visibleA2AMessages.length,
+  ]);
+
   const handleMessagesScroll = useCallback(() => {
     if (pinningScrollRef.current) return;
     const container = scrollContainerRef.current;
@@ -3782,7 +3802,47 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       )}
 
       {/* Streaming Activity Bar */}
-      {isStreaming && <StreamingActivityBar messages={currentSession.messages} />}
+      {(isStreaming || currentSession.status === 'running') && (
+        <StreamingActivityBar
+          messages={currentSession.messages}
+          fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
+        />
+      )}
+
+      {freeQuotaExhausted && (
+        <div className="px-4 pb-2 shrink-0">
+          <div className="max-w-3xl mx-auto">
+            <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+              <ExclamationTriangleIcon className="h-4 w-4 text-red-500 shrink-0" />
+              <span className="text-xs text-red-700 dark:text-red-300">
+                {i18nService.t('freeQuotaExhaustedBanner')}
+              </span>
+              {onRequestAppSettings && (
+                <button
+                  type="button"
+                  onClick={() => onRequestAppSettings({ initialTab: 'model', notice: i18nService.t('freeQuotaExhaustedNotice') })}
+                  className="text-xs font-medium text-red-700 dark:text-red-300 underline hover:no-underline shrink-0"
+                >
+                  {i18nService.t('freeQuotaGoSettings')}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isA2ASession && currentSession.status === 'error' && !freeQuotaExhausted && (
+        <div className="px-4 pb-2 shrink-0">
+          <div className="max-w-3xl mx-auto">
+            <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+              <ExclamationTriangleIcon className="h-4 w-4 text-red-500 shrink-0" />
+              <span className="text-xs text-red-700 dark:text-red-300">
+                {i18nService.t('coworkA2ASessionErrorBanner')}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Input Area */}
       {isA2ASession ? (
@@ -3843,25 +3903,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 <span className="text-xs text-amber-700 dark:text-amber-300">
                   {i18nService.t('delegationWaitingForResult')}
                 </span>
-              </div>
-            </div>
-          )}
-          {freeQuotaExhausted && (
-            <div className="max-w-3xl mx-auto mb-2">
-              <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
-                <ExclamationTriangleIcon className="h-4 w-4 text-red-500 shrink-0" />
-                <span className="text-xs text-red-700 dark:text-red-300">
-                  {i18nService.t('freeQuotaExhaustedBanner')}
-                </span>
-                {onRequestAppSettings && (
-                  <button
-                    type="button"
-                    onClick={() => onRequestAppSettings({ initialTab: 'model', notice: i18nService.t('freeQuotaExhaustedNotice') })}
-                    className="text-xs font-medium text-red-700 dark:text-red-300 underline hover:no-underline shrink-0"
-                  >
-                    {i18nService.t('freeQuotaGoSettings')}
-                  </button>
-                )}
               </div>
             </div>
           )}

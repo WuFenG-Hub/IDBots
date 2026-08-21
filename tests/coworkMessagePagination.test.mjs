@@ -300,3 +300,60 @@ test('A2A daemon queries stay bounded and preserve exact metadata for callers', 
     cleanup();
   }
 });
+
+test('A2A display window skips a hidden error flood and keeps visible conversation', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const session = store.createSession('error flood A2A', '/tmp/a2a', '', 'local', [], 1, 'a2a');
+    store.addMessage(session.id, {
+      type: 'user',
+      content: 'please fix invite_remote',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
+    });
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: 'wait a moment',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing' },
+    });
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: 'internal reasoning',
+      metadata: { isThinking: true },
+    });
+    store.addMessage(session.id, {
+      type: 'tool_use',
+      content: 'Using tool: bash',
+      metadata: { toolName: 'bash', toolUseId: 'call-1' },
+    });
+    for (let index = 0; index < 120; index += 1) {
+      store.addMessage(session.id, {
+        type: 'system',
+        content: 'Error: DSH turn failed: free_quota_exhausted',
+        metadata: { error: 'DSH turn failed: {"code":"QUOTA"}' },
+      });
+    }
+
+    const rawTail = store.getSessionMessagesPage(session.id, { limit: 100 });
+    assert.equal(rawTail.messages.length, 100);
+    assert.equal(rawTail.messages.every((message) => message.type === 'system'), true);
+
+    const view = store.getSessionView(session.id, 20);
+    const contents = view?.messages.map((message) => message.content) ?? [];
+    assert.equal(contents.includes('please fix invite_remote'), true);
+    assert.equal(contents.includes('wait a moment'), true);
+    assert.equal(contents.includes('internal reasoning'), true);
+    assert.equal(contents.includes('Using tool: bash'), true);
+    assert.equal(contents.filter((content) => content.startsWith('Error:')).length, 1);
+    assert.equal(view?.messageHistory?.hasMoreBefore, false);
+
+    const earlier = store.getSessionMessagesPage(session.id, {
+      beforeSequence: view?.messageHistory?.beforeSequence ?? undefined,
+      limit: 20,
+      displayWindow: true,
+    });
+    assert.equal(earlier.hasMoreBefore, false);
+  } finally {
+    cleanup();
+  }
+});

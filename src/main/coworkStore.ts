@@ -49,6 +49,11 @@ import {
   buildCanonicalPrivateConversationExternalConversationId,
   buildOrderProtocolDisplayMetadata,
 } from './services/simplemsgPeerConversation';
+import {
+  isA2ALiveWorkMessage,
+  isA2ASystemErrorMessage,
+  shouldHideA2AInternalMessage,
+} from './shared/a2aInternalMessageFilter';
 
 // Default working directory for new users
 const getDefaultWorkingDirectory = (): string => {
@@ -2879,7 +2884,7 @@ export class CoworkStore implements MemoryBackend {
         messages: this.getSessionMessages(id),
       };
     }
-    const page = this.getSessionMessagesPage(id, { limit: messageLimit });
+    const page = this.getSessionMessagesPage(id, { limit: messageLimit, displayWindow: true });
     return {
       ...session,
       messages: page.messages,
@@ -3727,7 +3732,7 @@ export class CoworkStore implements MemoryBackend {
 
   getSessionMessagesPage(
     sessionId: string,
-    options?: { beforeSequence?: number | null; limit?: number },
+    options?: { beforeSequence?: number | null; limit?: number; displayWindow?: boolean },
   ): CoworkMessagePage {
     const requestedLimit = Number(options?.limit);
     const limit = Number.isFinite(requestedLimit)
@@ -3737,14 +3742,37 @@ export class CoworkStore implements MemoryBackend {
     const beforeSequence = Number.isFinite(requestedBeforeSequence) && requestedBeforeSequence > 0
       ? Math.floor(requestedBeforeSequence)
       : null;
+    if (options?.displayWindow === true) {
+      return this.getA2ADisplayMessagesPage(sessionId, { beforeSequence, limit });
+    }
+    return this.getRawSessionMessagesPage(sessionId, { beforeSequence, limit });
+  }
+
+  private mapCoworkMessageRow(row: CoworkMessageRow): CoworkMessage {
+    return {
+      id: row.id,
+      type: row.type as CoworkMessageType,
+      content: row.content,
+      timestamp: row.created_at,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    };
+  }
+
+  /**
+   * Newest-first SQL page. `hasMoreBefore` means older rows exist beyond this chunk.
+   */
+  private querySessionMessageRows(
+    sessionId: string,
+    options: { beforeSequence: number | null; limit: number },
+  ): { rows: CoworkMessageRow[]; hasMoreBefore: boolean } {
     const params: Array<string | number> = [sessionId];
-    const beforeClause = beforeSequence == null
+    const beforeClause = options.beforeSequence == null
       ? ''
       : 'AND COALESCE(sequence, 0) < ?';
-    if (beforeSequence != null) {
-      params.push(beforeSequence);
+    if (options.beforeSequence != null) {
+      params.push(options.beforeSequence);
     }
-    params.push(limit + 1);
+    params.push(options.limit + 1);
 
     const rows = this.getAll<CoworkMessageRow>(`
       SELECT id, type, content, metadata, created_at, sequence
@@ -3757,25 +3785,118 @@ export class CoworkStore implements MemoryBackend {
         ROWID DESC
       LIMIT ?
     `, params);
-    const hasMoreBefore = rows.length > limit;
-    const pageRows = rows.slice(0, limit);
-    const oldestSequence = pageRows.length > 0
-      ? Number(pageRows[pageRows.length - 1]?.sequence)
+    const hasMoreBefore = rows.length > options.limit;
+    return {
+      rows: rows.slice(0, options.limit),
+      hasMoreBefore,
+    };
+  }
+
+  private getRawSessionMessagesPage(
+    sessionId: string,
+    options: { beforeSequence: number | null; limit: number },
+  ): CoworkMessagePage {
+    const { rows, hasMoreBefore } = this.querySessionMessageRows(sessionId, options);
+    const oldestSequence = rows.length > 0
+      ? Number(rows[rows.length - 1]?.sequence)
       : null;
 
     return {
-      messages: pageRows.reverse().map(row => ({
-        id: row.id,
-        type: row.type as CoworkMessageType,
-        content: row.content,
-        timestamp: row.created_at,
-        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-      })),
+      messages: rows.slice().reverse().map((row) => this.mapCoworkMessageRow(row)),
       hasMoreBefore,
       beforeSequence: hasMoreBefore && Number.isFinite(oldestSequence) && Number(oldestSequence) > 0
         ? Number(oldestSequence)
         : null,
     };
+  }
+
+  /**
+   * A2A UI window: walk newest→oldest skipping hidden internals so a flood of
+   * system errors cannot empty the conversation. Keeps trailing live work
+   * (tools/thinking) and at most one latest system error for banners.
+   */
+  private getA2ADisplayMessagesPage(
+    sessionId: string,
+    options: { beforeSequence: number | null; limit: number },
+  ): CoworkMessagePage {
+    const chunkSize = 100;
+    const maxChunks = 40;
+    const selected: Array<{ message: CoworkMessage; sequence: number }> = [];
+    let visibleCount = 0;
+    let latestErrorKept = false;
+    let cursor = options.beforeSequence;
+    let inTrailingHidden = true;
+
+    for (let chunkIndex = 0; chunkIndex < maxChunks && visibleCount < options.limit; chunkIndex += 1) {
+      const { rows, hasMoreBefore } = this.querySessionMessageRows(sessionId, {
+        beforeSequence: cursor,
+        limit: chunkSize,
+      });
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        const message = this.mapCoworkMessageRow(row);
+        const sequence = Number(row.sequence);
+        const normalizedSequence = Number.isFinite(sequence) && sequence > 0 ? sequence : 0;
+        if (!shouldHideA2AInternalMessage(message)) {
+          selected.push({ message, sequence: normalizedSequence });
+          visibleCount += 1;
+          inTrailingHidden = false;
+        } else if (inTrailingHidden && isA2ALiveWorkMessage(message)) {
+          selected.push({ message, sequence: normalizedSequence });
+        } else if (
+          inTrailingHidden
+          && isA2ASystemErrorMessage(message)
+          && !latestErrorKept
+        ) {
+          selected.push({ message, sequence: normalizedSequence });
+          latestErrorKept = true;
+        }
+        if (visibleCount >= options.limit) break;
+      }
+
+      if (!hasMoreBefore) {
+        cursor = null;
+        break;
+      }
+      const oldestSequence = Number(rows[rows.length - 1]?.sequence);
+      cursor = Number.isFinite(oldestSequence) && oldestSequence > 0 ? oldestSequence : null;
+      if (cursor == null) break;
+    }
+
+    selected.reverse();
+    const oldestKeptSequence = selected.length > 0 ? selected[0].sequence : null;
+    const hasMoreBefore = this.hasOlderA2ADisplayMessage(sessionId, oldestKeptSequence);
+
+    return {
+      messages: selected.map((item) => item.message),
+      hasMoreBefore,
+      beforeSequence: hasMoreBefore && oldestKeptSequence != null && oldestKeptSequence > 0
+        ? oldestKeptSequence
+        : null,
+    };
+  }
+
+  private hasOlderA2ADisplayMessage(sessionId: string, beforeSequence: number | null): boolean {
+    if (beforeSequence == null || beforeSequence <= 0) return false;
+    let cursor: number | null = beforeSequence;
+    const chunkSize = 100;
+    for (let chunkIndex = 0; chunkIndex < 40 && cursor != null; chunkIndex += 1) {
+      const { rows, hasMoreBefore } = this.querySessionMessageRows(sessionId, {
+        beforeSequence: cursor,
+        limit: chunkSize,
+      });
+      if (rows.some((row) => !shouldHideA2AInternalMessage(this.mapCoworkMessageRow(row)))) {
+        return true;
+      }
+      if (!hasMoreBefore || rows.length === 0) return false;
+      const oldestSequence = Number(rows[rows.length - 1]?.sequence);
+      if (!Number.isFinite(oldestSequence) || oldestSequence <= 0 || oldestSequence >= cursor) {
+        return false;
+      }
+      cursor = oldestSequence;
+    }
+    return false;
   }
 
   getA2AConversationHistoryPage(
