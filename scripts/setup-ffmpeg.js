@@ -73,7 +73,7 @@ function isNonEmptyFile(filePath) {
   }
 }
 
-async function downloadBinary(url, destination) {
+async function downloadBinaryOnce(url, destination) {
   const response = await fetch(url, { redirect: 'follow' });
   if (!response.ok || !response.body) {
     throw new Error(`Download failed (${response.status} ${response.statusText}) for ${url}`);
@@ -95,6 +95,31 @@ async function downloadBinary(url, destination) {
     }
     throw error;
   }
+}
+
+async function downloadBinary(url, destination) {
+  const attempts = 5;
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (attempt > 1) {
+      console.log(`[setup-ffmpeg] download attempt ${attempt} for ${url}`);
+    }
+    try {
+      await downloadBinaryOnce(url, destination);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        const delayMs = 3000 * attempt;
+        console.log(
+          `[setup-ffmpeg] download attempt ${attempt} failed: `
+          + `${error instanceof Error ? error.message : String(error)}; retrying in ${delayMs}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastError;
 }
 
 function resolvePlatforms(options) {
