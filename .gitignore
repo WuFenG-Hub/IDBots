@@ -282,3 +282,4 @@ man_base_data_pebble/
 .dev-userdata-fresh/
 .dev-appdata-fresh/
 !tests/metabotLlmBrainMigration.test.mjs
+!tests/sqliteStoreMetabotsRebuildExtras.test.mjs

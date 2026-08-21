@@ -26,6 +26,72 @@ type ChangePayload<T = unknown> = {
 const USER_MEMORIES_MIGRATION_KEY = 'userMemories.migration.v1.completed';
 const METABOT_TWIN_BACKFILL_MIGRATION_KEY = 'metabot_twin_backfill_migrated';
 const METABOT_WELCOME_TYPE_MIGRATION_KEY = 'metabot_welcome_type_migrated';
+
+/**
+ * Columns written explicitly by the metabots rebuild migrations
+ * (migrateMetabotInfoPinidOptional / migrateChatPublicKeyPinIdOptional /
+ * migrateMetabotWelcomeType). Anything the live table carries on top of this
+ * base — columns added by later ALTER migrations, or by builds this version
+ * no longer knows about (e.g. heartbeat_enabled) — is appended dynamically
+ * from PRAGMA table_info; see buildMetabotsRebuildExtrasDdl.
+ */
+const METABOTS_REBUILD_BASE_COLUMNS: ReadonlySet<string> = new Set([
+  'id',
+  'wallet_id',
+  'mvc_address',
+  'btc_address',
+  'doge_address',
+  'public_key',
+  'chat_public_key',
+  'chat_public_key_pin_id',
+  'name',
+  'avatar',
+  'enabled',
+  'metaid',
+  'globalmetaid',
+  'metabot_info_pinid',
+  'metabot_type',
+  'created_by',
+  'role',
+  'soul',
+  'goal',
+  'bio',
+  'background',
+  'boss_id',
+  'llm_id',
+  'tools',
+  'skills',
+  'allow_chat_skills',
+  'created_at',
+  'updated_at',
+]);
+
+/**
+ * Extra column DDL fragments for a metabots rebuild migration, derived from
+ * the source table's PRAGMA table_info rows. The rebuilds re-create metabots
+ * from an explicit base column list; a column the live table carries on top
+ * of that base (added by a later ALTER migration, or left over from a build
+ * this version no longer ships, e.g. heartbeat_enabled) previously made
+ * INSERT ... SELECT fail with "table metabots_new has no column named ..." —
+ * and since each migration's kv flag is only written on success, the failure
+ * repeated on every launch. Deriving extras dynamically closes that failure
+ * class. Pure + unit-tested.
+ */
+export function buildMetabotsRebuildExtrasDdl(infoRows: unknown[][]): string {
+  let ddl = '';
+  for (const row of infoRows) {
+    const name = String(row?.[1] ?? '');
+    if (!name || METABOTS_REBUILD_BASE_COLUMNS.has(name)) continue;
+    const type = String(row[2] ?? '').trim() || 'TEXT';
+    const notNull = Number(row[3]) === 1;
+    const defaultValue = row[4];
+    ddl += `, "${name}" ${type}`;
+    if (notNull) ddl += ' NOT NULL';
+    if (defaultValue !== null && defaultValue !== undefined) ddl += ` DEFAULT ${defaultValue}`;
+  }
+  return ddl;
+}
+
 const SQL_JS_WASM_RELATIVE_PATH = path.join('node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
 
 // Get the path to sql.js WASM file
@@ -2683,19 +2749,10 @@ export class SqliteStore {
       if (migrated) return;
 
       const colsResult = this.db.exec('PRAGMA table_info(metabots)');
-      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      const infoRows = (colsResult[0]?.values ?? []) as unknown[][];
+      const columns = infoRows.map((row) => row[1]) as string[];
       if (!columns.includes('metabot_info_pinid')) return;
 
-      const hasAvatarBlob = columns.includes('avatar_blob');
-      // Columns added by later ALTER migrations may already exist on the source table;
-      // carry them into the rebuilt table so INSERT ... SELECT does not fail.
-      const hasHomepage = columns.includes('homepage');
-      const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
-      const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
-      const hasFallbackLlmId = columns.includes('fallback_llm_id');
-      const hasA2aMaxIncomingTurns = columns.includes('a2a_max_incoming_turns');
-      const hasA2aByeCooldownMs = columns.includes('a2a_bye_cooldown_ms');
-      const hasA2aAutoReplyEnabled = columns.includes('a2a_auto_reply_enabled');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -2728,7 +2785,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''},
+        updated_at INTEGER NOT NULL${buildMetabotsRebuildExtrasDdl(infoRows)},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -2755,19 +2812,10 @@ export class SqliteStore {
       if (migrated) return;
 
       const colsResult = this.db.exec('PRAGMA table_info(metabots)');
-      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      const infoRows = (colsResult[0]?.values ?? []) as unknown[][];
+      const columns = infoRows.map((row) => row[1]) as string[];
       if (!columns.includes('chat_public_key_pin_id')) return;
 
-      const hasAvatarBlob = columns.includes('avatar_blob');
-      // Columns added by later ALTER migrations may already exist on the source table;
-      // carry them into the rebuilt table so INSERT ... SELECT does not fail.
-      const hasHomepage = columns.includes('homepage');
-      const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
-      const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
-      const hasFallbackLlmId = columns.includes('fallback_llm_id');
-      const hasA2aMaxIncomingTurns = columns.includes('a2a_max_incoming_turns');
-      const hasA2aByeCooldownMs = columns.includes('a2a_bye_cooldown_ms');
-      const hasA2aAutoReplyEnabled = columns.includes('a2a_auto_reply_enabled');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -2800,7 +2848,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''},
+        updated_at INTEGER NOT NULL${buildMetabotsRebuildExtrasDdl(infoRows)},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -2831,20 +2879,13 @@ export class SqliteStore {
       if (migrated) return;
 
       const colsResult = this.db.exec('PRAGMA table_info(metabots)');
-      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      const infoRows = (colsResult[0]?.values ?? []) as unknown[][];
+      const columns = infoRows.map((row) => row[1]) as string[];
       if (!columns.includes('metabot_type')) {
         this.set(METABOT_WELCOME_TYPE_MIGRATION_KEY, true);
         return;
       }
 
-      const hasAvatarBlob = columns.includes('avatar_blob');
-      const hasHomepage = columns.includes('homepage');
-      const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
-      const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
-      const hasFallbackLlmId = columns.includes('fallback_llm_id');
-      const hasA2aMaxIncomingTurns = columns.includes('a2a_max_incoming_turns');
-      const hasA2aByeCooldownMs = columns.includes('a2a_bye_cooldown_ms');
-      const hasA2aAutoReplyEnabled = columns.includes('a2a_auto_reply_enabled');
       // A leftover metabots_new can only be debris from an earlier failed run
       // of this migration; drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -2877,7 +2918,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''},
+        updated_at INTEGER NOT NULL${buildMetabotsRebuildExtrasDdl(infoRows)},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
