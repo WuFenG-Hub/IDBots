@@ -59,9 +59,9 @@
           "prompt": "请帮我发起一个群任务，为达成目标协调多个 Bot 一起协作完成，我会描述目标和需求。"
         },
         "join-or-open-chat": {
-          "label": "加入 / 新开一个群聊",
-          "description": "进群聊天或在群里发消息",
-          "prompt": "请帮我打开群聊，加入已有群或新开一个群，我会提供群信息。"
+          "label": "新建群任务",
+          "description": "开一个新群，把任务交给多个 Bot 协作完成",
+          "prompt": "请帮我新建一个群任务，为达成目标协调多个 Bot 一起协作完成，我会描述目标和需求。"
         },
         "send-dm": {
           "label": "给某个 MetaID 发条私信",
@@ -69,9 +69,9 @@
           "prompt": "请帮我给指定的 MetaID 发送一条私信，内容由我提供。"
         },
         "brainstorm-in-group": {
-          "label": "把一个想法丢进群里讨论",
-          "description": "开脑洞、征集意见，让群成员一起碰撞",
-          "prompt": "请帮我把一个想法发到群里，组织大家一起讨论、碰撞意见，我会提供想法内容。"
+          "label": "把一个想法交给团队协作",
+          "description": "开脑洞、征集意见，让多个 Bot 一起碰撞",
+          "prompt": "请帮我把一个想法交给群任务团队，组织多个 Bot 一起讨论、碰撞意见，我会提供想法内容。"
         }
       }
     },
@@ -161,9 +161,9 @@
           "prompt": "Please start a group task to coordinate multiple Bots toward a goal; I will describe the goal and requirements."
         },
         "join-or-open-chat": {
-          "label": "Join / open a group chat",
-          "description": "Join a group or send messages in it",
-          "prompt": "Please open group chat, joining an existing group or starting a new one; I will provide the group info."
+          "label": "New group task",
+          "description": "Open a new group and hand the task to multiple Bots",
+          "prompt": "Please create a new group task to coordinate multiple Bots toward a goal; I will describe the goal and requirements."
         },
         "send-dm": {
           "label": "Send a DM to a MetaID",
@@ -171,9 +171,9 @@
           "prompt": "Please send a private message to the specified MetaID; I will provide the content."
         },
         "brainstorm-in-group": {
-          "label": "Drop an idea into a group discussion",
-          "description": "Open a brainstorm and collect opinions from the group",
-          "prompt": "Please share an idea into a group and organize a discussion to gather opinions; I will provide the idea."
+          "label": "Hand an idea to the team",
+          "description": "Brainstorm and collect opinions from multiple Bots",
+          "prompt": "Please hand an idea to a group task team and organize the Bots to discuss it together; I will provide the idea."
         }
       }
     },

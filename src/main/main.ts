@@ -316,6 +316,7 @@ import {
   resolveMetaAppSourceByRenderUrl,
 } from './services/botBrowserSourceLocator';
 import { openMetaApp, resolveMetaAppUrl } from './services/metaAppOpenService';
+import { buildMetaAppAliases } from './libs/metaAppGuard';
 import {
   type CommunityMetaAppInstallResult,
   findCommunityMetaAppRecordBySourcePinId,
@@ -4888,6 +4889,21 @@ const getCoworkRunner = () => {
           ensureServerReady: ensureMetaAppServerReady,
         });
       },
+      // Feeds the open/resolve guard's alias matching: the AI passes the app
+      // id (occasionally the display name) while the user typed any loose
+      // wording ("今日门户" etc.), so the guard needs the app's alias set.
+      getMetaAppAliases: (appId) => {
+        try {
+          const needle = String(appId ?? '').trim();
+          if (!needle) return null;
+          const lowered = needle.toLowerCase();
+          const record = getMetaAppManager().listMetaApps()
+            .find((app) => app.id === needle || app.name.trim().toLowerCase() === lowered);
+          return record ? buildMetaAppAliases(record) : null;
+        } catch {
+          return null;
+        }
+      },
       // Resolved lazily because the IM gateway manager singleton is created
       // after the cowork runner; reading the module-scoped variable defers the
       // lookup until the inline MCP tool is actually invoked.
@@ -7390,6 +7406,8 @@ if (!gotTheLock) {
     /** Provider key the pending model was picked from (disambiguates colliding model ids). */
     modelProvider?: string | null;
     effort?: string | null;
+    /** Set when the prompt was filled verbatim from a quick action (建议操作) entry. */
+    source?: 'quick_action';
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
@@ -7456,7 +7474,12 @@ if (!gotTheLock) {
       coworkStoreInstance.addMessage(session.id, {
         type: 'user',
         content: options.prompt,
-        metadata: options.activeSkillIds?.length ? { skillIds: options.activeSkillIds } : undefined,
+        metadata: (options.activeSkillIds?.length || options.source)
+          ? {
+              ...(options.activeSkillIds?.length ? { skillIds: options.activeSkillIds } : {}),
+              ...(options.source ? { source: options.source } : {}),
+            }
+          : undefined,
       });
 
       // Start the session asynchronously (skip initial user message since we already added it).

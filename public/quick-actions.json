@@ -32,9 +32,9 @@
       "skillMapping": "metabot-group-task",
       "prompts": [
         { "id": "start-group-task" },
-        { "id": "join-or-open-chat", "skillMapping": "metabot-chat-groupchat" },
+        { "id": "join-or-open-chat", "skillMapping": "metabot-group-task" },
         { "id": "send-dm", "skillMapping": "metabot-chat-privatechat" },
-        { "id": "brainstorm-in-group", "skillMapping": "metabot-chat-groupchat" }
+        { "id": "brainstorm-in-group", "skillMapping": "metabot-group-task" }
       ]
     },
     {

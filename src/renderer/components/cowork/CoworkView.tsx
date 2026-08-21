@@ -104,6 +104,10 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const startRequestIdRef = useRef(0);
   // Ref for CoworkPromptInput
   const promptInputRef = useRef<CoworkPromptInputRef>(null);
+  // The exact prompt text last filled from a quick action (建议操作); when the
+  // user submits it unchanged the turn is marked as quick-action sourced so
+  // the host MetaApp guard treats it as a pre-approved request.
+  const quickActionPromptRef = useRef<string | null>(null);
 
   const {
     currentSession,
@@ -326,6 +330,10 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       const pending = pendingStartRef.current;
       return !pending || pending.requestId !== requestId || pending.cancelled;
     };
+    // A verbatim quick-action prompt marks the turn as quick-action sourced.
+    const isQuickActionPrompt = quickActionPromptRef.current !== null
+      && prompt.trim() === quickActionPromptRef.current.trim();
+    quickActionPromptRef.current = null;
     // Snapshot the composer pick before any await / setState. Clearing
     // pendingModelEffort and swapping to the temp session would otherwise
     // drop an explicit Off/Low choice and let the session fall through to
@@ -423,6 +431,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         model: pendingPick?.modelId ?? undefined,
         modelProvider: pendingPick?.providerKey ?? undefined,
         effort: pendingPick?.effort ?? undefined,
+        source: isQuickActionPrompt ? 'quick_action' : undefined,
       });
 
       // Stop immediately if user cancelled while startup request was in flight.
@@ -442,6 +451,10 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
     const submittedSessionId = currentSession.id;
     const sessionSkillIds = isStreaming ? [] : [...activeSkillIds];
+    // A verbatim quick-action prompt marks the turn as quick-action sourced.
+    const isQuickActionPrompt = quickActionPromptRef.current !== null
+      && prompt.trim() === quickActionPromptRef.current.trim();
+    quickActionPromptRef.current = null;
     // Only build/forward a fresh system prompt when the user picked skills for
     // this turn. Ordinary turns reuse the session's persisted prompt so the
     // LIVE MetaApp/Skill catalogs (which change whenever any bot publishes a
@@ -463,6 +476,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       text: prompt,
       systemPrompt,
       activeSkillIds: sessionSkillIds.length > 0 ? sessionSkillIds : undefined,
+      source: isQuickActionPrompt ? 'quick_action' : undefined,
     });
     if (activeSessionIdRef.current !== submittedSessionId) {
       return result.success;
@@ -540,6 +554,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     }
 
     // Fill the prompt into input
+    quickActionPromptRef.current = prompt.prompt;
     promptInputRef.current?.setValue(prompt.prompt);
     promptInputRef.current?.focus();
   };
