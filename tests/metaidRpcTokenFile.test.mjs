@@ -54,6 +54,48 @@ test('writeMetaidRpcTokenFile returns null (no throw) when the directory is unwr
   assert.equal(endpoint.writeMetaidRpcTokenFile(missingDir, { IDBOTS_RPC_TOKEN: 'x' }), null);
 });
 
+test('writeMetaidRpcTokenFile adopts an existing mirrored token instead of rotating it', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-rpctoken-adopt-'));
+  const tokenPath = endpoint.getMetaidRpcTokenFilePath(dir);
+  const existing = 'a'.repeat(48); // randomBytes(24) hex shape
+  fs.writeFileSync(tokenPath, `${existing}\n`, 'utf8');
+
+  // No env pin: a sibling instance (or a previous launch) already minted the
+  // token and may still own the gateway port — rotating it would 401 every
+  // client that instance serves. Adopt it verbatim and keep the file as-is.
+  const result = endpoint.writeMetaidRpcTokenFile(dir, {});
+  assert.equal(result, tokenPath);
+  assert.equal(fs.readFileSync(tokenPath, 'utf8').trim(), existing, 'mirror file must not be rewritten');
+  assert.equal(endpoint.getMetaidRpcToken({}), existing, 'process token adopts the mirrored token');
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(tokenPath).mode & 0o777, 0o600);
+  }
+});
+
+test('writeMetaidRpcTokenFile: env pin always wins over an existing mirror', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-rpctoken-pin-'));
+  const tokenPath = endpoint.getMetaidRpcTokenFilePath(dir);
+  fs.writeFileSync(tokenPath, `${'b'.repeat(48)}\n`, 'utf8');
+
+  const result = endpoint.writeMetaidRpcTokenFile(dir, { IDBOTS_RPC_TOKEN: 'pinned-token' });
+  assert.equal(result, tokenPath);
+  assert.equal(fs.readFileSync(tokenPath, 'utf8').trim(), 'pinned-token');
+});
+
+test('writeMetaidRpcTokenFile replaces a mirror whose content is not a generated token', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-rpctoken-invalid-'));
+  const tokenPath = endpoint.getMetaidRpcTokenFilePath(dir);
+  fs.writeFileSync(tokenPath, 'not-a-generated-token\n', 'utf8');
+
+  const result = endpoint.writeMetaidRpcTokenFile(dir, {});
+  assert.equal(result, tokenPath);
+  const written = fs.readFileSync(tokenPath, 'utf8').trim();
+  // Garbage content is never adopted: the file ends up with the current
+  // process token (freshly generated on first launch, or the active one).
+  assert.notEqual(written, 'not-a-generated-token');
+  assert.equal(written, endpoint.getMetaidRpcToken({}));
+});
+
 async function createCapturingServer() {
   const seen = [];
   const server = http.createServer((req, res) => {

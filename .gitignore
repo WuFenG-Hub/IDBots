@@ -59,6 +59,7 @@ tests/*
 !tests/dshPluginManager.test.mjs
 !tests/dshKernelDefault.test.mjs
 !tests/metaidRpcTokenFile.test.mjs
+!tests/httpListenWithRetry.test.mjs
 !tests/coworkDshRestartDefer.test.mjs
 !tests/coworkDshPerRouteCredential.test.mjs
 !tests/dshHostToolRegistry.test.mjs
