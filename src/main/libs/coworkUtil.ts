@@ -11,6 +11,7 @@ import { resolveWritableSkillsRoot } from './skillRoots';
 import { getMetaidRpcBase, getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
 import { chatCompletionWithTools } from '../services/cognitiveChatCompletion';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
+import { assignPathValue, collapseWindowsPathKeys, pathValueOf } from './windowsPathEnv';
 
 function appendEnvPath(current: string | undefined, additions: string[]): string | undefined {
   const items = new Set<string>();
@@ -928,14 +929,14 @@ function applyPackagedEnvOverrides(env: Record<string, string | undefined>): voi
     if (bashPath) {
       env.CLAUDE_CODE_GIT_BASH_PATH = bashPath;
       const gitToolDirs = getWindowsGitToolDirs(bashPath);
-      env.PATH = appendEnvPath(env.PATH, gitToolDirs);
+      assignPathValue(env, appendEnvPath(pathValueOf(env), gitToolDirs));
       coworkLog('INFO', 'resolveGitBash', `Injected Windows Git toolchain PATH entries: ${gitToolDirs.join(', ')}`);
     }
 
     // Prepend shim dir so our cygpath (and node) shims are found first — avoids "cygpath -u" failures when Git's cygpath is missing
     const shimInfo = ensureWindowsElectronNodeShim();
     if (shimInfo) {
-      env.PATH = appendEnvPath(env.PATH, [shimInfo.shimDir]);
+      assignPathValue(env, appendEnvPath(pathValueOf(env), [shimInfo.shimDir]));
       env.IDBOTS_NODE_SHIM_SCRIPT = shimInfo.shimScriptPath;
       env.IDBOTS_NODE_SHIM_DIR = shimInfo.shimDir;
       coworkLog('INFO', 'resolveNodeShim', `Injected Electron Node shim PATH entry: ${shimInfo.shimDir}`);
@@ -946,7 +947,7 @@ function applyPackagedEnvOverrides(env: Record<string, string | undefined>): voi
     // which typically excludes user-level Node.js installations.
     const nodeDirs = resolveWindowsNodeDirs();
     if (nodeDirs.length > 0) {
-      env.PATH = appendEnvPath(env.PATH, nodeDirs);
+      assignPathValue(env, appendEnvPath(pathValueOf(env), nodeDirs));
       coworkLog('INFO', 'resolveNodeDirs', `Injected Windows Node.js PATH entries: ${nodeDirs.join(', ')}`);
     }
 
@@ -969,7 +970,7 @@ function applyPackagedEnvOverrides(env: Record<string, string | undefined>): voi
   // Resolve user's shell PATH so that node, npm, and other tools are findable
   const userPath = resolveUserShellPath();
   if (userPath) {
-    env.PATH = userPath;
+    assignPathValue(env, userPath);
   } else {
     // Fallback: append common node installation paths
     const home = env.HOME || app.getPath('home');
@@ -980,7 +981,7 @@ function applyPackagedEnvOverrides(env: Record<string, string | undefined>): voi
       `${home}/.volta/bin`,
       `${home}/.fnm/current/bin`,
     ];
-    env.PATH = [env.PATH, ...commonPaths].filter(Boolean).join(delimiter);
+    assignPathValue(env, [pathValueOf(env), ...commonPaths].filter(Boolean).join(delimiter));
   }
 
   const resourcesPath = process.resourcesPath;
@@ -1037,30 +1038,47 @@ export function getSkillsRoot(): string {
  * BASH_ENV channel — see dshSkillSessionEnv.ts — because a shared env would
  * cross-leak between concurrent sessions and DSH scrubs KEY/TOKEN names.
  * IDBOTS_API_BASE_URL is the local cowork proxy (scheduled-task create/list/…).
+ *
+ * Windows packaged builds ship PortableGit at resources/mingit, but DSH
+ * bash-local spawns a bare `bash` name. applyPackagedEnvOverrides prepends
+ * those dirs onto PATH here so Start-menu Electron (no Git on system PATH)
+ * can still resolve bash.exe. BASH_ENV identity injection cannot help if
+ * the bash spawn itself fails with ENOENT.
  */
 export function getSkillHostEnv(): Record<string, string> {
   const skillsRoot = getSkillsRoot();
-  const env: Record<string, string> = {
-    SKILLS_ROOT: skillsRoot,
-    IDBOTS_SKILLS_ROOT: skillsRoot,
-    IDBOTS_ELECTRON_PATH: resolveElectronExecutablePath(),
-    IDBOTS_APP_DATA_PATH: app.getPath('appData'),
-    IDBOTS_USER_DATA_PATH: app.getPath('userData'),
-    // Global RPC base (no token). Per-session IDBOTS_RPC_TOKEN still rides
-    // the BASH_ENV session file / AUTHFILE; scripts default to 127.0.0.1:31200
-    // when this is missing.
-    IDBOTS_RPC_URL: getMetaidRpcBase(),
-    // Scrub-proof fallback channel for the local RPC bearer token: DSH bash
-    // erases *TOKEN* env names, so SKILL scripts read the token from this
-    // mirror file (written per launch by the MetaID RPC server) when the
-    // env-borne IDBOTS_RPC_TOKEN is missing.
-    [METAID_RPC_AUTHFILE_ENV]: getMetaidRpcTokenFilePath(app.getPath('userData')),
+  const env: Record<string, string | undefined> = {
+    // Seed PATH so Windows mingit/node injection has a base to prepend to.
+    PATH: process.env.PATH ?? process.env.Path,
+    CLAUDE_CODE_GIT_BASH_PATH: process.env.CLAUDE_CODE_GIT_BASH_PATH,
   };
+  applyPackagedEnvOverrides(env);
+
+  env.SKILLS_ROOT = skillsRoot;
+  env.IDBOTS_SKILLS_ROOT = skillsRoot;
+  env.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
+  env.IDBOTS_APP_DATA_PATH = app.getPath('appData');
+  env.IDBOTS_USER_DATA_PATH = app.getPath('userData');
+  // Global RPC base (no token). Per-session IDBOTS_RPC_TOKEN still rides
+  // the BASH_ENV session file / AUTHFILE; scripts default to 127.0.0.1:31200
+  // when this is missing.
+  env.IDBOTS_RPC_URL = getMetaidRpcBase();
+  // Scrub-proof fallback channel for the local RPC bearer token: DSH bash
+  // erases *TOKEN* env names, so SKILL scripts read the token from this
+  // mirror file (written per launch by the MetaID RPC server) when the
+  // env-borne IDBOTS_RPC_TOKEN is missing.
+  env[METAID_RPC_AUTHFILE_ENV] = getMetaidRpcTokenFilePath(app.getPath('userData'));
   const internalApiBaseURL = getInternalApiBaseURL();
   if (internalApiBaseURL) {
     env.IDBOTS_API_BASE_URL = internalApiBaseURL;
   }
-  return env;
+  collapseWindowsPathKeys(env);
+
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === 'string' && value.length > 0) out[key] = value;
+  }
+  return out;
 }
 
 /**
