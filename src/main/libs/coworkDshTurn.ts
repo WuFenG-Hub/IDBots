@@ -263,8 +263,32 @@ export function buildDshChildEnv(parts: {
   }
 }
 
+/** Sentinel cowork/DSH session id for startup warmup (no MCP, no pin). */
+export const DSH_WARMUP_SESSION_ID = '__dsh_warmup__'
+
+const DSH_WARMUP_CALLBACKS: DshTurnCallbacks = {
+  onMessage: () => 'dsh-warmup',
+  onMessageUpdate: () => undefined,
+  onMessageFinalize: () => undefined,
+  onUsage: () => undefined,
+  onApprovalRequest: () => undefined,
+  onApprovalCancelled: () => undefined,
+}
+
+interface DshEnsureKernelOptions {
+  /** Real turns pin the first workspace; warmup loads bash/fs plugins without
+   *  locking the shared runtime to a guessed cwd. */
+  pinWorkspace?: boolean
+  /** Real turns union MCP servers into the composition; warmup does not spawn
+   *  user MCP subprocesses at app start. */
+  accumulateMcp?: boolean
+}
+
 export class DshTurnHub {
   private kernel: DshKernel | null = null
+  /** Serializes ensureRuntime so startup warmup and the first turn cannot
+   *  spawn two children when they overlap. */
+  private kernelEnsureChain: Promise<void> = Promise.resolve()
   /** Keyed by DSH session id — that is what kernel event callbacks carry. */
   private controllersByDsh = new Map<string, DshTurnController>()
   /** cowork session id → DSH session id (steer/cancel look up by cowork id). */
@@ -277,6 +301,35 @@ export class DshTurnHub {
 
   constructor(opts: DshHubOptions) {
     this.opts = opts
+  }
+
+  get running(): boolean {
+    return this.kernel?.running === true
+  }
+
+  get restartCount(): number {
+    return this.kernel?.restartCount ?? 0
+  }
+
+  /**
+   * Spawn (or reuse) the shared runtime without opening a session or sending
+   * a prompt. Used at app-ready so the first cowork turn does not pay process
+   * boot + plugin load. Workspace is mounted for bash/fs plugin load but not
+   * pinned — the first real turn still owns the cwd lock.
+   */
+  async prewarm(input: {
+    provider: DshTurnProviderRoute
+    workspace?: { cwd: string }
+  }): Promise<void> {
+    await this.ensureKernel({
+      sessionId: DSH_WARMUP_SESSION_ID,
+      dshSessionId: DSH_WARMUP_SESSION_ID,
+      prompt: '',
+      provider: input.provider,
+      sections: [],
+      workspace: input.workspace,
+      callbacks: DSH_WARMUP_CALLBACKS,
+    }, { pinWorkspace: false, accumulateMcp: false })
   }
 
   /** Start (or reuse) the runtime and run one turn to completion. */
@@ -489,7 +542,7 @@ export class DshTurnHub {
    * matches the official DSH bundle (search backend is not per-model). */
   private webSearchSeen: { apiKey: string; baseURL: string } | null = null
 
-  private async ensureKernel(input: DshTurnInput): Promise<DshKernel> {
+  private rememberTurnInputs(input: DshTurnInput, options?: DshEnsureKernelOptions): void {
     this.providersSeen.set(
       input.provider.key,
       mergeProviderRoute(this.providersSeen.get(input.provider.key), providerRouteOf(input.provider)),
@@ -498,9 +551,11 @@ export class DshTurnHub {
       envName: dshProviderApiKeyEnv(input.provider.key),
       apiKey: input.provider.apiKey,
     })
-    for (const server of this.opts.mcpServersProvider?.(input.sessionId) ?? []) {
-      const name = String(server?.name ?? '').trim()
-      if (name) this.mcpServersSeen.set(name, server)
+    if (options?.accumulateMcp !== false) {
+      for (const server of this.opts.mcpServersProvider?.(input.sessionId) ?? []) {
+        const name = String(server?.name ?? '').trim()
+        if (name) this.mcpServersSeen.set(name, server)
+      }
     }
     if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
       this.webSearchSeen = {
@@ -508,7 +563,13 @@ export class DshTurnHub {
         baseURL: deepSeekWebSearchBaseURL(input.provider.baseUrl),
       }
     }
-    const config: DshRuntimeConfigInput = {
+    if (options?.pinWorkspace !== false && !this.workspaceSeen && input.workspace) {
+      this.workspaceSeen = input.workspace
+    }
+  }
+
+  private buildRuntimeConfig(input: DshTurnInput): DshRuntimeConfigInput {
+    return {
       sessionRoot: this.opts.sessionRoot,
       providers: [...this.providersSeen.values()],
       // sections/hostTools are PER-SESSION and ride session/ensure (agent-
@@ -549,7 +610,20 @@ export class DshTurnHub {
         skillHostEnv: this.opts.skillHostEnvProvider?.(),
       }),
     }
-    if (!this.workspaceSeen && input.workspace) this.workspaceSeen = input.workspace
+  }
+
+  private async ensureKernel(input: DshTurnInput, options?: DshEnsureKernelOptions): Promise<DshKernel> {
+    // Apply unioned route/MCP/workspace state immediately so a racing first
+    // turn can steer a still-booting warmup spawn (config is snapshotted
+    // only after the serialize lock is acquired).
+    this.rememberTurnInputs(input, options)
+    const run = this.kernelEnsureChain.then(() => this.spawnOrReuseFromSeenState(input))
+    this.kernelEnsureChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  private async spawnOrReuseFromSeenState(input: DshTurnInput): Promise<DshKernel> {
+    const config = this.buildRuntimeConfig(input)
     if (!this.kernel) {
       this.kernel = new DshKernel({
         runtimeDir: this.opts.runtimeDir,
@@ -568,7 +642,7 @@ export class DshTurnHub {
     // runtime's config, so the diff stays visible to the next call). Only a
     // config the old runtime genuinely cannot serve (caller's provider route
     // new or changed) keeps the bounded wait + restart path.
-    if (this.kernel?.running && this.lastConfigJson !== undefined) {
+    if (this.kernel.running && this.lastConfigJson !== undefined) {
       const nextJson = JSON.stringify(config)
       if (nextJson !== this.lastConfigJson && this.controllersByDsh.size > 0) {
         const changedKeys = dshConfigChangedKeys(this.lastConfigJson, nextJson)

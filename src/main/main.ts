@@ -13369,6 +13369,14 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('about to create window');
     createAppWindow();
 
+    // Spawn the shared DSH runtime in the background so the first cowork
+    // turn does not pay process boot + plugin load. Must not delay first
+    // paint — same contract as the retired Claude SDK pre-warm. Store getter,
+    // RPC token, and the OpenAI-compat proxy URL are already live, so the
+    // child env matches the first real turn.
+    startupLog('dsh runtime warmup begin');
+    void getCoworkRunner().prewarmDshRuntime();
+
     await startSqliteBackgroundJobs();
     startSqliteDaemons();
 
