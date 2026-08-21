@@ -139,7 +139,6 @@ tests/*
 !tests/knowledgePromptBlocks.test.mjs
 !tests/knowledgeTools.test.mjs
 !tests/experienceTimeAnchor.test.mjs
-!tests/metabotPostBuzzSkill.test.mjs
 !tests/metabotGroupTaskSkill.test.mjs
 !tests/metabotInfoPayload.test.mjs
 !tests/metabotInfoSyncSteps.test.mjs
@@ -229,6 +228,13 @@ man_base_data_pebble/
 !tests/metaIdSearchService.test.mjs
 !tests/metaIdSearchAgentTools.test.mjs
 !tests/metaFileUploadAgentTools.test.mjs
+!tests/postBuzzAgentTools.test.mjs
+!tests/omniCasterAgentTools.test.mjs
+!tests/privateChatAgentTools.test.mjs
+!tests/groupChatAgentTools.test.mjs
+!tests/omniReaderAgentTools.test.mjs
+!tests/browserOpenAgentTools.test.mjs
+!tests/screenshotAgentTools.test.mjs
 !tests/visionRelayService.test.mjs
 !tests/visionRelayAgentTools.test.mjs
 !tests/visionVideoRelay.test.mjs

@@ -24,7 +24,7 @@ const BOSS_METAID = 'BOSS_123';
 
 // SKILLs root (project SKILLs dir so Read can read a real file)
 const SKILLS_ROOT = path.resolve(__dirname, '..', 'SKILLs');
-const TEST_SKILL_ID = 'metabot-omni-caster';
+const TEST_SKILL_ID = 'web-search';
 const TEST_SKILL_MD = path.join(SKILLS_ROOT, TEST_SKILL_ID, 'SKILL.md');
 
 // Capture console.log for assertions
@@ -58,7 +58,7 @@ console.log = function (...args) {
 function getSkillsPromptForIds(ids) {
   if (!ids || ids.length === 0) return null;
   if (!fs.existsSync(TEST_SKILL_MD)) return null;
-  const skillEntries = `  <skill><id>${TEST_SKILL_ID}</id><name>Omni Caster</name><description>Post Buzz and protocol data.</description><location>${TEST_SKILL_MD}</location></skill>`;
+  const skillEntries = `  <skill><id>${TEST_SKILL_ID}</id><name>Web Search</name><description>Search the web.</description><location>${TEST_SKILL_MD}</location></skill>`;
   return [
     '## Skills (mandatory)',
     'Before replying: scan <available_skills> <description> entries.',

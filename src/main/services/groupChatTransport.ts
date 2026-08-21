@@ -6,7 +6,8 @@
  *
  * Payload references:
  * - Create body mirrors idchat production createChannel (idchat/src/utils/talk.ts:724-741).
- * - Join body matches SKILLs/metabot-chat-groupchat/scripts/index.js (simplegroupjoin).
+ * - Join body follows the SimpleGroupJoin protocol ({groupId, state, referrer, k});
+ *   the group_chat built-in tool's join_group sends the same shape.
  * - Send body matches the former inline sender in main.ts (simplegroupchat, AES).
  */
 
@@ -116,7 +117,7 @@ export function resetGroupChatTransportOverrides(): void {
  * Create a public group chat on-chain (/protocols/simplegroupcreate).
  * Body mirrors idchat createChannel (idchat/src/utils/talk.ts:724-741) for a public
  * text group; groupIcon added per the SimpleGroupCreate protocol doc
- * (SKILLs/metabot-omni-caster/references/03-group-management.md). The returned pinId
+ * (03-group-management.md in the MetaID protocol docs). The returned pinId
  * (<txid>i0) IS the canonical on-chain groupId (the indexer overrides the body
  * field), so the body groupId is left empty.
  */
@@ -180,7 +181,7 @@ export async function joinGroupChat(
  * pass the chair (group creator) metabot id. `removeMetaid` is the kicked
  * member's legacy MetaID (idchat removeMember convention); body mirrors the
  * SimpleGroupRemoveUser protocol doc
- * (SKILLs/metabot-omni-caster/references/03-group-management.md).
+ * (03-group-management.md in the MetaID protocol docs).
  */
 export async function removeGroupChatMember(
   metabotId: number,

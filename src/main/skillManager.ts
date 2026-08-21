@@ -902,9 +902,21 @@ export class SkillManager {
 
   private retireLegacySkillsFromUserData(userRoot: string): void {
     // metabot-upload-file was converted to the built-in upload_file tool; its
-    // on-chain logic now lives in services/metaFileUploadService.ts. Retire the
-    // external skill so existing installs drop it (dir + skills.config entry).
-    const retiredSkillIds = ['metabot-upload-largefile', 'metabot-upload-file'];
+    // on-chain logic now lives in services/metaFileUploadService.ts. The six
+    // metabot-* skills below were likewise converted to native built-in tools
+    // (post_buzz / send_private_chat / group_chat / omni_read / omni_cast /
+    // browser_open — see src/main/libs/*AgentTools.ts). Retire the external
+    // skills so existing installs drop them (dir + skills.config entry).
+    const retiredSkillIds = [
+      'metabot-upload-largefile',
+      'metabot-upload-file',
+      'metabot-post-buzz',
+      'metabot-chat-privatechat',
+      'metabot-chat-groupchat',
+      'metabot-omni-reader',
+      'metabot-omni-caster',
+      'metabot-browser-open',
+    ];
     for (const retiredId of retiredSkillIds) {
       const legacyDir = path.join(userRoot, retiredId);
       try {
@@ -1120,13 +1132,7 @@ export class SkillManager {
   private buildScopedRoutingPrompt(skills: SkillRecord[]): string | null {
     if (skills.length === 0) return null;
     const uniqueSkills = Array.from(new Map(skills.map((skill) => [skill.id, skill])).values());
-    const skillIds = new Set(uniqueSkills.map((skill) => skill.id));
-    const omniCasterConstraint = skillIds.has('metabot-omni-caster')
-      ? '- For metabot-omni-caster: path and payload must come from SKILL.md and references (e.g. buzz uses /protocols/simplebuzz); do not guess.'
-      : '';
-    return this.buildRoutingPromptFromSkills(uniqueSkills, {
-      extraRules: [omniCasterConstraint],
-    });
+    return this.buildRoutingPromptFromSkills(uniqueSkills);
   }
 
   private normalizeChatSkillAllowList(value: unknown): string[] {
@@ -1449,8 +1455,7 @@ export class SkillManager {
 
   /**
    * Run a skill by id with a JSON payload (e.g. from orchestrator tool call).
-   * Uses invocation adapter for known skills (e.g. metabot-omni-caster); otherwise
-   * runs scripts/index.js|index.ts or scripts/run.js|run.ts with --payload.
+   * Runs scripts/index.js|index.ts or scripts/run.js|run.ts with --payload.
    * Returns observation string for the LLM.
    */
   async runSkillById(
@@ -1512,78 +1517,25 @@ export class SkillManager {
     });
     const env: NodeJS.ProcessEnv = { ...baseEnv, ...envOverrides, ...imageEnvOverrides };
 
-    let scriptPath: string;
-    let scriptArgs: string[];
-    const id = skillId.trim().toLowerCase();
-
-    if (id === 'metabot-omni-caster') {
-      const omniScriptCandidates = [
-        path.join(skillDir, 'scripts', 'omni-caster.js'),
-        path.join(skillDir, 'scripts', 'dist', 'omni-caster.js'),
-        path.join(skillDir, 'scripts', 'omni-caster.ts'),
-      ];
-      const omniScript = omniScriptCandidates.find((candidate) => fs.existsSync(candidate));
-      if (!omniScript) {
-        return {
-          success: false,
-          observation: 'metabot-omni-caster: scripts/omni-caster.js, scripts/dist/omni-caster.js, or scripts/omni-caster.ts not found',
-        };
-      }
-      let pathVal: string;
-      let payloadVal: string;
-      let operation = 'create';
-      let contentType = 'application/json';
-      try {
-        const obj = JSON.parse(payloadJson || '{}') as Record<string, unknown>;
-        pathVal = typeof obj.path === 'string' ? obj.path.trim() : '';
-        payloadVal = typeof obj.payload === 'string' ? obj.payload : JSON.stringify(obj.payload ?? {});
-        if (typeof obj.operation === 'string' && obj.operation.trim()) {
-          operation = obj.operation.trim().toLowerCase();
-        }
-        if (typeof obj.contentType === 'string' && obj.contentType.trim()) {
-          contentType = obj.contentType.trim();
-        }
-        // If LLM sent single "payload" string with nested JSON (e.g. {"path":"...","payload":"..."})
-        if (!pathVal && typeof obj.payload === 'string') {
-          try {
-            const inner = JSON.parse(obj.payload) as Record<string, unknown>;
-            if (typeof inner.path === 'string') pathVal = inner.path.trim();
-            if (typeof inner.payload === 'string') payloadVal = inner.payload;
-            else payloadVal = JSON.stringify(inner.payload ?? {});
-          } catch {
-            // use pathVal/payloadVal as already set
-          }
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return { success: false, observation: `Invalid payload JSON: ${msg}` };
-      }
-      if (!pathVal) {
-        return { success: false, observation: 'metabot-omni-caster: path is required' };
-      }
-      scriptPath = omniScript;
-      scriptArgs = ['--path', pathVal, '--payload', payloadVal];
-      if (operation !== 'create') scriptArgs.push('--operation', operation);
-      if (contentType !== 'application/json') scriptArgs.push('--content-type', contentType);
-    } else {
-      const entryCandidates = [
-        path.join(skillDir, 'scripts', 'index.js'),
-        path.join(skillDir, 'scripts', 'dist', 'index.js'),
-        path.join(skillDir, 'scripts', 'run.js'),
-        path.join(skillDir, 'scripts', 'dist', 'run.js'),
-        path.join(skillDir, 'scripts', 'index.ts'),
-        path.join(skillDir, 'scripts', 'run.ts'),
-      ];
-      const selectedEntry = entryCandidates.find((candidate) => fs.existsSync(candidate));
-      if (!selectedEntry) {
-        return {
-          success: false,
-          observation: `Skill "${skillId}": no scripts/index.js, scripts/dist/index.js, run.js, scripts/dist/run.js, index.ts, or run.ts found`,
-        };
-      }
-      scriptPath = selectedEntry;
-      scriptArgs = ['--payload', payloadJson];
+    // Note: the metabot-omni-caster invocation adapter was removed together
+    // with the skill — its capability is now the built-in omni_cast tool.
+    const entryCandidates = [
+      path.join(skillDir, 'scripts', 'index.js'),
+      path.join(skillDir, 'scripts', 'dist', 'index.js'),
+      path.join(skillDir, 'scripts', 'run.js'),
+      path.join(skillDir, 'scripts', 'dist', 'run.js'),
+      path.join(skillDir, 'scripts', 'index.ts'),
+      path.join(skillDir, 'scripts', 'run.ts'),
+    ];
+    const selectedEntry = entryCandidates.find((candidate) => fs.existsSync(candidate));
+    if (!selectedEntry) {
+      return {
+        success: false,
+        observation: `Skill "${skillId}": no scripts/index.js, scripts/dist/index.js, run.js, scripts/dist/run.js, index.ts, or run.ts found`,
+      };
     }
+    const scriptPath = selectedEntry;
+    const scriptArgs = ['--payload', payloadJson];
 
     const timeoutMs = 60_000;
     const result = await this.runSkillScriptWithEnv(skillDir, scriptPath, scriptArgs, env, envOverrides, timeoutMs);
