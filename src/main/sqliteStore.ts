@@ -367,6 +367,7 @@ export class SqliteStore {
         hidden_from_session_list INTEGER NOT NULL DEFAULT 0,
         browser_uri TEXT,
         browser_title TEXT,
+        project_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -1766,6 +1767,11 @@ export class SqliteStore {
 
       if (!columns.includes('metabot_id')) {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN metabot_id INTEGER;');
+        this.save();
+      }
+
+      if (!columns.includes('project_id')) {
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN project_id TEXT;');
         this.save();
       }
 

@@ -18,7 +18,7 @@ import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 import { QuickActionBar, PromptPanel } from '../quick-actions';
 import type { SettingsOpenOptions } from '../Settings';
-import type { CoworkSession, CoworkPermissionMode } from '../../types/cowork';
+import type { CoworkSession, CoworkPermissionMode, CoworkWorkspaceSelection } from '../../types/cowork';
 import type { LocalizedPrompt } from '../../types/quickAction';
 import { resolveQuickActionPromptSkillMapping } from '../quick-actions/quickActionPresentation.js';
 import MetaBotSelector, { type MetaBotForSelector } from './MetaBotSelector';
@@ -86,6 +86,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const [permissionMode, setPermissionModeState] = useState<CoworkPermissionMode>(
     configService.getConfig().coworkPermissionMode ?? 'default'
   );
+  // The New Task composer's workspace choice: a project, an explicit folder, or
+  // the default bot workspace. Persisted only into the session row on start.
+  const [workspaceSelection, setWorkspaceSelection] = useState<CoworkWorkspaceSelection | null>(null);
   const setPermissionMode = useCallback((mode: CoworkPermissionMode) => {
     setPermissionModeState(mode);
     void configService.updateConfig({ coworkPermissionMode: mode });
@@ -363,6 +366,19 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       // Capture active skill IDs before clearing them
       const sessionSkillIds = [...activeSkillIds];
 
+      // Resolve the conversation's working directory + optional project binding
+      // from the New Task composer's workspace choice. A project (or explicit
+      // folder) pins the cwd; botWorkspace/empty falls back to the default chain
+      // so the main process routes to {base}/bots/{botId}/{date} as before.
+      const resolvedCwd = workspaceSelection?.kind === 'project'
+        ? workspaceSelection.cwd
+        : workspaceSelection?.kind === 'folder'
+          ? workspaceSelection.cwd
+          : config.workingDirectory || '';
+      const resolvedProjectId = workspaceSelection?.kind === 'project'
+        ? workspaceSelection.projectId
+        : null;
+
       const tempSession: CoworkSession = {
         id: tempSessionId,
         title: fallbackTitle,
@@ -371,13 +387,14 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         pinned: false,
         createdAt: now,
         updatedAt: now,
-        cwd: config.workingDirectory || '',
+        cwd: resolvedCwd,
         systemPrompt: '',
         executionMode: config.executionMode || 'local',
         activeSkillIds: sessionSkillIds,
         model: pendingPick?.modelId ?? undefined,
         modelProvider: pendingPick?.providerKey ?? undefined,
         effort: pendingPick?.effort ?? undefined,
+        projectId: resolvedProjectId ?? undefined,
         messages: [
           {
             id: `msg-${now}`,
@@ -421,7 +438,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       const startedSession = await coworkService.startSession({
         prompt,
         title,
-        cwd: config.workingDirectory || undefined,
+        cwd: resolvedCwd || undefined,
         systemPrompt: combinedSystemPrompt,
         activeSkillIds: sessionSkillIds,
         metabotId: selectedMetabotId,
@@ -432,6 +449,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         modelProvider: pendingPick?.providerKey ?? undefined,
         effort: pendingPick?.effort ?? undefined,
         source: isQuickActionPrompt ? 'quick_action' : undefined,
+        projectId: resolvedProjectId ?? undefined,
       });
 
       // Stop immediately if user cancelled while startup request was in flight.
@@ -712,6 +730,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
             onWorkingDirectoryChange={async (dir: string) => {
               await coworkService.updateConfig({ workingDirectory: dir });
             }}
+            workspaceSelection={workspaceSelection}
+            onWorkspaceSelectionChange={setWorkspaceSelection}
+            onOpenNewProject={() => onRequestAppSettings?.({ initialTab: 'projects', openNewProjectForm: true })}
             showFolderSelector={true}
             showModelSelector={true}
             modelEffortValue={{

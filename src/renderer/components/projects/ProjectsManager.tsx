@@ -14,7 +14,7 @@ const showToast = (message: string) => {
   window.dispatchEvent(new CustomEvent('app:showToast', { detail: message }));
 };
 
-const ProjectsManager: React.FC = () => {
+const ProjectsManager: React.FC<{ autoOpenCreateForm?: boolean }> = ({ autoOpenCreateForm = false }) => {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [actionError, setActionError] = useState('');
   const [pendingDelete, setPendingDelete] = useState<ProjectRecord | null>(null);
@@ -33,6 +33,15 @@ const ProjectsManager: React.FC = () => {
     load();
     return () => { isActive = false; };
   }, []);
+
+  // Auto-open the create form when Settings was opened with the "New Project"
+  // intent (e.g. from the New Task composer's project menu). Fires once.
+  useEffect(() => {
+    if (autoOpenCreateForm) {
+      setEditingProject(null);
+      setIsFormOpen(true);
+    }
+  }, [autoOpenCreateForm]);
 
   const handleToggleEnabled = async (project: ProjectRecord) => {
     if (togglingId) return;

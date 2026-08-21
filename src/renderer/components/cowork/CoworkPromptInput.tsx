@@ -14,7 +14,8 @@ import { RootState } from '../../store';
 import { setDraftPrompt, setSessionDraft } from '../../store/slices/coworkSlice';
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
-import type { CoworkContextUsage, CoworkPermissionMode } from '../../types/cowork';
+import type { CoworkContextUsage, CoworkPermissionMode, CoworkWorkspaceSelection } from '../../types/cowork';
+import type { ProjectRecord } from '../../types/project';
 import { getCompactFolderName } from '../../utils/path';
 import {
   createVersionedComposerField,
@@ -151,6 +152,11 @@ interface CoworkPromptInputProps {
   workingDirectory?: string;
   onWorkingDirectoryChange?: (dir: string) => void;
   showFolderSelector?: boolean;
+  /** Controlled workspace selection (project / folder / bot workspace). */
+  workspaceSelection?: CoworkWorkspaceSelection | null;
+  onWorkspaceSelectionChange?: (selection: CoworkWorkspaceSelection) => void;
+  /** Open the Settings > Projects > New Project form. */
+  onOpenNewProject?: () => void;
   showModelSelector?: boolean;
   /** Show the built-in attachment (paperclip) button. Hosts with their own attachment button can hide it. */
   showAttachmentButton?: boolean;
@@ -184,6 +190,9 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       workingDirectory = '',
       onWorkingDirectoryChange,
       showFolderSelector = false,
+      workspaceSelection = null,
+      onWorkspaceSelectionChange,
+      onOpenNewProject,
       showModelSelector = false,
       showAttachmentButton = true,
       modelEffortValue = null,
@@ -352,10 +361,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   }, []);
 
   useEffect(() => {
-    if (workingDirectory?.trim()) {
+    if (workingDirectory?.trim() || workspaceSelection) {
       setShowFolderRequiredWarning(false);
     }
-  }, [workingDirectory]);
+  }, [workingDirectory, workspaceSelection]);
 
   const handleSubmit = useCallback(async () => {
     if (disabled || (isStreaming && steerDisabled)) return;
@@ -367,7 +376,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const submittedAttachments = attachmentField.get();
     const trimmedValue = submittedValue.trim();
     if (isStreaming && !trimmedValue) return;
-    if (!isStreaming && showFolderSelector && !workingDirectory?.trim()) {
+    if (!isStreaming && showFolderSelector && !workingDirectory?.trim() && !workspaceSelection) {
       setShowFolderRequiredWarning(true);
       return;
     }
@@ -413,7 +422,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       }
       console.error('Cowork prompt submission failed:', error);
     }
-  }, [isStreaming, disabled, steerDisabled, onSubmit, activeSkillIds, skills, inputFileLabel, showFolderSelector, workingDirectory]);
+  }, [isStreaming, disabled, steerDisabled, onSubmit, activeSkillIds, skills, inputFileLabel, showFolderSelector, workingDirectory, workspaceSelection]);
 
   const handleSelectSkill = useCallback((skill: Skill) => {
     dispatch(toggleActiveSkill(skill.id));
@@ -453,11 +462,47 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     return getCompactFolderName(path, maxLength) || i18nService.t('noFolderSelected');
   };
 
-  const handleFolderSelect = (path: string) => {
-    if (onWorkingDirectoryChange) {
-      onWorkingDirectoryChange(path);
+  // In project mode the workspace choice flows through onWorkspaceSelectionChange
+  // (project / folder / bot-workspace). Fall back to the legacy directory
+  // callback for hosts that only need a raw path.
+  const handleWorkspaceSelect = useCallback((selection: CoworkWorkspaceSelection) => {
+    if (onWorkspaceSelectionChange) {
+      onWorkspaceSelectionChange(selection);
+      return;
     }
-  };
+    if (selection.kind === 'folder' || selection.kind === 'project') {
+      onWorkingDirectoryChange?.(selection.cwd);
+    }
+  }, [onWorkspaceSelectionChange, onWorkingDirectoryChange]);
+
+  const handleSelectProject = useCallback((project: ProjectRecord) => {
+    handleWorkspaceSelect({
+      kind: 'project',
+      projectId: project.id,
+      name: project.name,
+      cwd: project.sourceDir?.trim() || workingDirectory,
+    });
+  }, [handleWorkspaceSelect, workingDirectory]);
+
+  const handleSelectBotWorkspace = useCallback(() => {
+    handleWorkspaceSelect({ kind: 'botWorkspace' });
+  }, [handleWorkspaceSelect]);
+
+  // Label shown on the folder button: project name (or path / bot-workspace).
+  const workspaceLabel = workspaceSelection
+    ? (workspaceSelection.kind === 'project'
+        ? workspaceSelection.name
+        : workspaceSelection.kind === 'folder'
+          ? truncatePath(workspaceSelection.cwd)
+          : i18nService.t('coworkBotWorkspace'))
+    : truncatePath(workingDirectory);
+  const workspaceTooltip = workspaceSelection
+    ? (workspaceSelection.kind === 'project'
+        ? workspaceSelection.cwd
+        : workspaceSelection.kind === 'folder'
+          ? workspaceSelection.cwd
+          : i18nService.t('coworkBotWorkspace'))
+    : truncatePath(workingDirectory, 120);
 
   const addAttachment = useCallback((path: string) => {
     if (!path) return;
@@ -824,20 +869,23 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                       >
                         <FolderIcon className="h-4 w-4" />
                         <span className="max-w-[150px] truncate text-xs">
-                          {truncatePath(workingDirectory)}
+                          {workspaceLabel}
                         </span>
                       </button>
                       {/* Tooltip - hidden when folder menu is open */}
                       {!showFolderMenu && (
                         <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 px-3.5 py-2.5 text-[13px] leading-relaxed rounded-xl shadow-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text dark:border-claude-darkBorder border-claude-border border opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 pointer-events-none z-50 max-w-[400px] break-all whitespace-nowrap">
-                          {truncatePath(workingDirectory, 120)}
+                          {workspaceTooltip}
                         </div>
                       )}
                     </div>
                     <FolderSelectorPopover
                       isOpen={showFolderMenu}
                       onClose={() => setShowFolderMenu(false)}
-                      onSelectFolder={handleFolderSelect}
+                      onSelectFolder={(path) => handleWorkspaceSelect({ kind: 'folder', cwd: path })}
+                      onSelectProject={handleSelectProject}
+                      onOpenNewProject={onOpenNewProject}
+                      onSelectBotWorkspace={handleSelectBotWorkspace}
                       anchorRef={folderButtonRef as React.RefObject<HTMLElement>}
                       currentFolder={workingDirectory}
                     />

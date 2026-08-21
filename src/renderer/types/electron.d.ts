@@ -936,6 +936,7 @@ interface IElectronAPI {
   };
   generateSessionTitle: (userInput: string | null) => Promise<string>;
   getRecentCwds: (limit?: number) => Promise<string[]>;
+  getGitBranch: (cwd: string) => Promise<string | null>;
   appEvents: {
     onOpenSettings: (callback: () => void) => () => void;
     onNewTask: (callback: () => void) => () => void;

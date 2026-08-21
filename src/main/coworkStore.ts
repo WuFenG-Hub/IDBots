@@ -651,6 +651,8 @@ export interface CoworkSession {
   parentSessionId?: string | null;
   /** The source session's message id this fork was created from. */
   forkPointMessageId?: string | null;
+  /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
+  projectId?: string | null;
 }
 
 export type CoworkSessionMetadata = Pick<
@@ -697,6 +699,8 @@ export interface CoworkSessionSummary {
   /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
   effort?: string | null;
   hiddenFromSessionList?: boolean;
+  /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
+  projectId?: string | null;
 }
 
 export type CoworkUserMemoryStatus = 'created' | 'stale' | 'deleted';
@@ -2823,15 +2827,16 @@ export class CoworkStore implements MemoryBackend {
     permissionMode: CoworkPermissionMode = 'default',
     model: string | null = null,
     effort: string | null = null,
-    modelProvider: string | null = null
+    modelProvider: string | null = null,
+    projectId: string | null = null
   ): CoworkSession {
     const id = uuidv4();
     const now = Date.now();
 
     this.db.run(`
-      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, model, effort, model_provider, created_at, updated_at)
-      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [id, title, cwd, systemPrompt, resolveCoworkExecutionMode(executionMode), JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, model, effort, modelProvider, now, now]);
+      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, model, effort, model_provider, project_id, created_at, updated_at)
+      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, title, cwd, systemPrompt, resolveCoworkExecutionMode(executionMode), JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, model, effort, modelProvider, projectId, now, now]);
 
     this.upsertConversationMapping({
       channel: 'cowork_ui',
@@ -2865,6 +2870,7 @@ export class CoworkStore implements MemoryBackend {
       model,
       effort,
       modelProvider,
+      projectId,
     };
   }
 
@@ -2923,13 +2929,14 @@ export class CoworkStore implements MemoryBackend {
       model?: string | null;
       model_provider?: string | null;
       effort?: string | null;
+      project_id?: string | null;
       created_at: number;
       updated_at: number;
     }
 
     const row = this.getOne<SessionRow>(`
       SELECT id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id,
-             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, parent_session_id, fork_point_message_id, model, model_provider, effort, created_at, updated_at
+             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, parent_session_id, fork_point_message_id, model, model_provider, effort, project_id, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `, [id]);
@@ -2984,6 +2991,7 @@ export class CoworkStore implements MemoryBackend {
       model: row.model ?? null,
       modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
+      projectId: row.project_id ?? null,
       metabotName,
       metabotAvatar,
     };
@@ -3030,7 +3038,7 @@ export class CoworkStore implements MemoryBackend {
 
   updateSession(
     id: string,
-    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle' | 'permissionMode' | 'parentSessionId' | 'forkPointMessageId' | 'activeSkillIds'>>
+    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle' | 'permissionMode' | 'parentSessionId' | 'forkPointMessageId' | 'activeSkillIds' | 'projectId'>>
   ): void {
     const now = Date.now();
     const setClauses: string[] = ['updated_at = ?'];
@@ -3083,6 +3091,10 @@ export class CoworkStore implements MemoryBackend {
     if (updates.activeSkillIds !== undefined) {
       setClauses.push('active_skill_ids = ?');
       values.push(JSON.stringify(updates.activeSkillIds));
+    }
+    if (updates.projectId !== undefined) {
+      setClauses.push('project_id = ?');
+      values.push(updates.projectId);
     }
 
     values.push(id);
@@ -3278,6 +3290,7 @@ export class CoworkStore implements MemoryBackend {
       model?: string | null;
       model_provider?: string | null;
       effort?: string | null;
+      project_id?: string | null;
       created_at: number;
       updated_at: number;
       activity_at?: number | null;
@@ -3303,6 +3316,7 @@ export class CoworkStore implements MemoryBackend {
         s.model,
         s.model_provider,
         s.effort,
+        s.project_id,
         s.created_at,
         s.updated_at,
         -- Sort by the LAST USER MESSAGE time (fixed once a turn is sent), not
@@ -3350,6 +3364,7 @@ export class CoworkStore implements MemoryBackend {
       model: row.model ?? null,
       modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
+      projectId: row.project_id ?? null,
     }));
   }
 
@@ -3449,6 +3464,7 @@ export class CoworkStore implements MemoryBackend {
       model?: string | null;
       model_provider?: string | null;
       effort?: string | null;
+      project_id?: string | null;
       archived_at: number;
       created_at: number;
       updated_at: number;
@@ -3461,7 +3477,7 @@ export class CoworkStore implements MemoryBackend {
     const rows = this.getAll<ArchivedSessionRow>(`
       SELECT
         s.id, s.title, s.status, s.pinned, s.metabot_id, s.session_type, s.peer_name,
-        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.model, s.model_provider, s.effort,
+        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.model, s.model_provider, s.effort, s.project_id,
         s.archived_at, s.created_at, s.updated_at
       FROM cowork_sessions s
       WHERE ${clauses.join(' AND ')}
@@ -3486,6 +3502,7 @@ export class CoworkStore implements MemoryBackend {
       model: row.model ?? null,
       modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
+      projectId: row.project_id ?? null,
     }));
   }
 

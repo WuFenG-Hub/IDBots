@@ -340,6 +340,8 @@ export interface CoworkSession {
   effort?: string | null;
   /** Accumulated token/cost usage (computed by the main process, not persisted). */
   usageStats?: CoworkUsageStats | null;
+  /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
+  projectId?: string | null;
 }
 
 // Cowork configuration
@@ -635,7 +637,17 @@ export interface CoworkSessionSummary {
   /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
   effort?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
+  /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
+  projectId?: string | null;
 }
+
+// The New Task composer's working-directory choice. `project` and `folder` both
+// resolve to a concrete cwd for the conversation; `botWorkspace` keeps the
+// existing default chain ({base}/bots/{botId}/{date}).
+export type CoworkWorkspaceSelection =
+  | { kind: 'project'; projectId: string; name: string; cwd: string }
+  | { kind: 'folder'; cwd: string }
+  | { kind: 'botWorkspace' };
 
 // Start session options
 export interface CoworkStartOptions {
@@ -657,6 +669,8 @@ export interface CoworkStartOptions {
   effort?: string | null;
   /** Set when the prompt was filled verbatim from a quick action (建议操作) entry. */
   source?: 'quick_action';
+  /** FK to projects.id; binds the session to a Settings > Projects project. */
+  projectId?: string | null;
 }
 
 // Continue session options

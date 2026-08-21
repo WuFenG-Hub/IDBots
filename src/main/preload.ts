@@ -360,9 +360,11 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('generate-session-title', userInput),
   getRecentCwds: (limit?: number) =>
     ipcRenderer.invoke('get-recent-cwds', limit),
+  getGitBranch: (cwd: string) =>
+    ipcRenderer.invoke('git:getBranch', cwd),
   cowork: {
     // Session management
-    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; modelProvider?: string | null; effort?: string | null; source?: 'quick_action' }) =>
+    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; modelProvider?: string | null; effort?: string | null; source?: 'quick_action'; projectId?: string | null }) =>
       ipcRenderer.invoke('cowork:session:start', options),
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) =>
       ipcRenderer.invoke('cowork:session:continue', options),

@@ -250,6 +250,7 @@ man_base_data_pebble/
 !tests/ownerBindingSyncSteps.test.mjs
 !tests/botWorkspace.test.mjs
 !tests/coworkSessionMetabotFilter.test.mjs
+!tests/coworkSessionProjectBinding.test.mjs
 !tests/metabotAttribution.test.mjs
 !tests/dreamStore.test.mjs
 !tests/dreamMemoryWrites.test.mjs
