@@ -139,6 +139,28 @@ import {
   type SkillToolControl,
 } from './skillAgentTools';
 import {
+  buildPostBuzzAgentTools,
+  type ChainWriteCreatePin,
+} from './postBuzzAgentTools';
+import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
+import {
+  buildPrivateChatAgentTools,
+  type PrivateChatControl,
+} from './privateChatAgentTools';
+import {
+  buildGroupChatAgentTools,
+  type GroupChatControl,
+} from './groupChatAgentTools';
+import {
+  buildOmniReaderAgentTools,
+  type OmniReaderControl,
+} from './omniReaderAgentTools';
+import { buildBrowserOpenAgentTools } from './browserOpenAgentTools';
+import {
+  buildScreenshotAgentTools,
+  type ScreenshotHost,
+} from './screenshotAgentTools';
+import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
   ensureCoworkSandboxDirs,
@@ -1556,6 +1578,42 @@ export interface CoworkRunnerOptions {
    */
   skillTools?: SkillToolControl;
   /**
+   * When set, every cowork session gets the chain-write tools post_buzz and
+   * omni_cast (replacing the metabot-post-buzz / metabot-omni-caster skills).
+   * createPin delegates to services/metaidCore.ts createPin() — the same
+   * function the /api/metaid/create-pin RPC endpoint calls; encryptGroupMessage
+   * is the shared group-chat AES helper (services/metaWebCrypto.ts).
+   */
+  metabotChainWrite?: {
+    createPin: ChainWriteCreatePin;
+    encryptGroupMessage: (message: string, groupId: string) => string;
+  };
+  /**
+   * When set, every cowork session gets send_private_chat (replacing the
+   * metabot-chat-privatechat skill): one encrypted /protocols/simplemsg pin,
+   * with chatpubkey resolution and ECDH+AES handled host-side.
+   */
+  privateChat?: PrivateChatControl;
+  /**
+   * When set, every cowork session gets group_chat (replacing the
+   * metabot-chat-groupchat skill): orchestrate (local reply task),
+   * join_group (SimpleGroupJoin), send_group_message (SimpleGroupChat).
+   */
+  groupChat?: GroupChatControl;
+  /**
+   * When set, every cowork session gets omni_read (replacing the
+   * metabot-omni-reader skill): read-only raw queries against the public
+   * MetaID/MetaWeb indexer HTTP APIs.
+   */
+  omniReader?: OmniReaderControl;
+  /**
+   * Optional host for the screenshot tool (screen/window/region capture via
+   * the OS screen-capture API). When omitted the tool builds the default
+   * Electron desktopCapturer-backed host lazily. Registered for every cowork
+   * surface.
+   */
+  screenshotHost?: ScreenshotHost;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -1607,6 +1665,11 @@ export class CoworkRunner extends EventEmitter {
   private mediaTools?: MediaToolsControl;
   private metabotManage?: MetabotManageControl;
   private skillTools?: SkillToolControl;
+  private metabotChainWrite?: CoworkRunnerOptions['metabotChainWrite'];
+  private privateChat?: PrivateChatControl;
+  private groupChat?: GroupChatControl;
+  private omniReader?: OmniReaderControl;
+  private screenshotHost?: ScreenshotHost;
   private readonly localTurnStallTimeoutMs: number;
   private readonly dshTurnStallTimeoutMs: number;
   private activeSessions: Map<string, ActiveSession> = new Map();
@@ -1704,6 +1767,11 @@ export class CoworkRunner extends EventEmitter {
     this.mediaTools = options?.mediaTools;
     this.metabotManage = options?.metabotManage;
     this.skillTools = options?.skillTools;
+    this.metabotChainWrite = options?.metabotChainWrite;
+    this.privateChat = options?.privateChat;
+    this.groupChat = options?.groupChat;
+    this.omniReader = options?.omniReader;
+    this.screenshotHost = options?.screenshotHost;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -7626,6 +7694,76 @@ export class CoworkRunner extends EventEmitter {
         })
       );
     }
+    // MetaBot chain-write/read tools, registered for every cowork surface.
+    // They replace the retired metabot-post-buzz / metabot-omni-caster /
+    // metabot-chat-privatechat / metabot-chat-groupchat / metabot-omni-reader /
+    // metabot-browser-open skills: same on-chain semantics, no SKILL.md round
+    // trip, no skill-side env/RPC plumbing. The acting MetaBot is resolved
+    // from the session (resolveMetabotIdForMemory), exactly like upload_file.
+    if (this.metabotChainWrite) {
+      const resolveMetabotId = (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined;
+      // post_buzz uploads local attachments through the upload_file service,
+      // so it only registers when both controls are present.
+      if (this.metaFileUpload) {
+        memoryTools.push(
+          ...buildPostBuzzAgentTools({
+            tool,
+            createPin: this.metabotChainWrite.createPin,
+            uploadFile: this.metaFileUpload.upload.bind(this.metaFileUpload),
+            sessionId,
+            resolveMetabotId,
+          })
+        );
+      }
+      memoryTools.push(
+        ...buildOmniCasterAgentTools({
+          tool,
+          createPin: this.metabotChainWrite.createPin,
+          encryptGroupMessage: this.metabotChainWrite.encryptGroupMessage,
+          sessionId,
+          resolveMetabotId,
+        })
+      );
+    }
+    if (this.privateChat) {
+      memoryTools.push(
+        ...buildPrivateChatAgentTools({
+          tool,
+          control: this.privateChat,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
+        })
+      );
+    }
+    if (this.groupChat) {
+      memoryTools.push(
+        ...buildGroupChatAgentTools({
+          tool,
+          control: this.groupChat,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
+        })
+      );
+    }
+    if (this.omniReader) {
+      memoryTools.push(
+        ...buildOmniReaderAgentTools({ tool, control: this.omniReader })
+      );
+    }
+    // browser_open complements bot_browser_* (browser-session only): it runs
+    // on every surface and normalizes raw pinIds / globalMetaIds / web3
+    // domains into supported URIs before driving the Bot Browser.
+    if (this.controlBotBrowser) {
+      memoryTools.push(
+        ...buildBrowserOpenAgentTools({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
+      );
+    }
+    // Host screen capture (screen/window/region via the OS screen-capture
+    // API) for every cowork surface; the default host is built lazily from
+    // Electron desktopCapturer when none is injected.
+    memoryTools.push(
+      ...buildScreenshotAgentTools({ tool, host: this.screenshotHost })
+    );
     // Bot Browser screenshot is registered for EVERY cowork surface (not only
     // browser sessions) so any MetaBot can capture the active tab. When the
     // surface is not visible the tool returns a graceful hint instead of

@@ -88,7 +88,7 @@ import {
   executeTransfer,
   type TransferChain,
 } from './services/transferService';
-import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, initFeeRateStore } from './services/feeRateStore';
+import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, initFeeRateStore, resolveCreatePinFeeRate } from './services/feeRateStore';
 import {
   buildTokenTransferPreview as buildTokenTransferPreviewService,
   executeTokenTransfer as executeTokenTransferService,
@@ -246,14 +246,15 @@ import {
   storePrivateChatHistoryMessages,
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
-import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
+import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt, encryptGroupMessageECB } from './services/metaWebCrypto';
 import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, fetchGroupInfo, fetchGroupMembers, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { createAgentGameHost, type AgentGameHost } from './agentGame';
 import type { GameManifest, GameSession } from './agentGame/abi';
 import { toSessionView as toPublicSessionView } from './agentGame/abi';
-import { assignGroupChatTask, type AssignGroupChatTaskParams } from './services/assignGroupChatTaskService';
+import { assignGroupChatTask, resolveMetabotIdByName, type AssignGroupChatTaskParams } from './services/assignGroupChatTaskService';
 import { cancelActiveDownload, downloadUpdate, installUpdate, applyMacUpdateSilently, relaunchPendingMacUpdate, cleanupStaleDownloads } from './libs/appUpdateInstaller';
 import { fetchFromLocalOrFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './services/localIndexerProxy';
+import { freshGetUrlAndInit } from './services/freshFetch';
 import { resolveMetaidAvatarSource, resolvePinAssetSource } from './services/pinAssetService';
 import { buildMetafileUri } from './services/metaFileUploadShared';
 import { resolveMetaAppVisualFields } from './services/metaAppVisualService';
@@ -5074,6 +5075,120 @@ const getCoworkRunner = () => {
         upload: async (params) => {
           const { uploadMetaFile } = await import('./services/metaFileUploadService');
           return uploadMetaFile(getMetabotStore(), params);
+        },
+      },
+      // post_buzz / omni_cast tool backends (replacing the metabot-post-buzz
+      // and metabot-omni-caster skills). createPin delegates to the shared
+      // metaidCore createPin() — the same function the /api/metaid/create-pin
+      // RPC endpoint calls — with the RPC handler's fee-rate resolution
+      // (resolveCreatePinFeeRate) applied when the caller omits feeRate.
+      metabotChainWrite: {
+        createPin: (metabotId, metaidData, options) =>
+          createPin(getMetabotStore(), metabotId, metaidData, {
+            ...options,
+            feeRate: options?.feeRate ?? resolveCreatePinFeeRate(options?.network ?? 'mvc'),
+          }),
+        encryptGroupMessage: (message, groupId) => encryptGroupMessageECB(message, groupId),
+      },
+      // send_private_chat tool backend (replacing metabot-chat-privatechat).
+      // Mirrors the skill script: resolve the peer chatpubkey on-chain, then
+      // sendEncryptedSimplemsg() owns ECDH key derivation + AES + the
+      // /protocols/simplemsg pin tuple. contentType stays 'text/plain' to
+      // match the retired skill (the service default is text/markdown).
+      privateChat: {
+        send: async ({ metabotId, toGlobalMetaId, content, replyPin }) => {
+          const metabotStore = getMetabotStore();
+          const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
+          if (!wallet?.mnemonic?.trim()) {
+            throw new Error('the session MetaBot wallet is unavailable');
+          }
+          const peerChatPubkey = await resolveChatPubkeyForProvider(toGlobalMetaId);
+          if (!peerChatPubkey) {
+            throw new Error('target has no chatPublicKey on chain');
+          }
+          return sendEncryptedSimplemsg({
+            metabotId,
+            wallet,
+            peerGlobalMetaId: toGlobalMetaId,
+            peerChatPubkey,
+            plaintext: content,
+            replyPin,
+            contentType: 'text/plain',
+            createPin: (id, payload) => createPin(metabotStore, id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+          });
+        },
+      },
+      // group_chat tool backend (replacing metabot-chat-groupchat). assignTask
+      // shares the RPC endpoint's service + SqliteStore; joinGroup /
+      // sendGroupMessage build the exact SimpleGroupJoin/SimpleGroupChat
+      // payloads the skill script sent (empty optional fields omitted,
+      // millisecond timestamp, AES via encryptGroupMessageECB).
+      groupChat: {
+        resolveMetabotIdByName: (name) => resolveMetabotIdByName(getMetabotStore(), name),
+        getMetabotDisplayName: (metabotId) =>
+          getMetabotStore().getMetabotById(metabotId)?.name?.trim() || null,
+        assignTask: (params) =>
+          assignGroupChatTask(getStore().getDatabase(), getStore().getSaveFunction(), getMetabotStore(), params),
+        joinGroup: async ({ metabotId, groupId, referrer, k, network }) => {
+          const payload: Record<string, unknown> = { groupId, state: 1 };
+          if (referrer) payload.referrer = referrer;
+          if (k) payload.k = k;
+          const resolvedNetwork = network ?? 'mvc';
+          return createPin(getMetabotStore(), metabotId, {
+            operation: 'create',
+            path: '/protocols/simplegroupjoin',
+            encryption: '0',
+            version: '1.0',
+            contentType: 'application/json',
+            payload: JSON.stringify(payload),
+          }, { network: resolvedNetwork, feeRate: resolveCreatePinFeeRate(resolvedNetwork) });
+        },
+        sendGroupMessage: async ({ metabotId, groupId, content, nickName, replyPin, channelId, mention, network }) => {
+          const metabotStore = getMetabotStore();
+          const resolvedNickName = nickName
+            || metabotStore.getMetabotById(metabotId)?.name?.trim()
+            || '';
+          const payload: Record<string, unknown> = {
+            groupId,
+            nickName: resolvedNickName,
+            content: encryptGroupMessageECB(content, groupId),
+            contentType: 'text/plain',
+            encryption: 'aes',
+            timestamp: Date.now(),
+          };
+          if (replyPin) payload.replyPin = replyPin;
+          if (channelId) payload.channelId = channelId;
+          if (mention?.length) payload.mention = mention;
+          const resolvedNetwork = network ?? 'mvc';
+          return createPin(metabotStore, metabotId, {
+            operation: 'create',
+            path: '/protocols/simplegroupchat',
+            encryption: '0',
+            version: '1.0',
+            contentType: 'application/json',
+            payload: JSON.stringify(payload),
+          }, { network: resolvedNetwork, feeRate: resolveCreatePinFeeRate(resolvedNetwork) });
+        },
+      },
+      // omni_read tool backend (replacing metabot-omni-reader): plain GETs
+      // against the public MetaID/MetaWeb indexer APIs with cache-busting
+      // (freshGetUrlAndInit) and a 15s timeout. Read-only, no auth.
+      omniReader: {
+        fetchJson: async (url) => {
+          const fresh = freshGetUrlAndInit(url);
+          const response = await fetch(fresh.url, { ...fresh.init, signal: AbortSignal.timeout(15_000) });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status} from indexer (${url})`);
+          }
+          return response.json();
+        },
+        fetchText: async (url) => {
+          const fresh = freshGetUrlAndInit(url);
+          const response = await fetch(fresh.url, { ...fresh.init, signal: AbortSignal.timeout(15_000) });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status} from indexer (${url})`);
+          }
+          return response.text();
         },
       },
       // describe_image tool backend: one local image -> relay VLM -> text
