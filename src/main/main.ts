@@ -28,12 +28,11 @@ import {
 } from './libs/coworkRunner';
 import { SkillManager } from './skillManager';
 import { MetaAppManager } from './metaAppManager';
-import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionResult } from './libs/coworkPermissionTypes';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
 import { getOsLocale, getPersistedAppLanguage, setAppLanguageStoreGetter, tApp } from './libs/appLanguage';
 import { setGroupTaskCopyLanguageGetter } from './libs/groupTaskCopy';
-import { loadClaudeSdk } from './libs/claudeSdk';
-import { flattenSubagentTranscriptMessages, mapDshSubagentList, mapDshSubagentMessages, sessionUsesDshSubagents } from './libs/coworkSubagentTranscript';
+import { mapDshSubagentList, mapDshSubagentMessages, sessionUsesDshSubagents } from './libs/coworkSubagentTranscript';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
@@ -7758,9 +7757,7 @@ if (!gotTheLock) {
         const rows = await getCoworkRunner().dshListSubagents(sessionId);
         return { success: true, agents: mapDshSubagentList(rows) };
       }
-      const sdk = await loadClaudeSdk();
-      const agents = await sdk.listSubagents(session.claudeSessionId, { dir: session.cwd });
-      return { success: true, agents: Array.isArray(agents) ? agents : [] };
+      return { success: true, agents: [] };
     } catch (error) {
       return {
         success: false,
@@ -7786,13 +7783,7 @@ if (!gotTheLock) {
         const rows = await getCoworkRunner().dshGetSubagentMessages(sessionId, agentId, limit);
         return { success: true, messages: mapDshSubagentMessages(rows) };
       }
-      const sdk = await loadClaudeSdk();
-      const transcript = await sdk.getSubagentMessages(session.claudeSessionId, agentId, {
-        dir: session.cwd,
-        limit,
-      });
-      const flattened = flattenSubagentTranscriptMessages(transcript ?? []);
-      return { success: true, messages: flattened };
+      return { success: true, messages: [] };
     } catch (error) {
       return {
         success: false,

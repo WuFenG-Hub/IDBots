@@ -64,18 +64,24 @@ test('usage accumulation no longer hardcodes source to deepseek', () => {
 
 test('runner resolves billingSource from the API config in local and sandbox run paths', () => {
   const source = read('src/main/libs/coworkRunner.ts');
-  const localBody = methodBody(source, 'private async runClaudeCodeLocal(');
+  const localBody = methodBody(source, 'private async runDshSessionLocal(');
   const sandboxBody = methodBody(source, 'private async runClaudeCodeInSandbox(');
-  for (const body of [localBody, sandboxBody]) {
-    assert.ok(
-      body.includes('activeSession.billingSource = resolveCoworkBillingSource('),
-      'each run path must record the billing source at run start'
-    );
-    assert.ok(
-      body.includes('apiConfig.provider') && body.includes('apiConfig.upstreamBaseURL'),
-      'billing source must come from the resolved API config'
-    );
-  }
+  assert.ok(
+    localBody.includes('activeSession.billingSource = resolveCoworkBillingSource('),
+    'DSH local run must record the billing source at run start'
+  );
+  assert.ok(
+    localBody.includes('route.provider') && localBody.includes('route.baseUrl'),
+    'DSH billing source must come from the resolved provider route'
+  );
+  assert.ok(
+    sandboxBody.includes('activeSession.billingSource = resolveCoworkBillingSource('),
+    'sandbox run must record the billing source at run start'
+  );
+  assert.ok(
+    sandboxBody.includes('apiConfig.provider') && sandboxBody.includes('apiConfig.upstreamBaseURL'),
+    'sandbox billing source must come from the resolved API config'
+  );
 });
 
 test('usageStats source type admits other for gateway/plan providers', () => {

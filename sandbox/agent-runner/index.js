@@ -113,11 +113,7 @@ function safeReadJson(filePath) {
 }
 
 function getClaudeSdkVersion() {
-  try {
-    return require('@anthropic-ai/claude-agent-sdk/package.json')?.version || 'unknown';
-  } catch {
-    return 'unknown';
-  }
+  return 'removed';
 }
 
 function isMuslRuntime() {
@@ -1198,16 +1194,11 @@ async function handleRequest(requestId, request, requestPath) {
 
   try {
     appendLog(`Handling request ${requestId}`);
-    const mountResults = ensureMounts(request.mounts);
-    validateWorkspaceMount(request.mounts, mountResults, requestCwd, workspaceRoot);
+    throw new Error(
+      'Claude Agent SDK has been removed. Cowork runs on the DSH kernel locally; the sandbox VM agent-runner is retired.'
+    );
 
-    const sdk = await import('@anthropic-ai/claude-agent-sdk');
-    const sdkVersion = getClaudeSdkVersion();
-    const query = sdk.query;
-    if (typeof query !== 'function') {
-      throw new Error('Claude Agent SDK query function not available');
-    }
-    appendLog(`Loaded Claude SDK version: ${sdkVersion}`);
+    const mountResults = ensureMounts(request.mounts);
 
     const options = {
       cwd: requestCwd,

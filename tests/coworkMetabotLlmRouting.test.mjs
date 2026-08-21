@@ -49,27 +49,20 @@ test('metabot brain override honors any llm_id, not just deepseek', () => {
   assert.ok(body.includes('fallbackModelId:'), 'brain carries the fallback brain');
 });
 
-test('runClaudeCodeLocal falls back to the global default when llm_id does not resolve', () => {
+test('runDshSessionLocal falls back to the global default when llm_id does not resolve', () => {
   const source = read('src/main/libs/coworkRunner.ts');
-  const body = methodBody(source, 'private async runClaudeCodeLocal(');
+  const body = methodBody(source, 'private resolveSessionDshRoute(');
   assert.ok(
-    body.includes("if (!apiConfig && automationModelOverride)"),
-    'failed override resolution must trigger a fallback path'
+    body.includes('Model override did not resolve to an enabled provider; falling back to the default route'),
+    'failed override resolution must log the fallback so routing issues stay diagnosable'
   );
   assert.ok(
-    body.includes('falling back to the default model config'),
-    'the fallback must be logged so routing issues stay diagnosable'
+    body.includes('route = resolveDshProviderRoute()'),
+    'the fallback must reuse the global default DSH route'
   );
-  assert.ok(
-    body.includes("apiConfigResolution = { config: getCurrentApiConfig('local') }"),
-    'the fallback must reuse the global default config'
-  );
-  // Billing source is resolved after the fallback, from the config the
-  // session actually runs on.
-  const billingIndex = body.indexOf('activeSession.billingSource = resolveCoworkBillingSource(');
-  const fallbackIndex = body.indexOf('apiConfigResolution = { config: getCurrentApiConfig');
-  assert.ok(billingIndex > fallbackIndex && fallbackIndex > 0,
-    'billingSource must be resolved after the config (incl. fallback) is final');
+  const billingBody = methodBody(source, 'private async runDshSessionLocal(');
+  const billingIndex = billingBody.indexOf('activeSession.billingSource = resolveCoworkBillingSource(');
+  assert.ok(billingIndex >= 0, 'billingSource must be resolved from the DSH route the session actually runs on');
 });
 
 test('metabot llm_id stays the routing key in the store/UI contract', () => {

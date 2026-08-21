@@ -1,7 +1,12 @@
-import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+type SteerUserMessage = {
+  type: 'user';
+  session_id: string;
+  parent_tool_use_id: null;
+  message: { role: 'user'; content: Array<{ type: 'text'; text: string }> };
+};
 
 type PendingInput = {
-  message: SDKUserMessage;
+  message: SteerUserMessage;
   resolve: () => void;
   reject: (error: Error) => void;
 };
@@ -24,7 +29,7 @@ export class CoworkDshSteerWindowClosedError extends Error {
   }
 }
 
-export function buildCoworkSdkUserMessage(text: string): SDKUserMessage {
+export function buildCoworkSdkUserMessage(text: string): SteerUserMessage {
   return {
     type: 'user',
     session_id: '',
@@ -33,7 +38,7 @@ export function buildCoworkSdkUserMessage(text: string): SDKUserMessage {
   };
 }
 
-/** Interrupt-on-steer framing shared by both kernels (SDK envelope + raw text). */
+/** Interrupt-on-steer framing for DSH (and leftover local input channel). */
 export function buildCoworkSteerText(text: string): string {
   return [
     '<operator_steer>',
@@ -46,11 +51,11 @@ export function buildCoworkSteerText(text: string): string {
   ].join('\n');
 }
 
-export function buildCoworkSteerSdkMessage(text: string): SDKUserMessage {
+export function buildCoworkSteerSdkMessage(text: string): SteerUserMessage {
   return buildCoworkSdkUserMessage(buildCoworkSteerText(text));
 }
 
-export class CoworkSteerChannel implements AsyncIterable<SDKUserMessage> {
+export class CoworkSteerChannel implements AsyncIterable<SteerUserMessage> {
   private readonly pending: PendingInput[] = [];
   private waiter: {
     resolve: () => void;
@@ -74,7 +79,7 @@ export class CoworkSteerChannel implements AsyncIterable<SDKUserMessage> {
     return this.delivered;
   }
 
-  enqueue(message: SDKUserMessage): CoworkSteerEnqueueResult {
+  enqueue(message: SteerUserMessage): CoworkSteerEnqueueResult {
     if (!this.isOpen) {
       return {
         delivered: Promise.reject(this.abortError ?? new Error('Cowork steer input channel is closed')),
@@ -112,7 +117,7 @@ export class CoworkSteerChannel implements AsyncIterable<SDKUserMessage> {
   }
 
   /**
-   * Stop host input without rejecting the SDK's detached streamInput loop.
+   * Stop host input without rejecting an in-flight consumer loop.
    * Undelivered submissions still reject so callers can mark them cancelled.
    */
   stop(error: Error): void {
@@ -129,11 +134,11 @@ export class CoworkSteerChannel implements AsyncIterable<SDKUserMessage> {
     for (const input of this.pending.splice(0)) input.reject(error);
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
+  [Symbol.asyncIterator](): AsyncIterator<SteerUserMessage> {
     let finished = false;
 
     return {
-      next: async (): Promise<IteratorResult<SDKUserMessage>> => {
+      next: async (): Promise<IteratorResult<SteerUserMessage>> => {
         if (finished) return { done: true, value: undefined };
 
         this.acknowledgePrevious();

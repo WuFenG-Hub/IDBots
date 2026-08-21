@@ -1,5 +1,5 @@
-// M5 unit test: kernel routing decision (flag + apiType eligibility + handle
-// stickiness) and the `dsh:` session-handle helpers.
+// DSH-only kernel routing: Anthropic Messages is unavailable (no Claude SDK
+// fallback); everything else including sticky `dsh:` handles runs on DSH.
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -32,14 +32,13 @@ test('apiType eligibility: openai-compatible routes only', () => {
   assert.equal(isDshEligibleApiType(undefined), false)
 })
 
-test('flag gates new sessions; handle pins existing ones', () => {
-  assert.equal(resolveKernelChoice({ enabled: false, apiType: 'openai' }), 'claude')
-  assert.equal(resolveKernelChoice({ enabled: true, apiType: 'openai' }), 'dsh')
-  assert.equal(resolveKernelChoice({ enabled: true, apiType: 'anthropic' }), 'unavailable')
-  assert.equal(resolveKernelChoice({ enabled: false, apiType: 'anthropic' }), 'unavailable')
-  // Stickiness wins over the flag: a DSH session keeps its kernel even when
-  // the flag is later switched off (its handle only exists in the DSH runtime).
-  assert.equal(resolveKernelChoice({ enabled: false, apiType: 'openai', sessionHandle: 'dsh:cw-1' }), 'dsh')
-  // Anthropic-direct is not routed back to Claude.
-  assert.equal(resolveKernelChoice({ enabled: true, apiType: 'anthropic', sessionHandle: 'sdk-123' }), 'unavailable')
+test('local cowork is DSH-only; Anthropic Messages is unavailable', () => {
+  assert.equal(resolveKernelChoice({ apiType: 'openai' }), 'dsh')
+  assert.equal(resolveKernelChoice({ apiType: 'responses' }), 'dsh')
+  assert.equal(resolveKernelChoice({ apiType: 'anthropic' }), 'unavailable')
+  assert.equal(resolveKernelChoice({ apiType: undefined }), 'dsh')
+  // Stickiness: a DSH session keeps its kernel even on Anthropic-direct
+  // (its handle only exists in the DSH runtime).
+  assert.equal(resolveKernelChoice({ apiType: 'anthropic', sessionHandle: 'dsh:cw-1' }), 'dsh')
+  assert.equal(resolveKernelChoice({ apiType: 'anthropic', sessionHandle: 'sdk-123' }), 'unavailable')
 })

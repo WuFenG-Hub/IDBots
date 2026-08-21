@@ -1,6 +1,3 @@
-import { join } from 'path';
-import { existsSync } from 'fs';
-import { app } from 'electron';
 import type { SqliteStore } from '../sqliteStore';
 import type { CoworkPermissionMode } from '../coworkStore';
 import type { CoworkApiConfig } from './coworkConfigStore';
@@ -103,69 +100,6 @@ export function getDeepSeekProviderConfig(): { apiKey: string; baseUrl: string }
     return null;
   }
   return { apiKey, baseUrl };
-}
-
-export function getClaudeCodePath(): string {
-  const candidates = resolveClaudeCodeBinaryCandidates();
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  // Fall back to the first candidate so callers still get a deterministic path
-  // even before the platform package is installed.
-  return candidates[0];
-}
-
-/**
- * The 0.3.x Claude Agent SDK no longer ships a Node `cli.js`. It resolves a
- * compiled native binary from a platform-specific optional dependency such as
- * `@anthropic-ai/claude-agent-sdk-darwin-arm64`. We build the same candidate
- * list the SDK uses internally and anchor it to our node_modules root so the
- * packaged app (asar.unpacked) and dev checkouts both resolve.
- */
-function resolveClaudeCodeBinaryCandidates(): string[] {
-  const nodeModulesRoot = app.isPackaged
-    ? join(process.resourcesPath, 'app.asar.unpacked', 'node_modules')
-    : // In development, try to find node_modules in the project root.
-      // app.getAppPath() might point to dist-electron or other build output directories.
-      join(resolveProjectRootDir(), 'node_modules');
-
-  const platform = process.platform;
-  const arch = process.arch;
-  const binaryName = platform === 'win32' ? 'claude.exe' : 'claude';
-  const scope = '@anthropic-ai';
-
-  const packageNames: string[] = [];
-  if (platform === 'linux') {
-    // Prefer the musl build when the current process reports no glibc, matching SDK behavior.
-    if (isMuslRuntime()) {
-      packageNames.push(`claude-agent-sdk-linux-${arch}-musl`);
-      packageNames.push(`claude-agent-sdk-linux-${arch}`);
-    } else {
-      packageNames.push(`claude-agent-sdk-linux-${arch}`);
-      packageNames.push(`claude-agent-sdk-linux-${arch}-musl`);
-    }
-  } else {
-    packageNames.push(`claude-agent-sdk-${platform}-${arch}`);
-  }
-
-  return packageNames.map((name) => join(nodeModulesRoot, scope, name, binaryName));
-}
-
-function resolveProjectRootDir(): string {
-  const appPath = app.getAppPath();
-  return appPath.endsWith('dist-electron') ? join(appPath, '..') : appPath;
-}
-
-function isMuslRuntime(): boolean {
-  try {
-    const report = (process as unknown as { report?: { getReport?: () => { header?: { glibcVersionRuntime?: string } } } }).report;
-    const header = report?.getReport?.()?.header;
-    return header !== undefined && header.glibcVersionRuntime === undefined;
-  } catch {
-    return false;
-  }
 }
 
 type MatchedProvider = {
@@ -602,19 +536,12 @@ function dshApiRootOf(baseUrl: string, apiFormat: AnthropicApiFormat, providerNa
 }
 
 /**
- * Cowork kernel default: NEW sessions on OpenAI-compatible provider routes
- * run on the DSH kernel. Persisted in app_config like the other cowork
- * defaults. UNSET adopts the default (DSH) — only an explicit `false` (the
- * user switched the pill to Claude) keeps the Claude kernel; anthropic-direct
- * routes stay on Claude regardless (eligibility gate in coworkKernelRouting).
+ * Local cowork is DSH-only. The Claude Agent SDK kernel and the Settings
+ * pill that could switch back to it are retired so dual-kernel fallback
+ * cannot hide DSH bugs. Persisted `dshKernelEnabled: false` is ignored.
  */
 export function isDshKernelEnabled(): boolean {
-  // Env override wins so a DSH-kernel dev/test instance can be launched with
-  // one command (electron:dev:dsh) without touching persisted config.
-  if (process.env.IDBOTS_DSH_KERNEL === '1') return true;
-  const sqliteStore = getStore();
-  const stored = sqliteStore?.get<AppConfig>('app_config')?.dshKernelEnabled;
-  return stored === undefined ? true : stored === true;
+  return true;
 }
 
 /**
