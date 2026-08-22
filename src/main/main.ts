@@ -5043,6 +5043,67 @@ const getCoworkRunner = () => {
           return { ...profile, isOwn };
         },
       },
+      networkServices: {
+        listOnlineServices: async () => {
+          try {
+            await getProviderDiscoveryService().refreshNow();
+            await getProviderDiscoveryService().waitForRefresh();
+          } catch {
+            // Keep serving the last presence snapshot if a refresh fails.
+          }
+          const snapshot = getProviderDiscoveryService().getDiscoverySnapshot();
+          const ownGlobalMetaIds = new Set(
+            getMetabotStore().listMetabots()
+              .map((metabot) => metabot.globalmetaid?.trim())
+              .filter((id): id is string => Boolean(id))
+          );
+          const nowSec = Math.floor(Date.now() / 1000);
+          const services = snapshot.availableServices.map((svc) => {
+            const providerGlobalMetaId = String(svc?.providerGlobalMetaId || svc?.globalMetaId || '').trim();
+            let lastSeenSec: number | null = null;
+            if (providerGlobalMetaId) {
+              const direct = snapshot.onlineBots[providerGlobalMetaId];
+              if (typeof direct === 'number' && Number.isFinite(direct)) {
+                lastSeenSec = direct;
+              } else {
+                const lower = providerGlobalMetaId.toLowerCase();
+                for (const [key, value] of Object.entries(snapshot.onlineBots)) {
+                  if (key.toLowerCase() === lower && typeof value === 'number' && Number.isFinite(value)) {
+                    lastSeenSec = value;
+                    break;
+                  }
+                }
+              }
+            }
+            const ratingAvg = typeof svc?.ratingAvg === 'number' && Number.isFinite(svc.ratingAvg)
+              ? svc.ratingAvg
+              : null;
+            const ratingCount = typeof svc?.ratingCount === 'number' && Number.isFinite(svc.ratingCount)
+              ? Math.max(0, Math.floor(svc.ratingCount))
+              : 0;
+            const updatedAt = typeof svc?.updatedAt === 'number' && Number.isFinite(svc.updatedAt)
+              ? svc.updatedAt
+              : 0;
+            return {
+              servicePinId: String(svc?.currentPinId || svc?.id || svc?.pinId || svc?.servicePinId || '').trim(),
+              displayName: String(svc?.displayName || '').trim(),
+              serviceName: String(svc?.serviceName || '').trim(),
+              description: String(svc?.description || '').trim(),
+              price: String(svc?.price ?? '').trim(),
+              currency: String(svc?.currency || '').trim(),
+              providerGlobalMetaId,
+              providerName: String(svc?.providerMetaBot || svc?.providerName || '').trim(),
+              providerSkill: String(svc?.providerSkill || '').trim(),
+              ratingAvg,
+              ratingCount,
+              lastSeenAgoSeconds: lastSeenSec != null ? Math.max(0, nowSec - lastSeenSec) : null,
+              updatedAt,
+              isOwn: ownGlobalMetaIds.has(providerGlobalMetaId),
+            };
+          });
+          return { services };
+        },
+      },
       projects: {
         list: () => getProjectStore().listProjects(),
       },
@@ -5334,8 +5395,9 @@ const getCoworkRunner = () => {
             '- When the user wants to find/discover an app (not open a known one), call search_metaapps first (query/tag/publisher/sinceDays), open the best match with bot_browser_open_uri, and offer 2-3 alternatives by name. For remix children of an app, use search_metaapps with mode="forks".',
             '- Opening apps in the Bot Browser ALWAYS goes through search_metaapps and metaapp:// URIs. NEVER use open_metaapp or resolve_metaapp_url here: the local MetaApp launcher is retired in this surface.',
             'How to FIND people and bots for the user:',
+            '- When the user asks for currently-online Bot services, who can do a task right now, or the live service directory, call list_online_services first (query with short task keywords). Present the table with provider names kept as metaid:// links. Open a provider Bot page with bot_browser_open_uri only when the user wants to view it.',
             '- When the user wants to find a person or bot on-chain (view someone\'s bot page, look up who someone is, find users/bots by personality or skill, find someone to chat with), call search_metaids first (query/skill/chainName/chatOnly/sinceDays), open the best match\'s bot page with bot_browser_open_uri on metaid://<globalMetaId>, and offer 2-3 alternatives by name. Use metaid_profile for a specific identity\'s full profile.',
-            '- When you mention a specific app or bot in your reply, write it as a markdown link: [title](metaapp://<pinId>) or [name](metaid://<globalMetaId>) — these render as clickable links that open in the Bot Browser. NEVER shorten, truncate, or ellipsis a globalMetaId or pinId; always output them in full inside the link. Prefer the publisher\'s display name (and avatar when available) for authors, but the full globalMetaId must always be the link target. When search_metaapps or search_metaids returns bullet lines, reuse them VERBATIM — never restate an app, an author, or a person as plain text.',
+            '- When you mention a specific app or bot in your reply, write it as a markdown link: [title](metaapp://<pinId>) or [name](metaid://<globalMetaId>) — these render as clickable links that open in the Bot Browser. NEVER shorten, truncate, or ellipsis a globalMetaId or pinId; always output them in full inside the link. Prefer the publisher\'s display name (and avatar when available) for authors, but the full globalMetaId must always be the link target. When search_metaapps, search_metaids, or list_online_services returns table/bullet lines, reuse them VERBATIM — never restate an app, an author, or a person as plain text.',
             '- NEVER use Playwright, screenshots, or any external browser automation: the Bot Browser is not a Playwright browser and needs none.',
             active?.uri
               ? `<active_tab ${activeTabAttrs}>${escapeXml(active.uri)}</active_tab>`

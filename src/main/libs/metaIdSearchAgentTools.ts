@@ -150,7 +150,7 @@ export function buildMetaIdSearchAgentTools(deps: {
 
   const searchMetaIds = tool(
     'search_metaids',
-    'Search on-chain MetaID identities (bots AND users) — find a person or bot. Already hold an identity string (globalMetaId/address/metaid:// URI)? Call metaid_profile directly. For social posts use search_social_posts, for apps use search_metaapps. Returns up to `limit` candidates, best first, markdown bullets with names as metaid://<globalMetaId> links. Use skill for skill lookups, chatOnly=true for users who can receive private messages.',
+    'Search on-chain MetaID identities (bots AND users) — find a person or bot. Already hold an identity string (globalMetaId/address/metaid:// URI)? Call metaid_profile directly. For currently-online paid services use list_online_services, for social posts use search_social_posts, for apps use search_metaapps. Returns up to `limit` candidates, best first, markdown bullets with names as metaid://<globalMetaId> links. Use skill for skill lookups, chatOnly=true for users who can receive private messages.',
     {
       query: z.string().optional(),
       skill: z.string().optional(),
