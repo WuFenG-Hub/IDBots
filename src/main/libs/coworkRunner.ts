@@ -116,6 +116,10 @@ import {
   type MetaIdSearchControl,
 } from './metaIdSearchAgentTools';
 import {
+  buildNetworkServicesAgentTools,
+  type NetworkServicesControl,
+} from './networkServicesAgentTools';
+import {
   buildProjectsAgentTools,
   buildProjectsPromptSection,
   type ProjectsControl,
@@ -305,6 +309,9 @@ const READ_ONLY_TOOL_NAMES = new Set([
   'project_query',  // local Projects metadata lookup; no side effects
   'web_search', 'websearch', 'webfetch',  // informational; network policy handled separately
   'search_metaapps',
+  'search_metaids',
+  'metaid_profile',
+  'list_online_services',
   'metabot_getinfo',
   'metabot_list',
 ]);
@@ -1508,6 +1515,13 @@ export interface CoworkRunnerOptions {
    */
   metaIdSearch?: MetaIdSearchControl;
   /**
+   * When set, every cowork session gets list_online_services backed by the
+   * Gig Square live directory (ProviderDiscoveryService.availableServices).
+   * Browser sessions may open a provider bot page via bot_browser_open_uri;
+   * other sessions only present clickable metaid:// links.
+   */
+  networkServices?: NetworkServicesControl;
+  /**
    * When set, every cowork session gets the project_query tool backed by the
    * local Projects store (Settings > Projects), and a `## Local Projects`
    * section is injected into the composed system prompt. Disabled projects are
@@ -1642,6 +1656,7 @@ export class CoworkRunner extends EventEmitter {
   private knowledgeStore?: CoworkKnowledgeStore;
   private episodeTimelineProvider?: CoworkEpisodeTimeline;
   private metaIdSearch?: MetaIdSearchControl;
+  private networkServices?: NetworkServicesControl;
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
   private metaFileUpload?: MetaFileUploadControl;
@@ -1745,6 +1760,7 @@ export class CoworkRunner extends EventEmitter {
     this.knowledgeStore = options?.knowledgeStore;
     this.episodeTimelineProvider = options?.episodeTimelineProvider;
     this.metaIdSearch = options?.metaIdSearch;
+    this.networkServices = options?.networkServices;
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
     this.metaFileUpload = options?.metaFileUpload;
@@ -7358,7 +7374,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'local_workers_list',
-          'List all local MetaBots available as Workers for Twin orchestration — sanitized identity, persona, skills, capability evidence, and availability. Twin Bot only. Use BEFORE delegating, to pick a Worker whose skills match the step. When NOT to use: not in non-Twin sessions (the tool is absent there anyway); and not for browsing bots socially — use search_metaids for that. Returns one entry per local bot; select on the capability evidence, not the display name.',
+          'List all local MetaBots available as Workers for Twin orchestration — sanitized identity, persona, skills, capability evidence, and availability. Twin Bot only. Use BEFORE delegating, to pick a Worker whose skills match the step. When NOT to use: not in non-Twin sessions (the tool is absent there anyway); not for browsing bots socially (search_metaids); and not for currently-online paid services (list_online_services). Returns one entry per local bot; select on the capability evidence, not the display name.',
           {},
           async () => {
             const result = await this.handleHostToolExecution({ toolName: 'local_workers_list', toolInput: {} }, sessionId);
@@ -7814,6 +7830,18 @@ export class CoworkRunner extends EventEmitter {
         ...buildMetaIdSearchAgentTools({
           tool,
           metaIdSearch: this.metaIdSearch,
+          openBestMatchInBrowser: isBrowserSession,
+        })
+      );
+    }
+    // Live Gig Square yellow pages: services whose providers are online now.
+    // Distinct from search_metaids (on-chain identity search). Browser sessions
+    // may open a provider bot page; other sessions only present metaid:// links.
+    if (this.networkServices) {
+      memoryTools.push(
+        ...buildNetworkServicesAgentTools({
+          tool,
+          networkServices: this.networkServices,
           openBestMatchInBrowser: isBrowserSession,
         })
       );
