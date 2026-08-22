@@ -116,7 +116,7 @@ test('createGroupTask records sourceSessionId on the task row (R2 passthrough)',
       title: 'Relay demo',
       goal: 'ship it',
       memberMetabotIds: [2],
-      createdBy: 'twinbot',
+      createdBy: 'user',
       sourceSessionId: 'session-origin-123',
     });
     assert.equal(detail.sourceSessionId, 'session-origin-123');
@@ -135,7 +135,7 @@ test('closeGroupTask(done) relays [GROUP_TASK_ACCEPTANCE] once and arms the kv g
       title: '西游记第一回',
       goal: 'Three.js 动画',
       memberMetabotIds: [2],
-      createdBy: 'twinbot',
+      createdBy: 'user',
       sourceSessionId: 'session-origin-456',
     });
     advanceToReview(h.groupTaskStore, detail.id);
@@ -212,7 +212,7 @@ test('notifier returning ok:false does not arm the kv guard (retry stays possibl
       title: 'Gone session',
       goal: 'target missing',
       memberMetabotIds: [2],
-      createdBy: 'twinbot',
+      createdBy: 'user',
       sourceSessionId: 'session-gone',
     });
     advanceToReview(h.groupTaskStore, detail.id);
@@ -233,7 +233,7 @@ test('closeGroupTask(cancelled) also relays to the source session', async () => 
       title: 'Cancel me',
       goal: 'will be cancelled',
       memberMetabotIds: [2],
-      createdBy: 'twinbot',
+      createdBy: 'user',
       sourceSessionId: 'session-cancel',
     });
     advanceToReview(h.groupTaskStore, detail.id);

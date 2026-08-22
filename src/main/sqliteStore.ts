@@ -899,6 +899,28 @@ export class SqliteStore {
     this.migrateGroupTasksRatingColumns();
     this.migrateGroupTasksLocalState();
     this.migrateGroupTasksSourceSessionId();
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_staffing_proposals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_session_id TEXT NOT NULL,
+        twin_metabot_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        goal TEXT NOT NULL,
+        acceptance_criteria TEXT,
+        plan_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending','confirmed','skip_authorized','consumed','cancelled')),
+        skip_authorized INTEGER NOT NULL DEFAULT 0,
+        owner_decision TEXT,
+        created_task_id INTEGER,
+        created_at INTEGER NOT NULL,
+        confirmed_at INTEGER
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_staffing_proposals_session
+        ON group_task_staffing_proposals(source_session_id, created_at DESC);
+    `);
     // P0-5: state-transition audit log (who/from/to/reason + timestamp).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_transitions (

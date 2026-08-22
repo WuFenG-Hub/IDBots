@@ -1,16 +1,17 @@
 /**
- * OpenTeam M3: collaboration-impression sedimentation. When a group task with
- * remote (OpenTeam) teammates closes, when a remote teammate is kicked, or when
- * a remote teammate's deliverable is accepted/rejected, the chair (twin bot)
- * appends one objective observation per remote collaborator to its MetaID
- * impression ledger. The records are deterministic host-side facts (no LLM),
+ * Collaboration-impression sedimentation. When a group task closes, the chair
+ * (twin bot) appends one objective observation per non-chair teammate — local
+ * worker or remote OpenTeam — to its MetaID impression ledger. Kick and
+ * deliverable-verdict records stay remote-only (local authors still flow
+ * through the per-message experience + dream pipeline). Records are
+ * deterministic host-side facts (no LLM / no relationship temperature),
  * written through MetaIDImpressionStore.appendObservation with stable
- * idempotency keys so retries/restarts never duplicate them. They pave the way
- * for screening future collaboration candidates by collaboration history.
+ * idempotency keys so retries/restarts never duplicate them. They pave the
+ * way for screening future collaboration candidates by capability tags and
+ * pin-anchored facts.
  *
- * Direction is one-way (chair -> remote collaborator); local members keep using
- * the per-message experience pipeline (groupTaskDaemon -> dream). TODO(OpenTeam):
- * the guest side — an invited bot forming impressions of the inviter/task — is
+ * Direction is one-way (chair -> collaborator). TODO(OpenTeam): the guest
+ * side — an invited bot forming impressions of the inviter/task — is
  * intentionally NOT recorded here and is left to the guest's own dream pipeline.
  *
  * Wiring follows the groupTaskService setter-injection style: main.ts installs
@@ -97,19 +98,92 @@ function resolveObserverGlobalMetaID(
   }
 }
 
-/** Remote teammates of one task, deduped by GlobalMetaID (latest member row wins). */
-function listRemoteMemberSubjects(
+/** Non-chair teammates (local and remote), deduped by GlobalMetaID. */
+function listCollaboratorSubjects(
   deps: OpenTeamImpressionServiceDeps,
   taskId: number,
-): Array<{ globalMetaID: GlobalMetaID; removedAt: string | null }> {
-  const byGlobalMetaID = new Map<string, { globalMetaID: GlobalMetaID; removedAt: string | null }>();
+): Array<{
+  globalMetaID: GlobalMetaID;
+  removedAt: string | null;
+  joinedPinId: string | null;
+  removePinId: string | null;
+  metabotId: number | null;
+  name: string | null;
+}> {
+  const byGlobalMetaID = new Map<string, {
+    globalMetaID: GlobalMetaID;
+    removedAt: string | null;
+    joinedPinId: string | null;
+    removePinId: string | null;
+    metabotId: number | null;
+    name: string | null;
+  }>();
   for (const member of deps.groupTaskStore.listMembers(taskId, { includeRemoved: true })) {
-    if (member.metabotId != null) continue; // local members use the experience pipeline
+    if (member.role === 'chair') continue;
     const globalMetaID = normalizeGlobalMetaID(member.globalmetaid);
     if (!globalMetaID) continue;
-    byGlobalMetaID.set(globalMetaID, { globalMetaID, removedAt: member.removedAt ?? null });
+    byGlobalMetaID.set(globalMetaID, {
+      globalMetaID,
+      removedAt: member.removedAt ?? null,
+      joinedPinId: member.joinedPinId ?? null,
+      removePinId: member.removePinId ?? null,
+      metabotId: member.metabotId ?? null,
+      name: member.name ?? member.displayName ?? null,
+    });
   }
   return [...byGlobalMetaID.values()];
+}
+
+function extractPinToken(value: string | null | undefined): string | null {
+  const textValue = text(value);
+  const match = /([a-f0-9]{64}i0)/i.exec(textValue);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function pinAnchor(value: string | null | undefined): string | null {
+  return extractPinToken(value) || text(value) || null;
+}
+
+function collectCollaborationPinIds(
+  task: GroupTask,
+  subject: { joinedPinId: string | null; removePinId: string | null; globalMetaID: GlobalMetaID },
+  deliverables: GroupTaskDeliverable[],
+): string[] {
+  const pins = new Set<string>();
+  const createPin = pinAnchor(task.createPinId) ?? pinAnchor(task.groupId);
+  if (createPin) pins.add(createPin);
+  const joined = pinAnchor(subject.joinedPinId);
+  if (joined) pins.add(joined);
+  const removed = pinAnchor(subject.removePinId);
+  if (removed) pins.add(removed);
+  for (const deliverable of deliverables) {
+    if (text(deliverable.authorGlobalmetaid).toLowerCase() !== subject.globalMetaID) continue;
+    const msgPin = pinAnchor(deliverable.msgPinId);
+    if (msgPin) pins.add(msgPin);
+    const uriPin = pinAnchor(deliverable.uri);
+    if (uriPin) pins.add(uriPin);
+  }
+  return [...pins];
+}
+
+function resolveSeatRoleForSubject(
+  deps: OpenTeamImpressionServiceDeps,
+  taskId: number,
+  subject: { globalMetaID: GlobalMetaID; metabotId: number | null; name: string | null },
+): string | undefined {
+  const proposal = deps.groupTaskStore.getStaffingProposalByTaskId(taskId);
+  if (!proposal) return undefined;
+  const seat = proposal.plan.seats.find((item) => {
+    if (item.candidateGlobalMetaId && item.candidateGlobalMetaId.toLowerCase() === subject.globalMetaID) {
+      return true;
+    }
+    if (subject.metabotId != null && item.metabotId === subject.metabotId) return true;
+    if (subject.name && item.candidateName.toLowerCase() === subject.name.toLowerCase()) return true;
+    return false;
+  });
+  return seat?.role === 'domain' && seat.domainLabel
+    ? `domain:${seat.domainLabel}`
+    : seat?.role;
 }
 
 /** True when the GlobalMetaID belongs to a REMOTE member row of the task. */
@@ -320,25 +394,32 @@ export function recordTaskCloseImpressions(
     const closeReason = text(reason);
     const deliverables = deps.groupTaskStore.listDeliverables(task.id);
 
-    for (const subject of listRemoteMemberSubjects(deps, task.id)) {
+    for (const subject of listCollaboratorSubjects(deps, task.id)) {
       if (subject.globalMetaID === observer) {
         result.skipped += 1;
         continue;
       }
       try {
+        const pinIds = collectCollaborationPinIds(task, subject, deliverables);
+        if (pinIds.length === 0) {
+          result.skipped += 1;
+          continue;
+        }
         const stats = collectSubjectParticipationStats(deps, task, subject.globalMetaID, deliverables);
+        const seatRole = resolveSeatRoleForSubject(deps, task.id, subject);
         const removedNote = subject.removedAt
           ? ' The subject had been removed from the task before it closed.'
           : '';
         const outcomeText = outcome === 'done'
           ? 'closed with outcome "done"'
           : `closed with outcome "cancelled"${closeReason ? ` (recorded reason: "${closeReason}")` : ''}`;
+        const origin = subject.metabotId == null ? 'remote teammate' : 'local teammate';
         const appended = appendEventObservation({
           deps,
           observer,
           subject: subject.globalMetaID,
           task,
-          eventSourceKey: `task:${task.id}:close:${outcome}`,
+          eventSourceKey: `task:${task.id}:close:${outcome}:${subject.globalMetaID}`,
           eventMetadata: {
             event: 'task_close',
             taskId: task.id,
@@ -348,18 +429,32 @@ export function recordTaskCloseImpressions(
             subject: subject.globalMetaID,
             ...stats,
             removedBeforeClose: Boolean(subject.removedAt),
+            pinIds,
+            seatRole: seatRole ?? null,
           },
           observationText:
-            `OpenTeam collaboration record: group task #${task.id} "${task.title}" ${outcomeText}. `
-            + `The subject joined as a remote teammate. Host-recorded participation: `
-            + formatParticipationStats(stats) + removedNote,
+            `Collaboration record: group task #${task.id} "${task.title}" ${outcomeText}. `
+            + `The subject joined as a ${origin}. Host-recorded participation: `
+            + formatParticipationStats(stats) + removedNote
+            + ` Pins: ${pinIds.join(', ')}.`,
           interpretationText: outcome === 'done'
-            ? 'The subject took part in a remote collaboration that reached completion; '
-              + 'the figures above are host-recorded facts, not a quality judgment.'
+            ? 'The subject took part in a group-task collaboration that reached completion; '
+              + 'the figures and pins above are host-recorded facts, not a warmth judgment.'
             : 'The collaboration ended by cancellation, which is not by itself a negative signal '
-              + 'about the subject; the figures above are host-recorded facts.',
+              + 'about the subject; the figures and pins above are host-recorded facts.',
           dimensions: {
-            cooperationContext: 'openteam_remote_group_task',
+            subjectKind: 'collaborator',
+            capabilityTags: seatRole ? [seatRole] : [],
+            collaborationFact: {
+              taskId: task.id,
+              title: task.title,
+              seatRole,
+              outcome,
+              pinIds,
+              groupId: text(task.groupId) || undefined,
+              at: now,
+            },
+            cooperationContext: subject.metabotId == null ? 'openteam_remote_group_task' : 'local_group_task',
             taskId: task.id,
             outcome,
             messageCount: stats.messageCount,
@@ -369,7 +464,7 @@ export function recordTaskCloseImpressions(
             deliverablesPending: stats.deliverablesPending,
             removedBeforeClose: Boolean(subject.removedAt),
           },
-          idempotencyKey: `openteam:task-close:${task.id}:${subject.globalMetaID}`,
+          idempotencyKey: `collab:task-close:${task.id}:${subject.globalMetaID}`,
           now,
         });
         result.recorded += 1;
@@ -434,8 +529,18 @@ export function recordKickImpression(
         'Removal from a group task is a negative collaboration signal recorded by the host; '
         + 'weigh it against any later positive facts.',
       dimensions: {
+        subjectKind: 'collaborator',
+        capabilityTags: [],
+        weakSeat: 'unspecified',
+        collaborationFact: {
+          taskId: task.id,
+          title: task.title,
+          outcome: 'kicked',
+          pinIds: [extractPinToken(task.createPinId) || extractPinToken(task.groupId)].filter(Boolean),
+          groupId: text(task.groupId) || undefined,
+          at: now,
+        },
         cooperationContext: 'openteam_remote_group_task',
-        relationshipTemperature: 'negative',
         taskId: task.id,
         event: 'member_kick',
         reason: kickReason || null,
@@ -525,8 +630,23 @@ export function recordDeliverableVerdictImpression(
         ? 'An accepted delivery from this remote collaborator (host-recorded fact).'
         : 'A rejected delivery from this remote collaborator (host-recorded fact).',
       dimensions: {
+        subjectKind: 'collaborator',
+        capabilityTags: [],
+        weakSeat: verdict === 'rejected' ? 'unspecified' : undefined,
+        collaborationFact: {
+          taskId: task.id,
+          title: task.title,
+          outcome: verdict === 'accepted' ? 'deliverable_accepted' : 'deliverable_rejected',
+          pinIds: [
+            extractPinToken(deliverable?.msgPinId)
+            || extractPinToken(deliverableUri)
+            || extractPinToken(task.createPinId)
+            || extractPinToken(task.groupId),
+          ].filter(Boolean),
+          groupId: text(task.groupId) || undefined,
+          at: now,
+        },
         cooperationContext: 'openteam_remote_group_task',
-        relationshipTemperature: verdict === 'accepted' ? 'positive' : 'negative',
         taskId: task.id,
         event: 'deliverable_verdict',
         verdict,

@@ -8,7 +8,7 @@
  *   node index.js --payload @/path/to/payload.json
  *   echo '<JSON string>' | node index.js
  *
- * Payload: { action: 'create'|'list'|'show'|'member_status'|'send'|'invite'|'kick'|'close'|'search_remote'|'invite_remote', ... }
+ * Payload: { action: 'create'|'propose'|'list'|'show'|'member_status'|'send'|'invite'|'kick'|'close'|'search_candidates'|'search_remote'|'invite_remote', ... }
  * RPC base: process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200'
  */
 'use strict';
@@ -38,6 +38,7 @@ function rpcHeaders() {
 
 const ACTION_PATHS = {
   create: '/api/idbots/group-task/create',
+  propose: '/api/idbots/group-task/propose-staffing',
   list: '/api/idbots/group-task/list',
   show: '/api/idbots/group-task/show',
   member_status: '/api/idbots/group-task/member-status',
@@ -47,6 +48,7 @@ const ACTION_PATHS = {
   close: '/api/idbots/group-task/close',
   'deliverable-delete': '/api/idbots/group-task/deliverable-delete',
   search_remote: '/api/idbots/group-task/search-remote-candidates',
+  search_candidates: '/api/idbots/group-task/search-candidates',
   invite_remote: '/api/idbots/group-task/invite-remote',
   bots: '/api/idbots/list-metabots',
 };
@@ -105,10 +107,30 @@ async function main() {
       body = {};
       break;
     }
+    case 'propose': {
+      const title = String(params.title ?? '').trim();
+      const goal = String(params.goal ?? '').trim();
+      if (!title || !goal) fail('title and goal are required for propose');
+      const sourceSessionId = String(params.source_session_id ?? process.env.IDBOTS_COWORK_SESSION_ID ?? '').trim();
+      if (!sourceSessionId) fail('source_session_id is required for propose');
+      body = {
+        title,
+        goal,
+        acceptance_criteria: params.acceptance_criteria,
+        plan: params.plan,
+        source_session_id: sourceSessionId,
+        language: params.language === 'en' ? 'en' : 'zh',
+      };
+      break;
+    }
     case 'create': {
       const title = String(params.title ?? '').trim();
       const goal = String(params.goal ?? '').trim();
       if (!title || !goal) fail('title and goal are required for create');
+      const proposalId = Number(params.proposal_id);
+      if (!Number.isInteger(proposalId) || proposalId <= 0) {
+        fail('proposal_id is required for create — propose the roster and wait for owner confirm first');
+      }
       // P1/P4: forward the originating CoWork session (explicit payload wins;
       // env fallback covers hosts that inject IDBOTS_COWORK_SESSION_ID into
       // skill subprocesses). The task close-out relays the acceptance notice
@@ -120,6 +142,7 @@ async function main() {
         acceptance_criteria: params.acceptance_criteria,
         member_metabot_ids: Array.isArray(params.member_metabot_ids) ? params.member_metabot_ids : undefined,
         member_names: Array.isArray(params.member_names) ? params.member_names : undefined,
+        proposal_id: proposalId,
         ...(sourceSessionId ? { source_session_id: sourceSessionId } : {}),
         // The twin bot runs this skill, so it is the default creator/chair.
         created_by: params.created_by === 'user' ? 'user' : 'twinbot',
@@ -198,6 +221,25 @@ async function main() {
       }
       const reason = String(params.reason ?? '').trim();
       if (reason) body.reason = reason;
+      break;
+    }
+    case 'search_candidates': {
+      const query = String(params.query ?? '').trim();
+      const roleHint = String(params.role_hint ?? '').trim();
+      if (!query && !roleHint) fail('query or role_hint is required for search_candidates');
+      body = {};
+      if (query) body.query = query;
+      if (roleHint) body.role_hint = roleHint;
+      const domainLabel = String(params.domain_label ?? '').trim();
+      if (domainLabel) body.domain_label = domainLabel;
+      if (Array.isArray(params.skills) && params.skills.length) {
+        body.skills = params.skills.map((item) => String(item ?? '').trim()).filter(Boolean);
+      }
+      if (params.limit !== undefined) {
+        const limit = Number(params.limit);
+        if (!Number.isInteger(limit) || limit <= 0) fail('limit must be a positive integer for search_candidates');
+        body.limit = limit;
+      }
       break;
     }
     case 'search_remote': {

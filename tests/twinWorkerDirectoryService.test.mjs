@@ -92,9 +92,16 @@ test('Twin impression block joins snapshots by Worker globalMetaID', () => {
     ],
   }));
   const block = buildTwinLocalImpressionBlock(directory, [
-    { subjectGlobalMetaID: 'gmid-2', summaryText: 'Reliable TypeScript coder' },
+    {
+      subjectGlobalMetaID: 'gmid-2',
+      summaryText: 'Reliable TypeScript coder',
+      capabilityTags: ['engineering'],
+      lastCollaboration: { title: 'Skill intro MetaApp', outcome: 'done', pinIds: ['pin-1'] },
+    },
   ]);
   assert.match(block, /Bot 2: Reliable TypeScript coder/);
+  assert.match(block, /tags: engineering/);
+  assert.match(block, /last collab: "Skill intro MetaApp" done/);
   assert.doesNotMatch(block, /Bot 3/);
   assert.equal(buildTwinLocalImpressionBlock(directory, []), '');
 });

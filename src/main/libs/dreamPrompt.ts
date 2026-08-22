@@ -36,7 +36,7 @@ export const MAX_KNOWLEDGE_UPDATES = 6;
  * prompt, budgeting, stats or write semantics — completed in-window dates with
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0. */
-export const DREAM_VERSION = 8;
+export const DREAM_VERSION = 9;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -468,7 +468,7 @@ export function buildDreamPrompt(input: {
           `此前当前印象=${truncateText(previous.summaryText, 700)}`,
           previous.styleDescriptors.length > 0 ? `此前风格描述=${previous.styleDescriptors.join('、')}` : '',
           previous.cooperationContext ? `此前合作判断=${truncateText(previous.cooperationContext, 300)}` : '',
-          previous.relationshipTemperature ? `此前关系温度=${truncateText(previous.relationshipTemperature, 200)}` : '',
+          previous.relationshipTemperature ? `此前与主人的关系温度=${truncateText(previous.relationshipTemperature, 200)}` : '',
           previous.communicationGuidance ? `此前沟通建议=${truncateText(previous.communicationGuidance, 300)}` : '',
           previous.uncertaintyText ? `此前不确定性=${truncateText(previous.uncertaintyText, 300)}` : '',
         ].filter(Boolean).join('\n') : '此前没有当前印象快照（可能是第一次整理）。',
@@ -559,7 +559,7 @@ export function buildDreamPrompt(input: {
     '    {',
     '      "subject": "我今天完成的一项工作或一段重要交流",',
     '      "counterparty": "这项交流面对的对象(用户或某个 Bot)",',
-    '      "evaluation": "这段交流的关系温度轨迹,只能是 warming(升温:交流变得更真诚、更有用、更值得信任) / stable(持平) / cooling(降温:对方越来越冷淡,我的行为模式需要调整) 三选一。判断依据是整段对话的语气、对方回应的长度与主动性的变化,不要去找对方说没说过「满意/不满意」这类字眼",',
+    '      "evaluation": "仅当 counterparty 是人类主人(Boss)时填写关系温度: warming / stable / cooling。不要用升/降温评价其他 Bot",',
     '      "note": "温度判断的一句话依据(具体引用对话中的变化)"',
     '    }',
     '  ],',
@@ -577,7 +577,7 @@ export function buildDreamPrompt(input: {
     '      "evidenceIds": ["只能使用上面候选中的 evidence ID"],',
     '      "observation": "今天明确观察到的事实",',
     '      "interpretation": "基于事实的谨慎印象更新",',
-    '      "dimensions": {"styleDescriptors": [], "cooperation": ""},',
+    '      "dimensions": {"subjectKind": "owner 或 collaborator", "capabilityTags": ["content|design|engineering|promotion 或 domain:法律"], "collaborationFacts": [{"pinId": "只许用上面证据里出现的 PinID", "taskTitle": "", "outcome": "done|cancelled|deliverable_accepted|deliverable_rejected"}], "relationshipTemperature": "仅 subjectKind=owner 时填 warming|stable|cooling"},',
     '      "communicationGuidance": "下一次交流可以采用的方式",',
     '      "confidence": {"level": "low|medium|high", "uncertainty": "仍然不确定的地方"}',
     '    }',
@@ -596,7 +596,7 @@ export function buildDreamPrompt(input: {
     '关于群任务验收评价:若上方有「群任务验收评价」记录,work_reviews 里必须为对应任务写一条复盘——subject 写任务标题,counterparty 写验收的人类(Boss);高分(4-5 星)要总结这次具体做对了什么,并把可复用的做法写进 important_memories,供下次同类任务沿用;低分(1-3 星)要对照人类的具体评价找出差距,note 里给出下次的具体改进方向;evaluation 结合评分与评价内容判断,不许把高分写成空洞的自我表扬,也不许对低分轻描淡写。',
     '关于人类逐条消息评价:会话里你的回复若带〔人类评价:赞〕标记,表示人类明确认可这条回复——总结它具体好在哪里,把可复用的做法蒸馏进 important_memories 或写进 work_reviews;若带〔人类评价:踩〕标记,表示人类不认可——work_reviews 与 value_lessons 必须正视这些负反馈,不得回避;附有〔人类留言〕时,留言是改进的第一手依据(ground truth),要对照留言给出具体改进方向。',
     '关于知识点(knowledge_points):只提炼「对未来同类任务有预判帮助、可被复用」的知识点——要么是正面做法(know_how:下次该这么做),要么是坑/反例(pitfall:这个踩过,千万别再踩),要么是通用原则(principle)。不要把今天的琐碎流水、或只对本次有效的临时细节写成知识点。若上方「我已有的知识点」里有某条的结论今天被证伪、补充或修正,请用与那条完全相同的 topic 输出更新版本(系统会按 topic 匹配并升版本);如果是全新的知识点,给一个独立的新 topic。没有值得提炼的就给空数组,不要硬凑。',
-    '注意:work_reviews 最多 5 条,value_lessons 最多 3 条,impression_updates 最多 20 条,knowledge_points 最多 6 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
+    '注意:work_reviews 最多 5 条,且升/降温评价只写人类主人;其他 Bot 的判断写进 impression_updates 的 capabilityTags 与 collaborationFacts(必须带证据里出现过的 PinID,不要编造)。value_lessons 最多 3 条,impression_updates 最多 20 条,knowledge_points 最多 6 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
   ].join('\n');
 
   return { system: personaLines.join('\n'), user };

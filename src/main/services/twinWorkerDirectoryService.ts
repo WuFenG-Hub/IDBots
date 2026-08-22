@@ -58,6 +58,12 @@ export interface TwinImpressionEntry {
   subjectGlobalMetaID: string;
   summaryText: string | null;
   updatedAt?: number | null;
+  capabilityTags?: string[];
+  lastCollaboration?: {
+    title: string;
+    outcome: string;
+    pinIds: string[];
+  } | null;
 }
 
 export class TwinWorkerDirectoryAuthorizationError extends Error {
@@ -225,7 +231,16 @@ export function buildTwinLocalImpressionBlock(
     .map((worker) => {
       const entry = bySubject.get(worker.globalMetaID as string);
       const summary = capText(entry?.summaryText, IMPRESSION_SUMMARY_CAP);
-      return summary ? `- ${worker.name}: ${summary}` : null;
+      const tags = (entry?.capabilityTags ?? []).filter(Boolean).slice(0, 8);
+      const last = entry?.lastCollaboration;
+      const extras: string[] = [];
+      if (tags.length > 0) extras.push(`tags: ${tags.join(', ')}`);
+      if (last?.title) {
+        extras.push(`last collab: "${capText(last.title, 80)}" ${last.outcome}`);
+      }
+      if (!summary && extras.length === 0) return null;
+      const suffix = extras.length > 0 ? ` [${extras.join('; ')}]` : '';
+      return `- ${worker.name}: ${summary || 'no written summary'}${suffix}`;
     })
     .filter((line): line is string => Boolean(line));
   if (lines.length === 0) return '';

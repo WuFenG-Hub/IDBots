@@ -8,7 +8,17 @@ import {
 } from './shared/globalMetaId';
 import type { SqliteDatabase as Database } from './sqliteTypes';
 
-export const METAID_IMPRESSION_SNAPSHOT_VERSION = 1;
+export const METAID_IMPRESSION_SNAPSHOT_VERSION = 2;
+
+export type MetaIDCollaborationFact = {
+  taskId: number;
+  title: string;
+  seatRole?: string;
+  outcome: string;
+  pinIds: string[];
+  groupId?: string;
+  at: number;
+};
 
 export type MetaIDImpressionObservationStatus = 'active' | 'superseded' | 'rejected';
 
@@ -52,6 +62,8 @@ export interface MetaIDImpressionSnapshot {
   relationshipTemperature: string | null;
   communicationGuidance: string | null;
   uncertaintyText: string | null;
+  capabilityTags: string[];
+  collaborationFacts: MetaIDCollaborationFact[];
   latestObservationId: string;
   snapshotVersion: number;
   sourceHash: string;
@@ -119,6 +131,8 @@ interface SnapshotRow {
   relationship_temperature: string | null;
   communication_guidance: string | null;
   uncertainty_text: string | null;
+  capability_tags_json?: string | null;
+  collaboration_facts_json?: string | null;
   latest_observation_id: string;
   snapshot_version: number | string;
   source_hash: string;
@@ -212,6 +226,8 @@ export function ensureMetaIDImpressionSchema(db: Database): void {
       relationship_temperature TEXT,
       communication_guidance TEXT,
       uncertainty_text TEXT,
+      capability_tags_json TEXT NOT NULL DEFAULT '[]',
+      collaboration_facts_json TEXT NOT NULL DEFAULT '[]',
       latest_observation_id TEXT NOT NULL,
       snapshot_version INTEGER NOT NULL,
       source_hash TEXT NOT NULL,
@@ -226,6 +242,18 @@ export function ensureMetaIDImpressionSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_metaid_impression_snapshots_observer_updated
       ON metaid_impression_snapshots(observer_globalmetaid, updated_at DESC);
   `);
+  try {
+    const colsResult = db.exec('PRAGMA table_info(metaid_impression_snapshots)');
+    const columns = (colsResult[0]?.values?.map((row) => String(row[1])) ?? []);
+    if (!columns.includes('capability_tags_json')) {
+      db.run(`ALTER TABLE metaid_impression_snapshots ADD COLUMN capability_tags_json TEXT NOT NULL DEFAULT '[]'`);
+    }
+    if (!columns.includes('collaboration_facts_json')) {
+      db.run(`ALTER TABLE metaid_impression_snapshots ADD COLUMN collaboration_facts_json TEXT NOT NULL DEFAULT '[]'`);
+    }
+  } catch {
+    // Brand-new table already has the columns.
+  }
 }
 
 const asText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
@@ -284,6 +312,72 @@ function parseStringArray(value: string | null | undefined): string[] {
   } catch {
     return [];
   }
+}
+
+function parseCollaborationFacts(value: string | null | undefined): MetaIDCollaborationFact[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const row = item as Record<string, unknown>;
+      const pinIds = Array.isArray(row.pinIds)
+        ? row.pinIds.map((pin) => String(pin ?? '').trim()).filter(Boolean)
+        : [];
+      const taskId = Number(row.taskId);
+      const title = typeof row.title === 'string' ? row.title.trim() : '';
+      const outcome = typeof row.outcome === 'string' ? row.outcome.trim() : '';
+      if (!Number.isInteger(taskId) || taskId <= 0 || !title || !outcome || pinIds.length === 0) {
+        return [];
+      }
+      return [{
+        taskId,
+        title,
+        seatRole: typeof row.seatRole === 'string' ? row.seatRole : undefined,
+        outcome,
+        pinIds,
+        groupId: typeof row.groupId === 'string' ? row.groupId : undefined,
+        at: asInteger(row.at),
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function collectCapabilityTags(observations: MetaIDImpressionObservation[]): string[] {
+  const tags = new Set<string>();
+  for (const observation of observations) {
+    for (const tag of extractStringList(observation.dimensions.capabilityTags)) {
+      tags.add(tag.slice(0, 80));
+    }
+    const weak = extractText(observation.dimensions.weakSeat);
+    if (weak) tags.add(`weak:${weak.slice(0, 60)}`);
+  }
+  return [...tags].slice(0, 24);
+}
+
+function collectCollaborationFacts(observations: MetaIDImpressionObservation[]): MetaIDCollaborationFact[] {
+  const facts: MetaIDCollaborationFact[] = [];
+  const seen = new Set<string>();
+  for (const observation of observations) {
+    const rawFacts = Array.isArray(observation.dimensions.collaborationFacts)
+      ? observation.dimensions.collaborationFacts
+      : observation.dimensions.collaborationFact
+        ? [observation.dimensions.collaborationFact]
+        : [];
+    for (const item of rawFacts) {
+      const parsed = parseCollaborationFacts(JSON.stringify([item]));
+      for (const fact of parsed) {
+        const key = `${fact.taskId}:${fact.outcome}:${fact.pinIds.join(',')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        facts.push(fact);
+      }
+    }
+  }
+  return facts.slice(-20);
 }
 
 function normalizeObservationStatus(value: unknown): MetaIDImpressionObservationStatus {
@@ -373,6 +467,8 @@ function rowToSnapshot(row: SnapshotRow): MetaIDImpressionSnapshot {
     relationshipTemperature: row.relationship_temperature ?? null,
     communicationGuidance: row.communication_guidance ?? null,
     uncertaintyText: row.uncertainty_text ?? null,
+    capabilityTags: parseStringArray(row.capability_tags_json),
+    collaborationFacts: parseCollaborationFacts(row.collaboration_facts_json),
     latestObservationId: row.latest_observation_id,
     snapshotVersion: asInteger(row.snapshot_version),
     sourceHash: row.source_hash,
@@ -722,6 +818,12 @@ export class MetaIDImpressionStore {
     const lastSeenAt = asInteger(stats?.last_seen_at, firstSeenAt);
     const interactionCount = asInteger(stats?.interaction_count);
     const directInteractionCount = asInteger(stats?.direct_interaction_count);
+    const capabilityTags = collectCapabilityTags(observations);
+    const collaborationFacts = collectCollaborationFacts(observations);
+    const subjectKind = latestDimensionText(latestDimensions, ['subjectKind', 'subject_kind']);
+    const relationshipTemperature = subjectKind === 'owner'
+      ? latestDimensionText(latestDimensions, ['relationshipTemperature', 'relationship_temperature', 'temperature'])
+      : null;
     const sourceHash = hash(JSON.stringify({
       snapshotVersion: METAID_IMPRESSION_SNAPSHOT_VERSION,
       observer,
@@ -742,9 +844,10 @@ export class MetaIDImpressionStore {
          observer_globalmetaid, subject_globalmetaid, first_seen_at, last_seen_at,
          interaction_count, direct_interaction_count, summary_text,
          style_descriptors_json, cooperation_context, relationship_temperature,
-         communication_guidance, uncertainty_text, latest_observation_id,
+         communication_guidance, uncertainty_text, capability_tags_json,
+         collaboration_facts_json, latest_observation_id,
          snapshot_version, source_hash, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(observer_globalmetaid, subject_globalmetaid) DO UPDATE SET
          first_seen_at = excluded.first_seen_at,
          last_seen_at = excluded.last_seen_at,
@@ -756,6 +859,8 @@ export class MetaIDImpressionStore {
          relationship_temperature = excluded.relationship_temperature,
          communication_guidance = excluded.communication_guidance,
          uncertainty_text = excluded.uncertainty_text,
+         capability_tags_json = excluded.capability_tags_json,
+         collaboration_facts_json = excluded.collaboration_facts_json,
          latest_observation_id = excluded.latest_observation_id,
          snapshot_version = excluded.snapshot_version,
          source_hash = excluded.source_hash,
@@ -770,9 +875,11 @@ export class MetaIDImpressionStore {
         latest.interpretationText || latest.observationText,
         JSON.stringify([...descriptors]),
         latestDimensionText(latestDimensions, ['cooperationContext', 'cooperation_context', 'cooperation', 'cooperationPattern']),
-        latestDimensionText(latestDimensions, ['relationshipTemperature', 'relationship_temperature', 'temperature']),
+        relationshipTemperature,
         communicationGuidance,
         uncertaintyText,
+        JSON.stringify(capabilityTags),
+        JSON.stringify(collaborationFacts),
         latest.id,
         METAID_IMPRESSION_SNAPSHOT_VERSION,
         sourceHash,

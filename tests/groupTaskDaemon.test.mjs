@@ -1537,8 +1537,7 @@ test('prompts: remote OpenTeam teammate annotated in roster, profiles, and playb
   assert.match(chairPrompt, /Their replies come from their own machine and may arrive late or not at all/);
   assert.match(chairPrompt, /re-assign the work and explain the change to the owner/);
   // M2: capability-gap assessment and remote-search discipline rules.
-  assert.match(chairPrompt, /Capability check before recruiting: when you decompose the goal, inventory the LOCAL roster first/);
-  assert.match(chairPrompt, /remote recruitment is the exception, not the default/);
+  assert.match(chairPrompt, /Capability check is match-first: pick the seated specialist whose profile and impressions fit the step/);
   assert.match(chairPrompt, /recommend a remote OpenTeam recruit to the owner/);
   assert.match(chairPrompt, /One candidate at a time, best bio\/chatSkills\/on-chain fit first/);
   assert.match(chairPrompt, /has not joined after ~10 minutes, treat it as no deal/);
@@ -2162,7 +2161,7 @@ test('P1-4 r2: [DELIVERABLE] parsing is line-scoped — body dir paths and trunc
 // Round-2 iteration: P1-5 planning-directive distribution + opt-out (obs. 1/5)
 // ---------------------------------------------------------------------------
 
-test('P1-5 r2: planning directive demands distribution across at least 2 members when 2+ workers exist', async () => {
+test('P1-5 r2: planning directive assigns each seated specialist their own coarse seat', async () => {
   const h = await createHarness();
   try {
     h.createTask([2, 3], { activate: false }); // planning; two workers on the roster
@@ -2170,23 +2169,24 @@ test('P1-5 r2: planning directive demands distribution across at least 2 members
     const planningCall = h.chatCalls[0];
     assert.match(
       planningCall.userMessage,
-      /DISTRIBUTE the subtasks across AT LEAST 2 DIFFERENT members by their strengths/,
-      'with 2+ workers the directive forbids concentrating every subtask on one member',
+      /Assign each seated specialist their own coarse seat/,
+      'directive plans against the hired seats instead of spreading work to fill the roster',
     );
-    assert.match(planningCall.userMessage, /never concentrate every subtask on a single member/);
+    assert.match(planningCall.userMessage, /do not invent extra work to occupy unused names/);
+    assert.match(planningCall.userMessage, /Research is a basic capability of every seat/);
   } finally {
     h.cleanup();
   }
 });
 
-test('P1-5 r2: planning directive with a single worker assigns all work to that member', async () => {
+test('P1-5 r2: planning directive with a single worker assigns that seat to that member', async () => {
   const h = await createHarness();
   try {
     h.createTask([2], { activate: false });
     await h.loop.runTick();
     assert.match(
       h.chatCalls[0].userMessage,
-      /single worker on the roster — assign all subtasks to that one member/,
+      /single worker on the roster — assign that seat's work to that one member/,
     );
   } finally {
     h.cleanup();
@@ -3100,7 +3100,7 @@ test('P0-8: member correction message records an integrity event (deduped by pin
 // C-1: chair auto-planning must cover >= 2 members (defensive check)
 // ---------------------------------------------------------------------------
 
-test('C-1: checkPlanningCoverage — multi-worker plan must mention >= 2 workers', () => {
+test('C-1: checkPlanningCoverage is advisory — a one-seat plan is legal', () => {
   const { checkPlanningCoverage } = require('../dist-electron/main/services/groupTaskDaemon.js');
   const tenWorkers = ['AI_小新', 'Builder', 'Lucy', 'eleven', 'loop AI', '小明同学', '10th bot', '77', 'Stephen', 'claude-bot2'];
 
@@ -3108,8 +3108,9 @@ test('C-1: checkPlanningCoverage — multi-worker plan must mention >= 2 workers
     'Plan: @AI_小新 you are the only worker, do everything. [STATUS:EXECUTING]',
     tenWorkers,
   );
-  assert.equal(single.ok, false);
+  assert.equal(single.ok, true);
   assert.deepEqual(single.mentionedWorkers, ['AI_小新']);
+  assert.ok(single.unmentionedWorkers.includes('Lucy'));
 
   const spread = checkPlanningCoverage(
     'Plan: @AI_小新 research, @Lucy copy, @Builder assemble; others standby. [STATUS:EXECUTING]',
@@ -3122,21 +3123,18 @@ test('C-1: checkPlanningCoverage — multi-worker plan must mention >= 2 workers
   assert.equal(singleWorkerRoster.ok, true);
 });
 
-test('C-1: single-worker plan is retried, then posted with a host warning on the final attempt', async () => {
+test('C-1: a one-seat plan posts immediately without a host coverage warning', async () => {
   const h = await createHarness({
     chatReply: 'Plan: @Coder Bot, you are the only worker — do everything. [STATUS:EXECUTING]',
     disableChairPlanningTurn: false,
   });
   try {
-    // 3 workers: 2, 3, 4; the plan only mentions Coder Bot.
+    // Seated roster may be larger than the plan; extra names stay idle on purpose.
     const task = h.createTask([2, 3, 4], { activate: false });
-    for (let i = 0; i < 4; i++) {
-      await h.loop.runTick();
-    }
-    assert.equal(h.store.get(`group_task_chair_plan_attempts:${task.id}`), 2, 'two failed coverage attempts then posted with warning');
-    assert.equal(h.sends.length, 1, 'posted on final attempt with warning');
-    assert.match(h.sends[0].content, /Host warning/);
-    assert.match(h.sends[0].content, /concentrates the work on one member/);
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'posted on the first planning turn');
+    assert.doesNotMatch(h.sends[0].content, /Host warning/);
+    assert.equal(h.store.get(`group_task_chair_plan_attempts:${task.id}`), undefined);
   } finally {
     h.cleanup();
   }
@@ -3210,7 +3208,7 @@ test('F1: chair planning waits for the roster to settle — mid-create ticks nev
     h.state.nowMs += 25_000;
     await h.loop.runTick();
     assert.equal(h.chatCalls.length, 1, 'tick 4: planning fires once the roster settled');
-    assert.match(h.chatCalls[0].userMessage, /DISTRIBUTE the subtasks across AT LEAST 2 DIFFERENT members/, 'directive sees 2+ workers');
+    assert.match(h.chatCalls[0].userMessage, /Assign each seated specialist their own coarse seat/, 'directive sees the settled roster');
     assert.match(h.chatCalls[0].userMessage, /Coder Bot \[worker\]/, 'full roster embedded in the directive');
     assert.match(h.chatCalls[0].userMessage, /Designer Bot \[worker\]/, 'full roster embedded in the directive');
     assert.equal(h.sends.length, 1);
