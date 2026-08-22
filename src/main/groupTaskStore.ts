@@ -6,6 +6,12 @@
 
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import { normalizeRawGlobalMetaId } from './shared/globalMetaId';
+import {
+  normalizeStaffingPlan,
+  type GroupTaskStaffingPlan,
+  type GroupTaskStaffingProposal,
+  type GroupTaskStaffingProposalStatus,
+} from './services/groupTaskStaffing';
 
 /**
  * Canonical GlobalMetaID form when the value parses (trim + lowercase), else
@@ -2101,6 +2107,141 @@ export class GroupTaskStore {
     this.saveDb();
     return true;
   }
+
+  createStaffingProposal(input: {
+    sourceSessionId: string;
+    twinMetabotId: number;
+    title: string;
+    goal: string;
+    acceptanceCriteria?: string | null;
+    plan: GroupTaskStaffingPlan;
+    status: Extract<GroupTaskStaffingProposalStatus, 'pending' | 'skip_authorized'>;
+    createdAt: number;
+  }): GroupTaskStaffingProposal {
+    this.db.run(
+      `INSERT INTO group_task_staffing_proposals (
+         source_session_id, twin_metabot_id, title, goal, acceptance_criteria,
+         plan_json, status, skip_authorized, created_at, confirmed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.sourceSessionId,
+        input.twinMetabotId,
+        input.title,
+        input.goal,
+        input.acceptanceCriteria ?? null,
+        JSON.stringify(input.plan),
+        input.status,
+        input.status === 'skip_authorized' ? 1 : 0,
+        input.createdAt,
+        input.status === 'skip_authorized' ? input.createdAt : null,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const created = this.getStaffingProposalById(id);
+    if (!created) throw new Error(`createStaffingProposal failed: proposal ${id} not found`);
+    return created;
+  }
+
+  getStaffingProposalById(id: number): GroupTaskStaffingProposal | null {
+    const row = this.getOne<StaffingProposalRow>(
+      'SELECT * FROM group_task_staffing_proposals WHERE id = ?',
+      [id],
+    );
+    return row ? rowToStaffingProposal(row) : null;
+  }
+
+  getStaffingProposalByTaskId(taskId: number): GroupTaskStaffingProposal | null {
+    const row = this.getOne<StaffingProposalRow>(
+      `SELECT * FROM group_task_staffing_proposals
+       WHERE created_task_id = ? ORDER BY id DESC LIMIT 1`,
+      [taskId],
+    );
+    return row ? rowToStaffingProposal(row) : null;
+  }
+
+  markStaffingProposalReady(
+    id: number,
+    input: { status: 'confirmed' | 'skip_authorized'; ownerDecision: string; confirmedAt: number },
+  ): GroupTaskStaffingProposal {
+    this.db.run(
+      `UPDATE group_task_staffing_proposals
+       SET status = ?, owner_decision = ?, skip_authorized = ?, confirmed_at = ?
+       WHERE id = ?`,
+      [
+        input.status,
+        input.ownerDecision,
+        input.status === 'skip_authorized' ? 1 : 0,
+        input.confirmedAt,
+        id,
+      ],
+    );
+    this.saveDb();
+    const updated = this.getStaffingProposalById(id);
+    if (!updated) throw new Error(`Staffing proposal ${id} not found after update`);
+    return updated;
+  }
+
+  consumeStaffingProposal(id: number, taskId: number): GroupTaskStaffingProposal {
+    this.db.run(
+      `UPDATE group_task_staffing_proposals
+       SET status = 'consumed', created_task_id = ?
+       WHERE id = ?`,
+      [taskId, id],
+    );
+    this.saveDb();
+    const updated = this.getStaffingProposalById(id);
+    if (!updated) throw new Error(`Staffing proposal ${id} not found after consume`);
+    return updated;
+  }
+}
+
+interface StaffingProposalRow {
+  id: number;
+  source_session_id: string;
+  twin_metabot_id: number;
+  title: string;
+  goal: string;
+  acceptance_criteria: string | null;
+  plan_json: string;
+  status: string;
+  skip_authorized: number | string | null;
+  owner_decision: string | null;
+  created_task_id: number | null;
+  created_at: number | string;
+  confirmed_at: number | string | null;
+}
+
+function rowToStaffingProposal(row: StaffingProposalRow): GroupTaskStaffingProposal {
+  const status = (
+    row.status === 'confirmed'
+    || row.status === 'skip_authorized'
+    || row.status === 'consumed'
+    || row.status === 'cancelled'
+      ? row.status
+      : 'pending'
+  ) as GroupTaskStaffingProposalStatus;
+  let plan: GroupTaskStaffingPlan = { stages: [], seats: [] };
+  try {
+    plan = normalizeStaffingPlan(JSON.parse(row.plan_json));
+  } catch {
+    plan = { stages: [], seats: [] };
+  }
+  return {
+    id: row.id,
+    sourceSessionId: row.source_session_id,
+    twinMetabotId: row.twin_metabot_id,
+    title: row.title,
+    goal: row.goal,
+    acceptanceCriteria: row.acceptance_criteria ?? null,
+    plan,
+    status,
+    skipAuthorized: Boolean(Number(row.skip_authorized)),
+    ownerDecision: row.owner_decision ?? null,
+    createdTaskId: row.created_task_id ?? null,
+    createdAt: Number(row.created_at),
+    confirmedAt: row.confirmed_at == null ? null : Number(row.confirmed_at),
+  };
 }
 
 /** Member SELECT with metabots join (name/globalmetaid for mention matching). */

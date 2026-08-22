@@ -184,7 +184,7 @@ const openHarness = async ({ chairHasGmid = true } = {}) => {
 // recordTaskCloseImpressions
 // ---------------------------------------------------------------------------
 
-test('task close (done): one observation per remote member with correct stats; local members skipped; idempotent', async () => {
+test('task close (done): one observation per collaborator (local + remote) with pin facts; idempotent', async () => {
   const h = await openHarness();
   try {
     const task = h.createTask();
@@ -206,21 +206,23 @@ test('task close (done): one observation per remote member with correct stats; l
 
     h.wireDeps();
     const result = recordTaskCloseImpressions(task.id, 'done');
-    assert.deepEqual(result, { recorded: 2, created: 2, skipped: 0 });
+    assert.deepEqual(result, { recorded: 3, created: 3, skipped: 0 });
 
     const observationsA = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A });
     assert.equal(observationsA.length, 1);
     const observationA = observationsA[0];
-    assert.equal(
+    assert.match(observationA.observationText, /Collaboration record: group task #\d+ "Build MetaApp" closed with outcome "done"/);
+    assert.match(observationA.observationText, /joined as a remote teammate/);
+    assert.match(
       observationA.observationText,
-      `OpenTeam collaboration record: group task #${task.id} "Build MetaApp" closed with outcome "done". `
-      + 'The subject joined as a remote teammate. Host-recorded participation: '
-      + '2 group message(s) posted; 2 deliverable(s) submitted (1 accepted, 0 rejected, 1 still pending at close).',
+      /2 group message\(s\) posted; 2 deliverable\(s\) submitted \(1 accepted, 0 rejected, 1 still pending at close\)/,
     );
-    assert.equal(observationA.idempotencyKey, `openteam:task-close:${task.id}:${REMOTE_A}`);
+    assert.equal(observationA.idempotencyKey, `collab:task-close:${task.id}:${REMOTE_A}`);
+    assert.equal(observationA.dimensions.subjectKind, 'collaborator');
     assert.equal(observationA.dimensions.cooperationContext, 'openteam_remote_group_task');
     assert.equal(observationA.dimensions.messageCount, 2);
     assert.equal(observationA.dimensions.deliverablesAccepted, 1);
+    assert.ok(observationA.dimensions.collaborationFact?.pinIds?.length > 0);
     assert.ok(observationA.episodeId, 'observation anchored to the chair task episode');
     assert.match(observationA.dreamDate, /^\d{4}-\d{2}-\d{2}$/);
 
@@ -228,26 +230,30 @@ test('task close (done): one observation per remote member with correct stats; l
     const evidence = h.impressionStore.getObservationEvidence(observationA.id);
     assert.equal(evidence.length, 3);
     const episodeEvidence = h.experienceStore.listEvidence(observationA.episodeId);
-    const lifecycle = episodeEvidence.find((item) => item.evidenceType === 'group_task_event');
+    const lifecycle = episodeEvidence.find((item) => item.sourceKey === `task:${task.id}:close:done:${REMOTE_A}`);
     assert.ok(lifecycle, 'lifecycle evidence recorded');
-    assert.equal(lifecycle.sourceKey, `task:${task.id}:close:done`);
+    assert.equal(lifecycle.evidenceType, 'group_task_event');
     assert.equal(lifecycle.publisherGlobalMetaID, CHAIR);
 
     const observationsB = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_B });
     assert.equal(observationsB.length, 1);
     assert.match(observationsB[0].observationText, /0 group message\(s\) posted; 0 deliverable\(s\) submitted\./);
 
-    // Local worker and chair never get collaboration impressions here.
-    assert.equal(h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: WORKER }).length, 0);
+    const observationsLocal = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: WORKER });
+    assert.equal(observationsLocal.length, 1);
+    assert.equal(observationsLocal[0].dimensions.cooperationContext, 'local_group_task');
+    assert.match(observationsLocal[0].observationText, /joined as a local teammate/);
 
     // Snapshot rebuilt for immediate candidate-screening reads.
     const snapshot = h.impressionStore.getSnapshot(CHAIR, REMOTE_A);
     assert.ok(snapshot, 'snapshot rebuilt after the observation');
     assert.equal(snapshot.latestObservationId, observationA.id);
+    assert.ok(Array.isArray(snapshot.collaborationFacts));
+    assert.equal(snapshot.relationshipTemperature, null, 'collaborators do not store temperature');
 
     // Idempotent: a retry/restart confirms the same rows, writes nothing new.
     const again = recordTaskCloseImpressions(task.id, 'done');
-    assert.deepEqual(again, { recorded: 2, created: 0, skipped: 0 });
+    assert.deepEqual(again, { recorded: 3, created: 0, skipped: 0 });
     assert.equal(h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A })[0].id, observationA.id);
     assert.equal(h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A }).length, 1);
   } finally {
@@ -264,7 +270,7 @@ test('task close (cancelled): reason recorded; member kicked before close is not
 
     h.wireDeps();
     const result = recordTaskCloseImpressions(task.id, 'cancelled', 'owner changed priorities');
-    assert.deepEqual(result, { recorded: 1, created: 1, skipped: 0 });
+    assert.deepEqual(result, { recorded: 2, created: 2, skipped: 0 });
 
     const [observation] = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A });
     assert.match(observation.observationText, /closed with outcome "cancelled" \(recorded reason: "owner changed priorities"\)/);
@@ -297,7 +303,10 @@ test('kick: remote member gets a negative observation with the reason; idempoten
       `OpenTeam moderation record: the subject was removed (kicked) from group task `
       + `#${task.id} "Build MetaApp" by the observer side. Recorded reason: "off-topic output".`,
     );
-    assert.equal(observation.dimensions.relationshipTemperature, 'negative');
+    assert.equal(observation.dimensions.subjectKind, 'collaborator');
+    assert.equal(observation.dimensions.weakSeat, 'unspecified');
+    assert.equal(observation.dimensions.relationshipTemperature, undefined);
+    assert.equal(observation.dimensions.collaborationFact.outcome, 'kicked');
     assert.equal(observation.idempotencyKey, `openteam:kick:${task.id}:${REMOTE_A}`);
 
     const again = recordKickImpression(task.id, REMOTE_A, 'off-topic output');
@@ -344,13 +353,17 @@ test('deliverable verdict: remote author accepted/rejected recorded; local autho
       `OpenTeam delivery record: the subject's metaapp deliverable (metaapp://abc) in group task `
       + `#${task.id} "Build MetaApp" was accepted by the observer side.`,
     );
-    assert.equal(acceptedObservation.dimensions.relationshipTemperature, 'positive');
+    assert.equal(acceptedObservation.dimensions.subjectKind, 'collaborator');
+    assert.equal(acceptedObservation.dimensions.collaborationFact.outcome, 'deliverable_accepted');
+    assert.equal(acceptedObservation.dimensions.relationshipTemperature, undefined);
     assert.equal(acceptedObservation.dimensions.deliverableId, acceptedDeliverable.id);
     assert.equal(
       acceptedObservation.idempotencyKey,
       `openteam:deliverable-verdict:${task.id}:deliverable:${acceptedDeliverable.id}:accepted`,
     );
-    assert.equal(rejectedObservation.dimensions.relationshipTemperature, 'negative');
+    assert.equal(rejectedObservation.dimensions.weakSeat, 'unspecified');
+    assert.equal(rejectedObservation.dimensions.collaborationFact.outcome, 'deliverable_rejected');
+    assert.equal(rejectedObservation.dimensions.relationshipTemperature, undefined);
     assert.match(rejectedObservation.observationText, /was rejected by the observer side\./);
 
     // Idempotent per (deliverable, verdict).
@@ -446,7 +459,7 @@ test('hook closeGroupTask: close sediments impressions for remote members; recor
       title: 'Build MetaApp',
       goal: 'Build and publish the intro MetaApp',
       memberMetabotIds: [2],
-      createdBy: 'twinbot',
+      createdBy: 'user',
     });
     h.groupTaskStore.addMember({ taskId: detail.id, metabotId: null, globalmetaid: REMOTE_A, role: 'worker', displayName: 'Remote Bot A' });
     h.wireDeps();
@@ -454,12 +467,13 @@ test('hook closeGroupTask: close sediments impressions for remote members; recor
 
     const closed = await closeGroupTask(detail.id, { status: 'done' });
     assert.equal(closed.status, 'done');
-    assert.equal(appendCalls.length, 1, 'recorder invoked through the close hook');
-    assert.equal(appendCalls[0].subjectGlobalMetaID, REMOTE_A);
-    assert.equal(appendCalls[0].observerGlobalMetaID, CHAIR);
-    assert.equal(appendCalls[0].idempotencyKey, `openteam:task-close:${detail.id}:${REMOTE_A}`);
+    assert.equal(appendCalls.length, 2, 'close sediments local and remote collaborators');
+    const subjects = appendCalls.map((call) => call.subjectGlobalMetaID).sort();
+    assert.deepEqual(subjects, [REMOTE_A, WORKER].sort());
+    assert.ok(appendCalls.every((call) => call.observerGlobalMetaID === CHAIR));
+    assert.ok(appendCalls.some((call) => call.idempotencyKey === `collab:task-close:${detail.id}:${REMOTE_A}`));
     assert.equal(h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A }).length, 1);
-    assert.equal(h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: WORKER }).length, 0);
+    assert.equal(h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: WORKER }).length, 1);
 
     // Best-effort: a broken deps getter must not block an (idempotent) re-close.
     setOpenTeamImpressionServiceDepsGetter(() => { throw new Error('deps down'); });
@@ -477,7 +491,7 @@ test('hook kickGroupTaskMember: kicking a remote member sediments a kick impress
       title: 'Build MetaApp',
       goal: 'Build and publish the intro MetaApp',
       memberMetabotIds: [2],
-      createdBy: 'twinbot',
+      createdBy: 'user',
     });
     h.groupTaskStore.addMember({ taskId: detail.id, metabotId: null, globalmetaid: REMOTE_A, role: 'worker', displayName: 'Remote Bot A' });
     h.wireDeps();

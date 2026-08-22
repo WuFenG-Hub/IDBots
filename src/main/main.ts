@@ -180,6 +180,10 @@ import {
   unarchiveGroupTask,
 } from './services/groupTaskService';
 import {
+  buildGroupTaskCandidateSearchDeps,
+  setGroupTaskCandidateSearchDepsGetter,
+} from './services/groupTaskCandidateSearch';
+import {
   startGroupTaskDaemon,
   stopGroupTaskDaemon,
   type GroupTaskDaemonSendOwnerReportFn,
@@ -3175,6 +3179,10 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupTaskServiceCoworkStoreGetter(getCoworkStore);
+  setGroupTaskCandidateSearchDepsGetter(() => buildGroupTaskCandidateSearchDeps({
+    metabotStore: getMetabotStore(),
+    impressionStore: getMetaIDImpressionStore(),
+  }));
   // OpenTeam M3 kick loop closure: the member-list read feeds the post-kick
   // on-chain removal re-check (R2P1-2); the simplemsg sender (createPin bound
   // here) delivers the [OPENTEAM_KICK] notification to a kicked remote guest.
@@ -4854,11 +4862,18 @@ const getCoworkRunner = () => {
       }),
       listTwinImpressions: (observerGlobalMetaID: string) => {
         try {
-          return getMetaIDImpressionStore().listSnapshots(observerGlobalMetaID, 100).map((snapshot) => ({
-            subjectGlobalMetaID: snapshot.subjectGlobalMetaID,
-            summaryText: snapshot.summaryText,
-            updatedAt: snapshot.updatedAt,
-          }));
+          return getMetaIDImpressionStore().listSnapshots(observerGlobalMetaID, 100).map((snapshot) => {
+            const last = snapshot.collaborationFacts?.at(-1);
+            return {
+              subjectGlobalMetaID: snapshot.subjectGlobalMetaID,
+              summaryText: snapshot.summaryText,
+              updatedAt: snapshot.updatedAt,
+              capabilityTags: snapshot.capabilityTags,
+              lastCollaboration: last
+                ? { title: last.title, outcome: last.outcome, pinIds: last.pinIds }
+                : null,
+            };
+          });
         } catch {
           return [];
         }
@@ -9507,7 +9522,6 @@ if (!gotTheLock) {
           goal: String(input?.goal ?? '').trim(),
           acceptanceCriteria: typeof input?.acceptanceCriteria === 'string' ? input.acceptanceCriteria : undefined,
           memberMetabotIds: Array.isArray(input?.memberMetabotIds) ? input.memberMetabotIds : [],
-          autoSelectWorkers: true,
           createdBy: 'user',
         }));
       return { success: true, task };
