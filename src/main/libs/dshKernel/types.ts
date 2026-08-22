@@ -168,6 +168,9 @@ export interface DshRuntimeConfigInput {
   extraEntries?: Array<Record<string, unknown>>
   /** Extra env for the runtime process (credential vars, never keys in config). */
   env?: Record<string, string>
+  /** Distinguishes this process's composition file when several kernels share
+   *  one sessionRoot (one runtime per provider). Not a composition field. */
+  runtimeId?: string
 }
 
 export interface DshHostToolImagePayload {

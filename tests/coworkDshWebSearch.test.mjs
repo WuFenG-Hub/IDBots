@@ -60,7 +60,7 @@ test('deepseek web search: URL normalization + route detection', () => {
 test('deepseek web search: hub mounts the dsh-web trio and executes a search round trip',
   { skip: !runtimeReady && 'dsh-runtime node_modules not installed' },
   async () => {
-    const { DshTurnHub } = loadModules()
+    const { DshTurnHub, dshRuntimeConfigFileName } = loadModules()
     const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
     const { server, seen } = await startMockServer(PORT)
     const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-websearch-'))
@@ -94,8 +94,8 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
       assert.notEqual(outcome.kind, 'error', `turn failed: ${outcome.reason}`)
 
       // Composition file: the trio is mounted with the env-name indirection —
-      // the key itself must never appear in cordis.runtime.json.
-      const raw = fs.readFileSync(path.join(sessionRoot, 'cordis.runtime.json'), 'utf8')
+      // the key itself must never appear in the DeepSeek runtime config.
+      const raw = fs.readFileSync(path.join(sessionRoot, dshRuntimeConfigFileName('deepseek')), 'utf8')
       const cfg = JSON.parse(raw)
       const web = cfg.find((e) => e.name === '@deepseek-ai/dsh-web')
       assert.ok(web, 'dsh-web entry mounted')
@@ -127,8 +127,8 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
       const toolContent = typeof toolMsg?.content === 'string' ? toolMsg.content : JSON.stringify(toolMsg?.content ?? '')
       assert.match(toolContent, /Sources:/, 'follow-up request carries the search result to the model')
 
-      // Stickiness: a non-DeepSeek provider on the same runtime never
-      // unmounts the trio (config-change restarts are provider-env only).
+      // Isolation: a non-DeepSeek provider boots its own process and must
+      // not rewrite or unmount the DeepSeek slot's web trio.
       await runOneTurn(`ws2-${Date.now().toString(36)}`, {
         key: 'mockgw',
         apiFormat: 'openai',
@@ -136,8 +136,10 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
         apiKey: 'sk-other',
         model: 'mock-1',
       }, 'HELLO_MOCK')
-      const cfg2 = JSON.parse(fs.readFileSync(path.join(sessionRoot, 'cordis.runtime.json'), 'utf8'))
-      assert.ok(cfg2.some((e) => e.name === '@deepseek-ai/dsh-web'), 'web trio stays mounted after a non-deepseek turn')
+      const cfg2 = JSON.parse(fs.readFileSync(path.join(sessionRoot, dshRuntimeConfigFileName('deepseek')), 'utf8'))
+      assert.ok(cfg2.some((e) => e.name === '@deepseek-ai/dsh-web'), 'DeepSeek web trio survives a later non-deepseek turn')
+      assert.equal(hub.runtimeSlotCount, 2, 'the second provider must spawn its own runtime')
+      assert.ok(fs.existsSync(path.join(sessionRoot, dshRuntimeConfigFileName('mockgw'))), 'second provider writes its own composition file')
     } finally {
       await hub.close()
       server.close()

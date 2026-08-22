@@ -42,6 +42,14 @@ const dynamicImport = new Function('specifier', 'return import(specifier)') as (
 
 export const DSH_PUMP_YIELD_EVERY = 8
 
+/** Composition JSON filename. Each provider-keyed runtime writes its own file
+ *  so two kernels sharing sessionRoot cannot clobber each other. */
+export function dshRuntimeConfigFileName(runtimeId?: string): string {
+  if (!runtimeId) return 'cordis.runtime.json'
+  const safe = String(runtimeId).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80)
+  return `cordis.runtime.${safe || 'default'}.json`
+}
+
 export interface DshKernelOptions {
   /** Directory containing bin.mjs + node_modules (defaults: repo dsh-runtime/). */
   runtimeDir?: string
@@ -116,7 +124,7 @@ export class DshKernel {
     const generatorUrl = pathToFileURL(join(runtimeDir, 'lib', 'generate-runtime-config.mjs')).href
     const { generateRuntimeConfig } = await dynamicImport(generatorUrl)
     mkdirSync(config.sessionRoot, { recursive: true })
-    const configPath = join(config.sessionRoot, 'cordis.runtime.json')
+    const configPath = join(config.sessionRoot, dshRuntimeConfigFileName(config.runtimeId))
     writeFileSync(configPath, JSON.stringify(generateRuntimeConfig(config), null, 2))
     this.runtimeConfig = config
 

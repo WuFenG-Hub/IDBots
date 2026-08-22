@@ -1,13 +1,13 @@
 // DSH turn orchestration for cowork sessions (Phase 1 M5).
 //
-// DshTurnHub owns one DshKernel (and therefore one runtime subprocess) for the
-// whole CoworkRunner and multiplexes its single notification stream to the
-// per-session turn controllers. DshTurnController drives one active turn:
-// ensure → prompt → mapper actions → turn end, with native steer/cancel and
-// approval bridging. The kernel resolves streaming slots to message ids
-// internally, so the hub only routes resolved callbacks to the owner of each
-// session — every message lands through the same callbacks the Claude path
-// uses (store.addMessage + runner events).
+// DshTurnHub owns one DshKernel (and therefore one runtime subprocess) PER
+// provider key. Twin on official DeepSeek and Lucy on OpenCode must be able
+// to run at the same time — a single shared process cannot pick up a new
+// provider without restarting, and that restart used to dispose every
+// in-flight turn ("DSH runtime stream closed", exit 0). Same-provider
+// sessions still multiplex on one kernel (models union via mergeProviderRoute).
+// DshTurnController drives one active turn: ensure → prompt → mapper
+// actions → turn end, with native steer/cancel and approval bridging.
 
 import { app } from 'electron'
 import { join } from 'path'
@@ -31,6 +31,8 @@ import type {
   DshUsageSnapshot,
 } from './dshKernel/types'
 
+export { dshRuntimeConfigFileName } from './dshKernel/dshKernel'
+
 export interface DshTurnProviderRoute {
   key: string
   apiFormat: 'openai' | 'responses' | 'anthropic'
@@ -44,6 +46,11 @@ export interface DshTurnProviderRoute {
   /** Per-turn DSH reasoning effort (off|low|medium|high|max on the pi-ai
    * vocabulary; the native deepseek ladder is off|low|high|max). */
   reasoningEffort?: string
+}
+
+/** Pool key for a DSH runtime process: one subprocess per provider. */
+export function dshRuntimeKeyOf(provider: Pick<DshTurnProviderRoute, 'key'>): string {
+  return provider.key
 }
 
 /** Env var carrying the DeepSeek key for the runtime's web-search provider. */
@@ -289,11 +296,24 @@ interface DshEnsureKernelOptions {
   accumulateMcp?: boolean
 }
 
+/** One DSH subprocess and the composition state it was last spawned with. */
+interface DshRuntimeSlot {
+  key: string
+  kernel: DshKernel
+  /** Serializes ensureRuntime for THIS slot so warmup and the first turn
+   *  on the same provider cannot double-spawn. Other providers boot in parallel. */
+  kernelEnsureChain: Promise<void>
+  lastConfigJson: string | undefined
+  workspaceSeen: DshRuntimeConfigInput['workspace']
+  providersSeen: Map<string, DshProviderRoute>
+  routeApiKeys: Map<string, { envName: string; apiKey: string }>
+  mcpServersSeen: Map<string, DshMcpServerDefinition>
+  webSearchSeen: { apiKey: string; baseURL: string } | null
+}
+
 export class DshTurnHub {
-  private kernel: DshKernel | null = null
-  /** Serializes ensureRuntime so startup warmup and the first turn cannot
-   *  spawn two children when they overlap. */
-  private kernelEnsureChain: Promise<void> = Promise.resolve()
+  /** One runtime process per provider key. */
+  private readonly slots = new Map<string, DshRuntimeSlot>()
   /** Keyed by DSH session id — that is what kernel event callbacks carry. */
   private controllersByDsh = new Map<string, DshTurnController>()
   /** cowork session id → DSH session id (steer/cancel look up by cowork id). */
@@ -302,6 +322,10 @@ export class DshTurnHub {
   private coworkByDsh = new Map<string, string>()
   /** cowork id → dsh id, kept across turns for post-hoc panel lookups. */
   private pinnedDshIds = new Map<string, string>()
+  /** dsh session id → provider key of the kernel that last served it. */
+  private runtimeKeyByDsh = new Map<string, string>()
+  /** Approval / ask ids belong to the kernel that raised them. */
+  private askKernelById = new Map<string, DshKernel>()
   private readonly opts: DshHubOptions
 
   constructor(opts: DshHubOptions) {
@@ -309,11 +333,21 @@ export class DshTurnHub {
   }
 
   get running(): boolean {
-    return this.kernel?.running === true
+    for (const slot of this.slots.values()) {
+      if (slot.kernel.running) return true
+    }
+    return false
   }
 
   get restartCount(): number {
-    return this.kernel?.restartCount ?? 0
+    let total = 0
+    for (const slot of this.slots.values()) total += slot.kernel.restartCount
+    return total
+  }
+
+  /** Test/diagnostics: how many provider-keyed runtime processes exist. */
+  get runtimeSlotCount(): number {
+    return this.slots.size
   }
 
   /**
@@ -340,6 +374,7 @@ export class DshTurnHub {
 
   /** Start (or reuse) the runtime and run one turn to completion. */
   async runTurn(input: DshTurnInput): Promise<DshTurnOutcome> {
+    this.runtimeKeyByDsh.set(input.dshSessionId, dshRuntimeKeyOf(input.provider))
     const kernel = await this.ensureKernel(input)
     const controller = new DshTurnController(input)
     // One active turn per cowork session: a stray previous controller (e.g. a
@@ -392,12 +427,13 @@ export class DshTurnHub {
     shadowedItemCount?: number
     shadowedTokenCount?: number
   }> {
-    if (!this.kernel) {
-      return { ok: false, code: 'no-runtime', message: 'DSH runtime is not running' }
-    }
     const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
     if (!dshId) {
       return { ok: false, code: 'no-agent', message: 'no DSH session to compact' }
+    }
+    const kernel = this.kernelForDsh(dshId)
+    if (!kernel) {
+      return { ok: false, code: 'no-runtime', message: 'DSH runtime is not running' }
     }
     if (this.controllersByDsh.has(dshId)) {
       return {
@@ -406,7 +442,7 @@ export class DshTurnHub {
         message: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
       }
     }
-    return this.kernel.compact(dshId)
+    return kernel.compact(dshId)
   }
 
   private controllerOfCowork(sessionId: string): DshTurnController | undefined {
@@ -428,7 +464,8 @@ export class DshTurnHub {
    */
   async steer(sessionId: string, text: string): Promise<void> {
     const controller = this.controllerOfCowork(sessionId)
-    if (!controller || !this.kernel) throw new Error('DshTurnHub: no active turn for steer')
+    const kernel = this.kernelForDsh(controller?.dshSessionId)
+    if (!controller || !kernel) throw new Error('DshTurnHub: no active turn for steer')
     // Arm the boundary latch only when the cancel actually interrupted a
     // running activity. A no-op cancel against an idle agent (steer racing
     // turn start, or a second steer after a first abort already converged)
@@ -436,16 +473,13 @@ export class DshTurnHub {
     // turn's natural end instead. Older runtime builds always report
     // cancelled:true, so only an explicit false skips the latch.
     let interrupted = true
-    try {
-      const cancelResult = await this.kernel.cancel(controller.dshSessionId, 'steer', { keepInbox: true })
-      interrupted = cancelResult.cancelled !== false
-    } catch (error) {
-      // No interrupt happened: plain step-boundary steering, nothing armed.
-      throw error
-    }
+    // A thrown cancel means no interrupt happened: plain step-boundary
+    // steering, nothing armed. Let it propagate.
+    const cancelResult = await kernel.cancel(controller.dshSessionId, 'steer', { keepInbox: true })
+    interrupted = cancelResult.cancelled !== false
     if (interrupted) controller.expectSteerFollowUp()
     try {
-      await this.kernel.steer(controller.dshSessionId, text)
+      await kernel.steer(controller.dshSessionId, text)
     } catch (error) {
       // Interrupt landed but the steer never queued: disarm so the aborted
       // turn's boundary settles normally; the steer itself is lost (the
@@ -474,30 +508,40 @@ export class DshTurnHub {
 
   async cancel(sessionId: string, cause?: string): Promise<void> {
     const controller = this.controllerOfCowork(sessionId)
-    if (!controller || !this.kernel) return
-    await this.kernel.cancel(controller.dshSessionId, cause)
+    const kernel = this.kernelForDsh(controller?.dshSessionId)
+    if (!controller || !kernel) return
+    await kernel.cancel(controller.dshSessionId, cause)
   }
 
   /** Cancel a live DSH agent by its runtime session id (subagent Stop). */
   async cancelAgent(dshSessionId: string, cause?: string): Promise<void> {
-    if (!this.kernel || !dshSessionId) return
-    await this.kernel.cancel(dshSessionId, cause)
+    if (!dshSessionId) return
+    const kernel = this.kernelForDsh(dshSessionId)
+    if (kernel) {
+      await kernel.cancel(dshSessionId, cause)
+      return
+    }
+    for (const slot of this.slots.values()) {
+      if (slot.kernel.running) {
+        await slot.kernel.cancel(dshSessionId, cause).catch(() => undefined)
+      }
+    }
   }
 
   /** Subagent panel (cowork session id in, DSH routing inside). */
   async listSubagents(coworkSessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
-    if (!this.kernel) return []
     const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
-    if (!dshId) return []
-    const result = await this.kernel.listSubagents(dshId)
+    const kernel = this.kernelForDsh(dshId)
+    if (!kernel || !dshId) return []
+    const result = await kernel.listSubagents(dshId)
     return result.agents ?? []
   }
 
   async getSubagentMessages(coworkSessionId: string, agentId: string, limit?: number): Promise<Array<{ id: string; type: string; content: string; timestamp: number }>> {
-    if (!this.kernel) return []
     const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
-    if (!dshId) return []
-    const result = await this.kernel.getSubagentMessages(dshId, agentId, limit)
+    const kernel = this.kernelForDsh(dshId)
+    if (!kernel || !dshId) return []
+    const result = await kernel.getSubagentMessages(dshId, agentId, limit)
     return result.messages ?? []
   }
 
@@ -507,120 +551,132 @@ export class DshTurnHub {
    * Null when the runtime is down or the cowork session never ran on DSH.
    */
   async usageProjection(coworkSessionId: string): Promise<DshUsageProjectionResult | null> {
-    if (!this.kernel) return null
     const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
-    if (!dshId) return null
-    return this.kernel.usageProjection(dshId)
+    const kernel = this.kernelForDsh(dshId)
+    if (!kernel || !dshId) return null
+    return kernel.usageProjection(dshId)
   }
 
   async respondApproval(id: string, outcome: 'allowed-once' | 'rejected'): Promise<void> {
-    if (!this.kernel) throw new Error('DshTurnHub: runtime not started')
-    await this.kernel.respondApproval(id, outcome)
+    const kernel = this.askKernelById.get(id) ?? this.firstRunningKernel()
+    if (!kernel) throw new Error('DshTurnHub: runtime not started')
+    await kernel.respondApproval(id, outcome)
   }
 
   /** Answer a pending ask_user_question for the owning session. */
   async respondAsk(id: string, answers: Array<{ id: string; selected: string[]; custom?: string }>): Promise<void> {
-    if (!this.kernel) throw new Error('DshTurnHub: runtime not started')
-    await this.kernel.respondAsk(id, answers)
+    const kernel = this.askKernelById.get(id) ?? this.firstRunningKernel()
+    if (!kernel) throw new Error('DshTurnHub: runtime not started')
+    await kernel.respondAsk(id, answers)
   }
 
   async close(): Promise<void> {
-    if (this.kernel) await this.kernel.close()
-    this.kernel = null
+    const kernels = [...this.slots.values()].map((slot) => slot.kernel.close())
+    await Promise.all(kernels)
+    this.slots.clear()
     this.controllersByDsh.clear()
     this.dshByCowork.clear()
+    this.coworkByDsh.clear()
+    this.runtimeKeyByDsh.clear()
+    this.askKernelById.clear()
   }
 
-  /** First workspace seen keeps bash/fs plugins mounted at a stable
-   *  composition default. Execution cwd is per-session (session.header.cwd
-   *  via session/ensure). Updating this on every Twin/Worker folder would
-   *  restart the shared runtime and kill in-flight turns. */
-  private workspaceSeen: DshRuntimeConfigInput['workspace']
-  private lastConfigJson: string | undefined
-  /** Provider routes accumulated across sessions — the runtime serves a UNION
-   *  of providers AND of models on each provider so a mid-conversation model
-   *  switch never rewrites (and restarts over) an already-served route. */
-  private providersSeen = new Map<string, DshProviderRoute>()
-  /** Credential for every seen provider route, keyed by route key: the child
-   * env must carry EACH route's key under its own env name, not just the
-   * current turn's (see dshProviderApiKeyEnv). A rotated key overwrites the
-   * entry; the config diff then restarts the runtime (at quiescence) so the
-   * child picks the new value up. */
-  private routeApiKeys = new Map<string, { envName: string; apiKey: string }>()
-  /** MCP servers accumulated the same way: user-level (not per-session), and a
-   * removal keeps serving until the runtime restarts — same trade as providers. */
-  private mcpServersSeen = new Map<string, DshMcpServerDefinition>()
-  /** DeepSeek server-side web search: mounted once an official DeepSeek
-   * provider is seen and then sticky — like MCP servers, a later non-DeepSeek
-   * session never unmounts it (that would restart the runtime over nothing).
-   * Composition-level tools serve every session in the shared runtime, which
-   * matches the official DSH bundle (search backend is not per-model). */
-  private webSearchSeen: { apiKey: string; baseURL: string } | null = null
+  private kernelForDsh(dshId: string | undefined): DshKernel | null {
+    if (!dshId) return null
+    const key = this.runtimeKeyByDsh.get(dshId)
+    if (key) {
+      const slot = this.slots.get(key)
+      if (slot?.kernel.running) return slot.kernel
+    }
+    return null
+  }
 
-  private rememberTurnInputs(input: DshTurnInput, options?: DshEnsureKernelOptions): void {
-    this.providersSeen.set(
+  private firstRunningKernel(): DshKernel | null {
+    for (const slot of this.slots.values()) {
+      if (slot.kernel.running) return slot.kernel
+    }
+    return null
+  }
+
+  private inFlightOnSlot(key: string): number {
+    let count = 0
+    for (const dshId of this.controllersByDsh.keys()) {
+      if (this.runtimeKeyByDsh.get(dshId) === key) count += 1
+    }
+    return count
+  }
+
+  private getOrCreateSlot(key: string): DshRuntimeSlot {
+    const existing = this.slots.get(key)
+    if (existing) return existing
+    const slot: DshRuntimeSlot = {
+      key,
+      kernel: null as unknown as DshKernel,
+      kernelEnsureChain: Promise.resolve(),
+      lastConfigJson: undefined,
+      workspaceSeen: undefined,
+      providersSeen: new Map(),
+      routeApiKeys: new Map(),
+      mcpServersSeen: new Map(),
+      webSearchSeen: null,
+    }
+    slot.kernel = new DshKernel({
+      runtimeDir: this.opts.runtimeDir,
+      handlers: this.hubHandlers(slot),
+      log: this.opts.log,
+    })
+    this.slots.set(key, slot)
+    return slot
+  }
+
+  private rememberTurnInputs(slot: DshRuntimeSlot, input: DshTurnInput, options?: DshEnsureKernelOptions): void {
+    slot.providersSeen.set(
       input.provider.key,
-      mergeProviderRoute(this.providersSeen.get(input.provider.key), providerRouteOf(input.provider)),
+      mergeProviderRoute(slot.providersSeen.get(input.provider.key), providerRouteOf(input.provider)),
     )
-    this.routeApiKeys.set(input.provider.key, {
+    slot.routeApiKeys.set(input.provider.key, {
       envName: dshProviderApiKeyEnv(input.provider.key),
       apiKey: input.provider.apiKey,
     })
     if (options?.accumulateMcp !== false) {
       for (const server of this.opts.mcpServersProvider?.(input.sessionId) ?? []) {
         const name = String(server?.name ?? '').trim()
-        if (name) this.mcpServersSeen.set(name, server)
+        if (name) slot.mcpServersSeen.set(name, server)
       }
     }
     if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
-      this.webSearchSeen = {
+      slot.webSearchSeen = {
         apiKey: input.provider.apiKey,
         baseURL: deepSeekWebSearchBaseURL(input.provider.baseUrl),
       }
     }
-    if (options?.pinWorkspace !== false && !this.workspaceSeen && input.workspace) {
-      this.workspaceSeen = input.workspace
+    if (options?.pinWorkspace !== false && !slot.workspaceSeen && input.workspace) {
+      slot.workspaceSeen = input.workspace
     }
   }
 
-  private buildRuntimeConfig(input: DshTurnInput): DshRuntimeConfigInput {
+  private buildRuntimeConfig(slot: DshRuntimeSlot, input: DshTurnInput): DshRuntimeConfigInput {
     return {
       sessionRoot: this.opts.sessionRoot,
-      providers: [...this.providersSeen.values()],
+      runtimeId: slot.key,
+      providers: [...slot.providersSeen.values()],
       // sections/hostTools are PER-SESSION and ride session/ensure (agent-
       // scoped registration) — keeping them out of the config is what stops
-      // every new session's prompt from restarting the shared runtime.
-      workspace: this.workspaceSeen ?? input.workspace,
-      mcpServers: [...this.mcpServersSeen.values()],
-      ...(this.webSearchSeen ? {
+      // every new session's prompt from restarting this slot's runtime.
+      workspace: slot.workspaceSeen ?? input.workspace,
+      mcpServers: [...slot.mcpServersSeen.values()],
+      ...(slot.webSearchSeen ? {
         webSearch: {
           apiKeyEnv: DSH_WEBSEARCH_API_KEY_ENV,
-          baseURL: this.webSearchSeen.baseURL,
+          baseURL: slot.webSearchSeen.baseURL,
           model: DSH_WEBSEARCH_MODEL,
         },
       } : {}),
       extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
       env: buildDshChildEnv({
-        // Every seen route's credential rides the child env under ITS OWN
-        // name (credentials never enter the generated config file on disk).
-        // Accumulating all of them — not just the current turn's — keeps the
-        // shared runtime able to serve every unioned route no matter which
-        // provider last triggered the (re)spawn.
-        routeApiKeys: this.routeApiKeys.values(),
-        // The web-search credential rides a DEDICATED name so it survives
-        // provider switches (the route key above is swapped on every ensure).
-        webSearchApiKey: this.webSearchSeen?.apiKey,
-        // The per-launch local RPC bearer token (S1 hardening) must ride the
-        // runtime env too, or every bundled SKILL RPC client (group-task /
-        // post-buzz / metaapp / omni-caster / upload) fails with 401 from DSH
-        // sessions. Mirrors skillManager.ts runSkillById injection.
+        routeApiKeys: slot.routeApiKeys.values(),
+        webSearchApiKey: slot.webSearchSeen?.apiKey,
         rpcToken: getMetaidRpcToken(),
-        // Layer 2: the DSH bash tool scrubs env names matching
-        // /KEY|PASSWORD|SECRET|TOKEN/i before model-visible subprocesses
-        // inherit them, so the token above never reaches SKILL scripts run via
-        // bash. Its mirror file (written per launch by the MetaID RPC server)
-        // carries the credential instead; this env name must stay free of
-        // KEY/PASSWORD/SECRET/TOKEN to survive the same scrub.
         rpcAuthFile: getMetaidRpcTokenFilePath(app.getPath('userData')),
         skillHostEnv: this.opts.skillHostEnvProvider?.(),
       }),
@@ -628,69 +684,57 @@ export class DshTurnHub {
   }
 
   private async ensureKernel(input: DshTurnInput, options?: DshEnsureKernelOptions): Promise<DshKernel> {
-    // Apply unioned route/MCP/workspace state immediately so a racing first
+    // Apply this slot's route/MCP/workspace immediately so a racing first
     // turn can steer a still-booting warmup spawn (config is snapshotted
-    // only after the serialize lock is acquired).
-    this.rememberTurnInputs(input, options)
-    const run = this.kernelEnsureChain.then(() => this.spawnOrReuseFromSeenState(input))
-    this.kernelEnsureChain = run.then(() => undefined, () => undefined)
+    // only after the per-slot serialize lock is acquired).
+    const slot = this.getOrCreateSlot(dshRuntimeKeyOf(input.provider))
+    this.rememberTurnInputs(slot, input, options)
+    const run = slot.kernelEnsureChain.then(() => this.spawnOrReuseFromSeenState(slot, input))
+    slot.kernelEnsureChain = run.then(() => undefined, () => undefined)
     return run
   }
 
-  private async spawnOrReuseFromSeenState(input: DshTurnInput): Promise<DshKernel> {
-    const config = this.buildRuntimeConfig(input)
-    if (!this.kernel) {
-      this.kernel = new DshKernel({
-        runtimeDir: this.opts.runtimeDir,
-        handlers: this.hubHandlers(),
-        log: this.opts.log,
-      })
-    }
-    // A config change restarts the runtime; never do that while OTHER
-    // sessions have turns in flight. GT#26 follow-up: a config flap while a
-    // long turn ran (render / sleep-40 probe) restarted the shared runtime
-    // exactly at the 90s quiescence deadline and killed the turn ("runtime
-    // stream closed", exit 0). When the CALLING turn's provider route is
-    // served identically by the running runtime, the change is not needed
-    // for THIS turn — skip the restart and let the next quiescent ensureKernel
-    // apply the fresh config instead (lastConfigJson stays at the running
-    // runtime's config, so the diff stays visible to the next call). Only a
-    // config the old runtime genuinely cannot serve (caller's provider route
-    // new or changed) keeps the bounded wait + restart path.
-    if (this.kernel.running && this.lastConfigJson !== undefined) {
+  private async spawnOrReuseFromSeenState(slot: DshRuntimeSlot, input: DshTurnInput): Promise<DshKernel> {
+    const config = this.buildRuntimeConfig(slot, input)
+    // A config change restarts THIS slot's runtime only. Other providers
+    // keep their processes. GT#26 follow-up still applies inside a slot:
+    // MCP/env flaps on the same provider must not kill in-flight turns.
+    if (slot.kernel.running && slot.lastConfigJson !== undefined) {
       const nextJson = JSON.stringify(config)
-      if (nextJson !== this.lastConfigJson && this.controllersByDsh.size > 0) {
-        const changedKeys = dshConfigChangedKeys(this.lastConfigJson, nextJson)
+      const inFlight = this.inFlightOnSlot(slot.key)
+      if (nextJson !== slot.lastConfigJson && inFlight > 0) {
+        const changedKeys = dshConfigChangedKeys(slot.lastConfigJson, nextJson)
         const callerRouteJson = JSON.stringify(providerRouteOf(input.provider))
         const servedByRunningRuntime =
-          lastProviderRouteJsonOf(this.lastConfigJson, input.provider.key) === callerRouteJson
+          lastProviderRouteJsonOf(slot.lastConfigJson, input.provider.key) === callerRouteJson
         if (servedByRunningRuntime) {
           this.opts.log?.('warn',
             'config changed but the running runtime serves this turn; restart deferred until quiescence',
-            { changed: changedKeys, inFlight: this.controllersByDsh.size })
-          return this.kernel
+            { runtime: slot.key, changed: changedKeys, inFlight })
+          return slot.kernel
         }
         this.opts.log?.('warn',
           'config change needs a runtime restart; waiting (bounded) for in-flight turns',
-          { changed: changedKeys, inFlight: this.controllersByDsh.size })
+          { runtime: slot.key, changed: changedKeys, inFlight })
         const deadline = Date.now() + (this.opts.configRestartQuiescenceMs ?? 90000)
-        while (this.controllersByDsh.size > 0 && Date.now() < deadline) {
+        while (this.inFlightOnSlot(slot.key) > 0 && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, 100))
         }
       }
     }
-    await this.kernel.ensureRuntime(config)
-    this.lastConfigJson = JSON.stringify(config)
-    return this.kernel
+    await slot.kernel.ensureRuntime(config)
+    slot.lastConfigJson = JSON.stringify(config)
+    return slot.kernel
   }
 
-  private hubHandlers(): DshKernelOptions['handlers'] {
+  private hubHandlers(runtime: DshRuntimeSlot): DshKernelOptions['handlers'] {
     // Kernel event callbacks carry the DSH session id.
     const controllerOf = (dshSessionId: string) => this.controllersByDsh.get(dshSessionId)
+    const kernelOf = () => runtime.kernel
     return {
-      onMessage: (sessionId, message, slot) => {
+      onMessage: (sessionId, message, streamSlot) => {
         const controller = controllerOf(sessionId)
-        if (controller) return controller.cb.onMessage(message, slot)
+        if (controller) return controller.cb.onMessage(message, streamSlot)
         const coworkId = this.coworkOfDsh(sessionId)
         if (coworkId && this.opts.onIdleSessionMessage) {
           return this.opts.onIdleSessionMessage(coworkId, message)
@@ -710,12 +754,14 @@ export class DshTurnHub {
         controllerOf(sessionId)?.handleTurnEnd(reason, emptyTerminal)
       },
       onApprovalRequest: (sessionId, ask) => {
+        this.askKernelById.set(ask.id, kernelOf())
         controllerOf(sessionId)?.cb.onApprovalRequest(ask)
       },
       onApprovalCancelled: (askId) => {
         for (const controller of this.controllersByDsh.values()) controller.cb.onApprovalCancelled(askId)
       },
       onAskRequest: (ask) => {
+        this.askKernelById.set(ask.id, kernelOf())
         controllerOf(ask.sessionId)?.cb.onAskRequest?.(ask)
       },
       onAskCancelled: (askId) => {
@@ -725,11 +771,11 @@ export class DshTurnHub {
         controllerOf(event.sessionId)?.cb.onSubagentEvent?.(event)
       },
       onError: (error) => {
-        this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message })
-        // The runtime stream died (crash or restart): settle every in-flight
-        // turn with an error outcome so sessions fail loudly instead of
-        // hanging in "running" until manually stopped.
-        for (const controller of this.controllersByDsh.values()) {
+        this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message, runtime: runtime.key })
+        // Only settle turns on THIS kernel. A DeepSeek process dying must
+        // not fail Lucy's in-flight OpenCode turn (and vice versa).
+        for (const [dshId, controller] of this.controllersByDsh) {
+          if (this.runtimeKeyByDsh.get(dshId) !== runtime.key) continue
           controller.handleTurnEnd({ kind: 'error', reason: `DSH runtime stream closed: ${error.message}` })
         }
       },
@@ -737,20 +783,20 @@ export class DshTurnHub {
         const coworkId = this.coworkByDsh.get(request.sessionId)
         if (!coworkId || !this.opts.evaluatePolicy) {
           // No host policy: default-allow so ungated deployments keep working.
-          void this.kernel?.respondPolicy(request.id, 'allow')
+          void kernelOf().respondPolicy(request.id, 'allow')
           return
         }
         void this.opts.evaluatePolicy(coworkId, request.name, request.arguments ?? {})
-          .then((result) => this.kernel?.respondPolicy(request.id, result.decision, result.reason))
-          .catch(() => this.kernel?.respondPolicy(request.id, 'deny', 'policy evaluation failed'))
+          .then((result) => kernelOf().respondPolicy(request.id, result.decision, result.reason))
+          .catch(() => kernelOf().respondPolicy(request.id, 'deny', 'policy evaluation failed'))
       },
       onToolRequest: (request) => {
         // Map the DSH session id back to the cowork id for the executor.
         const coworkId = this.coworkByDsh.get(request.sessionId)
         if (!coworkId || !this.opts.executeTool) return
         void this.opts.executeTool(coworkId, request.name, request.arguments ?? {})
-          .then((result) => this.kernel?.respondTool(request.id, result))
-          .catch((error) => this.kernel?.respondTool(request.id, { ok: false, error: error instanceof Error ? error.message : String(error) }))
+          .then((result) => kernelOf().respondTool(request.id, result))
+          .catch((error) => kernelOf().respondTool(request.id, { ok: false, error: error instanceof Error ? error.message : String(error) }))
       },
     }
   }
