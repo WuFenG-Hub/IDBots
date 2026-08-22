@@ -37,6 +37,8 @@ docs/*
 !docs/dsh-phase1-plan.md
 !docs/dsh-parity-handoff.md
 !docs/group-task-orchestration-improvements-2026-08-09.md
+!docs/metaweb-learning-roadmap.md
+!docs/metaweb-search-backend-requirements.md
 !docs/gasfee-flow/
 !docs/gasfee-flow/**
 !docs/analysis/
