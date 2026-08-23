@@ -306,7 +306,6 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
   const handleDeleteKnowledge = async (entry: CoworkKnowledgeEntry) => {
     if (metabotId == null) return;
-    // eslint-disable-next-line no-alert
     if (!window.confirm(i18nService.t('memoryKnowledgeDeleteHint'))) return;
     try {
       const ok = await coworkService.deleteKnowledge({ id: entry.id, metabotId });

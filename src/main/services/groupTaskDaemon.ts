@@ -3822,9 +3822,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
-   * R6 L2: once a working/assigned LOCAL worker's [WORKING] signal goes stale
-   * (older than the timeout window), inject a deterministic "re-assign" hint
-   * into the chair's next turn and mark the authoritative state timeout. This
+   * R6 L2 + R1 (long-turn): once a working/assigned LOCAL worker shows no
+   * working activity (no [WORKING] signal AND no speech — any worker speech is
+   * implicit working evidence, same rule as the implicit-ACK path) for longer
+   * than the timeout window, inject a deterministic "re-assign" hint into the
+   * chair's next turn and mark the authoritative state timeout. This
    * is the escalation ABOVE the existing L1 ACK/delivery reminders: those fire
    * once per assignment at 3 min; this fires once per (task, member) timeout
    * streak — the chair gets a concrete "re-assign to a standby member or mark
@@ -3851,6 +3853,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       task.groupId,
       workers.map((member) => member.globalmetaid),
     );
+    // R1 (long-turn fix): the staleness basis is the LATER of the last explicit
+    // [WORKING] timestamp and the member's actual last chain speech. A long-turn
+    // worker (render / batch generation) who posted [WORKING] and keeps posting
+    // progress or [DELIVERABLE]s — without re-tagging [WORKING] — is demonstrably
+    // alive, so it must never be flagged stale/error. Only TOTAL silence past the
+    // window escalates. Chair members never ride this worker-rhythm path.
+    const speakMap = store.getMembersLastSpeakAt(
+      task.groupId,
+      workers.map((member) => member.globalmetaid),
+    );
     const standbyNames = members
       .filter((member) => member.role === 'worker' && member.status === 'standby')
       .map((member) => member.name ?? `bot-${member.metabotId}`);
@@ -3859,9 +3871,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const timedOut: string[] = [];
     for (const member of workers) {
       const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
-      const lastWorkingSec = gmid ? workingMap.get(gmid) ?? null : null;
-      if (lastWorkingSec == null) continue;
-      const staleMs = now() - lastWorkingSec * 1000;
+      if (!gmid) continue;
+      const workingSec = workingMap.get(gmid) ?? 0;
+      const speakSec = speakMap.get(gmid) ?? 0;
+      const lastActiveSec = Math.max(workingSec, speakSec) || null;
+      if (lastActiveSec == null) continue;
+      const staleMs = now() - lastActiveSec * 1000;
       if (staleMs <= memberTimeoutAfterMinutes * 60_000) continue;
 
       const name = member.name ?? `bot-${member.metabotId}`;
@@ -3881,7 +3896,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         timedOut.push(name);
         sqlite.set(hintKey, '1');
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: ${name} [WORKING] signal stale (${memberTimeoutAfterMinutes}+ min); ` +
+          `[GroupTaskDaemon] Task ${task.id}: ${name} no working activity (signal/speech) for ${memberTimeoutAfterMinutes}+ min; ` +
           'injecting chair re-assign hint',
         );
       }

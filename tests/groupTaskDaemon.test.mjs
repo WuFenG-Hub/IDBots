@@ -548,6 +548,45 @@ test('R6: stale [WORKING] local worker → timeout status + L3 owner brief (idem
   }
 });
 
+test('R1: a long-turn worker who spoke after [WORKING] is never flagged stale/unreachable', async () => {
+  const h = await createHarness({
+    workerCooldownMs: 0,
+    chairCooldownMs: 0,
+    // Fast windows so the test doesn't wait real minutes.
+    deps: { memberTimeoutAfterMinutes: 1, memberEscalateAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    // Worker 2 ACKed [WORKING] with a chain timestamp ~16.7 min in the past —
+    // the *[WORKING]-only* basis would already be stale at the default nowMs.
+    insertGroupMessage(h.db, {
+      pinId: 'working-old-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，渲染中', chainTimestamp: 999_999_000,
+    });
+    // ...but it keeps posting progress 50s ago (no [WORKING] re-tag): that is
+    // implicit working evidence — the long-turn worker is alive and must not be
+    // escalated by monitorLocalWorkerTimeout.
+    insertGroupMessage(h.db, {
+      pinId: 'progress-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '进度：第 12 帧渲染完成，继续', chainTimestamp: 999_999_950,
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    // Advance the daemon cursor past both messages so the tick's timeout monitor
+    // runs against the persisted chain timestamps (isolated from the protocol
+    // marker handler re-marking the member).
+    const lastId = h.db.exec('SELECT MAX(id) AS id FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastId);
+    await h.loop.runTick();
+
+    // R1: recent speech refreshes the working basis → NOT marked unreachable.
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'long-turn worker with recent speech stays working');
+    assert.equal(h.ownerReportCalls.length, 0, 'no L3 owner brief for an active worker');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('cursor advances on no-reply messages; a failing message holds the batch (fail-stop) until it recovers', async () => {
   // Cooldowns off: this test isolates the fail-stop/retry ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });

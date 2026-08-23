@@ -439,7 +439,7 @@ test('CoworkRunner keeps the full common outer prompt for standard cowork sessio
   // `<ownerMemories>\n- <text>` — assert that form is absent from the system prompt.
   assert.doesNotMatch(systemPrompt, /<ownerMemories>\n-/);
   assert.doesNotMatch(systemPrompt, /Local Time Context/);
-  assert.match(systemPrompt, /Do not use AskUserQuestion in this session/);
+  assert.match(systemPrompt, /Do not use the ask-user question tool in this session/);
 });
 
 test('cleanServiceResultText strips bot-to-bot wrapper and order metadata from mixed replies', async () => {
