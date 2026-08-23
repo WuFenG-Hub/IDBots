@@ -135,7 +135,9 @@ Acceptance: from a fresh IDBots install, asking the TwinBot "IDBots 能干什么
 
 ### M2 — Guided learning loop (L2)
 
-**Status: implemented 2026-08-23** (branch `feat/metaweb-learning`).
+**Status: implemented 2026-08-23; acceptance PASSED on main 2026-08-23** (merge `f3ba9dc7`; branch `feat/metaweb-learning` continues).
+
+Acceptance evidence (owner-side metabot, real sessions): search → read pin → step extraction walked through twice (tg-voice-vision / botos-fusion-status); pre-install declaration + owner confirmation prompt verified in both branches — allow installs, refusal stops without install (disk evidence); post-install verification (list_installed_skills 56→57, read_skill readable) plus the "I learned it" report and the knowledge record (v2, covering the refusal branch) all confirmed.
 
 **Goal**: the bot can follow a MetaWeb tutorial end-to-end, including installing what it needs.
 
@@ -150,13 +152,16 @@ Acceptance: S2 scenario ("learn to make videos") completes with the video skill 
 
 ### M3 — Experience memory (L3)
 
+**Status: implemented 2026-08-23** (branch `feat/metaweb-learning`; tool names use `procedure_*` to avoid colliding with the dream-derived `experience_recall`).
+
 **Goal**: a first-class local "experience" memory type — heavier than a knowledge point, lighter than a skill, no script dependency.
 
 Scope:
 
-- Experience record: `{title, trigger (when to use), steps, pitfalls, sourcePinIds, confidence, useCount, lastUsedAt}` stored per-bot in SQLite (extend `CoworkKnowledgeStore` or sibling store; idempotent migration per database-upgrade-safety rules).
-- Tools: `experience_save` (new), upgraded `experience_recall` (query by task similarity); prompt injection of relevant experiences into turns where triggers match (bounded, like knowledge blocks).
-- Dream/extraction integration: learning episodes (M2 outcomes) are distilled into experience records at turn end / dream time, deduped against existing records.
+- Experience record: `{title, trigger (when to use), steps, pitfalls, sourcePinIds, confidence, useCount, lastUsedAt}` stored per-bot in SQLite (extend `CoworkKnowledgeStore` or sibling store; idempotent migration per database-upgrade-safety rules). → shipped as the `metaid_knowledge_procedures` sibling table inside the knowledge store (`ensureMetaIDKnowledgeSchema`, idempotent `CREATE TABLE IF NOT EXISTS`), with title-fingerprint upsert dedupe and version bumps.
+- Tools: `experience_save` (new), upgraded `experience_recall` (query by task similarity); prompt injection of relevant experiences into turns where triggers match (bounded, like knowledge blocks). → shipped as `procedure_save` / `procedure_recall` (recall bumps `useCount`/`lastUsedAt`), plus the `<procedures>` hot block riding the volatile memory tail alongside the knowledge block.
+- Learning-loop integration: M2 step 6 now records outcomes via `procedure_save` with the source pinIds.
+- Dream/extraction integration: learning episodes (M2 outcomes) are distilled into experience records at turn end / dream time, deduped against existing records. → **deferred**: runtime saves (origin='agent') cover the primary flow; dream-side consolidation of procedures joins the M4 ingest-bridge work to avoid destabilizing the nightly dream prompt in this milestone.
 - Optional later: publish selected experiences on-chain (SimpleNote/buzz) to feed other bots.
 
 Acceptance: after learning a task once, the bot repeats it later without re-searching MetaWeb, citing its experience record; experiences are inspectable in the knowledge UI.

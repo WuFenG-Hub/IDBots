@@ -58,6 +58,13 @@ import {
   KNOWLEDGE_PROMPT_MAX_ITEMS,
   type KnowledgePromptEntry,
 } from './knowledgePromptBlocks';
+import {
+  buildProcedureBlock,
+  formatProcedureRecallResults,
+  formatProcedureSaveResult,
+  PROCEDURE_PROMPT_MAX_ITEMS,
+  type ProcedurePromptEntry,
+} from './procedurePromptBlocks';
 import { tApp } from './appLanguage';
 import { isContextWindowExceededError } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
@@ -1408,6 +1415,37 @@ export interface CoworkKnowledgeStore {
     origin?: 'agent' | 'dream' | 'user';
     sources?: Array<{ episodeId?: string | null; evidenceId?: string | null; sessionId?: string | null; sourceChannel?: string | null; relevance?: string | null }>;
   }): { created: boolean; revised: boolean; entry: { id: string; topic: string; version: number; kind: 'know_how' | 'pitfall' | 'principle' } };
+  listProcedures(options: {
+    metabotId: number;
+    status?: 'active' | 'archived' | 'all';
+    category?: string;
+    query?: string;
+    limit?: number;
+    touchUsed?: boolean;
+  }): Array<{
+    id: string;
+    title: string;
+    triggerText: string;
+    steps: string[];
+    pitfalls: string[];
+    sourcePinIds: string[];
+    category: string | null;
+    tags: string[];
+    version: number;
+    useCount: number;
+    updatedAt: number;
+  }>;
+  upsertProcedure(input: {
+    metabotId: number;
+    title: string;
+    triggerText: string;
+    steps: string[];
+    pitfalls?: string[];
+    sourcePinIds?: string[];
+    category?: string | null;
+    tags?: string[];
+    origin?: 'agent' | 'dream' | 'user';
+  }): { created: boolean; revised: boolean; entry: { id: string; title: string; version: number } };
 }
 
 /**
@@ -3105,6 +3143,111 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  /**
+   * procedure_recall tool: keyword-search the bot's procedure memory (经验) —
+   * proven task workflows with triggers, steps and pitfalls. Recall bumps
+   * useCount/lastUsedAt so frequently reused procedures stay hot.
+   */
+  private runProcedureRecallTool(args: {
+    query?: string;
+    category?: string;
+    limit?: number;
+  }, sessionId: string): { text: string; isError: boolean } {
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) {
+      return { text: 'procedure_recall failed: could not resolve MetaBot for session', isError: true };
+    }
+    if (!this.knowledgeStore) {
+      return { text: 'procedure_recall unavailable: knowledge store is not configured', isError: true };
+    }
+    try {
+      const limit = Math.max(1, Math.min(50, Math.floor(args.limit ?? 10)));
+      const results = this.knowledgeStore.listProcedures({
+        metabotId,
+        status: 'active',
+        query: typeof args.query === 'string' ? args.query.trim() || undefined : undefined,
+        category: typeof args.category === 'string' ? args.category.trim() || undefined : undefined,
+        limit,
+        touchUsed: true,
+      });
+      const entries: ProcedurePromptEntry[] = results.map((entry) => ({
+        title: entry.title,
+        triggerText: entry.triggerText,
+        steps: entry.steps,
+        pitfalls: entry.pitfalls,
+        sourcePinIds: entry.sourcePinIds,
+        version: entry.version,
+        useCount: entry.useCount,
+      }));
+      return { text: formatProcedureRecallResults(entries), isError: false };
+    } catch (error) {
+      return {
+        text: `procedure_recall failed: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+  }
+
+  /**
+   * procedure_save tool: save or rewrite one procedure at runtime
+   * (origin='agent'). Same title rewrites the record (version bump) — that
+   * fingerprint dedupe is what keeps repeated learning episodes from
+   * stacking near-duplicates.
+   */
+  private runProcedureSaveTool(args: {
+    title: string;
+    trigger: string;
+    steps: string[];
+    pitfalls?: string[];
+    sourcePinIds?: string[];
+    category?: string;
+    tags?: string[];
+  }, sessionId: string): { text: string; isError: boolean } {
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) {
+      return { text: 'procedure_save failed: could not resolve MetaBot for session', isError: true };
+    }
+    if (!this.knowledgeStore) {
+      return { text: 'procedure_save unavailable: knowledge store is not configured', isError: true };
+    }
+    const title = typeof args.title === 'string' ? args.title.trim() : '';
+    const trigger = typeof args.trigger === 'string' ? args.trigger.trim() : '';
+    const steps = Array.isArray(args.steps) ? args.steps.filter((step): step is string => typeof step === 'string' && step.trim().length > 0) : [];
+    if (!title || !trigger) {
+      return { text: 'procedure_save failed: title and trigger are required', isError: true };
+    }
+    if (steps.length === 0) {
+      return { text: 'procedure_save failed: steps must contain at least one step', isError: true };
+    }
+    try {
+      const result = this.knowledgeStore.upsertProcedure({
+        metabotId,
+        title,
+        triggerText: trigger,
+        steps,
+        pitfalls: Array.isArray(args.pitfalls) ? args.pitfalls.filter((p): p is string => typeof p === 'string') : undefined,
+        sourcePinIds: Array.isArray(args.sourcePinIds) ? args.sourcePinIds.filter((p): p is string => typeof p === 'string') : undefined,
+        category: typeof args.category === 'string' ? args.category.trim() || null : null,
+        tags: Array.isArray(args.tags) ? args.tags.filter((t): t is string => typeof t === 'string') : undefined,
+        origin: 'agent',
+      });
+      return {
+        text: formatProcedureSaveResult({
+          title,
+          created: result.created,
+          revised: result.revised,
+          version: result.entry.version,
+        }),
+        isError: false,
+      };
+    } catch (error) {
+      return {
+        text: `procedure_save failed: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+  }
+
   private runMemoryUserEditsTool(args: {
     action: 'list' | 'add' | 'update' | 'delete';
     id?: string;
@@ -4624,7 +4767,19 @@ export class CoworkRunner extends EventEmitter {
       });
       knowledgeBlock = buildKnowledgeBlock(knowledgeEntries);
     }
-    return [experienceBlock, knowledgeBlock].filter((block) => block.trim()).join('\n\n');
+    // Procedure hot-layer (经验): proven task workflows ride the same block so
+    // a matching procedure preempts a fresh MetaWeb search for a task the bot
+    // already learned.
+    let procedureBlock = '';
+    if (this.knowledgeStore) {
+      const procedureEntries = this.knowledgeStore.listProcedures({
+        metabotId,
+        status: 'active',
+        limit: PROCEDURE_PROMPT_MAX_ITEMS,
+      });
+      procedureBlock = buildProcedureBlock(procedureEntries);
+    }
+    return [experienceBlock, knowledgeBlock, procedureBlock].filter((block) => block.trim()).join('\n\n');
   }
 
   /**
@@ -4774,7 +4929,7 @@ export class CoworkRunner extends EventEmitter {
       '3. Before each install, tell the owner what you are installing, why the tutorial requires it, and the source pinId. Installs ask for the owner\'s confirmation — if the owner declines, stop that path and report back; never retry silently or work around the decision.',
       '4. After installing, verify with list_installed_skills and read_skill, then apply the new capability to the actual task.',
       '5. Report back to the owner: what you learned, which pins guided you (cite the pinIds), and what you installed.',
-      '6. Save what you learned with knowledge_upsert (kind know_how or pitfall; put the source pinIds in tags) so you never have to relearn the same task.',
+      '6. Save what you learned with procedure_save (trigger = when this task recurs, steps = what worked, pitfalls = what backfired, sourcePinIds = the pins that guided you) so you never have to relearn the same task — next time procedure_recall or your hot memory will hand you the workflow directly. Single-fact lessons belong to knowledge_upsert instead.',
     ].join('\n');
   }
 
@@ -7694,6 +7849,46 @@ export class CoworkRunner extends EventEmitter {
           },
           async (args: { topic: string; summary: string; kind?: 'know_how' | 'pitfall' | 'principle'; category?: string; tags?: string[] }) => {
             const result = this.runKnowledgeUpsertTool(args, sessionId);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: result.isError,
+            } as any;
+          }
+        )
+      );
+      memoryTools.push(
+        tool(
+          'procedure_recall',
+          'Recall YOUR OWN reusable procedures (经验) — proven task workflows with triggers, ordered steps and pitfalls from your past work. query keyword-searches title+trigger+steps; category filters a grouping; limit caps the count (1-50). Use BEFORE starting a task that resembles past work: if a procedure matches, follow its steps directly instead of re-searching MetaWeb. Not for single facts (knowledge_recall) or day logs (experience_recall). An empty result means you have no procedure for this yet — complete the task, then save one with procedure_save.',
+          {
+            query: z.string().optional(),
+            category: z.string().optional(),
+            limit: z.number().int().min(1).max(50).optional(),
+          },
+          async (args: { query?: string; category?: string; limit?: number }) => {
+            const result = this.runProcedureRecallTool(args, sessionId);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: result.isError,
+            } as any;
+          }
+        )
+      );
+      memoryTools.push(
+        tool(
+          'procedure_save',
+          'Save or update ONE reusable procedure (经验) — a proven way to GET A TASK DONE, heavier than a knowledge point, lighter than a skill, with no script dependency. title names the task capability so it can be found again; trigger says WHEN to use it ("when the user asks to …"); steps is the ordered checklist that worked; pitfalls lists what backfired; sourcePinIds records the MetaWeb pins this was learned from (provenance). Reusing an existing title REWRITES it (version bump) — do not create near-duplicates. Use after completing a task that is likely to recur — especially after following a MetaWeb tutorial. Not for single facts (knowledge_upsert), user facts (memory_user_edits), or day logs (experience_recall). Returns the saved title with its new version.',
+          {
+            title: z.string().min(1),
+            trigger: z.string().min(1),
+            steps: z.array(z.string()).min(1),
+            pitfalls: z.array(z.string()).optional(),
+            sourcePinIds: z.array(z.string()).optional(),
+            category: z.string().optional(),
+            tags: z.array(z.string()).optional(),
+          },
+          async (args: { title: string; trigger: string; steps: string[]; pitfalls?: string[]; sourcePinIds?: string[]; category?: string; tags?: string[] }) => {
+            const result = this.runProcedureSaveTool(args, sessionId);
             return {
               content: [{ type: 'text', text: result.text }],
               isError: result.isError,
