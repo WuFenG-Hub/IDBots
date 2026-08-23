@@ -13727,6 +13727,12 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
           coworkRunner.stopAllSessions();
         }
       },
+      closeDshRuntime: async () => {
+        if (coworkRunner) {
+          console.log('[Main] Closing DSH runtime...');
+          await coworkRunner.closeDshRuntime();
+        }
+      },
       stopOpenAICompatProxy: () => stopCoworkOpenAICompatProxy(),
       stopSkillServices: async () => {
         const skillServices = getSkillServiceManager();

@@ -207,6 +207,13 @@ export class DshKernel {
     })
   }
 
+  /** Drain a live agent so another provider-keyed runtime can resume the
+   *  same session JSONL. No-op when the process has no agent for this id. */
+  async disposeSession(sessionId: string): Promise<{ disposed: boolean }> {
+    if (!this.client || !sessionId) return { disposed: false }
+    return this.client.request('session/dispose', { sessionId })
+  }
+
   async respondApproval(id: string, outcome: 'allowed-once' | 'rejected'): Promise<{ answered: boolean }> {
     this.requireClient()
     return this.client.request('idbots/approval/respond', { id, outcome })

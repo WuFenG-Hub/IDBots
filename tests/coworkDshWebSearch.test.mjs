@@ -127,8 +127,9 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
       const toolContent = typeof toolMsg?.content === 'string' ? toolMsg.content : JSON.stringify(toolMsg?.content ?? '')
       assert.match(toolContent, /Sources:/, 'follow-up request carries the search result to the model')
 
-      // Isolation: a non-DeepSeek provider boots its own process and must
-      // not rewrite or unmount the DeepSeek slot's web trio.
+      // Shared web search: a later non-DeepSeek provider boots its own
+      // process but still mounts the DeepSeek search trio (hub-level, same
+      // as the pre-split single runtime).
       await runOneTurn(`ws2-${Date.now().toString(36)}`, {
         key: 'mockgw',
         apiFormat: 'openai',
@@ -139,7 +140,8 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
       const cfg2 = JSON.parse(fs.readFileSync(path.join(sessionRoot, dshRuntimeConfigFileName('deepseek')), 'utf8'))
       assert.ok(cfg2.some((e) => e.name === '@deepseek-ai/dsh-web'), 'DeepSeek web trio survives a later non-deepseek turn')
       assert.equal(hub.runtimeSlotCount, 2, 'the second provider must spawn its own runtime')
-      assert.ok(fs.existsSync(path.join(sessionRoot, dshRuntimeConfigFileName('mockgw'))), 'second provider writes its own composition file')
+      const cfgOther = JSON.parse(fs.readFileSync(path.join(sessionRoot, dshRuntimeConfigFileName('mockgw')), 'utf8'))
+      assert.ok(cfgOther.some((e) => e.name === '@deepseek-ai/dsh-web'), 'non-DeepSeek slot still mounts the shared web trio')
     } finally {
       await hub.close()
       server.close()

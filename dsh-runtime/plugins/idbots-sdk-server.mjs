@@ -24,6 +24,9 @@
 //                           session.header.cwd, NOT the composition-level
 //                           plugin default (which is pinned once so the
 //                           shared runtime does not restart per bot).
+//   session/dispose         { sessionId } → drain + unregister a live agent
+//                           so another provider-keyed runtime can resume the
+//                           same JSONL without a split-brain in-memory agent
 //   idbots/approval/respond { id, outcome } → answer a pending approval ask (M2)
 //   idbots/ask/respond       { id, answers } → answer a pending user question
 //   idbots/usage             { sessionId } → token-meter session projections
@@ -178,6 +181,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'session/steer': return this.idbotsSteer(params)
       case 'session/cancel': return this.idbotsCancel(params)
       case 'session/ensure': return this.idbotsEnsureSession(params)
+      case 'session/dispose': return this.idbotsDisposeSession(params)
       case 'idbots/prompt': return this.idbotsPrompt(params)
       case 'idbots/approval/respond': return this.idbotsApprovalRespond(params)
       case 'idbots/tool/respond': return this.idbotsToolRespond(params)
@@ -190,7 +194,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/usage', 'idbots/compact'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'session/dispose', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/usage', 'idbots/compact'],
         }
       }
       default: return super.handleRequest(method, params)
@@ -243,6 +247,22 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     // instead of colliding on the registry id.
     this.sessions.set(id, { handle })
     return { ensured: true, resumed }
+  }
+
+  /**
+   * Release a live agent so another runtime process can resume the same
+   * persisted session id. handle.dispose() stops the loop, flushes JSONL
+   * (session/disposed → persistence retire), and unregisters the agent.
+   * The log file stays on disk — this is not a session delete.
+   */
+  async idbotsDisposeSession(params) {
+    const id = String(params?.sessionId ?? '')
+    if (id.length === 0) throw new Error('idbots-sdk-server: session/dispose requires sessionId')
+    const record = this.sessions.get(id)
+    if (typeof record?.handle?.dispose !== 'function') return { disposed: false }
+    await record.handle.dispose()
+    this.sessions.delete(id)
+    return { disposed: true }
   }
 
   /**

@@ -381,6 +381,21 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
     /idbotsBindWorkspace/,
     'session/ensure must bind session.header.cwd so Twin and Worker keep separate workspaces',
   );
+  assert.match(
+    sdkServerSource,
+    /idbotsDisposeSession/,
+    'session/dispose must exist so a provider switch can evict the old live agent',
+  );
+  assert.match(
+    coworkDshTurnSource,
+    /disposeSessionOnSlot/,
+    'A mid-session provider switch must dispose the previous runtime\'s live agent',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /async closeDshRuntime/,
+    'CoworkRunner must close the DSH hub on app quit',
+  );
   const dshKernelSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'main', 'libs', 'dshKernel', 'dshKernel.ts'),
     'utf8',

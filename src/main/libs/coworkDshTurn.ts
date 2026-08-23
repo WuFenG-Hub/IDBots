@@ -250,6 +250,10 @@ export interface DshHubOptions {
   /** Quiescence budget before a NON-deferrable config change restarts the
    *  shared runtime while turns are in flight (default 90s; tests shrink it). */
   configRestartQuiescenceMs?: number
+  /** Close a provider-keyed runtime after this long with no in-flight turns
+   *  (default 30min; 0 disables; tests shrink it). Next turn on that provider
+   *  cold-starts and resumes sessions from disk. */
+  runtimeIdleTtlMs?: number
 }
 
 /** Child-env map for the shared DSH runtime. Route credentials and the RPC
@@ -308,7 +312,7 @@ interface DshRuntimeSlot {
   providersSeen: Map<string, DshProviderRoute>
   routeApiKeys: Map<string, { envName: string; apiKey: string }>
   mcpServersSeen: Map<string, DshMcpServerDefinition>
-  webSearchSeen: { apiKey: string; baseURL: string } | null
+  lastUsedAt: number
 }
 
 export class DshTurnHub {
@@ -326,6 +330,11 @@ export class DshTurnHub {
   private runtimeKeyByDsh = new Map<string, string>()
   /** Approval / ask ids belong to the kernel that raised them. */
   private askKernelById = new Map<string, DshKernel>()
+  /** DeepSeek server-side web search is composition-level and shared across
+   *  every provider slot once an official DeepSeek route has been seen —
+   *  same stickiness as the pre-split single runtime. */
+  private webSearchSeen: { apiKey: string; baseURL: string } | null = null
+  private reapTimer: ReturnType<typeof setTimeout> | null = null
   private readonly opts: DshHubOptions
 
   constructor(opts: DshHubOptions) {
@@ -374,7 +383,16 @@ export class DshTurnHub {
 
   /** Start (or reuse) the runtime and run one turn to completion. */
   async runTurn(input: DshTurnInput): Promise<DshTurnOutcome> {
-    this.runtimeKeyByDsh.set(input.dshSessionId, dshRuntimeKeyOf(input.provider))
+    const nextKey = dshRuntimeKeyOf(input.provider)
+    const prevKey = this.runtimeKeyByDsh.get(input.dshSessionId)
+    // Same dsh session id + a new provider key: the old process still holds
+    // the live agent (idbotsAgents never evicts on its own). Re-pinning
+    // without dispose leaves A→B→A talking to A's stale in-memory agent
+    // that never saw B's turns, and two processes writing one JSONL.
+    if (prevKey && prevKey !== nextKey) {
+      await this.disposeSessionOnSlot(prevKey, input.dshSessionId)
+    }
+    this.runtimeKeyByDsh.set(input.dshSessionId, nextKey)
     const kernel = await this.ensureKernel(input)
     const controller = new DshTurnController(input)
     // One active turn per cowork session: a stray previous controller (e.g. a
@@ -403,6 +421,7 @@ export class DshTurnHub {
       this.controllersByDsh.delete(input.dshSessionId)
       this.dshByCowork.delete(input.sessionId)
       this.coworkByDsh.delete(input.dshSessionId)
+      this.scheduleReap()
     }
   }
 
@@ -571,6 +590,10 @@ export class DshTurnHub {
   }
 
   async close(): Promise<void> {
+    if (this.reapTimer) {
+      clearTimeout(this.reapTimer)
+      this.reapTimer = null
+    }
     const kernels = [...this.slots.values()].map((slot) => slot.kernel.close())
     await Promise.all(kernels)
     this.slots.clear()
@@ -606,9 +629,58 @@ export class DshTurnHub {
     return count
   }
 
+  private async disposeSessionOnSlot(runtimeKey: string, dshSessionId: string): Promise<void> {
+    const slot = this.slots.get(runtimeKey)
+    if (!slot?.kernel.running) return
+    this.opts.log?.('info', 'dshTurnHub.disposeSession', {
+      dshSessionId,
+      runtime: runtimeKey,
+    })
+    try {
+      await slot.kernel.disposeSession(dshSessionId)
+    } catch (error) {
+      this.opts.log?.('warn', 'dshTurnHub.disposeSession failed', {
+        dshSessionId,
+        runtime: runtimeKey,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  private scheduleReap(): void {
+    const ttl = this.opts.runtimeIdleTtlMs ?? 30 * 60 * 1000
+    if (ttl <= 0 || this.reapTimer) return
+    const delay = Math.max(50, Math.min(ttl, 60_000))
+    this.reapTimer = setTimeout(() => {
+      this.reapTimer = null
+      void this.reapIdleSlots()
+    }, delay)
+    this.reapTimer.unref?.()
+  }
+
+  private async reapIdleSlots(): Promise<void> {
+    const ttl = this.opts.runtimeIdleTtlMs ?? 30 * 60 * 1000
+    if (ttl <= 0) return
+    const now = Date.now()
+    for (const [key, slot] of [...this.slots]) {
+      if (this.inFlightOnSlot(key) > 0) continue
+      if (now - slot.lastUsedAt < ttl) continue
+      this.opts.log?.('info', 'dshTurnHub.reapIdleRuntime', { runtime: key })
+      await slot.kernel.close().catch(() => undefined)
+      this.slots.delete(key)
+      for (const [dshId, mapped] of [...this.runtimeKeyByDsh]) {
+        if (mapped === key) this.runtimeKeyByDsh.delete(dshId)
+      }
+    }
+    if (this.slots.size > 0) this.scheduleReap()
+  }
+
   private getOrCreateSlot(key: string): DshRuntimeSlot {
     const existing = this.slots.get(key)
-    if (existing) return existing
+    if (existing) {
+      existing.lastUsedAt = Date.now()
+      return existing
+    }
     const slot: DshRuntimeSlot = {
       key,
       kernel: null as unknown as DshKernel,
@@ -618,7 +690,7 @@ export class DshTurnHub {
       providersSeen: new Map(),
       routeApiKeys: new Map(),
       mcpServersSeen: new Map(),
-      webSearchSeen: null,
+      lastUsedAt: Date.now(),
     }
     slot.kernel = new DshKernel({
       runtimeDir: this.opts.runtimeDir,
@@ -645,7 +717,7 @@ export class DshTurnHub {
       }
     }
     if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
-      slot.webSearchSeen = {
+      this.webSearchSeen = {
         apiKey: input.provider.apiKey,
         baseURL: deepSeekWebSearchBaseURL(input.provider.baseUrl),
       }
@@ -665,17 +737,17 @@ export class DshTurnHub {
       // every new session's prompt from restarting this slot's runtime.
       workspace: slot.workspaceSeen ?? input.workspace,
       mcpServers: [...slot.mcpServersSeen.values()],
-      ...(slot.webSearchSeen ? {
+      ...(this.webSearchSeen ? {
         webSearch: {
           apiKeyEnv: DSH_WEBSEARCH_API_KEY_ENV,
-          baseURL: slot.webSearchSeen.baseURL,
+          baseURL: this.webSearchSeen.baseURL,
           model: DSH_WEBSEARCH_MODEL,
         },
       } : {}),
       extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
       env: buildDshChildEnv({
         routeApiKeys: slot.routeApiKeys.values(),
-        webSearchApiKey: slot.webSearchSeen?.apiKey,
+        webSearchApiKey: this.webSearchSeen?.apiKey,
         rpcToken: getMetaidRpcToken(),
         rpcAuthFile: getMetaidRpcTokenFilePath(app.getPath('userData')),
         skillHostEnv: this.opts.skillHostEnvProvider?.(),
