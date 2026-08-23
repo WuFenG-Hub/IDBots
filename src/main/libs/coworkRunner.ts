@@ -5539,7 +5539,9 @@ export class CoworkRunner extends EventEmitter {
             `Agent 将把工作区之外的以下文件上传上链公开发布（不可撤销）：\n${list}\n是否允许本次上传？`,
             `The agent is about to upload the following files from OUTSIDE the session workspace on-chain, where they become public and irreversible:\n${list}\nAllow this upload?`
           );
-          return this.requestSafetyApproval(
+          // timeout/aborted (e.g. the 60s watchdog) count as NOT approved —
+          // publishing an out-of-workspace file needs an explicit yes.
+          const outcome = await this.requestSafetyApproval(
             sessionId,
             activeSession.abortController.signal,
             activeSession,
@@ -5547,6 +5549,7 @@ export class CoworkRunner extends EventEmitter {
             'upload_file',
             { files } as Record<string, unknown>
           );
+          return outcome === 'approved';
         }
         return true;
       },
