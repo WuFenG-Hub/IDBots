@@ -83,7 +83,10 @@ export function buildSessionTranscriptMarkdown(
         const input = message.metadata?.toolInput
           ? JSON.stringify(message.metadata.toolInput, null, 2)
           : message.content;
-        lines.push('```json', truncate(input, TOOL_INPUT_LIMIT), '```', '');
+        // Four-backtick fences: tool payloads legitimately contain triple
+        // backticks (markdown samples, code blocks), which would close a
+        // three-backtick fence mid-payload.
+        lines.push('````json', truncate(input, TOOL_INPUT_LIMIT), '````', '');
         break;
       }
       case 'tool_result': {
@@ -91,7 +94,7 @@ export function buildSessionTranscriptMarkdown(
         const failed = message.metadata?.isError ? ' (failed)' : '';
         lines.push(sectionHeading(`Tool result · ${toolName}${failed}`, message.timestamp), '');
         const result = message.metadata?.toolResult ?? message.content;
-        lines.push('```', truncate(result, TOOL_RESULT_LIMIT), '```', '');
+        lines.push('````', truncate(result, TOOL_RESULT_LIMIT), '````', '');
         break;
       }
     }

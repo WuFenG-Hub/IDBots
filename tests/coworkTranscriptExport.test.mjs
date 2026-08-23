@@ -81,6 +81,28 @@ test('long tool payloads are truncated', () => {
   assert.ok(markdown.length < 5000);
 });
 
+test('tool payloads containing triple backticks stay inside the fence', () => {
+  const payload = ['intro text', '```python', 'print("hi")', '```', 'outro text'].join('\n');
+  const markdown = buildSessionTranscriptMarkdown(
+    { id: 'sess-7', title: 's' },
+    [
+      {
+        id: 'm1',
+        type: 'tool_result',
+        content: '',
+        timestamp: baseTimestamp,
+        metadata: { toolName: 'bash', toolResult: payload },
+      },
+    ],
+  );
+  // Four-backtick fences wrap the payload; the inner triple fence survives.
+  assert.match(markdown, /^````$\n/m);
+  assert.match(markdown, /print\("hi"\)/);
+  assert.match(markdown, /outro text/);
+  // The document parses as balanced fences: even count of 4-backtick lines.
+  assert.equal((markdown.match(/^````.*$/gm) || []).length, 2);
+});
+
 test('failed tool results are labeled', () => {
   const markdown = buildSessionTranscriptMarkdown(
     { id: 'sess-4', title: 's' },

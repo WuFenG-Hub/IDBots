@@ -5900,9 +5900,13 @@ export class CoworkRunner extends EventEmitter {
   /**
    * Updates the session goal (/goal command). Active goals are injected as a
    * per-turn prompt section (see runDshSessionLocal and
-   * buildVolatileContextPrompt); null clears the goal.
+   * buildVolatileContextPrompt); null clears the goal. Throws for unknown
+   * session ids instead of silently no-op'ing the UPDATE.
    */
   setSessionGoal(sessionId: string, goal: CoworkSessionGoal | null): void {
+    if (!this.store.getSessionWithoutMessages(sessionId)) {
+      throw new Error('Session not found');
+    }
     this.store.updateSession(sessionId, { goal });
     coworkLog('INFO', 'setSessionGoal', 'Session goal updated', {
       sessionId,
