@@ -87,6 +87,12 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+
+function untrustedText(value: unknown, maxLen: number): string {
+  return text(value).replace(CONTROL_CHARS, '').replace(/\s+/g, ' ').trim().slice(0, maxLen);
+}
+
 function textList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item ?? '').trim()).filter(Boolean);
@@ -102,7 +108,7 @@ function normalizeReason(raw: unknown): BotSearchMatchReason | null {
   if (!raw || typeof raw !== 'object') return null;
   const record = raw as Record<string, unknown>;
   const field = text(record.field);
-  const token = text(record.token);
+  const token = untrustedText(record.token, 80);
   const weight = Number(record.weight);
   if (!field || !token || !Number.isFinite(weight)) return null;
   return { field, token, weight };
@@ -115,8 +121,8 @@ function normalizeGroupTask(raw: unknown): BotSearchGroupTask | null {
   if (!groupId) return null;
   return {
     groupId,
-    title: text(record.title),
-    goal: text(record.goal),
+    title: untrustedText(record.title, 200),
+    goal: untrustedText(record.goal, 200),
     joinedAs: text(record.joinedAs) || 'member',
     joinedAt: Number(record.joinedAt) || 0,
     joinPinId: text(record.joinPinId),
@@ -134,11 +140,11 @@ function normalizeCandidate(raw: unknown): BotSearchCandidate | null {
   return {
     globalMetaId,
     metaId: text(record.metaId),
-    name: text(record.name),
+    name: untrustedText(record.name, 80),
     avatarId: text(record.avatarId),
-    bio: text(record.bio),
-    role: text(record.role),
-    goal: text(record.goal),
+    bio: untrustedText(record.bio, 500),
+    role: untrustedText(record.role, 200),
+    goal: untrustedText(record.goal, 200),
     chatSkills: textList(record.chatSkills),
     publishedSkills: textList(record.publishedSkills),
     chainName: text(record.chainName),

@@ -2118,6 +2118,7 @@ export class GroupTaskStore {
     status: Extract<GroupTaskStaffingProposalStatus, 'pending' | 'skip_authorized'>;
     createdAt: number;
   }): GroupTaskStaffingProposal {
+    this.cancelOpenStaffingProposalsForSession(input.sourceSessionId);
     this.db.run(
       `INSERT INTO group_task_staffing_proposals (
          source_session_id, twin_metabot_id, title, goal, acceptance_criteria,
@@ -2193,6 +2194,92 @@ export class GroupTaskStore {
     const updated = this.getStaffingProposalById(id);
     if (!updated) throw new Error(`Staffing proposal ${id} not found after consume`);
     return updated;
+  }
+
+  /**
+   * CAS: flip a usable proposal to consumed before the on-chain group is
+   * created, so a concurrent Twin create cannot open a second group.
+   */
+  claimStaffingProposal(
+    id: number,
+    input?: { ownerDecision?: string },
+  ): {
+    proposal: GroupTaskStaffingProposal;
+    previousStatus: Extract<GroupTaskStaffingProposalStatus, 'pending' | 'confirmed' | 'skip_authorized'>;
+  } | null {
+    const current = this.getStaffingProposalById(id);
+    if (
+      !current
+      || (current.status !== 'pending' && current.status !== 'confirmed' && current.status !== 'skip_authorized')
+    ) {
+      return null;
+    }
+    this.db.run(
+      `UPDATE group_task_staffing_proposals
+       SET status = 'consumed',
+           owner_decision = COALESCE(?, owner_decision),
+           confirmed_at = CASE WHEN confirmed_at IS NULL THEN ? ELSE confirmed_at END
+       WHERE id = ? AND status IN ('pending', 'confirmed', 'skip_authorized')`,
+      [input?.ownerDecision ?? null, Date.now(), id],
+    );
+    const changes = this.db.getRowsModified?.() ?? 0;
+    if (changes !== 1) return null;
+    this.saveDb();
+    const updated = this.getStaffingProposalById(id);
+    if (!updated) return null;
+    return { proposal: updated, previousStatus: current.status };
+  }
+
+  releaseStaffingProposal(
+    id: number,
+    previousStatus: Extract<GroupTaskStaffingProposalStatus, 'pending' | 'confirmed' | 'skip_authorized'>,
+  ): GroupTaskStaffingProposal | null {
+    this.db.run(
+      `UPDATE group_task_staffing_proposals
+       SET status = ?, skip_authorized = ?, created_task_id = NULL
+       WHERE id = ? AND status = 'consumed' AND created_task_id IS NULL`,
+      [previousStatus, previousStatus === 'skip_authorized' ? 1 : 0, id],
+    );
+    const changes = this.db.getRowsModified?.() ?? 0;
+    if (changes !== 1) return this.getStaffingProposalById(id);
+    this.saveDb();
+    return this.getStaffingProposalById(id);
+  }
+
+  bindStaffingProposalTask(id: number, taskId: number): GroupTaskStaffingProposal {
+    this.db.run(
+      `UPDATE group_task_staffing_proposals
+       SET created_task_id = ?
+       WHERE id = ? AND status = 'consumed'`,
+      [taskId, id],
+    );
+    this.saveDb();
+    const updated = this.getStaffingProposalById(id);
+    if (!updated) throw new Error(`Staffing proposal ${id} not found after bind`);
+    return updated;
+  }
+
+  cancelStaffingProposal(id: number): GroupTaskStaffingProposal | null {
+    this.db.run(
+      `UPDATE group_task_staffing_proposals
+       SET status = 'cancelled'
+       WHERE id = ? AND status IN ('pending', 'confirmed', 'skip_authorized')`,
+      [id],
+    );
+    this.saveDb();
+    return this.getStaffingProposalById(id);
+  }
+
+  cancelOpenStaffingProposalsForSession(sourceSessionId: string): number {
+    this.db.run(
+      `UPDATE group_task_staffing_proposals
+       SET status = 'cancelled'
+       WHERE source_session_id = ? AND status IN ('pending', 'confirmed', 'skip_authorized')`,
+      [sourceSessionId],
+    );
+    const changes = this.db.getRowsModified?.() ?? 0;
+    this.saveDb();
+    return changes;
   }
 }
 

@@ -80,15 +80,17 @@ import {
   buildStaffingSlateText,
   detectSkipConfirmInWish,
   GroupTaskStaffingError,
+  isStaffingProposalExpired,
   localSeatMetabotIds,
-  localSeatNames,
   normalizeStaffingPlan,
+  pickTriggeringWishText,
   remoteSeats,
   resolveStaffingOwnerGate,
   splitSessionMessagesForStaffingGate,
   validateStaffingPlan,
   type GroupTaskStaffingPlan,
   type GroupTaskStaffingProposal,
+  type GroupTaskStaffingProposalStatus,
   type GroupTaskStaffingSeat,
   type StaffingSessionMessage,
 } from './groupTaskStaffing';
@@ -484,12 +486,6 @@ function evaluateProposalOwnerGate(
   proposal: GroupTaskStaffingProposal,
   sourceSessionId?: string,
 ): { allowed: boolean; decision: ReturnType<typeof resolveStaffingOwnerGate>['decision'] } {
-  if (proposal.status === 'skip_authorized' || proposal.skipAuthorized) {
-    return { allowed: true, decision: 'skip_authorized' };
-  }
-  if (proposal.status === 'confirmed') {
-    return { allowed: true, decision: 'owner_confirmed' };
-  }
   if (proposal.status === 'consumed' || proposal.status === 'cancelled') {
     return { allowed: false, decision: 'awaiting_owner' };
   }
@@ -498,15 +494,33 @@ function evaluateProposalOwnerGate(
     loadStaffingSessionMessages(sessionId),
     proposal.createdAt,
   );
-  return resolveStaffingOwnerGate(split);
+  return resolveStaffingOwnerGate({
+    triggeringWish: split.triggeringWish,
+    repliesAfterPropose: split.repliesAfterPropose,
+    persistedSkip: proposal.status === 'skip_authorized' || proposal.skipAuthorized,
+  });
 }
 
 function resolveLocalWorkerIdsFromPlan(plan: GroupTaskStaffingPlan, extraIds: number[]): number[] {
   const ids = [...localSeatMetabotIds(plan), ...extraIds];
   const metabotStore = getMetabotStore();
-  for (const name of localSeatNames(plan)) {
-    const id = resolveMetabotIdByName(metabotStore, name);
-    if (id != null) ids.push(id);
+  const unresolved: string[] = [];
+  for (const seat of plan.seats) {
+    if (seat.source !== 'local') continue;
+    if (seat.metabotId && ids.includes(seat.metabotId)) continue;
+    if (!seat.candidateName) continue;
+    const id = resolveMetabotIdByName(metabotStore, seat.candidateName);
+    if (id != null) {
+      ids.push(id);
+      continue;
+    }
+    if (!seat.metabotId) unresolved.push(seat.candidateName);
+  }
+  if (unresolved.length > 0) {
+    throw new GroupTaskStaffingError(
+      'STAFFING_PLAN_INVALID',
+      `Unknown local seat name(s): ${unresolved.join(', ')}`,
+    );
   }
   return [...new Set(ids)];
 }
@@ -533,10 +547,8 @@ export function proposeGroupTaskStaffing(
   const twinMetabotId = resolveTwinMetabotId();
   const messages = loadStaffingSessionMessages(sourceSessionId);
   const now = Date.now();
-  const wishTexts = messages
-    .filter((message) => message.type === 'user' && message.content.trim())
-    .map((message) => message.content);
-  const skipAuthorized = wishTexts.some((wish) => detectSkipConfirmInWish(wish));
+  const triggeringWish = pickTriggeringWishText(messages, now);
+  const skipAuthorized = detectSkipConfirmInWish(triggeringWish);
   const proposal = getGroupTaskStore().createStaffingProposal({
     sourceSessionId,
     twinMetabotId,
@@ -654,8 +666,13 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
   let pendingRemoteSeats: GroupTaskStaffingSeat[] = [];
   let staffingProposalId: number | null = null;
   let requestedWorkerIds = [...(opts.memberMetabotIds ?? [])];
-  let acceptedProposal: GroupTaskStaffingProposal | null = null;
+  let claimId: number | null = null;
+  let claimedPreviousStatus: Extract<
+    GroupTaskStaffingProposalStatus,
+    'pending' | 'confirmed' | 'skip_authorized'
+  > | null = null;
 
+  try {
   if (opts.createdBy === 'twinbot') {
     const proposalId = Number(opts.proposalId);
     if (!Number.isInteger(proposalId) || proposalId <= 0) {
@@ -668,8 +685,15 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
     if (!proposal) {
       throw new GroupTaskStaffingError('PROPOSAL_NOT_FOUND', `Staffing proposal ${proposalId} not found`);
     }
-    if (proposal.status === 'consumed') {
+    if (proposal.status === 'consumed' || proposal.status === 'cancelled') {
       throw new GroupTaskStaffingError('PROPOSAL_NOT_USABLE', `Staffing proposal ${proposalId} was already used`);
+    }
+    if (isStaffingProposalExpired(proposal.createdAt)) {
+      store.cancelStaffingProposal(proposal.id);
+      throw new GroupTaskStaffingError(
+        'PROPOSAL_NOT_USABLE',
+        `Staffing proposal ${proposalId} expired`,
+      );
     }
     const gate = evaluateProposalOwnerGate(proposal, opts.sourceSessionId);
     if (!gate.allowed) {
@@ -684,17 +708,19 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
         'The owner has not confirmed this roster yet. Show the slate and wait, unless they already said to start without confirming.',
       );
     }
-    if (proposal.status === 'pending') {
-      store.markStaffingProposalReady(proposal.id, {
-        status: gate.decision === 'skip_authorized' ? 'skip_authorized' : 'confirmed',
-        ownerDecision: gate.decision,
-        confirmedAt: Date.now(),
-      });
-    }
-    acceptedProposal = store.getStaffingProposalById(proposal.id);
-    staffingProposalId = proposal.id;
+    // Resolve names before claiming so a bad local seat does not burn the slate.
     requestedWorkerIds = resolveLocalWorkerIdsFromPlan(proposal.plan, requestedWorkerIds);
     pendingRemoteSeats = remoteSeats(proposal.plan);
+    const claimed = store.claimStaffingProposal(proposal.id, { ownerDecision: gate.decision });
+    if (!claimed) {
+      throw new GroupTaskStaffingError(
+        'PROPOSAL_NOT_USABLE',
+        `Staffing proposal ${proposalId} was already used`,
+      );
+    }
+    claimId = proposal.id;
+    claimedPreviousStatus = claimed.previousStatus;
+    staffingProposalId = proposal.id;
   }
 
   const workerIds = [...new Set(requestedWorkerIds
@@ -725,6 +751,9 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
     createPinId: pinId,
     sourceSessionId: opts.sourceSessionId?.trim() || null,
   });
+  if (claimId != null) {
+    store.bindStaffingProposalTask(claimId, task.id);
+  }
 
   try {
     orchestrationBridgeGetter?.().ensureCanonicalTask(task);
@@ -819,16 +848,21 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
     );
   }
 
-  if (acceptedProposal) {
-    store.consumeStaffingProposal(acceptedProposal.id, task.id);
-  }
-
   const detail = await getGroupTask(task.id);
   return {
     ...detail,
     pendingRemoteSeats,
     staffingProposalId,
   };
+  } catch (error) {
+    if (claimId != null && claimedPreviousStatus) {
+      const row = store.getStaffingProposalById(claimId);
+      if (row && row.status === 'consumed' && row.createdTaskId == null) {
+        store.releaseStaffingProposal(claimId, claimedPreviousStatus);
+      }
+    }
+    throw error;
+  }
 }
 
 export async function listGroupTasks(filter?: { status?: GroupTaskStatus }): Promise<GroupTask[]> {

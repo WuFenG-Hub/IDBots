@@ -274,6 +274,49 @@ test('snapshot rebuild is deterministic and derives per-subject counts without a
   }
 });
 
+test('dream-shaped collaborationFacts survive snapshot rebuild', async () => {
+  const db = await createLegacyMemoryDb();
+  try {
+    const experience = new MetaIDExperienceStore(db, () => {}, () => 1_800_000_000_000);
+    const impressions = new MetaIDImpressionStore(db, () => {}, () => 1_800_000_000_000);
+    const source = createEvidence(experience, {
+      sourceKey: 'episode:dream-fact',
+      occurredAt: 1_700_000_020_000,
+    });
+    impressions.appendObservation({
+      observerGlobalMetaID: OWNER,
+      subjectGlobalMetaID: SUBJECT,
+      episodeId: source.episode.id,
+      evidenceIds: [source.evidence.id],
+      observationText: 'Closed the intro task together.',
+      interpretationText: 'Reliable content collaborator.',
+      dimensions: {
+        subjectKind: 'collaborator',
+        capabilityTags: ['content'],
+        collaborationFacts: [{
+          pinId: source.evidence.pinId,
+          taskTitle: '技能介绍',
+          outcome: 'done',
+          taskId: 21,
+        }],
+      },
+      communicationGuidance: 'Give a clear brief.',
+      confidence: { uncertainty: 'One task.' },
+      dreamDate: '2026-08-08',
+      dreamVersion: 10,
+      sourceHash: sha('c'),
+    });
+    const snapshot = impressions.rebuildSnapshot(OWNER, SUBJECT);
+    assert.equal(snapshot.collaborationFacts.length, 1);
+    assert.equal(snapshot.collaborationFacts[0].taskId, 21);
+    assert.equal(snapshot.collaborationFacts[0].title, '技能介绍');
+    assert.equal(snapshot.collaborationFacts[0].outcome, 'done');
+    assert.deepEqual(snapshot.collaborationFacts[0].pinIds, [source.evidence.pinId]);
+  } finally {
+    db.close();
+  }
+});
+
 test('SqliteStore initializes impression tables on a normal database upgrade', async () => {
   const harness = await createSqliteStore();
   try {

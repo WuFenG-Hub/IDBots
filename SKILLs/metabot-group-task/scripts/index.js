@@ -119,7 +119,7 @@ async function main() {
         acceptance_criteria: params.acceptance_criteria,
         plan: params.plan,
         source_session_id: sourceSessionId,
-        language: params.language === 'en' ? 'en' : 'zh',
+        language: params.language === 'en' || params.language === 'zh' ? params.language : undefined,
       };
       break;
     }
