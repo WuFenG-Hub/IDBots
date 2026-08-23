@@ -174,7 +174,7 @@ import {
   type ChainWriteCreatePin,
 } from './postBuzzAgentTools';
 import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
-import type { UploadGateDeps } from './chainUploadGate';
+import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
   buildPrivateChatAgentTools,
@@ -5418,6 +5418,13 @@ export class CoworkRunner extends EventEmitter {
    * local files OUTSIDE the session workspace are only published after the
    * owner confirms (chainUploadGate). Mirrors withSkillInstallApproval's
    * permission-mode skip (acceptEdits / bypassPermissions / autoApprove).
+   *
+   * autoApprove posture (review follow-up): unattended STUDY sessions never
+   * reach this gate — the study-session tool allowlist structurally removes
+   * upload_file / post_buzz / post_simplenote / omni_cast from them. The
+   * remaining autoApprove consumers (group-task workers, A2A delivery) keep
+   * the established skill-install posture: approval gates are skipped in
+   * autoApprove because nobody is attending to answer the dialog.
    */
   private buildChainUploadGate(sessionId: string): UploadGateDeps {
     return {
@@ -8205,30 +8212,32 @@ export class CoworkRunner extends EventEmitter {
     // from the session (resolveMetabotIdForMemory), exactly like upload_file.
     if (this.metabotChainWrite) {
       const resolveMetabotId = (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined;
-      // post_buzz / post_simplenote upload local files through the
-      // upload_file service, so they only register when both controls are
-      // present. Files outside the session workspace go through the owner
-      // approval gate (chainUploadGate) before they are published on-chain.
+      // The chain-upload gate lives at the shared upload chokepoint
+      // (chainUploadGate.wrapUploadWithGate): upload_file, post_buzz and
+      // post_simplenote all upload through the SAME gated wrapper, and
+      // omni_cast gates its payload_file through the same deps — one gate,
+      // no bypass channel. post_buzz / post_simplenote only register when
+      // the upload control is present.
+      const uploadGate = this.buildChainUploadGate(sessionId);
+      const gateLocalFile = (filePath: string) => checkUploadAllowed(filePath, uploadGate);
       if (this.metaFileUpload) {
-        const uploadGate = this.buildChainUploadGate(sessionId);
+        const gatedUpload = wrapUploadWithGate(this.metaFileUpload.upload.bind(this.metaFileUpload), uploadGate);
         memoryTools.push(
           ...buildPostBuzzAgentTools({
             tool,
             createPin: this.metabotChainWrite.createPin,
-            uploadFile: this.metaFileUpload.upload.bind(this.metaFileUpload),
+            uploadFile: gatedUpload,
             sessionId,
             resolveMetabotId,
-            uploadGate,
           })
         );
         memoryTools.push(
           ...buildPostSimpleNoteAgentTools({
             tool,
             createPin: this.metabotChainWrite.createPin,
-            uploadFile: this.metaFileUpload.upload.bind(this.metaFileUpload),
+            uploadFile: gatedUpload,
             sessionId,
             resolveMetabotId,
-            uploadGate,
           })
         );
       }
@@ -8239,6 +8248,7 @@ export class CoworkRunner extends EventEmitter {
           encryptGroupMessage: this.metabotChainWrite.encryptGroupMessage,
           sessionId,
           resolveMetabotId,
+          gateLocalFile,
         })
       );
     }
@@ -8384,7 +8394,10 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         ...buildMetaFileUploadAgentTools({
           tool,
-          upload: this.metaFileUpload.upload.bind(this.metaFileUpload),
+          // Gated upload (chainUploadGate): files outside the session
+          // workspace require owner approval — same gate as the chain-write
+          // tools, applied at this shared chokepoint.
+          upload: wrapUploadWithGate(this.metaFileUpload.upload.bind(this.metaFileUpload), this.buildChainUploadGate(sessionId)),
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })

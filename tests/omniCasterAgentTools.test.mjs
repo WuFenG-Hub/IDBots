@@ -43,10 +43,24 @@ function makeHarness(overrides = {}) {
     encryptGroupMessage,
     sessionId: SESSION_ID,
     resolveMetabotId,
+    gateLocalFile: overrides.gateLocalFile,
   });
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   return { calls, byName };
 }
+
+test('payload_file outside the workspace is blocked when the gate denies it', async () => {
+  const secret = makeFixtureFile('id_rsa', 'secret');
+  const { calls, byName } = makeHarness({
+    gateLocalFile: async (filePath) => (filePath === secret
+      ? `Owner declined to upload a file outside the session workspace: ${filePath}`
+      : null),
+  });
+  const result = await byName.omni_cast.handler({ path: '/file', payload_file: secret });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Owner declined to upload a file outside the session workspace/);
+  assert.equal(calls.createPin.length, 0);
+});
 
 test('builds a single omni_cast tool', () => {
   const { byName } = makeHarness();

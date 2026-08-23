@@ -4,7 +4,6 @@ import { z } from 'zod';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import type { MetaFileUploadControl } from './metaFileUploadAgentTools';
 import { markdownSelfLink } from './metawebUri';
-import { guardExternalUploads, type UploadGateDeps } from './chainUploadGate';
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
 type SdkToolFactory = (
@@ -29,17 +28,16 @@ type SdkToolFactory = (
 export function buildPostSimpleNoteAgentTools(deps: {
   tool: SdkToolFactory;
   createPin: ChainWriteCreatePin;
+  /**
+   * Upload function; the host passes the GATED wrapper from chainUploadGate
+   * (wrapUploadWithGate) so files outside the session workspace require
+   * owner approval before they are published.
+   */
   uploadFile: MetaFileUploadControl['upload'];
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | undefined;
-  /**
-   * Owner-approval gate for uploads (see chainUploadGate): local files outside
-   * the session workspace are only published after the owner confirms. Active
-   * only when the host provides both resolvers — coworkRunner always does.
-   */
-  uploadGate?: UploadGateDeps;
 }): unknown[] {
-  const { tool, createPin, uploadFile, sessionId, resolveMetabotId, uploadGate } = deps;
+  const { tool, createPin, uploadFile, sessionId, resolveMetabotId } = deps;
 
   function asString(value: unknown): string {
     return typeof value === 'string' ? value.trim() : '';
@@ -151,23 +149,9 @@ export function buildPostSimpleNoteAgentTools(deps: {
       const uploadScope = { metabotId, network };
 
       try {
-        // Phase 0: owner-approval gate — local files OUTSIDE the session
-        // workspace are published publicly and irreversibly, so the owner
-        // must confirm them before anything leaves the machine.
-        const localPaths = [args.cover, ...(args.attachments ?? [])]
-          .map((item) => asString(item))
-          .filter((item) => item && path.isAbsolute(item));
-        const gate = await guardExternalUploads(localPaths, uploadGate ?? {});
-        if (!gate.approved) {
-          return textResult(
-            gate.external.length
-              ? `The owner declined to upload files outside the session workspace: ${gate.external.join(', ')}. Do not retry unless the owner explicitly asks again; suggest copying the file into the workspace instead.`
-              : 'The owner declined to upload files outside the session workspace. Do not retry unless the owner explicitly asks again.',
-            true,
-          );
-        }
-
-        // Phase 1: resolve cover and attachments to metafile:// URIs.
+        // Phase 1: resolve cover and attachments to metafile:// URIs. The
+        // upload function itself is the gated wrapper (chainUploadGate):
+        // files outside the session workspace throw when the owner declines.
         let coverImg = '';
         if (asString(args.cover)) {
           const cover = await resolveFileReference(uploadScope, args.cover ?? '', 'cover');

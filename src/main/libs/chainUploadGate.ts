@@ -1,13 +1,18 @@
+import fs from 'fs';
 import path from 'path';
 
 /**
- * Owner-approval gate for on-chain file uploads from chain-write tools
- * (post_buzz / post_simplenote). Uploading a file publishes it permanently
- * and publicly, so local paths OUTSIDE the session workspace require an
- * explicit owner confirmation before they ever leave the machine. Files
- * inside the workspace (the bot's own working directory) upload freely —
- * that is the tool's normal job. metafile:// URIs are already on-chain and
- * are never gated.
+ * Owner-approval gate for on-chain file publishing from chain-write tools
+ * (upload_file / post_buzz / post_simplenote / omni_cast payload_file).
+ * Publishing a file makes it public and irreversible, so local paths
+ * OUTSIDE the session workspace require an explicit owner confirmation
+ * before they ever leave the machine. Files inside the workspace (the
+ * bot's own working directory) publish freely — that is the tools' normal
+ * job. metafile:// URIs are already on-chain and are never gated.
+ *
+ * The gate lives at the SHARED upload chokepoint (wrapUploadWithGate /
+ * checkUploadAllowed) so every consumer channel is covered once and future
+ * tools cannot bypass it by calling the raw upload service.
  *
  * The gate is ACTIVE only when the host provides both the workspace
  * resolver and the confirmation callback (coworkRunner does). Hosts that
@@ -15,18 +20,32 @@ import path from 'path';
  * provide both.
  */
 
-/** True when filePath resolves inside dir (or equals it). Both OS-aware. */
-export function isPathInsideDir(filePath: string, dir: string): boolean {
-  if (!filePath || !dir) return false;
-  const rel = path.relative(path.resolve(dir), path.resolve(filePath));
-  return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
+/**
+ * Resolve a path through fs.realpathSync. When the final component does not
+ * exist, resolve the nearest existing ancestor and keep the remainder — a
+ * missing file inside a symlinked directory (e.g. /tmp → /private/tmp on
+ * macOS) then still compares against the resolved workspace correctly.
+ */
+function resolveReal(value: string): string {
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    const parent = resolveReal(path.dirname(value));
+    return path.join(parent, path.basename(value));
+  }
 }
 
-/** Local absolute paths that lie outside the session workspace, if known. */
-export function externalUploadPaths(localPaths: string[], workspaceDir: string | undefined): string[] {
-  const absolute = localPaths.filter((p) => path.isAbsolute(p));
-  if (!workspaceDir) return absolute;
-  return absolute.filter((p) => !isPathInsideDir(p, workspaceDir));
+/**
+ * True when filePath resolves inside dir (or equals it). Symlink-aware:
+ * both sides are resolved through symlinks first, so a symlink planted
+ * inside the workspace that points at e.g. ~/.ssh/id_rsa counts as
+ * OUTSIDE. Paths that do not exist keep their lexical tail (the caller's
+ * own existsSync validation reports them later).
+ */
+export function isPathInsideDir(filePath: string, dir: string): boolean {
+  if (!filePath || !dir) return false;
+  const rel = path.relative(resolveReal(path.resolve(dir)), resolveReal(path.resolve(filePath)));
+  return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
 }
 
 export type UploadGateDeps = {
@@ -37,19 +56,32 @@ export type UploadGateDeps = {
 };
 
 /**
- * Enforce the gate for one tool call: when any local file lies outside the
- * workspace (or the workspace is unknown), ask the owner once with the full
- * file list. Returns approved=false when the owner declined or when gating
- * is active but no confirmation channel exists.
+ * Gate one local file. Returns null when the upload may proceed, or a
+ * human/agent-readable error message when it must not (owner declined).
+ * A file outside the workspace — or any file when the workspace is
+ * unknown — asks the owner once.
  */
-export async function guardExternalUploads(
-  localPaths: string[],
-  deps: UploadGateDeps
-): Promise<{ approved: boolean; external: string[] }> {
-  if (!deps.getWorkspaceDir || !deps.confirmExternalUpload) return { approved: true, external: [] };
+export async function checkUploadAllowed(filePath: string, deps: UploadGateDeps): Promise<string | null> {
+  if (!deps.getWorkspaceDir || !deps.confirmExternalUpload) return null;
+  if (!filePath || !path.isAbsolute(filePath)) return null;
   const workspaceDir = deps.getWorkspaceDir();
-  const external = externalUploadPaths(localPaths, workspaceDir);
-  if (!external.length) return { approved: true, external: [] };
-  const approved = await deps.confirmExternalUpload(external);
-  return { approved, external };
+  const external = !workspaceDir || !isPathInsideDir(filePath, workspaceDir);
+  if (!external) return null;
+  const approved = await deps.confirmExternalUpload([filePath]);
+  if (approved) return null;
+  return `Owner declined to upload a file outside the session workspace: ${filePath}. Do not retry unless the owner explicitly asks again; suggest copying the file into the workspace instead.`;
+}
+
+/**
+ * Wrap one upload function with the gate. Consumers upload through the
+ * wrapper instead of the raw service; a declined file throws before any
+ * bytes leave the machine, and the caller's normal error handling
+ * surfaces the message to the agent.
+ */
+export function wrapUploadWithGate<T extends (params: { filePath: string }) => Promise<unknown>>(upload: T, deps: UploadGateDeps): T {
+  return (async (params: { filePath: string }) => {
+    const denied = await checkUploadAllowed(params.filePath, deps);
+    if (denied) throw new Error(denied);
+    return upload(params);
+  }) as T;
 }

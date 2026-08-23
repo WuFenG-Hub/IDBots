@@ -20,6 +20,8 @@ function makeFixtureFile(name = 'cover.png', contents = 'png-bytes') {
   return filePath;
 }
 
+const { wrapUploadWithGate } = require('../dist-electron/main/libs/chainUploadGate.js');
+
 function makeHarness(overrides = {}) {
   const calls = { createPin: [], upload: [], resolve: [], confirm: [] };
   const createPin = async (metabotId, metaidData, options) => {
@@ -27,14 +29,12 @@ function makeHarness(overrides = {}) {
     if (overrides.createPinError) throw overrides.createPinError;
     return overrides.pinResult ?? SAMPLE_PIN_RESULT;
   };
-  const uploadFile = async (params) => {
+  // Mirror the host wiring: the raw upload goes through the shared gate
+  // wrapper (coworkRunner passes exactly this to the tool builders).
+  const rawUpload = async (params) => {
     calls.upload.push(params);
     if (overrides.uploadError) throw overrides.uploadError;
     return overrides.uploadResult ?? { metafileUri: 'metafile://uploadedi0.png' };
-  };
-  const resolveMetabotId = (sessionId) => {
-    calls.resolve.push(sessionId);
-    return 'metabotId' in overrides ? overrides.metabotId : METABOT_ID;
   };
   const uploadGate = {
     getWorkspaceDir: () => overrides.workspaceDir,
@@ -45,15 +45,17 @@ function makeHarness(overrides = {}) {
       }
       : undefined,
   };
+  const uploadFile = wrapUploadWithGate(rawUpload, uploadGate);
+  const resolveMetabotId = (sessionId) => {
+    calls.resolve.push(sessionId);
+    return 'metabotId' in overrides ? overrides.metabotId : METABOT_ID;
+  };
   const tools = buildPostSimpleNoteAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, handler }),
     createPin,
     uploadFile,
     sessionId: SESSION_ID,
     resolveMetabotId,
-    // Gate is active only when the host provides both halves (coworkRunner
-    // does); confirmExternalUpload stays undefined here unless a test opts in.
-    uploadGate,
   });
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   return { calls, byName };
@@ -187,7 +189,7 @@ test('files outside the workspace are blocked when the owner declines', async ()
   });
   const result = await byName.post_simplenote.handler({ title: 't', content: 'c', cover: secret });
   assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /owner declined to upload files outside the session workspace/);
+  assert.match(result.content[0].text, /failed to upload cover .*Owner declined to upload a file outside the session workspace: /);
   assert.match(result.content[0].text, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.deepEqual(calls.confirm, [[secret]]);
   assert.equal(calls.upload.length, 0);
@@ -227,11 +229,27 @@ test('files inside the workspace and metafile URIs never ask for approval', asyn
   assert.equal(calls.upload.length, 1);
 });
 
-test('isPathInsideDir handles containment, siblings and equality', () => {
+test('a symlink inside the workspace pointing outside still asks for approval', async () => {
+  const secret = makeFixtureFile('id_rsa', 'secret');
+  const link = path.join(WORKSPACE, 'innocent.png');
+  fs.symlinkSync(secret, link);
+  const { calls, byName } = makeHarness({
+    workspaceDir: WORKSPACE,
+    confirmExternalUpload: async () => false,
+  });
+  const result = await byName.post_simplenote.handler({ title: 't', content: 'c', cover: link });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Owner declined to upload a file outside the session workspace/);
+  assert.equal(calls.upload.length, 0);
+  assert.equal(calls.createPin.length, 0);
+});
+
+test('isPathInsideDir handles containment, siblings, equality and missing paths', () => {
   const { isPathInsideDir } = require('../dist-electron/main/libs/chainUploadGate.js');
   assert.equal(isPathInsideDir('/tmp/ws/a.png', '/tmp/ws'), true);
   assert.equal(isPathInsideDir('/tmp/ws/sub/a.png', '/tmp/ws'), true);
   assert.equal(isPathInsideDir('/tmp/ws', '/tmp/ws'), true);
+  assert.equal(isPathInsideDir('/tmp/ws/missing/a.png', '/tmp/ws'), true);
   assert.equal(isPathInsideDir('/tmp/ws-other/a.png', '/tmp/ws'), false);
   assert.equal(isPathInsideDir('/tmp/wsfake/a.png', '/tmp/ws'), false);
   assert.equal(isPathInsideDir('', '/tmp/ws'), false);

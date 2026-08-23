@@ -2,7 +2,6 @@ import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import type { MetaFileUploadControl } from './metaFileUploadAgentTools';
-import { guardExternalUploads, type UploadGateDeps } from './chainUploadGate';
 
 /**
  * Chain-write surface the host (main.ts) provides for on-chain pin creation.
@@ -83,17 +82,16 @@ export function formatBuzzResult(input: {
 export function buildPostBuzzAgentTools(deps: {
   tool: SdkToolFactory;
   createPin: ChainWriteCreatePin;
+  /**
+   * Upload function; the host passes the GATED wrapper from chainUploadGate
+   * (wrapUploadWithGate) so files outside the session workspace require
+   * owner approval before they are published.
+   */
   uploadFile: MetaFileUploadControl['upload'];
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | undefined;
-  /**
-   * Owner-approval gate for uploads (see chainUploadGate): local files outside
-   * the session workspace are only published after the owner confirms. Active
-   * only when the host provides both resolvers — coworkRunner always does.
-   */
-  uploadGate?: UploadGateDeps;
 }): unknown[] {
-  const { tool, createPin, uploadFile, sessionId, resolveMetabotId, uploadGate } = deps;
+  const { tool, createPin, uploadFile, sessionId, resolveMetabotId } = deps;
 
   const postBuzz = tool(
     'post_buzz',
@@ -148,24 +146,10 @@ export function buildPostBuzzAgentTools(deps: {
       const attachmentNetwork = network === 'doge' ? 'mvc' : network;
 
       try {
-        // Phase 0: owner-approval gate — local files OUTSIDE the session
-        // workspace are published publicly and irreversibly, so the owner
-        // must confirm them before anything leaves the machine.
-        const localPaths = (args.attachments ?? [])
-          .map((item) => asString(item))
-          .filter((item) => item && path.isAbsolute(item));
-        const gate = await guardExternalUploads(localPaths, uploadGate ?? {});
-        if (!gate.approved) {
-          return textResult(
-            gate.external.length
-              ? `The owner declined to upload files outside the session workspace: ${gate.external.join(', ')}. Do not retry unless the owner explicitly asks again; suggest copying the file into the workspace instead.`
-              : 'The owner declined to upload files outside the session workspace. Do not retry unless the owner explicitly asks again.',
-            true,
-          );
-        }
-
         // Phase 1: upload local attachments and collect metafile:// URIs;
-        // existing metafile:// URIs pass through untouched.
+        // existing metafile:// URIs pass through untouched. The upload
+        // function itself is the gated wrapper (chainUploadGate): files
+        // outside the session workspace throw when the owner declines.
         const attachments: string[] = [];
         for (const raw of args.attachments ?? []) {
           const item = asString(raw);

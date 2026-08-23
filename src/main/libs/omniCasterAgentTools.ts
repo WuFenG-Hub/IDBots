@@ -90,8 +90,16 @@ export function buildOmniCasterAgentTools(deps: {
   encryptGroupMessage: (message: string, groupId: string) => string;
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | undefined;
+  /**
+   * Owner-approval gate for payload_file (chainUploadGate.checkUploadAllowed):
+   * returns null when the file may be published, or the denial message.
+   * Publishing a local file on-chain is irreversible, so files outside the
+   * session workspace need the owner's confirmation — same gate as the
+   * upload tools.
+   */
+  gateLocalFile?: (filePath: string) => Promise<string | null>;
 }): unknown[] {
-  const { tool, createPin, encryptGroupMessage, sessionId, resolveMetabotId } = deps;
+  const { tool, createPin, encryptGroupMessage, sessionId, resolveMetabotId, gateLocalFile } = deps;
 
   const omniCast = tool(
     'omni_cast',
@@ -99,7 +107,7 @@ export function buildOmniCasterAgentTools(deps: {
       'Cast one MetaID protocol pin (arbitrary 7-tuple broadcast) on-chain, as the MetaBot that owns this session.',
       'Use for protocol writes such as paylike, paycomment, simplenote, metaapp, /file, or any other /protocols/* path. Provide exactly one of payload (inline JSON/text) or payload_file (absolute local path; bytes are read and sent base64, with content_type inferred from the extension when omitted). JSON content types are parsed and re-serialized; for /protocols/simplegroupchat the payload content field is group-encrypted automatically (requires a non-empty groupId).',
       'Do NOT use for simplebuzz posts (use post_buzz), metafile:// file uploads (use upload_file), or group chat messaging (use group_chat).',
-      'Writes permanently on-chain and costs transaction fees; omit encoding to auto-detect base64 for binary content types. Returns txid, pinId, cost in sats, and a public link.',
+      'Writes permanently on-chain and costs transaction fees; omit encoding to auto-detect base64 for binary content types. A payload_file outside the session workspace requires the owner\'s explicit confirmation before it is published. Returns txid, pinId, cost in sats, and a pin:// view link.',
     ].join(' '),
     {
       path: z.string().min(1).describe('MetaID protocol path, e.g. /protocols/paylike'),
@@ -173,6 +181,12 @@ export function buildOmniCasterAgentTools(deps: {
         }
         if (!fs.existsSync(payloadFile)) {
           return textResult(`omni_cast payload file not found: ${payloadFile}`, true);
+        }
+        if (gateLocalFile) {
+          const denied = await gateLocalFile(payloadFile);
+          if (denied) {
+            return textResult(denied, true);
+          }
         }
         try {
           cleanPayload = fs.readFileSync(payloadFile).toString('base64');
