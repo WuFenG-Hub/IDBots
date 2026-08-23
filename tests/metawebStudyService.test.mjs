@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 
 const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
   .catch(() => import('../dist-electron/nativeSqliteDatabase.js'));
-const { MetawebStudyJobStore, MAX_STUDY_RUNS_PER_JOB } = await import('../dist-electron/main/metawebStudyJobStore.js')
+const {
+  MetawebStudyJobStore,
+  MAX_STUDY_RUNS_PER_JOB,
+  MAX_STUDY_CONSECUTIVE_FAILURES,
+} = await import('../dist-electron/main/metawebStudyJobStore.js')
   .catch(() => import('../dist-electron/metawebStudyJobStore.js'));
 const {
   MetawebStudyService,
@@ -58,6 +62,7 @@ test('a done job with the same topic does not block re-enqueue', () => {
   store.recordRun(first.id, {
     nextStatus: 'done',
     processedPinIds: ['p1i0'],
+    consecutiveFailures: 0,
     summary: 'done',
     error: null,
     nowIso: NIGHT.toISOString(),
@@ -84,6 +89,7 @@ test('a run saving new pins keeps the job pending for the next night', async () 
   const after = store.getById(job.id);
   assert.equal(after.status, 'pending');
   assert.equal(after.runCount, 1);
+  assert.equal(after.consecutiveFailures, 0);
   assert.deepEqual(after.processedPinIds, ['pin-1i0']);
   assert.equal(after.lastRunSummary, 'saved one pin');
 });
@@ -106,6 +112,7 @@ test('reaching the run-count safety cap completes the job even with new pins', a
     store.recordRun(job.id, {
       nextStatus: 'pending',
       processedPinIds: [`old-${index}i0`],
+      consecutiveFailures: 0,
       summary: 'x',
       error: null,
       nowIso: NIGHT.toISOString(),
@@ -118,7 +125,44 @@ test('reaching the run-count safety cap completes the job even with new pins', a
   assert.match(after.lastRunSummary, /safety cap/);
 });
 
-test('a throwing run hook marks the job failed and the tick continues with the next job', async () => {
+test('a failing run keeps the job pending until the consecutive-failure threshold', async () => {
+  const { service, store } = setup({
+    runStudyJob: async () => { throw new Error('LLM exploded'); },
+  });
+  const job = service.enqueueStudyJob(7, { topic: 'bad' }).job;
+  for (let round = 1; round < MAX_STUDY_CONSECUTIVE_FAILURES; round += 1) {
+    await service.runTick();
+    const mid = store.getById(job.id);
+    assert.equal(mid.status, 'pending', `failure ${round} stays retryable`);
+    assert.equal(mid.consecutiveFailures, round);
+    assert.match(mid.lastError, /LLM exploded/);
+  }
+  await service.runTick();
+  const terminal = store.getById(job.id);
+  assert.equal(terminal.status, 'failed', 'threshold reached → failed');
+  assert.equal(terminal.consecutiveFailures, MAX_STUDY_CONSECUTIVE_FAILURES);
+});
+
+test('a successful run resets the consecutive-failure counter', async () => {
+  let shouldFail = true;
+  const { service, store } = setup({
+    runStudyJob: async () => {
+      if (shouldFail) throw new Error('flaky');
+      return { newPinIds: ['ok-1i0'], summary: 'recovered' };
+    },
+  });
+  const job = service.enqueueStudyJob(7, { topic: 'flaky topic' }).job;
+  await service.runTick();
+  assert.equal(store.getById(job.id).consecutiveFailures, 1);
+  shouldFail = false;
+  await service.runTick();
+  const after = store.getById(job.id);
+  assert.equal(after.consecutiveFailures, 0);
+  assert.equal(after.status, 'pending');
+  assert.deepEqual(after.processedPinIds, ['ok-1i0']);
+});
+
+test('one job\'s failure does not stop the batch', async () => {
   const { service, store } = setup({
     runStudyJob: async (job) => {
       if (job.topic === 'bad') throw new Error('LLM exploded');
@@ -129,10 +173,9 @@ test('a throwing run hook marks the job failed and the tick continues with the n
   const good = service.enqueueStudyJob(7, { topic: 'good' }).job;
   const result = await service.runTick();
   assert.equal(result.ran, 2);
-  const badAfter = store.getById(bad.id);
-  assert.equal(badAfter.status, 'failed');
-  assert.match(badAfter.lastError, /LLM exploded/);
+  assert.equal(store.getById(bad.id).consecutiveFailures, 1);
   assert.equal(store.getById(good.id).status, 'pending');
+  assert.deepEqual(store.getById(good.id).processedPinIds, ['ok-1i0']);
 });
 
 test('parseMetawebStudyRunReport reads the last json fence', () => {
