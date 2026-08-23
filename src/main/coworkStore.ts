@@ -10,6 +10,11 @@ import {
   type CoworkMemoryGuardLevel,
 } from './libs/coworkMemoryExtractor';
 import { judgeMemoryCandidate } from './libs/coworkMemoryJudge';
+import {
+  parseSessionGoal,
+  serializeSessionGoal,
+  type CoworkSessionGoal,
+} from './libs/coworkSessionGoal';
 import type {
   MemoryBackend,
   MemoryCreateUserMemoryInput,
@@ -690,6 +695,8 @@ export interface CoworkSession {
   forkPointMessageId?: string | null;
   /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
   projectId?: string | null;
+  /** Session goal set via the composer /goal command; null = none. */
+  goal?: CoworkSessionGoal | null;
 }
 
 export type CoworkSessionMetadata = Pick<
@@ -1238,6 +1245,12 @@ export class CoworkStore implements MemoryBackend {
         // Persisted per-session token/cache usage so the usage chip survives
         // app restarts (the in-memory CoworkRunner map is lost on restart).
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN usage_stats TEXT;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('goal')) {
+        // /goal command state: JSON {text, status: active|paused, updatedAt}.
+        // NULL = no goal (the DSH /goal port's storage).
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN goal TEXT;');
         changed = true;
       }
     } catch (error) {
@@ -2874,15 +2887,16 @@ export class CoworkStore implements MemoryBackend {
     model: string | null = null,
     effort: string | null = null,
     modelProvider: string | null = null,
-    projectId: string | null = null
+    projectId: string | null = null,
+    goal: CoworkSessionGoal | null = null
   ): CoworkSession {
     const id = uuidv4();
     const now = Date.now();
 
     this.db.run(`
-      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, model, effort, model_provider, project_id, created_at, updated_at)
-      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [id, title, cwd, systemPrompt, resolveCoworkExecutionMode(executionMode), JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, model, effort, modelProvider, projectId, now, now]);
+      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, model, effort, model_provider, project_id, goal, created_at, updated_at)
+      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, title, cwd, systemPrompt, resolveCoworkExecutionMode(executionMode), JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, model, effort, modelProvider, projectId, goal ? serializeSessionGoal(goal) : null, now, now]);
 
     this.upsertConversationMapping({
       channel: 'cowork_ui',
@@ -2917,6 +2931,7 @@ export class CoworkStore implements MemoryBackend {
       effort,
       modelProvider,
       projectId,
+      goal,
     };
   }
 
@@ -2976,13 +2991,14 @@ export class CoworkStore implements MemoryBackend {
       model_provider?: string | null;
       effort?: string | null;
       project_id?: string | null;
+      goal?: string | null;
       created_at: number;
       updated_at: number;
     }
 
     const row = this.getOne<SessionRow>(`
       SELECT id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id,
-             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, parent_session_id, fork_point_message_id, model, model_provider, effort, project_id, created_at, updated_at
+             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, parent_session_id, fork_point_message_id, model, model_provider, effort, project_id, goal, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `, [id]);
@@ -3038,6 +3054,7 @@ export class CoworkStore implements MemoryBackend {
       modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
       projectId: row.project_id ?? null,
+      goal: parseSessionGoal(row.goal),
       metabotName,
       metabotAvatar,
     };
@@ -3084,7 +3101,7 @@ export class CoworkStore implements MemoryBackend {
 
   updateSession(
     id: string,
-    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle' | 'permissionMode' | 'parentSessionId' | 'forkPointMessageId' | 'activeSkillIds' | 'projectId'>>
+    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle' | 'permissionMode' | 'parentSessionId' | 'forkPointMessageId' | 'activeSkillIds' | 'projectId' | 'goal'>>
   ): void {
     const now = Date.now();
     const setClauses: string[] = ['updated_at = ?'];
@@ -3141,6 +3158,10 @@ export class CoworkStore implements MemoryBackend {
     if (updates.projectId !== undefined) {
       setClauses.push('project_id = ?');
       values.push(updates.projectId);
+    }
+    if (updates.goal !== undefined) {
+      setClauses.push('goal = ?');
+      values.push(updates.goal ? serializeSessionGoal(updates.goal) : null);
     }
 
     values.push(id);

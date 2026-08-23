@@ -35,12 +35,31 @@ const TRAILING_URI_PUNCTUATION_RE = /[.,;:!?]+$/;
  * are already part of a scheme:// URI (e.g. the tail of metaapp://…i0).
  */
 const BARE_PINID_RE = /(?<![/:=\w])([0-9a-f]{64}i0)(?![0-9a-f])/gi;
+/**
+ * Web2 pin-viewer URLs bots were trained to emit (metaid.io/pin/…,
+ * openagentinternet.org/browser/…). Rewritten to the matching MetaWeb URI so
+ * the link opens in the built-in Bot Browser instead of leaving the app.
+ * buzz/pin viewers both map to the universal pin:// scheme.
+ */
+const WEB2_PIN_VIEWER_RE = /\bhttps?:\/\/(?:www\.)?(?:metaid\.io|openagentinternet\.org\/browser)\/(pin|buzz|metaapp|metafile)\/([0-9a-f]{64}i0)(?![0-9a-f])/gi;
+const WEB2_PIN_VIEWER_HINT_RE = /\bhttps?:\/\/(?:www\.)?(?:metaid\.io|openagentinternet\.org\/browser)\/(?:pin|buzz|metaapp|metafile)\/[0-9a-f]{64}i0/i;
+
+const rewriteWeb2PinViewerUris = (segment: string): string => {
+  if (!WEB2_PIN_VIEWER_HINT_RE.test(segment)) return segment;
+  return segment.replace(WEB2_PIN_VIEWER_RE, (_m: string, kind: string, pinId: string) => {
+    const scheme = kind === 'metaapp' || kind === 'metafile' ? kind : 'pin';
+    return `${scheme}://${pinId}`;
+  });
+};
 
 const linkifyPlainSegment = (segment: string): string => {
-  // R3: first turn bare pin ids into pin:// links (before the scheme pass, so
+  // First rewrite Web2 pin-viewer URLs (bare or as markdown link
+  // destinations) into MetaWeb URIs, then run the pin/scheme linkify passes.
+  let out = rewriteWeb2PinViewerUris(segment);
+  // R3: turn bare pin ids into pin:// links (before the scheme pass, so
   // the subsequent scheme matcher sees them as already-linkified destinations
   // and skips them via the ']' + '(' guard below).
-  let out = segment.replace(BARE_PINID_RE, (m: string) => `[${m}](pin://${m})`);
+  out = out.replace(BARE_PINID_RE, (m: string) => `[${m}](pin://${m})`);
   out = out.replace(AGENT_INTERNET_URI_RE, (rawMatch: string, offset: number, full: string) => {
     // Already a markdown link/image destination — leave it alone.
     if (full.slice(Math.max(0, offset - 2), offset) === '](') return rawMatch;
@@ -56,13 +75,16 @@ const linkifyPlainSegment = (segment: string): string => {
 /**
  * Turn bare Agent Internet URIs (metaid://, metaapp://, map://, metafile://,
  * pin://, preview-metaapp://) in markdown text into markdown links so they
- * render clickable everywhere (CoWork, A2A, Bot Browser panel). Existing
- * markdown links and code spans/blocks are left untouched.
+ * render clickable everywhere (CoWork, A2A, Bot Browser panel), and rewrite
+ * Web2 pin-viewer URLs (metaid.io/pin/…, openagentinternet.org/browser/…)
+ * into the matching MetaWeb URIs. Existing markdown links and code
+ * spans/blocks are left untouched (viewer-URL rewriting applies to link
+ * destinations, never to code).
  */
 export const linkifyAgentInternetUris = (content: string): string => {
   if (!content) return content;
-  // R3: linkify when there is either a scheme:// URI or a bare pin id present.
-  if (!AGENT_INTERNET_URI_HINT_RE.test(content) && !BARE_PINID_RE.test(content)) return content;
+  // Linkify when there is a scheme:// URI, a bare pin id, or a Web2 viewer URL.
+  if (!AGENT_INTERNET_URI_HINT_RE.test(content) && !BARE_PINID_RE.test(content) && !WEB2_PIN_VIEWER_HINT_RE.test(content)) return content;
   BARE_PINID_RE.lastIndex = 0;
   return content
     .split(CODE_SEGMENT_RE)

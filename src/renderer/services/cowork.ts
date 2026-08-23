@@ -16,6 +16,7 @@ import {
   updateSessionPinned,
   updateSessionTitle,
   updateSessionPermissionMode,
+  updateSessionGoal,
   upsertSubagentTask,
   setSubagentTasks,
   enqueuePendingPermission,
@@ -386,6 +387,20 @@ class CoworkService {
     return result;
   }
 
+  /**
+   * /export command: renders the session transcript as Markdown and saves it
+   * through a native save dialog. `cancelled` means the user dismissed the
+   * dialog (not an error).
+   */
+  async exportSessionTranscript(sessionId: string): Promise<{ success: boolean; cancelled?: boolean; path?: string; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.exportTranscript) {
+      console.error('exportTranscript API not available');
+      return { success: false, error: 'Transcript export API not available' };
+    }
+    return cowork.exportTranscript(sessionId);
+  }
+
   async stopSession(sessionId: string): Promise<boolean> {
     const cowork = window.electron?.cowork;
     if (!cowork) return false;
@@ -414,6 +429,28 @@ class CoworkService {
     }
     console.error('Failed to set permission mode:', result.error);
     return false;
+  }
+
+  /**
+   * /goal command: set, update, or clear a session's goal (null clears).
+   * Patches the active session in the store on success.
+   */
+  async setSessionGoal(
+    sessionId: string,
+    goal: { text: string; status: 'active' | 'paused' } | null,
+  ): Promise<{ success: boolean; goal?: import('../types/cowork').CoworkSessionGoal | null; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setSessionGoal) {
+      console.error('setSessionGoal API not available');
+      return { success: false, error: 'setSessionGoal API not available' };
+    }
+    const result = await cowork.setSessionGoal(sessionId, goal);
+    if (result.success) {
+      store.dispatch(updateSessionGoal({ sessionId, goal: result.goal ?? null }));
+    } else {
+      console.error('Failed to set session goal:', result.error);
+    }
+    return result;
   }
 
   /**

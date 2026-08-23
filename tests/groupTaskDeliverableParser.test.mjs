@@ -237,7 +237,7 @@ test('P0-1: invalid pinid (truncated) surfaces as a field-level pinid error', ()
   assert.equal(result.warnings.length, 0);
 });
 
-test('P0-1: buzz pinid wrapped in metaapp:// gets a non-blocking buzz-link warning', () => {
+test('P0-1: buzz pinid wrapped in metaapp:// gets a non-blocking pin:// warning', () => {
   const { validateDeliverableLines } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
   const result = validateDeliverableLines(
     `**[DELIVERABLE] buzz 交付: metaapp://${PIN_B}**`,
@@ -247,7 +247,20 @@ test('P0-1: buzz pinid wrapped in metaapp:// gets a non-blocking buzz-link warni
   assert.equal(result.errors.length, 0);
   assert.equal(result.warnings.length, 1);
   assert.equal(result.warnings[0].field, 'pinid');
-  assert.match(result.warnings[0].message, /buzz link/);
+  assert.match(result.warnings[0].message, /pin:\/\/<pinid>/);
+});
+
+test('pin:// deliverable lines record the scheme uri as a valid pinid candidate without warnings', () => {
+  const { validateDeliverableLines } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const result = validateDeliverableLines(
+    `**[DELIVERABLE] buzz 交付: pin://${PIN_B}**`,
+  );
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].valid, true);
+  assert.equal(result.candidates[0].kind, 'pinid');
+  assert.equal(result.candidates[0].uri, `pin://${PIN_B}`);
+  assert.equal(result.errors.length, 0);
+  assert.equal(result.warnings.length, 0);
 });
 
 test('P0-1: valid URL has no errors/warnings; malformed URL (ellipsis) errors on url field', () => {

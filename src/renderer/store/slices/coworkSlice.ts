@@ -8,6 +8,7 @@ import type {
   CoworkConfig,
   CoworkPermissionRequest,
   CoworkPermissionMode,
+  CoworkSessionGoal,
   CoworkSessionStatus,
   MessageFeedback,
   MessageFeedbackRating,
@@ -356,6 +357,14 @@ const coworkSlice = createSlice({
       }
     },
 
+    /** /goal command: patch the active session's goal (null clears). */
+    updateSessionGoal(state, action: PayloadAction<{ sessionId: string; goal: CoworkSessionGoal | null }>) {
+      const { sessionId, goal } = action.payload;
+      if (state.currentSession?.id === sessionId) {
+        state.currentSession.goal = goal;
+      }
+    },
+
     /**
      * Upsert a subagent task row from a SDK task or tool_progress event.
      * Later events (progress, notification) merge into the existing row.
@@ -468,6 +477,7 @@ export const {
   updateSessionPinned,
   updateSessionTitle,
   updateSessionPermissionMode,
+  updateSessionGoal,
   upsertSubagentTask,
   setSubagentTasks,
   setSubagentPanelOpen,

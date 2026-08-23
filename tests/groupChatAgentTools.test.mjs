@@ -183,7 +183,8 @@ test('join_group forwards referrer/k/network and returns pinId/txids', async () 
   assert.match(text, /SimpleGroupJoin/);
   assert.match(text, /pinId: joinPin1i0/);
   assert.match(text, /txids: tx-j/);
-  assert.match(text, /https:\/\/openagentinternet\.org\/browser\/pin\/joinPin1i0/);
+  assert.match(text, /pin link: \[pin:\/\/joinPin1i0\]\(pin:\/\/joinPin1i0\)/);
+  assert.doesNotMatch(text, /openagentinternet|metaid\.io/);
 });
 
 test('join_group defaults network to mvc and omits empty referrer/k', async () => {

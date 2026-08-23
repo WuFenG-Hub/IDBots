@@ -13,6 +13,7 @@ import type {
 import type { Skill } from '../../types/skill';
 import type { SettingsOpenOptions } from '../Settings';
 import CoworkPromptInput from './CoworkPromptInput';
+import { buildSessionComposerCommands } from './composerCommandCatalog';
 import PermissionModeSelector from './PermissionModeSelector';
 import SubagentPanel from './SubagentPanel';
 import TodoPanel from './TodoPanel';
@@ -3987,6 +3988,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               onModelEffortChange={handleSessionModelEffortChange}
               contextUsage={currentSession.contextUsage}
               suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
+              commands={buildSessionComposerCommands({ sessionId: currentSession.id, goal: currentSession.goal ?? null })}
             />
             {submitError && (
               <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">

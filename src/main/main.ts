@@ -34,6 +34,7 @@ import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits
 import { getOsLocale, getPersistedAppLanguage, setAppLanguageStoreGetter, tApp } from './libs/appLanguage';
 import { setGroupTaskCopyLanguageGetter } from './libs/groupTaskCopy';
 import { mapDshSubagentList, mapDshSubagentMessages, sessionUsesDshSubagents } from './libs/coworkSubagentTranscript';
+import { buildSessionTranscriptMarkdown, transcriptExportFileName } from './libs/coworkTranscriptExport';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
@@ -7745,6 +7746,8 @@ if (!gotTheLock) {
     source?: 'quick_action';
     /** FK to projects.id; binds the session to a Settings > Projects project. */
     projectId?: string | null;
+    /** Session goal set from the new-task composer's /goal command (objective text). */
+    goal?: string;
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
@@ -7806,7 +7809,10 @@ if (!gotTheLock) {
         // an explicit '' pick means "model default" and is persisted as null.
         options.effort === undefined ? null : (options.effort?.trim() || null),
         options.modelProvider?.trim() || null,
-        options.projectId?.trim() || null
+        options.projectId?.trim() || null,
+        options.goal?.trim()
+          ? { text: options.goal.trim(), status: 'active', updatedAt: Date.now() }
+          : null
       );
       const runner = getCoworkRunner();
 
@@ -7957,6 +7963,47 @@ if (!gotTheLock) {
     }
   });
 
+  // /export command: render the session transcript as Markdown and save it
+  // through a native save dialog (host-side port of the DSH /export command).
+  ipcMain.handle('cowork:session:exportTranscript', async (event, sessionId: string) => {
+    try {
+      if (!sessionId) {
+        return { success: false, error: 'Session id is required' };
+      }
+      const session = getCoworkStore().getSession(sessionId);
+      if (!session) {
+        return { success: false, error: 'Session not found' };
+      }
+      const markdown = buildSessionTranscriptMarkdown(
+        { id: session.id, title: session.title, cwd: session.cwd, createdAt: session.createdAt },
+        session.messages,
+      );
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      const defaultName = transcriptExportFileName(session);
+      const saveOptions = {
+        title: 'Export Session Transcript',
+        defaultPath: path.join(app.getPath('downloads'), defaultName),
+        filters: [{ name: 'Markdown', extensions: ['md'] }],
+      };
+      const saveResult = ownerWindow
+        ? await dialog.showSaveDialog(ownerWindow, saveOptions)
+        : await dialog.showSaveDialog(saveOptions);
+      if (saveResult.canceled || !saveResult.filePath) {
+        return { success: true, cancelled: true };
+      }
+      const outputPath = saveResult.filePath.toLowerCase().endsWith('.md')
+        ? saveResult.filePath
+        : `${saveResult.filePath}.md`;
+      await fs.promises.writeFile(outputPath, markdown, 'utf-8');
+      return { success: true, cancelled: false, path: outputPath };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to export transcript',
+      };
+    }
+  });
+
   ipcMain.handle('cowork:session:setPermissionMode', async (_event, payload: {
     sessionId: string;
     permissionMode: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
@@ -7974,6 +8021,31 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to set permission mode',
+        };
+      }
+    });
+  });
+
+  // /goal command: set, update, or clear a session's goal (null clears).
+  ipcMain.handle('cowork:session:setGoal', async (_event, payload: {
+    sessionId: string;
+    goal: { text: string; status: 'active' | 'paused' } | null;
+  }) => {
+    return withSqliteRecovery('cowork:session:setGoal', async () => {
+      try {
+        const { sessionId, goal } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        if (goal && !goal.text.trim()) throw new Error('Goal text is required');
+        const normalized = goal
+          ? { text: goal.text.trim(), status: goal.status === 'paused' ? ('paused' as const) : ('active' as const), updatedAt: Date.now() }
+          : null;
+        getCoworkRunner().setSessionGoal(sessionId, normalized);
+        return { success: true, goal: normalized };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to set session goal',
         };
       }
     });
