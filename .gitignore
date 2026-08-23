@@ -233,6 +233,7 @@ man_base_data_pebble/
 !tests/metaIdSearchService.test.mjs
 !tests/metaIdSearchAgentTools.test.mjs
 !tests/metawebUriLinks.test.mjs
+!tests/postSimpleNoteAgentTools.test.mjs
 !tests/networkServicesAgentTools.test.mjs
 !tests/metaFileUploadAgentTools.test.mjs
 !tests/postBuzzAgentTools.test.mjs

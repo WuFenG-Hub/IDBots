@@ -153,6 +153,7 @@ import {
   buildPostBuzzAgentTools,
   type ChainWriteCreatePin,
 } from './postBuzzAgentTools';
+import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
   buildPrivateChatAgentTools,
@@ -1585,9 +1586,10 @@ export interface CoworkRunnerOptions {
    */
   skillTools?: SkillToolControl;
   /**
-   * When set, every cowork session gets the chain-write tools post_buzz and
-   * omni_cast (replacing the metabot-post-buzz / metabot-omni-caster skills).
-   * createPin delegates to services/metaidCore.ts createPin() — the same
+   * When set, every cowork session gets the chain-write tools post_buzz,
+   * post_simplenote and omni_cast (replacing the metabot-post-buzz /
+   * metabot-omni-caster skills). createPin delegates to
+   * services/metaidCore.ts createPin() — the same
    * function the /api/metaid/create-pin RPC endpoint calls; encryptGroupMessage
    * is the shared group-chat AES helper (services/metaWebCrypto.ts).
    */
@@ -7869,11 +7871,21 @@ export class CoworkRunner extends EventEmitter {
     // from the session (resolveMetabotIdForMemory), exactly like upload_file.
     if (this.metabotChainWrite) {
       const resolveMetabotId = (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined;
-      // post_buzz uploads local attachments through the upload_file service,
-      // so it only registers when both controls are present.
+      // post_buzz / post_simplenote upload local files through the
+      // upload_file service, so they only register when both controls are
+      // present.
       if (this.metaFileUpload) {
         memoryTools.push(
           ...buildPostBuzzAgentTools({
+            tool,
+            createPin: this.metabotChainWrite.createPin,
+            uploadFile: this.metaFileUpload.upload.bind(this.metaFileUpload),
+            sessionId,
+            resolveMetabotId,
+          })
+        );
+        memoryTools.push(
+          ...buildPostSimpleNoteAgentTools({
             tool,
             createPin: this.metabotChainWrite.createPin,
             uploadFile: this.metaFileUpload.upload.bind(this.metaFileUpload),
