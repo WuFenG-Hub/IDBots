@@ -5078,8 +5078,10 @@ const getCoworkRunner = () => {
       networkServices: {
         listOnlineServices: async () => {
           try {
-            await getProviderDiscoveryService().refreshNow();
-            await getProviderDiscoveryService().waitForRefresh();
+            // Reuse a snapshot younger than the 10s poll cadence so paging
+            // list_online_services does not force a network round-trip per page
+            // or let the directory drift between cursors.
+            await getProviderDiscoveryService().refreshNowIfStale();
           } catch {
             // Keep serving the last presence snapshot if a refresh fails.
           }
