@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
-import { PaperClipIcon, XMarkIcon, SparklesIcon } from '@heroicons/react/24/outline';
+import { PaperClipIcon, XMarkIcon, SparklesIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
 import ModelEffortPicker, { type ModelEffortValue } from '../ModelEffortPicker';
 import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
@@ -858,39 +858,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                 className="flex items-center gap-2 relative border-0 p-0 m-0 min-w-0"
                 disabled={disabled || isStreaming}
               >
-                {showFolderSelector && (
-                  <>
-                    <div className="relative group">
-                      <button
-                        ref={folderButtonRef as React.RefObject<HTMLButtonElement>}
-                        type="button"
-                        onClick={() => setShowFolderMenu(!showFolderMenu)}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
-                      >
-                        <FolderIcon className="h-4 w-4" />
-                        <span className="max-w-[150px] truncate text-xs">
-                          {workspaceLabel}
-                        </span>
-                      </button>
-                      {/* Tooltip - hidden when folder menu is open */}
-                      {!showFolderMenu && (
-                        <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 px-3.5 py-2.5 text-[13px] leading-relaxed rounded-xl shadow-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text dark:border-claude-darkBorder border-claude-border border opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 pointer-events-none z-50 max-w-[400px] break-all whitespace-nowrap">
-                          {workspaceTooltip}
-                        </div>
-                      )}
-                    </div>
-                    <FolderSelectorPopover
-                      isOpen={showFolderMenu}
-                      onClose={() => setShowFolderMenu(false)}
-                      onSelectFolder={(path) => handleWorkspaceSelect({ kind: 'folder', cwd: path })}
-                      onSelectProject={handleSelectProject}
-                      onOpenNewProject={onOpenNewProject}
-                      onSelectBotWorkspace={handleSelectBotWorkspace}
-                      anchorRef={folderButtonRef as React.RefObject<HTMLElement>}
-                      currentFolder={workingDirectory}
-                    />
-                  </>
-                )}
                 {showModelSelector && (
                   <ModelEffortPicker
                     dropdownDirection="up"
@@ -916,12 +883,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   onManageSkills={handleManageSkills}
                 />
                 <ActiveSkillBadge />
-                {showPermissionModeSelector && onPermissionModeChange && (
-                  <PermissionModeSelector
-                    currentMode={permissionMode ?? 'default'}
-                    onModeChange={onPermissionModeChange}
-                  />
-                )}
               </fieldset>
               <div className="flex items-center gap-2">
                 {contextUsage && (
@@ -1008,6 +969,56 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
           </>
         )}
       </div>
+      {(showFolderSelector || (showPermissionModeSelector && onPermissionModeChange)) && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {showFolderSelector && (
+            <>
+              <div className="relative group">
+                <button
+                  ref={folderButtonRef as React.RefObject<HTMLButtonElement>}
+                  type="button"
+                  onClick={() => setShowFolderMenu(!showFolderMenu)}
+                  disabled={disabled || isStreaming}
+                  className="flex items-center gap-1.5 rounded-lg border dark:border-claude-darkBorder border-claude-border px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset dark:hover:text-claude-darkText hover:text-claude-text transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  aria-label={i18nService.t('coworkWorkingDirectory')}
+                >
+                  <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                  <span className="max-w-[180px] truncate">
+                    {workspaceLabel}
+                  </span>
+                  <ChevronDownIcon
+                    className={`h-3 w-3 flex-shrink-0 opacity-60 transition-transform ${showFolderMenu ? 'rotate-180' : ''}`}
+                  />
+                </button>
+                {/* Tooltip - hidden when folder menu is open */}
+                {!showFolderMenu && (
+                  <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 px-3.5 py-2.5 text-[13px] leading-relaxed rounded-xl shadow-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text dark:border-claude-darkBorder border-claude-border border opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 pointer-events-none z-50 max-w-[400px] break-all whitespace-nowrap">
+                    {workspaceTooltip}
+                  </div>
+                )}
+              </div>
+              <FolderSelectorPopover
+                isOpen={showFolderMenu}
+                onClose={() => setShowFolderMenu(false)}
+                onSelectFolder={(path) => handleWorkspaceSelect({ kind: 'folder', cwd: path })}
+                onSelectProject={handleSelectProject}
+                onOpenNewProject={onOpenNewProject}
+                onSelectBotWorkspace={handleSelectBotWorkspace}
+                anchorRef={folderButtonRef as React.RefObject<HTMLElement>}
+                currentFolder={workingDirectory}
+              />
+            </>
+          )}
+          {showPermissionModeSelector && onPermissionModeChange && (
+            <PermissionModeSelector
+              currentMode={permissionMode ?? 'default'}
+              onModeChange={onPermissionModeChange}
+              disabled={disabled || isStreaming}
+              chevron
+            />
+          )}
+        </div>
+      )}
       {showFolderRequiredWarning && (
         <div className="mt-2 text-xs text-red-500 dark:text-red-400">
           {i18nService.t('coworkSelectFolderFirst')}
