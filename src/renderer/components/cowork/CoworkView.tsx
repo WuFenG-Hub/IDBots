@@ -13,6 +13,7 @@ import { i18nService } from '../../services/i18n';
 import { convertLegacyEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
 import CoworkPromptInput, { type CoworkPromptInputRef } from './CoworkPromptInput';
 import CoworkSessionDetail from './CoworkSessionDetail';
+import { buildNewTaskComposerCommands } from './composerCommandCatalog';
 import BootstrapShortcuts from './BootstrapShortcuts';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -118,6 +119,11 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     setPermissionModeState(mode);
     void configService.updateConfig({ coworkPermissionMode: mode });
   }, []);
+  // Slash-command catalog for the new-task composer. Rebuilt every render so
+  // command copy follows language switches without extra subscriptions.
+  const composerCommands = buildNewTaskComposerCommands({
+    setPermissionMode: (mode) => setPermissionMode(mode),
+  });
   // Gate the empty-list selection reset below: the metabot list loads async,
   // so without this flag every mount would clear the persisted New Task
   // selection before the IPC resolves.
@@ -783,6 +789,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
             showPermissionModeSelector={true}
             permissionMode={permissionMode}
             onPermissionModeChange={setPermissionMode}
+            commands={composerCommands}
           />
         </div>
       </div>

@@ -1,12 +1,22 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
-import { PaperClipIcon, XMarkIcon, SparklesIcon, ChevronDownIcon } from '@heroicons/react/24/outline';
+import { PaperClipIcon, XMarkIcon, SparklesIcon, ChevronDownIcon, PlusIcon, PuzzlePieceIcon, CommandLineIcon } from '@heroicons/react/24/outline';
 import ModelEffortPicker, { type ModelEffortValue } from '../ModelEffortPicker';
 import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
 import PermissionModeSelector from './PermissionModeSelector';
-import { SkillsButton, ActiveSkillBadge } from '../skills';
+import ComposerCommandPicker from './ComposerCommandPicker';
+import {
+  commandToken,
+  filterComposerCommands,
+  parseLeadingCommand,
+  slashQueryOf,
+  type ComposerClaim,
+  type ComposerCommand,
+  type ComposerCommandContext,
+} from './composerCommands';
+import { SkillsPopover, ActiveSkillBadge } from '../skills';
 import { i18nService } from '../../services/i18n';
 import { configService } from '../../services/config';
 import { skillService } from '../../services/skill';
@@ -82,6 +92,9 @@ const CONTEXT_MENU_WIDTH = 176;
 const CONTEXT_MENU_HEIGHT = 168;
 const CONTEXT_MENU_PADDING = 8;
 
+/** DOM id of the '/' command picker listbox (aria wiring). */
+const COMMAND_PICKER_ID = 'cowork-command-picker';
+
 const ContextMenuItem: React.FC<{
   label: string;
   shortcut?: string;
@@ -107,6 +120,77 @@ const ContextMenuItem: React.FC<{
 const getFileNameFromPath = (path: string): string => {
   const parts = path.split(/[/\\]/);
   return parts[parts.length - 1] || path;
+};
+
+interface PlusMenuButtonProps {
+  open: boolean;
+  showAttachment: boolean;
+  showCommands: boolean;
+  buttonRef: React.RefObject<HTMLButtonElement>;
+  menuRef: React.RefObject<HTMLDivElement>;
+  onToggle: () => void;
+  onAddAttachment: () => void;
+  onUseSkill: () => void;
+  onUseCommand: () => void;
+}
+
+/**
+ * The composer's '+' trigger with its quick-action menu (add attachment /
+ * use a skill / pick a '/' command), ported from the DSH composer layout:
+ * the plus icon sits at the far left of the toolbar.
+ */
+const PlusMenuButton: React.FC<PlusMenuButtonProps> = ({
+  open,
+  showAttachment,
+  showCommands,
+  buttonRef,
+  menuRef,
+  onToggle,
+  onAddAttachment,
+  onUseSkill,
+  onUseCommand,
+}) => {
+  const itemClass = 'w-full flex items-center gap-3 px-3 py-2 text-left text-sm dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors';
+  return (
+    <div className="relative">
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={onToggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="flex items-center justify-center p-1.5 rounded-lg text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
+        title={i18nService.t('composerPlusMenuTitle')}
+        aria-label={i18nService.t('composerPlusMenuTitle')}
+      >
+        <PlusIcon className="h-4 w-4" />
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          role="menu"
+          className="absolute left-0 bottom-full mb-2 z-50 w-64 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg shadow-lg overflow-hidden py-1"
+        >
+          {showAttachment && (
+            <button type="button" role="menuitem" onClick={onAddAttachment} className={itemClass}>
+              <PaperClipIcon className="h-4 w-4 flex-shrink-0" />
+              <span>{i18nService.t('composerMenuAddAttachment')}</span>
+            </button>
+          )}
+          <button type="button" role="menuitem" onClick={onUseSkill} className={itemClass}>
+            <PuzzlePieceIcon className="h-4 w-4 flex-shrink-0" />
+            <span>{i18nService.t('composerMenuUseSkill')}</span>
+          </button>
+          {showCommands && (
+            <button type="button" role="menuitem" onClick={onUseCommand} className={itemClass}>
+              <CommandLineIcon className="h-4 w-4 flex-shrink-0" />
+              <span>{i18nService.t('composerMenuUseCommand')}</span>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
 };
 
 const getSkillDirectoryFromPath = (skillPath: string): string => {
@@ -174,6 +258,12 @@ interface CoworkPromptInputProps {
   permissionMode?: CoworkPermissionMode;
   /** Callback when the footer permission-mode selector changes. */
   onPermissionModeChange?: (mode: CoworkPermissionMode) => void;
+  /**
+   * Slash-command catalog for the composer (DSH-style '/' picker + claimed
+   * `/name ` token rendering). Empty/undefined disables command affordances;
+   * the '+' menu then only offers attachments and skills.
+   */
+  commands?: ComposerCommand[];
 }
 
 const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInputProps>(
@@ -203,6 +293,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       showPermissionModeSelector = false,
       permissionMode,
       onPermissionModeChange,
+      commands,
     } = props;
     const isMac = (window as { electron?: { platform?: string } }).electron?.platform === 'darwin';
     const dispatch = useDispatch();
@@ -217,11 +308,22 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const [attachments, setAttachments] = useState<CoworkAttachment[]>(initialAttachmentsRef.current);
     const [showFolderMenu, setShowFolderMenu] = useState(false);
     const [showFolderRequiredWarning, setShowFolderRequiredWarning] = useState(false);
+    const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+    const [skillsMenuOpen, setSkillsMenuOpen] = useState(false);
+    // '/' picker: dismissal is user intent (Escape), tracked separately from
+    // the query so re-typing '/' after a dismissal still reopens the picker.
+    const [commandPickerDismissed, setCommandPickerDismissed] = useState(false);
+    const [commandPickerHighlight, setCommandPickerHighlight] = useState(0);
+    const [claim, setClaim] = useState<ComposerClaim | null>(null);
+    const [commandNotice, setCommandNotice] = useState<string | null>(null);
     const [isDraggingFiles, setIsDraggingFiles] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const folderButtonRef = useRef<HTMLButtonElement>(null);
     const dragDepthRef = useRef(0);
     const contextMenuRef = useRef<HTMLDivElement>(null);
+    const plusButtonRef = useRef<HTMLButtonElement>(null);
+    const backdropRef = useRef<HTMLDivElement>(null);
+    const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     // Selection captured when the context menu opened; only drives the
     // enabled/disabled state of the menu items. Actions re-read the live
     // selection from the textarea so streaming updates cannot desync them.
@@ -366,6 +468,162 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     }
   }, [workingDirectory, workspaceSelection]);
 
+  // ----- Slash commands (DSH-style '+' menu / picker / claim token) -----
+
+  const commandsEnabled = isLarge && !disabled && commands !== undefined && commands.length > 0;
+  const slashQuery = commandsEnabled && !isStreaming ? slashQueryOf(value) : null;
+  const commandPickerOpen = slashQuery !== null && !commandPickerDismissed;
+  const filteredCommands = React.useMemo(
+    () => filterComposerCommands(commands ?? [], slashQuery ?? ''),
+    [commands, slashQuery],
+  );
+  const effectiveCommandHighlight = filteredCommands.length === 0
+    ? -1
+    : Math.min(commandPickerHighlight, filteredCommands.length - 1);
+  const claimActive = claim !== null && value.startsWith(claim.token);
+
+  // Leaving the slash-token shape (or a dismissal) resets the picker state.
+  useEffect(() => {
+    if (slashQuery === null) {
+      setCommandPickerDismissed(false);
+      setCommandPickerHighlight(0);
+    }
+  }, [slashQuery]);
+
+  // Claim lifecycle: the claim survives while the draft keeps the `/name `
+  // prefix; a draft that already leads with a claimable token (restored
+  // draft, manual typing) re-claims automatically.
+  useEffect(() => {
+    if (claim && !value.startsWith(claim.token)) {
+      setClaim(null);
+      return;
+    }
+    if (!claim && commandsEnabled) {
+      const leading = parseLeadingCommand(value, commands ?? []);
+      if (leading && leading.command.hint) {
+        const token = commandToken(leading.command);
+        if (value.startsWith(token)) {
+          setClaim({ command: leading.command, token, hint: leading.command.hint });
+        }
+      }
+    }
+  }, [value, claim, commandsEnabled, commands]);
+
+  const showCommandNotice = useCallback((text: string) => {
+    if (noticeTimerRef.current) {
+      clearTimeout(noticeTimerRef.current);
+    }
+    setCommandNotice(text);
+    noticeTimerRef.current = setTimeout(() => {
+      setCommandNotice(null);
+      noticeTimerRef.current = null;
+    }, 5000);
+  }, []);
+
+  useEffect(() => () => {
+    if (noticeTimerRef.current) {
+      clearTimeout(noticeTimerRef.current);
+    }
+  }, []);
+
+  // Close the '+' menu on outside clicks (its items each close it on click).
+  const plusMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!plusMenuOpen) return;
+    const handleMouseDownOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        !plusMenuRef.current?.contains(target)
+        && !plusButtonRef.current?.contains(target)
+      ) {
+        setPlusMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setPlusMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleMouseDownOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDownOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [plusMenuOpen]);
+
+  /** Message submit used by commands that steer text into the conversation. */
+  const submitMessageForCommand = useCallback(async (text: string): Promise<boolean> => {
+    const trimmed = text.trim();
+    if (!trimmed || isStreaming) return false;
+    if (showFolderSelector && !workingDirectory?.trim() && !workspaceSelection) {
+      setShowFolderRequiredWarning(true);
+      return false;
+    }
+    setShowFolderRequiredWarning(false);
+    try {
+      const accepted = await onSubmit(trimmed, undefined);
+      return accepted !== false;
+    } catch (error) {
+      console.error('Composer command message submit failed:', error);
+      return false;
+    }
+  }, [isStreaming, showFolderSelector, workingDirectory, workspaceSelection, onSubmit]);
+
+  /** Execute a command and clear the composer (DSH command-submit behavior). */
+  const runCommand = useCallback(async (command: ComposerCommand, args: string) => {
+    const ctx: ComposerCommandContext = { submitMessage: submitMessageForCommand };
+    try {
+      const notice = await command.run(args, ctx);
+      if (typeof notice === 'string' && notice) {
+        showCommandNotice(notice);
+      }
+    } catch (error) {
+      console.error('Composer command failed:', error);
+      showCommandNotice(i18nService.t('composerCommandFailed'));
+    }
+    draftFieldRef.current?.set('');
+    attachmentFieldRef.current?.set([]);
+    setClaim(null);
+  }, [showCommandNotice, submitMessageForCommand]);
+
+  /** Picker pick: input commands claim `/name `, no-input commands execute now. */
+  const pickCommand = useCallback((command: ComposerCommand) => {
+    if (command.hint) {
+      const token = commandToken(command);
+      draftFieldRef.current?.set(token);
+      setClaim({ command, token, hint: command.hint });
+      setCommandPickerDismissed(true);
+      setCommandPickerHighlight(0);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      return;
+    }
+    void runCommand(command, '');
+  }, [runCommand]);
+
+  const handlePlusMenuAddAttachment = () => {
+    setPlusMenuOpen(false);
+    void handleAddFile();
+  };
+
+  const handlePlusMenuUseSkill = () => {
+    setPlusMenuOpen(false);
+    setSkillsMenuOpen(true);
+  };
+
+  const handlePlusMenuUseCommand = () => {
+    setPlusMenuOpen(false);
+    if (!commandsEnabled) return;
+    if (!value.trim()) {
+      draftFieldRef.current?.set('/');
+      setCommandPickerDismissed(false);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    } else {
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      showCommandNotice(i18nService.t('composerCommandSeedHint'));
+    }
+  };
+
   const handleSubmit = useCallback(async () => {
     if (disabled || (isStreaming && steerDisabled)) return;
 
@@ -376,6 +634,23 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const submittedAttachments = attachmentField.get();
     const trimmedValue = submittedValue.trim();
     if (isStreaming && !trimmedValue) return;
+    // Slash-command adjudication (DSH port): a live claim, a bare `/name`
+    // line, or a manually typed `/name <args>` executes the command instead
+    // of sending a message; unknown /-leading text falls through as a
+    // normal message.
+    if (!isStreaming && commandsEnabled && trimmedValue.startsWith('/')) {
+      const activeClaim = claim && submittedValue.startsWith(claim.token) ? claim : null;
+      if (activeClaim) {
+        const args = submittedValue.slice(activeClaim.token.length).trimStart();
+        void runCommand(activeClaim.command, args);
+        return;
+      }
+      const leading = parseLeadingCommand(submittedValue, commands ?? []);
+      if (leading && (leading.command.hint || leading.args === '')) {
+        void runCommand(leading.command, leading.args);
+        return;
+      }
+    }
     if (!isStreaming && showFolderSelector && !workingDirectory?.trim() && !workspaceSelection) {
       setShowFolderRequiredWarning(true);
       return;
@@ -422,7 +697,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       }
       console.error('Cowork prompt submission failed:', error);
     }
-  }, [isStreaming, disabled, steerDisabled, onSubmit, activeSkillIds, skills, inputFileLabel, showFolderSelector, workingDirectory, workspaceSelection]);
+  }, [isStreaming, disabled, steerDisabled, onSubmit, activeSkillIds, skills, inputFileLabel, showFolderSelector, workingDirectory, workspaceSelection, commandsEnabled, claim, commands, runCommand]);
 
   const handleSelectSkill = useCallback((skill: Skill) => {
     dispatch(toggleActiveSkill(skill.id));
@@ -437,6 +712,56 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter to submit, Shift+Enter for new line
     const isComposing = event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229;
+    // Claimed token: Backspace with the caret at the token end removes the
+    // whole `/name ` token (DSH occurrence-delete behavior).
+    if (claimActive && event.key === 'Backspace' && !isComposing && textareaRef.current) {
+      const textarea = textareaRef.current;
+      if (
+        textarea.selectionStart === textarea.selectionEnd
+        && textarea.selectionStart === claim!.token.length
+      ) {
+        event.preventDefault();
+        draftFieldRef.current?.set('');
+        setClaim(null);
+        return;
+      }
+    }
+    if (commandPickerOpen && !isComposing) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (filteredCommands.length > 0) {
+          const delta = event.key === 'ArrowDown' ? 1 : -1;
+          const next = effectiveCommandHighlight < 0
+            ? (delta > 0 ? 0 : filteredCommands.length - 1)
+            : (effectiveCommandHighlight + delta + filteredCommands.length) % filteredCommands.length;
+          setCommandPickerHighlight(next);
+        }
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setCommandPickerDismissed(true);
+        return;
+      }
+      if (event.key === ' ') {
+        // Space after an exact input-command name claims the token.
+        const exact = (commands ?? []).find((entry) => entry.name === slashQuery && entry.hint);
+        if (exact) {
+          event.preventDefault();
+          pickCommand(exact);
+          return;
+        }
+      }
+      if (event.key === 'Enter' && !event.shiftKey && !disabled) {
+        if (effectiveCommandHighlight >= 0 && filteredCommands[effectiveCommandHighlight]) {
+          event.preventDefault();
+          pickCommand(filteredCommands[effectiveCommandHighlight]);
+          return;
+        }
+        // No matches highlighted: dismiss and fall through to submit.
+        setCommandPickerDismissed(true);
+      }
+    }
     if (event.key === 'Enter' && !event.shiftKey && !isComposing && !disabled) {
       event.preventDefault();
       void handleSubmit();
@@ -456,6 +781,16 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   const textareaClass = isLarge
     ? `w-full resize-none bg-transparent px-4 pt-2.5 pb-2 dark:text-claude-darkText text-claude-text placeholder:dark:text-claude-darkTextSecondary/60 placeholder:text-claude-textSecondary/60 focus:outline-none text-[15px] leading-6 min-h-[${minHeight}px] max-h-[${maxHeight}px]`
     : 'flex-1 resize-none bg-transparent dark:text-claude-darkText text-claude-text placeholder:dark:text-claude-darkTextSecondary placeholder:text-claude-textSecondary focus:outline-none text-sm leading-relaxed min-h-[24px] max-h-[200px]';
+
+  // Claimed-command variant of the large textarea: glyphs transparent (the
+  // backdrop layer paints them), caret keeps a visible accent color.
+  const claimTextareaClass = 'w-full resize-none bg-transparent px-4 pt-2.5 pb-2 placeholder:dark:text-claude-darkTextSecondary/60 placeholder:text-claude-textSecondary/60 focus:outline-none text-[15px] leading-6 text-transparent caret-claude-accent';
+
+  const handleBackdropScrollSync = (event: React.UIEvent<HTMLTextAreaElement>) => {
+    if (backdropRef.current) {
+      backdropRef.current.scrollTop = event.currentTarget.scrollTop;
+    }
+  };
 
   const truncatePath = (path: string, maxLength = 30): string => {
     if (!path) return i18nService.t('noFolderSelected');
@@ -838,26 +1173,78 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             {i18nService.t('coworkDropFileHint')}
           </div>
         )}
+        {commandPickerOpen && (
+          <ComposerCommandPicker
+            commands={filteredCommands}
+            highlightIndex={effectiveCommandHighlight}
+            listboxId={COMMAND_PICKER_ID}
+            onHighlight={setCommandPickerHighlight}
+            onPick={pickCommand}
+          />
+        )}
         {isLarge ? (
           <>
-            <textarea
-              ref={textareaRef}
-              value={value}
-              onChange={(e) => draftFieldRef.current?.set(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              onContextMenu={handleTextareaContextMenu}
-              placeholder={effectivePlaceholder}
-              disabled={disabled || (isStreaming && steerDisabled)}
-              rows={isLarge ? 2 : 1}
-              className={textareaClass}
-              style={{ minHeight: `${minHeight}px` }}
-            />
+            <div className="relative">
+              {/* Mirror-layer command token (DSH port): while a `/name ` claim
+                  is live the textarea's glyphs turn transparent and this
+                  backdrop paints the token in the command color plus the ghost
+                  hint, sharing the textarea's exact metrics. */}
+              {claimActive && claim && (
+                <div
+                  ref={backdropRef}
+                  aria-hidden
+                  data-decoration="command-token"
+                  className="pointer-events-none absolute inset-0 z-10 overflow-hidden px-4 pt-2.5 pb-2 text-[15px] leading-6 whitespace-pre-wrap break-words dark:text-claude-darkText text-claude-text"
+                >
+                  <span className="font-medium text-amber-600 dark:text-amber-400">{claim.token}</span>
+                  {value.slice(claim.token.length)}
+                  {value.slice(claim.token.length) === '' && (
+                    <span className="dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60">
+                      {claim.hint}
+                    </span>
+                  )}
+                </div>
+              )}
+              <textarea
+                ref={textareaRef}
+                value={value}
+                onChange={(e) => draftFieldRef.current?.set(e.target.value)}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                onContextMenu={handleTextareaContextMenu}
+                onScroll={claimActive ? handleBackdropScrollSync : undefined}
+                placeholder={effectivePlaceholder}
+                disabled={disabled || (isStreaming && steerDisabled)}
+                rows={2}
+                className={claimActive ? claimTextareaClass : textareaClass}
+                style={{ minHeight: `${minHeight}px` }}
+                role={commandPickerOpen ? 'combobox' : undefined}
+                aria-expanded={commandPickerOpen || undefined}
+                aria-controls={commandPickerOpen ? COMMAND_PICKER_ID : undefined}
+                aria-autocomplete={commandPickerOpen ? 'list' : undefined}
+                aria-activedescendant={
+                  commandPickerOpen && effectiveCommandHighlight >= 0 && filteredCommands[effectiveCommandHighlight]
+                    ? `${COMMAND_PICKER_ID}-option-${filteredCommands[effectiveCommandHighlight].name}`
+                    : undefined
+                }
+              />
+            </div>
             <div className="flex items-center justify-between px-4 pb-2 pt-1.5">
               <fieldset
                 className="flex items-center gap-2 relative border-0 p-0 m-0 min-w-0"
                 disabled={disabled || isStreaming}
               >
+                <PlusMenuButton
+                  open={plusMenuOpen}
+                  showAttachment={showAttachmentButton}
+                  showCommands={commandsEnabled}
+                  buttonRef={plusButtonRef}
+                  menuRef={plusMenuRef}
+                  onToggle={() => setPlusMenuOpen(!plusMenuOpen)}
+                  onAddAttachment={handlePlusMenuAddAttachment}
+                  onUseSkill={handlePlusMenuUseSkill}
+                  onUseCommand={handlePlusMenuUseCommand}
+                />
                 {showModelSelector && (
                   <ModelEffortPicker
                     dropdownDirection="up"
@@ -866,22 +1253,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                     globalDefaultModel={configService.getConfig().model?.defaultModel ?? null}
                   />
                 )}
-                {showAttachmentButton ? (
-                  <button
-                    type="button"
-                    onClick={handleAddFile}
-                    className="flex items-center justify-center p-1.5 rounded-lg text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
-                    title={i18nService.t('coworkAddFile')}
-                    aria-label={i18nService.t('coworkAddFile')}
-                    disabled={disabled || isStreaming}
-                  >
-                    <PaperClipIcon className="h-4 w-4" />
-                  </button>
-                ) : null}
-                <SkillsButton
-                  onSelectSkill={handleSelectSkill}
-                  onManageSkills={handleManageSkills}
-                />
                 <ActiveSkillBadge />
               </fieldset>
               <div className="flex items-center gap-2">
@@ -932,18 +1303,17 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             />
 
             <div className="flex items-center gap-1">
-              {showAttachmentButton ? (
-                <button
-                  type="button"
-                  onClick={handleAddFile}
-                  className="flex-shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
-                  title={i18nService.t('coworkAddFile')}
-                  aria-label={i18nService.t('coworkAddFile')}
-                  disabled={disabled || isStreaming}
-                >
-                  <PaperClipIcon className="h-4 w-4" />
-                </button>
-              ) : null}
+              <PlusMenuButton
+                open={plusMenuOpen}
+                showAttachment={showAttachmentButton}
+                showCommands={commandsEnabled}
+                buttonRef={plusButtonRef}
+                menuRef={plusMenuRef}
+                onToggle={() => setPlusMenuOpen(!plusMenuOpen)}
+                onAddAttachment={handlePlusMenuAddAttachment}
+                onUseSkill={handlePlusMenuUseSkill}
+                onUseCommand={handlePlusMenuUseCommand}
+              />
             </div>
 
             {showStopButton ? (
@@ -1019,6 +1389,18 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
           )}
         </div>
       )}
+      {commandNotice && (
+        <div className="mt-2 text-xs text-amber-600 dark:text-amber-400" role="status">
+          {commandNotice}
+        </div>
+      )}
+      <SkillsPopover
+        isOpen={skillsMenuOpen}
+        onClose={() => setSkillsMenuOpen(false)}
+        onSelectSkill={handleSelectSkill}
+        onManageSkills={handleManageSkills}
+        anchorRef={plusButtonRef as React.RefObject<HTMLElement>}
+      />
       {showFolderRequiredWarning && (
         <div className="mt-2 text-xs text-red-500 dark:text-red-400">
           {i18nService.t('coworkSelectFolderFirst')}
