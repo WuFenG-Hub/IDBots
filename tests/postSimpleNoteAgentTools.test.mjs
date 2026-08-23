@@ -229,10 +229,18 @@ test('files inside the workspace and metafile URIs never ask for approval', asyn
   assert.equal(calls.upload.length, 1);
 });
 
-test('a symlink inside the workspace pointing outside still asks for approval', async () => {
+test('a symlink inside the workspace pointing outside still asks for approval', async (t) => {
   const secret = makeFixtureFile('id_rsa', 'secret');
   const link = path.join(WORKSPACE, 'innocent.png');
-  fs.symlinkSync(secret, link);
+  try {
+    fs.symlinkSync(secret, link);
+  } catch (error) {
+    if (process.platform === 'win32') {
+      t.skip('file symlinks require admin/developer mode on Windows');
+      return;
+    }
+    throw error;
+  }
   const { calls, byName } = makeHarness({
     workspaceDir: WORKSPACE,
     confirmExternalUpload: async () => false,
