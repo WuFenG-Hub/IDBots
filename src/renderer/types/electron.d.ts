@@ -514,6 +514,12 @@ interface WindowState {
   isFocused: boolean;
 }
 
+import type {
+  KnowledgeBaseInfo,
+  KnowledgeBaseLearnStatusEvent,
+  KnowledgeBaseLearnSummary,
+} from './knowledgeBase';
+
 import type { OfficialSkillItem } from './skill';
 
 interface Skill {
@@ -1107,7 +1113,7 @@ interface IElectronAPI {
   };
   dialog: {
     selectDirectory: () => Promise<{ success: boolean; path: string | null }>;
-    selectFile: (options?: { title?: string; filters?: { name: string; extensions: string[] }[] }) => Promise<{ success: boolean; path: string | null }>;
+    selectFile: (options?: { title?: string; filters?: { name: string; extensions: string[] }[]; multi?: boolean }) => Promise<{ success: boolean; path: string | null; paths?: string[] }>;
     saveInlineFile: (options: { dataBase64: string; fileName?: string; mimeType?: string; cwd?: string }) => Promise<{ success: boolean; path: string | null; error?: string }>;
   };
   shell: {
@@ -1538,6 +1544,16 @@ interface IElectronAPI {
       error?: string;
     }>;
     onStatusChanged: (callback: (payload: { metabotId: number; dreaming: boolean }) => void) => () => void;
+  };
+  knowledgeBase: {
+    list: (metabotId: number) => Promise<{ success: boolean; knowledgeBases?: KnowledgeBaseInfo[]; error?: string }>;
+    create: (metabotId: number, input: { name: string; description?: string; rawDir?: string }) => Promise<{ success: boolean; knowledgeBase?: KnowledgeBaseInfo; error?: string }>;
+    update: (metabotId: number, kbId: string, patch: { name?: string; description?: string; autoLearn?: boolean }) => Promise<{ success: boolean; knowledgeBase?: KnowledgeBaseInfo; error?: string }>;
+    remove: (metabotId: number, kbId: string) => Promise<{ success: boolean; error?: string }>;
+    learn: (metabotId: number, kbId: string, options?: { full?: boolean }) => Promise<{ success: boolean; summary?: KnowledgeBaseLearnSummary; error?: string }>;
+    importFiles: (metabotId: number, kbId: string, filePaths: string[]) => Promise<{ success: boolean; imported?: string[]; skipped?: Array<{ filePath: string; reason: string }>; error?: string }>;
+    openDir: (metabotId: number, kbId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
+    onLearnStatus: (callback: (payload: KnowledgeBaseLearnStatusEvent) => void) => () => void;
   };
   permissions: {
     checkCalendar: () => Promise<{ success: boolean; status?: string; error?: string; autoRequested?: boolean }>;

@@ -5,6 +5,7 @@ import type {
   CoworkSubmitInput,
   CoworkSubmitInputResult,
 } from '../renderer/types/cowork';
+import type { KnowledgeBaseLearnStatusEvent } from '../renderer/types/knowledgeBase';
 
 // 暴露安全的 API 到渲染进程
 contextBridge.exposeInMainWorld('electron', {
@@ -610,7 +611,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
   dialog: {
     selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory'),
-    selectFile: (options?: { title?: string; filters?: { name: string; extensions: string[] }[] }) =>
+    selectFile: (options?: { title?: string; filters?: { name: string; extensions: string[] }[]; multi?: boolean }) =>
       ipcRenderer.invoke('dialog:selectFile', options),
     saveInlineFile: (options: { dataBase64: string; fileName?: string; mimeType?: string; cwd?: string }) =>
       ipcRenderer.invoke('dialog:saveInlineFile', options),
@@ -992,6 +993,24 @@ contextBridge.exposeInMainWorld('electron', {
       const handler = (_event: Electron.IpcRendererEvent, payload: { metabotId: number; dreaming: boolean }) => callback(payload);
       ipcRenderer.on('metabot:dreamStatusChanged', handler);
       return () => ipcRenderer.removeListener('metabot:dreamStatusChanged', handler);
+    },
+  },
+  knowledgeBase: {
+    list: (metabotId: number) => ipcRenderer.invoke('knowledgeBase:list', metabotId),
+    create: (metabotId: number, input: { name: string; description?: string; rawDir?: string }) =>
+      ipcRenderer.invoke('knowledgeBase:create', metabotId, input),
+    update: (metabotId: number, kbId: string, patch: { name?: string; description?: string; autoLearn?: boolean }) =>
+      ipcRenderer.invoke('knowledgeBase:update', metabotId, kbId, patch),
+    remove: (metabotId: number, kbId: string) => ipcRenderer.invoke('knowledgeBase:remove', metabotId, kbId),
+    learn: (metabotId: number, kbId: string, options?: { full?: boolean }) =>
+      ipcRenderer.invoke('knowledgeBase:learn', metabotId, kbId, options),
+    importFiles: (metabotId: number, kbId: string, filePaths: string[]) =>
+      ipcRenderer.invoke('knowledgeBase:importFiles', metabotId, kbId, filePaths),
+    openDir: (metabotId: number, kbId: string) => ipcRenderer.invoke('knowledgeBase:openDir', metabotId, kbId),
+    onLearnStatus: (callback: (payload: KnowledgeBaseLearnStatusEvent) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: KnowledgeBaseLearnStatusEvent) => callback(payload);
+      ipcRenderer.on('knowledgeBase:learnStatus', handler);
+      return () => ipcRenderer.removeListener('knowledgeBase:learnStatus', handler);
     },
   },
   networkStatus: {

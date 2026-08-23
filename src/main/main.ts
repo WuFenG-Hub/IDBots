@@ -219,6 +219,8 @@ import {
 } from './services/cognitiveChatCompletion';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
+import { KnowledgeBaseService } from './services/knowledgeBaseService';
+import { KnowledgeBaseStore } from './knowledgeBaseStore';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
@@ -2595,6 +2597,8 @@ let serviceOrderStore: ServiceOrderStore | null = null;
 let metaidExperienceStore: MetaIDExperienceStore | null = null;
 let metaidImpressionStore: MetaIDImpressionStore | null = null;
 let metaidKnowledgeStore: MetaIDKnowledgeStore | null = null;
+let knowledgeBaseStore: KnowledgeBaseStore | null = null;
+let knowledgeBaseService: KnowledgeBaseService | null = null;
 let serviceOrderLifecycleService: ServiceOrderLifecycleService | null = null;
 let serviceRefundSyncService: ServiceRefundSyncService | null = null;
 let serviceRefundSettlementService: ServiceRefundSettlementService | null = null;
@@ -3033,6 +3037,8 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   metaidExperienceStore = null;
   metaidImpressionStore = null;
   metaidKnowledgeStore = null;
+  knowledgeBaseStore = null;
+  knowledgeBaseService = null;
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
   serviceRefundSettlementService = null;
@@ -3777,6 +3783,11 @@ const startSqliteDaemons = (): void => {
     },
   });
 
+  // Knowledge bases ("知识库"): per-bot document corpora learned into a local
+  // search index. Nightly auto-learn shares the dream window but is LLM-free
+  // and deliberately decoupled from dream gating/success.
+  getKnowledgeBaseService().startAutoLearnSchedule();
+
   // Agent-Game-v2 persistent App/Game Runtime (docs/14). Wire the host once the
   // sqlite stores + group-chat transport are ready. Survives MetaApp close and
   // host restart; reuses the existing LLM / pin-write / group-chat infra.
@@ -3799,6 +3810,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   await stopCognitiveOrchestrator({ waitForTick: true });
   await stopPrivateChatDaemon({ waitForTick: true });
   stopDreamService();
+  knowledgeBaseService?.stopAutoLearnSchedule();
   stopPrivateChatBackfill();
   stopGroupChatBackfill();
   stopGroupTaskDaemon();
@@ -6085,6 +6097,34 @@ const getMetaIDKnowledgeStore = (): MetaIDKnowledgeStore => {
     );
   }
   return metaidKnowledgeStore;
+};
+
+const getKnowledgeBaseStore = (): KnowledgeBaseStore => {
+  if (!knowledgeBaseStore) {
+    const sqliteStore = getStore();
+    knowledgeBaseStore = new KnowledgeBaseStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return knowledgeBaseStore;
+};
+
+const getKnowledgeBaseService = (): KnowledgeBaseService => {
+  if (!knowledgeBaseService) {
+    knowledgeBaseService = new KnowledgeBaseService({
+      store: getKnowledgeBaseStore(),
+      resolveUserDataDir: () => app.getPath('userData'),
+      emitToRenderer: (channel, data) => {
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) {
+            try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
+          }
+        });
+      },
+    });
+  }
+  return knowledgeBaseService;
 };
 
 const captureServiceOrderExperience = (
@@ -10134,6 +10174,94 @@ if (!gotTheLock) {
     });
   });
 
+  // ==================== Knowledge Base IPC Handlers ====================
+
+  ipcMain.handle('knowledgeBase:list', async (_event, metabotId: number) =>
+    withSqliteRecovery('knowledgeBase:list', async () => {
+      try {
+        const knowledgeBases = getKnowledgeBaseService().listKnowledgeBases(Number(metabotId));
+        return { success: true, knowledgeBases };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to list knowledge bases' };
+      }
+    }));
+
+  ipcMain.handle('knowledgeBase:create', async (_event, metabotId: number, input: { name: string; description?: string; rawDir?: string }) =>
+    withSqliteRecovery('knowledgeBase:create', async () => {
+      try {
+        const knowledgeBase = getKnowledgeBaseService().createKnowledgeBase(Number(metabotId), input ?? { name: '' });
+        return { success: true, knowledgeBase };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to create knowledge base' };
+      }
+    }));
+
+  ipcMain.handle('knowledgeBase:update', async (_event, metabotId: number, kbId: string, patch: { name?: string; description?: string; autoLearn?: boolean }) =>
+    withSqliteRecovery('knowledgeBase:update', async () => {
+      try {
+        const knowledgeBase = getKnowledgeBaseService().updateKnowledgeBase(Number(metabotId), String(kbId), patch ?? {});
+        return { success: true, knowledgeBase };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to update knowledge base' };
+      }
+    }));
+
+  ipcMain.handle('knowledgeBase:remove', async (_event, metabotId: number, kbId: string) =>
+    withSqliteRecovery('knowledgeBase:remove', async () => {
+      try {
+        getKnowledgeBaseService().removeKnowledgeBase(Number(metabotId), String(kbId));
+        return { success: true };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to remove knowledge base' };
+      }
+    }));
+
+  ipcMain.handle('knowledgeBase:learn', async (_event, metabotId: number, kbId: string, options?: { full?: boolean }) =>
+    withSqliteRecovery('knowledgeBase:learn', async () => {
+      try {
+        const summary = await getKnowledgeBaseService().learnKnowledgeBase(Number(metabotId), String(kbId), { full: options?.full === true });
+        return { success: true, summary };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to learn knowledge base' };
+      }
+    }));
+
+  ipcMain.handle('knowledgeBase:importFiles', async (_event, metabotId: number, kbId: string, filePaths: string[]) =>
+    withSqliteRecovery('knowledgeBase:importFiles', async () => {
+      try {
+        const { imported, skipped } = getKnowledgeBaseService().importFiles(
+          Number(metabotId),
+          String(kbId),
+          Array.isArray(filePaths) ? filePaths.map((filePath) => String(filePath)) : [],
+        );
+        return { success: true, imported, skipped };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to import files' };
+      }
+    }));
+
+  ipcMain.handle('knowledgeBase:openDir', async (_event, metabotId: number, kbId: string) =>
+    withSqliteRecovery('knowledgeBase:openDir', async () => {
+      try {
+        const record = getKnowledgeBaseService().requireKnowledgeBase(Number(metabotId), String(kbId));
+        fs.mkdirSync(record.rawDir, { recursive: true });
+        const openError = await shell.openPath(record.rawDir);
+        if (openError) {
+          return { success: false, error: openError };
+        }
+        return { success: true, path: record.rawDir };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to open knowledge base directory' };
+      }
+    }));
+
   ipcMain.handle('metabot:checkNameExists', async (_event, options: { name: string; excludeId?: number }) => {
     try {
       const list = getMetabotStore().listMetabots();
@@ -12243,16 +12371,16 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     return { success: true, path: result.filePaths[0] };
   });
 
-  ipcMain.handle('dialog:selectFile', async (_event, options?: { title?: string; filters?: { name: string; extensions: string[] }[] }) => {
+  ipcMain.handle('dialog:selectFile', async (_event, options?: { title?: string; filters?: { name: string; extensions: string[] }[]; multi?: boolean }) => {
     const result = await dialog.showOpenDialog({
-      properties: ['openFile'],
+      properties: options?.multi ? ['openFile', 'multiSelections'] : ['openFile'],
       title: options?.title,
       filters: options?.filters,
     });
     if (result.canceled || result.filePaths.length === 0) {
-      return { success: true, path: null };
+      return { success: true, path: null, paths: [] };
     }
-    return { success: true, path: result.filePaths[0] };
+    return { success: true, path: result.filePaths[0], paths: result.filePaths };
   });
 
   ipcMain.handle(
