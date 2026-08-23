@@ -318,6 +318,8 @@ import {
   getSocialPost as getSocialPostRemote,
   getSocialPostComments as getSocialPostCommentsRemote,
 } from './services/socialRecallService';
+import { searchMetaweb as searchMetawebRemote } from './services/metawebSearchService';
+import { readMetawebPin as readMetawebPinRemote } from './services/metawebPinService';
 import {
   readRendererFromEnvelope,
   resolveMetaAppSourceByRenderUrl,
@@ -5158,6 +5160,25 @@ const getCoworkRunner = () => {
             hasMore: page.hasMore,
             nextCursor: page.nextCursor,
           };
+        },
+      },
+      // MetaWeb learning tool backends (search_metaweb / read_metaweb_pin):
+      // thin pass-throughs to the metaso-p2p /api/metaweb/* aggregation APIs.
+      // IDBOTS_METAWEB_API_BASE_URL overrides the default so.metaid.io base
+      // for staging integration ahead of the production rollout.
+      metawebLearning: {
+        search: async (input) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          const page = await searchMetawebRemote(input, baseUrl ? { baseUrl } : undefined);
+          return {
+            items: page.items,
+            hasMore: page.hasMore,
+            nextCursor: page.nextCursor,
+          };
+        },
+        readPin: async (pinId) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          return readMetawebPinRemote(pinId, baseUrl ? { baseUrl } : undefined);
         },
       },
       // upload_file tool backend. Delegates to the shared uploadMetaFile()

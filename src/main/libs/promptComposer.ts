@@ -53,6 +53,12 @@ export const PROMPT_SECTION_ORDER = {
   /** Memory strategy prose (volatile memory blocks ride the user turn). */
   MEMORY_STRATEGY: 40,
   /**
+   * MetaWeb (Agent Internet) worldview: the external-brain model plus the
+   * search-first / read-pin / cite discipline. Static strategy prose — safe
+   * for the cacheable head.
+   */
+  METAWEB_WORLDVIEW: 42,
+  /**
    * Local-app routing block (`## MetaApps`). Reserved order slot: the
    * MetaApps and Skills blocks are still carried inside the renderer-combined
    * base prompt today, but their relative precedence — MetaApp routing wins

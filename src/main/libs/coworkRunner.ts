@@ -129,6 +129,10 @@ import {
   type SocialRecallControl,
 } from './socialRecallAgentTools';
 import {
+  buildMetawebLearningAgentTools,
+  type MetawebLearningControl,
+} from './metawebLearningAgentTools';
+import {
   buildMetaFileUploadAgentTools,
   type MetaFileUploadControl,
 } from './metaFileUploadAgentTools';
@@ -1537,6 +1541,12 @@ export interface CoworkRunnerOptions {
    */
   socialRecall?: SocialRecallControl;
   /**
+   * When set, every cowork session gets the MetaWeb learning tools
+   * (search_metaweb / read_metaweb_pin) backed by the metaso-p2p
+   * /api/metaweb/* aggregation APIs (main.ts wires the control).
+   */
+  metawebLearning?: MetawebLearningControl;
+  /**
    * When set, every cowork session gets the upload_file tool backed by
    * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
    * on-chain semantics: direct vs chunked mode, MVC sponsor-first direct upload
@@ -1659,6 +1669,7 @@ export class CoworkRunner extends EventEmitter {
   private networkServices?: NetworkServicesControl;
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
+  private metawebLearning?: MetawebLearningControl;
   private metaFileUpload?: MetaFileUploadControl;
   private visionRelay?: VisionRelayControl;
   private mediaTools?: MediaToolsControl;
@@ -1763,6 +1774,7 @@ export class CoworkRunner extends EventEmitter {
     this.networkServices = options?.networkServices;
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
+    this.metawebLearning = options?.metawebLearning;
     this.metaFileUpload = options?.metaFileUpload;
     this.visionRelay = options?.visionRelay;
     this.mediaTools = options?.mediaTools;
@@ -4701,6 +4713,13 @@ export class CoworkRunner extends EventEmitter {
         order: PROMPT_SECTION_ORDER.MEMORY_STRATEGY,
         text: this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy, implicitMemoryUpdateEnabled),
       },
+      // MetaWeb worldview is static strategy prose, safe for the cacheable
+      // head; any per-turn MetaWeb context must ride the volatile tail instead.
+      {
+        name: 'idbots:metaweb-worldview',
+        order: PROMPT_SECTION_ORDER.METAWEB_WORLDVIEW,
+        text: this.buildMetawebWorldviewPrompt(),
+      },
       // Skill routing rules WITHOUT the live catalog (that rides the volatile
       // user-message tail). Null/empty for legacy prompts that still carry
       // their own inline skills block, and for sandbox-planned sessions the
@@ -4708,6 +4727,27 @@ export class CoworkRunner extends EventEmitter {
       { name: 'idbots:skills', order: PROMPT_SECTION_ORDER.SKILLS, text: skillsSection ?? '' },
       { name: 'idbots:base', order: PROMPT_SECTION_ORDER.BASE, text: baseSystemPrompt?.trim() },
     ]);
+  }
+
+  /**
+   * Static MetaWeb (Agent Internet) worldview: MetaWeb as the bot's external
+   * brain, when to search first, the search→select→open→cite workflow, and
+   * the honesty rule. Session-invariant by design — it lives in the cacheable
+   * system-prompt head, and the DSH path inherits it inside the composed
+   * idbots:base section.
+   */
+  private buildMetawebWorldviewPrompt(): string {
+    return [
+      '## MetaWeb — your external brain',
+      '',
+      'MetaWeb (the Agent Internet, built on MetaID) is a shared, public, chain-verified knowledge layer that every bot can read — treat it as an extension of your own disk. It carries tutorials, how-to guides, skill packages, service listings, apps, and experience posts published by other bots, and its coverage keeps growing.',
+      '',
+      'Search first, don\'t guess: when the user\'s request involves something you do not reliably know — IDBots/MetaBot usage, agent skills and how to install them, MetaWeb protocols, "how do I …" tasks, or any topic where fresher authoritative knowledge may exist on-chain — call search_metaweb BEFORE answering from memory. Derive the keywords yourself from the user\'s actual need: never hardcode keyword lists and never ask the user for search terms; mix Chinese and English terms across separate queries when relevant.',
+      '',
+      'Read like a person using a search engine: search_metaweb returns candidates with protocol, title, summary, publisher and pinId. Judge by title and summary, then open the 1–3 most promising pins with read_metaweb_pin (a pinId works for any protocol). If the first pins disappoint, open 1–2 more or search again with broader or narrower keywords.',
+      '',
+      'Ground and cite: answer from what you actually read and cite the pinIds you used so the user can verify. If MetaWeb genuinely has nothing useful, say so honestly and fall back to your own knowledge — never fabricate pins, titles, publishers, or content.',
+    ].join('\n');
   }
 
   /**
@@ -7864,6 +7904,17 @@ export class CoworkRunner extends EventEmitter {
           tool,
           socialRecall: this.socialRecall,
           openBestMatchInBrowser: isBrowserSession,
+        })
+      );
+    }
+    // MetaWeb learning tools (unified cross-protocol search + generic pin
+    // read) carry the same always-on posture as social recall: they are the
+    // bot's window into the Agent Internet knowledge base.
+    if (this.metawebLearning) {
+      memoryTools.push(
+        ...buildMetawebLearningAgentTools({
+          tool,
+          metawebLearning: this.metawebLearning,
         })
       );
     }
