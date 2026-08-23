@@ -1017,6 +1017,9 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('knowledgeBase:learnStatus', handler);
     },
   },
+  metawebStudy: {
+    list: (metabotId: number) => ipcRenderer.invoke('metawebStudy:list', metabotId),
+  },
   networkStatus: {
     send: (status: 'online' | 'offline') => ipcRenderer.send('network:status-change', status),
   },

@@ -25,7 +25,7 @@ The mental model we give the bot: **MetaWeb is one big public computer — an ex
 
 - **S1 — "What is IDBots?"** A brand-new user asks their TwinBot what IDBots can do. The bot combines local knowledge (system prompt, bundled playbooks) with an active MetaWeb search. It derives its own keywords ("IDBots tutorial", "MetaBot beginner", "TwinBot 初始化"), gets back 5–10 results with title/summary/pinId across protocols, opens the 1–3 most promising pins, and answers — following tutorial steps itself where applicable.
 - **S2 — "Learn to make videos."** The bot searches MetaWeb for video-production tutorials and experience posts, follows the guide (e.g. installs the required skill/plugin from an on-chain `metabot-skill` package), verifies the install, records what worked as an experience, and reports to the owner: "I can now make videos."
-- **S3 — "Study game development in your spare time."** During idle/dream time the bot crawls MetaWeb for the topic, distills the articles into a local wiki knowledge base (metabot-create-wiki style), and becomes a domain expert. Publishing the distilled knowledge back on-chain is optional.
+- **S3 — "Study game development in your spare time."** During the nightly idle window the bot crawls MetaWeb for the topic, saves worthwhile pin bodies into its local knowledge base (per-bot corpus, incremental FTS5 index, source-pinId provenance), and becomes a domain expert. Publishing the distilled knowledge back on-chain is optional.
 
 ## 3. Design principles
 
@@ -91,7 +91,7 @@ There is no dedicated tutorial/wiki/experience protocol today, and none is neede
 - **G3 — SimpleNote is not indexed at all** in metaso-p2p, despite being the best knowledge carrier.
 - **G4 — No title/summary projection** for non-note protocols (buzz = body text only), so a unified result list cannot be built without an extraction convention.
 - **G5 — No MetaWeb worldview in the system prompt.** The bot is never told that MetaWeb is its external brain or that it should search-first when it lacks knowledge.
-- **G6 — The wiki distiller can't ingest MetaWeb.** `metabot-create-wiki` absorbs only a local directory; nothing fetches chosen pins into it.
+- **G6 — The wiki distiller can't ingest MetaWeb.** `metabot-create-wiki` absorbs only a local directory; nothing fetches chosen pins into it. → **Closed by the knowledge-base feature (2026-08-23)**: `knowledge_base_add_document` accepts MetaWeb pin bodies with `sourceType: 'metaweb'` + pinId provenance (kept verbatim, `x-kb-source` injected), and the learning loop already instructs bots to save substantial pins into a matching KB. M4 builds the autonomous batch-fetch layer on top of it.
 - **G7 — Experience memory exists but is disconnected from MetaWeb learning** — no structured "experience" record type that captures source pins, steps, and pitfalls from a learning episode.
 
 ## 5. Target architecture
@@ -166,28 +166,42 @@ Scope:
 
 Acceptance: after learning a task once, the bot repeats it later without re-searching MetaWeb, citing its experience record; experiences are inspectable in the knowledge UI.
 
-### M4 — Autonomous study / dreaming (L4)
+### M4 — Autonomous study on the knowledge-base stack (L4)
+
+**Status: implemented 2026-08-23** (branch `feat/metaweb-learning`): `metaweb_study_jobs` queue table + `MetawebStudyService` (nightly [00:00,06:00) scheduler, one bounded background cowork session per job via `runOrchestratorSkillTurn`, hidden from the session list, final ```json report parsed into the job record) + `metaweb_study_enqueue` / `metaweb_study_status` agent tools + three-layer memory division in the learning-loop prompt + read-only study-jobs panel at the bottom of the knowledge-base tab. Jobs span nights (≤budgetPins NEW pins per run) and complete when a run adds nothing new or a 10-run safety cap hits.
+
+**Scope realigned 2026-08-23 with the shipped knowledge-base feature (`feat/knowledge-base`).** The original M4 design (fetch pins into a raw-docs directory, then `metabot-create-wiki` absorb/index) is superseded: per-bot knowledge bases are the distillation target — strictly better (per-bot registry, incremental FTS5 index, bot-facing tools, built-in pin provenance) and already built. What remains for M4 is the autonomous trigger + execution layer.
+
+Locked decisions (owner, 2026-08-23):
+
+1. **Trigger: owner-assigned topics only.** "Study game development in your spare time" enqueues a job. Bot-self-derived topics are M5 scope — owner guidance: derive them from the bot's role/persona (角色人设).
+2. **No proactive morning report.** Owners with many bots would get spammed in cowork. Instead: (a) the bot can truthfully answer "what have you been learning?" from the jobs record; (b) a learning-jobs entry near the knowledge-base UI for users who want to look.
+3. **Budget: 20 pins per topic per night** (default cap).
 
 **Goal**: "study topic X in your spare time" → the bot becomes a local domain expert.
 
 Scope:
 
-- Study jobs: scheduled-task/dream infrastructure triggers a bounded study run (budget: N searches, M pin reads, token cap).
-- Ingest bridge (closes G6): fetch chosen pins (note/buzz/markdown metafile, resolving `metafile://`) into a local raw-docs directory, then `metabot-create-wiki` absorb → index → query produces a per-topic wiki skill registered in the bot's skill roots.
-- Provenance: the wiki records source pinIds per distilled unit; re-study refreshes incrementally.
-- Optional publish: distilled wiki snapshot back on-chain (wiki skill already supports ZIP + snapshot publish).
+- **Study-job queue**: new per-bot table (topic, status, processed pinIds, budget, result summary, timestamps), idempotent migration per database-upgrade-safety rules.
+- **Bot tools**: enqueue a study topic (when the owner asks), and query study status/history so the bot answers learning questions truthfully — this replaces the proactive report.
+- **Nightly study run**: inside the KB auto-learn window ([00:00,06:00)), a bounded background cowork session per pending job runs the learning loop at scale: batch `search_metaweb` → `read_metaweb_pin` → `knowledge_base_add_document` (sourceType `metaweb` + pinId) → `knowledge_base_learn`. Dedupe via the job's processed pinIds (`addDocument`'s content-hash filenames make re-saves idempotent anyway); a result summary is recorded on the job.
+- **Three-layer memory division, written into the prompts**: full pin bodies / tutorials → knowledge base (`knowledge_base_add_document`); how-to-get-it-done steps → `procedure_save`; noun/concept facts → `knowledge_upsert`. The learning-loop section already seeds this (steps 6–7); M4 sharpens the criteria.
+- **UI**: a learning-jobs list entry adjacent to the knowledge-base tab (read-only status view).
+- Deferred: publishing a distilled KB snapshot on-chain (SimpleNote); dream-side procedure consolidation (parked from M3) stays parked unless it lands naturally with the nightly run.
 
-Acceptance: after "study game development tonight", the bot answers domain questions from its local wiki (offline, no search), and can name the source pins.
+Acceptance: after "study game development tonight", the bot answers domain questions from its knowledge base (offline, no search), cites source pins via KB citations, and can recount what it studied and when when the owner asks.
 
 ### M5 — Reputation & ranking signals (future)
 
 Fold `skill-service-rate` and publisher track record into search ranking; surface publisher reputation in results; let bots rate content they used. Backend ranking change + IDBots display/tooling; no protocol changes required by design (P6).
 
+Also queued here: **self-derived study topics** — the bot proposes/enqueues its own study jobs from its role/persona (角色人设) and recent tasks (owner guidance 2026-08-23); M4 ships owner-assigned topics only.
+
 ## 7. Cross-project work split
 
 | Project | Work |
 |---|---|
-| IDBots (this repo) | M1 tools + services + worldview prompt; M2 learning loop + approval policy; M3 experience store/tools; M4 study jobs + ingest bridge |
+| IDBots (this repo) | M1 tools + services + worldview prompt; M2 learning loop + approval policy; M3 experience store/tools; M4 study-job queue + nightly study runs on the knowledge-base stack |
 | metaso-p2p (backend) | Unified search API, SimpleNote indexing + backfill, generic pin endpoint — per `docs/metaweb-search-backend-requirements.md` |
 | open-agent-connect / metabot CLI (optional) | machine-first `pin get --pin-id` so OAC-side agents share the same search→fetch path |
 | Content workstream (separate bots) | Seed and maintain tutorials/knowledge per §8 conventions |

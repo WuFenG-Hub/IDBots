@@ -310,3 +310,6 @@ man_base_data_pebble/
 !tests/knowledgeBaseIndexStore.test.mjs
 !tests/knowledgeBaseService.test.mjs
 !tests/knowledgeBaseAgentTools.test.mjs
+!tests/metawebStudyJobStore.test.mjs
+!tests/metawebStudyService.test.mjs
+!tests/procedureRecall.test.mjs

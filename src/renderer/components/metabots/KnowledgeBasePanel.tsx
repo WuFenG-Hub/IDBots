@@ -27,6 +27,7 @@ import {
 import { i18nService } from '../../services/i18n';
 import type { KnowledgeBaseInfo, KnowledgeBaseLearnSummary } from '../../types/knowledgeBase';
 import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
+import MetawebStudyJobsPanel from './MetawebStudyJobsPanel';
 
 interface KnowledgeBasePanelProps {
   metabotId: number;
@@ -665,6 +666,9 @@ const KnowledgeBasePanel: React.FC<KnowledgeBasePanelProps> = ({ metabotId }) =>
       ) : (
         knowledgeBases.map(renderCard)
       )}
+
+      {/* M4 autonomous study jobs ("自主学习"): read-only status view. */}
+      <MetawebStudyJobsPanel metabotId={metabotId} />
     </div>
   );
 };

@@ -17,6 +17,7 @@ import { ensureMetaIDImpressionSchema } from './metaidImpressionStore';
 import { ensureMetaIDMemoryGrantSchema } from './metaidMemoryGrantStore';
 import { ensureMetaIDKnowledgeSchema } from './metaidKnowledgeStore';
 import { ensureKnowledgeBaseSchema } from './knowledgeBaseStore';
+import { ensureMetawebStudyJobSchema } from './metawebStudyJobStore';
 
 type ChangePayload<T = unknown> = {
   key: string;
@@ -2127,6 +2128,9 @@ export class SqliteStore {
     // The corpus files and derived search index live on the filesystem; this is
     // only the registry. Same idempotent pattern.
     ensureKnowledgeBaseSchema(this.db);
+    // MetaWeb study jobs ("自主学习任务"): the M4 owner-assigned study-topic
+    // queue drained by nightly bounded background sessions. Same pattern.
+    ensureMetawebStudyJobSchema(this.db);
 
     this.save();
   }

@@ -149,6 +149,10 @@ import {
   type KnowledgeBasePromptRecord,
 } from './knowledgeBasePromptBlocks';
 import {
+  buildMetawebStudyAgentTools,
+  type MetawebStudyControl,
+} from './metawebStudyAgentTools';
+import {
   buildMetaFileUploadAgentTools,
   type MetaFileUploadControl,
 } from './metaFileUploadAgentTools';
@@ -1603,6 +1607,14 @@ export interface CoworkRunnerOptions {
    */
   knowledgeBase?: KnowledgeBaseControl;
   /**
+   * When set, every cowork session gets the MetaWeb study-job tools
+   * (metaweb_study_enqueue / metaweb_study_status) backed by the
+   * MetawebStudyService queue (services/metawebStudyService.ts; main.ts wires
+   * the control). The nightly runs themselves are driven by that service, not
+   * by these tools.
+   */
+  metawebStudy?: MetawebStudyControl;
+  /**
    * When set, every cowork session gets the upload_file tool backed by
    * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
    * on-chain semantics: direct vs chunked mode, MVC sponsor-first direct upload
@@ -1728,6 +1740,7 @@ export class CoworkRunner extends EventEmitter {
   private socialRecall?: SocialRecallControl;
   private metawebLearning?: MetawebLearningControl;
   private knowledgeBase?: KnowledgeBaseControl;
+  private metawebStudy?: MetawebStudyControl;
   private metaFileUpload?: MetaFileUploadControl;
   private visionRelay?: VisionRelayControl;
   private mediaTools?: MediaToolsControl;
@@ -1834,6 +1847,7 @@ export class CoworkRunner extends EventEmitter {
     this.socialRecall = options?.socialRecall;
     this.metawebLearning = options?.metawebLearning;
     this.knowledgeBase = options?.knowledgeBase;
+    this.metawebStudy = options?.metawebStudy;
     this.metaFileUpload = options?.metaFileUpload;
     this.visionRelay = options?.visionRelay;
     this.mediaTools = options?.mediaTools;
@@ -4978,6 +4992,14 @@ export class CoworkRunner extends EventEmitter {
       '5. Report back to the owner: what you learned, which pins guided you (cite them as pin:// markdown links), and what you installed.',
       '6. Save what you learned with procedure_save (trigger = when this task recurs, steps = what worked, pitfalls = what backfired, sourcePinIds = the pins that guided you) so you never have to relearn the same task — next time procedure_recall or your hot memory will hand you the workflow directly. Single-fact lessons belong to knowledge_upsert instead.',
       '7. When a pin you read carries substantial tutorial or reference content worth keeping long-term, save its body into a matching knowledge base with knowledge_base_add_document (sourceType \'metaweb\' with the pinId; use the default knowledge base when no topical one exists).',
+      '',
+      'Where learned things live — pick exactly one home per lesson:',
+      '- Full tutorial or reference bodies (articles, guides, long documentation) → your knowledge bases (knowledge_base_add_document). This is the corpus you later citation-search with knowledge_base_query.',
+      '- Repeatable how-to workflows (the steps that got a task done, with pitfalls) → procedure_save. Recall them with procedure_recall when a similar task recurs.',
+      '- Single facts, names, concepts, one-line lessons → knowledge_upsert.',
+      'Never store the same lesson in two layers: distill into procedure_save / knowledge_upsert what you already archived in full into a knowledge base.',
+      '',
+      'Autonomous study jobs: when the owner asks you to learn or research a topic in your spare time (not right now), queue it with metaweb_study_enqueue — a bounded background session studies it on MetaWeb during the nightly window and feeds your knowledge bases. When the owner asks what you have been studying or learning, answer from metaweb_study_status and knowledge_base_query — report what the records actually say; never claim you studied something you did not.',
     ].join('\n');
   }
 
@@ -7944,7 +7966,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'procedure_recall',
-          'Recall YOUR OWN reusable procedures (经验) — proven task workflows with triggers, ordered steps and pitfalls from your past work. query keyword-searches title+trigger+steps; category filters a grouping; limit caps the count (1-50). Use BEFORE starting a task that resembles past work: if a procedure matches, follow its steps directly instead of re-searching MetaWeb. Not for single facts (knowledge_recall) or day logs (experience_recall). An empty result means you have no procedure for this yet — complete the task, then save one with procedure_save.',
+          'Recall YOUR OWN reusable procedures (经验) — proven task workflows with triggers, ordered steps and pitfalls from your past work. query matches title+trigger+steps by term coverage — pass several natural keywords at once (e.g. "MetaWeb 安装 技能" or colloquial "装技能"); entries containing any of the query\'s content terms rank in, title hits first. category filters a grouping; limit caps the count (1-50). Use BEFORE starting a task that resembles past work: if a procedure matches, follow its steps directly instead of re-searching MetaWeb. Not for single facts (knowledge_recall) or day logs (experience_recall). An empty result means you have no procedure for this yet — complete the task, then save one with procedure_save.',
           {
             query: z.string().optional(),
             category: z.string().optional(),
@@ -7962,7 +7984,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'procedure_save',
-          'Save or update ONE reusable procedure (经验) — a proven way to GET A TASK DONE, heavier than a knowledge point, lighter than a skill, with no script dependency. title names the task capability so it can be found again; trigger says WHEN to use it ("when the user asks to …"); steps is the ordered checklist that worked; pitfalls lists what backfired; sourcePinIds records the MetaWeb pins this was learned from (provenance). Reusing an existing title REWRITES it (version bump) — do not create near-duplicates. Use after completing a task that is likely to recur — especially after following a MetaWeb tutorial. Not for single facts (knowledge_upsert), user facts (memory_user_edits), or day logs (experience_recall). Returns the saved title with its new version.',
+          'Save or update ONE reusable procedure (经验) — a proven way to GET A TASK DONE, heavier than a knowledge point, lighter than a skill, with no script dependency. title names the task capability so it can be found again; trigger says WHEN to use it ("when the user asks to …"); steps is the ordered checklist that worked; pitfalls lists what backfired; sourcePinIds records the MetaWeb pins this was learned from (provenance). BEFORE saving, procedure_recall the topic: if a same-topic procedure already exists, reuse its EXACT title so this save rewrites that entry (version bump) instead of stacking a near-duplicate. Use after completing a task that is likely to recur — especially after following a MetaWeb tutorial. Not for single facts (knowledge_upsert), user facts (memory_user_edits), or day logs (experience_recall). Returns the saved title with its new version.',
           {
             title: z.string().min(1),
             trigger: z.string().min(1),
@@ -8293,6 +8315,21 @@ export class CoworkRunner extends EventEmitter {
         ...buildKnowledgeBaseAgentTools({
           tool,
           knowledgeBase: this.knowledgeBase,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
+        })
+      );
+    }
+    // MetaWeb study jobs ("自主学习任务", M4): the owner assigns a topic in
+    // chat (metaweb_study_enqueue); the nightly runs are driven by
+    // MetawebStudyService, and metaweb_study_status is how the bot answers
+    // "what have you been learning" — the deliberate substitute for a
+    // proactive morning report. Same strict session attribution as above.
+    if (this.metawebStudy) {
+      memoryTools.push(
+        ...buildMetawebStudyAgentTools({
+          tool,
+          metawebStudy: this.metawebStudy,
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })

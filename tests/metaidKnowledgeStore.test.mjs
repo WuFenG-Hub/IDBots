@@ -20,6 +20,7 @@ try {
 
 const KNOWLEDGE_TABLES = [
   'metaid_knowledge_entries',
+  'metaid_knowledge_procedures',
   'metaid_knowledge_revisions',
   'metaid_knowledge_sources',
 ];
