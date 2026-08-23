@@ -5193,6 +5193,11 @@ const getCoworkRunner = () => {
           return readMetawebPinRemote(pinId, baseUrl ? { baseUrl } : undefined);
         },
       },
+      // knowledge_base_* tool backends: the built-in per-bot knowledge base
+      // service (registry + incremental learn + citation query + document
+      // inbox). The service instance matches the KnowledgeBaseControl shape
+      // method-for-method.
+      knowledgeBase: getKnowledgeBaseService(),
       // upload_file tool backend. Delegates to the shared uploadMetaFile()
       // service so the tool, the RPC endpoint, and the IPC handlers all share
       // one on-chain path (direct/chunked, MVC sponsor-first with self-paid
