@@ -602,7 +602,9 @@ const PROCEDURE_QUERY_MAX_TERMS = 12;
  * when ANY precision term appears in its title/trigger/steps, and ranking
  * favors title hits over trigger over steps (3/2/1 per matched term,
  * normalized to [0,1]). Input order is recency, so ties stay recent-first
- * (Array.sort is stable).
+ * (Array.sort is stable). Single-character fallback (no ≥2-char term at all)
+ * matches TITLES only — one common CJK char appears in almost every steps
+ * text, which would otherwise recall nearly the whole library.
  */
 function scoreProceduresForQuery(
   entries: MetaIDProcedureEntry[],
@@ -612,6 +614,7 @@ function scoreProceduresForQuery(
   const specific = tokens.filter((token) => token.length >= 2);
   const terms = (specific.length > 0 ? specific : tokens).slice(0, PROCEDURE_QUERY_MAX_TERMS);
   if (terms.length === 0) return entries;
+  const titleOnly = specific.length === 0;
   const scored: Array<{ entry: MetaIDProcedureEntry; score: number }> = [];
   for (const entry of entries) {
     const title = entry.title.toLowerCase();
@@ -620,8 +623,8 @@ function scoreProceduresForQuery(
     let raw = 0;
     for (const term of terms) {
       if (title.includes(term)) raw += 3;
-      else if (trigger.includes(term)) raw += 2;
-      else if (steps.includes(term)) raw += 1;
+      else if (!titleOnly && trigger.includes(term)) raw += 2;
+      else if (!titleOnly && steps.includes(term)) raw += 1;
     }
     if (raw > 0) scored.push({ entry, score: raw / (3 * terms.length) });
   }
@@ -1115,6 +1118,29 @@ export class MetaIDKnowledgeStore {
       [asText(id)],
     );
     return row ? rowToProcedure(row) : null;
+  }
+
+  /**
+   * Retire an active procedure by exact title (fingerprint match). The record
+   * is kept (status='archived') so recall/hot layers stop surfacing it while
+   * history stays inspectable — the lifecycle counterpart to upsert.
+   */
+  archiveProcedureByTitle(metabotId: number, title: string): MetaIDProcedureEntry | null {
+    const id = asInteger(metabotId);
+    const titleText = asText(title);
+    if (!id || !titleText) return null;
+    const row = this.getOne<ProcedureRow>(
+      `SELECT * FROM metaid_knowledge_procedures
+       WHERE metabot_id = ? AND title_fingerprint = ? AND status = 'active' LIMIT 1`,
+      [id, topicFingerprintOf(titleText)],
+    );
+    if (!row) return null;
+    this.db.run(
+      `UPDATE metaid_knowledge_procedures SET status = 'archived', updated_at = ? WHERE id = ?`,
+      [this.now(), row.id],
+    );
+    this.saveDb();
+    return this.getProcedure(row.id);
   }
 
   /** Keyword search across title + trigger + steps for the recall tool / hot layer. */

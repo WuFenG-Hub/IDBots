@@ -57,6 +57,11 @@ export interface RunOrchestratorSkillTurnParams {
   /** Background delegation may opt into a bounded permission mode. */
   autoApprove?: boolean;
   disableMemoryUpdates?: boolean;
+  /**
+   * M4 nightly study session: restricts the inline tool surface to the
+   * learning allowlist and hard-caps metaweb-source KB adds at pinBudget.
+   */
+  metawebStudySession?: { pinBudget: number };
   permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   /** Overrides the skill-turn watchdog timeout (ms). Defaults to 300s. */
   skillTurnTimeoutMs?: number;
@@ -175,6 +180,7 @@ export async function runOrchestratorSkillTurn(
     autoApprove = true,
     disableMemoryUpdates = true,
     permissionMode = 'default',
+    metawebStudySession,
   } = params;
 
   const now = Date.now();
@@ -382,6 +388,7 @@ export async function runOrchestratorSkillTurn(
         disableMemoryUpdates,
         disableRemoteServicesPrompt,
         permissionMode,
+        metawebStudySession,
         confirmationMode: 'text',
         workspaceRoot: cwd,
       })

@@ -129,10 +129,20 @@ async function fetchApiData(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetchImpl(url, {
-      signal: controller.signal,
-      headers: { accept: 'application/json' },
-    });
+    let response: Response;
+    try {
+      response = await fetchImpl(url, {
+        signal: controller.signal,
+        headers: { accept: 'application/json' },
+      });
+    } catch (error) {
+      // Map the raw AbortError to an actionable timeout message — the model
+      // sees this text verbatim in the tool result.
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(`MetaWeb search API timed out after ${Math.round(timeoutMs / 1000)}s — try again, or narrow the query.`);
+      }
+      throw error;
+    }
     const body = await response.json().catch(() => null) as Record<string, unknown> | null;
     if (!body || typeof body !== 'object') {
       throw new Error(`MetaWeb search API returned an invalid response (HTTP ${response.status}).`);

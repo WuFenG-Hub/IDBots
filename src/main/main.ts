@@ -6192,9 +6192,13 @@ const getMetawebStudyService = (): MetawebStudyService => {
           // Unattended: no owner is watching (any stray prompt auto-rejects in
           // 60s). Memory updates stay ENABLED on purpose — disableMemoryUpdates
           // would strip procedure_save from the session's tools.
+          // metawebStudySession restricts the tool surface to the learning
+          // allowlist (no on-chain writes / installs / social / file tools are
+          // registered at all) and hard-caps metaweb-source KB adds at budget.
           autoApprove: true,
           permissionMode: 'acceptEdits',
           disableMemoryUpdates: false,
+          metawebStudySession: { pinBudget: job.budgetPins },
           // Study runs read up to ~20 pins; the 300s delegation default is far
           // too small. On timeout the job records failed while the session may
           // still finish in the background — its KB saves are never lost.

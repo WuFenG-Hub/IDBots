@@ -1,5 +1,6 @@
 import {
   DEFAULT_STUDY_PIN_BUDGET_PER_NIGHT,
+  MAX_STUDY_CONSECUTIVE_FAILURES,
   MAX_STUDY_RUNS_PER_JOB,
   MetawebStudyJobStore,
   normalizeStudyTopic,
@@ -43,8 +44,10 @@ export interface MetawebStudyRunResult {
 
 /**
  * Host hook (main.ts) that runs ONE bounded background study session for the
- * job and resolves with what it saved. Implementations must enforce the
- * job's pin budget and never prompt the user (unattended).
+ * job and resolves with what it saved. Implementations must be unattended
+ * (no user prompts) and pass the job's pin budget through
+ * `metawebStudySession: { pinBudget }` so coworkRunner restricts the session
+ * to the learning tool allowlist and hard-caps metaweb-source KB adds.
  */
 export type MetawebStudyRunHook = (job: MetawebStudyJobRecord) => Promise<MetawebStudyRunResult>;
 
@@ -140,6 +143,8 @@ export class MetawebStudyService {
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Runs are serialized globally — one background study session at a time. */
   private running = false;
+  /** Job currently running in THIS process (null when idle) — see startSchedule. */
+  private runningJobId: string | null = null;
 
   constructor(deps: MetawebStudyServiceDeps) {
     this.store = deps.store;
@@ -170,6 +175,7 @@ export class MetawebStudyService {
       budgetPins,
       processedPinIds: [],
       runCount: 0,
+      consecutiveFailures: 0,
       lastRunAt: null,
       lastRunSummary: null,
       lastError: null,
@@ -187,7 +193,10 @@ export class MetawebStudyService {
   startSchedule(): void {
     if (this.timer) return;
     // Crash recovery: a process killed mid-run leaves 'running' rows behind.
-    this.store.resetRunningToPending(this.now().toISOString());
+    // A job still running in THIS process (sqlite recovery restarts the
+    // schedule while its session lives on) is excluded — resetting it would
+    // start a duplicate study session.
+    this.store.resetRunningToPending(this.now().toISOString(), this.runningJobId ?? undefined);
     // First tick immediately (no-op outside the window) so a job queued just
     // before the window, or an app restart inside it, does not wait 30min.
     void this.runTick().catch(() => undefined);
@@ -207,7 +216,10 @@ export class MetawebStudyService {
    * Drain the pending queue inside the nightly window, one job at a time.
    * Jobs whose run ends still finding new material go back to 'pending' and
    * continue the next night; a run that saved nothing new (or hit the run
-   * cap) completes the job.
+   * cap) completes the job. Failures are retryable: the job stays 'pending'
+   * until MAX_STUDY_CONSECUTIVE_FAILURES failures in a row, then 'failed'.
+   * One job's bookkeeping error must never kill the batch — it is logged and
+   * the drain continues with the next job.
    */
   async runTick(): Promise<{ ran: number }> {
     if (this.running) return { ran: 0 };
@@ -216,9 +228,9 @@ export class MetawebStudyService {
     for (const job of this.store.listPending()) {
       if (!inStudyWindow(this.now())) break;
       this.running = true;
-      const nowIso = this.now().toISOString();
-      this.store.markRunning(job.id, nowIso);
+      this.runningJobId = job.id;
       try {
+        this.store.markRunning(job.id, this.now().toISOString());
         const result = await this.runStudyJob(this.store.getById(job.id) ?? job);
         const merged = [...new Set([...job.processedPinIds, ...result.newPinIds])];
         const newCount = merged.length - job.processedPinIds.length;
@@ -232,20 +244,32 @@ export class MetawebStudyService {
         this.store.recordRun(job.id, {
           nextStatus,
           processedPinIds: merged,
+          consecutiveFailures: 0,
           summary,
           error: null,
           nowIso: this.now().toISOString(),
         });
       } catch (error) {
-        this.store.recordRun(job.id, {
-          nextStatus: 'failed',
-          processedPinIds: job.processedPinIds,
-          summary: null,
-          error: truncateMiddle(error instanceof Error ? error.message : String(error), 500),
-          nowIso: this.now().toISOString(),
-        });
+        const message = truncateMiddle(error instanceof Error ? error.message : String(error), 500);
+        try {
+          const consecutiveFailures = job.consecutiveFailures + 1;
+          this.store.recordRun(job.id, {
+            nextStatus: consecutiveFailures >= MAX_STUDY_CONSECUTIVE_FAILURES ? 'failed' : 'pending',
+            processedPinIds: job.processedPinIds,
+            consecutiveFailures,
+            summary: null,
+            error: message,
+            nowIso: this.now().toISOString(),
+          });
+        } catch (bookkeepingError) {
+          // The store itself is unhealthy (e.g. mid sqlite recovery) — log and
+          // move on; the job stays pending and is retried on a later tick.
+          console.error('[MetawebStudy] failed to record study run outcome:', bookkeepingError instanceof Error ? bookkeepingError.message : String(bookkeepingError));
+        }
+        console.error('[MetawebStudy] study run failed:', message);
       } finally {
         this.running = false;
+        this.runningJobId = null;
       }
       ran += 1;
     }

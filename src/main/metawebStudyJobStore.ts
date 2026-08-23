@@ -23,6 +23,8 @@ export type MetawebStudyJobStatus = 'pending' | 'running' | 'done' | 'failed';
 export const DEFAULT_STUDY_PIN_BUDGET_PER_NIGHT = 20;
 /** Safety bound so a topic with an ever-growing corpus cannot run forever. */
 export const MAX_STUDY_RUNS_PER_JOB = 10;
+/** A failing job stays pending (retried next nights) until this many consecutive failures. */
+export const MAX_STUDY_CONSECUTIVE_FAILURES = 3;
 const MAX_TOPIC_CHARS = 200;
 
 export interface MetawebStudyJobRecord {
@@ -34,6 +36,7 @@ export interface MetawebStudyJobRecord {
   budgetPins: number;
   processedPinIds: string[];
   runCount: number;
+  consecutiveFailures: number;
   lastRunAt: string | null;
   lastRunSummary: string | null;
   lastError: string | null;
@@ -50,6 +53,7 @@ interface MetawebStudyJobRow {
   budget_pins: number;
   processed_pin_ids: string;
   run_count: number;
+  consecutive_failures: number;
   last_run_at: string | null;
   last_run_summary: string | null;
   last_error: string | null;
@@ -85,6 +89,7 @@ const rowToRecord = (row: MetawebStudyJobRow): MetawebStudyJobRecord => ({
   budgetPins: Number(row.budget_pins) || DEFAULT_STUDY_PIN_BUDGET_PER_NIGHT,
   processedPinIds: parsePinIds(row.processed_pin_ids),
   runCount: Number(row.run_count) || 0,
+  consecutiveFailures: Number(row.consecutive_failures) || 0,
   lastRunAt: row.last_run_at || null,
   lastRunSummary: row.last_run_summary || null,
   lastError: row.last_error || null,
@@ -105,6 +110,7 @@ export function ensureMetawebStudyJobSchema(db: Database): void {
       budget_pins INTEGER NOT NULL DEFAULT ${DEFAULT_STUDY_PIN_BUDGET_PER_NIGHT},
       processed_pin_ids TEXT NOT NULL DEFAULT '[]',
       run_count INTEGER NOT NULL DEFAULT 0,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
       last_run_at TEXT,
       last_run_summary TEXT,
       last_error TEXT,
@@ -120,6 +126,13 @@ export function ensureMetawebStudyJobSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_metaweb_study_jobs_runnable
       ON metaweb_study_jobs(status, created_at);
   `);
+  // Additive migration for databases created before consecutive_failures
+  // existed (CREATE TABLE IF NOT EXISTS is a no-op there).
+  const columns = db.exec('PRAGMA table_info(metaweb_study_jobs)')[0]?.values ?? [];
+  const names = columns.map((row) => String(row[1]));
+  if (!names.includes('consecutive_failures')) {
+    db.run('ALTER TABLE metaweb_study_jobs ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0');
+  }
 }
 
 export class MetawebStudyJobStore {
@@ -150,9 +163,9 @@ export class MetawebStudyJobStore {
     this.db.run(
       `INSERT INTO metaweb_study_jobs
         (id, metabot_id, topic, topic_fingerprint, status, budget_pins,
-         processed_pin_ids, run_count, last_run_at, last_run_summary, last_error,
+         processed_pin_ids, run_count, consecutive_failures, last_run_at, last_run_summary, last_error,
          created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         record.id,
         record.metabotId,
@@ -162,6 +175,7 @@ export class MetawebStudyJobStore {
         record.budgetPins,
         JSON.stringify(record.processedPinIds),
         record.runCount,
+        record.consecutiveFailures,
         record.lastRunAt,
         record.lastRunSummary,
         record.lastError,
@@ -216,15 +230,18 @@ export class MetawebStudyJobStore {
 
   /**
    * Record one finished nightly run. `nextStatus` is 'pending' when the job
-   * continues tomorrow night, 'done' when the corpus gave nothing new or the
-   * run cap hit, 'failed' on error. `processedPinIds` is the full cumulative
-   * list (the service merges, the store just persists).
+   * continues tomorrow night (including retryable failures below the
+   * consecutive-failure threshold), 'done' when the corpus gave nothing new
+   * or the run cap hit, 'failed' after too many consecutive failures.
+   * `processedPinIds` is the full cumulative list (the service merges, the
+   * store just persists).
    */
   recordRun(
     id: string,
     outcome: {
       nextStatus: MetawebStudyJobStatus;
       processedPinIds: string[];
+      consecutiveFailures: number;
       summary: string | null;
       error: string | null;
       nowIso: string;
@@ -233,11 +250,13 @@ export class MetawebStudyJobStore {
     this.db.run(
       `UPDATE metaweb_study_jobs
        SET status = ?, processed_pin_ids = ?, run_count = run_count + 1,
+           consecutive_failures = ?,
            last_run_at = ?, last_run_summary = ?, last_error = ?, updated_at = ?
        WHERE id = ?`,
       [
         outcome.nextStatus,
         JSON.stringify(outcome.processedPinIds),
+        outcome.consecutiveFailures,
         outcome.nowIso,
         outcome.summary,
         outcome.error,
@@ -248,12 +267,24 @@ export class MetawebStudyJobStore {
     this.saveDb();
   }
 
-  /** Crash recovery: a job left 'running' by a killed process becomes pending again. */
-  resetRunningToPending(nowIso: string): number {
-    this.db.run(
-      `UPDATE metaweb_study_jobs SET status = 'pending', updated_at = ? WHERE status = 'running'`,
-      [nowIso],
-    );
+  /**
+   * Crash recovery: a job left 'running' by a killed process becomes pending
+   * again. `excludeId` protects a job that is still running IN THIS PROCESS
+   * (sqlite recovery restarts the schedule while an in-flight run lives on) —
+   * resetting it would start a duplicate session.
+   */
+  resetRunningToPending(nowIso: string, excludeId?: string): number {
+    if (excludeId) {
+      this.db.run(
+        `UPDATE metaweb_study_jobs SET status = 'pending', updated_at = ? WHERE status = 'running' AND id <> ?`,
+        [nowIso, excludeId],
+      );
+    } else {
+      this.db.run(
+        `UPDATE metaweb_study_jobs SET status = 'pending', updated_at = ? WHERE status = 'running'`,
+        [nowIso],
+      );
+    }
     this.saveDb();
     return this.db.getRowsModified?.() ?? 0;
   }
