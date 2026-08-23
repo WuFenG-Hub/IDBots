@@ -5,7 +5,12 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 function loadProviderDiscoveryService() {
-  return require('../dist-electron/services/providerDiscoveryService.js');
+  try {
+    return require('../dist-electron/main/services/providerDiscoveryService.js');
+  } catch (error) {
+    if (error.code !== 'MODULE_NOT_FOUND') throw error;
+    return require('../dist-electron/services/providerDiscoveryService.js');
+  }
 }
 
 function createPresenceStub(statuses = {}, options = {}) {
@@ -275,4 +280,60 @@ test('ProviderDiscoveryService waitForRefresh waits for an active refresh', asyn
 
   assert.equal(waitSettled, true);
   assert.equal(service.getDiscoverySnapshot().availableServices.length, 1);
+});
+
+test('refreshNowIfStale skips a network refresh when the snapshot is younger than 10s', async () => {
+  const { DISCOVERY_SNAPSHOT_MIN_AGE_MS, ProviderDiscoveryService } = loadProviderDiscoveryService();
+  let nowMs = 200_000;
+  const presence = createPresenceStub({
+    idq1providera: { isOnline: true, lastSeenAt: 171000, deviceCount: 1 },
+  });
+  const service = new ProviderDiscoveryService({
+    presence,
+    now: () => nowMs,
+  });
+  service.startPolling(() => [
+    { providerGlobalMetaId: 'idq1providera', providerAddress: 'mvc-a', serviceName: 'alpha' },
+  ]);
+  await service.refreshNow();
+  const afterFirst = presence.statusCalls.length;
+
+  nowMs += DISCOVERY_SNAPSHOT_MIN_AGE_MS - 1;
+  const refreshed = await service.refreshNowIfStale();
+  assert.equal(refreshed, false);
+  assert.equal(presence.statusCalls.length, afterFirst);
+  service.dispose();
+});
+
+test('refreshNowIfStale refreshes when the snapshot is missing or at least 10s old', async () => {
+  const { DISCOVERY_SNAPSHOT_MIN_AGE_MS, ProviderDiscoveryService } = loadProviderDiscoveryService();
+  let nowMs = 200_000;
+  const presence = createPresenceStub({
+    idq1providera: { isOnline: true, lastSeenAt: 171000, deviceCount: 1 },
+  });
+  const neverRefreshed = new ProviderDiscoveryService({
+    presence,
+    now: () => nowMs,
+  });
+  assert.equal(neverRefreshed.getLastRefreshAtMs(), null);
+  assert.equal(await neverRefreshed.refreshNowIfStale(), true);
+  assert.equal(neverRefreshed.getLastRefreshAtMs(), nowMs);
+  neverRefreshed.dispose();
+
+  const service = new ProviderDiscoveryService({
+    presence,
+    now: () => nowMs,
+  });
+  service.startPolling(() => [
+    { providerGlobalMetaId: 'idq1providera', providerAddress: 'mvc-a', serviceName: 'alpha' },
+  ]);
+  await service.waitForRefresh();
+  presence.statusCalls.length = 0;
+
+  nowMs += DISCOVERY_SNAPSHOT_MIN_AGE_MS;
+  const refreshed = await service.refreshNowIfStale();
+  assert.equal(refreshed, true);
+  assert.equal(presence.statusCalls.length, 1);
+  assert.equal(service.getLastRefreshAtMs(), nowMs);
+  service.dispose();
 });

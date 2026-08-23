@@ -2,7 +2,9 @@ import { normalizeRawGlobalMetaId } from '../shared/globalMetaId';
 import type { IdchatOnlineStatusEntry, IdchatPresenceService } from './idchatPresenceService';
 import type { LocalPresenceSnapshot } from './p2pPresenceClient';
 
-const PRESENCE_POLL_INTERVAL_MS = 10 * 1000;
+/** Skip a forced refresh when the last snapshot is younger than the poll cadence. */
+export const DISCOVERY_SNAPSHOT_MIN_AGE_MS = 10 * 1000;
+const PRESENCE_POLL_INTERVAL_MS = DISCOVERY_SNAPSHOT_MIN_AGE_MS;
 
 type ProviderGroup = {
   key: string;
@@ -172,6 +174,7 @@ export class ProviderDiscoveryService {
   private refreshPromise: Promise<void> | null = null;
   private pendingRefresh = false;
   private pendingRefreshOptions: ResolvedRefreshOptions = normalizeRefreshOptions({ rebroadcast: false });
+  private lastRefreshAtMs: number | null = null;
 
   constructor(deps: ProviderDiscoveryServiceDeps) {
     this.deps = deps;
@@ -241,6 +244,29 @@ export class ProviderDiscoveryService {
     this.forcedOfflineGlobalMetaIds.delete(normalizedGlobalMetaId);
   }
 
+  getLastRefreshAtMs(): number | null {
+    return this.lastRefreshAtMs;
+  }
+
+  /**
+   * Refresh only when the last completed snapshot is older than `minAgeMs`.
+   * Callers that page the same directory (list_online_services) reuse one
+   * snapshot instead of forcing a network round-trip per page.
+   */
+  async refreshNowIfStale(
+    minAgeMs = DISCOVERY_SNAPSHOT_MIN_AGE_MS,
+    options?: RefreshOptions,
+  ): Promise<boolean> {
+    if (
+      this.lastRefreshAtMs != null
+      && this.nowMs() - this.lastRefreshAtMs < minAgeMs
+    ) {
+      return false;
+    }
+    await this.refreshNow(options);
+    return true;
+  }
+
   async refreshNow(options?: RefreshOptions): Promise<void> {
     const requested = normalizeRefreshOptions(options);
     if (this.refreshPromise) {
@@ -289,6 +315,7 @@ export class ProviderDiscoveryService {
           this.buildIdchatSnapshot(groups, statusByGlobalMetaId),
           options.rebroadcast,
         );
+        this.lastRefreshAtMs = this.nowMs();
         return;
       } catch (error) {
         console.warn('[ProviderDiscovery] idchat online-status fetch failed:', error);
@@ -303,6 +330,7 @@ export class ProviderDiscoveryService {
             this.buildP2PSnapshot(groups, p2pPresence),
             options.rebroadcast,
           );
+          this.lastRefreshAtMs = this.nowMs();
           return;
         }
       } catch (error) {
@@ -314,6 +342,7 @@ export class ProviderDiscoveryService {
       this.buildIdchatSnapshot(groups, statusByGlobalMetaId, ids.length > 0 ? 'online_status_failed' : null),
       options.rebroadcast,
     );
+    this.lastRefreshAtMs = this.nowMs();
   }
 
   private buildIdchatSnapshot(
@@ -390,9 +419,12 @@ export class ProviderDiscoveryService {
     return { onlineBots, availableServices, providers };
   }
 
+  private nowMs(): number {
+    return this.deps.now ? this.deps.now() : Date.now();
+  }
+
   private nowSec(): number {
-    const now = this.deps.now ? this.deps.now() : Date.now();
-    return Math.floor(now / 1000);
+    return Math.floor(this.nowMs() / 1000);
   }
 
   private applySnapshot(nextSnapshot: DiscoverySnapshot, forceEmit: boolean): void {
