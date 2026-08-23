@@ -58,6 +58,16 @@ test('a skip phrase after propose authorizes create without a new propose', () =
       triggeringWish: '帮我开个群任务做技能介绍',
       repliesAfterPropose: ['换人', '不用确认直接开'],
     }),
+    { allowed: true, decision: 'skip_authorized' },
+  );
+});
+
+test('last decisive owner reply wins: skip then 换人 is revise', () => {
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['不用确认直接开', '换人'],
+    }),
     { allowed: false, decision: 'owner_revise' },
   );
 });

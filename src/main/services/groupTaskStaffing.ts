@@ -315,14 +315,16 @@ export function resolveStaffingOwnerGate(input: {
   repliesAfterPropose: string[];
   persistedSkip?: boolean;
 }): { allowed: boolean; decision: GroupTaskStaffingOwnerDecision } {
+  let lastIntent: GroupTaskStaffingOwnerDecision | null = null;
   for (const reply of input.repliesAfterPropose) {
     const kind = classifyOwnerStaffingReply(reply);
-    if (kind === 'revise') return { allowed: false, decision: 'owner_revise' };
-    if (kind === 'confirm') return { allowed: true, decision: 'owner_confirmed' };
-    if (detectSkipConfirmInWish(reply)) {
-      return { allowed: true, decision: 'skip_authorized' };
-    }
+    if (kind === 'revise') lastIntent = 'owner_revise';
+    else if (kind === 'confirm') lastIntent = 'owner_confirmed';
+    else if (detectSkipConfirmInWish(reply)) lastIntent = 'skip_authorized';
   }
+  if (lastIntent === 'owner_revise') return { allowed: false, decision: 'owner_revise' };
+  if (lastIntent === 'owner_confirmed') return { allowed: true, decision: 'owner_confirmed' };
+  if (lastIntent === 'skip_authorized') return { allowed: true, decision: 'skip_authorized' };
   if (detectSkipConfirmInWish(input.triggeringWish) || input.persistedSkip) {
     return { allowed: true, decision: 'skip_authorized' };
   }
