@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { SqliteDatabase as Database } from './sqliteTypes';
+import { tokenizeKnowledgeBaseText } from './libs/knowledgeBaseText';
 
 /**
  * Knowledge-point anchored memory ("经验/知识点").
@@ -589,6 +590,46 @@ function normalizeSources(value: unknown): MetaIDKnowledgeSourceInput[] {
   return result;
 }
 
+const PROCEDURE_QUERY_MAX_TERMS = 12;
+
+/**
+ * Score procedures against a free-form recall query. Terms come from
+ * tokenizeKnowledgeBaseText (latin words + CJK unigrams/bigrams); precision
+ * terms (≥2 chars: latin words, CJK bigrams) carry the query, single CJK
+ * chars only when the query has nothing else (same rule as the KB LIKE
+ * fallback). A whole-substring match can't hit "MetaWeb 安装 技能" against a
+ * title phrased differently ("…学习并安装链上技能"), so a procedure qualifies
+ * when ANY precision term appears in its title/trigger/steps, and ranking
+ * favors title hits over trigger over steps (3/2/1 per matched term,
+ * normalized to [0,1]). Input order is recency, so ties stay recent-first
+ * (Array.sort is stable).
+ */
+function scoreProceduresForQuery(
+  entries: MetaIDProcedureEntry[],
+  query: string,
+): MetaIDProcedureEntry[] {
+  const tokens = [...new Set(tokenizeKnowledgeBaseText(query))];
+  const specific = tokens.filter((token) => token.length >= 2);
+  const terms = (specific.length > 0 ? specific : tokens).slice(0, PROCEDURE_QUERY_MAX_TERMS);
+  if (terms.length === 0) return entries;
+  const scored: Array<{ entry: MetaIDProcedureEntry; score: number }> = [];
+  for (const entry of entries) {
+    const title = entry.title.toLowerCase();
+    const trigger = entry.triggerText.toLowerCase();
+    const steps = entry.steps.join('\n').toLowerCase();
+    let raw = 0;
+    for (const term of terms) {
+      if (title.includes(term)) raw += 3;
+      else if (trigger.includes(term)) raw += 2;
+      else if (steps.includes(term)) raw += 1;
+    }
+    if (raw > 0) scored.push({ entry, score: raw / (3 * terms.length) });
+  }
+  return scored
+    .sort((left, right) => right.score - left.score)
+    .map((item) => item.entry);
+}
+
 export class MetaIDKnowledgeStore {
   constructor(
     private readonly db: Database,
@@ -1091,35 +1132,35 @@ export class MetaIDKnowledgeStore {
       clauses.push('category = ?');
       params.push(boundedOptionalText(options.category, 'category', MAX_CATEGORY));
     }
-    if (options.query) {
-      const like = `%${asText(options.query).toLowerCase()}%`;
-      clauses.push('(LOWER(title) LIKE ? OR LOWER(trigger_text) LIKE ? OR LOWER(steps_json) LIKE ?)');
-      params.push(like, like, like);
-    }
     const limit = Math.min(500, Math.max(1, asInteger(options.limit, 100)));
     const offset = Math.max(0, asInteger(options.offset, 0));
-    params.push(limit, offset);
+    const queryText = asText(options.query).trim();
+    // Query path: tokenized coverage scoring, NOT one whole-substring LIKE —
+    // "MetaWeb 安装 技能" must hit a title phrased "…学习并安装链上技能", and
+    // colloquial "装技能" must hit via its 技能 bigram. Per-bot procedure sets
+    // are small, so scoring in JS beats a clause-explosion SQL OR.
     const rows = this.getAll<ProcedureRow>(
       `SELECT * FROM metaid_knowledge_procedures
        WHERE ${clauses.join(' AND ')}
-       ORDER BY updated_at DESC, id DESC
-       LIMIT ? OFFSET ?`,
+       ORDER BY updated_at DESC, id DESC`,
       params,
     ).map(rowToProcedure);
+    const ranked = queryText ? scoreProceduresForQuery(rows, queryText) : rows;
+    const page = ranked.slice(offset, offset + limit);
 
-    if (options.touchUsed && rows.length > 0) {
+    if (options.touchUsed && page.length > 0) {
       const now = this.now();
-      const ids = rows.map((row) => row.id);
+      const ids = page.map((row) => row.id);
       this.db.run(
         `UPDATE metaid_knowledge_procedures SET use_count = use_count + 1, last_used_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`,
         [now, ...ids],
       );
       this.saveDb();
-      for (const row of rows) {
+      for (const row of page) {
         row.useCount += 1;
         row.lastUsedAt = now;
       }
     }
-    return rows;
+    return page;
   }
 }

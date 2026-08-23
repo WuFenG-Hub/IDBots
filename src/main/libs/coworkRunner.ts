@@ -7930,7 +7930,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'procedure_recall',
-          'Recall YOUR OWN reusable procedures (经验) — proven task workflows with triggers, ordered steps and pitfalls from your past work. query keyword-searches title+trigger+steps; category filters a grouping; limit caps the count (1-50). Use BEFORE starting a task that resembles past work: if a procedure matches, follow its steps directly instead of re-searching MetaWeb. Not for single facts (knowledge_recall) or day logs (experience_recall). An empty result means you have no procedure for this yet — complete the task, then save one with procedure_save.',
+          'Recall YOUR OWN reusable procedures (经验) — proven task workflows with triggers, ordered steps and pitfalls from your past work. query matches title+trigger+steps by term coverage — pass several natural keywords at once (e.g. "MetaWeb 安装 技能" or colloquial "装技能"); entries containing any of the query\'s content terms rank in, title hits first. category filters a grouping; limit caps the count (1-50). Use BEFORE starting a task that resembles past work: if a procedure matches, follow its steps directly instead of re-searching MetaWeb. Not for single facts (knowledge_recall) or day logs (experience_recall). An empty result means you have no procedure for this yet — complete the task, then save one with procedure_save.',
           {
             query: z.string().optional(),
             category: z.string().optional(),
@@ -7948,7 +7948,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'procedure_save',
-          'Save or update ONE reusable procedure (经验) — a proven way to GET A TASK DONE, heavier than a knowledge point, lighter than a skill, with no script dependency. title names the task capability so it can be found again; trigger says WHEN to use it ("when the user asks to …"); steps is the ordered checklist that worked; pitfalls lists what backfired; sourcePinIds records the MetaWeb pins this was learned from (provenance). Reusing an existing title REWRITES it (version bump) — do not create near-duplicates. Use after completing a task that is likely to recur — especially after following a MetaWeb tutorial. Not for single facts (knowledge_upsert), user facts (memory_user_edits), or day logs (experience_recall). Returns the saved title with its new version.',
+          'Save or update ONE reusable procedure (经验) — a proven way to GET A TASK DONE, heavier than a knowledge point, lighter than a skill, with no script dependency. title names the task capability so it can be found again; trigger says WHEN to use it ("when the user asks to …"); steps is the ordered checklist that worked; pitfalls lists what backfired; sourcePinIds records the MetaWeb pins this was learned from (provenance). BEFORE saving, procedure_recall the topic: if a same-topic procedure already exists, reuse its EXACT title so this save rewrites that entry (version bump) instead of stacking a near-duplicate. Use after completing a task that is likely to recur — especially after following a MetaWeb tutorial. Not for single facts (knowledge_upsert), user facts (memory_user_edits), or day logs (experience_recall). Returns the saved title with its new version.',
           {
             title: z.string().min(1),
             trigger: z.string().min(1),
