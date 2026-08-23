@@ -21,7 +21,7 @@ function makeFixtureFile(name = 'cover.png', contents = 'png-bytes') {
 }
 
 function makeHarness(overrides = {}) {
-  const calls = { createPin: [], upload: [], resolve: [] };
+  const calls = { createPin: [], upload: [], resolve: [], confirm: [] };
   const createPin = async (metabotId, metaidData, options) => {
     calls.createPin.push({ metabotId, metaidData, options });
     if (overrides.createPinError) throw overrides.createPinError;
@@ -36,12 +36,24 @@ function makeHarness(overrides = {}) {
     calls.resolve.push(sessionId);
     return 'metabotId' in overrides ? overrides.metabotId : METABOT_ID;
   };
+  const uploadGate = {
+    getWorkspaceDir: () => overrides.workspaceDir,
+    confirmExternalUpload: overrides.confirmExternalUpload
+      ? async (files) => {
+        calls.confirm.push(files);
+        return overrides.confirmExternalUpload(files);
+      }
+      : undefined,
+  };
   const tools = buildPostSimpleNoteAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, handler }),
     createPin,
     uploadFile,
     sessionId: SESSION_ID,
     resolveMetabotId,
+    // Gate is active only when the host provides both halves (coworkRunner
+    // does); confirmExternalUpload stays undefined here unless a test opts in.
+    uploadGate,
   });
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   return { calls, byName };
@@ -159,4 +171,68 @@ test('formatSimpleNoteResult minimal and full shapes', () => {
   });
   assert.match(full, /view link: \[pin:\/\/abci0\]\(pin:\/\/abci0\)/);
   assert.doesNotMatch(full, /https?:\/\//);
+});
+
+// ---------------------------------------------------------------------------
+// Owner-approval gate for uploads outside the session workspace (P0 review fix)
+// ---------------------------------------------------------------------------
+
+const WORKSPACE = fs.mkdtempSync(path.join(os.tmpdir(), 'simplenote-workspace-'));
+
+test('files outside the workspace are blocked when the owner declines', async () => {
+  const secret = makeFixtureFile('id_rsa', 'secret');
+  const { calls, byName } = makeHarness({
+    workspaceDir: WORKSPACE,
+    confirmExternalUpload: async () => false,
+  });
+  const result = await byName.post_simplenote.handler({ title: 't', content: 'c', cover: secret });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /owner declined to upload files outside the session workspace/);
+  assert.match(result.content[0].text, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.deepEqual(calls.confirm, [[secret]]);
+  assert.equal(calls.upload.length, 0);
+  assert.equal(calls.createPin.length, 0);
+});
+
+test('files outside the workspace upload after the owner approves', async () => {
+  const secret = makeFixtureFile('chart.png');
+  const { calls, byName } = makeHarness({
+    workspaceDir: WORKSPACE,
+    confirmExternalUpload: async () => true,
+  });
+  const result = await byName.post_simplenote.handler({ title: 't', content: 'c', attachments: [secret] });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(calls.confirm, [[secret]]);
+  assert.equal(calls.upload.length, 1);
+  assert.equal(calls.createPin.length, 1);
+});
+
+test('files inside the workspace and metafile URIs never ask for approval', async () => {
+  const inside = path.join(WORKSPACE, 'cover.png');
+  fs.writeFileSync(inside, 'png');
+  const { calls, byName } = makeHarness({
+    workspaceDir: WORKSPACE,
+    confirmExternalUpload: async () => {
+      throw new Error('should not ask');
+    },
+  });
+  const result = await byName.post_simplenote.handler({
+    title: 't',
+    content: 'c',
+    cover: inside,
+    attachments: ['metafile://existingi0.png'],
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.confirm.length, 0);
+  assert.equal(calls.upload.length, 1);
+});
+
+test('isPathInsideDir handles containment, siblings and equality', () => {
+  const { isPathInsideDir } = require('../dist-electron/main/libs/chainUploadGate.js');
+  assert.equal(isPathInsideDir('/tmp/ws/a.png', '/tmp/ws'), true);
+  assert.equal(isPathInsideDir('/tmp/ws/sub/a.png', '/tmp/ws'), true);
+  assert.equal(isPathInsideDir('/tmp/ws', '/tmp/ws'), true);
+  assert.equal(isPathInsideDir('/tmp/ws-other/a.png', '/tmp/ws'), false);
+  assert.equal(isPathInsideDir('/tmp/wsfake/a.png', '/tmp/ws'), false);
+  assert.equal(isPathInsideDir('', '/tmp/ws'), false);
 });

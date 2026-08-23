@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import type { MetaFileUploadControl } from './metaFileUploadAgentTools';
 import { markdownSelfLink } from './metawebUri';
+import { guardExternalUploads, type UploadGateDeps } from './chainUploadGate';
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
 type SdkToolFactory = (
@@ -31,8 +32,14 @@ export function buildPostSimpleNoteAgentTools(deps: {
   uploadFile: MetaFileUploadControl['upload'];
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | undefined;
+  /**
+   * Owner-approval gate for uploads (see chainUploadGate): local files outside
+   * the session workspace are only published after the owner confirms. Active
+   * only when the host provides both resolvers — coworkRunner always does.
+   */
+  uploadGate?: UploadGateDeps;
 }): unknown[] {
-  const { tool, createPin, uploadFile, sessionId, resolveMetabotId } = deps;
+  const { tool, createPin, uploadFile, sessionId, resolveMetabotId, uploadGate } = deps;
 
   function asString(value: unknown): string {
     return typeof value === 'string' ? value.trim() : '';
@@ -91,7 +98,7 @@ export function buildPostSimpleNoteAgentTools(deps: {
       'Use when the user asks to publish/write an article, blog post, tutorial, long-form documentation, or a note on MetaWeb. Content defaults to Markdown (`content_type` text/markdown) but any MIME type is allowed — you decide what fits.',
       'Images and files must be ON-CHAIN, never Web2 hotlinks: the built-in Bot Browser renders metafile:// URIs natively, so to show an image inside the article, upload it first (pass its local absolute path as `cover`/`attachments` here, or use upload_file yourself) and then reference the returned metafile://<pinId> in the Markdown body, e.g. ![alt](metafile://<pinId>). NEVER embed https:// Web2 URLs for on-chain articles.',
       'Do NOT use for short buzz posts (post_buzz), publishing an app (bot_browser_publish_app), or plain file uploads (upload_file).',
-      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE note still upload on MVC (file upload does not support DOGE). Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
+      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE note still upload on MVC (file upload does not support DOGE). Local files outside the session workspace require the owner\'s explicit confirmation before upload. Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
     ].join(' '),
     {
       title: z.string().min(1).describe('Note title. Required and must not be empty.'),
@@ -144,6 +151,22 @@ export function buildPostSimpleNoteAgentTools(deps: {
       const uploadScope = { metabotId, network };
 
       try {
+        // Phase 0: owner-approval gate — local files OUTSIDE the session
+        // workspace are published publicly and irreversibly, so the owner
+        // must confirm them before anything leaves the machine.
+        const localPaths = [args.cover, ...(args.attachments ?? [])]
+          .map((item) => asString(item))
+          .filter((item) => item && path.isAbsolute(item));
+        const gate = await guardExternalUploads(localPaths, uploadGate ?? {});
+        if (!gate.approved) {
+          return textResult(
+            gate.external.length
+              ? `The owner declined to upload files outside the session workspace: ${gate.external.join(', ')}. Do not retry unless the owner explicitly asks again; suggest copying the file into the workspace instead.`
+              : 'The owner declined to upload files outside the session workspace. Do not retry unless the owner explicitly asks again.',
+            true,
+          );
+        }
+
         // Phase 1: resolve cover and attachments to metafile:// URIs.
         let coverImg = '';
         if (asString(args.cover)) {

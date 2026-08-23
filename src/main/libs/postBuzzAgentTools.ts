@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import type { MetaFileUploadControl } from './metaFileUploadAgentTools';
+import { guardExternalUploads, type UploadGateDeps } from './chainUploadGate';
 
 /**
  * Chain-write surface the host (main.ts) provides for on-chain pin creation.
@@ -85,8 +86,14 @@ export function buildPostBuzzAgentTools(deps: {
   uploadFile: MetaFileUploadControl['upload'];
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | undefined;
+  /**
+   * Owner-approval gate for uploads (see chainUploadGate): local files outside
+   * the session workspace are only published after the owner confirms. Active
+   * only when the host provides both resolvers — coworkRunner always does.
+   */
+  uploadGate?: UploadGateDeps;
 }): unknown[] {
-  const { tool, createPin, uploadFile, sessionId, resolveMetabotId } = deps;
+  const { tool, createPin, uploadFile, sessionId, resolveMetabotId, uploadGate } = deps;
 
   const postBuzz = tool(
     'post_buzz',
@@ -94,7 +101,7 @@ export function buildPostBuzzAgentTools(deps: {
       'Post a buzz (short text post with optional attachments) on-chain via the simplebuzz protocol, as the MetaBot that owns this session.',
       'Use when the user asks to post or publish a buzz, a short on-chain message, or a development-journal entry on MetaWeb. Attachments accept local absolute file paths (uploaded automatically) and existing metafile:// URIs (attached as-is); quote_pin quotes/reposts an existing buzz.',
       'Do NOT use for file-only uploads (use upload_file), generic protocol writes like paylike/paycomment (use omni_cast), or private/group chat messages.',
-      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE buzz still upload on MVC (file upload does not support DOGE). Returns pinId, txids, cost in sats, attachment metafile URIs, and a public link.',
+      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE buzz still upload on MVC (file upload does not support DOGE). Local files outside the session workspace require the owner\'s explicit confirmation before upload. Returns pinId, txids, cost in sats, attachment metafile URIs, and a pin:// view link.',
     ].join(' '),
     {
       content: z.string().min(1).describe('Buzz text content. Required and must not be empty.'),
@@ -141,6 +148,22 @@ export function buildPostBuzzAgentTools(deps: {
       const attachmentNetwork = network === 'doge' ? 'mvc' : network;
 
       try {
+        // Phase 0: owner-approval gate — local files OUTSIDE the session
+        // workspace are published publicly and irreversibly, so the owner
+        // must confirm them before anything leaves the machine.
+        const localPaths = (args.attachments ?? [])
+          .map((item) => asString(item))
+          .filter((item) => item && path.isAbsolute(item));
+        const gate = await guardExternalUploads(localPaths, uploadGate ?? {});
+        if (!gate.approved) {
+          return textResult(
+            gate.external.length
+              ? `The owner declined to upload files outside the session workspace: ${gate.external.join(', ')}. Do not retry unless the owner explicitly asks again; suggest copying the file into the workspace instead.`
+              : 'The owner declined to upload files outside the session workspace. Do not retry unless the owner explicitly asks again.',
+            true,
+          );
+        }
+
         // Phase 1: upload local attachments and collect metafile:// URIs;
         // existing metafile:// URIs pass through untouched.
         const attachments: string[] = [];

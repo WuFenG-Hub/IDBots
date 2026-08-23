@@ -44,10 +44,29 @@ function makeHarness(overrides = {}) {
     uploadFile,
     sessionId: SESSION_ID,
     resolveMetabotId,
+    // Gate is active only when the host provides both halves (coworkRunner
+    // does); tests opt in via workspaceDir/confirmExternalUpload overrides.
+    uploadGate: {
+      getWorkspaceDir: () => overrides.workspaceDir,
+      confirmExternalUpload: overrides.confirmExternalUpload,
+    },
   });
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   return { calls, byName };
 }
+
+test('attachments outside the workspace are blocked when the owner declines', async () => {
+  const secret = makeFixtureFile('id_rsa', 'secret');
+  const { calls, byName } = makeHarness({
+    workspaceDir: fs.mkdtempSync(path.join(os.tmpdir(), 'buzz-workspace-')),
+    confirmExternalUpload: async () => false,
+  });
+  const result = await byName.post_buzz.handler({ content: 'hello', attachments: [secret] });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /owner declined to upload files outside the session workspace/);
+  assert.equal(calls.upload.length, 0);
+  assert.equal(calls.createPin.length, 0);
+});
 
 test('builds a single post_buzz tool', () => {
   const { byName } = makeHarness();

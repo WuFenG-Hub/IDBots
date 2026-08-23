@@ -39,9 +39,12 @@ const BARE_PINID_RE = /(?<![/:=\w])([0-9a-f]{64}i0)(?![0-9a-f])/gi;
  * Web2 pin-viewer URLs bots were trained to emit (metaid.io/pin/…,
  * openagentinternet.org/browser/…). Rewritten to the matching MetaWeb URI so
  * the link opens in the built-in Bot Browser instead of leaving the app.
- * buzz/pin viewers both map to the universal pin:// scheme.
+ * buzz/pin viewers both map to the universal pin:// scheme. A trailing
+ * ?query/#fragment is viewer chrome — consumed and dropped so no residue
+ * leaks into the rewritten URI (markdown ')' / ']' never count as part of
+ * it, keeping link destinations intact).
  */
-const WEB2_PIN_VIEWER_RE = /\bhttps?:\/\/(?:www\.)?(?:metaid\.io|openagentinternet\.org\/browser)\/(pin|buzz|metaapp|metafile)\/([0-9a-f]{64}i0)(?![0-9a-f])/gi;
+const WEB2_PIN_VIEWER_RE = /\bhttps?:\/\/(?:www\.)?(?:metaid\.io|openagentinternet\.org\/browser)\/(pin|buzz|metaapp|metafile)\/([0-9a-f]{64}i0)(?:[?#][^\s)\]]*)?(?![0-9a-f])/gi;
 const WEB2_PIN_VIEWER_HINT_RE = /\bhttps?:\/\/(?:www\.)?(?:metaid\.io|openagentinternet\.org\/browser)\/(?:pin|buzz|metaapp|metafile)\/[0-9a-f]{64}i0/i;
 
 const rewriteWeb2PinViewerUris = (segment: string): string => {
@@ -77,9 +80,11 @@ const linkifyPlainSegment = (segment: string): string => {
  * pin://, preview-metaapp://) in markdown text into markdown links so they
  * render clickable everywhere (CoWork, A2A, Bot Browser panel), and rewrite
  * Web2 pin-viewer URLs (metaid.io/pin/…, openagentinternet.org/browser/…)
- * into the matching MetaWeb URIs. Existing markdown links and code
- * spans/blocks are left untouched (viewer-URL rewriting applies to link
- * destinations, never to code).
+ * into the matching MetaWeb URIs. Existing markdown link syntax is left
+ * alone (rewrites only replace the URL itself). Code BLOCKS (triple
+ * backticks) stay verbatim; INLINE code spans are rewritten/linkified too,
+ * because bots habitually wrap metaweb URIs in backticks and those must
+ * remain clickable.
  */
 export const linkifyAgentInternetUris = (content: string): string => {
   if (!content) return content;

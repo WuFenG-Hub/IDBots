@@ -174,6 +174,7 @@ import {
   type ChainWriteCreatePin,
 } from './postBuzzAgentTools';
 import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
+import type { UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
   buildPrivateChatAgentTools,
@@ -5412,6 +5413,41 @@ export class CoworkRunner extends EventEmitter {
     };
   }
 
+  /**
+   * Owner-approval gate for chain-write uploads (post_buzz / post_simplenote):
+   * local files OUTSIDE the session workspace are only published after the
+   * owner confirms (chainUploadGate). Mirrors withSkillInstallApproval's
+   * permission-mode skip (acceptEdits / bypassPermissions / autoApprove).
+   */
+  private buildChainUploadGate(sessionId: string): UploadGateDeps {
+    return {
+      getWorkspaceDir: () => this.store.getSession(sessionId)?.cwd,
+      confirmExternalUpload: async (files) => {
+        const activeSession = this.activeSessions.get(sessionId);
+        const mode = activeSession?.permissionMode ?? 'default';
+        const skipAsk = mode === 'acceptEdits'
+          || mode === 'bypassPermissions'
+          || activeSession?.autoApprove === true;
+        if (activeSession && !skipAsk) {
+          const list = files.map((file) => `- ${file}`).join('\n');
+          const question = tApp(
+            `Agent 将把工作区之外的以下文件上传上链公开发布（不可撤销）：\n${list}\n是否允许本次上传？`,
+            `The agent is about to upload the following files from OUTSIDE the session workspace on-chain, where they become public and irreversible:\n${list}\nAllow this upload?`
+          );
+          return this.requestSafetyApproval(
+            sessionId,
+            activeSession.abortController.signal,
+            activeSession,
+            question,
+            'upload_file',
+            { files } as Record<string, unknown>
+          );
+        }
+        return true;
+      },
+    };
+  }
+
   private markCrossSessionTurnRunning(sessionId: string): void {
     this.crossSessionRunningTurns.add(sessionId);
   }
@@ -8171,8 +8207,10 @@ export class CoworkRunner extends EventEmitter {
       const resolveMetabotId = (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined;
       // post_buzz / post_simplenote upload local files through the
       // upload_file service, so they only register when both controls are
-      // present.
+      // present. Files outside the session workspace go through the owner
+      // approval gate (chainUploadGate) before they are published on-chain.
       if (this.metaFileUpload) {
+        const uploadGate = this.buildChainUploadGate(sessionId);
         memoryTools.push(
           ...buildPostBuzzAgentTools({
             tool,
@@ -8180,6 +8218,7 @@ export class CoworkRunner extends EventEmitter {
             uploadFile: this.metaFileUpload.upload.bind(this.metaFileUpload),
             sessionId,
             resolveMetabotId,
+            uploadGate,
           })
         );
         memoryTools.push(
@@ -8189,6 +8228,7 @@ export class CoworkRunner extends EventEmitter {
             uploadFile: this.metaFileUpload.upload.bind(this.metaFileUpload),
             sessionId,
             resolveMetabotId,
+            uploadGate,
           })
         );
       }

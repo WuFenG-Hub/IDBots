@@ -77,6 +77,9 @@ jobs:
       - name: Validate runtime dependency contracts
         run: node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs
 
+      - name: Run MetaWeb agent-tool tests
+        run: npm run test:metaweb
+
       - name: Install web-search skill dependencies
         working-directory: SKILLs/web-search
         run: npm install
