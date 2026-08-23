@@ -251,8 +251,10 @@ export function ensureMetaIDImpressionSchema(db: Database): void {
     if (!columns.includes('collaboration_facts_json')) {
       db.run(`ALTER TABLE metaid_impression_snapshots ADD COLUMN collaboration_facts_json TEXT NOT NULL DEFAULT '[]'`);
     }
-  } catch {
-    // Brand-new table already has the columns.
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/duplicate column name/i.test(message)) return;
+    console.warn('[MetaIDImpression] snapshot column migrate failed:', message);
   }
 }
 
@@ -324,9 +326,11 @@ function parseCollaborationFacts(value: string | null | undefined): MetaIDCollab
       const row = item as Record<string, unknown>;
       const pinIds = Array.isArray(row.pinIds)
         ? row.pinIds.map((pin) => String(pin ?? '').trim()).filter(Boolean)
-        : [];
+        : (row.pinId != null && String(row.pinId).trim() ? [String(row.pinId).trim()] : []);
       const taskId = Number(row.taskId);
-      const title = typeof row.title === 'string' ? row.title.trim() : '';
+      const title = typeof row.title === 'string' && row.title.trim()
+        ? row.title.trim()
+        : (typeof row.taskTitle === 'string' ? row.taskTitle.trim() : '');
       const outcome = typeof row.outcome === 'string' ? row.outcome.trim() : '';
       if (!Number.isInteger(taskId) || taskId <= 0 || !title || !outcome || pinIds.length === 0) {
         return [];

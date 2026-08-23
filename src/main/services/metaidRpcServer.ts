@@ -1261,7 +1261,7 @@ export function startMetaidRpcServer(
           acceptanceCriteria: typeof parsed.acceptance_criteria === 'string' ? parsed.acceptance_criteria : undefined,
           plan: parsed.plan,
           sourceSessionId: parsed.source_session_id != null ? String(parsed.source_session_id).trim() : undefined,
-          language: parsed.language === 'en' ? 'en' : 'zh',
+          language: parsed.language === 'en' ? 'en' : parsed.language === 'zh' ? 'zh' : undefined,
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, ...result }));

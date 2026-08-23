@@ -494,4 +494,9 @@ test('buildDreamPrompt renders same-day group chat and in-progress group tasks',
   assert.ok(!user.includes('## 群任务验收评价'), 'active tasks must not look like acceptances');
   assert.ok(user.includes('进行中群任务 1 项'));
   assert.ok(user.includes('链上群聊 1 段(2 条)'));
+  assert.ok(user.includes('任务ID=21'), 'in-progress group tasks carry the numeric taskId the parser needs');
+  assert.ok(
+    user.includes('"collaborationFacts": [{"taskId": 12, "title": "任务标题", "pinIds":'),
+    'dream schema must match parseCollaborationFacts (taskId/title/pinIds, not pinId/taskTitle)',
+  );
 });

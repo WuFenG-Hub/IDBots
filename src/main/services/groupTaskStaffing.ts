@@ -1,10 +1,12 @@
 /**
  * Group-task staffing: decompose → coarse seats → one bot per seat →
- * owner-confirm (unless the wish said "just start") → create.
+ * owner-confirm (unless the triggering wish said "just start") → create.
  *
  * Research is a basic capability of every seat, not a seat of its own.
  * Match-first; local is a tie-break, not a gate.
  */
+
+import { groupTaskLanguage } from '../libs/groupTaskCopy';
 
 export const GROUP_TASK_SEAT_ROLES = [
   'content',
@@ -105,6 +107,9 @@ export class GroupTaskStaffingError extends Error {
   }
 }
 
+/** Pending / confirmed / skip-authorized slates expire after 24h. */
+export const STAFFING_PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000;
+
 const SKIP_CONFIRM_PATTERNS: RegExp[] = [
   /不用确认/,
   /不必确认/,
@@ -113,8 +118,13 @@ const SKIP_CONFIRM_PATTERNS: RegExp[] = [
   /不用问我/,
   /不用等人选/,
   /跳过确认/,
-  /直接开(群|始|吧|任务)?/,
-  /自行决定(人选)?/,
+  /直接开群/,
+  /直接开始/,
+  /直接开吧/,
+  /直接开任务/,
+  // Command-like "直接开" only — must not match 开发 / 开会 / 开通.
+  /(^|[，,。；;！!\s])直接开[。.!！]*$/,
+  /自行决定人选/,
   /no need to confirm/i,
   /skip confirmation/i,
   /without confirmation/i,
@@ -123,6 +133,14 @@ const SKIP_CONFIRM_PATTERNS: RegExp[] = [
   /just start/i,
   /start directly/i,
   /proceed without confirmation/i,
+];
+
+const KEEP_ROSTER_PATTERNS: RegExp[] = [
+  /不换人/,
+  /不用换/,
+  /不要换/,
+  /keep (the )?(roster|team|slate|people)/i,
+  /don'?t (swap|replace|change)/i,
 ];
 
 const REVISE_PATTERNS: RegExp[] = [
@@ -136,8 +154,8 @@ const REVISE_PATTERNS: RegExp[] = [
   /\breplace\b/i,
   /\bswap\b/i,
   /\bremove\b/i,
-  /\bdrop\b/i,
-  /\binstead\b/i,
+  // Bare "drop" / "instead" mis-fire on "ok, use B instead of A".
+  /\bdrop\s+(the\s+)?(seat|role|bot|member|candidate|person)\b/i,
 ];
 
 const CONFIRM_EXACT_PATTERNS: RegExp[] = [
@@ -247,31 +265,68 @@ export function validateStaffingPlan(plan: GroupTaskStaffingPlan): StaffingPlanV
   return { ok: errors.length === 0, errors, warnings, teamSize };
 }
 
+function isInterrogativeStaffingText(text: string): boolean {
+  const value = text.trim();
+  if (!value) return false;
+  if (/[？?]/.test(value)) return true;
+  if (/吗\s*[。.!！]*$/.test(value)) return true;
+  if (/^(能不能|可不可以|能否)/.test(value)) return true;
+  return false;
+}
+
 export function detectSkipConfirmInWish(text: string): boolean {
-  const value = String(text ?? '');
+  const value = String(text ?? '').trim();
+  if (!value || isInterrogativeStaffingText(value)) return false;
   return SKIP_CONFIRM_PATTERNS.some((pattern) => pattern.test(value));
 }
 
 export function classifyOwnerStaffingReply(text: string): 'confirm' | 'revise' | 'unknown' {
   const value = String(text ?? '').trim();
   if (!value) return 'unknown';
+  // "好的，不换人" must not fire /换人/ first-match revise.
+  if (KEEP_ROSTER_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
   if (REVISE_PATTERNS.some((pattern) => pattern.test(value))) return 'revise';
   if (CONFIRM_EXACT_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
   if (CONFIRM_PHRASE_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
   return 'unknown';
 }
 
-export function resolveStaffingOwnerGate(input: {
-  wishTexts: string[];
-  repliesAfterPropose: string[];
-}): { allowed: boolean; decision: GroupTaskStaffingOwnerDecision } {
-  if (input.wishTexts.some((wish) => detectSkipConfirmInWish(wish))) {
-    return { allowed: true, decision: 'skip_authorized' };
+export function pickTriggeringWishText(
+  messages: StaffingSessionMessage[],
+  atOrBeforeMs: number,
+): string {
+  const chronological = [...messages].sort((left, right) => left.timestamp - right.timestamp);
+  let latest = '';
+  for (const message of chronological) {
+    if (message.type !== 'user') continue;
+    if (message.timestamp > atOrBeforeMs) continue;
+    const content = String(message.content ?? '').trim();
+    if (content) latest = content;
   }
+  return latest;
+}
+
+export function isStaffingProposalExpired(createdAt: number, nowMs: number = Date.now()): boolean {
+  return nowMs - createdAt > STAFFING_PROPOSAL_TTL_MS;
+}
+
+export function resolveStaffingOwnerGate(input: {
+  triggeringWish: string;
+  repliesAfterPropose: string[];
+  persistedSkip?: boolean;
+}): { allowed: boolean; decision: GroupTaskStaffingOwnerDecision } {
+  let lastIntent: GroupTaskStaffingOwnerDecision | null = null;
   for (const reply of input.repliesAfterPropose) {
     const kind = classifyOwnerStaffingReply(reply);
-    if (kind === 'revise') return { allowed: false, decision: 'owner_revise' };
-    if (kind === 'confirm') return { allowed: true, decision: 'owner_confirmed' };
+    if (kind === 'revise') lastIntent = 'owner_revise';
+    else if (kind === 'confirm') lastIntent = 'owner_confirmed';
+    else if (detectSkipConfirmInWish(reply)) lastIntent = 'skip_authorized';
+  }
+  if (lastIntent === 'owner_revise') return { allowed: false, decision: 'owner_revise' };
+  if (lastIntent === 'owner_confirmed') return { allowed: true, decision: 'owner_confirmed' };
+  if (lastIntent === 'skip_authorized') return { allowed: true, decision: 'skip_authorized' };
+  if (detectSkipConfirmInWish(input.triggeringWish) || input.persistedSkip) {
+    return { allowed: true, decision: 'skip_authorized' };
   }
   return { allowed: false, decision: 'awaiting_owner' };
 }
@@ -279,18 +334,19 @@ export function resolveStaffingOwnerGate(input: {
 export function splitSessionMessagesForStaffingGate(
   messages: StaffingSessionMessage[],
   proposedAtMs: number,
-): { wishTexts: string[]; repliesAfterPropose: string[] } {
+): { triggeringWish: string; repliesAfterPropose: string[] } {
   const chronological = [...messages].sort((left, right) => left.timestamp - right.timestamp);
-  const wishTexts: string[] = [];
   const repliesAfterPropose: string[] = [];
   for (const message of chronological) {
     if (message.type !== 'user') continue;
     const content = String(message.content ?? '').trim();
     if (!content) continue;
-    if (message.timestamp <= proposedAtMs) wishTexts.push(content);
-    else repliesAfterPropose.push(content);
+    if (message.timestamp > proposedAtMs) repliesAfterPropose.push(content);
   }
-  return { wishTexts, repliesAfterPropose };
+  return {
+    triggeringWish: pickTriggeringWishText(messages, proposedAtMs),
+    repliesAfterPropose,
+  };
 }
 
 export function localSeatMetabotIds(plan: GroupTaskStaffingPlan): number[] {
@@ -319,7 +375,8 @@ export function buildStaffingSlateText(input: {
   ownerConfirmRequired: boolean;
   language?: 'zh' | 'en';
 }): string {
-  const zh = input.language !== 'en';
+  const language = input.language ?? groupTaskLanguage();
+  const zh = language !== 'en';
   const roleLabel = (seat: GroupTaskStaffingSeat): string => {
     if (seat.role === 'domain') return zh ? `领域（${seat.domainLabel || '未标注'}）` : `domain (${seat.domainLabel || 'unspecified'})`;
     const labels: Record<Exclude<GroupTaskSeatRole, 'domain'>, [string, string]> = {

@@ -108,6 +108,7 @@ const createHarness = async (overrides = {}) => {
     indexed: overrides.indexed ?? true,
     ownerJoinFails: overrides.ownerJoinFails ?? false,
     nextGroupSeq: 0,
+    createHold: null,
   };
 
   setGroupTaskServiceMetabotStoreGetter(() => metabotStore);
@@ -117,6 +118,7 @@ const createHarness = async (overrides = {}) => {
   setGroupTaskServiceTransport({
     createGroupChat: async (metabotId, opts) => {
       calls.create.push({ metabotId, opts });
+      if (state.createHold) await state.createHold;
       const suffix = String(state.nextGroupSeq).padStart(2, '0');
       state.nextGroupSeq += 1;
       const groupId = state.nextGroupSeq === 1
@@ -1312,6 +1314,310 @@ test('createGroupTask rejects a roster above the hard team cap', async () => {
       }),
       (error) => error instanceof GroupTaskStaffingError && error.code === 'ROSTER_CAP_EXCEEDED',
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('「能直接开发吗？」does not skip owner confirm', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '能直接开发吗？', timestamp: 1_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-dev-question',
+    });
+    assert.equal(proposed.ownerConfirmRequired, true);
+    assert.equal(proposed.proposal.status, 'pending');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a historical skip phrase does not authorize a later propose', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '上次那个不用确认直接开', timestamp: 1_000 },
+      { type: 'user', content: '这次开个群任务做技能介绍', timestamp: 2_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-old-skip',
+    });
+    assert.equal(proposed.ownerConfirmRequired, true);
+    assert.equal(proposed.proposal.status, 'pending');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('owner skip phrase after a pending propose authorizes Twin create', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-skip-after',
+    });
+    assert.equal(proposed.proposal.status, 'pending');
+    messages.push({
+      type: 'user',
+      content: '不用确认直接开',
+      timestamp: proposed.proposal.createdAt + 10,
+    });
+    const detail = await createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: proposed.proposal.id,
+      sourceSessionId: 'session-skip-after',
+    });
+    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2]);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'consumed');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('换人 after a skip-authorized wish still requires a new propose', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: '开个群任务做技能介绍，不用确认直接开', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-skip-then-revise',
+    });
+    assert.equal(proposed.proposal.status, 'skip_authorized');
+    messages.push({ type: 'user', content: '换人', timestamp: proposed.proposal.createdAt + 10 });
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-skip-then-revise',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'OWNER_REVISE_REQUIRED',
+    );
+    assert.equal(h.calls.create.length, 0);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'skip_authorized');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('「好的，不换人」confirms the roster instead of revising it', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-keep-roster',
+    });
+    messages.push({ type: 'user', content: '好的，不换人', timestamp: proposed.proposal.createdAt + 10 });
+    const detail = await createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: proposed.proposal.id,
+      sourceSessionId: 'session-keep-roster',
+    });
+    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2]);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'consumed');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a new propose cancels the previous open slate for the same session', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ]);
+    const first = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-replace',
+    });
+    const second = proposeGroupTaskStaffing({
+      title: '技能介绍 v2',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-replace',
+    });
+    assert.equal(h.groupTaskStore.getStaffingProposalById(first.proposal.id).status, 'cancelled');
+    assert.equal(second.proposal.status, 'pending');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('an expired pending proposal cannot be used to create', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-expired',
+    });
+    h.db.run(
+      'UPDATE group_task_staffing_proposals SET created_at = ? WHERE id = ?',
+      [Date.now() - (25 * 60 * 60 * 1000), proposed.proposal.id],
+    );
+    h.store.getSaveFunction()();
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-expired',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'PROPOSAL_NOT_USABLE',
+    );
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'cancelled');
+    assert.equal(h.calls.create.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('unknown local seat names fail create without consuming the proposal', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '开个群任务做技能介绍，不用确认直接开', timestamp: 1_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: {
+        stages: contentPlan().stages,
+        seats: [{
+          role: 'content',
+          candidateName: 'Ghost Bot',
+          source: 'local',
+          reason: 'does not exist',
+        }],
+      },
+      sourceSessionId: 'session-ghost',
+    });
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-ghost',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'STAFFING_PLAN_INVALID',
+    );
+    assert.equal(h.calls.create.length, 0);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'skip_authorized');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Twin create claims the proposal before the on-chain group so a concurrent create cannot double-open', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '开个群任务做技能介绍，不用确认直接开', timestamp: 1_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-cas',
+    });
+    let releaseCreate;
+    h.state.createHold = new Promise((resolve) => { releaseCreate = resolve; });
+    const first = createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: proposed.proposal.id,
+      sourceSessionId: 'session-cas',
+    });
+    const started = Date.now();
+    while (h.calls.create.length === 0 && Date.now() - started < 2_000) {
+      await new Promise((resolve) => { setTimeout(resolve, 10); });
+    }
+    assert.equal(h.calls.create.length, 1, 'first create reached the chain');
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-cas',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'PROPOSAL_NOT_USABLE',
+    );
+    releaseCreate();
+    const detail = await first;
+    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2]);
+    assert.equal(h.calls.create.length, 1);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'consumed');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('create releases a claimed proposal when the on-chain group fails before a task row exists', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '开个群任务做技能介绍，不用确认直接开', timestamp: 1_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-release',
+    });
+    h.state.createHold = Promise.reject(new Error('chain down'));
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-release',
+      }),
+      (error) => error instanceof Error && error.message === 'chain down',
+    );
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'skip_authorized');
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).createdTaskId, null);
   } finally {
     h.cleanup();
   }

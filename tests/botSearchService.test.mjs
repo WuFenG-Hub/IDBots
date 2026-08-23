@@ -93,6 +93,37 @@ test('searchBots POSTs the staffing query to so.metaid.io and normalizes the pag
   assert.equal(page.queriedAt, 1780000000000);
 });
 
+test('searchBots strips control characters and caps untrusted remote résumé fields', async () => {
+  const page = await searchBots(
+    { query: '合同' },
+    {
+      fetchImpl: stubFetch({
+        code: 0,
+        message: '',
+        data: {
+          candidates: [{
+            ...SAMPLE,
+            name: `Counsel\u0007-bot${'x'.repeat(200)}`,
+            bio: `line1\n\nline2${'b'.repeat(600)}`,
+            role: `法律顾问${'r'.repeat(300)}`,
+            goal: `帮客户审查合同${'g'.repeat(300)}`,
+            matchReasons: [{ field: 'bio', token: '合\u0001同', weight: 2 }],
+          }],
+          nextCursor: null,
+          queriedAt: 1780000000000,
+        },
+      }),
+    },
+  );
+  assert.equal(page.candidates[0].name.length, 80);
+  assert.equal(page.candidates[0].name.includes('\u0007'), false);
+  assert.equal(page.candidates[0].bio.length, 500);
+  assert.equal(page.candidates[0].bio.includes('\n'), false);
+  assert.equal(page.candidates[0].role.length, 200);
+  assert.equal(page.candidates[0].goal.length, 200);
+  assert.equal(page.candidates[0].matchReasons[0].token, '合同');
+});
+
 test('searchBots throws BotSearchError on presence_unavailable', async () => {
   await assert.rejects(
     () => searchBots(
