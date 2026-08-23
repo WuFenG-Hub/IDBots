@@ -216,6 +216,9 @@ nul
 .worktrees/
 .tmp-bin/
 .tmp-oss/
+
+# Task-runner scratch dirs (e.g. task29 whisper/metaapp staging); never commit.
+SKILLs/.tmp*/
 man_base_data_pebble/
 
 # Repo-local gstack generated Codex skill entrypoints are machine-local symlinks.
