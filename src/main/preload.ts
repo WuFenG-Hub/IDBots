@@ -364,7 +364,7 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('git:getBranch', cwd),
   cowork: {
     // Session management
-    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; modelProvider?: string | null; effort?: string | null; source?: 'quick_action'; projectId?: string | null }) =>
+    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; modelProvider?: string | null; effort?: string | null; source?: 'quick_action'; projectId?: string | null; goal?: string }) =>
       ipcRenderer.invoke('cowork:session:start', options),
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) =>
       ipcRenderer.invoke('cowork:session:continue', options),
@@ -374,6 +374,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:stop', sessionId),
     setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) =>
       ipcRenderer.invoke('cowork:session:setPermissionMode', { sessionId, permissionMode }),
+    setSessionGoal: (sessionId: string, goal: { text: string; status: 'active' | 'paused' } | null) =>
+      ipcRenderer.invoke('cowork:session:setGoal', { sessionId, goal }),
     requestManualCompaction: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:compact', sessionId),
     exportTranscript: (sessionId: string) =>

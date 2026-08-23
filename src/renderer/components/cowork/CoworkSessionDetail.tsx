@@ -3988,7 +3988,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               onModelEffortChange={handleSessionModelEffortChange}
               contextUsage={currentSession.contextUsage}
               suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
-              commands={buildSessionComposerCommands({ sessionId: currentSession.id })}
+              commands={buildSessionComposerCommands({ sessionId: currentSession.id, goal: currentSession.goal ?? null })}
             />
             {submitError && (
               <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">

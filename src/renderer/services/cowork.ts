@@ -16,6 +16,7 @@ import {
   updateSessionPinned,
   updateSessionTitle,
   updateSessionPermissionMode,
+  updateSessionGoal,
   upsertSubagentTask,
   setSubagentTasks,
   enqueuePendingPermission,
@@ -428,6 +429,28 @@ class CoworkService {
     }
     console.error('Failed to set permission mode:', result.error);
     return false;
+  }
+
+  /**
+   * /goal command: set, update, or clear a session's goal (null clears).
+   * Patches the active session in the store on success.
+   */
+  async setSessionGoal(
+    sessionId: string,
+    goal: { text: string; status: 'active' | 'paused' } | null,
+  ): Promise<{ success: boolean; goal?: import('../types/cowork').CoworkSessionGoal | null; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setSessionGoal) {
+      console.error('setSessionGoal API not available');
+      return { success: false, error: 'setSessionGoal API not available' };
+    }
+    const result = await cowork.setSessionGoal(sessionId, goal);
+    if (result.success) {
+      store.dispatch(updateSessionGoal({ sessionId, goal: result.goal ?? null }));
+    } else {
+      console.error('Failed to set session goal:', result.error);
+    }
+    return result;
   }
 
   /**

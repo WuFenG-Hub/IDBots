@@ -7626,6 +7626,8 @@ if (!gotTheLock) {
     source?: 'quick_action';
     /** FK to projects.id; binds the session to a Settings > Projects project. */
     projectId?: string | null;
+    /** Session goal set from the new-task composer's /goal command (objective text). */
+    goal?: string;
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
@@ -7687,7 +7689,10 @@ if (!gotTheLock) {
         // an explicit '' pick means "model default" and is persisted as null.
         options.effort === undefined ? null : (options.effort?.trim() || null),
         options.modelProvider?.trim() || null,
-        options.projectId?.trim() || null
+        options.projectId?.trim() || null,
+        options.goal?.trim()
+          ? { text: options.goal.trim(), status: 'active', updatedAt: Date.now() }
+          : null
       );
       const runner = getCoworkRunner();
 
@@ -7896,6 +7901,31 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to set permission mode',
+        };
+      }
+    });
+  });
+
+  // /goal command: set, update, or clear a session's goal (null clears).
+  ipcMain.handle('cowork:session:setGoal', async (_event, payload: {
+    sessionId: string;
+    goal: { text: string; status: 'active' | 'paused' } | null;
+  }) => {
+    return withSqliteRecovery('cowork:session:setGoal', async () => {
+      try {
+        const { sessionId, goal } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        if (goal && !goal.text.trim()) throw new Error('Goal text is required');
+        const normalized = goal
+          ? { text: goal.text.trim(), status: goal.status === 'paused' ? ('paused' as const) : ('active' as const), updatedAt: Date.now() }
+          : null;
+        getCoworkRunner().setSessionGoal(sessionId, normalized);
+        return { success: true, goal: normalized };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to set session goal',
         };
       }
     });
