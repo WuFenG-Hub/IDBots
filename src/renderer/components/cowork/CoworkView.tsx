@@ -388,6 +388,10 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     // drop an explicit Off/Low choice and let the session fall through to
     // the model default (DeepSeek: max).
     const pendingPick = pendingModelEffort;
+    // Same snapshot discipline for the /goal objective: read the ref once at
+    // entry so a later setPendingGoal (or another command) during the awaits
+    // below cannot swap what this submission carries.
+    const submittedGoal = pendingGoalRef.current;
 
     try {
       try {
@@ -457,11 +461,12 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       dispatch(setStreaming(true));
 
       // Clear active skills and quick action selection after starting session
-      // so they don't persist to next session
+      // so they don't persist to next session. The pending goal is NOT cleared
+      // here: it is consumed only after startSession succeeds, so a failed or
+      // cancelled start keeps the objective for the retry.
       dispatch(clearActiveSkills());
       dispatch(clearSelection());
       setPendingModelEffort(null);
-      setPendingGoal(null);
 
       const combinedSystemPrompt = await buildCombinedSystemPrompt(skillPrompt);
 
@@ -498,10 +503,17 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         source: isQuickActionPrompt ? 'quick_action' : undefined,
         projectId: resolvedProjectId ?? undefined,
         // Only an active pending goal rides along; a paused one stays local.
-        // Read the ref (not the state): a /goal create in the same tick as
-        // this submit has not re-rendered yet.
-        goal: pendingGoalRef.current?.status === 'active' ? pendingGoalRef.current.text : undefined,
+        // Reads the entry snapshot: the ref may have been swapped during the
+        // awaits above, but this submission carries what was pending when it
+        // began.
+        goal: submittedGoal?.status === 'active' ? submittedGoal.text : undefined,
       });
+
+      // The goal is consumed once the session actually exists; a failed
+      // start leaves it pending for the retry.
+      if (startedSession) {
+        setPendingGoal(null);
+      }
 
       // Stop immediately if user cancelled while startup request was in flight.
       if (isPendingStartCancelled() && startedSession) {
