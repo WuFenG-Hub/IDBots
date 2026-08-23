@@ -58,7 +58,7 @@ function isBinaryContentType(contentType: string): boolean {
 
 /**
  * Human-readable success sheet mirroring the retired metabot-omni-caster
- * skill's result output (txid, pinId, cost, public link). Exposed for tests.
+ * skill's result output (txid, pinId, cost, view link). Exposed for tests.
  */
 export function formatCastResult(input: {
   pinId: string;
@@ -71,7 +71,7 @@ export function formatCastResult(input: {
   if (input.pinId) lines.push(`- pinId: ${input.pinId}`);
   lines.push(`- cost: ${input.totalCost} sats`);
   if (input.pinId) {
-    lines.push(`- public link: https://openagentinternet.org/browser/pin/${input.pinId}`);
+    lines.push(`- view link: [pin://${input.pinId}](pin://${input.pinId})`);
   }
   return lines.join('\n');
 }

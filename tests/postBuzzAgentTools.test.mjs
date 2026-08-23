@@ -83,7 +83,8 @@ test('posts a text-only buzz with the simplebuzz 7-tuple', async () => {
   assert.match(text, /pinId: tx-buzz-1i0/);
   assert.match(text, /txids: tx-buzz-1/);
   assert.match(text, /cost: 1234 sats/);
-  assert.match(text, /https:\/\/openagentinternet\.org\/browser\/pin\/tx-buzz-1i0/);
+  assert.match(text, /view link: \[pin:\/\/tx-buzz-1i0\]\(pin:\/\/tx-buzz-1i0\)/);
+  assert.doesNotMatch(text, /openagentinternet|metaid\.io/);
   assert.doesNotMatch(text, /attachment:/);
 });
 
@@ -195,7 +196,7 @@ test('formatBuzzResult lists txids, cost, attachments, and the public link', () 
   assert.match(text, /txids: tx-1, tx-2/);
   assert.match(text, /cost: 546 sats/);
   assert.match(text, /attachment: metafile:\/\/ai0\.png/);
-  assert.match(text, /public link: https:\/\/openagentinternet\.org\/browser\/pin\/abci0/);
+  assert.match(text, /view link: \[pin:\/\/abci0\]\(pin:\/\/abci0\)/);
 
   const minimal = formatBuzzResult({ pinId: '', txids: [], totalCost: 0, attachments: [] });
   assert.equal(minimal, 'Buzz posted on-chain.\n- cost: 0 sats');

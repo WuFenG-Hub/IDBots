@@ -96,3 +96,37 @@ test('R3: inline backticks without a URI are preserved as code', () => {
   const output = linkifyAgentInternetUris('plain `code snippet` here');
   assert.equal(output, 'plain `code snippet` here');
 });
+
+const REWRITE_PIN = '1efcf89496d74d839012d65feb00634b60cc791bd593cb0699d3ac6e99edefa7i0';
+
+test('Web2 pin-viewer URLs (metaid.io / openagentinternet.org) are rewritten to MetaWeb URIs', () => {
+  const output = linkifyAgentInternetUris(
+    `see [this pin](https://www.metaid.io/pin/${REWRITE_PIN}) and https://openagentinternet.org/browser/buzz/${REWRITE_PIN}`,
+  );
+  // Markdown link destination rewritten, label untouched.
+  assert.match(output, new RegExp(`\\[this pin\\]\\(pin://${REWRITE_PIN}\\)`));
+  // Bare buzz viewer URL rewritten to the universal pin:// scheme and linkified.
+  assert.match(output, new RegExp(`\\[pin://${REWRITE_PIN}\\]\\(pin://${REWRITE_PIN}\\)`));
+  assert.doesNotMatch(output, /metaid\.io|openagentinternet\.org/);
+});
+
+test('Web2 viewer rewrite maps the app/file kinds to their schemes', () => {
+  const output = linkifyAgentInternetUris(
+    `app https://openagentinternet.org/browser/metaapp/${REWRITE_PIN} file https://openagentinternet.org/browser/metafile/${REWRITE_PIN}`,
+  );
+  assert.match(output, new RegExp(`\\[metaapp://${REWRITE_PIN}\\]\\(metaapp://${REWRITE_PIN}\\)`));
+  assert.match(output, new RegExp(`\\[metafile://${REWRITE_PIN}\\]\\(metafile://${REWRITE_PIN}\\)`));
+});
+
+test('Web2 viewer rewrite ignores non-viewer URLs and code blocks', () => {
+  const input = [
+    'docs at https://www.metaid.io/docs remain plain web links',
+    '```',
+    `https://www.metaid.io/pin/${REWRITE_PIN}`,
+    '```',
+  ].join('\n');
+  const output = linkifyAgentInternetUris(input);
+  // Non-viewer https URLs are not linkified and not rewritten; the viewer URL
+  // inside a code block stays verbatim.
+  assert.equal(output, input);
+});

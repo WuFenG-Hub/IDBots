@@ -57,7 +57,7 @@ function formatPinResult(title: string, result: { txids: string[]; pinId: string
     title,
     `- pinId: ${result.pinId}`,
     `- txids: ${(result.txids ?? []).join(', ')}`,
-    `- pin link: https://openagentinternet.org/browser/pin/${result.pinId}`,
+    `- pin link: [pin://${result.pinId}](pin://${result.pinId})`,
   ].join('\n');
 }
 

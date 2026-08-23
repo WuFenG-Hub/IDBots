@@ -168,6 +168,7 @@ import {
   buildPostBuzzAgentTools,
   type ChainWriteCreatePin,
 } from './postBuzzAgentTools';
+import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
   buildPrivateChatAgentTools,
@@ -1639,9 +1640,10 @@ export interface CoworkRunnerOptions {
    */
   skillTools?: SkillToolControl;
   /**
-   * When set, every cowork session gets the chain-write tools post_buzz and
-   * omni_cast (replacing the metabot-post-buzz / metabot-omni-caster skills).
-   * createPin delegates to services/metaidCore.ts createPin() — the same
+   * When set, every cowork session gets the chain-write tools post_buzz,
+   * post_simplenote and omni_cast (replacing the metabot-post-buzz /
+   * metabot-omni-caster skills). createPin delegates to
+   * services/metaidCore.ts createPin() — the same
    * function the /api/metaid/create-pin RPC endpoint calls; encryptGroupMessage
    * is the shared group-chat AES helper (services/metaWebCrypto.ts).
    */
@@ -4950,7 +4952,9 @@ export class CoworkRunner extends EventEmitter {
       '',
       'Read like a person using a search engine: search_metaweb returns candidates with protocol, title, summary, publisher and pinId. Judge by title and summary, then open the 1–3 most promising pins with read_metaweb_pin (a pinId works for any protocol). If the first pins disappoint, open 1–2 more or search again with broader or narrower keywords.',
       '',
-      'Ground and cite: answer from what you actually read and cite the pinIds you used so the user can verify. If MetaWeb genuinely has nothing useful, say so honestly and fall back to your own knowledge — never fabricate pins, titles, publishers, or content.',
+      'Link with MetaWeb URIs, never Web2 URLs: whenever your reply names on-chain content, make it a clickable MetaWeb URI markdown link — pin://<pinId> for any pin, metaapp://<pinId> for MetaApp packages (/protocols/metaapp), metafile://<pinId> for on-chain binary files (/file), metaid://<globalMetaId> for people/bots. When unsure which scheme applies, pin:// always works. NEVER construct Web2 viewer URLs (metaid.io, openagentinternet.org, …) for on-chain content: the user\'s app opens MetaWeb URIs directly in its built-in Bot Browser, and a Web2 URL sends them out of the app for no reason.',
+      '',
+      'Ground and cite: answer from what you actually read and cite the pins you used (as pin:// markdown links) so the user can verify. If MetaWeb genuinely has nothing useful, say so honestly and fall back to your own knowledge — never fabricate pins, titles, publishers, or content.',
     ].join('\n');
   }
 
@@ -4970,7 +4974,7 @@ export class CoworkRunner extends EventEmitter {
       '2. When a step requires a skill or package, install it from the on-chain metabot-skill package the tutorial references (skill_tool install_skill with the package\'s metafile:// URI from the pin payload, e.g. the skill-file field). Never substitute a Web2 download when an on-chain package exists.',
       '3. Before each install, tell the owner what you are installing, why the tutorial requires it, and the source pinId. Installs ask for the owner\'s confirmation — if the owner declines, stop that path and report back; never retry silently or work around the decision.',
       '4. After installing, verify with list_installed_skills and read_skill, then apply the new capability to the actual task.',
-      '5. Report back to the owner: what you learned, which pins guided you (cite the pinIds), and what you installed.',
+      '5. Report back to the owner: what you learned, which pins guided you (cite them as pin:// markdown links), and what you installed.',
       '6. Save what you learned with procedure_save (trigger = when this task recurs, steps = what worked, pitfalls = what backfired, sourcePinIds = the pins that guided you) so you never have to relearn the same task — next time procedure_recall or your hot memory will hand you the workflow directly. Single-fact lessons belong to knowledge_upsert instead.',
       '7. When a pin you read carries substantial tutorial or reference content worth keeping long-term, save its body into a matching knowledge base with knowledge_base_add_document (sourceType \'metaweb\' with the pinId; use the default knowledge base when no topical one exists).',
     ].join('\n');
@@ -8111,11 +8115,21 @@ export class CoworkRunner extends EventEmitter {
     // from the session (resolveMetabotIdForMemory), exactly like upload_file.
     if (this.metabotChainWrite) {
       const resolveMetabotId = (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined;
-      // post_buzz uploads local attachments through the upload_file service,
-      // so it only registers when both controls are present.
+      // post_buzz / post_simplenote upload local files through the
+      // upload_file service, so they only register when both controls are
+      // present.
       if (this.metaFileUpload) {
         memoryTools.push(
           ...buildPostBuzzAgentTools({
+            tool,
+            createPin: this.metabotChainWrite.createPin,
+            uploadFile: this.metaFileUpload.upload.bind(this.metaFileUpload),
+            sessionId,
+            resolveMetabotId,
+          })
+        );
+        memoryTools.push(
+          ...buildPostSimpleNoteAgentTools({
             tool,
             createPin: this.metabotChainWrite.createPin,
             uploadFile: this.metaFileUpload.upload.bind(this.metaFileUpload),

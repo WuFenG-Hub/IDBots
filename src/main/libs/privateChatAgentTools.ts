@@ -102,7 +102,7 @@ export function buildPrivateChatAgentTools(deps: {
             'Private message sent.',
             `- pinId: ${result.pinId}`,
             `- txids: ${(result.txids ?? []).join(', ')}`,
-            `- pin link: https://openagentinternet.org/browser/pin/${result.pinId}`,
+            `- pin link: [pin://${result.pinId}](pin://${result.pinId})`,
           ].join('\n'),
         );
       } catch (error) {
