@@ -168,7 +168,9 @@ Acceptance: after learning a task once, the bot repeats it later without re-sear
 
 ### M4 — Autonomous study on the knowledge-base stack (L4)
 
-**Status: scope realigned 2026-08-23 with the shipped knowledge-base feature (`feat/knowledge-base`).** The original M4 design (fetch pins into a raw-docs directory, then `metabot-create-wiki` absorb/index) is superseded: per-bot knowledge bases are the distillation target — strictly better (per-bot registry, incremental FTS5 index, bot-facing tools, built-in pin provenance) and already built. What remains for M4 is the autonomous trigger + execution layer.
+**Status: implemented 2026-08-23** (branch `feat/metaweb-learning`): `metaweb_study_jobs` queue table + `MetawebStudyService` (nightly [00:00,06:00) scheduler, one bounded background cowork session per job via `runOrchestratorSkillTurn`, hidden from the session list, final ```json report parsed into the job record) + `metaweb_study_enqueue` / `metaweb_study_status` agent tools + three-layer memory division in the learning-loop prompt + read-only study-jobs panel at the bottom of the knowledge-base tab. Jobs span nights (≤budgetPins NEW pins per run) and complete when a run adds nothing new or a 10-run safety cap hits.
+
+**Scope realigned 2026-08-23 with the shipped knowledge-base feature (`feat/knowledge-base`).** The original M4 design (fetch pins into a raw-docs directory, then `metabot-create-wiki` absorb/index) is superseded: per-bot knowledge bases are the distillation target — strictly better (per-bot registry, incremental FTS5 index, bot-facing tools, built-in pin provenance) and already built. What remains for M4 is the autonomous trigger + execution layer.
 
 Locked decisions (owner, 2026-08-23):
 

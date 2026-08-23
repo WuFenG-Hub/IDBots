@@ -520,6 +520,8 @@ import type {
   KnowledgeBaseLearnSummary,
 } from './knowledgeBase';
 
+import type { MetawebStudyJobInfo } from './metawebStudy';
+
 import type { OfficialSkillItem } from './skill';
 
 interface Skill {
@@ -1554,6 +1556,9 @@ interface IElectronAPI {
     importFiles: (metabotId: number, kbId: string, filePaths: string[]) => Promise<{ success: boolean; imported?: string[]; skipped?: Array<{ filePath: string; reason: string }>; error?: string }>;
     openDir: (metabotId: number, kbId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
     onLearnStatus: (callback: (payload: KnowledgeBaseLearnStatusEvent) => void) => () => void;
+  };
+  metawebStudy: {
+    list: (metabotId: number) => Promise<{ success: boolean; jobs?: MetawebStudyJobInfo[]; error?: string }>;
   };
   permissions: {
     checkCalendar: () => Promise<{ success: boolean; status?: string; error?: string; autoRequested?: boolean }>;

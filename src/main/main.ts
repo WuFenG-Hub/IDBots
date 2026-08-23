@@ -41,7 +41,7 @@ import { generateSessionTitle } from './libs/coworkUtil';
 import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
 import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps } from './libs/coworkOpenAICompatProxy';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
-import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
+import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, resolveSessionWorkingDirectory, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
 import { getGitBranch } from './libs/gitWorkspace';
 import { IMGatewayManager, IMPlatform, IMGatewayConfig } from './im';
 import { APP_NAME } from './appConstants';
@@ -221,6 +221,12 @@ import { metabotBrainOptions, normalizeMetabotLlmId } from './services/llmFallba
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { KnowledgeBaseService } from './services/knowledgeBaseService';
 import { KnowledgeBaseStore } from './knowledgeBaseStore';
+import {
+  MetawebStudyService,
+  buildMetawebStudySessionPrompt,
+  parseMetawebStudyRunReport,
+} from './services/metawebStudyService';
+import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
@@ -2599,6 +2605,8 @@ let metaidImpressionStore: MetaIDImpressionStore | null = null;
 let metaidKnowledgeStore: MetaIDKnowledgeStore | null = null;
 let knowledgeBaseStore: KnowledgeBaseStore | null = null;
 let knowledgeBaseService: KnowledgeBaseService | null = null;
+let metawebStudyJobStore: MetawebStudyJobStore | null = null;
+let metawebStudyService: MetawebStudyService | null = null;
 let serviceOrderLifecycleService: ServiceOrderLifecycleService | null = null;
 let serviceRefundSyncService: ServiceRefundSyncService | null = null;
 let serviceRefundSettlementService: ServiceRefundSettlementService | null = null;
@@ -3039,6 +3047,8 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   metaidKnowledgeStore = null;
   knowledgeBaseStore = null;
   knowledgeBaseService = null;
+  metawebStudyJobStore = null;
+  metawebStudyService = null;
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
   serviceRefundSettlementService = null;
@@ -3788,6 +3798,12 @@ const startSqliteDaemons = (): void => {
   // and deliberately decoupled from dream gating/success.
   getKnowledgeBaseService().startAutoLearnSchedule();
 
+  // MetaWeb study jobs ("自主学习任务", M4): drains the owner-assigned
+  // study-topic queue inside the same nightly window via bounded background
+  // cowork sessions (search → read pins → save into the bot's knowledge
+  // bases). One session at a time; no proactive reporting.
+  getMetawebStudyService().startSchedule();
+
   // Agent-Game-v2 persistent App/Game Runtime (docs/14). Wire the host once the
   // sqlite stores + group-chat transport are ready. Survives MetaApp close and
   // host restart; reuses the existing LLM / pin-write / group-chat infra.
@@ -3811,6 +3827,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   await stopPrivateChatDaemon({ waitForTick: true });
   stopDreamService();
   knowledgeBaseService?.stopAutoLearnSchedule();
+  metawebStudyService?.stopSchedule();
   stopPrivateChatBackfill();
   stopGroupChatBackfill();
   stopGroupTaskDaemon();
@@ -5198,6 +5215,10 @@ const getCoworkRunner = () => {
       // inbox). The service instance matches the KnowledgeBaseControl shape
       // method-for-method.
       knowledgeBase: getKnowledgeBaseService(),
+      // metaweb_study_* tool backends: the M4 study-job queue (owner-assigned
+      // topics, drained nightly into the bot's knowledge bases). The service
+      // instance matches the MetawebStudyControl shape method-for-method.
+      metawebStudy: getMetawebStudyService(),
       // upload_file tool backend. Delegates to the shared uploadMetaFile()
       // service so the tool, the RPC endpoint, and the IPC handlers all share
       // one on-chain path (direct/chunked, MVC sponsor-first with self-paid
@@ -6130,6 +6151,60 @@ const getKnowledgeBaseService = (): KnowledgeBaseService => {
     });
   }
   return knowledgeBaseService;
+};
+
+const getMetawebStudyJobStore = (): MetawebStudyJobStore => {
+  if (!metawebStudyJobStore) {
+    const sqliteStore = getStore();
+    metawebStudyJobStore = new MetawebStudyJobStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return metawebStudyJobStore;
+};
+
+const getMetawebStudyService = (): MetawebStudyService => {
+  if (!metawebStudyService) {
+    metawebStudyService = new MetawebStudyService({
+      store: getMetawebStudyJobStore(),
+      // One bounded background cowork session per job run, through the same
+      // orchestrator bridge the Twin/Worker flow uses. The session carries the
+      // bot's metabotId, so the whole inline tool surface (search_metaweb,
+      // read_metaweb_pin, knowledge_base_*, procedure_save) resolves to this
+      // bot. Hidden from the session list; the final ```json report becomes
+      // the job's run record.
+      runStudyJob: async (job) => {
+        const coworkStore = getCoworkStore();
+        const cwd = resolveSessionWorkingDirectory(
+          coworkStore.getConfig().workingDirectory,
+          job.metabotId,
+        );
+        const replyText = await runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
+          systemPrompt: '',
+          userMessage: buildMetawebStudySessionPrompt(job),
+          cwd,
+          metabotId: job.metabotId,
+          activeSkillIds: [],
+          disableRemoteServicesPrompt: true,
+          sourceChannel: 'orchestrator',
+          // Unattended: no owner is watching (any stray prompt auto-rejects in
+          // 60s). Memory updates stay ENABLED on purpose — disableMemoryUpdates
+          // would strip procedure_save from the session's tools.
+          autoApprove: true,
+          permissionMode: 'acceptEdits',
+          disableMemoryUpdates: false,
+          // Study runs read up to ~20 pins; the 300s delegation default is far
+          // too small. On timeout the job records failed while the session may
+          // still finish in the background — its KB saves are never lost.
+          skillTurnTimeoutMs: 30 * 60 * 1000,
+          onSessionCreated: (sessionId) => coworkStore.setSessionHiddenFromList(sessionId, true),
+        });
+        return parseMetawebStudyRunReport(replyText);
+      },
+    });
+  }
+  return metawebStudyService;
 };
 
 const captureServiceOrderExperience = (
@@ -10264,6 +10339,19 @@ if (!gotTheLock) {
       } catch (error) {
         rethrowSqliteWasmBoundsError(error);
         return { success: false, error: error instanceof Error ? error.message : 'Failed to open knowledge base directory' };
+      }
+    }));
+
+  // ==================== MetaWeb Study Job IPC Handlers ====================
+
+  ipcMain.handle('metawebStudy:list', async (_event, metabotId: number) =>
+    withSqliteRecovery('metawebStudy:list', async () => {
+      try {
+        const jobs = getMetawebStudyService().listStudyJobs(Number(metabotId));
+        return { success: true, jobs };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to list study jobs' };
       }
     }));
 

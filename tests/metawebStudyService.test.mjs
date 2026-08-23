@@ -1,0 +1,164 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
+  .catch(() => import('../dist-electron/nativeSqliteDatabase.js'));
+const { MetawebStudyJobStore, MAX_STUDY_RUNS_PER_JOB } = await import('../dist-electron/main/metawebStudyJobStore.js')
+  .catch(() => import('../dist-electron/metawebStudyJobStore.js'));
+const {
+  MetawebStudyService,
+  buildMetawebStudySessionPrompt,
+  parseMetawebStudyRunReport,
+} = await import('../dist-electron/main/services/metawebStudyService.js')
+  .catch(() => import('../dist-electron/services/metawebStudyService.js'));
+
+const NIGHT = new Date('2026-08-24T02:00:00'); // local 02:00 — inside [00:00, 06:00)
+const DAY = new Date('2026-08-24T12:00:00'); // local noon — outside
+
+const setup = (overrides = {}) => {
+  const db = createNativeSqliteDatabase(':memory:');
+  assert.ok(db, 'native sqlite available in test runtime');
+  const store = new MetawebStudyJobStore(db, () => {});
+  let nowValue = NIGHT;
+  const runs = [];
+  const service = new MetawebStudyService({
+    store,
+    now: () => nowValue,
+    runStudyJob: overrides.runStudyJob ?? (async (job) => {
+      runs.push(job.id);
+      return { newPinIds: [`pin-${job.runCount + 1}i0`], summary: 'saved one pin' };
+    }),
+  });
+  return {
+    store,
+    service,
+    runs,
+    setNow: (value) => { nowValue = value; },
+  };
+};
+
+test('enqueue normalizes, defaults the budget, and dedupes active jobs by fingerprint', () => {
+  const { service } = setup();
+  const first = service.enqueueStudyJob(7, { topic: '  Game   Development ' });
+  assert.equal(first.created, true);
+  assert.equal(first.job.topic, 'Game Development');
+  assert.equal(first.job.budgetPins, 20);
+  const dupe = service.enqueueStudyJob(7, { topic: 'game development' });
+  assert.equal(dupe.created, false);
+  assert.equal(dupe.job.id, first.job.id);
+  const otherBot = service.enqueueStudyJob(8, { topic: 'game development', budgetPins: 999 });
+  assert.equal(otherBot.created, true);
+  assert.equal(otherBot.job.budgetPins, 50, 'budget clamps to the 50 ceiling');
+  assert.throws(() => service.enqueueStudyJob(7, { topic: '   ' }), /topic is required/i);
+});
+
+test('a done job with the same topic does not block re-enqueue', () => {
+  const { service, store } = setup();
+  const first = service.enqueueStudyJob(7, { topic: 'video' }).job;
+  store.recordRun(first.id, {
+    nextStatus: 'done',
+    processedPinIds: ['p1i0'],
+    summary: 'done',
+    error: null,
+    nowIso: NIGHT.toISOString(),
+  });
+  const second = service.enqueueStudyJob(7, { topic: 'video' });
+  assert.equal(second.created, true);
+  assert.notEqual(second.job.id, first.id);
+});
+
+test('runTick does nothing outside the nightly window', async () => {
+  const { service, runs, setNow } = setup();
+  service.enqueueStudyJob(7, { topic: 'video' });
+  setNow(DAY);
+  const result = await service.runTick();
+  assert.equal(result.ran, 0);
+  assert.deepEqual(runs, []);
+});
+
+test('a run saving new pins keeps the job pending for the next night', async () => {
+  const { service, store } = setup();
+  const job = service.enqueueStudyJob(7, { topic: 'video' }).job;
+  const result = await service.runTick();
+  assert.equal(result.ran, 1);
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'pending');
+  assert.equal(after.runCount, 1);
+  assert.deepEqual(after.processedPinIds, ['pin-1i0']);
+  assert.equal(after.lastRunSummary, 'saved one pin');
+});
+
+test('a run saving nothing new completes the job', async () => {
+  const { service, store } = setup({
+    runStudyJob: async () => ({ newPinIds: [], summary: 'corpus exhausted' }),
+  });
+  const job = service.enqueueStudyJob(7, { topic: 'video' }).job;
+  await service.runTick();
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'done');
+  assert.equal(after.lastRunSummary, 'corpus exhausted');
+});
+
+test('reaching the run-count safety cap completes the job even with new pins', async () => {
+  const { service, store } = setup();
+  const job = service.enqueueStudyJob(7, { topic: 'video' }).job;
+  for (let index = 0; index < MAX_STUDY_RUNS_PER_JOB - 1; index += 1) {
+    store.recordRun(job.id, {
+      nextStatus: 'pending',
+      processedPinIds: [`old-${index}i0`],
+      summary: 'x',
+      error: null,
+      nowIso: NIGHT.toISOString(),
+    });
+  }
+  await service.runTick();
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'done');
+  assert.equal(after.runCount, MAX_STUDY_RUNS_PER_JOB);
+  assert.match(after.lastRunSummary, /safety cap/);
+});
+
+test('a throwing run hook marks the job failed and the tick continues with the next job', async () => {
+  const { service, store } = setup({
+    runStudyJob: async (job) => {
+      if (job.topic === 'bad') throw new Error('LLM exploded');
+      return { newPinIds: ['ok-1i0'], summary: 'fine' };
+    },
+  });
+  const bad = service.enqueueStudyJob(7, { topic: 'bad' }).job;
+  const good = service.enqueueStudyJob(7, { topic: 'good' }).job;
+  const result = await service.runTick();
+  assert.equal(result.ran, 2);
+  const badAfter = store.getById(bad.id);
+  assert.equal(badAfter.status, 'failed');
+  assert.match(badAfter.lastError, /LLM exploded/);
+  assert.equal(store.getById(good.id).status, 'pending');
+});
+
+test('parseMetawebStudyRunReport reads the last json fence', () => {
+  const report = parseMetawebStudyRunReport(
+    'I saved things. Example: ```json\n{"processedPinIds": []}\n```\nFinal:\n```json\n{"processedPinIds": ["a1i0", "b2i0", "a1i0"], "summary": "two pins"}\n```',
+  );
+  assert.deepEqual(report.newPinIds, ['a1i0', 'b2i0']);
+  assert.equal(report.summary, 'two pins');
+});
+
+test('parseMetawebStudyRunReport accepts bare JSON and defaults a missing summary', () => {
+  const report = parseMetawebStudyRunReport('{"processedPinIds": ["x9i0"]}');
+  assert.deepEqual(report.newPinIds, ['x9i0']);
+  assert.match(report.summary, /did not provide a summary/);
+});
+
+test('parseMetawebStudyRunReport throws on prose-only replies', () => {
+  assert.throws(() => parseMetawebStudyRunReport('I studied a lot but wrote no report.'), /did not return/);
+});
+
+test('buildMetawebStudySessionPrompt carries topic, budget and already-processed pins', () => {
+  const { service } = setup();
+  const job = service.enqueueStudyJob(7, { topic: 'game development', budgetPins: 5 }).job;
+  const prompt = buildMetawebStudySessionPrompt({ ...job, processedPinIds: ['old1i0', 'old2i0'] });
+  assert.match(prompt, /game development/);
+  assert.match(prompt, /AT MOST 5 NEW pins/);
+  assert.match(prompt, /old1i0/);
+  assert.match(prompt, /unattended/i);
+});
