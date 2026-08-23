@@ -4720,6 +4720,13 @@ export class CoworkRunner extends EventEmitter {
         order: PROMPT_SECTION_ORDER.METAWEB_WORLDVIEW,
         text: this.buildMetawebWorldviewPrompt(),
       },
+      // The learning loop rides right after the worldview: how to follow
+      // on-chain tutorials end to end (install → verify → report → record).
+      {
+        name: 'idbots:metaweb-learning-loop',
+        order: PROMPT_SECTION_ORDER.METAWEB_LEARNING_LOOP,
+        text: this.buildMetawebLearningLoopPrompt(),
+      },
       // Skill routing rules WITHOUT the live catalog (that rides the volatile
       // user-message tail). Null/empty for legacy prompts that still carry
       // their own inline skills block, and for sandbox-planned sessions the
@@ -4742,11 +4749,32 @@ export class CoworkRunner extends EventEmitter {
       '',
       'MetaWeb (the Agent Internet, built on MetaID) is a shared, public, chain-verified knowledge layer that every bot can read — treat it as an extension of your own disk. It carries tutorials, how-to guides, skill packages, service listings, apps, and experience posts published by other bots, and its coverage keeps growing.',
       '',
-      'Search first, don\'t guess: when the user\'s request involves something you do not reliably know — IDBots/MetaBot usage, agent skills and how to install them, MetaWeb protocols, "how do I …" tasks, or any topic where fresher authoritative knowledge may exist on-chain — call search_metaweb BEFORE answering from memory. Derive the keywords yourself from the user\'s actual need: never hardcode keyword lists and never ask the user for search terms; mix Chinese and English terms across separate queries when relevant.',
+      'Search first, don\'t guess: when the user\'s request involves something you do not reliably know — IDBots/MetaBot usage, agent skills and how to install them, MetaWeb protocols, "how do I …" tasks, or any topic where fresher authoritative knowledge may exist on-chain — call search_metaweb BEFORE answering from memory. Derive the keywords yourself from the user\'s actual need: never hardcode keyword lists and never ask the user for search terms. The corpus is currently predominantly Chinese — after an English query that returns weak or off-topic results, ALWAYS retry with translated Chinese keywords (and vice versa) before concluding MetaWeb lacks the knowledge.',
       '',
       'Read like a person using a search engine: search_metaweb returns candidates with protocol, title, summary, publisher and pinId. Judge by title and summary, then open the 1–3 most promising pins with read_metaweb_pin (a pinId works for any protocol). If the first pins disappoint, open 1–2 more or search again with broader or narrower keywords.',
       '',
       'Ground and cite: answer from what you actually read and cite the pinIds you used so the user can verify. If MetaWeb genuinely has nothing useful, say so honestly and fall back to your own knowledge — never fabricate pins, titles, publishers, or content.',
+    ].join('\n');
+  }
+
+  /**
+   * Static MetaWeb learning-loop policy: how to follow an on-chain tutorial
+   * end to end — resolve skills from chain packages, declare before install
+   * (the install itself is gated by withSkillInstallApproval), verify,
+   * report with provenance, and record the outcome so the same task is never
+   * relearned. Session-invariant; lives in the cacheable head.
+   */
+  private buildMetawebLearningLoopPrompt(): string {
+    return [
+      '## Learning from MetaWeb tutorials',
+      '',
+      'When you follow a tutorial or guide you read on MetaWeb:',
+      '1. Extract the concrete steps and execute them in order. If a step is unclear, re-read the pin or open a related one before improvising.',
+      '2. When a step requires a skill or package, install it from the on-chain metabot-skill package the tutorial references (skill_tool install_skill with the package\'s metafile:// URI from the pin payload, e.g. the skill-file field). Never substitute a Web2 download when an on-chain package exists.',
+      '3. Before each install, tell the owner what you are installing, why the tutorial requires it, and the source pinId. Installs ask for the owner\'s confirmation — if the owner declines, stop that path and report back; never retry silently or work around the decision.',
+      '4. After installing, verify with list_installed_skills and read_skill, then apply the new capability to the actual task.',
+      '5. Report back to the owner: what you learned, which pins guided you (cite the pinIds), and what you installed.',
+      '6. Save what you learned with knowledge_upsert (kind know_how or pitfall; put the source pinIds in tags) so you never have to relearn the same task.',
     ].join('\n');
   }
 
@@ -5094,6 +5122,53 @@ export class CoworkRunner extends EventEmitter {
     }
 
     return null;
+  }
+
+  /**
+   * Wrap the skill_tool control so install_skill requires a human
+   * confirmation in interactive sessions: installing a skill package brings
+   * executable content onto the device, the same trust surface as a delete
+   * operation. Unattended sessions (acceptEdits / bypassPermissions /
+   * autoApprove) skip the prompt so background workers are never blocked on a
+   * human. The learning-loop prompt section still requires the bot to declare
+   * what it is installing, why, and the source pinId before calling
+   * install_skill — this gate is the enforcement half of that policy.
+   */
+  private withSkillInstallApproval(sessionId: string, control: SkillToolControl): SkillToolControl {
+    return {
+      ...control,
+      installSkill: async (input) => {
+        const activeSession = this.activeSessions.get(sessionId);
+        const mode = activeSession?.permissionMode ?? 'default';
+        const skipAsk = mode === 'acceptEdits'
+          || mode === 'bypassPermissions'
+          || activeSession?.autoApprove === true;
+        if (activeSession && !skipAsk) {
+          const source = [
+            input.zip ? `zip: ${input.zip}` : '',
+            input.github ? `github: ${input.github}` : '',
+            input['skills.sh'] ? `skills.sh: ${input['skills.sh']}` : '',
+            input.npm ? `npm: ${input.npm}` : '',
+          ].filter(Boolean).join(', ') || '(unknown source)';
+          const question = tApp(
+            `Agent 将安装技能包（来源: ${source}）。安装技能会引入可执行内容，根据安全策略需要人工确认。是否允许本次安装？`,
+            `The agent is about to install a skill package (source: ${source}). Installing a skill introduces executable content, so safety policy requires a human confirmation. Allow this install?`
+          );
+          const approved = await this.requestSafetyApproval(
+            sessionId,
+            activeSession.abortController.signal,
+            activeSession,
+            question,
+            'skill_tool',
+            input as Record<string, unknown>
+          );
+          if (!approved) {
+            return { ok: false as const, error: 'Skill install denied by the owner.' };
+          }
+        }
+        return control.installSkill(input);
+      },
+    };
   }
 
   private markCrossSessionTurnRunning(sessionId: string): void {
@@ -7779,7 +7854,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         ...buildSkillAgentTools({
           tool,
-          control: this.skillTools,
+          control: this.withSkillInstallApproval(sessionId, this.skillTools),
           getWorkspaceDir: () => this.store.getSession(sessionId)?.cwd || process.cwd(),
         })
       );

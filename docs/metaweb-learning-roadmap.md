@@ -135,14 +135,16 @@ Acceptance: from a fresh IDBots install, asking the TwinBot "IDBots 能干什么
 
 ### M2 — Guided learning loop (L2)
 
+**Status: implemented 2026-08-23** (branch `feat/metaweb-learning`).
+
 **Goal**: the bot can follow a MetaWeb tutorial end-to-end, including installing what it needs.
 
 Scope:
 
-- Tutorial-execution policy in the worldview section: extract concrete steps from a tutorial pin; when a step requires a skill/plugin, resolve it on-chain (`/protocols/metabot-skill` via existing skill sync / `skill_tool install_skill`) rather than from Web2.
-- Install safety: reuse the existing approval flow — installing a skill from a tutorial requires owner approval by default (configurable); the bot must state what, why, and source pinId.
-- Verification: after install, `list_installed_skills`/`read_skill` confirm; the bot reports "I learned X" with provenance (source pins).
-- Outcome recording: minimal structured note of what was learned (feeds M3).
+- Tutorial-execution policy in the worldview section: extract concrete steps from a tutorial pin; when a step requires a skill/plugin, resolve it on-chain (`/protocols/metabot-skill` via existing skill sync / `skill_tool install_skill`) rather than from Web2. → shipped as the `idbots:metaweb-learning-loop` prompt section (order 43).
+- Install safety: reuse the existing approval flow — installing a skill from a tutorial requires owner approval by default (configurable); the bot must state what, why, and source pinId. → shipped as `coworkRunner.withSkillInstallApproval`, gating every `install_skill` call through the shared AskUserQuestion safety-approval path (unattended acceptEdits/bypassPermissions/autoApprove sessions skip, same posture as the delete guard).
+- Verification: after install, `list_installed_skills`/`read_skill` confirm; the bot reports "I learned X" with provenance (source pins). → learning-loop section steps 4–5.
+- Outcome recording: minimal structured note of what was learned (feeds M3). → learning-loop section step 6 rides the existing `knowledge_upsert` (source pinIds in tags); the dedicated experience record type is M3 scope.
 
 Acceptance: S2 scenario ("learn to make videos") completes with the video skill installed from MetaWeb, verified, and reported — with zero Web2 searches.
 
@@ -201,3 +203,4 @@ Fold `skill-service-rate` and publisher track record into search ranking; surfac
 - **Install safety (M2)**: auto-installing executable skills from chain content is a trust decision; default to owner approval, revisit with M5 reputation.
 - **Empty/encrypted pin content**: some pins return `content: null` (encryption or indexer gaps); tools and prompts must tolerate and skip.
 - **Protocol drift**: carrier conventions live in this doc and in the metaprotocol registry; keep both updated when new carriers appear.
+- **Language imbalance / cross-lingual reach** (field report 2026-08-23): the seed corpus is predominantly Chinese, so generic English queries landed on substring noise (English dev journals, protocol descriptors) instead of the good Chinese articles; concrete nouns still hit. Mitigations shipped: tool-level language note + mandatory cross-language retry guidance in the tool description and worldview prompt. Follow-ups tracked: backend ranking hardening (stopword filtering, word-boundary latin matching, IDF/down-weighting of corpus-common tokens), English content seeding by the publisher workstream, and semantic/cross-lingual search as a later backend phase.

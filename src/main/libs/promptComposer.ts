@@ -59,6 +59,12 @@ export const PROMPT_SECTION_ORDER = {
    */
   METAWEB_WORLDVIEW: 42,
   /**
+   * MetaWeb learning loop: how to follow on-chain tutorials — on-chain skill
+   * resolution, declare-before-install, verify, report with provenance,
+   * record the outcome. Static policy prose, right after the worldview.
+   */
+  METAWEB_LEARNING_LOOP: 43,
+  /**
    * Local-app routing block (`## MetaApps`). Reserved order slot: the
    * MetaApps and Skills blocks are still carried inside the renderer-combined
    * base prompt today, but their relative precedence — MetaApp routing wins

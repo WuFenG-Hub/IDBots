@@ -131,7 +131,7 @@ export function buildMetawebLearningAgentTools(deps: {
 
   const searchMetaweb = tool(
     'search_metaweb',
-    'Search MetaWeb (the Agent Internet) — your external brain carrying tutorials, how-to guides, skill packages, service listings, apps, and experience posts published by other bots, across protocols (simplenote, simplebuzz, metaapp, metabot-skill, skill-service, metaprotocol). Trigger liberally when the user asks about something you do not reliably know — IDBots/MetaBot usage, agent skills and how to install them, MetaWeb protocols, "how do I …" tasks — or when fresher authoritative knowledge may exist on-chain. Derive the keywords yourself from the user\'s actual need (never hardcode or ask the user for search terms). Returns up to `size` relevance-ranked candidates with protocol/title/summary/publisher/pinId; this is the results page, not the content — open chosen pins with read_metaweb_pin. Not for people/identity lookup (search_metaids), app browsing (search_metaapps), or social buzz feeds (search_social_posts).',
+    'Search MetaWeb (the Agent Internet) — your external brain carrying tutorials, how-to guides, skill packages, service listings, apps, and experience posts published by other bots, across protocols (simplenote, simplebuzz, metaapp, metabot-skill, skill-service, metaprotocol). Trigger liberally when the user asks about something you do not reliably know — IDBots/MetaBot usage, agent skills and how to install them, MetaWeb protocols, "how do I …" tasks — or when fresher authoritative knowledge may exist on-chain. Derive the keywords yourself from the user\'s actual need (never hardcode or ask the user for search terms). The corpus is currently predominantly Chinese: after a query in one language, if the results do not directly answer the question, ALWAYS retry with translated keywords in the other language (English ↔ Chinese) before concluding MetaWeb lacks the knowledge. Returns up to `size` relevance-ranked candidates with protocol/title/summary/publisher/pinId; this is the results page, not the content — open chosen pins with read_metaweb_pin. When hunting for capabilities (things to install or services to call), search WITHOUT the protocols filter — installable packages live under metabot-skill while paid service offerings live under skill-service, and filtering to one hides the other. Not for people/identity lookup (search_metaids), app browsing (search_metaapps), or social buzz feeds (search_social_posts).',
     {
       query: z.string().min(1),
       protocols: z.array(z.enum(PROTOCOL_KEYS)).optional(),
@@ -181,6 +181,12 @@ export function buildMetawebLearningAgentTools(deps: {
           formatMetawebSearchBullets(items),
           searchGuidance,
         ];
+        // Deterministic language nudge: the corpus is currently Chinese-heavy,
+        // so a pure-ASCII (English) query deserves an explicit retry reminder
+        // when results may be off-topic.
+        if (/^[\x00-\x7F]+$/.test(q)) {
+          sections.push('Language note: MetaWeb content is currently predominantly Chinese. If these results do not directly answer the question, retry with translated Chinese keywords before answering — do not settle for weak or off-topic results.');
+        }
         if (hasMore && nextCursor) {
           sections.push(`More results are available — call search_metaweb again with cursor="${nextCursor}" if you want them.`);
         }
