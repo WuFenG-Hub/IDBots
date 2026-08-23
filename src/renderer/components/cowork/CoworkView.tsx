@@ -13,6 +13,7 @@ import { i18nService } from '../../services/i18n';
 import { convertLegacyEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
 import CoworkPromptInput, { type CoworkPromptInputRef } from './CoworkPromptInput';
 import CoworkSessionDetail from './CoworkSessionDetail';
+import { buildNewTaskComposerCommands } from './composerCommandCatalog';
 import BootstrapShortcuts from './BootstrapShortcuts';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -118,6 +119,15 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     setPermissionModeState(mode);
     void configService.updateConfig({ coworkPermissionMode: mode });
   }, []);
+  // Slash-command catalog for the new-task composer. Rebuilt every render so
+  // command copy follows language switches without extra subscriptions.
+  // pendingGoal is the /goal objective attached to the next started session.
+  const [pendingGoal, setPendingGoal] = useState<{ text: string; status: 'active' | 'paused' } | null>(null);
+  const composerCommands = buildNewTaskComposerCommands({
+    setPermissionMode: (mode) => setPermissionMode(mode),
+    pendingGoal,
+    setPendingGoal: (goal) => setPendingGoal(goal),
+  });
   // Gate the empty-list selection reset below: the metabot list loads async,
   // so without this flag every mount would clear the persisted New Task
   // selection before the IPC resolves.
@@ -443,6 +453,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       dispatch(clearActiveSkills());
       dispatch(clearSelection());
       setPendingModelEffort(null);
+      setPendingGoal(null);
 
       const combinedSystemPrompt = await buildCombinedSystemPrompt(skillPrompt);
 
@@ -478,6 +489,8 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         effort: pendingPick?.effort ?? undefined,
         source: isQuickActionPrompt ? 'quick_action' : undefined,
         projectId: resolvedProjectId ?? undefined,
+        // Only an active pending goal rides along; a paused one stays local.
+        goal: pendingGoal?.status === 'active' ? pendingGoal.text : undefined,
       });
 
       // Stop immediately if user cancelled while startup request was in flight.
@@ -783,6 +796,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
             showPermissionModeSelector={true}
             permissionMode={permissionMode}
             onPermissionModeChange={setPermissionMode}
+            commands={composerCommands}
           />
         </div>
       </div>

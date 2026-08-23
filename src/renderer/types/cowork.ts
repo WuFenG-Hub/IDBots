@@ -342,6 +342,17 @@ export interface CoworkSession {
   usageStats?: CoworkUsageStats | null;
   /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
   projectId?: string | null;
+  /** Session goal set via the composer /goal command; null = none. */
+  goal?: CoworkSessionGoal | null;
+}
+
+/** Session goal state for the /goal command (active goals are injected per turn). */
+export interface CoworkSessionGoal {
+  /** The objective text. */
+  text: string;
+  /** 'active' goals are injected each turn; 'paused' goals are only visible. */
+  status: 'active' | 'paused';
+  updatedAt: number;
 }
 
 // Cowork configuration
@@ -674,6 +685,8 @@ export interface CoworkStartOptions {
   source?: 'quick_action';
   /** FK to projects.id; binds the session to a Settings > Projects project. */
   projectId?: string | null;
+  /** Objective text from the new-task composer's /goal command; attached to the started session. */
+  goal?: string;
 }
 
 // Continue session options

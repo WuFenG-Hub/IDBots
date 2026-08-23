@@ -51,6 +51,9 @@ tests/*
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/coworkKernelRouting.test.mjs
 !tests/coworkDshIntegration.test.mjs
+!tests/composerCommands.test.ts
+!tests/coworkTranscriptExport.test.mjs
+!tests/coworkSessionGoal.test.mjs
 !tests/coworkSessionGtCloseStatus.test.mjs
 !tests/coworkDshSessionTypes.test.mjs
 !tests/coworkDshStallWatchdog.test.mjs

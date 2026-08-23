@@ -4,6 +4,7 @@ import {
   ShieldCheckIcon,
   PencilSquareIcon,
   BoltIcon,
+  ChevronDownIcon,
 } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { CoworkPermissionMode } from '../../types/cowork';
@@ -14,6 +15,8 @@ interface PermissionModeSelectorProps {
   currentMode: CoworkPermissionMode;
   onModeChange: (mode: CoworkPermissionMode) => void;
   disabled?: boolean;
+  /** Show a dropdown chevron on the trigger (standalone pill placements below the composer). */
+  chevron?: boolean;
 }
 
 const MODE_ORDER: CoworkPermissionMode[] = ['default', 'plan', 'acceptEdits', 'bypassPermissions'];
@@ -27,6 +30,7 @@ const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
   currentMode,
   onModeChange,
   disabled = false,
+  chevron = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -81,6 +85,11 @@ const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
         <span className={`font-medium ${modeColor(currentMode)}`}>
           {i18nService.t(`coworkPermissionMode_${currentMode}`)}
         </span>
+        {chevron && (
+          <ChevronDownIcon
+            className={`h-3 w-3 flex-shrink-0 opacity-60 transition-transform ${isOpen ? 'rotate-180' : ''}`}
+          />
+        )}
       </button>
       {isOpen && (
         <div className="absolute right-0 bottom-full mb-2 w-56 rounded-xl shadow-xl dark:bg-claude-darkBg bg-claude-bg dark:border-claude-darkBorder border-claude-border border p-1.5 z-50">

@@ -11,6 +11,7 @@ import type { PermissionResult } from './coworkPermissionTypes';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
 import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute, isFreeQuotaProvider, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
+import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
 import { DshTurnHub, dshSessionRootFor, type DshTurnProviderRoute } from './coworkDshTurn';
 import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
@@ -5105,6 +5106,16 @@ export class CoworkRunner extends EventEmitter {
         text: await this.getBrowserContextPrompt(sessionId).catch(() => ''),
       });
     }
+    // Active session goal (/goal command): rides the per-turn tail like the
+    // other volatile blocks; a stable goal text costs nothing after its first
+    // injection thanks to content-hash dedup.
+    const goal = this.store.getSessionWithoutMessages(sessionId)?.goal ?? null;
+    if (goal && goal.status === 'active') {
+      sections.push({
+        key: 'goal',
+        text: buildGoalPromptSection(goal),
+      });
+    }
     if (!disableRemoteServicesPrompt) {
       sections.push({
         key: 'remote-services',
@@ -5862,6 +5873,20 @@ export class CoworkRunner extends EventEmitter {
     }
     this.store.updateSession(sessionId, { permissionMode: mode });
     coworkLog('INFO', 'setPermissionMode', 'Permission mode updated', { sessionId, mode });
+  }
+
+  /**
+   * Updates the session goal (/goal command). Active goals are injected as a
+   * per-turn prompt section (see runDshSessionLocal and
+   * buildVolatileContextPrompt); null clears the goal.
+   */
+  setSessionGoal(sessionId: string, goal: CoworkSessionGoal | null): void {
+    this.store.updateSession(sessionId, { goal });
+    coworkLog('INFO', 'setSessionGoal', 'Session goal updated', {
+      sessionId,
+      status: goal?.status ?? null,
+      length: goal?.text.length ?? 0,
+    });
   }
 
   /**
@@ -6984,6 +7009,12 @@ export class CoworkRunner extends EventEmitter {
         dshInFlightToolUses.clear();
         dshAnonInFlightToolUses = 0;
         armDshStallWatchdog();
+        // Active session goal (/goal command): its own prompt section every
+        // turn until paused or cleared; a goal set mid-run applies here.
+        const sessionGoal = this.store.getSessionWithoutMessages(sessionId)?.goal ?? null;
+        const goalSection = sessionGoal && sessionGoal.status === 'active'
+          ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(sessionGoal) }]
+          : [];
         try {
           return await hub.runTurn({
         sessionId,
@@ -6994,6 +7025,7 @@ export class CoworkRunner extends EventEmitter {
         workspace: { cwd },
         sections: [
           { name: 'idbots:base', order: 0, text: systemPrompt },
+          ...goalSection,
           // The Claude path inherits tool-use discipline from the claude_code
           // preset; the DSH base prompt has none, and without it the model
           // chats about tasks instead of acting on them.
