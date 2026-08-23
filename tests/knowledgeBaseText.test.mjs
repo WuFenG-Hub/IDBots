@@ -58,7 +58,10 @@ test('toKnowledgeBaseFtsText joins tokens with spaces', () => {
 test('buildKbFtsQuery quotes tokens, ORs them, dedupes and caps the count', () => {
   const query = buildKbFtsQuery('民法 民法 contract');
   const parts = query.split(' OR ');
-  assert.deepEqual([...parts].sort(), ['"contract"', '"民"', '"民法"', '"法"'].sort());
+  assert.deepEqual([...parts].sort(), ['"contract"', '"民法"'].sort());
+  // isolated single CJK char keeps its unigram; longer runs only emit bigrams
+  assert.equal(buildKbFtsQuery('法'), '"法"');
+  assert.equal(buildKbFtsQuery('民法典'), '"民法" OR "法典"');
   assert.equal(buildKbFtsQuery('!!!'), '');
   const capped = buildKbFtsQuery(Array.from({ length: 50 }, (_, i) => `t${i}`).join(' '), 10);
   assert.equal(capped.split(' OR ').length, 10);

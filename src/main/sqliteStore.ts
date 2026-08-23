@@ -16,6 +16,7 @@ import { ensureMetaIDExperienceSchema } from './metaidExperienceStore';
 import { ensureMetaIDImpressionSchema } from './metaidImpressionStore';
 import { ensureMetaIDMemoryGrantSchema } from './metaidMemoryGrantStore';
 import { ensureMetaIDKnowledgeSchema } from './metaidKnowledgeStore';
+import { ensureKnowledgeBaseSchema } from './knowledgeBaseStore';
 
 type ChangePayload<T = unknown> = {
   key: string;
@@ -2122,6 +2123,10 @@ export class SqliteStore {
     // Knowledge-point anchored memory ("经验/知识点"): forward-looking, updatable,
     // KV-shaped know-how/pitfalls keyed by topic. Same idempotent pattern.
     ensureMetaIDKnowledgeSchema(this.db);
+    // Knowledge base registry ("知识库"): per-bot raw-document corpora metadata.
+    // The corpus files and derived search index live on the filesystem; this is
+    // only the registry. Same idempotent pattern.
+    ensureKnowledgeBaseSchema(this.db);
 
     this.save();
   }

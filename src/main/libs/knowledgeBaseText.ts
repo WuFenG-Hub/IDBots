@@ -201,14 +201,34 @@ export function toKnowledgeBaseFtsText(text: string): string {
 }
 
 /**
- * Builds a safe FTS5 MATCH expression from a free-form query: each token is
- * double-quoted (tokens only ever contain [a-z0-9_] or CJK chars) and OR-ed so
- * bm25() ranks chunks covering more of the query higher.
+ * Builds a safe FTS5 MATCH expression from a free-form query.
+ *
+ * Token selection favors precision: latin words and CJK *bigrams* (a CJK
+ * unigram is only emitted for an isolated single char, never for chars inside
+ * a longer run — otherwise every doc containing e.g. 法 in 做法 would match a
+ * 民法 query). Tokens are double-quoted (they only ever contain [a-z0-9_] or
+ * CJK chars) and OR-ed so bm25() ranks chunks covering more of the query
+ * higher.
  */
 export function buildKbFtsQuery(query: string, maxTokens = 32): string {
-  const tokens = [...new Set(tokenizeKnowledgeBaseText(query))].slice(0, maxTokens);
-  if (!tokens.length) return '';
-  return tokens.map((token) => `"${token}"`).join(' OR ');
+  const source = String(query || '').toLowerCase();
+  const tokens: string[] = [];
+  const latin = source.match(/[a-z0-9_]+/g);
+  if (latin) tokens.push(...latin);
+  const cjkRuns = source.match(/[一-鿿]+/g) || [];
+  for (const run of cjkRuns) {
+    const chars = Array.from(run);
+    if (chars.length === 1) {
+      tokens.push(chars[0]);
+      continue;
+    }
+    for (let idx = 0; idx < chars.length - 1; idx += 1) {
+      tokens.push(`${chars[idx]}${chars[idx + 1]}`);
+    }
+  }
+  const unique = [...new Set(tokens)].slice(0, maxTokens);
+  if (!unique.length) return '';
+  return unique.map((token) => `"${token}"`).join(' OR ');
 }
 
 export interface KnowledgeBaseChunk {
