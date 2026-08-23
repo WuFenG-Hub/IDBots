@@ -190,6 +190,7 @@ Fold `skill-service-rate` and publisher track record into search ranking; surfac
 - Tutorials/knowledge articles publish as **SimpleNote** with: meaningful `title`, one-line `subtitle` (used as the search summary), markdown `content`, and `tags` including topic tags, a language tag (`zh`/`en`), and a domain tag (e.g. `idbots`, `skill-guide`, `video`).
 - Announce every new/updated article with a short **simplebuzz** quoting the note pinId (buzz = changelog/discovery layer).
 - MetaApps keep an up-to-date `APP.md`; skill packages keep an up-to-date `SKILL.md`; skill-services attach a `skillDocument` markdown guide.
+- **MetaApp-form tutorials**: search indexes only the pin's `title`/`intro`/`tags` (title carries the highest weight), and `read_metaweb_pin` returns just the `intro` for metaapp pins — the full `APP.md` inside the package is consumed via `skill_tool extract_metaapp`. Publishers MUST put the discovery keywords into `title`/`intro`/`tags`; never rely on the packaged content being searchable.
 - Updates use pin modify semantics so `currentPinId` chains stay intact; publisher identity must be a consistent MetaID (reputation input, M5).
 
 ## 9. Risks and open questions

@@ -68,6 +68,17 @@ export function formatMetawebSearchBullets(items: MetawebSearchItem[]): string {
   }).join('\n');
 }
 
+/**
+ * Follow-up hints per protocol, appended to read_metaweb_pin output: where to
+ * go when the pin body is only a summary of a richer package. Keeps the
+ * search → read → deep-read/install chain closed without hardcoding it into
+ * the model's prompt.
+ */
+const PROTOCOL_FOLLOWUP_HINTS: Record<string, string> = {
+  metaapp: 'this is an on-chain MetaApp package and the content above is only its intro — read its full agent-facing documentation (APP.md) with skill_tool extract_metaapp using this pinId.',
+  'metabot-skill': 'this is an on-chain skill package — install it with skill_tool install_skill (pass the package metafile:// URI from the payload, e.g. the skill-file field, as the zip source), then verify with list_installed_skills / read_skill.',
+};
+
 /** Human-readable sheet for read_metaweb_pin; the creator line keeps a ready-to-quote metaid:// link. */
 export function formatMetawebPinDetail(pin: MetawebPin): string {
   const creatorLabel = pin.creator.name || pin.creator.globalMetaId || pin.creator.metaid || pin.creator.address || 'unknown';
@@ -86,6 +97,8 @@ export function formatMetawebPinDetail(pin: MetawebPin): string {
   if (pin.attachments.length) {
     lines.push(`- attachments: ${pin.attachments.map((att) => att.url || att.uri).filter(Boolean).join(', ')}`);
   }
+  const followupHint = PROTOCOL_FOLLOWUP_HINTS[pin.protocol];
+  if (followupHint) lines.push(`- next: ${followupHint}`);
   if (pin.text != null) {
     const sizeNote = pin.truncated === true && pin.totalLength != null
       ? ` (showing first ${pin.text.length} of ${pin.totalLength} runes — server-side truncated)`
