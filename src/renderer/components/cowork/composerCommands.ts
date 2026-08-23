@@ -114,6 +114,8 @@ export type GoalCommand =
   | { kind: 'show' }
   | { kind: 'create'; text: string }
   | { kind: 'edit'; text: string }
+  /** `edit` without an objective — the caller must ask for text, never create. */
+  | { kind: 'edit-missing-text' }
   | { kind: 'clear' }
   | { kind: 'pause' }
   | { kind: 'resume' };
@@ -121,6 +123,8 @@ export type GoalCommand =
 /**
  * Parse `/goal` arguments with the DSH grammar: empty → show, `clear` /
  * `pause` / `resume` keywords, `edit <objective>`, anything else → create.
+ * A bare `edit` (no objective) parses as `edit-missing-text`, NOT as a
+ * create whose text happens to be the literal word "edit".
  */
 export function parseGoalCommandArgs(args: string): GoalCommand {
   const trimmed = args.trim();
@@ -128,9 +132,10 @@ export function parseGoalCommandArgs(args: string): GoalCommand {
   if (trimmed === 'clear') return { kind: 'clear' };
   if (trimmed === 'pause') return { kind: 'pause' };
   if (trimmed === 'resume') return { kind: 'resume' };
-  if (trimmed.startsWith('edit ')) {
-    const text = trimmed.slice('edit '.length).trim();
-    if (text) return { kind: 'edit', text };
+  if (trimmed === 'edit' || trimmed.startsWith('edit ')) {
+    const text = trimmed.slice('edit'.length).trim();
+    if (!text) return { kind: 'edit-missing-text' };
+    return { kind: 'edit', text };
   }
   return { kind: 'create', text: trimmed };
 }

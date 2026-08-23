@@ -122,11 +122,19 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   // Slash-command catalog for the new-task composer. Rebuilt every render so
   // command copy follows language switches without extra subscriptions.
   // pendingGoal is the /goal objective attached to the next started session.
-  const [pendingGoal, setPendingGoal] = useState<{ text: string; status: 'active' | 'paused' } | null>(null);
+  // A ref mirrors it because /goal create sets the goal and submits in the
+  // same tick: handleStartSession runs from the pre-update render closure, so
+  // it must read the synchronously-written ref, not the (stale) state value.
+  const pendingGoalRef = useRef<{ text: string; status: 'active' | 'paused' } | null>(null);
+  const [pendingGoal, setPendingGoalState] = useState<{ text: string; status: 'active' | 'paused' } | null>(null);
+  const setPendingGoal = useCallback((goal: { text: string; status: 'active' | 'paused' } | null) => {
+    pendingGoalRef.current = goal;
+    setPendingGoalState(goal);
+  }, []);
   const composerCommands = buildNewTaskComposerCommands({
     setPermissionMode: (mode) => setPermissionMode(mode),
     pendingGoal,
-    setPendingGoal: (goal) => setPendingGoal(goal),
+    setPendingGoal,
   });
   // Gate the empty-list selection reset below: the metabot list loads async,
   // so without this flag every mount would clear the persisted New Task
@@ -490,7 +498,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         source: isQuickActionPrompt ? 'quick_action' : undefined,
         projectId: resolvedProjectId ?? undefined,
         // Only an active pending goal rides along; a paused one stays local.
-        goal: pendingGoal?.status === 'active' ? pendingGoal.text : undefined,
+        // Read the ref (not the state): a /goal create in the same tick as
+        // this submit has not re-rendered yet.
+        goal: pendingGoalRef.current?.status === 'active' ? pendingGoalRef.current.text : undefined,
       });
 
       // Stop immediately if user cancelled while startup request was in flight.
