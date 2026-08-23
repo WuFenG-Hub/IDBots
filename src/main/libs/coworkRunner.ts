@@ -8426,10 +8426,14 @@ export class CoworkRunner extends EventEmitter {
     // citation-queried at runtime (knowledge_base_query) and fed by
     // knowledge_base_add_document + knowledge_base_learn. The acting bot is
     // resolved from the session, with the same strict no-guess attribution as
-    // the memory/knowledge tools. M4 study sessions get a budget-counting
-    // wrapper: metaweb-source adds are hard-capped at the job's pin budget
-    // (prompt guidance alone is not a budget).
-    if (this.knowledgeBase) {
+    // the memory/knowledge tools. Gated on sessionMemoryEnabled like every
+    // other memory-surface tool: the <knowledge_bases> prompt block already
+    // hides when memory is off, and the tools must not stay callable behind
+    // it — knowledge_base_learn(full:true) rebuilds whole indexes. M4 study
+    // sessions additionally get a budget-counting wrapper: metaweb-source
+    // adds are hard-capped at the job's pin budget (prompt guidance alone is
+    // not a budget).
+    if (sessionMemoryEnabled && this.knowledgeBase) {
       const studySession = this.activeSessions.get(sessionId)?.metawebStudySession;
       memoryTools.push(
         ...buildKnowledgeBaseAgentTools({
@@ -8446,8 +8450,9 @@ export class CoworkRunner extends EventEmitter {
     // chat (metaweb_study_enqueue); the nightly runs are driven by
     // MetawebStudyService, and metaweb_study_status is how the bot answers
     // "what have you been learning" — the deliberate substitute for a
-    // proactive morning report. Same strict session attribution as above.
-    if (this.metawebStudy) {
+    // proactive morning report. Same strict session attribution as above, and
+    // the same memory gate: a study job's whole purpose is feeding the KB.
+    if (sessionMemoryEnabled && this.metawebStudy) {
       memoryTools.push(
         ...buildMetawebStudyAgentTools({
           tool,

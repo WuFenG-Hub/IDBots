@@ -156,6 +156,9 @@ export class MetawebStudyService {
     metabotId: number,
     input: { topic: string; budgetPins?: number },
   ): { job: MetawebStudyJobRecord; created: boolean } {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) {
+      throw new Error(`Invalid metabotId: ${String(metabotId)}`);
+    }
     const topic = normalizeStudyTopic(input.topic);
     if (!topic) throw new Error('Study topic is required');
     const fingerprint = studyTopicFingerprintOf(topic);
@@ -187,6 +190,7 @@ export class MetawebStudyService {
   }
 
   listStudyJobs(metabotId: number): MetawebStudyJobRecord[] {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) return [];
     return this.store.listByMetabot(metabotId);
   }
 

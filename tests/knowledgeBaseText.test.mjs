@@ -169,3 +169,26 @@ test('sha256File hashes file bytes deterministically', () => {
   assert.equal(sha256File(filePath), sha256File(filePath));
   assert.equal(sha256File(filePath).length, 64);
 });
+
+test('extractKnowledgeBaseTextAsync matches the sync extractor (md + simplenote JSON)', async () => {
+  const { extractKnowledgeBaseTextAsync, sha256FileAsync } = await import('../dist-electron/main/libs/knowledgeBaseText.js')
+    .catch(() => import('../dist-electron/libs/knowledgeBaseText.js'));
+  const mdPath = writeTmp('async.md', '# 标题\n\n正文内容。');
+  assert.deepEqual(await extractKnowledgeBaseTextAsync(mdPath), extractKnowledgeBaseText(mdPath));
+
+  const notePath = writeTmp('async-note.json', JSON.stringify({
+    title: '笔记标题',
+    contentType: 'text/markdown',
+    content: '笔记正文',
+  }));
+  const note = await extractKnowledgeBaseTextAsync(notePath);
+  assert.equal(note.title, '笔记标题');
+  assert.match(note.text, /笔记正文/);
+
+  assert.equal(await sha256FileAsync(mdPath), sha256File(mdPath));
+
+  await assert.rejects(
+    () => extractKnowledgeBaseTextAsync(writeTmp('async.bin', 'x')),
+    (error) => error instanceof KnowledgeBaseTextError && error.code === 'unsupported_format',
+  );
+});
