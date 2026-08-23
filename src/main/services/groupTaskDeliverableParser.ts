@@ -13,7 +13,7 @@
  *   carried a real metaapp:// pinid AND a share link on two tag lines, only one
  *   row was recorded).
  * - Strict format validation: a candidate URI must contain a `[0-9a-f]{64}i0`
- *   pinid token (metaapp/metafile/bare pinid) or be an `^https?://` URL with a
+ *   pinid token (metaapp/metafile/pin/bare pinid) or be an `^https?://` URL with a
  *   non-empty host. Placeholders (`metaapp://<pinId>`, `metaapp://[PINID]`),
  *   scheme-only fragments (`metaapp://`), ellipsis truncation
  *   (`metafile://…zip`) and truncated pinids without `i0` are INVALID and must
@@ -53,13 +53,13 @@ const DELIVERABLE_TAG_SPLIT = /\[DELIVERABLE\]/gi;
  * ellipsis (truncation), backticks and markdown emphasis (never part of a URI).
  */
 const URI_TOKEN_EXCLUDES = `\\s\\[\\]<>()（）「」『』【】{}…\`*_`;
-const SCHEME_URI_RE = new RegExp(`(metaapp|metafile)://([^${URI_TOKEN_EXCLUDES}]+)`, 'i');
+const SCHEME_URI_RE = new RegExp(`(metaapp|metafile|pin)://([^${URI_TOKEN_EXCLUDES}]+)`, 'i');
 const HTTP_URI_RE = new RegExp(`(https?)://([^${URI_TOKEN_EXCLUDES}]+)`, 'i');
 const BARE_PINID_RE = /\b[0-9a-f]{64}i0\b/i;
 const PINID_TOKEN_RE = /[0-9a-f]{64}i0/i;
 
 /** A segment carries an uri-SHAPED token even when the token itself is malformed. */
-const HAS_SCHEME_TOKEN_RE = /(?:metaapp|metafile):\/\//i;
+const HAS_SCHEME_TOKEN_RE = /(?:metaapp|metafile|pin):\/\//i;
 const HAS_HTTP_TOKEN_RE = /https?:\/\//i;
 /** Hex-ish fragment (truncated pinid) that can never validate without `i0`. */
 const HAS_HEXISH_RE = /[0-9a-f]{16,}/i;
@@ -94,12 +94,12 @@ function valid(kind: DeliverableKind, uri: string, warnings: string[] = []): Par
     : { kind, uri, valid: true, note: null };
 }
 
-/** P0-1: a buzz pinid wrapped in metaapp:// (loop AI #4 lesson) — advise a buzz link. */
+/** P0-1: a buzz pinid wrapped in metaapp:// (loop AI #4 lesson) — advise a pin:// link. */
 function buzzWrappingWarnings(text: string, kind: DeliverableKind): string[] {
   if (!/buzz/i.test(text)) return [];
   if (kind === 'metaapp' || kind === 'pinid') {
     return [
-      'buzz deliverable should be shared as a buzz link (e.g. https://openagentinternet.org/browser/buzz/<pinid>), not wrapped in metaapp://',
+      'buzz deliverable is best shared as a pin://<pinid> link (opens the post in the app\'s Bot Browser), not wrapped in metaapp://',
     ];
   }
   return [];
@@ -117,13 +117,17 @@ function parseSegment(segment: string): ParsedDeliverable {
 
   const schemeMatch = SCHEME_URI_RE.exec(text);
   if (schemeMatch) {
-    const kind = schemeMatch[1].toLowerCase() as 'metaapp' | 'metafile';
+    const scheme = schemeMatch[1].toLowerCase();
+    // pin:// is the universal fallback scheme for any pin — recorded under the
+    // existing 'pinid' kind, but WITHOUT the buzz-wrapping warning (pin:// is
+    // the recommended citation form for buzz posts too).
+    const kind = (scheme === 'pin' ? 'pinid' : scheme) as 'metaapp' | 'metafile' | 'pinid';
     const payload = stripTrailingPunct(schemeMatch[2]);
     if (PLACEHOLDER_RE.test(payload)) return invalid(kind, 'placeholder token in URI');
     if (ELLIPSIS_RE.test(payload) || DOTS_TRUNCATION_RE.test(payload)) {
       return invalid(kind, 'ellipsis/truncation in URI');
     }
-    // metaapp/metafile URIs are only real when they carry a full 64-hex + i0 pinid.
+    // Scheme URIs are only real when they carry a full 64-hex + i0 pinid.
     const pinidToken = payload.match(PINID_TOKEN_RE)?.[0];
     if (!pinidToken) return invalid(kind, 'missing 64-hex+i0 pinid token');
     // Canonical pinids are lowercase hex — normalize the token (keep suffixes
@@ -131,7 +135,8 @@ function parseSegment(segment: string): ParsedDeliverable {
     const normalizedPayload = pinidToken === pinidToken.toLowerCase()
       ? payload
       : payload.replace(pinidToken, pinidToken.toLowerCase());
-    return valid(kind, `${kind}://${normalizedPayload}`, buzzWrappingWarnings(text, kind));
+    const warnings = scheme === 'pin' ? [] : buzzWrappingWarnings(text, kind);
+    return valid(kind, `${scheme}://${normalizedPayload}`, warnings);
   }
 
   const httpMatch = HTTP_URI_RE.exec(text);

@@ -64,7 +64,8 @@ test('resolves the session metabotId and forwards to/content/replyPin to control
   assert.match(text, /Private message sent\./);
   assert.match(text, /pinId: abc123i0/);
   assert.match(text, /txids: tx-1, tx-2/);
-  assert.match(text, /https:\/\/openagentinternet\.org\/browser\/pin\/abc123i0/);
+  assert.match(text, /pin link: \[pin:\/\/abc123i0\]\(pin:\/\/abc123i0\)/);
+  assert.doesNotMatch(text, /openagentinternet|metaid\.io/);
 });
 
 test('omits replyPin when reply_pin is not provided', async () => {

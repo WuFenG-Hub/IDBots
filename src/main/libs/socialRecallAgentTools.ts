@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { SocialPostItem, SocialCommentItem } from '../services/socialRecallService';
+import { buildPinBrowserUri, markdownSelfLink } from './metawebUri';
 
 /** A feed candidate from the Social Recall API, marked when authored by one of the user's own MetaBots. */
 export type SocialPostCandidate = SocialPostItem & { isOwn?: boolean };
@@ -75,14 +76,20 @@ function authorName(post: SocialPostItem): string {
   return post.author.globalMetaId || post.author.address || post.author.metaId || 'unknown';
 }
 
-/** Ready-to-quote markdown bullets for social feed candidates. Author names are metaid:// links. */
+/** Ready-to-quote markdown bullets for social feed candidates. Post snippets are pin:// links, author names metaid:// links. */
 export function formatSocialPostBullets(items: SocialPostItem[]): string {
   return items.map((item) => {
     const name = authorName(item);
     const label = sanitizeLinkLabel(name);
     const namePart = item.author.globalMetaId ? `[${label}](${metaIdUri(item.author.globalMetaId)})` : label;
     const own = (item as SocialPostCandidate).isOwn ? ' (your post)' : '';
-    const head = `- **${postSnippet(item)}** — by ${namePart} · ${formatTime(item.createdAt)}${own}`;
+    // The snippet links to pin://<pinId> — the ready-to-quote citation form;
+    // the plain `pin:` id stays in the meta line for tool calls.
+    const snippet = sanitizeLinkLabel(postSnippet(item));
+    const snippetPart = item.pinId
+      ? `[${snippet}](${buildPinBrowserUri({ pinId: item.pinId, path: item.protocolPath })})`
+      : snippet;
+    const head = `- **${snippetPart}** — by ${namePart} · ${formatTime(item.createdAt)}${own}`;
     const meta = [
       `likes ${item.likeCount}`,
       `comments ${item.commentCount}`,
@@ -107,6 +114,8 @@ export function formatSocialPostDetail(post: SocialPostCandidate): string {
   ];
   if (post.chainName) lines.push(`- chain: ${post.chainName}`);
   if (post.protocolPath) lines.push(`- protocol: ${post.protocolPath}`);
+  const viewLink = markdownSelfLink(buildPinBrowserUri({ pinId: post.pinId, path: post.protocolPath }));
+  if (viewLink) lines.push(`- view: ${viewLink}`);
   if (post.createdAt) {
     const created = formatTime(post.createdAt);
     const updated = post.updatedAt && post.updatedAt !== post.createdAt ? formatTime(post.updatedAt) : '';
@@ -119,14 +128,17 @@ export function formatSocialPostDetail(post: SocialPostCandidate): string {
   return lines.join('\n');
 }
 
-/** Ready-to-quote markdown bullets for post comments; author names are metaid:// links. */
+/** Ready-to-quote markdown bullets for post comments; author names are metaid:// links, comment pins pin:// links. */
 export function formatSocialComments(items: SocialCommentItem[]): string {
   return items.map((comment) => {
     const name = comment.authorGlobalMetaId || comment.authorAddress || comment.authorMetaId || 'unknown';
     const label = sanitizeLinkLabel(name);
     const namePart = comment.authorGlobalMetaId ? `[${label}](${metaIdUri(comment.authorGlobalMetaId)})` : label;
     const content = comment.content ? truncate(comment.content.replace(/\s+/g, ' '), 200) : '(empty comment)';
-    return `- ${content} — ${namePart} · ${formatTime(comment.timestamp)}${comment.pinId ? ` · pin: ${comment.pinId}` : ''}`;
+    const pinPart = comment.pinId
+      ? ` · pin: ${markdownSelfLink(buildPinBrowserUri({ pinId: comment.pinId }))}`
+      : '';
+    return `- ${content} — ${namePart} · ${formatTime(comment.timestamp)}${pinPart}`;
   }).join('\n');
 }
 
@@ -180,12 +192,12 @@ export function buildSocialRecallAgentTools(deps: {
   const { tool, socialRecall, openBestMatchInBrowser } = deps;
 
   const candidatesGuidance = openBestMatchInBrowser
-    ? 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: author names MUST remain metaid:// links and pinIds must stay intact (they are needed for social_post_detail / social_post_comments). When the user wants to view an author, open their page with bot_browser_open_uri on the metaid:// URI (prefer newTab=true). Never invent posts, authors, or engagement numbers.'
-    : 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: author names MUST remain clickable metaid:// links and pinIds must stay intact; never invent posts, authors, or engagement numbers. Do NOT open anything in the Bot Browser yourself: the user works in this chat view and will click links. For a post\'s aggregated engagement (likes/comments/quotes) use social_post_detail; for its replies use social_post_comments.';
+    ? 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: post snippets MUST remain pin:// links, author names MUST remain metaid:// links, and pinIds must stay intact (they are needed for social_post_detail / social_post_comments). When the user wants to view an author, open their page with bot_browser_open_uri on the metaid:// URI (prefer newTab=true). Never invent posts, authors, or engagement numbers, and never turn an on-chain pin into a Web2 URL.'
+    : 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: post snippets MUST remain clickable pin:// links, author names MUST remain clickable metaid:// links, and pinIds must stay intact; never invent posts, authors, or engagement numbers, and never turn an on-chain pin into a Web2 URL. Do NOT open anything in the Bot Browser yourself: the user works in this chat view and will click links. For a post\'s aggregated engagement (likes/comments/quotes) use social_post_detail; for its replies use social_post_comments.';
 
   const detailGuidance = openBestMatchInBrowser
     ? 'Present these fields to the user with the author name kept as a clickable metaid:// link, and open the author\'s bot page with bot_browser_open_uri on that URI when the user asks to view them. For the post\'s replies use social_post_comments.'
-    : 'Present these fields to the user with the author name kept as a clickable metaid:// link. Do NOT open the Bot Browser yourself — the user clicks the link to view the author. For the post\'s replies use social_post_comments.';
+    : 'Present these fields to the user with the author name kept as a clickable metaid:// link and the post cited via its pin:// view link. Do NOT open the Bot Browser yourself — the user clicks the links to view. For the post\'s replies use social_post_comments.';
 
   const searchSocialPosts = tool(
     'search_social_posts',
@@ -314,7 +326,7 @@ export function buildSocialRecallAgentTools(deps: {
         const sections = [
           `${items.length} comment(s) on post "${pinId}":`,
           formatSocialComments(items),
-          'Present these comments; keep author names as clickable metaid:// links.',
+          'Present these comments; keep author names as clickable metaid:// links and comment pins as pin:// links.',
         ];
         if (hasMore && nextCursor) {
           sections.push(`More comments are available — call social_post_comments again with cursor="${nextCursor}" if the user wants them.`);

@@ -78,7 +78,8 @@ test('casts a JSON payload pin with the default 7-tuple', async () => {
   assert.match(text, /txid: tx-cast-1/);
   assert.match(text, /pinId: tx-cast-1i0/);
   assert.match(text, /cost: 777 sats/);
-  assert.match(text, /https:\/\/openagentinternet\.org\/browser\/pin\/tx-cast-1i0/);
+  assert.match(text, /view link: \[pin:\/\/tx-cast-1i0\]\(pin:\/\/tx-cast-1i0\)/);
+  assert.doesNotMatch(text, /openagentinternet|metaid\.io/);
 });
 
 test('forwards operation and network overrides', async () => {
@@ -232,12 +233,12 @@ test('surfaces createPin failures as an error result without throwing', async ()
   assert.match(result.content[0].text, /omni_cast failed: broadcast rejected/);
 });
 
-test('formatCastResult lists txid, pinId, cost, and the public link', () => {
+test('formatCastResult lists txid, pinId, cost, and the view link', () => {
   const text = formatCastResult({ pinId: 'abci0', txids: ['tx-1'], totalCost: 42 });
   assert.match(text, /txid: tx-1/);
   assert.match(text, /pinId: abci0/);
   assert.match(text, /cost: 42 sats/);
-  assert.match(text, /public link: https:\/\/openagentinternet\.org\/browser\/pin\/abci0/);
+  assert.match(text, /view link: \[pin:\/\/abci0\]\(pin:\/\/abci0\)/);
 
   const minimal = formatCastResult({ pinId: '', txids: [], totalCost: 0 });
   assert.equal(minimal, 'Pin cast on-chain.\n- cost: 0 sats');

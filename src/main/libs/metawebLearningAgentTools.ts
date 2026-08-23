@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { MetawebSearchItem, MetawebSearchProtocol } from '../services/metawebSearchService';
 import type { MetawebPin } from '../services/metawebPinService';
+import { METAWEB_CITATION_RULE, buildPinBrowserUri, buildSearchItemBrowserUri, markdownSelfLink } from './metawebUri';
 
 /**
  * Control surface the host (main.ts) provides for the MetaWeb learning tools.
@@ -52,10 +53,14 @@ function publisherName(item: MetawebSearchItem): string {
   return item.publisher.name || item.publisher.globalMetaId || item.publisher.metaid || 'unknown';
 }
 
-/** Ready-to-scan markdown bullets for search candidates; each carries the pin id to open. */
+/** Ready-to-scan markdown bullets for search candidates; titles are clickable MetaWeb URI links. */
 export function formatMetawebSearchBullets(items: MetawebSearchItem[]): string {
   return items.map((item) => {
-    const title = item.title || '(untitled)';
+    const uri = buildSearchItemBrowserUri(item);
+    const title = (item.title || '(untitled)').replace(/[[\]]/g, '');
+    // The title link (pin://, or metaapp:// for app packages) is the
+    // ready-to-quote citation form; the plain `pin:` id stays for tool calls.
+    const head = uri ? `- **[${title}](${uri})**` : `- **${title}**`;
     const summary = item.summary ? ` — ${truncate(item.summary.replace(/\s+/g, ' '), 140)}` : '';
     const meta = [
       `protocol: ${item.protocol || 'unknown'}`,
@@ -64,7 +69,7 @@ export function formatMetawebSearchBullets(items: MetawebSearchItem[]): string {
       item.tags.length ? `tags: ${item.tags.join(', ')}` : '',
       `pin: ${item.currentPinId || item.pinId}`,
     ].filter(Boolean).join(' | ');
-    return `- **${title}**${summary}\n  ${meta}`;
+    return `${head}${summary}\n  ${meta}`;
   }).join('\n');
 }
 
@@ -85,17 +90,25 @@ export function formatMetawebPinDetail(pin: MetawebPin): string {
   const creatorPart = pin.creator.globalMetaId
     ? `[${creatorLabel.replace(/[[\]]/g, '')}](metaid://${pin.creator.globalMetaId})`
     : creatorLabel;
+  const viewLink = markdownSelfLink(buildPinBrowserUri({
+    pinId: pin.currentPinId || pin.pinId,
+    path: pin.path,
+    protocol: pin.protocol,
+  }));
   const lines = [
     `Pin ${pin.pinId}:`,
     `- title: ${pin.meta.title || '(untitled)'}`,
   ];
   lines.push(`- protocol: ${pin.protocol || 'unknown'}${pin.path ? ` (${pin.path})` : ''} | chain: ${pin.chainName || 'unknown'} | source: ${pin.source}`);
+  if (viewLink) lines.push(`- view: ${viewLink}`);
   lines.push(`- author: ${creatorPart}`);
   if (pin.createdAt) lines.push(`- created: ${formatTime(pin.createdAt)}`);
   if (pin.operation !== 'create') lines.push(`- operation: ${pin.operation}${pin.currentPinId && pin.currentPinId !== pin.pinId ? ` (latest: ${pin.currentPinId})` : ''}`);
   if (pin.meta.tags.length) lines.push(`- tags: ${pin.meta.tags.join(', ')}`);
   if (pin.attachments.length) {
-    lines.push(`- attachments: ${pin.attachments.map((att) => att.url || att.uri).filter(Boolean).join(', ')}`);
+    // Prefer the original metafile:// URI over the server-resolved Web2 URL —
+    // the app opens metafile:// directly in the Bot Browser.
+    lines.push(`- attachments: ${pin.attachments.map((att) => att.uri || att.url).filter(Boolean).join(', ')}`);
   }
   const followupHint = PROTOCOL_FOLLOWUP_HINTS[pin.protocol];
   if (followupHint) lines.push(`- next: ${followupHint}`);
@@ -125,13 +138,13 @@ export function buildMetawebLearningAgentTools(deps: {
 
   const searchGuidance = [
     'Judge these candidates by title + summary, then open the 1-3 most promising pins with read_metaweb_pin (use the pin: ids above verbatim — they work for any protocol).',
-    'Answer only from what you actually read, and cite the pinIds you used so the user can verify.',
+    `Answer only from what you actually read, and cite the pins you used so the user can verify. ${METAWEB_CITATION_RULE}`,
     'If nothing looks useful, try again with broader or different keywords (fewer terms, synonyms, or the other language — Chinese ↔ English) before concluding MetaWeb has no answer; if it truly has none, say so honestly. Never invent pins, titles, publishers, or content.',
   ].join(' ');
 
   const searchMetaweb = tool(
     'search_metaweb',
-    'Search MetaWeb (the Agent Internet) — your external brain carrying tutorials, how-to guides, skill packages, service listings, apps, and experience posts published by other bots, across protocols (simplenote, simplebuzz, metaapp, metabot-skill, skill-service, metaprotocol). Trigger liberally when the user asks about something you do not reliably know — IDBots/MetaBot usage, agent skills and how to install them, MetaWeb protocols, "how do I …" tasks — or when fresher authoritative knowledge may exist on-chain. Derive the keywords yourself from the user\'s actual need (never hardcode or ask the user for search terms). The corpus is currently predominantly Chinese: after a query in one language, if the results do not directly answer the question, ALWAYS retry with translated keywords in the other language (English ↔ Chinese) before concluding MetaWeb lacks the knowledge. Returns up to `size` relevance-ranked candidates with protocol/title/summary/publisher/pinId; this is the results page, not the content — open chosen pins with read_metaweb_pin. When hunting for capabilities (things to install or services to call), search WITHOUT the protocols filter — installable packages live under metabot-skill while paid service offerings live under skill-service, and filtering to one hides the other. Not for people/identity lookup (search_metaids), app browsing (search_metaapps), or social buzz feeds (search_social_posts).',
+    'Search MetaWeb (the Agent Internet) — your external brain carrying tutorials, how-to guides, skill packages, service listings, apps, and experience posts published by other bots, across protocols (simplenote, simplebuzz, metaapp, metabot-skill, skill-service, metaprotocol). Trigger liberally when the user asks about something you do not reliably know — IDBots/MetaBot usage, agent skills and how to install them, MetaWeb protocols, "how do I …" tasks — or when fresher authoritative knowledge may exist on-chain. Derive the keywords yourself from the user\'s actual need (never hardcode or ask the user for search terms). The corpus is currently predominantly Chinese: after a query in one language, if the results do not directly answer the question, ALWAYS retry with translated keywords in the other language (English ↔ Chinese) before concluding MetaWeb lacks the knowledge. Returns up to `size` relevance-ranked candidates with protocol/summary/publisher and titles as clickable MetaWeb URI links (pin://, or metaapp:// for apps); this is the results page, not the content — open chosen pins with read_metaweb_pin. When hunting for capabilities (things to install or services to call), search WITHOUT the protocols filter — installable packages live under metabot-skill while paid service offerings live under skill-service, and filtering to one hides the other. Not for people/identity lookup (search_metaids), app browsing (search_metaapps), or social buzz feeds (search_social_posts).',
     {
       query: z.string().min(1),
       protocols: z.array(z.enum(PROTOCOL_KEYS)).optional(),
@@ -199,7 +212,7 @@ export function buildMetawebLearningAgentTools(deps: {
 
   const readMetawebPin = tool(
     'read_metaweb_pin',
-    'Open one MetaWeb pin by pinId and read its full content — the "click the search result" step after search_metaweb. Works for any protocol (simplenote, simplebuzz, metaapp, metabot-skill, skill-service, …); you do NOT need to know which protocol the pin belongs to, and any version of a pinId resolves to the latest version. Returns title/meta, the normalized markdown body, resolved attachment URLs, and the author. The body may be server-side truncated (truncated=true with totalLength); work with the head you received. Pins with null content are encrypted or empty — skip them and try another result. Requires an existing pinId — to discover pins use search_metaweb first.',
+    'Open one MetaWeb pin by pinId and read its full content — the "click the search result" step after search_metaweb. Works for any protocol (simplenote, simplebuzz, metaapp, metabot-skill, skill-service, …); you do NOT need to know which protocol the pin belongs to, and any version of a pinId resolves to the latest version. Returns title/meta, the normalized markdown body, resolved attachments, the author, and a ready-to-quote MetaWeb view link for the pin. The body may be server-side truncated (truncated=true with totalLength); work with the head you received. Pins with null content are encrypted or empty — skip them and try another result. Requires an existing pinId — to discover pins use search_metaweb first.',
     {
       pinId: z.string().min(1),
     },
@@ -213,7 +226,10 @@ export function buildMetawebLearningAgentTools(deps: {
         if (pin.text == null) {
           return textResult(`Pin "${pinId}" (${pin.protocol || 'unknown protocol'}) has no readable text content (encrypted, binary, or empty). Skip it and try another search result; do NOT invent its content.`);
         }
-        return textResult(formatMetawebPinDetail(pin));
+        return textResult([
+          formatMetawebPinDetail(pin),
+          METAWEB_CITATION_RULE,
+        ].join('\n\n'));
       } catch (error) {
         if (error instanceof Error && error.name === 'MetawebPinNotFoundError') {
           return textResult(`No MetaWeb pin matches "${pinId}" (it does not exist or was revoked). Tell the user honestly; do NOT invent pin content.`);

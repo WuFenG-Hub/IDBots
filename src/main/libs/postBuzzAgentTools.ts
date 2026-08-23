@@ -50,8 +50,8 @@ function isMetafileUri(value: string): boolean {
 
 /**
  * Human-readable success sheet mirroring the retired metabot-post-buzz skill's
- * result output (pinId, txids, cost, attachment URIs, public link). Exposed
- * for tests.
+ * result output (pinId, txids, cost, attachment URIs, view link). Exposed for
+ * tests.
  */
 export function formatBuzzResult(input: {
   pinId: string;
@@ -65,7 +65,7 @@ export function formatBuzzResult(input: {
   lines.push(`- cost: ${input.totalCost} sats`);
   for (const uri of input.attachments) lines.push(`- attachment: ${uri}`);
   if (input.pinId) {
-    lines.push(`- public link: https://openagentinternet.org/browser/pin/${input.pinId}`);
+    lines.push(`- view link: [pin://${input.pinId}](pin://${input.pinId})`);
   }
   return lines.join('\n');
 }
