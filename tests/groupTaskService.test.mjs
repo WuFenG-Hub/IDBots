@@ -33,6 +33,7 @@ Module._load = originalLoad;
 
 const {
   createGroupTask,
+  proposeGroupTaskStaffing,
   listGroupTasks,
   listGroupTaskSummaries,
   getGroupTask,
@@ -46,11 +47,13 @@ const {
   setGroupTaskServiceOpenTeamMembershipStoreGetter,
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
+  setGroupTaskServiceStaffingSessionMessagesLoader,
   setGroupTaskServiceTransport,
   resetGroupTaskServiceTransport,
   deriveGroupTaskMemberInviteStatus,
   computeGroupTaskMemberWorkStatus,
 } = groupTaskService;
+const { GroupTaskStaffingError } = require('../dist-electron/main/services/groupTaskStaffing.js');
 
 const GROUP_ID = 'aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000i0';
 const CREATE_PIN_ID = GROUP_ID;
@@ -104,6 +107,7 @@ const createHarness = async (overrides = {}) => {
     joinFailures: new Set(overrides.joinFailures ?? []),
     indexed: overrides.indexed ?? true,
     ownerJoinFails: overrides.ownerJoinFails ?? false,
+    nextGroupSeq: 0,
   };
 
   setGroupTaskServiceMetabotStoreGetter(() => metabotStore);
@@ -113,7 +117,12 @@ const createHarness = async (overrides = {}) => {
   setGroupTaskServiceTransport({
     createGroupChat: async (metabotId, opts) => {
       calls.create.push({ metabotId, opts });
-      return { groupId: GROUP_ID, pinId: CREATE_PIN_ID };
+      const suffix = String(state.nextGroupSeq).padStart(2, '0');
+      state.nextGroupSeq += 1;
+      const groupId = state.nextGroupSeq === 1
+        ? GROUP_ID
+        : GROUP_ID.replace(/00i0$/, `${suffix}i0`);
+      return { groupId, pinId: groupId };
     },
     joinGroupChat: async (metabotId, groupId) => {
       calls.join.push({ metabotId, groupId });
@@ -147,6 +156,7 @@ const createHarness = async (overrides = {}) => {
     store, db, metabotStore, groupTaskStore, calls, state,
     cleanup: () => {
       setGroupTaskServiceOrchestrationBridgeGetter(null);
+      setGroupTaskServiceStaffingSessionMessagesLoader(null);
       resetGroupTaskServiceTransport();
       store.close();
     },
@@ -161,7 +171,7 @@ test('createGroupTask happy path: twin chair, joins per member, kickoff, rows pe
       goal: 'Build and publish the intro MetaApp',
       acceptanceCriteria: 'Preview URL works',
       memberMetabotIds: [2, 3],
-      createdBy: 'twinbot',
+      createdBy: 'user',
     });
 
     // chair = twin resolved automatically; group created by the chair
@@ -175,7 +185,7 @@ test('createGroupTask happy path: twin chair, joins per member, kickoff, rows pe
     assert.equal(detail.groupId, GROUP_ID);
     assert.equal(detail.status, 'planning');
     assert.equal(detail.chairMetabotId, 1);
-    assert.equal(detail.createdBy, 'twinbot');
+    assert.equal(detail.createdBy, 'user');
     assert.equal(detail.createPinId, CREATE_PIN_ID);
 
     // members: chair + 2 workers, all joined on-chain
@@ -219,24 +229,27 @@ test('createGroupTask happy path: twin chair, joins per member, kickoff, rows pe
   }
 });
 
-test('createGroupTask auto-selects the complete local Worker roster for Twin planning', async () => {
+test('createGroupTask joins only the named workers (no auto-select of the local roster)', async () => {
   const h = await createHarness();
   try {
-    const detail = await createGroupTask({
-      title: 'Choose specialists',
-      goal: 'Have the Twin select the right local Worker',
-      autoSelectWorkers: true,
-      memberMetabotIds: [99],
+    const empty = await createGroupTask({
+      title: 'Chair only',
+      goal: 'Do not pull in every local worker',
       createdBy: 'user',
     });
+    assert.deepEqual(empty.members.map((member) => member.metabotId).sort(), [1]);
+    assert.equal(h.calls.join.length, 0);
 
-    // The adapter exposes the complete enabled Worker roster; the planning
-    // prompt can then choose a specialist based on each Worker profile.
-    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2, 3]);
-    assert.deepEqual(h.calls.join.map((call) => call.metabotId).sort(), [2, 3]);
-    // P0-3: kickoff roster line has no @ prefixes (see happy-path test above).
-    assert.match(h.calls.send[0].opts.content, /Members: Designer Bot, Coder Bot/);
-    assert.doesNotMatch(h.calls.send[0].opts.content, /@Coder Bot|@Designer Bot/);
+    const named = await createGroupTask({
+      title: 'One specialist',
+      goal: 'Join the named coder only',
+      memberMetabotIds: [2],
+      createdBy: 'user',
+    });
+    assert.deepEqual(named.members.map((member) => member.metabotId).sort(), [1, 2]);
+    assert.deepEqual(h.calls.join.map((call) => call.metabotId), [2]);
+    assert.match(h.calls.send[1].opts.content, /Members: Coder Bot/);
+    assert.doesNotMatch(h.calls.send[1].opts.content, /Designer Bot/);
   } finally {
     h.cleanup();
   }
@@ -865,7 +878,7 @@ test('P1-1: getGroupTask exposes inviteStatus per remote member', async () => {
       title: 'Invite status task',
       goal: 'Check the invite status readout',
       memberMetabotIds: [2],
-      createdBy: 'twinbot',
+      createdBy: 'user',
     });
     const taskId = created.id;
 
@@ -1130,6 +1143,175 @@ test('local state: listGroupTaskSummaries (IPC surface) excludes archived tasks'
     assert.equal(summaries[0].id, a.id + 1);
     assert.equal(summaries[0].title, 'B');
     assert.equal(summaries[0].archivedAt, null);
+  } finally {
+    h.cleanup();
+  }
+});
+
+const contentPlan = () => ({
+  stages: [{ id: 'copy', title: 'Write the intro', seatRole: 'content', dependsOn: [] }],
+  seats: [{
+    role: 'content',
+    candidateName: 'Coder Bot',
+    metabotId: 2,
+    source: 'local',
+    reason: 'writes the intro',
+  }],
+});
+
+test('Twin create without a staffing proposal is rejected', async () => {
+  const h = await createHarness();
+  try {
+    await assert.rejects(
+      () => createGroupTask({ title: 'T', goal: 'G', memberMetabotIds: [2], createdBy: 'twinbot' }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'OWNER_CONFIRM_REQUIRED',
+    );
+    assert.equal(h.calls.create.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Twin create is rejected until the owner confirms the proposed slate', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-confirm',
+    });
+    assert.equal(proposed.ownerConfirmRequired, true);
+    assert.match(proposed.slateText, /确认人选/);
+
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-confirm',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'OWNER_CONFIRM_REQUIRED',
+    );
+
+    messages.push({ type: 'user', content: '换人，用设计师', timestamp: proposed.proposal.createdAt + 10 });
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-confirm',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'OWNER_REVISE_REQUIRED',
+    );
+
+    messages[1] = { type: 'user', content: '确认人选', timestamp: proposed.proposal.createdAt + 20 };
+    const detail = await createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: proposed.proposal.id,
+      sourceSessionId: 'session-confirm',
+    });
+    assert.equal(detail.createdBy, 'twinbot');
+    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2]);
+    assert.equal(detail.staffingProposalId, proposed.proposal.id);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'consumed');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('wish that said to start without confirming skip-authorizes Twin create', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '开个群任务做技能介绍，不用确认直接开', timestamp: 1_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-skip',
+    });
+    assert.equal(proposed.ownerConfirmRequired, false);
+    assert.equal(proposed.proposal.status, 'skip_authorized');
+
+    const detail = await createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: proposed.proposal.id,
+      sourceSessionId: 'session-skip',
+    });
+    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2]);
+    assert.equal(detail.pendingRemoteSeats.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Twin create joins local seats only and returns pending remote seats', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: 'just start without confirmation', timestamp: 1_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      language: 'en',
+      plan: {
+        stages: [
+          { id: 'copy', title: 'Copy', seatRole: 'content', dependsOn: [] },
+          { id: 'visuals', title: 'Visuals', seatRole: 'design', dependsOn: ['copy'] },
+        ],
+        seats: [
+          ...contentPlan().seats,
+          {
+            role: 'design',
+            candidateName: 'Remote Artist',
+            candidateGlobalMetaId: 'idq1remotea00000000000000000000000000000',
+            source: 'remote',
+            reason: 'online designer',
+          },
+        ],
+      },
+      sourceSessionId: 'session-remote',
+    });
+    const detail = await createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: proposed.proposal.id,
+    });
+    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2]);
+    assert.equal(detail.pendingRemoteSeats.length, 1);
+    assert.equal(detail.pendingRemoteSeats[0].candidateName, 'Remote Artist');
+    assert.equal(h.calls.join.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('createGroupTask rejects a roster above the hard team cap', async () => {
+  const h = await createHarness();
+  try {
+    await assert.rejects(
+      () => createGroupTask({
+        title: 'Too many',
+        goal: 'Cap the roster',
+        memberMetabotIds: [2, 3, 4, 5, 6, 7, 8, 9],
+        createdBy: 'user',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'ROSTER_CAP_EXCEEDED',
+    );
   } finally {
     h.cleanup();
   }

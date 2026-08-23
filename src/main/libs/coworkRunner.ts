@@ -140,6 +140,14 @@ import {
   type MetawebLearningControl,
 } from './metawebLearningAgentTools';
 import {
+  buildKnowledgeBaseAgentTools,
+  type KnowledgeBaseControl,
+} from './knowledgeBaseAgentTools';
+import {
+  buildKnowledgeBasesPromptBlock,
+  type KnowledgeBasePromptRecord,
+} from './knowledgeBasePromptBlocks';
+import {
   buildMetaFileUploadAgentTools,
   type MetaFileUploadControl,
 } from './metaFileUploadAgentTools';
@@ -1585,6 +1593,14 @@ export interface CoworkRunnerOptions {
    */
   metawebLearning?: MetawebLearningControl;
   /**
+   * When set, every cowork session gets the knowledge base tools
+   * (knowledge_base_list / knowledge_base_query / knowledge_base_add_document
+   * / knowledge_base_learn) backed by the per-bot KnowledgeBaseService
+   * (services/knowledgeBaseService.ts; main.ts wires the control), and a
+   * bounded <knowledge_bases> block joins the volatile per-turn prompt.
+   */
+  knowledgeBase?: KnowledgeBaseControl;
+  /**
    * When set, every cowork session gets the upload_file tool backed by
    * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
    * on-chain semantics: direct vs chunked mode, MVC sponsor-first direct upload
@@ -1708,6 +1724,7 @@ export class CoworkRunner extends EventEmitter {
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
   private metawebLearning?: MetawebLearningControl;
+  private knowledgeBase?: KnowledgeBaseControl;
   private metaFileUpload?: MetaFileUploadControl;
   private visionRelay?: VisionRelayControl;
   private mediaTools?: MediaToolsControl;
@@ -1813,6 +1830,7 @@ export class CoworkRunner extends EventEmitter {
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
     this.metawebLearning = options?.metawebLearning;
+    this.knowledgeBase = options?.knowledgeBase;
     this.metaFileUpload = options?.metaFileUpload;
     this.visionRelay = options?.visionRelay;
     this.mediaTools = options?.mediaTools;
@@ -4665,7 +4683,8 @@ export class CoworkRunner extends EventEmitter {
       'When a Worker session is genuinely stuck (a step or confirmation that never returns, confirmed via twin_task_status), do not leave it hanging: stop it with worker_session_stop, then cancel or reassign its task so the step is retried elsewhere. A stopped session is a clean terminal state — the Owner should never have to clean up a hung Worker manually.',
       'When the owner\'s wish needs multiple specialists to coordinate (research + build + publish, multi-step content production, etc.), you can also organize an on-chain Group Task via the metabot-group-task skill: you chair it, local Workers join as members, and you drive planning, assignments, verification, and the final report.',
       'Group Tasks support optional human-in-the-loop checkpoints (the chair pauses the task for the owner\'s decision at a milestone). Use them when the owner\'s wish explicitly asks to review/confirm an intermediate result, or when a decision materially changes the outcome of a complex task — but keep autonomous one-shot completion the default: never insert human checkpoints into small or routine tasks the owner expected you to just finish.',
-      'Plan local-first: match every decomposed step against the local Worker roster (persona, skills, capability evidence) before looking outside; only when a needed capability has no local match should you recruit one remote bot through the metabot-group-task skill\'s OpenTeam flow (search_remote → invite_remote, one candidate at a time, wait for the join before assigning).',
+      'For a Group Task, staff like a human lead: decompose the wish into stages, define coarse seats (content, design, engineering, promotion, optional domain), and hire ONE bot per seat. Research is a basic capability of every seat — never a seat of its own. Design covers images and video together; engineering covers code and on-chain publish. Typical team size is at most 5 including you; never more than 8 including you.',
+      'Match-first: for each seat, call metabot-group-task search_candidates once (query + role_hint). The host already merges local workers and online bots, applies your impressions, and prefers local only when scores are close. Use primary/backup; mark source=remote as non-local. Show the owner the slate (via propose) and wait for confirmation unless the wish already said to start without confirming. Do not create the group until the owner confirms — the host will reject an unconfirmed Twin create.',
       'Delegate with local_worker_delegate only after defining one bounded step, required evidence, and an explicit permission scope. A Worker is a persistent specialist with its own identity, memories, history, wallet, skills, workspace, and permissions; a subagent is only an ephemeral tool inside a Worker run.',
       'Remain available to the owner while delegated work runs. Never fabricate progress or completion. Treat a Worker handoff as evidence to review, not proof; verify deliverables and report blockers, retries, reassignment, and final evidence.',
       'Do not disclose private owner memory or unrelated conversation history in a delegated prompt. Do not broaden authority for payments, transfers, destructive actions, public publishing, or private messaging without the owner\'s explicit bounded approval.',
@@ -4779,6 +4798,30 @@ export class CoworkRunner extends EventEmitter {
       procedureBlock = buildProcedureBlock(procedureEntries);
     }
     return [experienceBlock, knowledgeBlock, procedureBlock].filter((block) => block.trim()).join('\n\n');
+  }
+
+  /**
+   * Knowledge-base hot layer: which knowledge bases ("知识库") the session's
+   * bot owns, so the model queries them (knowledge_base_query) before answering
+   * domain questions they cover and saves worthwhile finds
+   * (knowledge_base_add_document). Volatile (doc counts change on every learn
+   * run), so it rides the per-turn tail; a listing failure must never break a
+   * turn, and unattributed sessions get '' (strict, no cross-bot guessing).
+   */
+  private buildKnowledgeBasesPromptXml(sessionId: string): string {
+    if (!this.knowledgeBase) return '';
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) return '';
+    try {
+      const records: KnowledgeBasePromptRecord[] = this.knowledgeBase.listKnowledgeBases(metabotId);
+      return buildKnowledgeBasesPromptBlock(records);
+    } catch (error) {
+      coworkLog('WARN', 'buildKnowledgeBasesPromptXml', 'Knowledge base listing unavailable', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return '';
+    }
   }
 
   /**
@@ -4929,6 +4972,7 @@ export class CoworkRunner extends EventEmitter {
       '4. After installing, verify with list_installed_skills and read_skill, then apply the new capability to the actual task.',
       '5. Report back to the owner: what you learned, which pins guided you (cite the pinIds), and what you installed.',
       '6. Save what you learned with procedure_save (trigger = when this task recurs, steps = what worked, pitfalls = what backfired, sourcePinIds = the pins that guided you) so you never have to relearn the same task — next time procedure_recall or your hot memory will hand you the workflow directly. Single-fact lessons belong to knowledge_upsert instead.',
+      '7. When a pin you read carries substantial tutorial or reference content worth keeping long-term, save its body into a matching knowledge base with knowledge_base_add_document (sourceType \'metaweb\' with the pinId; use the default knowledge base when no topical one exists).',
     ].join('\n');
   }
 
@@ -5041,6 +5085,12 @@ export class CoworkRunner extends EventEmitter {
         sections.push({
           key: 'twin-impression',
           text: await this.buildTwinLocalImpressionPrompt(sessionId),
+        });
+        // Per-bot knowledge bases: doc counts shift on every learn run, so
+        // the listing is volatile and content-deduped like the other blocks.
+        sections.push({
+          key: 'knowledge-bases',
+          text: this.buildKnowledgeBasesPromptXml(sessionId),
         });
       }
     }
@@ -8184,6 +8234,21 @@ export class CoworkRunner extends EventEmitter {
         ...buildMetawebLearningAgentTools({
           tool,
           metawebLearning: this.metawebLearning,
+        })
+      );
+    }
+    // Per-bot knowledge bases ("知识库"): the bot's own document corpora,
+    // citation-queried at runtime (knowledge_base_query) and fed by
+    // knowledge_base_add_document + knowledge_base_learn. The acting bot is
+    // resolved from the session, with the same strict no-guess attribution as
+    // the memory/knowledge tools.
+    if (this.knowledgeBase) {
+      memoryTools.push(
+        ...buildKnowledgeBaseAgentTools({
+          tool,
+          knowledgeBase: this.knowledgeBase,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })
       );
     }

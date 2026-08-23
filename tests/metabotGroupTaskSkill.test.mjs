@@ -89,3 +89,71 @@ test('F4: unknown action error enumerates member_status in the supported list', 
   assert.match(result.stderr, /member_status/);
   assert.equal(rpc.requests.length, 0);
 });
+
+test('propose forwards the staffing plan to propose-staffing', async (t) => {
+  const rpc = await createRpcServer();
+  t.after(() => rpc.close());
+
+  const result = await runSkill(JSON.stringify({
+    action: 'propose',
+    title: '技能介绍',
+    goal: '写出介绍并发布',
+    source_session_id: 'sess-1',
+    plan: { stages: [], seats: [{ role: 'content', candidateName: 'Coder', source: 'local' }] },
+  }), rpc.url);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(rpc.requests[0].url, '/api/idbots/group-task/propose-staffing');
+  assert.equal(rpc.requests[0].body.source_session_id, 'sess-1');
+  assert.equal(rpc.requests[0].body.plan.seats[0].role, 'content');
+});
+
+test('search_candidates forwards query and role_hint', async (t) => {
+  const rpc = await createRpcServer();
+  t.after(() => rpc.close());
+
+  const missing = await runSkill(JSON.stringify({ action: 'search_candidates' }), rpc.url);
+  assert.notEqual(missing.code, 0);
+  assert.match(missing.stderr, /query or role_hint is required/);
+  assert.equal(rpc.requests.length, 0);
+
+  const ok = await runSkill(JSON.stringify({
+    action: 'search_candidates',
+    query: '法律 合同',
+    role_hint: 'domain',
+    domain_label: 'legal',
+    limit: 8,
+  }), rpc.url);
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(rpc.requests[0].url, '/api/idbots/group-task/search-candidates');
+  assert.equal(rpc.requests[0].body.query, '法律 合同');
+  assert.equal(rpc.requests[0].body.role_hint, 'domain');
+  assert.equal(rpc.requests[0].body.domain_label, 'legal');
+  assert.equal(rpc.requests[0].body.limit, 8);
+});
+
+test('create requires proposal_id and forwards it', async (t) => {
+  const rpc = await createRpcServer();
+  t.after(() => rpc.close());
+
+  const missing = await runSkill(JSON.stringify({
+    action: 'create',
+    title: '技能介绍',
+    goal: '写出介绍并发布',
+  }), rpc.url);
+  assert.notEqual(missing.code, 0);
+  assert.match(missing.stderr, /proposal_id is required/);
+  assert.equal(rpc.requests.length, 0);
+
+  const ok = await runSkill(JSON.stringify({
+    action: 'create',
+    title: '技能介绍',
+    goal: '写出介绍并发布',
+    proposal_id: 7,
+    source_session_id: 'sess-1',
+  }), rpc.url);
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(rpc.requests[0].url, '/api/idbots/group-task/create');
+  assert.equal(rpc.requests[0].body.proposal_id, 7);
+  assert.equal(rpc.requests[0].body.created_by, 'twinbot');
+});

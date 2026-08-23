@@ -243,7 +243,7 @@ const createTaskWithCoder = async (h) => {
     title: 'Build MetaApp',
     goal: 'Build and publish the intro MetaApp',
     memberMetabotIds: [2],
-    createdBy: 'twinbot',
+    createdBy: 'user',
   });
   h.calls.send.length = 0; // ignore the kickoff message
   return detail;

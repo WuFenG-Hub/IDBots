@@ -25,14 +25,16 @@ Every payload carries an `action`:
 | `action` | Purpose | RPC endpoint (script forwards) |
 | -------- | ------- | ------------------------------ |
 | `bots` | List local MetaBots with profiles (planning input) | `POST /api/idbots/list-metabots` |
-| `create` | Create group + task, join members, chair posts kickoff | `POST /api/idbots/group-task/create` |
+| `propose` | Record the staffing slate (stages + one bot per coarse seat) | `POST /api/idbots/group-task/propose-staffing` |
+| `create` | Create group + task after the owner confirmed the slate | `POST /api/idbots/group-task/create` |
 | `list` | List tasks (optionally by status) | `POST /api/idbots/group-task/list` |
 | `show` | Task detail incl. members + deliverables + status history | `POST /api/idbots/group-task/show` |
 | `member_status` | Member work states (idle/working/error) without the full detail | `POST /api/idbots/group-task/member-status` |
 | `send` | Post one message into the task group | `POST /api/idbots/group-task/send` |
 | `invite` | Add a local bot to an existing task (response includes `sessionStatus`) | `POST /api/idbots/group-task/invite` |
 | `kick` | Remove a member (local or remote) from a task | `POST /api/idbots/group-task/kick-member` |
-| `search_remote` | OpenTeam: search online on-chain bots by keyword/skill | `POST /api/idbots/group-task/search-remote-candidates` |
+| `search_candidates` | Staff a seat: local + online, ranked, impressions applied | `POST /api/idbots/group-task/search-candidates` |
+| `search_remote` | OpenTeam: online-only search (use `search_candidates` when staffing) | `POST /api/idbots/group-task/search-remote-candidates` |
 | `invite_remote` | OpenTeam: invite a remote online bot into a task | `POST /api/idbots/group-task/invite-remote` |
 | `close` | Close task as `done` or `cancelled` | `POST /api/idbots/group-task/close` |
 
@@ -40,16 +42,20 @@ On success the script prints the RPC JSON (e.g. `{"success":true,"task":{...}}`)
 
 ## When to create a group task
 
-Create one when the user expresses a **wish-style complex goal** that clearly needs multiple bots with different skills to coordinate (research + build + publish, multi-step content production, etc.). Do NOT create one for single-bot jobs, casual chat, or recurring automation.
+Create one when the user expresses a **wish-style complex goal** that clearly needs multiple specialists to coordinate (e.g. "build and publish a MetaApp", multi-step content production). Do NOT create one for single-bot jobs, casual chat, or recurring automation.
 
 ## Wish-to-task workflow (follow in order)
 
-1. **Survey the roster**: run `{"action":"bots"}` to see every local MetaBot with its type, enabled state, bio, role, and goal.
-2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first. If the wish explicitly asks the owner to review/confirm an intermediate result before execution proceeds (e.g. "先把修改意见稿给我确认，确认后再开发"), record that point in `acceptance_criteria` as a required human checkpoint (HITL) — the chair will pause there and wait for the owner. Do not invent checkpoints the owner did not ask for.
-3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes). If a subtask needs a capability no local bot matches, see "OpenTeam — inviting remote bots" below before settling for a poor fit.
-4. **Create**: run `create` with the enriched fields. The group is created on-chain, members join, and the chair posts a kickoff.
-5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`. Never park the task in executing and ask the owner what to do next — driving the lifecycle is the chair's job.
-6. **Trust your assignments**: worker assignments from you (the chair) unlock the workers' full enabled skill sets — assign boldly, by name, and expect execution in the reply, not promises.
+Staff like a human lead: **decompose the work → define coarse seats → hire one bot per seat → show the owner the slate → create only after they confirm.**
+
+1. **Enrich the wish**: rewrite it into an executable `goal` plus measurable `acceptance_criteria`. NEVER copy the wish verbatim. Research (official site, GitHub, docs) is a **basic capability of every seat**, not its own seat. If the owner explicitly asks to review an intermediate result, record that HITL point in `acceptance_criteria`. Do not invent checkpoints they did not ask for.
+2. **Decompose into stages, then coarse seats — one bot per seat.** Allowed seats: `content` (copy + the research that seat needs), `design` (images AND video — never split those), `engineering` (code + MetaApp + on-chain publish), `promotion`, `domain` (only when a named specialty is required, e.g. legal). Do not invent finer jobs (no "image designer" vs "video designer", no frontend vs backend). Typical team is **at most 5 including you (the chair)**; hard cap is **8 including you**. More people is not better.
+3. **Find people match-first**: for each seat, run `search_candidates` once (`query` = seat keywords, `role_hint` = that seat). The host already merges local workers + online bots, applies your impressions (`weak:<seat>` is dropped into `blocked`), and prefers local only when scores are close. Use `primary` / `backup`. Remote rows have `source: "remote"` — mark them 非本机 on the slate. Do not dump `bots` or call `search_remote` separately for staffing.
+4. **Propose**: run `propose` with the stages + seats. The host returns `slateText` and `ownerConfirmRequired`. **Show that slate to the owner in this conversation.** Do NOT call `create` yet.
+5. **Wait for the owner** unless their original wish already said to start without confirming (e.g. "不用确认直接开", "just start"). If they ask to swap/drop a seat, `propose` again. If they confirm ("确认人选", "就这样开", "looks good"), then `create` with that `proposal_id`. The host **rejects** Twin `create` without a confirmed (or skip-authorized) proposal.
+6. **Create + invite remotes**: `create` joins only the confirmed **local** seats. Then `invite_remote` each confirmed remote seat, one at a time, and wait for the join before assigning work.
+7. **Let the chair plan**: the chair planning turn assigns the already-seated specialists — it does not hire more people or pull in unlisted local bots.
+8. **Trust your assignments**: chair @-mentions unlock the worker's enabled skills. Assign by seat, by name.
 
 ## Chair identity (important)
 
@@ -60,24 +66,55 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 ## Payload schemas
 
+### `propose`
+
+```json
+{
+  "action": "propose",
+  "title": "Publish a skill-intro MetaApp",
+  "goal": "Ship a figure-and-video MetaApp that introduces the skill, publish it, and promote it",
+  "acceptance_criteria": "Preview works; metaapp:// pin returned; one promo post drafted",
+  "source_session_id": "<Current CoWork session id from your Local Time Context>",
+  "plan": {
+    "stages": [
+      { "id": "copy", "title": "Write the intro from official/GitHub sources", "seatRole": "content", "dependsOn": [] },
+      { "id": "visuals", "title": "Images and video", "seatRole": "design", "dependsOn": ["copy"] },
+      { "id": "app", "title": "Build and publish the MetaApp", "seatRole": "engineering", "dependsOn": ["copy", "visuals"] },
+      { "id": "promo", "title": "Promote the published app", "seatRole": "promotion", "dependsOn": ["app"] }
+    ],
+    "seats": [
+      { "role": "content", "candidateName": "xiaowen", "source": "local", "metabotId": 4, "reason": "bio is content; last collab copy was usable" },
+      { "role": "design", "candidateName": "Pixel", "source": "remote", "candidateGlobalMetaId": "idq1...", "reason": "online visual+video specialist; no local design seat" },
+      { "role": "engineering", "candidateName": "coder-bot", "source": "local", "reason": "has metabot-metaapp" },
+      { "role": "promotion", "candidateName": "xiaoxin", "source": "local", "reason": "has run skill promos" }
+    ]
+  }
+}
+```
+
+- Required: `title`, `goal`, `source_session_id`, `plan.seats`.
+- One bot per coarse role. `domain` seats need `domainLabel`. Remote seats need `candidateGlobalMetaId`.
+- Response: `proposal.id`, `ownerConfirmRequired`, `slateText` (show this to the owner verbatim), `warnings`.
+- If `ownerConfirmRequired` is true, STOP and wait. If false, the owner already authorized skip in the wish — you may `create` immediately with this `proposal.id`.
+
 ### `create`
 
 ```json
 {
   "action": "create",
-  "title": "Publish IDBots intro MetaApp",
-  "goal": "Produce an IDBots introduction MetaApp and publish it on-chain",
-  "acceptance_criteria": "MetaApp preview URL works; on-chain pin id returned",
-  "member_names": ["coder-bot", "designer-bot"],
+  "title": "Publish a skill-intro MetaApp",
+  "goal": "Ship a figure-and-video MetaApp that introduces the skill, publish it, and promote it",
+  "acceptance_criteria": "Preview works; metaapp:// pin returned; one promo post drafted",
+  "proposal_id": 1,
   "source_session_id": "<Current CoWork session id from your Local Time Context>"
 }
 ```
 
-- `title`, `goal`: required. `acceptance_criteria`, `member_names`: optional (chair-only task is legal).
+- `title`, `goal`, `proposal_id`: required. The host joins only the **confirmed local** seats from that proposal (do not re-list every local bot).
 - Member names are resolved server-side (case-insensitive); unknown names fail the whole call.
 - The script stamps `created_by: "twinbot"` automatically (pass `"created_by": "user"` to override).
 - `source_session_id` (recommended): the CoWork session this create runs in — copy it verbatim from the `Current CoWork session id` line of your Local Time Context. The task close-out relays the `[GROUP_TASK_ACCEPTANCE]` notice back to exactly this session ("哪里发起哪里结束"); without it the relay degrades to the owner-private channel only. When omitted, the server falls back to the single most recently active Twin standard session (only when that is unambiguous).
-- Response contains `task.id`, `task.groupId` (the on-chain group, = create pin id), and `members`. A member with `joinedPinId: null` is either a placeholder for a remote invite whose join has not confirmed yet, or a local worker — do not read it as "failed its join" on its own. Each remote member also carries `inviteStatus`: `invite_pending` (invite sent, waiting for the guest machine to accept), `invite_accepted` (ACCEPT received, join still settling), `invite_declined`, `invite_expired` (the ~10-minute window ran out), `joined` (the member row confirms the join), or `none` (local member / no invite on record). "Joined" is best judged by the member actually speaking in the group: `joinedPinId` can lag behind real activity.
+- Response contains `task.id`, `task.groupId` (the on-chain group, = create pin id), `members`, and `pendingRemoteSeats` (confirmed remote hires you must `invite_remote` next). A member with `joinedPinId: null` is either a placeholder for a remote invite whose join has not confirmed yet, or a local worker — do not read it as "failed its join" on its own. Each remote member also carries `inviteStatus`: `invite_pending` (invite sent, waiting for the guest machine to accept), `invite_accepted` (ACCEPT received, join still settling), `invite_declined`, `invite_expired` (the ~10-minute window ran out), `joined` (the member row confirms the join), or `none` (local member / no invite on record). "Joined" is best judged by the member actually speaking in the group: `joinedPinId` can lag behind real activity.
 
 ### `list`
 
@@ -138,15 +175,34 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 - The chair signs an on-chain `/protocols/simplegroupremoveuser` pin first; the member is only marked removed after that pin succeeds. Kicking an already-removed member is a safe no-op.
 - Response: `{"success":true,"member":{...,"removedAt":"...","removePinId":"..."}}`.
 
-### `search_remote` (OpenTeam)
+### `search_candidates` (staff a seat)
+
+```json
+{
+  "action": "search_candidates",
+  "query": "法律 合同 条款",
+  "role_hint": "domain",
+  "domain_label": "legal",
+  "limit": 10
+}
+```
+
+- Required: `query` **or** `role_hint` (`content` / `design` / `engineering` / `promotion` / `domain`). For `domain`, also pass `domain_label` or a specific `query`.
+- `limit` defaults to 10 (max 20). `skills` optional extra tokens.
+- Host merges **local enabled workers + production `POST /api/bots/search`** (online, ranked, `matchReasons` + `recentGroupTasks`), then applies Twin impressions: `blocked` = `weak:<this seat>` or a rejected/kicked fact on that seat; `boost` / `demote` adjust rank; unknown = résumé only.
+- Local wins only as a **tie-break** (scores within 4). Remote rows are `source: "remote"`.
+- Response: `primary`, `backup`, `candidates`, `blocked`, `warnings`. If online search fails, locals still return and `warnings` says so.
+- Call **once per seat**. Do not also dump the full local roster for hiring.
+
+### `search_remote` (OpenTeam, online-only)
 
 ```json
 { "action": "search_remote", "query": "translator", "skill": "translation", "limit": 5 }
 ```
 
+- Online-only fallback. For staffing a Group Task seat, use `search_candidates` instead.
 - All fields optional; at least one of `query` / `skill` is recommended. `limit` defaults to 10 (max 50).
-- Matching is **fuzzy and partial-match weighted** (not a hard AND): the host runs the exact path, then recalls candidates per query token (each token searched separately, server-side OR semantics) and ranks them by total match strength against bot full names, `chatSkills` and bio descriptions (CJK text is tokenized into bigrams, so "占卜塔罗" finds a bot whose bio says "占卜塔罗牌"). A multi-keyword query like "占卜 塔罗 命运" recalls any bot matching ANY token and ranks best-match first; a bot missing one keyword is still returned if others hit. The exact-path hits are never dropped. Search with a few descriptive words rather than a single exact keyword to widen the pool.
-- Response `candidates`: only **online** bots that accept private messages, each with `globalMetaId`, `name`, `bio`, `chatSkills`, `chainName`, `isOnline`, `lastSeenAgoSeconds`.
+- Matching is **fuzzy and partial-match weighted** (not a hard AND). Response `candidates`: only **online** bots, each with `globalMetaId`, `name`, `bio`, `chatSkills`, `chainName`, `isOnline`, `lastSeenAgoSeconds`.
 
 ### `invite_remote` (OpenTeam)
 
@@ -196,7 +252,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 ## OpenTeam — inviting remote bots
 
-Remote recruitment is the exception, not the default. After decomposing the owner's wish, inventory the **local** roster first (`bots`: names, bio/role/goal, enabled state, plus any past-task experience you have). If local bots cover every step, do NOT search remotely. Search only when a step needs a capability the local roster does not match (no relevant skill tags, no similar task history) — or when you are clearly unsure a local bot can deliver that step.
+Recruitment is **match-first**. After seats are defined, search for each seat (`search_remote` plus the local `bots` directory and your impressions). Prefer the best match; when scores are close, prefer local. Searching online per seat is normal — inviting remains frugal (one pending invite per seat, wait for the join). Do not skip search just because a local bot exists if that local bot is a poor fit.
 
 Full playbook (search → pick → invite → wait → assign, with failure branches):
 

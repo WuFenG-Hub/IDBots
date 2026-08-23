@@ -74,6 +74,24 @@ import {
   recordTaskCloseImpressions,
   recordKickImpression,
 } from './openTeamImpressionService';
+import { resolveMetabotIdByName } from './assignGroupChatTaskService';
+import {
+  assertCreateRosterCap,
+  buildStaffingSlateText,
+  detectSkipConfirmInWish,
+  GroupTaskStaffingError,
+  localSeatMetabotIds,
+  localSeatNames,
+  normalizeStaffingPlan,
+  remoteSeats,
+  resolveStaffingOwnerGate,
+  splitSessionMessagesForStaffingGate,
+  validateStaffingPlan,
+  type GroupTaskStaffingPlan,
+  type GroupTaskStaffingProposal,
+  type GroupTaskStaffingSeat,
+  type StaffingSessionMessage,
+} from './groupTaskStaffing';
 
 export interface CreateGroupTaskOptions {
   title: string;
@@ -94,16 +112,34 @@ export interface CreateGroupTaskOptions {
    */
   activeMemberNames?: string[];
 
-  /** When true, make the entire small local Worker roster available to the Twin chair;
-   * the chair's LLM selects the specialist and only its assignment is mentioned. */
-  autoSelectWorkers?: boolean;
   createdBy: 'user' | 'twinbot';
+  /**
+   * Twin-created tasks MUST pass a staffing proposal the owner already
+   * confirmed (or whose originating wish authorized skipping confirm).
+   */
+  proposalId?: number;
   /**
    * R2: the originating CoWork session creating this task, so the host can
    * relay the acceptance result back on close ("哪里发起哪里结束"). Omitted by
    * the panel IPC (panel-created tasks have no originating session).
    */
   sourceSessionId?: string;
+}
+
+export interface ProposeGroupTaskStaffingOptions {
+  title: string;
+  goal: string;
+  acceptanceCriteria?: string;
+  plan: unknown;
+  sourceSessionId?: string;
+  language?: 'zh' | 'en';
+}
+
+export interface ProposeGroupTaskStaffingResult {
+  proposal: GroupTaskStaffingProposal;
+  ownerConfirmRequired: boolean;
+  slateText: string;
+  warnings: string[];
 }
 
 export interface GroupTaskDetail extends GroupTask {
@@ -143,6 +179,11 @@ export interface GroupTaskDetail extends GroupTask {
    * nothing but the tag). Document links inside it survive untouched.
    */
   openCheckpointSummary: string | null;
+}
+
+export interface CreateGroupTaskResult extends GroupTaskDetail {
+  pendingRemoteSeats: GroupTaskStaffingSeat[];
+  staffingProposalId: number | null;
 }
 
 /** P2-8: who drives a task right now (multi-window/multi-session annotation). */
@@ -259,6 +300,18 @@ export function setGroupTaskServiceKvStoreGetter(getter: () => GroupTaskServiceK
 
 export function setGroupTaskServiceCoworkStoreGetter(getter: () => CoworkStore): void {
   coworkStoreGetter = getter;
+}
+
+/**
+ * Test seam: inject originating-session messages so staffing tests do not
+ * need a full CoworkStore. Production always reads through getCoworkStore().
+ */
+let staffingSessionMessagesLoader: ((sessionId: string) => StaffingSessionMessage[]) | null = null;
+
+export function setGroupTaskServiceStaffingSessionMessagesLoader(
+  loader: ((sessionId: string) => StaffingSessionMessage[]) | null,
+): void {
+  staffingSessionMessagesLoader = loader;
 }
 
 function getCoworkStore(): CoworkStore {
@@ -407,6 +460,108 @@ function resolveTwinMetabotId(): number {
   return twin.id;
 }
 
+function loadStaffingSessionMessages(sessionId: string): StaffingSessionMessage[] {
+  if (staffingSessionMessagesLoader) {
+    try {
+      return staffingSessionMessagesLoader(sessionId);
+    } catch {
+      return [];
+    }
+  }
+  try {
+    const page = getCoworkStore().getSessionMessagesPage(sessionId, { limit: 200 });
+    return page.messages.map((message) => ({
+      type: message.type,
+      content: message.content,
+      timestamp: message.timestamp,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function evaluateProposalOwnerGate(
+  proposal: GroupTaskStaffingProposal,
+  sourceSessionId?: string,
+): { allowed: boolean; decision: ReturnType<typeof resolveStaffingOwnerGate>['decision'] } {
+  if (proposal.status === 'skip_authorized' || proposal.skipAuthorized) {
+    return { allowed: true, decision: 'skip_authorized' };
+  }
+  if (proposal.status === 'confirmed') {
+    return { allowed: true, decision: 'owner_confirmed' };
+  }
+  if (proposal.status === 'consumed' || proposal.status === 'cancelled') {
+    return { allowed: false, decision: 'awaiting_owner' };
+  }
+  const sessionId = (sourceSessionId || proposal.sourceSessionId).trim();
+  const split = splitSessionMessagesForStaffingGate(
+    loadStaffingSessionMessages(sessionId),
+    proposal.createdAt,
+  );
+  return resolveStaffingOwnerGate(split);
+}
+
+function resolveLocalWorkerIdsFromPlan(plan: GroupTaskStaffingPlan, extraIds: number[]): number[] {
+  const ids = [...localSeatMetabotIds(plan), ...extraIds];
+  const metabotStore = getMetabotStore();
+  for (const name of localSeatNames(plan)) {
+    const id = resolveMetabotIdByName(metabotStore, name);
+    if (id != null) ids.push(id);
+  }
+  return [...new Set(ids)];
+}
+
+export function proposeGroupTaskStaffing(
+  opts: ProposeGroupTaskStaffingOptions,
+): ProposeGroupTaskStaffingResult {
+  const title = opts.title?.trim();
+  const goal = opts.goal?.trim();
+  if (!title) throw new GroupTaskStaffingError('STAFFING_PLAN_INVALID', 'title is required');
+  if (!goal) throw new GroupTaskStaffingError('STAFFING_PLAN_INVALID', 'goal is required');
+  const sourceSessionId = opts.sourceSessionId?.trim();
+  if (!sourceSessionId) {
+    throw new GroupTaskStaffingError(
+      'SOURCE_SESSION_REQUIRED',
+      'source_session_id is required to propose a group-task roster (owner confirm happens in that session)',
+    );
+  }
+  const plan = normalizeStaffingPlan(opts.plan);
+  const validation = validateStaffingPlan(plan);
+  if (!validation.ok) {
+    throw new GroupTaskStaffingError('STAFFING_PLAN_INVALID', validation.errors.join('; '));
+  }
+  const twinMetabotId = resolveTwinMetabotId();
+  const messages = loadStaffingSessionMessages(sourceSessionId);
+  const now = Date.now();
+  const wishTexts = messages
+    .filter((message) => message.type === 'user' && message.content.trim())
+    .map((message) => message.content);
+  const skipAuthorized = wishTexts.some((wish) => detectSkipConfirmInWish(wish));
+  const proposal = getGroupTaskStore().createStaffingProposal({
+    sourceSessionId,
+    twinMetabotId,
+    title,
+    goal,
+    acceptanceCriteria: opts.acceptanceCriteria?.trim() || null,
+    plan,
+    status: skipAuthorized ? 'skip_authorized' : 'pending',
+    createdAt: now,
+  });
+  return {
+    proposal,
+    ownerConfirmRequired: !skipAuthorized,
+    slateText: buildStaffingSlateText({
+      title,
+      goal,
+      acceptanceCriteria: opts.acceptanceCriteria,
+      plan,
+      ownerConfirmRequired: !skipAuthorized,
+      language: opts.language,
+    }),
+    warnings: validation.warnings,
+  };
+}
+
 function requireTask(taskId: number): GroupTask {
   const task = getGroupTaskStore().getTaskById(taskId);
   if (!task) throw new Error(`Group task ${taskId} not found`);
@@ -483,7 +638,7 @@ function buildKickoffMessage(input: {
  * logged) and joins/kickoff are attempted anyway: the group pin is already
  * on-chain, so the indexer will catch up and the backfill daemon reconciles.
  */
-export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<GroupTaskDetail> {
+export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<CreateGroupTaskResult> {
   const title = opts.title?.trim();
   const goal = opts.goal?.trim();
   if (!title) throw new Error('title is required');
@@ -496,12 +651,56 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
   const chair = metabotStore.getMetabotById(chairMetabotId);
   const chairName = chair?.name?.trim() || `bot-${chairMetabotId}`;
 
-  const requestedWorkerIds = opts.autoSelectWorkers
-    ? metabotStore.listMetabots().filter((metabot) => metabot.metabot_type === 'worker' && metabot.enabled).map((metabot) => metabot.id)
-    : (opts.memberMetabotIds ?? []);
+  let pendingRemoteSeats: GroupTaskStaffingSeat[] = [];
+  let staffingProposalId: number | null = null;
+  let requestedWorkerIds = [...(opts.memberMetabotIds ?? [])];
+  let acceptedProposal: GroupTaskStaffingProposal | null = null;
+
+  if (opts.createdBy === 'twinbot') {
+    const proposalId = Number(opts.proposalId);
+    if (!Number.isInteger(proposalId) || proposalId <= 0) {
+      throw new GroupTaskStaffingError(
+        'OWNER_CONFIRM_REQUIRED',
+        'Twin-created group tasks require a staffing proposal the owner confirmed (or a wish that said to start without confirming). Call propose first.',
+      );
+    }
+    const proposal = store.getStaffingProposalById(proposalId);
+    if (!proposal) {
+      throw new GroupTaskStaffingError('PROPOSAL_NOT_FOUND', `Staffing proposal ${proposalId} not found`);
+    }
+    if (proposal.status === 'consumed') {
+      throw new GroupTaskStaffingError('PROPOSAL_NOT_USABLE', `Staffing proposal ${proposalId} was already used`);
+    }
+    const gate = evaluateProposalOwnerGate(proposal, opts.sourceSessionId);
+    if (!gate.allowed) {
+      if (gate.decision === 'owner_revise') {
+        throw new GroupTaskStaffingError(
+          'OWNER_REVISE_REQUIRED',
+          'The owner asked to change the roster. Update the plan with propose and wait for a new confirmation.',
+        );
+      }
+      throw new GroupTaskStaffingError(
+        'OWNER_CONFIRM_REQUIRED',
+        'The owner has not confirmed this roster yet. Show the slate and wait, unless they already said to start without confirming.',
+      );
+    }
+    if (proposal.status === 'pending') {
+      store.markStaffingProposalReady(proposal.id, {
+        status: gate.decision === 'skip_authorized' ? 'skip_authorized' : 'confirmed',
+        ownerDecision: gate.decision,
+        confirmedAt: Date.now(),
+      });
+    }
+    acceptedProposal = store.getStaffingProposalById(proposal.id);
+    staffingProposalId = proposal.id;
+    requestedWorkerIds = resolveLocalWorkerIdsFromPlan(proposal.plan, requestedWorkerIds);
+    pendingRemoteSeats = remoteSeats(proposal.plan);
+  }
+
   const workerIds = [...new Set(requestedWorkerIds
     .map((id) => Math.trunc(Number(id)))
     .filter((id) => Number.isFinite(id) && id > 0 && id !== chairMetabotId))];
+  assertCreateRosterCap(workerIds.length);
 
   const { groupId, pinId } = await createGroupChatFn(chairMetabotId, {
     groupName: title,
@@ -620,7 +819,16 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
     );
   }
 
-  return getGroupTask(task.id);
+  if (acceptedProposal) {
+    store.consumeStaffingProposal(acceptedProposal.id, task.id);
+  }
+
+  const detail = await getGroupTask(task.id);
+  return {
+    ...detail,
+    pendingRemoteSeats,
+    staffingProposalId,
+  };
 }
 
 export async function listGroupTasks(filter?: { status?: GroupTaskStatus }): Promise<GroupTask[]> {

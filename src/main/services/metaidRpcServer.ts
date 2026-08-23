@@ -29,6 +29,7 @@ import {
 } from './assignGroupChatTaskService';
 import {
   createGroupTask,
+  proposeGroupTaskStaffing,
   listGroupTasks,
   getGroupTask,
   getGroupTaskChairMetabotId,
@@ -45,7 +46,9 @@ import {
 } from './groupTaskService';
 import { gateChairDrivingSend, gateExternalChairSend, DEFAULT_DRIVER_GRACE_MS } from './groupTaskDaemon';
 import { resolveTwinSourceSessionFallback } from './groupTaskSourceSession';
+import { GroupTaskStaffingError } from './groupTaskStaffing';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
+import { searchGroupTaskSeatCandidates } from './groupTaskCandidateSearch';
 import { buildMetabotDirectory } from './metabotDirectoryService';
 import type { GroupTaskStatus, GroupTaskMemberStatus } from '../groupTaskStore';
 import { getAddressBalance } from './addressBalanceService';
@@ -95,6 +98,7 @@ const BOT_BROWSER_OPEN_PATH = '/api/idbots/bot-browser/open';
 const BOT_BROWSER_TABS_PATH = '/api/idbots/bot-browser/tabs';
 const SET_METABOT_HOMEPAGE_METAAPP_PATH = '/api/idbots/metabot/homepage/set-metaapp';
 const GROUP_TASK_CREATE_PATH = '/api/idbots/group-task/create';
+const GROUP_TASK_PROPOSE_STAFFING_PATH = '/api/idbots/group-task/propose-staffing';
 const GROUP_TASK_LIST_PATH = '/api/idbots/group-task/list';
 const GROUP_TASK_SHOW_PATH = '/api/idbots/group-task/show';
 const GROUP_TASK_SEND_PATH = '/api/idbots/group-task/send';
@@ -107,6 +111,7 @@ const GROUP_TASK_SET_MEMBER_STATUS_PATH = '/api/idbots/group-task/set-member-sta
 const GROUP_TASK_REWORK_PATH = '/api/idbots/group-task/rework';
 const GROUP_TASK_EXPORT_PATH = '/api/idbots/group-task/export';
 const GROUP_TASK_SEARCH_REMOTE_PATH = '/api/idbots/group-task/search-remote-candidates';
+const GROUP_TASK_SEARCH_CANDIDATES_PATH = '/api/idbots/group-task/search-candidates';
 const GROUP_TASK_INVITE_REMOTE_PATH = '/api/idbots/group-task/invite-remote';
 const LIST_METABOTS_PATH = '/api/idbots/list-metabots';
 const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
@@ -1229,6 +1234,50 @@ export function startMetaidRpcServer(
       return;
     }
 
+    if (req.method === 'POST' && pathname === GROUP_TASK_PROPOSE_STAFFING_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: {
+        title?: string;
+        goal?: string;
+        acceptance_criteria?: string;
+        plan?: unknown;
+        source_session_id?: unknown;
+        language?: string;
+      };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      try {
+        const result = proposeGroupTaskStaffing({
+          title: String(parsed.title ?? '').trim(),
+          goal: String(parsed.goal ?? '').trim(),
+          acceptanceCriteria: typeof parsed.acceptance_criteria === 'string' ? parsed.acceptance_criteria : undefined,
+          plan: parsed.plan,
+          sourceSessionId: parsed.source_session_id != null ? String(parsed.source_session_id).trim() : undefined,
+          language: parsed.language === 'en' ? 'en' : 'zh',
+        });
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, ...result }));
+      } catch (err) {
+        const staffing = err instanceof GroupTaskStaffingError ? err : null;
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(staffing ? 400 : 500);
+        res.end(JSON.stringify({
+          success: false,
+          error: message,
+          ...(staffing ? { code: staffing.code } : {}),
+        }));
+      }
+      return;
+    }
+
     if (req.method === 'POST' && pathname === GROUP_TASK_CREATE_PATH) {
       let body = '';
       for await (const chunk of req) {
@@ -1244,6 +1293,7 @@ export function startMetaidRpcServer(
         observer_roles?: Record<string, unknown>;
         active_member_names?: unknown[];
         source_session_id?: unknown;
+        proposal_id?: unknown;
       };
       try {
         parsed = JSON.parse(body) as typeof parsed;
@@ -1345,10 +1395,7 @@ export function startMetaidRpcServer(
         }
       }
       try {
-        // P0-2: explicit members (ids or names) MUST be honored. Auto-select the
-        // whole roster only when the caller did not name any member — silently
-        // overriding a provided member list with the full roster was the bug.
-        const autoSelectWorkers = memberMetabotIds.length === 0;
+        const proposalId = Number(parsed.proposal_id);
         // P0-6: observer expectations for listed-but-unassigned members.
         const observerRoles: Record<string, string> = {};
         if (parsed.observer_roles && typeof parsed.observer_roles === 'object' && !Array.isArray(parsed.observer_roles)) {
@@ -1365,8 +1412,8 @@ export function startMetaidRpcServer(
           goal,
           acceptanceCriteria: typeof parsed.acceptance_criteria === 'string' ? parsed.acceptance_criteria : undefined,
           memberMetabotIds,
-          autoSelectWorkers,
           createdBy: parsed.created_by === 'twinbot' ? 'twinbot' : 'user',
+          proposalId: Number.isInteger(proposalId) && proposalId > 0 ? proposalId : undefined,
           observerRoles: Object.keys(observerRoles).length > 0 ? observerRoles : undefined,
           activeMemberNames,
           sourceSessionId,
@@ -1374,9 +1421,14 @@ export function startMetaidRpcServer(
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, task }));
       } catch (err) {
+        const staffing = err instanceof GroupTaskStaffingError ? err : null;
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
-        res.writeHead(500);
-        res.end(JSON.stringify({ success: false, error: message }));
+        res.writeHead(staffing ? 400 : 500);
+        res.end(JSON.stringify({
+          success: false,
+          error: message,
+          ...(staffing ? { code: staffing.code } : {}),
+        }));
       }
       return;
     }
@@ -1724,6 +1776,52 @@ export function startMetaidRpcServer(
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_SEARCH_CANDIDATES_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: {
+        query?: string;
+        role_hint?: string;
+        domain_label?: string;
+        skills?: unknown;
+        limit?: number;
+      };
+      try {
+        parsed = JSON.parse(body || '{}') as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const limit = parsed.limit === undefined || parsed.limit === null ? undefined : Number(parsed.limit);
+      if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'limit must be a positive integer' }));
+        return;
+      }
+      const skills = Array.isArray(parsed.skills)
+        ? parsed.skills.map((item) => String(item ?? '').trim()).filter(Boolean)
+        : undefined;
+      try {
+        const result = await searchGroupTaskSeatCandidates({
+          query: typeof parsed.query === 'string' ? parsed.query : undefined,
+          roleHint: typeof parsed.role_hint === 'string' ? parsed.role_hint : undefined,
+          domainLabel: typeof parsed.domain_label === 'string' ? parsed.domain_label : undefined,
+          skills,
+          limit,
+        });
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, ...result }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(400);
         res.end(JSON.stringify({ success: false, error: message }));
       }
       return;
