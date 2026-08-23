@@ -135,7 +135,9 @@ Acceptance: from a fresh IDBots install, asking the TwinBot "IDBots 能干什么
 
 ### M2 — Guided learning loop (L2)
 
-**Status: implemented 2026-08-23** (branch `feat/metaweb-learning`).
+**Status: implemented 2026-08-23; acceptance PASSED on main 2026-08-23** (merge `f3ba9dc7`; branch `feat/metaweb-learning` continues).
+
+Acceptance evidence (owner-side metabot, real sessions): search → read pin → step extraction walked through twice (tg-voice-vision / botos-fusion-status); pre-install declaration + owner confirmation prompt verified in both branches — allow installs, refusal stops without install (disk evidence); post-install verification (list_installed_skills 56→57, read_skill readable) plus the "I learned it" report and the knowledge record (v2, covering the refusal branch) all confirmed.
 
 **Goal**: the bot can follow a MetaWeb tutorial end-to-end, including installing what it needs.
 
