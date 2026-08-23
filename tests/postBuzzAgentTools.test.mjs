@@ -7,6 +7,7 @@ import test from 'node:test';
 
 const require = Module.createRequire(import.meta.url);
 const { buildPostBuzzAgentTools, formatBuzzResult } = require('../dist-electron/main/libs/postBuzzAgentTools.js');
+const { wrapUploadWithGate } = require('../dist-electron/main/libs/chainUploadGate.js');
 
 const SESSION_ID = 'sess-buzz-1';
 const METABOT_ID = 42;
@@ -27,7 +28,7 @@ function makeHarness(overrides = {}) {
     if (overrides.createPinError) throw overrides.createPinError;
     return overrides.pinResult ?? SAMPLE_PIN_RESULT;
   };
-  const uploadFile = async (params) => {
+  const uploadFile0 = async (params) => {
     calls.upload.push(params);
     if (overrides.uploadError) throw overrides.uploadError;
     return overrides.uploadResult ?? { metafileUri: 'metafile://uploadedi0.txt' };
@@ -38,6 +39,13 @@ function makeHarness(overrides = {}) {
     // fall back to the default when the harness did not specify one.
     return 'metabotId' in overrides ? overrides.metabotId : METABOT_ID;
   };
+  // Mirror the host wiring: the raw upload goes through the shared gate
+  // wrapper (coworkRunner passes exactly this to the tool builders).
+  const gate = {
+    getWorkspaceDir: () => overrides.workspaceDir,
+    confirmExternalUpload: overrides.confirmExternalUpload,
+  };
+  const uploadFile = wrapUploadWithGate(uploadFile0, gate);
   const tools = buildPostBuzzAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, handler }),
     createPin,
@@ -48,6 +56,19 @@ function makeHarness(overrides = {}) {
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   return { calls, byName };
 }
+
+test('attachments outside the workspace are blocked when the owner declines', async () => {
+  const secret = makeFixtureFile('id_rsa', 'secret');
+  const { calls, byName } = makeHarness({
+    workspaceDir: fs.mkdtempSync(path.join(os.tmpdir(), 'buzz-workspace-')),
+    confirmExternalUpload: async () => false,
+  });
+  const result = await byName.post_buzz.handler({ content: 'hello', attachments: [secret] });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Buzz post failed: Owner declined to upload a file outside the session workspace: /);
+  assert.equal(calls.upload.length, 0);
+  assert.equal(calls.createPin.length, 0);
+});
 
 test('builds a single post_buzz tool', () => {
   const { byName } = makeHarness();

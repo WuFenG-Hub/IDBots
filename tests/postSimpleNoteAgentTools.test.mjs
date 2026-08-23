@@ -20,18 +20,32 @@ function makeFixtureFile(name = 'cover.png', contents = 'png-bytes') {
   return filePath;
 }
 
+const { wrapUploadWithGate } = require('../dist-electron/main/libs/chainUploadGate.js');
+
 function makeHarness(overrides = {}) {
-  const calls = { createPin: [], upload: [], resolve: [] };
+  const calls = { createPin: [], upload: [], resolve: [], confirm: [] };
   const createPin = async (metabotId, metaidData, options) => {
     calls.createPin.push({ metabotId, metaidData, options });
     if (overrides.createPinError) throw overrides.createPinError;
     return overrides.pinResult ?? SAMPLE_PIN_RESULT;
   };
-  const uploadFile = async (params) => {
+  // Mirror the host wiring: the raw upload goes through the shared gate
+  // wrapper (coworkRunner passes exactly this to the tool builders).
+  const rawUpload = async (params) => {
     calls.upload.push(params);
     if (overrides.uploadError) throw overrides.uploadError;
     return overrides.uploadResult ?? { metafileUri: 'metafile://uploadedi0.png' };
   };
+  const uploadGate = {
+    getWorkspaceDir: () => overrides.workspaceDir,
+    confirmExternalUpload: overrides.confirmExternalUpload
+      ? async (files) => {
+        calls.confirm.push(files);
+        return overrides.confirmExternalUpload(files);
+      }
+      : undefined,
+  };
+  const uploadFile = wrapUploadWithGate(rawUpload, uploadGate);
   const resolveMetabotId = (sessionId) => {
     calls.resolve.push(sessionId);
     return 'metabotId' in overrides ? overrides.metabotId : METABOT_ID;
@@ -159,4 +173,84 @@ test('formatSimpleNoteResult minimal and full shapes', () => {
   });
   assert.match(full, /view link: \[pin:\/\/abci0\]\(pin:\/\/abci0\)/);
   assert.doesNotMatch(full, /https?:\/\//);
+});
+
+// ---------------------------------------------------------------------------
+// Owner-approval gate for uploads outside the session workspace (P0 review fix)
+// ---------------------------------------------------------------------------
+
+const WORKSPACE = fs.mkdtempSync(path.join(os.tmpdir(), 'simplenote-workspace-'));
+
+test('files outside the workspace are blocked when the owner declines', async () => {
+  const secret = makeFixtureFile('id_rsa', 'secret');
+  const { calls, byName } = makeHarness({
+    workspaceDir: WORKSPACE,
+    confirmExternalUpload: async () => false,
+  });
+  const result = await byName.post_simplenote.handler({ title: 't', content: 'c', cover: secret });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /failed to upload cover .*Owner declined to upload a file outside the session workspace: /);
+  assert.match(result.content[0].text, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.deepEqual(calls.confirm, [[secret]]);
+  assert.equal(calls.upload.length, 0);
+  assert.equal(calls.createPin.length, 0);
+});
+
+test('files outside the workspace upload after the owner approves', async () => {
+  const secret = makeFixtureFile('chart.png');
+  const { calls, byName } = makeHarness({
+    workspaceDir: WORKSPACE,
+    confirmExternalUpload: async () => true,
+  });
+  const result = await byName.post_simplenote.handler({ title: 't', content: 'c', attachments: [secret] });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(calls.confirm, [[secret]]);
+  assert.equal(calls.upload.length, 1);
+  assert.equal(calls.createPin.length, 1);
+});
+
+test('files inside the workspace and metafile URIs never ask for approval', async () => {
+  const inside = path.join(WORKSPACE, 'cover.png');
+  fs.writeFileSync(inside, 'png');
+  const { calls, byName } = makeHarness({
+    workspaceDir: WORKSPACE,
+    confirmExternalUpload: async () => {
+      throw new Error('should not ask');
+    },
+  });
+  const result = await byName.post_simplenote.handler({
+    title: 't',
+    content: 'c',
+    cover: inside,
+    attachments: ['metafile://existingi0.png'],
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.confirm.length, 0);
+  assert.equal(calls.upload.length, 1);
+});
+
+test('a symlink inside the workspace pointing outside still asks for approval', async () => {
+  const secret = makeFixtureFile('id_rsa', 'secret');
+  const link = path.join(WORKSPACE, 'innocent.png');
+  fs.symlinkSync(secret, link);
+  const { calls, byName } = makeHarness({
+    workspaceDir: WORKSPACE,
+    confirmExternalUpload: async () => false,
+  });
+  const result = await byName.post_simplenote.handler({ title: 't', content: 'c', cover: link });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Owner declined to upload a file outside the session workspace/);
+  assert.equal(calls.upload.length, 0);
+  assert.equal(calls.createPin.length, 0);
+});
+
+test('isPathInsideDir handles containment, siblings, equality and missing paths', () => {
+  const { isPathInsideDir } = require('../dist-electron/main/libs/chainUploadGate.js');
+  assert.equal(isPathInsideDir('/tmp/ws/a.png', '/tmp/ws'), true);
+  assert.equal(isPathInsideDir('/tmp/ws/sub/a.png', '/tmp/ws'), true);
+  assert.equal(isPathInsideDir('/tmp/ws', '/tmp/ws'), true);
+  assert.equal(isPathInsideDir('/tmp/ws/missing/a.png', '/tmp/ws'), true);
+  assert.equal(isPathInsideDir('/tmp/ws-other/a.png', '/tmp/ws'), false);
+  assert.equal(isPathInsideDir('/tmp/wsfake/a.png', '/tmp/ws'), false);
+  assert.equal(isPathInsideDir('', '/tmp/ws'), false);
 });

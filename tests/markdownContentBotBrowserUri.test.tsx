@@ -130,3 +130,18 @@ test('Web2 viewer rewrite ignores non-viewer URLs and code blocks', () => {
   // inside a code block stays verbatim.
   assert.equal(output, input);
 });
+
+test('Web2 viewer rewrite drops ?query/#fragment residue', () => {
+  const output = linkifyAgentInternetUris(
+    `[doc](https://www.metaid.io/pin/${REWRITE_PIN}?from=feed#anchor) and bare https://openagentinternet.org/browser/pin/${REWRITE_PIN}?utm=x`,
+  );
+  assert.match(output, new RegExp(`\\[doc\\]\\(pin://${REWRITE_PIN}\\)`));
+  assert.match(output, new RegExp(`\\[pin://${REWRITE_PIN}\\]\\(pin://${REWRITE_PIN}\\)`));
+  assert.doesNotMatch(output, /\?from=feed|\?utm=x|#anchor/);
+});
+
+test('Web2 viewer URLs inside INLINE code spans are rewritten too (they must stay clickable)', () => {
+  const output = linkifyAgentInternetUris('deliverable at `https://www.metaid.io/pin/' + REWRITE_PIN + '`');
+  assert.match(output, new RegExp(`\\[pin://${REWRITE_PIN}\\]\\(pin://${REWRITE_PIN}\\)`));
+  assert.doesNotMatch(output, /metaid\.io/);
+});

@@ -82,6 +82,11 @@ export function formatBuzzResult(input: {
 export function buildPostBuzzAgentTools(deps: {
   tool: SdkToolFactory;
   createPin: ChainWriteCreatePin;
+  /**
+   * Upload function; the host passes the GATED wrapper from chainUploadGate
+   * (wrapUploadWithGate) so files outside the session workspace require
+   * owner approval before they are published.
+   */
   uploadFile: MetaFileUploadControl['upload'];
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | undefined;
@@ -94,7 +99,7 @@ export function buildPostBuzzAgentTools(deps: {
       'Post a buzz (short text post with optional attachments) on-chain via the simplebuzz protocol, as the MetaBot that owns this session.',
       'Use when the user asks to post or publish a buzz, a short on-chain message, or a development-journal entry on MetaWeb. Attachments accept local absolute file paths (uploaded automatically) and existing metafile:// URIs (attached as-is); quote_pin quotes/reposts an existing buzz.',
       'Do NOT use for file-only uploads (use upload_file), generic protocol writes like paylike/paycomment (use omni_cast), or private/group chat messages.',
-      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE buzz still upload on MVC (file upload does not support DOGE). Returns pinId, txids, cost in sats, attachment metafile URIs, and a public link.',
+      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE buzz still upload on MVC (file upload does not support DOGE). Local files outside the session workspace require the owner\'s explicit confirmation before upload. Returns pinId, txids, cost in sats, attachment metafile URIs, and a pin:// view link.',
     ].join(' '),
     {
       content: z.string().min(1).describe('Buzz text content. Required and must not be empty.'),
@@ -142,7 +147,9 @@ export function buildPostBuzzAgentTools(deps: {
 
       try {
         // Phase 1: upload local attachments and collect metafile:// URIs;
-        // existing metafile:// URIs pass through untouched.
+        // existing metafile:// URIs pass through untouched. The upload
+        // function itself is the gated wrapper (chainUploadGate): files
+        // outside the session workspace throw when the owner declines.
         const attachments: string[] = [];
         for (const raw of args.attachments ?? []) {
           const item = asString(raw);

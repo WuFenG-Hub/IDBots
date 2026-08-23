@@ -28,6 +28,11 @@ type SdkToolFactory = (
 export function buildPostSimpleNoteAgentTools(deps: {
   tool: SdkToolFactory;
   createPin: ChainWriteCreatePin;
+  /**
+   * Upload function; the host passes the GATED wrapper from chainUploadGate
+   * (wrapUploadWithGate) so files outside the session workspace require
+   * owner approval before they are published.
+   */
   uploadFile: MetaFileUploadControl['upload'];
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | undefined;
@@ -91,7 +96,7 @@ export function buildPostSimpleNoteAgentTools(deps: {
       'Use when the user asks to publish/write an article, blog post, tutorial, long-form documentation, or a note on MetaWeb. Content defaults to Markdown (`content_type` text/markdown) but any MIME type is allowed — you decide what fits.',
       'Images and files must be ON-CHAIN, never Web2 hotlinks: the built-in Bot Browser renders metafile:// URIs natively, so to show an image inside the article, upload it first (pass its local absolute path as `cover`/`attachments` here, or use upload_file yourself) and then reference the returned metafile://<pinId> in the Markdown body, e.g. ![alt](metafile://<pinId>). NEVER embed https:// Web2 URLs for on-chain articles.',
       'Do NOT use for short buzz posts (post_buzz), publishing an app (bot_browser_publish_app), or plain file uploads (upload_file).',
-      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE note still upload on MVC (file upload does not support DOGE). Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
+      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE note still upload on MVC (file upload does not support DOGE). Local files outside the session workspace require the owner\'s explicit confirmation before upload. Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
     ].join(' '),
     {
       title: z.string().min(1).describe('Note title. Required and must not be empty.'),
@@ -144,7 +149,9 @@ export function buildPostSimpleNoteAgentTools(deps: {
       const uploadScope = { metabotId, network };
 
       try {
-        // Phase 1: resolve cover and attachments to metafile:// URIs.
+        // Phase 1: resolve cover and attachments to metafile:// URIs. The
+        // upload function itself is the gated wrapper (chainUploadGate):
+        // files outside the session workspace throw when the owner declines.
         let coverImg = '';
         if (asString(args.cover)) {
           const cover = await resolveFileReference(uploadScope, args.cover ?? '', 'cover');
