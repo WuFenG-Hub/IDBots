@@ -188,6 +188,9 @@ export class MetawebStudyService {
     if (this.timer) return;
     // Crash recovery: a process killed mid-run leaves 'running' rows behind.
     this.store.resetRunningToPending(this.now().toISOString());
+    // First tick immediately (no-op outside the window) so a job queued just
+    // before the window, or an app restart inside it, does not wait 30min.
+    void this.runTick().catch(() => undefined);
     this.timer = setInterval(() => {
       void this.runTick().catch(() => undefined);
     }, TICK_MS);
