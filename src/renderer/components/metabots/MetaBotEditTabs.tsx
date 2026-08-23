@@ -1,12 +1,17 @@
 /**
  * Tabbed MetaBot edit form (replaces the old single-page MetaBotForm edit mode).
  *
- * Four tabs — Basic / Persona / Chat Settings / Advanced — each with its own
- * save button, per-tab dirty tracking and per-tab on-chain sync grouping, so a
- * user can iterate on one slice of the profile without publishing unrelated
- * edits. All panels stay mounted (inactive ones are CSS-hidden) so unsaved
- * edits in other tabs survive tab switches; switching away from a dirty tab
- * asks for confirmation and reverts that tab's fields on confirm.
+ * Five tabs — Basic / Persona / Chat Settings / Knowledge Base / Advanced. The
+ * four profile tabs each have their own save button, per-tab dirty tracking
+ * and per-tab on-chain sync grouping, so a user can iterate on one slice of
+ * the profile without publishing unrelated edits. The Knowledge Base tab is
+ * different: it manages the bot's document corpora through the knowledgeBase:*
+ * IPC surface with immediate effect, so it owns no MetaBotEditValues fields,
+ * no dirty tracking and no on-chain sync (deliberately absent from
+ * EDIT_TAB_FIELDS / EDIT_TAB_SYNC_GROUPS). All panels stay mounted (inactive
+ * ones are CSS-hidden) so unsaved edits in other tabs survive tab switches;
+ * switching away from a dirty tab asks for confirmation and reverts that tab's
+ * fields on confirm.
  *
  * Field state is a single MetaBotEditValues object plus a `baseline` snapshot
  * of the last saved/loaded values; dirty = tab fields differ from baseline.
@@ -30,6 +35,7 @@ import {
 } from './allowChatSkills.ts';
 import MetaBotAdvancedActionsSection from './MetaBotAdvancedActionsSection';
 import MetaBotHomepageSection, { composeHomepageForSave } from './MetaBotHomepageSection';
+import KnowledgeBasePanel from './KnowledgeBasePanel';
 import { buildMetaBotToggleViewModel, canShowMetabotTwinSwitch } from './metaBotCardPresentation.js';
 
 const AVATAR_MAX_SIZE_BYTES = 200 * 1024; // 200KB
@@ -96,10 +102,13 @@ export interface LlmOption {
   label: string;
 }
 
-export type MetaBotEditTabKey = 'basic' | 'persona' | 'chatSettings' | 'advanced';
+export type MetaBotEditTabKey = 'basic' | 'persona' | 'chatSettings' | 'knowledgeBase' | 'advanced';
 
 /** Editable fields owned by each tab; drives dirty tracking and save scoping. */
-export const EDIT_TAB_FIELDS: Record<MetaBotEditTabKey, readonly (keyof MetaBotEditValues)[]> = {
+// 'knowledgeBase' is deliberately absent: that panel manages the bot's
+// document corpora via the knowledgeBase:* IPC surface with immediate effect,
+// so it owns no MetaBotEditValues fields and needs no dirty tracking.
+export const EDIT_TAB_FIELDS: Partial<Record<MetaBotEditTabKey, readonly (keyof MetaBotEditValues)[]>> = {
   basic: ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'llm_provider', 'llm_effort', 'fallback_llm_id', 'fallback_llm_provider', 'fallback_llm_effort'],
   persona: ['role', 'soul', 'goal'],
   chatSettings: ['allow_chat_skills', 'a2a_max_incoming_turns', 'a2a_bye_cooldown_ms', 'a2a_auto_reply_enabled'],
@@ -108,20 +117,22 @@ export const EDIT_TAB_FIELDS: Record<MetaBotEditTabKey, readonly (keyof MetaBotE
 
 // metabot_type is deliberately absent from EDIT_TAB_SYNC_GROUPS: the Twin/Worker
 // role is a local-only setting and is never published on-chain.
+// 'knowledgeBase' is likewise absent: nothing in that panel syncs on-chain.
 /** On-chain sync step groups each tab is allowed to publish on save. */
-export const EDIT_TAB_SYNC_GROUPS: Record<MetaBotEditTabKey, readonly SyncStepKey[]> = {
+export const EDIT_TAB_SYNC_GROUPS: Partial<Record<MetaBotEditTabKey, readonly SyncStepKey[]>> = {
   basic: ['name', 'avatar', 'bio', 'owner', 'llm'],
   persona: ['persona'],
   chatSettings: ['chatSkills'],
   advanced: ['homepage'],
 };
 
-const EDIT_TAB_ORDER: readonly MetaBotEditTabKey[] = ['basic', 'persona', 'chatSettings', 'advanced'];
+const EDIT_TAB_ORDER: readonly MetaBotEditTabKey[] = ['basic', 'persona', 'chatSettings', 'knowledgeBase', 'advanced'];
 
-const EDIT_TAB_LABEL_KEYS: Record<MetaBotEditTabKey, 'metabotTabBasic' | 'metabotTabPersona' | 'metabotTabChatSettings' | 'metabotTabAdvanced'> = {
+const EDIT_TAB_LABEL_KEYS: Record<MetaBotEditTabKey, 'metabotTabBasic' | 'metabotTabPersona' | 'metabotTabChatSettings' | 'metabotTabKnowledgeBase' | 'metabotTabAdvanced'> = {
   basic: 'metabotTabBasic',
   persona: 'metabotTabPersona',
   chatSettings: 'metabotTabChatSettings',
+  knowledgeBase: 'metabotTabKnowledgeBase',
   advanced: 'metabotTabAdvanced',
 };
 
@@ -316,7 +327,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   };
 
   const isTabDirty = (tab: MetaBotEditTabKey): boolean =>
-    EDIT_TAB_FIELDS[tab].some((field) => !editFieldEquals(values[field], baseline[field]));
+    (EDIT_TAB_FIELDS[tab] ?? []).some((field) => !editFieldEquals(values[field], baseline[field]));
 
   const handleTabClick = (tab: MetaBotEditTabKey) => {
     if (tab === activeTab) return;
@@ -325,7 +336,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
       // Discard the outgoing tab's unsaved edits.
       setValues((prev) => {
         const next = { ...prev };
-        for (const field of EDIT_TAB_FIELDS[activeTab]) {
+        for (const field of EDIT_TAB_FIELDS[activeTab] ?? []) {
           (next as unknown as Record<string, unknown>)[field] = baseline[field];
         }
         return next;
@@ -486,7 +497,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
       // keep their unsaved edits and stay dirty.
       setBaseline((prev) => {
         const next = { ...prev };
-        for (const field of EDIT_TAB_FIELDS[tab]) {
+        for (const field of EDIT_TAB_FIELDS[tab] ?? []) {
           (next as unknown as Record<string, unknown>)[field] = values[field];
         }
         next.allow_chat_skills = tab === 'chatSettings'
@@ -1149,6 +1160,15 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
         </div>
 
         {renderPanelSaveRow('chatSettings')}
+      </div>
+
+      {/* Knowledge Base tab: per-bot document corpora, IPC-managed (no save row). */}
+      <div
+        role="tabpanel"
+        data-slot="metabot-edit-panel-knowledgeBase"
+        className={`space-y-3 ${activeTab === 'knowledgeBase' ? '' : 'hidden'}`}
+      >
+        <KnowledgeBasePanel metabotId={metabotId} />
       </div>
 
       {/* Advanced tab: on-chain homepage source */}

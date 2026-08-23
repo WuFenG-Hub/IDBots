@@ -343,7 +343,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     if (!current) throw new Error(i18nService.t('metabotLoadFailed'));
 
     const scopedValues: MetaBotEditValues = { ...buildEditFormValues(current) };
-    for (const field of EDIT_TAB_FIELDS[tab]) {
+    for (const field of EDIT_TAB_FIELDS[tab] ?? []) {
       (scopedValues as unknown as Record<string, unknown>)[field] = values[field];
     }
     if (tab === 'advanced') {
