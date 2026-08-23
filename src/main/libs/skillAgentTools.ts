@@ -53,8 +53,10 @@ function asString(value: unknown): string {
  * surface (standard Chat included) so a bot can search → read APP.md →
  * install → verify without leaving the conversation.
  *
- * Does not prompt AskUserQuestion: install is a local SKILLs/ write that
- * the product owner explicitly opted out of confirmation for.
+ * install_skill is gated host-side: coworkRunner.withSkillInstallApproval
+ * asks the owner for confirmation in interactive sessions (unattended
+ * acceptEdits/bypassPermissions/autoApprove sessions skip the prompt), so
+ * this builder itself never prompts.
  */
 export function buildSkillAgentTools(deps: {
   tool: SdkToolFactory;

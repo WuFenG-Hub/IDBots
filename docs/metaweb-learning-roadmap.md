@@ -135,14 +135,16 @@ Acceptance: from a fresh IDBots install, asking the TwinBot "IDBots 能干什么
 
 ### M2 — Guided learning loop (L2)
 
+**Status: implemented 2026-08-23** (branch `feat/metaweb-learning`).
+
 **Goal**: the bot can follow a MetaWeb tutorial end-to-end, including installing what it needs.
 
 Scope:
 
-- Tutorial-execution policy in the worldview section: extract concrete steps from a tutorial pin; when a step requires a skill/plugin, resolve it on-chain (`/protocols/metabot-skill` via existing skill sync / `skill_tool install_skill`) rather than from Web2.
-- Install safety: reuse the existing approval flow — installing a skill from a tutorial requires owner approval by default (configurable); the bot must state what, why, and source pinId.
-- Verification: after install, `list_installed_skills`/`read_skill` confirm; the bot reports "I learned X" with provenance (source pins).
-- Outcome recording: minimal structured note of what was learned (feeds M3).
+- Tutorial-execution policy in the worldview section: extract concrete steps from a tutorial pin; when a step requires a skill/plugin, resolve it on-chain (`/protocols/metabot-skill` via existing skill sync / `skill_tool install_skill`) rather than from Web2. → shipped as the `idbots:metaweb-learning-loop` prompt section (order 43).
+- Install safety: reuse the existing approval flow — installing a skill from a tutorial requires owner approval by default (configurable); the bot must state what, why, and source pinId. → shipped as `coworkRunner.withSkillInstallApproval`, gating every `install_skill` call through the shared AskUserQuestion safety-approval path (unattended acceptEdits/bypassPermissions/autoApprove sessions skip, same posture as the delete guard).
+- Verification: after install, `list_installed_skills`/`read_skill` confirm; the bot reports "I learned X" with provenance (source pins). → learning-loop section steps 4–5.
+- Outcome recording: minimal structured note of what was learned (feeds M3). → learning-loop section step 6 rides the existing `knowledge_upsert` (source pinIds in tags); the dedicated experience record type is M3 scope.
 
 Acceptance: S2 scenario ("learn to make videos") completes with the video skill installed from MetaWeb, verified, and reported — with zero Web2 searches.
 
