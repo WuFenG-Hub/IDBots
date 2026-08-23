@@ -103,6 +103,69 @@ export interface UpsertMetaIDKnowledgeResult {
   revised: boolean;
 }
 
+/**
+ * Procedure memory ("经验") — a proven way to GET A TASK DONE. Heavier than a
+ * knowledge point (it carries an ordered checklist and pitfalls), lighter
+ * than a skill (no script/package dependency). Learned at runtime after
+ * completing a recurring task — typically after following a MetaWeb tutorial,
+ * with sourcePinIds recording provenance. Upserted by title fingerprint:
+ * re-saving the same title rewrites the record and bumps its version
+ * (dedupe), and recall bumps useCount/lastUsedAt so frequently reused
+ * procedures stay hot.
+ */
+export interface MetaIDProcedureEntry {
+  id: string;
+  metabotId: number;
+  title: string;
+  titleFingerprint: string;
+  /** When to use this procedure ("when the user asks to …"). */
+  triggerText: string;
+  steps: string[];
+  pitfalls: string[];
+  /** MetaWeb pin ids this procedure was learned from. */
+  sourcePinIds: string[];
+  category: string | null;
+  tags: string[];
+  confidence: number;
+  status: 'active' | 'archived';
+  origin: MetaIDKnowledgeOrigin;
+  useCount: number;
+  lastUsedAt: number | null;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface UpsertMetaIDProcedureInput {
+  metabotId: number;
+  title: string;
+  triggerText: string;
+  steps: string[];
+  pitfalls?: string[];
+  sourcePinIds?: string[];
+  category?: string | null;
+  tags?: string[];
+  confidence?: number;
+  origin?: MetaIDKnowledgeOrigin;
+}
+
+export interface UpsertMetaIDProcedureResult {
+  entry: MetaIDProcedureEntry;
+  created: boolean;
+  revised: boolean;
+}
+
+export interface ListMetaIDProcedureOptions {
+  metabotId: number;
+  category?: string;
+  status?: 'active' | 'archived' | 'all';
+  query?: string;
+  limit?: number;
+  offset?: number;
+  /** Bump use_count/last_used_at on returned rows (recall reuse signal). */
+  touchUsed?: boolean;
+}
+
 export interface ListMetaIDKnowledgeOptions {
   metabotId: number;
   kind?: MetaIDKnowledgeKind;
@@ -256,6 +319,34 @@ export function ensureMetaIDKnowledgeSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_metaid_knowledge_revisions_knowledge
       ON metaid_knowledge_revisions(knowledge_id, version DESC);
   `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS metaid_knowledge_procedures (
+      id TEXT PRIMARY KEY,
+      metabot_id INTEGER NOT NULL REFERENCES metabots(id),
+      title TEXT NOT NULL CHECK (trim(title) <> ''),
+      title_fingerprint TEXT NOT NULL CHECK (trim(title_fingerprint) <> ''),
+      trigger_text TEXT NOT NULL CHECK (trim(trigger_text) <> ''),
+      steps_json TEXT NOT NULL DEFAULT '[]',
+      pitfalls_json TEXT NOT NULL DEFAULT '[]',
+      source_pin_ids_json TEXT NOT NULL DEFAULT '[]',
+      category TEXT,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      confidence REAL NOT NULL DEFAULT 0.75 CHECK (confidence >= 0 AND confidence <= 1),
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+      origin TEXT NOT NULL DEFAULT 'agent' CHECK (origin IN (${ORIGINS_SQL})),
+      use_count INTEGER NOT NULL DEFAULT 0 CHECK (use_count >= 0),
+      last_used_at INTEGER,
+      version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(metabot_id, title_fingerprint)
+    );
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_metaid_knowledge_procedures_metabot_updated
+      ON metaid_knowledge_procedures(metabot_id, status, updated_at DESC);
+  `);
 }
 
 const asText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
@@ -336,6 +427,7 @@ function parseTags(value: string | null | undefined): string[] {
     const parsed = JSON.parse(value) as unknown;
     return Array.isArray(parsed)
       ? parsed.filter((item): item is string => typeof item === 'string')
+
       : [];
   } catch {
     return [];
@@ -404,6 +496,74 @@ function rowToRevision(row: KnowledgeRevisionRow): MetaIDKnowledgeRevision {
     origin: normalizeOrigin(row.origin),
     sourceDreamDate: row.source_dream_date ?? null,
     createdAt: asInteger(row.created_at),
+  };
+}
+
+interface ProcedureRow {
+  id: string;
+  metabot_id: number | string;
+  title: string;
+  title_fingerprint: string;
+  trigger_text: string;
+  steps_json: string;
+  pitfalls_json: string;
+  source_pin_ids_json: string;
+  category: string | null;
+  tags_json: string;
+  confidence: number | string;
+  status: string;
+  origin: string;
+  use_count: number | string;
+  last_used_at: number | string | null;
+  version: number | string;
+  created_at: number | string;
+  updated_at: number | string;
+}
+
+const MAX_PROCEDURE_TITLE = 300;
+const MAX_PROCEDURE_TRIGGER = 500;
+const MAX_PROCEDURE_STEPS = 20;
+const MAX_PROCEDURE_STEP_LEN = 500;
+const MAX_PROCEDURE_PITFALLS = 10;
+const MAX_PROCEDURE_PITFALL_LEN = 300;
+const MAX_PROCEDURE_PIN_IDS = 20;
+const MAX_PROCEDURE_PIN_ID_LEN = 100;
+
+function normalizeStringArray(value: unknown, maxItems: number, maxItemLength: number): string[] {
+  if (!Array.isArray(value)) return [];
+  const result: string[] = [];
+  for (const raw of value) {
+    const item = asText(raw).slice(0, maxItemLength);
+    if (item) result.push(item);
+    if (result.length >= maxItems) break;
+  }
+  return result;
+}
+
+function normalizeProcedureStatus(value: unknown): 'active' | 'archived' {
+  return value === 'archived' ? 'archived' : 'active';
+}
+
+function rowToProcedure(row: ProcedureRow): MetaIDProcedureEntry {
+  return {
+    id: row.id,
+    metabotId: asInteger(row.metabot_id),
+    title: row.title,
+    titleFingerprint: row.title_fingerprint,
+    triggerText: row.trigger_text,
+    steps: parseTags(row.steps_json),
+    pitfalls: parseTags(row.pitfalls_json),
+    sourcePinIds: parseTags(row.source_pin_ids_json),
+    category: row.category ?? null,
+    tags: parseTags(row.tags_json),
+    confidence: asNumber(row.confidence, 0.75),
+    status: normalizeProcedureStatus(row.status),
+    origin: normalizeOrigin(row.origin),
+    useCount: Math.max(0, asInteger(row.use_count, 0)),
+    lastUsedAt: row.last_used_at == null ? null : asInteger(row.last_used_at),
+    version: Math.max(1, asInteger(row.version, 1)),
+    createdAt: asInteger(row.created_at),
+    updatedAt: asInteger(row.updated_at),
   };
 }
 
@@ -841,5 +1001,125 @@ export class MetaIDKnowledgeStore {
       [asInteger(metabotId)],
     );
     return asInteger(row?.count, 0);
+  }
+
+  /**
+   * Upsert a procedure ("经验") by title fingerprint: a fresh title inserts,
+   * an existing title rewrites in place (version bump) — that dedupe keeps
+   * the dream/runtime paths from stacking near-duplicates.
+   */
+  upsertProcedure(input: UpsertMetaIDProcedureInput): UpsertMetaIDProcedureResult {
+    const metabotId = asInteger(input.metabotId);
+    if (!metabotId) throw new Error('metabotId is required');
+    const title = boundedRequiredText(input.title, 'title', MAX_PROCEDURE_TITLE);
+    const triggerText = boundedRequiredText(input.triggerText, 'triggerText', MAX_PROCEDURE_TRIGGER);
+    const steps = normalizeStringArray(input.steps, MAX_PROCEDURE_STEPS, MAX_PROCEDURE_STEP_LEN);
+    if (steps.length === 0) throw new Error('steps is required (at least one step)');
+    const pitfalls = normalizeStringArray(input.pitfalls ?? [], MAX_PROCEDURE_PITFALLS, MAX_PROCEDURE_PITFALL_LEN);
+    const sourcePinIds = normalizeStringArray(input.sourcePinIds ?? [], MAX_PROCEDURE_PIN_IDS, MAX_PROCEDURE_PIN_ID_LEN);
+    const category = boundedOptionalText(input.category, 'category', MAX_CATEGORY);
+    const tags = normalizeTags(input.tags);
+    const confidence = normalizeConfidence(input.confidence);
+    const origin = normalizeOrigin(input.origin);
+    const titleFingerprint = topicFingerprintOf(title);
+    const now = this.now();
+
+    const existing = this.getOne<ProcedureRow>(
+      `SELECT * FROM metaid_knowledge_procedures
+       WHERE metabot_id = ? AND title_fingerprint = ? LIMIT 1`,
+      [metabotId, titleFingerprint],
+    );
+
+    if (!existing) {
+      const id = uuidv4();
+      this.db.run(
+        `INSERT INTO metaid_knowledge_procedures (
+           id, metabot_id, title, title_fingerprint, trigger_text, steps_json,
+           pitfalls_json, source_pin_ids_json, category, tags_json, confidence,
+           status, origin, use_count, last_used_at, version, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, NULL, 1, ?, ?)`,
+        [
+          id, metabotId, title, titleFingerprint, triggerText, serializeTags(steps),
+          serializeTags(pitfalls), serializeTags(sourcePinIds), category, serializeTags(tags),
+          confidence, origin, now, now,
+        ],
+      );
+      this.saveDb();
+      const entry = this.getProcedure(id);
+      if (!entry) throw new Error('failed to load the procedure after insert');
+      return { entry, created: true, revised: false };
+    }
+
+    this.db.run(
+      `UPDATE metaid_knowledge_procedures
+       SET title = ?, trigger_text = ?, steps_json = ?, pitfalls_json = ?, source_pin_ids_json = ?,
+           category = ?, tags_json = ?, confidence = ?, origin = ?, status = 'active',
+           version = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        title, triggerText, serializeTags(steps), serializeTags(pitfalls), serializeTags(sourcePinIds),
+        category, serializeTags(tags), confidence, origin,
+        asInteger(existing.version, 1) + 1, now, existing.id,
+      ],
+    );
+    this.saveDb();
+    const entry = this.getProcedure(existing.id);
+    if (!entry) throw new Error('failed to load the procedure after update');
+    return { entry, created: false, revised: true };
+  }
+
+  getProcedure(id: string): MetaIDProcedureEntry | null {
+    const row = this.getOne<ProcedureRow>(
+      `SELECT * FROM metaid_knowledge_procedures WHERE id = ? LIMIT 1`,
+      [asText(id)],
+    );
+    return row ? rowToProcedure(row) : null;
+  }
+
+  /** Keyword search across title + trigger + steps for the recall tool / hot layer. */
+  listProcedures(options: ListMetaIDProcedureOptions): MetaIDProcedureEntry[] {
+    const metabotId = asInteger(options.metabotId);
+    if (!metabotId) return [];
+    const clauses = ['metabot_id = ?'];
+    const params: unknown[] = [metabotId];
+    const status = options.status === 'all' ? null : normalizeProcedureStatus(options.status ?? 'active');
+    if (status) {
+      clauses.push('status = ?');
+      params.push(status);
+    }
+    if (options.category) {
+      clauses.push('category = ?');
+      params.push(boundedOptionalText(options.category, 'category', MAX_CATEGORY));
+    }
+    if (options.query) {
+      const like = `%${asText(options.query).toLowerCase()}%`;
+      clauses.push('(LOWER(title) LIKE ? OR LOWER(trigger_text) LIKE ? OR LOWER(steps_json) LIKE ?)');
+      params.push(like, like, like);
+    }
+    const limit = Math.min(500, Math.max(1, asInteger(options.limit, 100)));
+    const offset = Math.max(0, asInteger(options.offset, 0));
+    params.push(limit, offset);
+    const rows = this.getAll<ProcedureRow>(
+      `SELECT * FROM metaid_knowledge_procedures
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY updated_at DESC, id DESC
+       LIMIT ? OFFSET ?`,
+      params,
+    ).map(rowToProcedure);
+
+    if (options.touchUsed && rows.length > 0) {
+      const now = this.now();
+      const ids = rows.map((row) => row.id);
+      this.db.run(
+        `UPDATE metaid_knowledge_procedures SET use_count = use_count + 1, last_used_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`,
+        [now, ...ids],
+      );
+      this.saveDb();
+      for (const row of rows) {
+        row.useCount += 1;
+        row.lastUsedAt = now;
+      }
+    }
+    return rows;
   }
 }

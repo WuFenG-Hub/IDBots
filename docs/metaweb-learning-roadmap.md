@@ -152,13 +152,16 @@ Acceptance: S2 scenario ("learn to make videos") completes with the video skill 
 
 ### M3 — Experience memory (L3)
 
+**Status: implemented 2026-08-23** (branch `feat/metaweb-learning`; tool names use `procedure_*` to avoid colliding with the dream-derived `experience_recall`).
+
 **Goal**: a first-class local "experience" memory type — heavier than a knowledge point, lighter than a skill, no script dependency.
 
 Scope:
 
-- Experience record: `{title, trigger (when to use), steps, pitfalls, sourcePinIds, confidence, useCount, lastUsedAt}` stored per-bot in SQLite (extend `CoworkKnowledgeStore` or sibling store; idempotent migration per database-upgrade-safety rules).
-- Tools: `experience_save` (new), upgraded `experience_recall` (query by task similarity); prompt injection of relevant experiences into turns where triggers match (bounded, like knowledge blocks).
-- Dream/extraction integration: learning episodes (M2 outcomes) are distilled into experience records at turn end / dream time, deduped against existing records.
+- Experience record: `{title, trigger (when to use), steps, pitfalls, sourcePinIds, confidence, useCount, lastUsedAt}` stored per-bot in SQLite (extend `CoworkKnowledgeStore` or sibling store; idempotent migration per database-upgrade-safety rules). → shipped as the `metaid_knowledge_procedures` sibling table inside the knowledge store (`ensureMetaIDKnowledgeSchema`, idempotent `CREATE TABLE IF NOT EXISTS`), with title-fingerprint upsert dedupe and version bumps.
+- Tools: `experience_save` (new), upgraded `experience_recall` (query by task similarity); prompt injection of relevant experiences into turns where triggers match (bounded, like knowledge blocks). → shipped as `procedure_save` / `procedure_recall` (recall bumps `useCount`/`lastUsedAt`), plus the `<procedures>` hot block riding the volatile memory tail alongside the knowledge block.
+- Learning-loop integration: M2 step 6 now records outcomes via `procedure_save` with the source pinIds.
+- Dream/extraction integration: learning episodes (M2 outcomes) are distilled into experience records at turn end / dream time, deduped against existing records. → **deferred**: runtime saves (origin='agent') cover the primary flow; dream-side consolidation of procedures joins the M4 ingest-bridge work to avoid destabilizing the nightly dream prompt in this milestone.
 - Optional later: publish selected experiences on-chain (SimpleNote/buzz) to feed other bots.
 
 Acceptance: after learning a task once, the bot repeats it later without re-searching MetaWeb, citing its experience record; experiences are inspectable in the knowledge UI.
