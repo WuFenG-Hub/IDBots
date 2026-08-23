@@ -48,6 +48,11 @@ export function buildNewTaskComposerCommands(
       description: i18nService.t('composerCommandCompactDesc'),
       run: () => i18nService.t('composerNoticeCompactNoHistory'),
     },
+    {
+      name: 'export',
+      description: i18nService.t('composerCommandExportDesc'),
+      run: () => i18nService.t('composerNoticeExportNoSession'),
+    },
   ];
 }
 
@@ -91,6 +96,20 @@ export function buildSessionComposerCommands(
           return i18nService.t('composerNoticeCompactNoHistory');
         }
         return result.error ?? i18nService.t('composerCommandFailed');
+      },
+    },
+    {
+      name: 'export',
+      description: i18nService.t('composerCommandExportDesc'),
+      run: async () => {
+        const result = await coworkService.exportSessionTranscript(options.sessionId);
+        if (result.success && result.cancelled) {
+          return i18nService.t('composerNoticeExportCancelled');
+        }
+        if (result.success) {
+          return i18nService.t('composerNoticeExportSaved');
+        }
+        return result.error ?? i18nService.t('composerNoticeExportFailed');
       },
     },
   ];

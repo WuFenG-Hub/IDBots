@@ -386,6 +386,20 @@ class CoworkService {
     return result;
   }
 
+  /**
+   * /export command: renders the session transcript as Markdown and saves it
+   * through a native save dialog. `cancelled` means the user dismissed the
+   * dialog (not an error).
+   */
+  async exportSessionTranscript(sessionId: string): Promise<{ success: boolean; cancelled?: boolean; path?: string; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.exportTranscript) {
+      console.error('exportTranscript API not available');
+      return { success: false, error: 'Transcript export API not available' };
+    }
+    return cowork.exportTranscript(sessionId);
+  }
+
   async stopSession(sessionId: string): Promise<boolean> {
     const cowork = window.electron?.cowork;
     if (!cowork) return false;

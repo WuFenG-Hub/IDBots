@@ -34,6 +34,7 @@ import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits
 import { getOsLocale, getPersistedAppLanguage, setAppLanguageStoreGetter, tApp } from './libs/appLanguage';
 import { setGroupTaskCopyLanguageGetter } from './libs/groupTaskCopy';
 import { mapDshSubagentList, mapDshSubagentMessages, sessionUsesDshSubagents } from './libs/coworkSubagentTranscript';
+import { buildSessionTranscriptMarkdown, transcriptExportFileName } from './libs/coworkTranscriptExport';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
@@ -7833,6 +7834,47 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to compact session',
+      };
+    }
+  });
+
+  // /export command: render the session transcript as Markdown and save it
+  // through a native save dialog (host-side port of the DSH /export command).
+  ipcMain.handle('cowork:session:exportTranscript', async (event, sessionId: string) => {
+    try {
+      if (!sessionId) {
+        return { success: false, error: 'Session id is required' };
+      }
+      const session = getCoworkStore().getSession(sessionId);
+      if (!session) {
+        return { success: false, error: 'Session not found' };
+      }
+      const markdown = buildSessionTranscriptMarkdown(
+        { id: session.id, title: session.title, cwd: session.cwd, createdAt: session.createdAt },
+        session.messages,
+      );
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      const defaultName = transcriptExportFileName(session);
+      const saveOptions = {
+        title: 'Export Session Transcript',
+        defaultPath: path.join(app.getPath('downloads'), defaultName),
+        filters: [{ name: 'Markdown', extensions: ['md'] }],
+      };
+      const saveResult = ownerWindow
+        ? await dialog.showSaveDialog(ownerWindow, saveOptions)
+        : await dialog.showSaveDialog(saveOptions);
+      if (saveResult.canceled || !saveResult.filePath) {
+        return { success: true, cancelled: true };
+      }
+      const outputPath = saveResult.filePath.toLowerCase().endsWith('.md')
+        ? saveResult.filePath
+        : `${saveResult.filePath}.md`;
+      await fs.promises.writeFile(outputPath, markdown, 'utf-8');
+      return { success: true, cancelled: false, path: outputPath };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to export transcript',
       };
     }
   });
