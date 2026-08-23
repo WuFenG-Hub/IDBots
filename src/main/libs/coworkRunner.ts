@@ -11118,4 +11118,10 @@ export class CoworkRunner extends EventEmitter {
       }
     }
   }
+
+  async closeDshRuntime(): Promise<void> {
+    if (!this.dshTurnHub) return;
+    await this.dshTurnHub.close();
+    this.dshTurnHub = null;
+  }
 }

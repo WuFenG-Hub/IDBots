@@ -120,3 +120,47 @@ test('a second provider boots its own runtime and does not kill an in-flight tur
     fs.rmSync(sessionRoot, { recursive: true, force: true })
   }
 })
+
+test('idle provider runtimes are reaped after the configured TTL', {
+  skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed',
+}, async () => {
+  const { DshTurnHub } = loadModules()
+  const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
+  const { server } = await startMockServer(48814)
+  const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-idle-'))
+  const logs = []
+  const hub = new DshTurnHub({
+    runtimeDir,
+    sessionRoot,
+    runtimeIdleTtlMs: 200,
+    log: (level, message, detail) => logs.push({ level, message, detail: detail ?? {} }),
+  })
+  try {
+    const out = await hub.runTurn({
+      sessionId: 'cowork-idle',
+      dshSessionId: 'cw-idle',
+      prompt: 'hello',
+      provider: {
+        key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48814/v1',
+        apiKey: 'sk-a', model: 'mock-1',
+      },
+      sections: [{ name: 'idbots:base', order: 0, text: 'You are Alice.' }],
+      callbacks: {
+        onMessage: () => 'm1',
+        onMessageUpdate: () => undefined,
+        onMessageFinalize: () => undefined,
+        onUsage: () => undefined,
+        onApprovalRequest: () => undefined,
+        onApprovalCancelled: () => undefined,
+      },
+    })
+    assert.notEqual(out.kind, 'error', `idle-reap setup turn failed: ${JSON.stringify(out).slice(0, 200)}`)
+    assert.equal(hub.runtimeSlotCount, 1)
+    await waitFor(() => hub.runtimeSlotCount === 0, 5000, 'idle runtime reap')
+    assert.ok(logs.some((l) => l.message.includes('dshTurnHub.reapIdleRuntime')))
+  } finally {
+    await hub.close().catch(() => undefined)
+    server.close()
+    fs.rmSync(sessionRoot, { recursive: true, force: true })
+  }
+})

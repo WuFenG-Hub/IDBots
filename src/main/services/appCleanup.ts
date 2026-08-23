@@ -3,6 +3,9 @@ export interface AppCleanupDeps {
   stopSkillWatching: () => void;
   closeMetaidRpcServer: () => void;
   stopCoworkSessions: () => void;
+  /** Drain every DSH runtime subprocess. Optional so older cleanup
+   *  callers that only stop cowork sessions still type-check. */
+  closeDshRuntime?: () => Promise<void>;
   stopOpenAICompatProxy: () => Promise<void>;
   stopSkillServices: () => Promise<void>;
   stopIMGateways: () => Promise<void>;
@@ -22,6 +25,9 @@ export async function runAppCleanup(deps: AppCleanupDeps): Promise<void> {
   deps.stopSkillWatching();
   deps.closeMetaidRpcServer();
   deps.stopCoworkSessions();
+  await deps.closeDshRuntime?.().catch((error) => {
+    deps.error('Failed to close DSH runtime:', error);
+  });
 
   await deps.stopOpenAICompatProxy().catch((error) => {
     deps.error('Failed to stop OpenAI compatibility proxy:', error);
