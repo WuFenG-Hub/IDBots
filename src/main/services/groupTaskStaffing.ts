@@ -154,8 +154,8 @@ const REVISE_PATTERNS: RegExp[] = [
   /\breplace\b/i,
   /\bswap\b/i,
   /\bremove\b/i,
-  /\bdrop\b/i,
-  /\binstead\b/i,
+  // Bare "drop" / "instead" mis-fire on "ok, use B instead of A".
+  /\bdrop\s+(the\s+)?(seat|role|bot|member|candidate|person)\b/i,
 ];
 
 const CONFIRM_EXACT_PATTERNS: RegExp[] = [
@@ -319,6 +319,9 @@ export function resolveStaffingOwnerGate(input: {
     const kind = classifyOwnerStaffingReply(reply);
     if (kind === 'revise') return { allowed: false, decision: 'owner_revise' };
     if (kind === 'confirm') return { allowed: true, decision: 'owner_confirmed' };
+    if (detectSkipConfirmInWish(reply)) {
+      return { allowed: true, decision: 'skip_authorized' };
+    }
   }
   if (detectSkipConfirmInWish(input.triggeringWish) || input.persistedSkip) {
     return { allowed: true, decision: 'skip_authorized' };

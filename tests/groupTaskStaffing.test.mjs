@@ -38,6 +38,30 @@ test('不换人 is confirm; 换人 is revise', () => {
   assert.equal(classifyOwnerStaffingReply('确认人选'), 'confirm');
 });
 
+test('bare English instead/drop are not automatic revise', () => {
+  assert.equal(classifyOwnerStaffingReply('ok, use B instead of A'), 'unknown');
+  assert.equal(classifyOwnerStaffingReply('looks good — use Pixel instead'), 'unknown');
+  assert.equal(classifyOwnerStaffingReply('replace the designer'), 'revise');
+  assert.equal(classifyOwnerStaffingReply('drop the seat'), 'revise');
+});
+
+test('a skip phrase after propose authorizes create without a new propose', () => {
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['不用确认直接开'],
+    }),
+    { allowed: true, decision: 'skip_authorized' },
+  );
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['换人', '不用确认直接开'],
+    }),
+    { allowed: false, decision: 'owner_revise' },
+  );
+});
+
 test('owner replies beat a skip wish, and skip is only the triggering wish', () => {
   const messages = [
     { type: 'user', content: '上次那个不用确认直接开', timestamp: 1 },

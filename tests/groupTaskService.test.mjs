@@ -1358,6 +1358,39 @@ test('a historical skip phrase does not authorize a later propose', async () => 
   }
 });
 
+test('owner skip phrase after a pending propose authorizes Twin create', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-skip-after',
+    });
+    assert.equal(proposed.proposal.status, 'pending');
+    messages.push({
+      type: 'user',
+      content: '不用确认直接开',
+      timestamp: proposed.proposal.createdAt + 10,
+    });
+    const detail = await createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: proposed.proposal.id,
+      sourceSessionId: 'session-skip-after',
+    });
+    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2]);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'consumed');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('换人 after a skip-authorized wish still requires a new propose', async () => {
   const h = await createHarness();
   try {
