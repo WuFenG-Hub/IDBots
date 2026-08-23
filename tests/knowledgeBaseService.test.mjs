@@ -293,3 +293,83 @@ test('auto-learn tick only runs inside the nightly window and once per day', asy
     cleanup();
   }
 });
+
+test('invalid metabotId is rejected before any store/filesystem side effect', async () => {
+  const { service, cleanup } = setup();
+  try {
+    assert.throws(() => service.listKnowledgeBases(Number('not-a-number')), /Invalid metabotId/);
+    assert.throws(() => service.createKnowledgeBase(0, { name: 'x' }), /Invalid metabotId/);
+    assert.throws(() => service.requireKnowledgeBase(-3, 'default'), /Invalid metabotId/);
+    assert.throws(
+      () => service.addDocument(Number.NaN, { title: 't', content: 'c' }),
+      /Invalid metabotId/,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('addDocument bounds provenance fields (url/pinId/tags)', async () => {
+  const { service, cleanup } = setup();
+  try {
+    const saved = service.addDocument(7, {
+      title: 'bounded',
+      content: 'hello',
+      source: {
+        type: 'metaweb',
+        pinId: 'p'.repeat(300),
+        url: `https://example.com/${'u'.repeat(800)}`,
+        tags: Array.from({ length: 40 }, (_, index) => `tag-${index}-${'x'.repeat(100)}`),
+      },
+    });
+    const stored = JSON.parse(fs.readFileSync(saved.filePath, 'utf8'));
+    const source = stored['x-kb-source'];
+    assert.equal(source.pinId.length, 128);
+    assert.equal(source.url.length, 500);
+    assert.equal(source.tags.length, 20);
+    assert.ok(source.tags.every((tag) => tag.length <= 80));
+  } finally {
+    cleanup();
+  }
+});
+
+test('a corrupt index self-heals: query survives, next learn rebuilds', async () => {
+  const { service, cleanup } = setup();
+  try {
+    const kb = service.listKnowledgeBases(7)[0];
+    writeRaw(kb.rawDir, 'a.md', '# 自主学习\n\n夜间学习的内容会进入知识库索引。');
+    await service.learnKnowledgeBase(7, kb.id);
+    const before = service.queryKnowledgeBase(7, { query: '自主学习' });
+    assert.ok(before.length > 0, 'baseline query hits');
+
+    // Corrupt the derived index on disk.
+    const kbRoot = path.dirname(kb.rawDir);
+    fs.writeFileSync(path.join(kbRoot, 'index', 'kb.sqlite'), 'this is not a sqlite database');
+    const afterCorrupt = service.queryKnowledgeBase(7, { query: '自主学习' });
+    assert.deepEqual(afterCorrupt, [], 'self-heal rebuilt an empty index instead of throwing');
+
+    await service.learnKnowledgeBase(7, kb.id);
+    const afterHeal = service.queryKnowledgeBase(7, { query: '自主学习' });
+    assert.ok(afterHeal.length > 0, 'learn rebuilt the index from raw docs');
+  } finally {
+    cleanup();
+  }
+});
+
+test('learn emits error (not a stuck spinner) when the index cannot be opened at all', async () => {
+  const { service, events, cleanup } = setup();
+  const kb = service.listKnowledgeBases(7)[0];
+  const kbRoot = path.dirname(kb.rawDir);
+  // A read-only KB root makes every open attempt fail (delete + recreate
+  // included), so even the self-heal retry throws.
+  fs.chmodSync(kbRoot, 0o444);
+  try {
+    await assert.rejects(() => service.learnKnowledgeBase(7, kb.id), /index/i);
+    const states = events.filter((event) => event.payload?.kbId === kb.id).map((event) => event.payload.state);
+    assert.ok(states.includes('running'));
+    assert.equal(states[states.length - 1], 'error', 'failure surfaces as an error event');
+  } finally {
+    fs.chmodSync(kbRoot, 0o755);
+    cleanup();
+  }
+});

@@ -10,9 +10,9 @@ import {
   chunkKnowledgeBaseText,
   cleanKnowledgeBaseText,
   extractKbDocTitle,
-  extractKnowledgeBaseText,
+  extractKnowledgeBaseTextAsync,
   phraseScore,
-  sha256File,
+  sha256FileAsync,
   sha256Text,
   toKnowledgeBaseFtsText,
   tokenizeKnowledgeBaseText,
@@ -38,6 +38,11 @@ const AUTO_LEARN_TICK_MS = 30 * 60 * 1000;
 
 const MAX_KB_NAME_CHARS = 80;
 const MAX_KB_DESCRIPTION_CHARS = 500;
+/** Provenance bounds for addDocument sources — unbounded strings would land verbatim in the JSON payload. */
+const MAX_KB_SOURCE_URL_CHARS = 500;
+const MAX_KB_SOURCE_PIN_ID_CHARS = 128;
+const MAX_KB_SOURCE_TAGS = 20;
+const MAX_KB_SOURCE_TAG_CHARS = 80;
 const DEFAULT_QUERY_TOP_K = 8;
 const DEFAULT_QUERY_MIN_SCORE = 0.18;
 const LEXICAL_WEIGHT = 0.85;
@@ -104,6 +109,13 @@ export class KnowledgeBaseService {
   private readonly now: () => Date;
   private readonly learnQueues = new Map<string, Promise<unknown>>();
   private autoLearnTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Per-process cache of bots whose default KB directory was verified this
+   * run. listKnowledgeBases → ensureDefaultKnowledgeBase is called EVERY
+   * TURN by the volatile prompt block; without this cache each turn pays a
+   * mkdirSync (and the create path an INSERT) on the hot path.
+   */
+  private readonly ensuredDefaultKb = new Set<number>();
 
   constructor(deps: KnowledgeBaseServiceDeps) {
     this.store = deps.store;
@@ -120,14 +132,39 @@ export class KnowledgeBaseService {
     return path.join(this.kbRootDir(metabotId, kbId), 'raw');
   }
 
+  /**
+   * Open a KB's derived index with one self-heal retry: the index is always
+   * rebuildable from the raw documents, so a corrupt index directory (failed
+   * schema open, half-written db) is deleted and rebuilt once instead of
+   * breaking every learn/query until manual intervention. A null return
+   * (native sqlite unavailable) is passed through — retrying is pointless
+   * there.
+   */
+  private openIndexWithSelfHeal(kbRootDir: string): KnowledgeBaseIndexStore | null {
+    try {
+      return openKnowledgeBaseIndex(kbRootDir);
+    } catch {
+      try {
+        fs.rmSync(path.join(kbRootDir, 'index'), { recursive: true, force: true });
+      } catch {
+        // best effort; the retry below surfaces any remaining problem
+      }
+      return openKnowledgeBaseIndex(kbRootDir);
+    }
+  }
+
   private emitLearnStatus(payload: Record<string, unknown>): void {
     this.emitToRenderer?.(KNOWLEDGE_BASE_LEARN_STATUS_CHANNEL, payload);
   }
 
   ensureDefaultKnowledgeBase(metabotId: number): KnowledgeBaseRecord {
+    this.assertMetabotId(metabotId);
     const existing = this.store.getDefault(metabotId);
     if (existing) {
-      fs.mkdirSync(existing.rawDir, { recursive: true });
+      if (!this.ensuredDefaultKb.has(metabotId)) {
+        fs.mkdirSync(existing.rawDir, { recursive: true });
+        this.ensuredDefaultKb.add(metabotId);
+      }
       return existing;
     }
     const nowIso = this.now().toISOString();
@@ -148,6 +185,7 @@ export class KnowledgeBaseService {
     };
     fs.mkdirSync(record.rawDir, { recursive: true });
     this.store.insert(record);
+    this.ensuredDefaultKb.add(metabotId);
     return record;
   }
 
@@ -160,6 +198,7 @@ export class KnowledgeBaseService {
     metabotId: number,
     input: { name: string; description?: string; rawDir?: string },
   ): KnowledgeBaseRecord {
+    this.assertMetabotId(metabotId);
     const name = asTrimmed(input.name).slice(0, MAX_KB_NAME_CHARS);
     if (!name) throw new Error('Knowledge base name is required');
     const description = asTrimmed(input.description).slice(0, MAX_KB_DESCRIPTION_CHARS);
@@ -214,7 +253,20 @@ export class KnowledgeBaseService {
     this.store.remove(metabotId, kbId);
   }
 
+  /**
+   * Every public entry validates the bot id: an NaN/0/negative metabotId
+   * (e.g. a malformed IPC payload) must never reach a store INSERT or a
+   * filesystem path. requireKnowledgeBase + ensureDefaultKnowledgeBase funnel
+   * nearly all methods, so validating these two covers the surface.
+   */
+  private assertMetabotId(metabotId: number): void {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) {
+      throw new Error(`Invalid metabotId: ${String(metabotId)}`);
+    }
+  }
+
   requireKnowledgeBase(metabotId: number, kbId: string): KnowledgeBaseRecord {
+    this.assertMetabotId(metabotId);
     const record = this.store.getById(metabotId, kbId);
     if (!record) throw new Error(`Knowledge base not found: ${kbId}`);
     return record;
@@ -285,7 +337,17 @@ export class KnowledgeBaseService {
     const full = options.full === true;
     this.emitLearnStatus({ metabotId, kbId, state: 'running', full });
 
-    const index = openKnowledgeBaseIndex(this.kbRootDir(metabotId, kbId));
+    // Open inside the failure boundary: an index that fails to open (even
+    // after the self-heal retry) must emit 'error' — otherwise every window's
+    // learn spinner stays stuck on the 'running' event forever.
+    let index: KnowledgeBaseIndexStore | null = null;
+    try {
+      index = this.openIndexWithSelfHeal(this.kbRootDir(metabotId, kbId));
+    } catch (error) {
+      const message = `Knowledge base index could not be opened (rebuild retry also failed): ${error instanceof Error ? error.message : String(error)}`;
+      this.emitLearnStatus({ metabotId, kbId, state: 'error', error: message });
+      throw new Error(message);
+    }
     if (!index) {
       const error = 'Native SQLite (node:sqlite) is unavailable in this runtime; knowledge base indexing is not supported here.';
       this.emitLearnStatus({ metabotId, kbId, state: 'error', error });
@@ -319,13 +381,15 @@ export class KnowledgeBaseService {
             summary.unchanged += 1;
             continue;
           }
-          const sha256 = sha256File(file.absPath);
+          // Async I/O + a per-file yield: learn runs in the nightly window and
+          // big documents must never freeze the main process (review M9).
+          const sha256 = await sha256FileAsync(file.absPath);
           if (existing && existing.sha256 === sha256) {
             index.touchDoc(file.relpath, { size: file.size, mtimeMs: file.mtimeMs, sha256 });
             summary.unchanged += 1;
             continue;
           }
-          const extraction = extractKnowledgeBaseText(file.absPath);
+          const extraction = await extractKnowledgeBaseTextAsync(file.absPath);
           const text = cleanKnowledgeBaseText(extraction.text);
           const title = extraction.title || extractKbDocTitle(file.absPath, text);
           const chunks = chunkKnowledgeBaseText(text).map((chunk, ord) => ({
@@ -354,6 +418,9 @@ export class KnowledgeBaseService {
             error: error instanceof Error ? error.message : String(error),
           });
         }
+        // Let the event loop breathe between files (chunking/tokenizing is
+        // sync CPU work bounded per file; the await points above cover I/O).
+        await new Promise((resolve) => setImmediate(resolve));
       }
 
       for (const relpath of known.keys()) {
@@ -422,7 +489,7 @@ export class KnowledgeBaseService {
     topK: number,
     minScore: number,
   ): KnowledgeBaseCitation[] {
-    const index = openKnowledgeBaseIndex(this.kbRootDir(record.metabotId, record.id));
+    const index = this.openIndexWithSelfHeal(this.kbRootDir(record.metabotId, record.id));
     if (!index) return [];
     try {
       const candidateLimit = topK * 4;
@@ -508,7 +575,18 @@ export class KnowledgeBaseService {
     if (!title) throw new Error('Document title is required');
     if (!content.trim()) throw new Error('Document content is required');
 
-    const source: KnowledgeBaseDocumentSource = input.source ?? { type: 'manual' };
+    const rawSource: KnowledgeBaseDocumentSource = input.source ?? { type: 'manual' };
+    // Bounded provenance: these strings land verbatim in the stored JSON.
+    const source: KnowledgeBaseDocumentSource = { type: rawSource.type };
+    if (rawSource.url) source.url = asTrimmed(rawSource.url).slice(0, MAX_KB_SOURCE_URL_CHARS);
+    if (rawSource.pinId) source.pinId = asTrimmed(rawSource.pinId).slice(0, MAX_KB_SOURCE_PIN_ID_CHARS);
+    if (rawSource.protocol) source.protocol = asTrimmed(rawSource.protocol).slice(0, MAX_KB_SOURCE_TAG_CHARS);
+    if (Array.isArray(rawSource.tags)) {
+      source.tags = rawSource.tags
+        .map((tag) => asTrimmed(tag).slice(0, MAX_KB_SOURCE_TAG_CHARS))
+        .filter(Boolean)
+        .slice(0, MAX_KB_SOURCE_TAGS);
+    }
     let payload: Record<string, unknown>;
     let parsed: unknown;
     try {

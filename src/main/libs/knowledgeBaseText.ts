@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { execFile, spawnSync } from 'child_process';
 
 /**
  * Pure text processing for the built-in MetaBot knowledge base.
@@ -154,6 +154,82 @@ export function extractKnowledgeBaseText(filePath: string): KnowledgeBaseExtract
       throw new KnowledgeBaseTextError('dependency_missing', getDocxDependencyHint());
     }
     const result = runTextCommand('textutil', ['-convert', 'txt', '-stdout', filePath]);
+    if (result.status === 0 && result.stdout.trim()) {
+      return { text: result.stdout };
+    }
+    throw new KnowledgeBaseTextError(
+      'extract_failed',
+      `Failed to parse DOCX "${filePath}". ${getDocxDependencyHint()}`
+    );
+  }
+
+  throw new KnowledgeBaseTextError('unsupported_format', `Unsupported file extension: ${ext}`);
+}
+
+/**
+ * Async command runner for the learn loop: spawnSync freezes the whole main
+ * process for the duration of pdftotext/textutil (seconds on big documents,
+ * and learn also runs in the nightly window while the user may be active).
+ * Exit code maps to status; a spawn failure (ENOENT & co.) maps to null.
+ */
+function runTextCommandAsync(command: string, args: string[]): Promise<{ status: number | null; stdout: string }> {
+  return new Promise((resolve) => {
+    execFile(command, args, { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }, (error, stdout) => {
+      const out = typeof stdout === 'string' ? stdout : '';
+      if (!error) {
+        resolve({ status: 0, stdout: out });
+        return;
+      }
+      const code = (error as { code?: unknown }).code;
+      resolve({ status: typeof code === 'number' ? code : null, stdout: out });
+    });
+  });
+}
+
+/** Async sha256File: hashing a large file no longer blocks the event loop on a synchronous read. */
+export async function sha256FileAsync(filePath: string): Promise<string> {
+  return crypto.createHash('sha256').update(await fs.promises.readFile(filePath)).digest('hex');
+}
+
+/**
+ * Async extractKnowledgeBaseText — identical semantics, non-blocking I/O. The
+ * knowledge-base learn loop uses this so learning a large corpus (manual or
+ * nightly auto-learn) never freezes the app.
+ */
+export async function extractKnowledgeBaseTextAsync(filePath: string): Promise<KnowledgeBaseExtraction> {
+  const ext = path.extname(filePath).toLowerCase();
+
+  if (ext === '.md' || ext === '.txt' || ext === '.json' || ext === '.csv') {
+    const raw = await fs.promises.readFile(filePath, 'utf8');
+    if (ext === '.json') {
+      const note = tryExtractNoteJson(raw);
+      if (note) return note;
+    }
+    return { text: raw };
+  }
+
+  if (ext === '.pdf') {
+    if (!commandExists('pdftotext')) {
+      throw new KnowledgeBaseTextError(
+        'dependency_missing',
+        `Missing dependency "pdftotext" for PDF parsing. ${getPdftotextInstallHint()}`
+      );
+    }
+    const result = await runTextCommandAsync('pdftotext', ['-layout', '-enc', 'UTF-8', filePath, '-']);
+    if (result.status === 0 && result.stdout.trim()) {
+      return { text: result.stdout };
+    }
+    throw new KnowledgeBaseTextError(
+      'extract_failed',
+      `Failed to parse PDF "${filePath}". ${getPdftotextInstallHint()}`
+    );
+  }
+
+  if (ext === '.docx') {
+    if (!commandExists('textutil')) {
+      throw new KnowledgeBaseTextError('dependency_missing', getDocxDependencyHint());
+    }
+    const result = await runTextCommandAsync('textutil', ['-convert', 'txt', '-stdout', filePath]);
     if (result.status === 0 && result.stdout.trim()) {
       return { text: result.stdout };
     }
