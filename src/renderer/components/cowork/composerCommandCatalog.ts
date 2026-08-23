@@ -71,6 +71,8 @@ export function buildNewTaskComposerCommands(
           case 'clear':
             options.setPendingGoal(null);
             return i18nService.t('composerNoticeGoalCleared');
+          case 'edit-missing-text':
+            return i18nService.t('composerNoticeGoalRequiresText');
           case 'edit':
             options.setPendingGoal({ text: parsed.text, status: options.pendingGoal?.status ?? 'active' });
             return i18nService.t('composerNoticeGoalSet');
@@ -172,6 +174,8 @@ export function buildSessionComposerCommands(
             await coworkService.setSessionGoal(options.sessionId, null);
             return i18nService.t('composerNoticeGoalCleared');
           }
+          case 'edit-missing-text':
+            return i18nService.t('composerNoticeGoalRequiresText');
           case 'edit': {
             const result = await coworkService.setSessionGoal(options.sessionId, {
               text: parsed.text,

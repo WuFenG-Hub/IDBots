@@ -104,6 +104,17 @@ test('parseGoalCommandArgs follows the DSH goal grammar', () => {
   });
 });
 
+test('bare edit without an objective never becomes a create', () => {
+  assert.deepEqual(parseGoalCommandArgs('edit'), { kind: 'edit-missing-text' });
+  assert.deepEqual(parseGoalCommandArgs('  edit   '), { kind: 'edit-missing-text' });
+  // Prefixed words that merely start with "edit" stay creates.
+  assert.deepEqual(parseGoalCommandArgs('editx this'), { kind: 'create', text: 'editx this' });
+  assert.deepEqual(parseGoalCommandArgs('editorial pass'), {
+    kind: 'create',
+    text: 'editorial pass',
+  });
+});
+
 test('isValidCommandName mirrors the DSH registry rule', () => {
   assert.equal(isValidCommandName('plan'), true);
   assert.equal(isValidCommandName('accept-edits'), true);

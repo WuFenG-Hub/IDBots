@@ -461,6 +461,8 @@ const IPC_MESSAGE_CONTENT_MAX_CHARS = 120_000;
 const IPC_UPDATE_CONTENT_MAX_CHARS = 120_000;
 const IPC_STRING_MAX_CHARS = 4_000;
 const IPC_MAX_DEPTH = 5;
+/** /goal objective cap: the goal rides the system-side prompt every turn. */
+const SESSION_GOAL_MAX_CHARS = 4_000;
 const IPC_MAX_KEYS = 80;
 const IPC_MAX_ITEMS = 40;
 const MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -7798,6 +7800,17 @@ if (!gotTheLock) {
           ? resolveBotWorkspaceCwd(selectedWorkspaceRoot, sessionMetabotId)
           : resolveTaskWorkingDirectory(selectedWorkspaceRoot));
 
+      // /goal command objective from the new-task composer. Cap it here (the
+      // IPC layer is the enforcement point) instead of persisting unbounded
+      // text that rides the system-side prompt every turn.
+      const goalText = options.goal?.trim() || '';
+      if (goalText.length > SESSION_GOAL_MAX_CHARS) {
+        throw new Error(`Goal text is too long (max ${SESSION_GOAL_MAX_CHARS} characters)`);
+      }
+      const sessionGoal = goalText
+        ? { text: goalText, status: 'active' as const, updatedAt: Date.now() }
+        : null;
+
       const session = coworkStoreInstance.createSession(
         title,
         taskWorkingDirectory,
@@ -7816,9 +7829,7 @@ if (!gotTheLock) {
         options.effort === undefined ? null : (options.effort?.trim() || null),
         options.modelProvider?.trim() || null,
         options.projectId?.trim() || null,
-        options.goal?.trim()
-          ? { text: options.goal.trim(), status: 'active', updatedAt: Date.now() }
-          : null
+        sessionGoal
       );
       const runner = getCoworkRunner();
 
@@ -8042,6 +8053,11 @@ if (!gotTheLock) {
         const { sessionId, goal } = payload;
         if (!sessionId) throw new Error('Session id is required');
         if (goal && !goal.text.trim()) throw new Error('Goal text is required');
+        // Cap the objective at the IPC layer: the goal rides the system-side
+        // prompt every turn, so an unbounded text is a bloat/injection surface.
+        if (goal && goal.text.length > SESSION_GOAL_MAX_CHARS) {
+          throw new Error(`Goal text is too long (max ${SESSION_GOAL_MAX_CHARS} characters)`);
+        }
         const normalized = goal
           ? { text: goal.text.trim(), status: goal.status === 'paused' ? ('paused' as const) : ('active' as const), updatedAt: Date.now() }
           : null;

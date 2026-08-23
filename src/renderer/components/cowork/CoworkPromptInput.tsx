@@ -480,7 +480,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   const effectiveCommandHighlight = filteredCommands.length === 0
     ? -1
     : Math.min(commandPickerHighlight, filteredCommands.length - 1);
-  const claimActive = claim !== null && value.startsWith(claim.token);
+  // A live claim requires a non-streaming composer: during streaming the
+  // draft is a steer message (command adjudication is off), so the amber
+  // token must not render as if the command would execute.
+  const claimActive = claim !== null && !isStreaming && value.startsWith(claim.token);
 
   // Leaving the slash-token shape (or a dismissal) resets the picker state.
   useEffect(() => {
@@ -492,8 +495,13 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
   // Claim lifecycle: the claim survives while the draft keeps the `/name `
   // prefix; a draft that already leads with a claimable token (restored
-  // draft, manual typing) re-claims automatically.
+  // draft, manual typing) re-claims automatically. Streaming releases the
+  // claim (commands never execute mid-stream).
   useEffect(() => {
+    if (isStreaming) {
+      if (claim) setClaim(null);
+      return;
+    }
     if (claim && !value.startsWith(claim.token)) {
       setClaim(null);
       return;
@@ -507,7 +515,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
         }
       }
     }
-  }, [value, claim, commandsEnabled, commands]);
+  }, [value, claim, commandsEnabled, commands, isStreaming]);
 
   const showCommandNotice = useCallback((text: string) => {
     if (noticeTimerRef.current) {
