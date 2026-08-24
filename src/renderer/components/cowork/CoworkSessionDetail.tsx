@@ -2406,21 +2406,20 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     setSessionModelOverride(null);
   }, [currentSession?.id]);
   // Current git branch of the session's working directory, shown next to the
-  // folder chip when the directory is inside a git repository.
+  // folder chip when the directory is inside a git repository. Polled on a
+  // short interval (plus window focus / tab re-visibility) so a branch switch
+  // in the working directory — e.g. `git checkout feat/x` in a terminal — is
+  // reflected in the header without reopening the session: the chip must show
+  // the branch the agent is actually on. Same-value updates are skipped so an
+  // unchanged branch never triggers a re-render.
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   // Project display name for a project-bound session (looked up from Settings >
   // Projects so the header can show the project name instead of its source dir).
   const [boundProject, setBoundProject] = useState<{ name: string; icon?: string | null } | null>(null);
   useEffect(() => {
     let active = true;
-    setGitBranch(null);
     setBoundProject(null);
     if (!currentSession?.id) return;
-    if (currentSession.cwd) {
-      window.electron?.getGitBranch?.(currentSession.cwd)
-        .then((branch) => { if (active) setGitBranch(branch); })
-        .catch(() => { if (active) setGitBranch(null); });
-    }
     if (currentSession.projectId) {
       projectsService.loadProjects()
         .then((list) => {
@@ -2430,7 +2429,36 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         .catch(() => { if (active) setBoundProject(null); });
     }
     return () => { active = false; };
-  }, [currentSession?.id, currentSession?.cwd, currentSession?.projectId]);
+  }, [currentSession?.id, currentSession?.projectId]);
+  useEffect(() => {
+    let active = true;
+    setGitBranch(null);
+    if (!currentSession?.id || !currentSession.cwd) return;
+    const cwd = currentSession.cwd;
+    const refresh = async () => {
+      // Skip while the tab is hidden/backgrounded: the branch cannot change
+      // through the UI here, and idle git probes waste nothing useful.
+      if (!active || document.visibilityState !== 'visible') return;
+      try {
+        const branch = (await window.electron?.getGitBranch?.(cwd)) ?? null;
+        if (active) setGitBranch((prev) => (prev === branch ? prev : branch));
+      } catch {
+        if (active) setGitBranch(null);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => { void refresh(); }, 3000);
+    const onFocus = () => { void refresh(); };
+    const onVisibility = () => { if (document.visibilityState === 'visible') void refresh(); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [currentSession?.id, currentSession?.cwd]);
   const sessionModelId = sessionModelOverride
     ? sessionModelOverride.modelId
     : (currentSession?.model ?? null);
