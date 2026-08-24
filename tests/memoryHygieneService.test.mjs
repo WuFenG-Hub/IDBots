@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
 
-import { createCoworkStore, createSqliteStore, getColumns } from './memoryTestUtils.mjs';
+import { createCoworkStore, createSqliteStore, getColumns, getRow } from './memoryTestUtils.mjs';
 
 const require = Module.createRequire(import.meta.url);
 
@@ -128,7 +128,7 @@ test('scheduled tick: runs once per night after 04:00 and emits status', async (
     assert.ok(first, 'run is persisted');
     assert.equal(first.trigger, 'scheduled');
     assert.equal(first.dateKey, '2026-08-25');
-    assert.deepEqual(first.counts, {});
+    assert.equal(first.counts.memoriesArchived, 0, 'dream-memory step runs with the always-present coworkStore');
     assert.deepEqual(first.errors, []);
     assert.equal(events.length, 1);
     assert.equal(events[0].channel, 'memoryHygiene:statusChanged');
@@ -319,6 +319,144 @@ test('impression compaction step is wired into the nightly run', async () => {
     });
     assert.equal(active.length, 1);
     assert.equal(active[0].interpretationText, 'interp c');
+  } finally {
+    cleanup();
+  }
+});
+
+const MEM_OLD_TS = 1_700_000_000_000;
+
+test('dream-memory decay archives only stale dream rows, reversibly', async () => {
+  const NOW = new Date(2026, 7, 25, 10, 0).getTime();
+  const { cleanup, coworkStore, db } = await setup(new Date(2026, 7, 25, 10, 0));
+  try {
+    const create = (overrides = {}) => coworkStore.createUserMemory({
+      metabotId: 9,
+      text: `memory ${Math.random().toString(36).slice(2, 8)}`,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'profile_fact',
+      origin: 'dream',
+      isExplicit: true,
+      forceNew: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-01-01' },
+      ...overrides,
+    });
+
+    const dreamOld = create();
+    create(); // dream recent (updated_at = real now)
+    create({ origin: 'conversation' }); // conversation-origin: never auto-archived
+    const identity = create({ usageClass: 'self_identity' });
+    db.run(
+      'UPDATE user_memories SET updated_at = ?, last_used_at = ? WHERE id IN (?, ?, ?)',
+      [MEM_OLD_TS, MEM_OLD_TS, dreamOld.id, identity.id, identity.id]
+    );
+
+    const archived = coworkStore.archiveDecayedDreamMemories({
+      cutoffMs: NOW - 30 * 86_400_000,
+      archivedAt: NOW,
+    });
+    assert.equal(archived, 1, 'only the stale dream row archives');
+
+    const visible = coworkStore.listUserMemories({
+      metabotId: 9,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      status: 'all',
+      limit: 50,
+    });
+    assert.equal(visible.some((memory) => memory.id === dreamOld.id), false, 'archived row leaves default listings');
+    assert.equal(visible.some((memory) => memory.id === identity.id), true, 'self_identity stays');
+
+    const withArchived = coworkStore.listUserMemories({
+      metabotId: 9,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      status: 'all',
+      limit: 50,
+      includeArchived: true,
+    });
+    const restoredRow = withArchived.find((memory) => memory.id === dreamOld.id);
+    assert.equal(restoredRow.archivedAt, NOW);
+
+    assert.equal(coworkStore.unarchiveUserMemories({ ids: [dreamOld.id] }), 1);
+    assert.equal(
+      coworkStore.listUserMemories({
+        metabotId: 9,
+        scopeKind: 'owner',
+        scopeKey: 'owner:self',
+        status: 'all',
+        limit: 50,
+      }).some((memory) => memory.id === dreamOld.id),
+      true,
+      'unarchive restores visibility'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('tombstone purge physically removes only aged deleted rows and their sources', async () => {
+  const NOW = new Date(2026, 7, 25, 10, 0).getTime();
+  const { cleanup, coworkStore, db } = await setup(new Date(2026, 7, 25, 10, 0));
+  try {
+    const aged = coworkStore.createUserMemory({
+      metabotId: 9,
+      text: 'aged tombstone',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      origin: 'conversation',
+      forceNew: true,
+    });
+    const fresh = coworkStore.createUserMemory({
+      metabotId: 9,
+      text: 'fresh tombstone',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      origin: 'conversation',
+      forceNew: true,
+    });
+    assert.equal(coworkStore.deleteUserMemory(aged.id, 9), true);
+    assert.equal(coworkStore.deleteUserMemory(fresh.id, 9), true);
+    db.run('UPDATE user_memories SET updated_at = ? WHERE id = ?', [MEM_OLD_TS, aged.id]);
+
+    const purged = coworkStore.purgeDeletedMemoryTombstones({
+      cutoffMs: NOW - 30 * 86_400_000,
+    });
+    assert.equal(purged, 1);
+    assert.equal(getRow(db, 'SELECT id FROM user_memories WHERE id = ?', [aged.id]), null, 'aged tombstone physically gone');
+    assert.ok(getRow(db, 'SELECT id FROM user_memory_sources WHERE memory_id = ?', [aged.id]) === null, 'its sources are gone');
+    assert.ok(getRow(db, 'SELECT id FROM user_memories WHERE id = ?', [fresh.id]), 'fresh tombstone survives the grace window');
+  } finally {
+    cleanup();
+  }
+});
+
+test('dream-memory hygiene steps are wired into the nightly run', async () => {
+  const NOW = new Date(2026, 7, 25, 10, 0).getTime();
+  const { cleanup, coworkStore, db } = await setup(new Date(2026, 7, 25, 10, 0));
+  try {
+    const stale = coworkStore.createUserMemory({
+      metabotId: 9,
+      text: 'stale dream memory',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'work_review',
+      origin: 'dream',
+      isExplicit: true,
+      forceNew: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-01-02' },
+    });
+    db.run('UPDATE user_memories SET updated_at = ?, last_used_at = ? WHERE id = ?', [MEM_OLD_TS, MEM_OLD_TS, stale.id]);
+
+    const stats = await new MemoryHygieneService({
+      coworkStore,
+      metabotStore: { listMetabots: () => [{ id: 9, globalmetaid: 'metaid://stub-owner' }] },
+      now: () => new Date(2026, 7, 25, 10, 0),
+    }).runNow();
+    assert.equal(stats.counts.memoriesArchived, 1);
+    assert.equal(stats.counts.tombstonesPurged, 0);
+    void NOW;
   } finally {
     cleanup();
   }

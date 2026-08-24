@@ -67,6 +67,8 @@ export interface MemoryListUserMemoriesOptions extends MemoryScopeSelectorInput 
   limit?: number;
   offset?: number;
   includeDeleted?: boolean;
+  /** Include hygiene-archived rows (admin/stats surfaces); default hides them. */
+  includeArchived?: boolean;
   touchLastUsed?: boolean;
 }
 

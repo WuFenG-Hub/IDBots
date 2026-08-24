@@ -44,6 +44,8 @@ export interface MemoryHygieneRunContext {
   nowMs: number;
   /** Owner GlobalMetaIDs of bots whose per-bot policy opted out of hygiene. */
   disabledOwners: ReadonlySet<string>;
+  /** MetaBot ids of the same opt-out set (stores keyed by metabot_id). */
+  disabledMetabotIds: ReadonlySet<number>;
   coworkStore: CoworkStore;
   dreamStore?: DreamStore;
   experienceStore?: MetaIDExperienceStore;
@@ -113,6 +115,25 @@ export class MemoryHygieneService {
           excludeOwners: context.disabledOwners,
         });
         return { episodesArchived: archived };
+      },
+    });
+    // Dream memories: decay-archive entries untouched past the horizon
+    // (self_identity and conversation-origin rows never auto-archive), then
+    // physically purge tombstones that outlived the grace period — the one
+    // low-risk delete in the memory layer.
+    this.steps.push({
+      name: 'dream-memories',
+      run: (context) => {
+        const archived = context.coworkStore.archiveDecayedDreamMemories({
+          cutoffMs: context.nowMs - context.config.memoryDecayDays * 86_400_000,
+          archivedAt: context.nowMs,
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        const purged = context.coworkStore.purgeDeletedMemoryTombstones({
+          cutoffMs: context.nowMs - context.config.tombstonePurgeDays * 86_400_000,
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        return { memoriesArchived: archived, tombstonesPurged: purged };
       },
     });
   }
@@ -205,6 +226,7 @@ export class MemoryHygieneService {
         config,
         nowMs: stats.ranAt,
         disabledOwners: this.resolveDisabledOwners(),
+        disabledMetabotIds: this.resolveDisabledMetabotIds(),
         coworkStore: this.deps.coworkStore,
         dreamStore: this.deps.dreamStore,
         experienceStore: this.deps.metaidExperienceStore,
@@ -247,6 +269,24 @@ export class MemoryHygieneService {
       );
     }
     return owners;
+  }
+
+  /** The same opt-out set expressed as metabot ids for metabot-keyed stores. */
+  protected resolveDisabledMetabotIds(): Set<number> {
+    const ids = new Set<number>();
+    try {
+      for (const bot of this.deps.metabotStore.listMetabots()) {
+        const policy = this.deps.coworkStore.getEffectiveMemoryPolicyForMetabot(bot.id);
+        if (!policy.hygieneEnabled) {
+          ids.add(bot.id);
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[MemoryHygiene] Failed to resolve per-bot hygiene policy ids: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    return ids;
   }
 }
 

@@ -109,7 +109,7 @@ const METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebOrderSimplem
 const METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebPrivateSimplemsgMetadata.v1.completed';
 const MEMORY_ROW_SELECT_COLUMNS = `
   id, text, fingerprint, confidence, is_explicit, status,
-  created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin
+  created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin, archived_at
 `;
 const PRIVATE_CHAT_SIMPLEMSG_BACKFILL_TIME_WINDOW_MS = 10 * 60 * 1000;
 
@@ -768,6 +768,8 @@ export interface CoworkUserMemory {
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+  /** Hygiene decay mark: archived dream memories leave injection but stay restorable. */
+  archivedAt?: number | null;
 }
 
 export interface CoworkUserMemorySource {
@@ -1002,6 +1004,7 @@ interface CoworkUserMemoryRow {
   usage_class?: string | null;
   visibility?: string | null;
   origin?: string | null;
+  archived_at?: number | string | null;
 }
 
 interface CoworkUserMemorySourceRow {
@@ -1294,6 +1297,10 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!memoryColumns.includes('origin')) {
         this.db.run("ALTER TABLE user_memories ADD COLUMN origin TEXT NOT NULL DEFAULT 'conversation';");
+        changed = true;
+      }
+      if (!memoryColumns.includes('archived_at')) {
+        this.db.run('ALTER TABLE user_memories ADD COLUMN archived_at INTEGER;');
         changed = true;
       }
       this.db.run(`
@@ -5950,6 +5957,7 @@ export class CoworkStore implements MemoryBackend {
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
       lastUsedAt: row.last_used_at === null ? null : Number(row.last_used_at),
+      archivedAt: row.archived_at == null ? null : Number(row.archived_at),
     };
   }
 
@@ -6135,6 +6143,11 @@ export class CoworkStore implements MemoryBackend {
     if (!includeDeleted && status === 'all') {
       clauses.push(`status != 'deleted'`);
     }
+    // Hygiene decay: archived dream memories leave injection and default
+    // listings; admin/UI surfaces opt back in with includeArchived.
+    if (!options.includeArchived) {
+      clauses.push('archived_at IS NULL');
+    }
     if (status !== 'all') {
       clauses.push('status = ?');
       params.push(status);
@@ -6300,6 +6313,120 @@ export class CoworkStore implements MemoryBackend {
     }
     this.saveDb();
     return memoryRowsModified > 0;
+  }
+
+  /**
+   * Hygiene decay stroke: dream-origin memories (never self_identity, never
+   * conversation-origin rows that may carry the user's explicit "remember
+   * this") untouched for longer than the cutoff get a reversible archived_at
+   * mark so they leave injection and default listings. Bounded per pass.
+   */
+  archiveDecayedDreamMemories(input: {
+    cutoffMs: number;
+    archivedAt: number;
+    excludeMetabotIds?: ReadonlySet<number>;
+    limit?: number;
+  }): number {
+    const cutoff = Math.floor(input.cutoffMs);
+    const limit = Math.min(20_000, Math.max(1, Math.floor(input.limit ?? 5_000)));
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const metabotExclusion = excluded.length > 0
+      ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : '';
+    const ids = this.getAll<{ id: string }>(
+      `SELECT id FROM user_memories
+       WHERE archived_at IS NULL
+         AND status = 'created'
+         AND origin = 'dream'
+         AND usage_class != 'self_identity'
+         AND COALESCE(last_used_at, updated_at) < ?${metabotExclusion}
+       ORDER BY COALESCE(last_used_at, updated_at) ASC
+       LIMIT ?`,
+      [cutoff, ...excluded, limit],
+    ).map((row) => row.id);
+    if (ids.length === 0) return 0;
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      this.db.run(
+        `UPDATE user_memories
+         SET archived_at = ?
+         WHERE archived_at IS NULL AND id IN (${chunk.map(() => '?').join(', ')})`,
+        [Math.floor(input.archivedAt), ...chunk],
+      );
+    }
+    this.saveDb();
+    return ids.length;
+  }
+
+  /** Reverse the hygiene decay mark on specific memories. */
+  unarchiveUserMemories(input: { ids: string[] }): number {
+    const ids = input.ids.map((id) => id.trim()).filter(Boolean);
+    if (ids.length === 0) return 0;
+    let restored = 0;
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      this.db.run(
+        `UPDATE user_memories
+         SET archived_at = NULL
+         WHERE archived_at IS NOT NULL AND id IN (${chunk.map(() => '?').join(', ')})`,
+        chunk,
+      );
+      restored += chunk.length;
+    }
+    this.saveDb();
+    return restored;
+  }
+
+  /**
+   * The one low-risk physical delete in the memory layer: tombstones
+   * (status='deleted') older than the grace period are removed together with
+   * their source rows. They were already deleted content; the grace window
+   * exists only so recent deletions stay undoable.
+   */
+  purgeDeletedMemoryTombstones(input: {
+    cutoffMs: number;
+    excludeMetabotIds?: ReadonlySet<number>;
+    limit?: number;
+  }): number {
+    const cutoff = Math.floor(input.cutoffMs);
+    const limit = Math.min(20_000, Math.max(1, Math.floor(input.limit ?? 5_000)));
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const metabotExclusion = excluded.length > 0
+      ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : '';
+    const ids = this.getAll<{ id: string }>(
+      `SELECT id FROM user_memories
+       WHERE status = 'deleted' AND updated_at < ?${metabotExclusion}
+       ORDER BY updated_at ASC
+       LIMIT ?`,
+      [cutoff, ...excluded, limit],
+    ).map((row) => row.id);
+    if (ids.length === 0) return 0;
+    this.db.run('BEGIN IMMEDIATE');
+    try {
+      for (let offset = 0; offset < ids.length; offset += 500) {
+        const chunk = ids.slice(offset, offset + 500);
+        this.db.run(
+          `DELETE FROM user_memory_sources WHERE memory_id IN (${chunk.map(() => '?').join(', ')})`,
+          chunk,
+        );
+        this.db.run(
+          `DELETE FROM user_memories
+           WHERE status = 'deleted' AND id IN (${chunk.map(() => '?').join(', ')})`,
+          chunk,
+        );
+      }
+      this.db.run('COMMIT');
+    } catch (error) {
+      try {
+        this.db.run('ROLLBACK');
+      } catch {
+        // Preserve the original write error.
+      }
+      throw error;
+    }
+    this.saveDb();
+    return ids.length;
   }
 
   /**
