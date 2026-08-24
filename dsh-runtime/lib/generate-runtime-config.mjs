@@ -31,6 +31,10 @@
 //     model: string,                     //   model for the auxiliary search call
 //   },                                   //   mounted once the host has seen a DeepSeek provider
 //   workspace?: { cwd: string },       // mounts DSH-native bash/fs tools at cwd
+//   workspaceInstructions?: {          // AGENTS.md/CLAUDE.md discovery controls
+//     maxBytes?: number,               //   rendered baseline byte budget (default 65536)
+//     dshHome?: string,                //   user-global AGENTS.md home (default $DSH_HOME/~/.dsh)
+//   },
 //   extraEntries?: [...],              // dev/test fixtures appended verbatim
 // }
 //
@@ -313,6 +317,24 @@ export function generateRuntimeConfig(input) {
       },
       { id: 'fs-local', name: '@deepseek-ai/dsh-fs-local', config: { cwd: input.workspace.cwd } },
       { id: 'fs-observation-policy', name: '@deepseek-ai/dsh-fs-observation-policy' },
+      // Workspace instructions: discovers AGENTS.md/CLAUDE.md from the session
+      // cwd (project root markers → root-to-cwd chain) and injects them as a
+      // durable user-role baseline before the first model request — the same
+      // mechanism the DeepSeek Harness web UI uses. Also reconciles on fs tool
+      // touches. Only mounted with the fs provider it reads through; a
+      // providerless composition simply never injects.
+      {
+        id: 'agent-instructions',
+        name: '@deepseek-ai/dsh-agent-instructions',
+        config: {
+          maxBytes: Number.isFinite(input.workspaceInstructions?.maxBytes) && input.workspaceInstructions.maxBytes > 0
+            ? input.workspaceInstructions.maxBytes
+            : 65536,
+          ...(typeof input.workspaceInstructions?.dshHome === 'string' && input.workspaceInstructions.dshHome.length > 0
+            ? { dshHome: input.workspaceInstructions.dshHome }
+            : {}),
+        },
+      },
       { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
       { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' },
       { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },

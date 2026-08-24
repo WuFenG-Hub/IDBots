@@ -55,10 +55,19 @@ export function startMockServer(port = 48787) {
         }))
         return
       }
-      // Skip plugin runtime-context snapshots (they can land before OR after
-      // the real prompt depending on the create path) — markers key on the
-      // actual human input only.
-      const lastUser = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user' && !String(m.content).startsWith('Current runtime context.'))
+      // Skip runtime-injected user-role messages (they can land before OR
+      // after the real prompt depending on the create path) — markers key on
+      // the actual human input only. Injected messages share stable prefixes:
+      // the dsh-system-prompt runtime-context snapshot and the
+      // dsh-agent-instructions workspace baseline/replacement frames.
+      const INJECTED_USER_PREFIXES = [
+        'Current runtime context.',
+        '<system-reminder>\nThe following workspace instructions',
+        '<system-reminder>\nThis complete workspace instruction baseline',
+        '<system-reminder>\nWorkspace instructions were omitted',
+      ]
+      const lastUser = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user'
+        && !INJECTED_USER_PREFIXES.some((prefix) => String(m.content).startsWith(prefix)))
       const lastUserText = typeof lastUser?.content === 'string' ? lastUser.content : ''
       // A tool result rides as role 'tool'; only the FIRST request of a
       // CALL_BIG_TOOL turn asks for the tool — afterwards answer in plain text
