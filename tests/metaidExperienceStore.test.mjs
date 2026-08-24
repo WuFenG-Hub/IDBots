@@ -261,3 +261,77 @@ test('listEvidence can bound a long-lived episode to a day window', async () => 
   });
   assert.deepEqual(day.map((row) => row.sourceKey), ['day-2', 'day-1']);
 });
+
+const ARCHIVE_OLD_TS = 1_700_000_000_000;
+const ARCHIVE_RECENT_TS = 1_800_000_000_000;
+
+const seedEpisode = (store, { owner = OWNER, sourceKey, status = 'completed', startedAt }) => store.createEpisode({
+  ownerGlobalMetaID: owner,
+  episodeType: 'direct_interaction',
+  sourceChannel: 'test',
+  sourceKey,
+  status,
+  startedAt,
+}).episode;
+
+test('archiveEpisodes soft-archives only terminal old episodes and stays reversible', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    assert.ok(getColumns(db, 'metaid_experience_episodes').includes('archived_at'));
+
+    const store = new MetaIDExperienceStore(db, () => {}, () => ARCHIVE_RECENT_TS);
+    const oldDone = seedEpisode(store, { sourceKey: 'old-done', startedAt: ARCHIVE_OLD_TS });
+    const oldOpen = seedEpisode(store, { sourceKey: 'old-open', status: 'open', startedAt: ARCHIVE_OLD_TS });
+    const recentDone = seedEpisode(store, { sourceKey: 'recent-done', startedAt: ARCHIVE_RECENT_TS });
+    const otherOwnerOld = seedEpisode(store, { owner: SUBJECT, sourceKey: 'other-owner', startedAt: ARCHIVE_OLD_TS });
+
+    const archived = store.archiveEpisodes({
+      cutoffMs: ARCHIVE_RECENT_TS - 30 * 86_400_000,
+      archivedAt: ARCHIVE_RECENT_TS,
+      excludeOwners: new Set([SUBJECT]),
+    });
+    assert.equal(archived, 1, 'only terminal + old + non-excluded rows archive');
+
+    assert.equal(store.getEpisode(oldDone.id).archivedAt, ARCHIVE_RECENT_TS);
+    assert.equal(store.getEpisode(oldOpen.id).archivedAt, null, 'open episodes never archive');
+    assert.equal(store.getEpisode(recentDone.id).archivedAt, null, 'recent episodes stay hot');
+    assert.equal(store.getEpisode(otherOwnerOld.id).archivedAt, null, 'excluded owner untouched');
+
+    assert.equal(
+      store.archiveEpisodes({ cutoffMs: ARCHIVE_RECENT_TS, archivedAt: ARCHIVE_RECENT_TS }),
+      1, // without excludeOwners the other owner's old terminal row archives; the rest are open/recent/idempotent-skipped
+      'second pass picks up nothing new when policy unchanged'
+    );
+
+    const restored = store.unarchiveEpisodes({ episodeIds: [oldDone.id] });
+    assert.equal(restored, 1);
+    assert.equal(store.getEpisode(oldDone.id).archivedAt, null);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('listEpisodes hides archived episodes by default and includes them on demand', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new MetaIDExperienceStore(db, () => {}, () => ARCHIVE_RECENT_TS);
+    const oldDone = seedEpisode(store, { sourceKey: 'old-done', startedAt: ARCHIVE_OLD_TS });
+    seedEpisode(store, { sourceKey: 'recent-done', startedAt: ARCHIVE_RECENT_TS });
+    store.archiveEpisodes({
+      cutoffMs: ARCHIVE_RECENT_TS - 30 * 86_400_000,
+      archivedAt: ARCHIVE_RECENT_TS,
+    });
+
+    const hot = store.listEpisodes({ ownerGlobalMetaID: OWNER, limit: 10 });
+    assert.deepEqual(hot.map((episode) => episode.sourceKey), ['recent-done']);
+
+    const all = store.listEpisodes({ ownerGlobalMetaID: OWNER, limit: 10, includeArchived: true });
+    assert.equal(all.length, 2);
+    const archivedRow = all.find((episode) => episode.id === oldDone.id);
+    assert.equal(archivedRow.archivedAt, ARCHIVE_RECENT_TS);
+  } finally {
+    harness.cleanup();
+  }
+});

@@ -1487,7 +1487,8 @@ export interface CoworkEpisodeTimeline {
     fromTime?: number;
     toTime?: number;
     limit?: number;
-  }): Array<{ startedAt: number; sourceChannel: string; episodeType: string; sessionId?: string | null }>;
+    includeArchived?: boolean;
+  }): Array<{ startedAt: number; sourceChannel: string; episodeType: string; sessionId?: string | null; archived?: boolean }>;
 }
 
 export interface CoworkRunnerOptions {
@@ -3104,6 +3105,9 @@ export class CoworkRunner extends EventEmitter {
         fromTime,
         toTime: safeToTime,
         limit: 50,
+        // Explicit cold query: soft-archived episodes stay retrievable here
+        // (they carry the "(archived)" marker) instead of vanishing.
+        includeArchived: true,
       });
       return formatExperienceTimelineFallback({ dateFrom, dateTo, episodes });
     } catch {

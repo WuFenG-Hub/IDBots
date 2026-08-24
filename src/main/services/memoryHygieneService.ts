@@ -100,6 +100,21 @@ export class MemoryHygieneService {
         };
       },
     });
+    // Episodes: soft-archive terminal episodes past the retention horizon so
+    // dream candidates / contact views / cognition context stop scanning them;
+    // explicit experience_recall keeps them visible with an (archived) mark.
+    this.steps.push({
+      name: 'episodes',
+      run: (context) => {
+        if (!context.experienceStore) return {};
+        const archived = context.experienceStore.archiveEpisodes({
+          cutoffMs: context.nowMs - context.config.episodeArchiveDays * 86_400_000,
+          archivedAt: context.nowMs,
+          excludeOwners: context.disabledOwners,
+        });
+        return { episodesArchived: archived };
+      },
+    });
   }
 
   start(): void {

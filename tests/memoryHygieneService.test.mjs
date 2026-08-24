@@ -216,6 +216,40 @@ const loadExperienceStoreModule = async () => {
   }
 };
 
+test('episode archival step is wired into the nightly run', async () => {
+  const { MetaIDExperienceStore } = await loadExperienceStoreModule();
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  const experience = new MetaIDExperienceStore(db, () => {}, () => 1_700_000_000_000);
+  experience.createEpisode({
+    ownerGlobalMetaID: 'idq1observer',
+    episodeType: 'direct_interaction',
+    sourceChannel: 'test',
+    sourceKey: 'hygiene-episodes:old',
+    status: 'completed',
+    startedAt: 1_700_000_000_000,
+  });
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, globalmetaid: 'metaid://stub-owner' }] },
+    metaidExperienceStore: experience,
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.episodesArchived, 1);
+    assert.equal(experience.listEpisodes({ ownerGlobalMetaID: 'idq1observer' }).length, 0, 'hot path hides the archived episode');
+    assert.equal(
+      experience.listEpisodes({ ownerGlobalMetaID: 'idq1observer', includeArchived: true }).length,
+      1,
+      'explicit recall still sees it',
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('impression compaction step is wired into the nightly run', async () => {
   const { MetaIDImpressionStore } = await loadImpressionStoreModule();
   const { MetaIDExperienceStore } = await loadExperienceStoreModule();

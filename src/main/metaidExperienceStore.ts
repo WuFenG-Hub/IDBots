@@ -31,6 +31,8 @@ export interface MetaIDExperienceEpisode {
   status: MetaIDExperienceEpisodeStatus;
   startedAt: number;
   endedAt: number | null;
+  /** Hygiene retention mark: soft-archived episodes leave hot paths but stay restorable. */
+  archivedAt: number | null;
   metadata: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
@@ -107,6 +109,13 @@ export interface ListMetaIDExperienceEpisodesOptions {
   fromTime?: number;
   toTime?: number;
   limit?: number;
+  /**
+   * Include soft-archived episodes. Hot paths (dream candidates, contact
+   * view, cognition context) exclude them by default; the experience_recall
+   * raw-episode fallback opts in because an explicit cold query is exactly
+   * the "fetch the compressed pointer back" channel.
+   */
+  includeArchived?: boolean;
 }
 
 export interface ListMetaIDExperienceEvidenceOptions {
@@ -128,6 +137,7 @@ interface EpisodeRow {
   status: string;
   started_at: number | string;
   ended_at: number | string | null;
+  archived_at?: number | string | null;
   metadata_json: string | null;
   created_at: number | string;
   updated_at: number | string;
@@ -179,6 +189,7 @@ export function ensureMetaIDExperienceSchema(db: Database): void {
       status TEXT NOT NULL DEFAULT 'open' CHECK (status IN (${EPISODE_STATUSES_SQL})),
       started_at INTEGER NOT NULL,
       ended_at INTEGER,
+      archived_at INTEGER,
       metadata_json TEXT NOT NULL DEFAULT '{}',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -268,6 +279,20 @@ export function ensureMetaIDExperienceSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_metaid_experience_evidence_occurred
       ON metaid_experience_evidence(episode_id, occurred_at DESC);
   `);
+  try {
+    // Hygiene retention mark, added post-release: existing databases get the
+    // nullable column via idempotent ALTER (no CHECK constraints involved).
+    const episodeCols = db.exec('PRAGMA table_info(metaid_experience_episodes)');
+    const episodeColumns = (episodeCols[0]?.values ?? []).map((row) => String(row[1]));
+    if (!episodeColumns.includes('archived_at')) {
+      db.run('ALTER TABLE metaid_experience_episodes ADD COLUMN archived_at INTEGER');
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/duplicate column name/i.test(message)) {
+      console.warn('[MetaIDExperience] archived_at column migrate failed:', message);
+    }
+  }
 }
 
 const asText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
@@ -333,6 +358,7 @@ function rowToEpisode(row: EpisodeRow): MetaIDExperienceEpisode {
     status: normalizeEpisodeStatus(row.status),
     startedAt: asTimestamp(row.started_at, 0),
     endedAt: row.ended_at == null ? null : asTimestamp(row.ended_at, 0),
+    archivedAt: row.archived_at == null ? null : asTimestamp(row.archived_at, 0),
     metadata: parseMetadata(row.metadata_json),
     createdAt: asTimestamp(row.created_at, 0),
     updatedAt: asTimestamp(row.updated_at, 0),
@@ -661,6 +687,9 @@ export class MetaIDExperienceStore {
     if (options.subjectGlobalMetaID !== undefined && !subjectGlobalMetaID) return [];
     const clauses = ['e.owner_globalmetaid = ?'];
     const params: unknown[] = [ownerGlobalMetaID];
+    if (!options.includeArchived) {
+      clauses.push('e.archived_at IS NULL');
+    }
     if (subjectGlobalMetaID) {
       clauses.push(`EXISTS (
         SELECT 1 FROM metaid_experience_participants p
@@ -704,5 +733,67 @@ export class MetaIDExperienceStore {
        LIMIT ?`,
       params,
     ).map(rowToEpisode);
+  }
+
+  /**
+   * Hygiene compression stroke for episodes: terminal episodes older than
+   * `cutoffMs` (by ended_at, falling back to started_at/created_at) get the
+   * soft-archive mark so hot paths stop scanning them. Nothing is deleted and
+   * the mark is reversible (unarchiveEpisodes); the dream's raw input window
+   * only looks back 7 days, so anything past the cutoff will never be
+   * re-dreamed from raw transcripts anyway. Bounded by `limit` rows per pass.
+   */
+  archiveEpisodes(input: {
+    cutoffMs: number;
+    archivedAt: number;
+    excludeOwners?: ReadonlySet<string>;
+    limit?: number;
+  }): number {
+    const cutoff = Math.floor(input.cutoffMs);
+    const limit = Math.min(20_000, Math.max(1, Math.floor(input.limit ?? 5_000)));
+    const excludedOwners = input.excludeOwners ? [...input.excludeOwners] : [];
+    const ownerExclusion = excludedOwners.length > 0
+      ? ` AND e.owner_globalmetaid NOT IN (${excludedOwners.map(() => '?').join(', ')})`
+      : '';
+    const ids = this.getAll<{ id: string }>(
+      `SELECT e.id FROM metaid_experience_episodes e
+       WHERE e.archived_at IS NULL
+         AND e.status IN ('completed', 'failed', 'abandoned')
+         AND COALESCE(e.ended_at, e.started_at, e.created_at) < ?${ownerExclusion}
+       ORDER BY COALESCE(e.ended_at, e.started_at, e.created_at) ASC
+       LIMIT ?`,
+      [cutoff, ...excludedOwners, limit],
+    ).map((row) => row.id);
+    if (ids.length === 0) return 0;
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      this.db.run(
+        `UPDATE metaid_experience_episodes
+         SET archived_at = ?
+         WHERE archived_at IS NULL AND id IN (${chunk.map(() => '?').join(', ')})`,
+        [Math.floor(input.archivedAt), ...chunk],
+      );
+    }
+    this.saveDb();
+    return ids.length;
+  }
+
+  /** Reverse the soft-archive mark; archived data becomes hot again. */
+  unarchiveEpisodes(input: { episodeIds: string[] }): number {
+    const ids = input.episodeIds.map((id) => asText(id)).filter(Boolean);
+    if (ids.length === 0) return 0;
+    let restored = 0;
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      this.db.run(
+        `UPDATE metaid_experience_episodes
+         SET archived_at = NULL
+         WHERE archived_at IS NOT NULL AND id IN (${chunk.map(() => '?').join(', ')})`,
+        chunk,
+      );
+      restored += chunk.length;
+    }
+    this.saveDb();
+    return restored;
   }
 }
