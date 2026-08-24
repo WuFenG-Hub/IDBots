@@ -197,8 +197,10 @@ export interface GroupTaskDriverInfo {
 /** P1-4/R6: host-computed member work state. 'timeout' (R6) = a self-reported
  * working/assigned member whose [WORKING] signal has gone stale — the
  * authoritative "went silent" read, distinct from 'idle' (spoke, not currently
- * working). */
-export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'idle' | 'unknown';
+ * working). 'done' (terminal tasks only) = the member's deliverable was
+ * delivered/accepted after the task closed; liveness-derived values no longer
+ * apply to a finished member. */
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'idle' | 'unknown' | 'done';
 
 /** Minutes a [WORKING] tag stays "working" after its last occurrence. */
 export const GROUP_TASK_WORKING_WINDOW_MINUTES = 20;
@@ -1182,6 +1184,20 @@ export async function getGroupTask(
   // reused for the detail payload and the open-checkpoint decision summary.
   const checkpoints = store.listCheckpoints(id);
   const avatarById = buildMetabotAvatarMap(members.map((member) => member.metabotId));
+  const deliverables = store.listDeliverables(id);
+  // Terminal display normalization (0825 pipeline feedback): once a task is
+  // accepted (done), members whose deliverables were delivered/accepted read
+  // as 'done' — not the stale 'unreachable'/'standby' the state machine last
+  // stamped, and not a liveness-derived workStatus ('timeout'/'unknown').
+  // Projection-only, so historical closed tasks (#33/#34) repair themselves
+  // without a data migration; closeGroupTask additionally persists 'done'.
+  const taskDone = task.status === 'done';
+  const deliveredAuthorIds = new Set(
+    deliverables
+      .filter((row) => row.status === 'delivered' || row.status === 'accepted')
+      .map((row) => (row.authorGlobalmetaid ?? '').trim().toLowerCase())
+      .filter(Boolean),
+  );
   const membersWithStatus: GroupTaskMemberSummary[] = members.map((member) => {
     const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
     const lastSpeakAt = gmid ? (speakMap.get(gmid) ?? null) : null;
@@ -1191,19 +1207,23 @@ export async function getGroupTask(
         ? bridge.getWorkerAttemptStatus(id, member.metabotId)
         : { status: null, atMs: null };
     const invite = inviteByGmid.get(gmid);
+    const memberDelivered = taskDone && gmid !== '' && deliveredAuthorIds.has(gmid);
     return {
       ...member,
       avatar: member.metabotId != null ? (avatarById.get(member.metabotId) ?? null) : null,
       lastSpeakAt,
       lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
-      workStatus: computeGroupTaskMemberWorkStatus({
-        metabotId: member.metabotId,
-        lastSpeakAt,
-        lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
-        attemptStatus: attempt.status,
-        attemptAtMs: attempt.atMs,
-        memberStatus: member.status,
-      }),
+      status: memberDelivered && member.status !== 'done' ? 'done' : member.status,
+      workStatus: memberDelivered
+        ? 'done'
+        : computeGroupTaskMemberWorkStatus({
+            metabotId: member.metabotId,
+            lastSpeakAt,
+            lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
+            attemptStatus: attempt.status,
+            attemptAtMs: attempt.atMs,
+            memberStatus: member.status,
+          }),
       inviteStatus: deriveGroupTaskMemberInviteStatus({
         metabotId: member.metabotId,
         memberJoinedPinId: member.joinedPinId,
@@ -1215,7 +1235,7 @@ export async function getGroupTask(
   return {
     ...task,
     members: membersWithStatus,
-    deliverables: store.listDeliverables(id),
+    deliverables,
     transitions: store.listTaskTransitions(id),
     integrityEvents: store.listIntegrityEvents(id),
     messages: task.groupId
@@ -2015,6 +2035,44 @@ export function notifySourceSessionReview(
  * React state after Accept & Close; a bare GroupTask row lacks `members` and
  * whitescreens the renderer on `detail.members.find(...)`.
  */
+/**
+ * 0825 pipeline feedback: settle every member whose deliverable was
+ * delivered/accepted to the 'done' member state when the task closes as done.
+ * Without this, a watchdog 'unreachable' or a 'standby' stamped during the
+ * final turn survives the acceptance and misleads the owner's review. Best
+ * effort per member: never throws into the close flow. Rejected deliverables
+ * do NOT settle the author.
+ */
+function normalizeDeliveredMemberStatuses(taskId: number): void {
+  try {
+    const store = getGroupTaskStore();
+    const deliveredIds = new Set(
+      store.listDeliverables(taskId)
+        .filter((row) => row.status === 'delivered' || row.status === 'accepted')
+        .map((row) => (row.authorGlobalmetaid ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    );
+    if (deliveredIds.size === 0) return;
+    for (const member of store.listMembers(taskId)) {
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      if (!gmid || !deliveredIds.has(gmid) || member.status === 'done') continue;
+      try {
+        store.setMemberStatus(taskId, member.metabotId, 'done', member.globalmetaid);
+      } catch (error) {
+        console.warn(
+          `[GroupTask] Failed to settle delivered member ${member.metabotId ?? gmid} ` +
+          `to done on close of task ${taskId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Failed to settle delivered members on close of task ${taskId}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 export async function closeGroupTask(
   taskId: number,
   opts: { status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string; actor?: GroupTaskStatusEventActor },
@@ -2043,6 +2101,12 @@ export async function closeGroupTask(
       `[GroupTask] Failed to cancel open checkpoints on close of task ${taskId}: ` +
       `${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+  if (closed.status === 'done') {
+    // 0825 pipeline feedback: settle delivered members to the 'done' member
+    // state so a stale 'unreachable'/'standby' stamp from the final turn
+    // doesn't outlive the accepted task (the read path also projects this).
+    normalizeDeliveredMemberStatuses(taskId);
   }
   if (closed.status === 'done' && opts.rating != null) {
     const rated = getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);

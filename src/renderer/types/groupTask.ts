@@ -105,7 +105,7 @@ export interface GroupTaskDeliverable {
   sourceSenderName?: string | null;
 }
 
-export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'idle' | 'unknown';
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'idle' | 'unknown' | 'done';
 
 export type GroupTaskCheckpointStatus = 'open' | 'resolved' | 'cancelled';
 

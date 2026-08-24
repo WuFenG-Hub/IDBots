@@ -1622,3 +1622,56 @@ test('create releases a claimed proposal when the on-chain group fails before a 
     h.cleanup();
   }
 });
+
+test('done tasks show delivered members as done, not unreachable/standby', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'Daily skill',
+      goal: 'Ship one skill episode',
+      acceptanceCriteria: 'Deliverable delivered and accepted',
+      memberMetabotIds: [2, 3],
+      createdBy: 'user',
+    });
+    // Worker 2 delivered; worker 3 never did. Simulate the #33/#34 stamps:
+    // the delivered author stuck 'unreachable' (watchdog), the other 'standby'.
+    const deliverable = h.groupTaskStore.addDeliverable({
+      taskId: detail.id,
+      msgPinId: 'deliver-pin-1',
+      authorGlobalmetaid: 'gmid-coder',
+      kind: 'metaapp',
+      uri: 'metafile://deliver-pin-1',
+    });
+    h.groupTaskStore.updateDeliverableStatus(deliverable.id, 'delivered');
+    h.groupTaskStore.setMemberStatus(detail.id, 2, 'unreachable', 'gmid-coder');
+    h.groupTaskStore.setMemberStatus(detail.id, 3, 'standby', 'gmid-designer');
+
+    // While the task is still running, liveness-derived statuses are unchanged.
+    const executing = await getGroupTask(detail.id);
+    const coderPre = executing.members.find((m) => m.metabotId === 2);
+    assert.equal(coderPre.status, 'unreachable');
+    assert.equal(coderPre.workStatus, 'unknown');
+
+    const closed = await closeGroupTask(detail.id, { status: 'done', reason: 'owner 5/5' });
+    assert.equal(closed.status, 'done');
+    const coder = closed.members.find((m) => m.metabotId === 2);
+    assert.equal(coder.status, 'done');
+    assert.equal(coder.workStatus, 'done');
+    // A member without a deliverable keeps its state-machine value and the
+    // derived workStatus (never 'done').
+    const designer = closed.members.find((m) => m.metabotId === 3);
+    assert.equal(designer.status, 'standby');
+    assert.notEqual(designer.workStatus, 'done');
+
+    // Read-path projection also repairs pre-fix historical rows: force the
+    // stale 'unreachable' back (as closed tasks from before the fix have it)
+    // and the detail view still settles the delivered member on 'done'.
+    h.groupTaskStore.setMemberStatus(detail.id, 2, 'unreachable', 'gmid-coder');
+    const reshow = await getGroupTask(detail.id);
+    const stale = reshow.members.find((m) => m.metabotId === 2);
+    assert.equal(stale.status, 'done');
+    assert.equal(stale.workStatus, 'done');
+  } finally {
+    h.cleanup();
+  }
+});
