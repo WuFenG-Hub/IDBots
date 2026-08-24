@@ -2,26 +2,44 @@ import { z } from 'zod';
 import type {
   ExtractMetaAppResult,
   InstallSkillResult,
-  InstalledSkillInfo,
   InstallSkillSource,
 } from '../services/skillInstallService';
+
+/** Calling session's skill perspective: its bot binding, or null for a
+ * bot-less user session (which sees bundled + global skills only). */
+export type SkillToolPerspective = { metabotId: number | null };
 
 /**
  * Control surface the host (main.ts) provides for the skill_tool.
  * Backed by skillInstallService — extract MetaApp zips, install skill
  * packages into the user-data SKILLs directory, and list what is already
- * installed.
+ * installed. Every skill operation is perspective-aware: the caller's bot
+ * determines assignment on install and visibility on list/read.
  */
 export type SkillToolControl = {
   extractMetaApp(input: { pinId: string; workspaceDir: string }): Promise<ExtractMetaAppResult>;
-  installSkill(input: InstallSkillSource): Promise<InstallSkillResult>;
-  listInstalledSkills(): InstalledSkillInfo[];
+  installSkill(
+    input: InstallSkillSource,
+    perspective: SkillToolPerspective
+  ): Promise<InstallSkillResult & {
+    /** Skill id (folder name) of the installed package, when ok. */
+    skillId?: string;
+    /** metabot the skill was auto-assigned to; null = installed to the
+     * library unassigned (bot-less session — assign via the Skills UI). */
+    assignedToMetabotId?: number | null;
+  }>;
+  listInstalledSkills(perspective: SkillToolPerspective): Array<{
+    id: string;
+    name: string;
+    origin: 'bundled' | 'global' | 'assigned';
+  }>;
   /**
    * Load one enabled skill's full SKILL.md plus its directory (for relative
-   * path resolution). Backs the read_skill action; null when the name/id
-   * does not resolve to an enabled skill.
+   * path resolution), scoped to the caller's visible set. Backs the
+   * read_skill action; null when the name/id does not resolve to a skill the
+   * caller's bot may use.
    */
-  readSkill(nameOrId: string): {
+  readSkill(nameOrId: string, perspective: SkillToolPerspective): {
     id: string;
     name: string;
     directory: string;
@@ -53,6 +71,11 @@ function asString(value: unknown): string {
  * surface (standard Chat included) so a bot can search → read APP.md →
  * install → verify without leaving the conversation.
  *
+ * All skill operations are scoped to the calling session's bot: installs are
+ * auto-assigned to that bot (bot-less user sessions install to the library
+ * unassigned), and list/read only surface skills the bot may actually use
+ * (bundled + global + assigned).
+ *
  * install_skill is gated host-side: coworkRunner.withSkillInstallApproval
  * asks the owner for confirmation in interactive sessions (unattended
  * acceptEdits/bypassPermissions/autoApprove sessions skip the prompt), so
@@ -62,8 +85,11 @@ export function buildSkillAgentTools(deps: {
   tool: SdkToolFactory;
   control: SkillToolControl;
   getWorkspaceDir: () => string;
+  /** The calling session's REAL metabot binding (no twin fallback). */
+  getMetabotId: () => number | null;
 }): unknown[] {
-  const { tool, control, getWorkspaceDir } = deps;
+  const { tool, control, getWorkspaceDir, getMetabotId } = deps;
+  const perspective = (): SkillToolPerspective => ({ metabotId: getMetabotId() });
 
   return [
     tool(
@@ -71,10 +97,10 @@ export function buildSkillAgentTools(deps: {
       [
         'Install, read, and list on-device skills; also extract a MetaApp package to read its APP.md.',
         'Use action "extract_metaapp" with pinId (or metaapp://<pinId>) after search_metaapps: unpacks the app zip into the workspace temp dir, returns the file list plus APP.md (install instructions live there). Not for just opening an app in the Bot Browser.',
-        'Use action "install_skill" to install one skill into the user-data SKILLs directory (never the source tree). Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). Package must contain SKILL.md; installed as SKILLs/<name from SKILL.md>/; 4MB limit.',
-        'Use action "list_installed_skills" to verify a skill is on disk (name + version) after install.',
+        'Use action "install_skill" to install one skill into the user-data SKILLs directory (never the source tree). Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). Package must contain SKILL.md; installed as SKILLs/<name from SKILL.md>/; 4MB limit. Skills belong to bots: when called from a bot session the install is auto-assigned to that bot; from a bot-less session it lands in the library unassigned — tell the owner to assign it via the Skills UI if it should be usable.',
+        'Use action "list_installed_skills" to list the skills THIS session\'s bot can use (bundled / global / assigned) and verify a skill is usable after install.',
         'Use action "read_skill" with name (id or name from the <available_skills> catalog) to load a skill\'s full SKILL.md plus its on-disk directory; resolve the SKILL.md\'s relative paths against that directory.',
-        'Chat-skill whitelist changes belong on metabot_update (chat_skill_op), not here. Returns JSON per action.',
+        'Assigning skills to other bots belongs on metabot_update (chat_skill_op), not here. Returns JSON per action.',
       ].join(' '),
       {
         action: z.enum(['extract_metaapp', 'install_skill', 'list_installed_skills', 'read_skill']),
@@ -95,13 +121,16 @@ export function buildSkillAgentTools(deps: {
         npm?: string;
       }) => {
         if (args.action === 'list_installed_skills') {
-          const skills = control.listInstalledSkills();
+          const skills = control.listInstalledSkills(perspective());
           if (skills.length === 0) {
-            return textResult('No skills installed in the user-data SKILLs directory.');
+            return textResult('No skills available for this session.');
           }
-          const lines = skills.map((skill) => `- ${skill.name} (${skill.version})`);
+          const lines = skills.map((skill) => `- ${skill.name} (${skill.id}, ${skill.origin})`);
           return textResult(
-            [`Installed skills (${skills.length}):`, ...lines].join('\n'),
+            [
+              `Skills available to this session (${skills.length}; origin: bundled = shipped with IDBots, global = shared with all bots, assigned = assigned to this bot):`,
+              ...lines,
+            ].join('\n'),
           );
         }
 
@@ -110,7 +139,7 @@ export function buildSkillAgentTools(deps: {
           if (!name) {
             return textResult('skill_tool read_skill requires name (skill id or name).', true);
           }
-          const entry = control.readSkill(name);
+          const entry = control.readSkill(name, perspective());
           if (!entry) {
             return textResult(
               `Skill "${name}" not found or not enabled. Use action list_installed_skills to see what is installed.`,
@@ -155,7 +184,7 @@ export function buildSkillAgentTools(deps: {
           npm: asString(args.npm) || undefined,
         };
         try {
-          const result = await control.installSkill(source);
+          const result = await control.installSkill(source, perspective());
           return textResult(JSON.stringify(result, null, 2), result.ok === false);
         } catch (error) {
           return textResult(

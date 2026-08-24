@@ -593,9 +593,9 @@ test('skill: routing hit runs the skill turn (scoped to own allow_chat_skills), 
     await loop.runTick();
 
     assert.equal(skillCalls.routing.length, 1);
-    // External group members are never the owner: only the bot's own
-    // configured allow_chat_skills, allowAllEnabled stays false.
-    assert.deepEqual(skillCalls.routing[0], { allowChatSkills: ['skill-doc'], allowAllEnabled: false });
+    // External group members are never the owner: only the bot's assigned
+    // skills are routable — widened stays false.
+    assert.deepEqual(skillCalls.routing[0], { metabotId: 7, widened: false });
 
     assert.equal(skillCalls.skillTurn.length, 1);
     assert.deepEqual(skillCalls.skillTurn[0].activeSkillIds, ['skill-doc']);

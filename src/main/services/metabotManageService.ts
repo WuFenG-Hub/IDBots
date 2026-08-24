@@ -149,6 +149,15 @@ export interface MetabotManageDeps {
     enabled?: boolean;
     models?: Array<{ id?: string }>;
   } | undefined> | undefined;
+  /**
+   * Skill-assignment write seam (wired to SkillManager.applyMetabotAssignedSkills).
+   * Called whenever an update carries allow_chat_skills / chat_skill_op — the
+   * on-chain published whitelist stays the metabots.allow_chat_skills column,
+   * but the local authorization source of truth is the assignment table, so
+   * every whitelist write must also replace that bot's assignment rows.
+   * Absent = assignment write skipped (bare-embedding callers).
+   */
+  applyChatSkillAssignments?: (metabotId: number, skillIdsOrNames: readonly string[]) => string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +666,24 @@ export async function updateMetaBotCore(
   const before = store.getMetabotById(id);
   if (!before) {
     return { success: false, error: `MetaBot ${id} not found` };
+  }
+
+  // Skill-assignment absorption: an update carrying allow_chat_skills (the
+  // metabot_update tool folds chat_skill_op into it before reaching here)
+  // rewrites that bot's assignment rows — the local authorization source of
+  // truth — before the regular column write + on-chain sync proceed. The
+  // resolved id list (bundled skills dropped, names resolved) replaces the
+  // raw input so the published column and the assignment rows never diverge.
+  if (input.allow_chat_skills !== undefined && deps.applyChatSkillAssignments) {
+    try {
+      const resolvedSkillIds = deps.applyChatSkillAssignments(id, normalizedList(input.allow_chat_skills));
+      input = { ...input, allow_chat_skills: resolvedSkillIds };
+    } catch (error) {
+      console.warn(
+        `[metabotManageService] chat-skill assignment write failed for bot ${id}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
 
   const local = applyMetabotUpdateLocal(store, id, input, deps);

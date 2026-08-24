@@ -1517,9 +1517,11 @@ export interface CoworkRunnerOptions {
    * Cowork skill prompt parts (rules section / volatile catalog / sandbox
    * inline section), composed main-side so the live skill catalog never gets
    * baked into the stored session prompt. Re-read per turn: skill installs
-   * apply on the next turn without restarting the session.
+   * apply on the next turn without restarting the session. The metabotId
+   * argument scopes the catalog to the session's bot (null = bot-less user
+   * session: bundled + global skills only).
    */
-  coworkSkillPromptsProvider?: () => {
+  coworkSkillPromptsProvider?: (metabotId: number | null) => {
     rules: string | null;
     catalog: string | null;
     sandboxSection: string | null;
@@ -1751,7 +1753,7 @@ export class CoworkRunner extends EventEmitter {
   private twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
   private twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   private mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
-  private coworkSkillPromptsProvider?: () => {
+  private coworkSkillPromptsProvider?: (metabotId: number | null) => {
     rules: string | null;
     catalog: string | null;
     sandboxSection: string | null;
@@ -5106,7 +5108,9 @@ export class CoworkRunner extends EventEmitter {
     if (hasEmbeddedSkillCatalog(baseSystemPrompt)) {
       return { skillsSection: null, skillsCatalogMode: 'legacy' };
     }
-    const parts = this.coworkSkillPromptsProvider?.() ?? null;
+    // The session's REAL metabot binding (no twin fallback): bot-less user
+    // sessions see bundled + global only, bot sessions see that bot's set.
+    const parts = this.coworkSkillPromptsProvider?.(this.store.getMetabotIdForSession(sessionId)) ?? null;
     const config = this.store.getConfig();
     const plannedMode: CoworkExecutionMode = this.store.getSession(sessionId)?.executionMode
       || config.executionMode
@@ -5229,7 +5233,7 @@ export class CoworkRunner extends EventEmitter {
     if (this.activeSessions.get(sessionId)?.skillsCatalogMode === 'volatile') {
       sections.push({
         key: 'skills-catalog',
-        text: this.coworkSkillPromptsProvider?.()?.catalog ?? '',
+        text: this.coworkSkillPromptsProvider?.(this.store.getMetabotIdForSession(sessionId))?.catalog ?? '',
       });
     }
 
@@ -5467,7 +5471,7 @@ export class CoworkRunner extends EventEmitter {
   private withSkillInstallApproval(sessionId: string, control: SkillToolControl): SkillToolControl {
     return {
       ...control,
-      installSkill: async (input) => {
+      installSkill: async (input, perspective) => {
         const activeSession = this.activeSessions.get(sessionId);
         if (!activeSession) {
           // Fail closed: without session state we cannot ask the owner — and
@@ -5507,7 +5511,7 @@ export class CoworkRunner extends EventEmitter {
             return { ok: false as const, error };
           }
         }
-        return control.installSkill(input);
+        return control.installSkill(input, perspective);
       },
     };
   }
@@ -8326,6 +8330,9 @@ export class CoworkRunner extends EventEmitter {
           tool,
           control: this.withSkillInstallApproval(sessionId, this.skillTools),
           getWorkspaceDir: () => this.store.getSession(sessionId)?.cwd || process.cwd(),
+          // The session's REAL metabot binding (no twin fallback): installs
+          // auto-assign to this bot; list/read stay scoped to its skills.
+          getMetabotId: () => this.store.getMetabotIdForSession(sessionId),
         })
       );
     }

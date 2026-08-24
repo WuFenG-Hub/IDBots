@@ -8,6 +8,18 @@ import { SqliteStore } from './sqliteStore';
 import { getEnhancedEnv } from './libs/coworkUtil';
 import { isPathWithin, resolveElectronExecutablePath } from './libs/runtimePaths';
 import { resolveBundledSkillsRoot, resolveWritableSkillsRoot } from './libs/skillRoots';
+import {
+  assignSkillToMetabot,
+  ensureSkillAssignmentSchema,
+  getGlobalScopeMap,
+  listAssignedSkillIds,
+  listAssignmentMetabotIds,
+  removeSkillFromAssignmentStore,
+  setMetabotAssignedSkills,
+  setSkillAssignments,
+  setSkillScope,
+  type SkillAssignmentVia,
+} from './libs/skillAssignmentStore';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { getMetaidRpcBase, getMetaidRpcToken } from './services/metaidRpcEndpoint';
 
@@ -984,6 +996,125 @@ export class SkillManager {
     return skills;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Per-MetaBot skill resolution (assignment model)                     */
+  /* ------------------------------------------------------------------ */
+
+  private assignmentSchemaEnsured = false;
+
+  /** Create the assignment table on first use (idempotent, memoized). */
+  private ensureAssignmentSchema(): void {
+    if (this.assignmentSchemaEnsured) return;
+    ensureSkillAssignmentSchema(this.getStore().getDatabase());
+    this.assignmentSchemaEnsured = true;
+  }
+
+  /**
+   * Skills visible to one bot: bundled (implicitly every bot) + scope=global +
+   * explicitly assigned, all still gated by the library-level enabled switch.
+   * A null metabotId (bot-less user session or system surface) sees bundled +
+   * global only. The memory backend's twin-fallback must NOT be reused here:
+   * a bot-less session resolving the first twin's skills would silently leak
+   * that bot's assignments into the user's own sessions.
+   */
+  listSkillsForMetabot(metabotId: number | null): SkillRecord[] {
+    this.ensureAssignmentSchema();
+    const enabled = this.listSkills().filter((skill) => skill.enabled && skill.prompt);
+    const globalScope = getGlobalScopeMap(this.getStore());
+    if (metabotId == null) {
+      return enabled.filter((skill) => skill.isBuiltIn || globalScope[skill.id] === 'global');
+    }
+    const assigned = new Set(listAssignedSkillIds(this.getStore().getDatabase(), metabotId));
+    return enabled.filter(
+      (skill) => skill.isBuiltIn || globalScope[skill.id] === 'global' || assigned.has(skill.id)
+    );
+  }
+
+  /** The bot's assigned external skills (chat-routing baseline; no bundled/global). */
+  private listAssignedSkillRecordsForMetabot(metabotId: number): SkillRecord[] {
+    this.ensureAssignmentSchema();
+    const assigned = new Set(listAssignedSkillIds(this.getStore().getDatabase(), metabotId));
+    return this.listSkills().filter((skill) => assigned.has(skill.id) && skill.enabled && skill.prompt);
+  }
+
+  /** Library metadata for the Skills UI: scope + assigned bots, external skills only. */
+  getSkillAssignmentInfo(): Record<string, { scope: 'library' | 'global'; assignedMetabotIds: number[] }> {
+    this.ensureAssignmentSchema();
+    const globalScope = getGlobalScopeMap(this.getStore());
+    const db = this.getStore().getDatabase();
+    const info: Record<string, { scope: 'library' | 'global'; assignedMetabotIds: number[] }> = {};
+    for (const skill of this.listSkills()) {
+      if (skill.isBuiltIn) continue;
+      info[skill.id] = {
+        scope: globalScope[skill.id] === 'global' ? 'global' : 'library',
+        assignedMetabotIds: listAssignmentMetabotIds(db, skill.id),
+      };
+    }
+    return info;
+  }
+
+  setSkillScopeForSkill(id: string, scope: 'library' | 'global'): void {
+    const resolved = this.resolveSkillById(id);
+    if (!resolved) {
+      throw new Error(`Unknown skill: ${id}`);
+    }
+    setSkillScope(this.getStore(), resolved.id, scope);
+    this.notifySkillsChanged();
+  }
+
+  /** Skill-side scope editor: replace one skill's assignment set exactly. */
+  setAssignmentsForSkill(id: string, metabotIds: number[], via: SkillAssignmentVia = 'ui'): void {
+    const resolved = this.resolveSkillById(id);
+    if (!resolved) {
+      throw new Error(`Unknown skill: ${id}`);
+    }
+    const store = this.getStore();
+    setSkillAssignments(store.getDatabase(), store.getSaveFunction(), resolved.id, metabotIds, via);
+    this.notifySkillsChanged();
+  }
+
+  /** Resolve an allowlist entry (skill id or name) to a registry skill id. */
+  resolveSkillIdForAssignment(idOrName: string): string | null {
+    const skills = this.listSkills();
+    const match = this.resolveSkillById(idOrName, skills) ?? this.resolveSkillByName(idOrName, skills);
+    return match?.id ?? null;
+  }
+
+  /**
+   * Bot-side assignment replace (metabot_update / bot Skills tab). Accepts ids
+   * or names; bundled skills are dropped — they are implicitly visible to
+   * every bot and must not consume assignment rows. Returns the resolved ids
+   * so callers can mirror them into metabots.allow_chat_skills.
+   */
+  applyMetabotAssignedSkills(
+    metabotId: number,
+    entries: readonly string[],
+    via: SkillAssignmentVia = 'metabot_update'
+  ): string[] {
+    this.ensureAssignmentSchema();
+    const skills = this.listSkills();
+    const seen = new Set<string>();
+    const resolvedIds: string[] = [];
+    for (const entry of entries) {
+      const match = this.resolveSkillById(entry, skills) ?? this.resolveSkillByName(entry, skills);
+      if (!match || match.isBuiltIn || seen.has(match.id)) continue;
+      seen.add(match.id);
+      resolvedIds.push(match.id);
+    }
+    const store = this.getStore();
+    setMetabotAssignedSkills(store.getDatabase(), store.getSaveFunction(), metabotId, resolvedIds, via);
+    this.notifySkillsChanged();
+    return resolvedIds;
+  }
+
+  /** skill_tool install auto-assignment: add one skill to one bot. */
+  assignInstalledSkill(skillId: string, metabotId: number, via: SkillAssignmentVia = 'skill_tool'): void {
+    this.ensureAssignmentSchema();
+    const store = this.getStore();
+    assignSkillToMetabot(store.getDatabase(), store.getSaveFunction(), skillId, metabotId, via);
+    this.notifySkillsChanged();
+  }
+
   private isSuperpowersSkillId(skillId: string): boolean {
     return String(skillId || '').trim().startsWith(SUPERPOWERS_SKILL_PREFIX);
   }
@@ -1123,9 +1254,12 @@ export class SkillManager {
     ].join('\n');
   }
 
+  /**
+   * Auto routing prompt for bot-less system surfaces (IM gateway, scheduler):
+   * bundled + global only — same view a bot-less user session gets.
+   */
   buildAutoRoutingPrompt(): string | null {
-    const skills = this.listSkills();
-    const enabled = skills.filter(s => s.enabled && s.prompt);
+    const enabled = this.listSkillsForMetabot(null);
     return this.buildRoutingPromptFromSkills(enabled);
   }
 
@@ -1135,95 +1269,49 @@ export class SkillManager {
     return this.buildRoutingPromptFromSkills(uniqueSkills);
   }
 
-  private normalizeChatSkillAllowList(value: unknown): string[] {
-    let rawItems: unknown[] = [];
-    if (Array.isArray(value)) {
-      rawItems = value;
-    } else if (typeof value === 'string') {
-      const trimmed = value.trim();
-      if (!trimmed) {
-        rawItems = [];
-      } else {
-        try {
-          const parsed = JSON.parse(trimmed) as unknown;
-          rawItems = Array.isArray(parsed) ? parsed : [trimmed];
-        } catch {
-          rawItems = trimmed.split(',');
-        }
-      }
-    } else if (value != null) {
-      rawItems = [value];
+  /**
+   * Chat-surface skill routing under the assignment model.
+   * Baseline (anyone messaging the bot): the bot's ASSIGNED external skills
+   * only — the successor of the legacy allow_chat_skills allowlist (which the
+   * one-time migration converts into assignment rows).
+   * Widened (owner / boss / chair): the bot's full visible set (bundled +
+   * global + assigned) — capped at the bot, never the whole library.
+   */
+  resolveChatSkillIds(input: { metabotId?: number | null; widened?: boolean } = {}): string[] {
+    if (input.widened) {
+      return this.listSkillsForMetabot(input.metabotId ?? null).map((skill) => skill.id);
     }
-
-    const seen = new Set<string>();
-    const normalized: string[] = [];
-    for (const item of rawItems) {
-      const id = String(item ?? '').trim();
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      normalized.push(id);
+    if (input.metabotId == null) {
+      return [];
     }
-    return normalized;
-  }
-
-  resolveChatSkillIds(input: {
-    allowChatSkills?: unknown;
-    isOwner?: boolean;
-  } = {}): string[] {
-    const skills = this.listSkills();
-    const enabledSkills = skills.filter((skill) => skill.enabled && skill.prompt);
-    if (input.isOwner) {
-      return enabledSkills.map((skill) => skill.id);
-    }
-
-    const resolvedIds: string[] = [];
-    const seen = new Set<string>();
-    for (const candidate of this.normalizeChatSkillAllowList(input.allowChatSkills)) {
-      const resolved =
-        this.resolveSkillById(candidate, enabledSkills)
-        || this.resolveSkillByName(candidate, enabledSkills);
-      if (!resolved || seen.has(resolved.id)) continue;
-      seen.add(resolved.id);
-      resolvedIds.push(resolved.id);
-    }
-    return resolvedIds;
+    return this.listAssignedSkillRecordsForMetabot(input.metabotId).map((skill) => skill.id);
   }
 
   buildChatSkillsRoutingPrompt(input: {
-    allowChatSkills?: unknown;
-    allowAllEnabled?: boolean;
+    metabotId?: number | null;
+    widened?: boolean;
   } = {}): ChatSkillsRoutingPromptResult {
-    const skills = this.listSkills();
-    const enabledSkills = skills.filter((skill) => skill.enabled && skill.prompt);
-    if (input.allowAllEnabled) {
-      const activeSkillIds = this.resolveChatSkillIds({ isOwner: true });
-      return {
-        prompt: this.buildScopedRoutingPrompt(enabledSkills),
-        activeSkillIds,
-      };
-    }
-
-    const activeSkillIds = this.resolveChatSkillIds({ allowChatSkills: input.allowChatSkills });
-    const activeSkills = activeSkillIds
-      .map((skillId) => enabledSkills.find((skill) => skill.id === skillId))
-      .filter((skill): skill is SkillRecord => Boolean(skill));
-
+    const activeSkills = input.widened
+      ? this.listSkillsForMetabot(input.metabotId ?? null)
+      : this.listAssignedSkillRecordsForMetabot(input.metabotId ?? -1);
+    const activeSkillIds = activeSkills.map((skill) => skill.id);
     return {
       prompt: this.buildScopedRoutingPrompt(activeSkills),
       activeSkillIds,
     };
   }
 
+  /** Diagnostic auto-routing prompt (skills:autoRoutingPrompt IPC): bot-less view. */
   buildCoworkAutoRoutingPrompt(): string | null {
-    const skills = this.listSkills();
-    const enabled = skills.filter((skill) => skill.enabled && skill.prompt);
+    const enabled = this.listSkillsForMetabot(null);
     return this.buildRoutingPromptFromSkills(enabled, {
       introBlocks: [this.buildCoworkSuperpowersBootstrap(enabled)].filter(Boolean),
     });
   }
 
   /**
-   * Cowork skill-prompt parts from a single listSkills scan:
+   * Cowork skill-prompt parts from a single listSkills scan, scoped to one
+   * bot's visible set (null = bot-less session: bundled + global):
    * - rules: the `## Skills (mandatory)` rules section WITHOUT the catalog;
    *   composed into the system prompt (promptComposer SKILLS slot).
    * - catalog: the bare <available_skills> block in compact one-line-per-skill
@@ -1235,12 +1323,12 @@ export class SkillManager {
    *   for sandbox sessions, whose prompt must carry the catalog inline so
    *   resolveAutoRoutingForSandbox can rewrite locations to guest paths.
    */
-  buildCoworkSkillPromptParts(): {
+  buildCoworkSkillPromptParts(metabotId: number | null = null): {
     rules: string | null;
     catalog: string | null;
     sandboxSection: string | null;
   } {
-    const enabled = this.listSkills().filter((skill) => skill.enabled && skill.prompt);
+    const enabled = this.listSkillsForMetabot(metabotId);
     const introBlocks = [this.buildCoworkSuperpowersBootstrap(enabled)].filter(Boolean);
     return {
       rules: this.buildRoutingPromptFromSkills(enabled, { introBlocks, catalogPlacement: 'volatile' }),
@@ -1254,11 +1342,13 @@ export class SkillManager {
   /**
    * Load one enabled skill's full SKILL.md on demand, backing the cowork
    * skill_tool read_skill action. Accepts an id or a (case-insensitive) name.
-   * Returns the skill directory so the caller can tell the model where to
-   * resolve the relative paths SKILL.md files routinely contain. Disabled
-   * skills are not routed and are not loadable through this path.
+   * With a metabotId the lookup is scoped to that bot's visible set — a bot
+   * cannot read skills it has not been assigned (or that are not bundled /
+   * global). Returns the skill directory so the caller can tell the model
+   * where to resolve the relative paths SKILL.md files routinely contain.
+   * Disabled skills are not routed and are not loadable through this path.
    */
-  readSkillCatalogEntry(nameOrId: string): {
+  readSkillCatalogEntry(nameOrId: string, metabotId?: number | null): {
     id: string;
     name: string;
     directory: string;
@@ -1267,7 +1357,10 @@ export class SkillManager {
   } | null {
     const trimmed = String(nameOrId ?? '').trim();
     if (!trimmed) return null;
-    const enabled = this.listSkills().filter((skill) => skill.enabled && skill.prompt);
+    const pool = metabotId === undefined
+      ? this.listSkills()
+      : this.listSkillsForMetabot(metabotId);
+    const enabled = pool.filter((skill) => skill.enabled && skill.prompt);
     const match = this.resolveSkillById(trimmed, enabled) ?? this.resolveSkillByName(trimmed, enabled);
     if (!match) return null;
     let content: string;
@@ -1564,6 +1657,15 @@ export class SkillManager {
     const state = this.loadSkillStateMap();
     delete state[id];
     this.saveSkillStateMap(state);
+    // Drop assignment rows + scope entry so an uninstalled skill leaves no
+    // dangling authorization behind (reinstalling starts library-scoped).
+    this.ensureAssignmentSchema();
+    removeSkillFromAssignmentStore(
+      this.getStore().getDatabase(),
+      this.getStore().getSaveFunction(),
+      this.getStore(),
+      id
+    );
     this.startWatching();
     this.notifySkillsChanged();
     return this.listSkills();

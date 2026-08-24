@@ -84,6 +84,9 @@ async function runGroupCase(senderGlobalMetaId, overrides = {}) {
     ...overrides.metabot,
   };
   const performChatCompletionCalls = [];
+  // Assignment-model stand-in: the daemon resolves the bot's baseline set
+  // from its assignment rows (seeded from the legacy allowlist here).
+  const baselineSkillIds = metabot.allow_chat_skills ?? [];
 
   await runTickOnce(
     db,
@@ -100,7 +103,7 @@ async function runGroupCase(senderGlobalMetaId, overrides = {}) {
       skillsRoots: [process.cwd()],
       getChatSkillsRoutingPrompt: (input) => {
         chatRoutingCalls.push(input);
-        const activeSkillIds = input.allowAllEnabled ? ['enabled-skill-a', 'enabled-skill-b'] : input.allowChatSkills;
+        const activeSkillIds = input.widened ? ['enabled-skill-a', 'enabled-skill-b'] : baselineSkillIds;
         if (!activeSkillIds || activeSkillIds.length === 0) {
           return { activeSkillIds: [], prompt: null };
         }
@@ -122,7 +125,7 @@ async function runGroupCase(senderGlobalMetaId, overrides = {}) {
 test('group chat Boss turns run with all enabled chat skills instead of deprecated task allowed_skills', async () => {
   const { chatRoutingCalls, skillTurnCalls, broadcasts } = await runGroupCase('boss-global');
 
-  assert.deepEqual(chatRoutingCalls, [{ allowAllEnabled: true }]);
+  assert.deepEqual(chatRoutingCalls, [{ metabotId: 9, widened: true }]);
   assert.deepEqual(skillTurnCalls[0].activeSkillIds, ['enabled-skill-a', 'enabled-skill-b']);
   assert.equal(broadcasts.at(-1).content, 'used enabled-skill-a,enabled-skill-b');
 });
@@ -130,7 +133,7 @@ test('group chat Boss turns run with all enabled chat skills instead of deprecat
 test('group chat non-Boss turns run only with metabot allow_chat_skills after attention gate passes', async () => {
   const { chatRoutingCalls, skillTurnCalls, broadcasts } = await runGroupCase('peer-global');
 
-  assert.deepEqual(chatRoutingCalls, [{ allowChatSkills: ['chat-allowed-skill'] }]);
+  assert.deepEqual(chatRoutingCalls, [{ metabotId: 9, widened: false }]);
   assert.deepEqual(skillTurnCalls[0].activeSkillIds, ['chat-allowed-skill']);
   assert.equal(broadcasts[0].content, 'used chat-allowed-skill');
 });
@@ -140,7 +143,7 @@ test('group chat non-Boss turns with empty allowlist use the normal LLM path', a
     metabot: { allow_chat_skills: [] },
   });
 
-  assert.deepEqual(chatRoutingCalls, [{ allowChatSkills: [] }]);
+  assert.deepEqual(chatRoutingCalls, [{ metabotId: 9, widened: false }]);
   assert.equal(skillTurnCalls.length, 0);
   assert.equal(performChatCompletionCalls.length, 1);
   assert.equal(broadcasts.at(-1).content, 'llm reply');
