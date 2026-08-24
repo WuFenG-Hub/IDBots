@@ -45,7 +45,27 @@ const actionBtnClass = 'inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rou
 const dangerBtnClass = 'inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-red-500/50 dark:border-red-500/50 text-red-600 dark:text-red-400 hover:bg-red-500/10 dark:hover:bg-red-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
 
 /** Keep in sync with SUPPORTED_KB_EXTENSIONS in src/main/libs/knowledgeBaseText.ts. */
-const KB_IMPORT_FILE_EXTENSIONS = ['md', 'txt', 'json', 'csv', 'pdf', 'docx'];
+const KB_IMPORT_FILE_EXTENSIONS = [
+  'md',
+  'markdown',
+  'txt',
+  'json',
+  'csv',
+  'tsv',
+  'yaml',
+  'yml',
+  'xml',
+  'log',
+  'rst',
+  'pdf',
+  'docx',
+  'pptx',
+  'xlsx',
+  'xls',
+  'html',
+  'htm',
+  'epub',
+];
 const NOTICE_AUTO_CLEAR_MS = 10_000;
 
 interface KnowledgeBaseNotice {
@@ -657,6 +677,11 @@ const KnowledgeBasePanel: React.FC<KnowledgeBasePanelProps> = ({ metabotId }) =>
         </button>
       </div>
       <p className={hintClass}>{i18nService.t('knowledgeBasePanelHint')}</p>
+      <p className={hintClass}>
+        {i18nService
+          .t('knowledgeBaseSupportedFormats')
+          .replace('{formats}', KB_IMPORT_FILE_EXTENSIONS.map((ext) => `.${ext}`).join(' '))}
+      </p>
 
       {panelError ? renderError(panelError) : null}
       {createOpen ? renderCreateForm() : null}
