@@ -12,7 +12,7 @@ import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStat
 import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute, isFreeQuotaProvider, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
-import { DshTurnHub, dshSessionRootFor, type DshTurnProviderRoute } from './coworkDshTurn';
+import { DshTurnHub, dshSessionRootFor, isNativeDeepSeekChatRoute, type DshTurnProviderRoute } from './coworkDshTurn';
 import { truncateUtf16Units } from './llmSafeText';
 import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
@@ -6762,7 +6762,11 @@ export class CoworkRunner extends EventEmitter {
   ): DshTurnProviderRoute {
     const apiFormat = dshApiFormatOf(route.apiFormat);
     const modelLimits = resolveCurrentModelLimits(route.model);
-    const officialDeepSeekNative = route.provider === 'deepseek' && route.apiFormat !== 'anthropic';
+    // Official DeepSeek rides the first-party dsh-llm-deepseek adapter under
+    // its own route key — but ONLY on the official api.deepseek.com host: a
+    // 'deepseek'-keyed provider with a custom proxy base URL stays on the
+    // pi-ai route (see isNativeDeepSeekChatRoute for the 400 failure mode).
+    const officialDeepSeekNative = isNativeDeepSeekChatRoute(route);
     const reasoningEffort = extras?.reasoningEffort;
     return {
       key: officialDeepSeekNative ? 'deepseek-official' : route.provider,
@@ -7092,10 +7096,11 @@ export class CoworkRunner extends EventEmitter {
       // the runtime always used the provider default (thinking ON, no
       // reasoning_effort).
       const modelOptions = resolveModelOptions(route.model);
-      // Official DeepSeek (non-anthropic format) rides the first-party
-      // dsh-llm-deepseek adapter under its own route key; everything else —
-      // including anthropic-format deepseek relays — stays on the pi-ai route.
-      const officialDeepSeekNative = route.provider === 'deepseek' && route.apiFormat !== 'anthropic';
+      // Official DeepSeek rides the first-party dsh-llm-deepseek adapter under
+      // its own route key; everything else — anthropic-format deepseek relays
+      // AND openai-format custom-base-URL relays — stays on the pi-ai route.
+      // Must stay in sync with dshTurnProviderFromRoute (same predicate).
+      const officialDeepSeekNative = isNativeDeepSeekChatRoute(route);
       const dshEffortDialect = officialDeepSeekNative ? 'deepseek-native' : 'generic';
       const dshReasoningEffort = mapDshReasoningEffort(
         toLlmEffortLevel(

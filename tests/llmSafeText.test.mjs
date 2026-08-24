@@ -8,8 +8,10 @@
 // HTTP 400, surfaced to the user as a generic
 // "DSH turn failed: DeepSeek API error (HTTP 400)".
 //
-// Covers the llmSafeText helpers and the Twin roster regression (roster
-// block from an over-cap bio with an emoji at the cut).
+// Covers the llmSafeText helpers, the Twin roster regression (roster
+// block from an over-cap bio with an emoji at the cut), and the
+// native-adapter route gate (a 'deepseek'-keyed provider on a custom proxy
+// base URL must stay on the generic pi-ai route).
 // Requires: npm run compile:electron.
 
 import assert from 'node:assert/strict'
@@ -39,6 +41,7 @@ function loadModules() {
     return {
       llmSafeText: require('../dist-electron/main/libs/llmSafeText.js'),
       twinWorkerDirectoryService: require('../dist-electron/main/services/twinWorkerDirectoryService.js'),
+      coworkDshTurn: require('../dist-electron/main/libs/coworkDshTurn.js'),
     }
   } finally {
     Module._load = originalLoad
@@ -122,4 +125,19 @@ test('twin roster: an over-cap bio with an emoji at the cut carries no lone surr
   assert.equal(LONE_SURROGATE_RE.test(roster), false)
   // The wire form must be free of lone-surrogate hex escapes too.
   assert.equal(LONE_SURROGATE_RE.test(JSON.stringify(roster)), false)
+})
+
+test('isNativeDeepSeekChatRoute: only the official api.deepseek.com host rides the native adapter', () => {
+  const { isNativeDeepSeekChatRoute } = loadModules().coworkDshTurn
+  // Official host, chat-completions shape (dshApiRootOf keeps /v1) → native.
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com', apiFormat: 'openai' }), true)
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', apiFormat: 'openai' }), true)
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', apiFormat: 'responses' }), true)
+  // Custom proxy base URL under the 'deepseek' key → generic pi-ai route.
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'https://relay.example.com/v1', apiFormat: 'openai' }), false)
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'http://127.0.0.1:48795/v1', apiFormat: 'openai' }), false)
+  // Anthropic-format official endpoint → pi-ai anthropic-messages.
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com/anthropic', apiFormat: 'anthropic' }), false)
+  // Another provider keyed on the official host is not the deepseek route.
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'opencode', baseUrl: 'https://api.deepseek.com/v1', apiFormat: 'openai' }), false)
 })
