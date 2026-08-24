@@ -1,6 +1,7 @@
 /**
  * Group-task staffing: decompose → coarse seats → one bot per seat →
- * owner-confirm (unless the triggering wish said "just start") → create.
+ * owner-confirm (unless the triggering wish said "just start", or the slate is
+ * all-local and small) → create.
  *
  * Research is a basic capability of every seat, not a seat of its own.
  * Match-first; local is a tie-break, not a gate.
@@ -21,6 +22,16 @@ export type GroupTaskSeatRole = (typeof GROUP_TASK_SEAT_ROLES)[number];
 export const GROUP_TASK_TYPICAL_TEAM_SIZE = 5;
 export const GROUP_TASK_HARD_TEAM_SIZE = 8;
 
+/**
+ * All-local slates with fewer seats than this skip the owner confirmation
+ * round automatically: every member runs on this machine and the full team
+ * (Twin chair included) stays within the typical team size, so an extra
+ * confirm adds friction without changing the roster's blast radius. The owner
+ * can still override afterwards — a revise reply after propose always blocks
+ * the auto-start.
+ */
+export const GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS = 5;
+
 export type GroupTaskStaffingProposalStatus =
   | 'pending'
   | 'confirmed'
@@ -32,7 +43,8 @@ export type GroupTaskStaffingOwnerDecision =
   | 'skip_authorized'
   | 'owner_confirmed'
   | 'owner_revise'
-  | 'awaiting_owner';
+  | 'awaiting_owner'
+  | 'local_auto_start';
 
 export interface GroupTaskStaffingStage {
   id: string;
@@ -310,10 +322,19 @@ export function isStaffingProposalExpired(createdAt: number, nowMs: number = Dat
   return nowMs - createdAt > STAFFING_PROPOSAL_TTL_MS;
 }
 
+/** True when the slate is small and every seat is a local bot — such teams
+ * start without an owner confirmation round (see GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS). */
+export function isLocalOnlySmallSlate(plan: GroupTaskStaffingPlan): boolean {
+  return plan.seats.length < GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS
+    && plan.seats.every((seat) => seat.source === 'local');
+}
+
 export function resolveStaffingOwnerGate(input: {
   triggeringWish: string;
   repliesAfterPropose: string[];
   persistedSkip?: boolean;
+  /** Set when the slate qualifies for the all-local small-team auto-start. */
+  localSmallSlate?: boolean;
 }): { allowed: boolean; decision: GroupTaskStaffingOwnerDecision } {
   let lastIntent: GroupTaskStaffingOwnerDecision | null = null;
   for (const reply of input.repliesAfterPropose) {
@@ -328,6 +349,7 @@ export function resolveStaffingOwnerGate(input: {
   if (detectSkipConfirmInWish(input.triggeringWish) || input.persistedSkip) {
     return { allowed: true, decision: 'skip_authorized' };
   }
+  if (input.localSmallSlate) return { allowed: true, decision: 'local_auto_start' };
   return { allowed: false, decision: 'awaiting_owner' };
 }
 
@@ -373,6 +395,8 @@ export function buildStaffingSlateText(input: {
   acceptanceCriteria?: string | null;
   plan: GroupTaskStaffingPlan;
   ownerConfirmRequired: boolean;
+  /** Why confirmation is skipped — selects the tail-line copy. */
+  skipReason?: 'wish' | 'local_small';
   language?: 'zh' | 'en';
 }): string {
   const language = input.language ?? groupTaskLanguage();
@@ -419,6 +443,10 @@ export function buildStaffingSlateText(input: {
     lines.push(zh
       ? '请看是否合理。可以说换人、去掉某岗，或回复「确认人选 / 就这样开」。没确认前我不会建群。'
       : 'Please confirm this roster, ask to swap/drop a seat, or say "looks good, start". I will not create the group until you confirm.');
+  } else if (input.skipReason === 'local_small') {
+    lines.push(zh
+      ? '这份名单全是本机成员且规模不大，无需确认，我将直接开群。想换人或去掉某个岗位，现在说。'
+      : 'This slate is all local and small, so no confirmation is needed — I will create the group with it directly. Speak up now to swap or drop a seat.');
   } else {
     lines.push(zh
       ? '你已经说了不用确认人选，我将按这份名单直接开群。'

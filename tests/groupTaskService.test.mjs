@@ -1161,6 +1161,24 @@ const contentPlan = () => ({
   }],
 });
 
+/**
+ * Slate that always requires owner confirmation: one remote seat disables the
+ * all-local small-team auto-start (see the auto-start tests further down).
+ */
+const confirmRequiredPlan = () => ({
+  stages: [{ id: 'copy', title: 'Write the intro', seatRole: 'content', dependsOn: [] }],
+  seats: [
+    ...contentPlan().seats,
+    {
+      role: 'design',
+      candidateName: 'Remote Artist',
+      candidateGlobalMetaId: 'idq1remotea00000000000000000000000000000',
+      source: 'remote',
+      reason: 'online designer',
+    },
+  ],
+});
+
 test('Twin create without a staffing proposal is rejected', async () => {
   const h = await createHarness();
   try {
@@ -1184,7 +1202,7 @@ test('Twin create is rejected until the owner confirms the proposed slate', asyn
     const proposed = proposeGroupTaskStaffing({
       title: '技能介绍',
       goal: '写出介绍并发布',
-      plan: contentPlan(),
+      plan: confirmRequiredPlan(),
       sourceSessionId: 'session-confirm',
     });
     assert.equal(proposed.ownerConfirmRequired, true);
@@ -1239,7 +1257,7 @@ test('wish that said to start without confirming skip-authorizes Twin create', a
     const proposed = proposeGroupTaskStaffing({
       title: '技能介绍',
       goal: '写出介绍并发布',
-      plan: contentPlan(),
+      plan: confirmRequiredPlan(),
       sourceSessionId: 'session-skip',
     });
     assert.equal(proposed.ownerConfirmRequired, false);
@@ -1253,7 +1271,106 @@ test('wish that said to start without confirming skip-authorizes Twin create', a
       sourceSessionId: 'session-skip',
     });
     assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2]);
+    assert.equal(detail.pendingRemoteSeats.length, 1);
+    assert.equal(detail.pendingRemoteSeats[0].candidateName, 'Remote Artist');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('an all-local small slate auto-starts without owner confirmation', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-local-auto',
+    });
+    assert.equal(proposed.ownerConfirmRequired, false);
+    assert.equal(proposed.proposal.status, 'pending');
+    assert.match(proposed.slateText, /无需确认/);
+    assert.match(proposed.slateText, /本机/);
+
+    const detail = await createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: proposed.proposal.id,
+      sourceSessionId: 'session-local-auto',
+    });
+    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2]);
     assert.equal(detail.pendingRemoteSeats.length, 0);
+    assert.equal(
+      h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).ownerDecision,
+      'local_auto_start',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('five all-local seats still require owner confirmation', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ]);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: {
+        stages: [],
+        seats: [
+          { role: 'content', candidateName: 'Coder Bot', metabotId: 2, source: 'local', reason: 'local' },
+          { role: 'design', candidateName: 'Designer Bot', metabotId: 3, source: 'local', reason: 'local' },
+          { role: 'engineering', candidateName: 'Coder Bot', metabotId: 2, source: 'local', reason: 'local' },
+          { role: 'promotion', candidateName: 'Designer Bot', metabotId: 3, source: 'local', reason: 'local' },
+          { role: 'domain', domainLabel: 'legal', candidateName: 'Coder Bot', metabotId: 2, source: 'local', reason: 'local' },
+        ],
+      },
+      sourceSessionId: 'session-five-local',
+    });
+    assert.equal(proposed.ownerConfirmRequired, true);
+    assert.equal(proposed.proposal.status, 'pending');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('an owner revise reply blocks the all-local auto-start', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-local-revise',
+    });
+    assert.equal(proposed.ownerConfirmRequired, false);
+    messages.push({
+      type: 'user',
+      content: '换人，用设计师',
+      timestamp: proposed.proposal.createdAt + 10,
+    });
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-local-revise',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'OWNER_REVISE_REQUIRED',
+    );
+    assert.equal(h.calls.create.length, 0);
   } finally {
     h.cleanup();
   }
@@ -1328,7 +1445,7 @@ test('「能直接开发吗？」does not skip owner confirm', async () => {
     const proposed = proposeGroupTaskStaffing({
       title: '技能介绍',
       goal: '写出介绍并发布',
-      plan: contentPlan(),
+      plan: confirmRequiredPlan(),
       sourceSessionId: 'session-dev-question',
     });
     assert.equal(proposed.ownerConfirmRequired, true);
@@ -1348,7 +1465,7 @@ test('a historical skip phrase does not authorize a later propose', async () => 
     const proposed = proposeGroupTaskStaffing({
       title: '技能介绍',
       goal: '写出介绍并发布',
-      plan: contentPlan(),
+      plan: confirmRequiredPlan(),
       sourceSessionId: 'session-old-skip',
     });
     assert.equal(proposed.ownerConfirmRequired, true);
@@ -1368,7 +1485,7 @@ test('owner skip phrase after a pending propose authorizes Twin create', async (
     const proposed = proposeGroupTaskStaffing({
       title: '技能介绍',
       goal: '写出介绍并发布',
-      plan: contentPlan(),
+      plan: confirmRequiredPlan(),
       sourceSessionId: 'session-skip-after',
     });
     assert.equal(proposed.proposal.status, 'pending');

@@ -80,6 +80,7 @@ import {
   buildStaffingSlateText,
   detectSkipConfirmInWish,
   GroupTaskStaffingError,
+  isLocalOnlySmallSlate,
   isStaffingProposalExpired,
   localSeatMetabotIds,
   normalizeStaffingPlan,
@@ -498,6 +499,7 @@ function evaluateProposalOwnerGate(
     triggeringWish: split.triggeringWish,
     repliesAfterPropose: split.repliesAfterPropose,
     persistedSkip: proposal.status === 'skip_authorized' || proposal.skipAuthorized,
+    localSmallSlate: isLocalOnlySmallSlate(proposal.plan),
   });
 }
 
@@ -548,7 +550,13 @@ export function proposeGroupTaskStaffing(
   const messages = loadStaffingSessionMessages(sourceSessionId);
   const now = Date.now();
   const triggeringWish = pickTriggeringWishText(messages, now);
-  const skipAuthorized = detectSkipConfirmInWish(triggeringWish);
+  const wishSkip = detectSkipConfirmInWish(triggeringWish);
+  // All-local small slates skip the confirm round on their own. They stay
+  // 'pending' in the store — 'skip_authorized' is reserved for the owner's
+  // explicit waiver — and the create-time gate admits them as
+  // 'local_auto_start', keeping the audit trail honest about who waived what.
+  const localAutoStart = isLocalOnlySmallSlate(plan);
+  const confirmWaived = wishSkip || localAutoStart;
   const proposal = getGroupTaskStore().createStaffingProposal({
     sourceSessionId,
     twinMetabotId,
@@ -556,18 +564,19 @@ export function proposeGroupTaskStaffing(
     goal,
     acceptanceCriteria: opts.acceptanceCriteria?.trim() || null,
     plan,
-    status: skipAuthorized ? 'skip_authorized' : 'pending',
+    status: wishSkip ? 'skip_authorized' : 'pending',
     createdAt: now,
   });
   return {
     proposal,
-    ownerConfirmRequired: !skipAuthorized,
+    ownerConfirmRequired: !confirmWaived,
     slateText: buildStaffingSlateText({
       title,
       goal,
       acceptanceCriteria: opts.acceptanceCriteria,
       plan,
-      ownerConfirmRequired: !skipAuthorized,
+      ownerConfirmRequired: !confirmWaived,
+      skipReason: wishSkip ? 'wish' : 'local_small',
       language: opts.language,
     }),
     warnings: validation.warnings,
