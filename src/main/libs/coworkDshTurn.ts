@@ -6,6 +6,15 @@
 // provider without restarting, and that restart used to dispose every
 // in-flight turn ("DSH runtime stream closed", exit 0). Same-provider
 // sessions still multiplex on one kernel (models union via mergeProviderRoute).
+//
+// A config change the running process cannot serve (a new model route or MCP
+// server joining the union) used to wait a bounded 90s for in-flight turns
+// and then restart anyway — killing any turn still running past the budget
+// (incident: a long scheduled-task turn died exactly 90s after a v4-pro
+// session first arrived on a flash-only slot). Now such a change boots a
+// SUCCESSOR kernel immediately and marks the old one draining: the caller's
+// turn runs on the successor, in-flight turns finish on the old process, and
+// the drained process closes once its last turn settles.
 // DshTurnController drives one active turn: ensure → prompt → mapper
 // actions → turn end, with native steer/cancel and approval bridging.
 
@@ -247,12 +256,10 @@ export interface DshHubOptions {
    *  runtime); those values are written to a DSH_SESSION_ID-keyed env file
    *  that bash sources via BASH_ENV after the KEY/TOKEN scrub. */
   skillHostEnvProvider?: () => Record<string, string>
-  /** Quiescence budget before a NON-deferrable config change restarts the
-   *  shared runtime while turns are in flight (default 90s; tests shrink it). */
-  configRestartQuiescenceMs?: number
   /** Close a provider-keyed runtime after this long with no in-flight turns
    *  (default 30min; 0 disables; tests shrink it). Next turn on that provider
-   *  cold-starts and resumes sessions from disk. */
+   *  cold-starts and resumes sessions from disk. Also sweeps drained
+   *  (superseded) kernels whose turns have all settled. */
   runtimeIdleTtlMs?: number
 }
 
@@ -304,6 +311,12 @@ interface DshEnsureKernelOptions {
 interface DshRuntimeSlot {
   key: string
   kernel: DshKernel
+  /** Superseded kernels still serving their in-flight turns. A config change
+   *  the running process cannot serve boots a successor kernel instead of
+   *  restarting under live turns; drained kernels close once their last turn
+   *  settles (never force-killed — a legitimately long turn must outlive the
+   *  handover). */
+  drainingKernels: DshKernel[]
   /** Serializes ensureRuntime for THIS slot so warmup and the first turn
    *  on the same provider cannot double-spawn. Other providers boot in parallel. */
   kernelEnsureChain: Promise<void>
@@ -328,6 +341,11 @@ export class DshTurnHub {
   private pinnedDshIds = new Map<string, string>()
   /** dsh session id → provider key of the kernel that last served it. */
   private runtimeKeyByDsh = new Map<string, string>()
+  /** dsh session id → the kernel instance whose process holds the session's
+   *  live agent. Slot key alone is ambiguous while a superseded kernel drains
+   *  alongside its successor; steer/cancel/dispose must reach the exact
+   *  process that owns the agent. */
+  private kernelByDsh = new Map<string, DshKernel>()
   /** Approval / ask ids belong to the kernel that raised them. */
   private askKernelById = new Map<string, DshKernel>()
   /** DeepSeek server-side web search is composition-level and shared across
@@ -344,13 +362,17 @@ export class DshTurnHub {
   get running(): boolean {
     for (const slot of this.slots.values()) {
       if (slot.kernel.running) return true
+      if (slot.drainingKernels.some((kernel) => kernel.running)) return true
     }
     return false
   }
 
   get restartCount(): number {
     let total = 0
-    for (const slot of this.slots.values()) total += slot.kernel.restartCount
+    for (const slot of this.slots.values()) {
+      total += slot.kernel.restartCount
+      for (const kernel of slot.drainingKernels) total += kernel.restartCount
+    }
     return total
   }
 
@@ -394,6 +416,14 @@ export class DshTurnHub {
     }
     this.runtimeKeyByDsh.set(input.dshSessionId, nextKey)
     const kernel = await this.ensureKernel(input)
+    // The session's live agent may sit on a superseded (draining) kernel when
+    // this turn starts — release it there first so exactly one process owns
+    // the JSONL (same contract as the cross-provider re-pin above).
+    const holder = this.kernelByDsh.get(input.dshSessionId)
+    if (holder && holder !== kernel && holder.running) {
+      await holder.disposeSession(input.dshSessionId).catch(() => undefined)
+    }
+    this.kernelByDsh.set(input.dshSessionId, kernel)
     const controller = new DshTurnController(input)
     // One active turn per cowork session: a stray previous controller (e.g. a
     // turn that never settled) must not swallow events.
@@ -421,6 +451,15 @@ export class DshTurnHub {
       this.controllersByDsh.delete(input.dshSessionId)
       this.dshByCowork.delete(input.sessionId)
       this.coworkByDsh.delete(input.dshSessionId)
+      // Turn ran on a superseded kernel: release its agent so the successor
+      // can resume the session from disk, then retire the drained process
+      // once nothing else runs on it.
+      const servedKernel = this.kernelByDsh.get(input.dshSessionId)
+      const slot = this.slots.get(nextKey)
+      if (servedKernel && slot && servedKernel !== slot.kernel) {
+        await servedKernel.disposeSession(input.dshSessionId).catch(() => undefined)
+        this.settleDrains(nextKey)
+      }
       this.scheduleReap()
     }
   }
@@ -541,8 +580,11 @@ export class DshTurnHub {
       return
     }
     for (const slot of this.slots.values()) {
-      if (slot.kernel.running) {
-        await slot.kernel.cancel(dshSessionId, cause).catch(() => undefined)
+      const candidates = [slot.kernel, ...slot.drainingKernels]
+      for (const kernel of candidates) {
+        if (kernel.running) {
+          await kernel.cancel(dshSessionId, cause).catch(() => undefined)
+        }
       }
     }
   }
@@ -594,18 +636,27 @@ export class DshTurnHub {
       clearTimeout(this.reapTimer)
       this.reapTimer = null
     }
-    const kernels = [...this.slots.values()].map((slot) => slot.kernel.close())
+    const kernels: Promise<void>[] = []
+    for (const slot of this.slots.values()) {
+      kernels.push(slot.kernel.close())
+      for (const kernel of slot.drainingKernels) kernels.push(kernel.close())
+    }
     await Promise.all(kernels)
     this.slots.clear()
     this.controllersByDsh.clear()
     this.dshByCowork.clear()
     this.coworkByDsh.clear()
     this.runtimeKeyByDsh.clear()
+    this.kernelByDsh.clear()
     this.askKernelById.clear()
   }
 
   private kernelForDsh(dshId: string | undefined): DshKernel | null {
     if (!dshId) return null
+    // Holder first: while a drained kernel and its successor coexist, the
+    // agent (and any in-flight turn) lives on the exact process recorded here.
+    const holder = this.kernelByDsh.get(dshId)
+    if (holder?.running) return holder
     const key = this.runtimeKeyByDsh.get(dshId)
     if (key) {
       const slot = this.slots.get(key)
@@ -617,6 +668,9 @@ export class DshTurnHub {
   private firstRunningKernel(): DshKernel | null {
     for (const slot of this.slots.values()) {
       if (slot.kernel.running) return slot.kernel
+      for (const kernel of slot.drainingKernels) {
+        if (kernel.running) return kernel
+      }
     }
     return null
   }
@@ -630,14 +684,16 @@ export class DshTurnHub {
   }
 
   private async disposeSessionOnSlot(runtimeKey: string, dshSessionId: string): Promise<void> {
-    const slot = this.slots.get(runtimeKey)
-    if (!slot?.kernel.running) return
+    // The agent may live on a drained kernel of this slot rather than on the
+    // current one — dispose where it actually is (no-op elsewhere).
+    const kernel = this.kernelForDsh(dshSessionId)
+    if (!kernel) return
     this.opts.log?.('info', 'dshTurnHub.disposeSession', {
       dshSessionId,
       runtime: runtimeKey,
     })
     try {
-      await slot.kernel.disposeSession(dshSessionId)
+      await kernel.disposeSession(dshSessionId)
     } catch (error) {
       this.opts.log?.('warn', 'dshTurnHub.disposeSession failed', {
         dshSessionId,
@@ -663,13 +719,22 @@ export class DshTurnHub {
     if (ttl <= 0) return
     const now = Date.now()
     for (const [key, slot] of [...this.slots]) {
+      // Retire drained kernels whose turns have all settled, even when the
+      // slot itself is too young/fresh to reap.
+      this.settleDrains(key)
       if (this.inFlightOnSlot(key) > 0) continue
       if (now - slot.lastUsedAt < ttl) continue
       this.opts.log?.('info', 'dshTurnHub.reapIdleRuntime', { runtime: key })
       await slot.kernel.close().catch(() => undefined)
+      for (const kernel of slot.drainingKernels) await kernel.close().catch(() => undefined)
       this.slots.delete(key)
       for (const [dshId, mapped] of [...this.runtimeKeyByDsh]) {
         if (mapped === key) this.runtimeKeyByDsh.delete(dshId)
+      }
+      for (const [dshId, holder] of [...this.kernelByDsh]) {
+        if (holder === slot.kernel || slot.drainingKernels.includes(holder)) {
+          this.kernelByDsh.delete(dshId)
+        }
       }
     }
     if (this.slots.size > 0) this.scheduleReap()
@@ -684,6 +749,7 @@ export class DshTurnHub {
     const slot: DshRuntimeSlot = {
       key,
       kernel: null as unknown as DshKernel,
+      drainingKernels: [],
       kernelEnsureChain: Promise.resolve(),
       lastConfigJson: undefined,
       workspaceSeen: undefined,
@@ -692,13 +758,67 @@ export class DshTurnHub {
       mcpServersSeen: new Map(),
       lastUsedAt: Date.now(),
     }
-    slot.kernel = new DshKernel({
-      runtimeDir: this.opts.runtimeDir,
-      handlers: this.hubHandlers(slot),
-      log: this.opts.log,
-    })
+    this.attachKernel(slot)
     this.slots.set(key, slot)
     return slot
+  }
+
+  /** Create the slot's CURRENT kernel. Handlers bind to this exact instance —
+   *  a slot can briefly host a drained kernel alongside its successor, and
+   *  approvals/tool responses must reach the process that raised them. The
+   *  lazy resolver dodges the constructor/assignment cycle. */
+  private attachKernel(slot: DshRuntimeSlot): DshKernel {
+    const kernel = new DshKernel({
+      runtimeDir: this.opts.runtimeDir,
+      handlers: this.hubHandlers(slot, () => kernel),
+      log: this.opts.log,
+    })
+    slot.kernel = kernel
+    return kernel
+  }
+
+  /** Swap in a successor kernel and mark the current one draining. Idle
+   *  agents on the old process are released right away; in-flight turns keep
+   *  it alive until they settle (their runTurn finally releases the agent and
+   *  calls settleDrains). */
+  private supersedeKernel(slot: DshRuntimeSlot): DshKernel {
+    const old = slot.kernel
+    for (const [dshId, holder] of this.kernelByDsh) {
+      if (holder !== old || this.controllersByDsh.has(dshId)) continue
+      void old.disposeSession(dshId).then(
+        () => this.settleDrains(slot.key),
+        () => undefined,
+      )
+    }
+    slot.drainingKernels.push(old)
+    return this.attachKernel(slot)
+  }
+
+  /** Close drained kernels: a superseded runtime retires once no turn is left
+   *  running on it. Never force-closes — a turn that legitimately outlasts the
+   *  handover keeps its process for exactly as long as it runs. */
+  private settleDrains(key: string): void {
+    const slot = this.slots.get(key)
+    if (!slot) return
+    slot.drainingKernels = slot.drainingKernels.filter((kernel) => {
+      if (kernel.running && this.inFlightOnKernel(kernel) > 0) return true
+      void kernel.close().then(() => undefined, () => undefined)
+      for (const [dshId, holder] of this.kernelByDsh) {
+        if (holder === kernel) this.kernelByDsh.delete(dshId)
+      }
+      this.opts.log?.('info', 'dshTurnHub.drainedRuntimeClosed', { runtime: key })
+      return false
+    })
+  }
+
+  /** Turns whose kernel is this exact instance (a slot's in-flight turns may
+   *  be split between a drained kernel and its successor). */
+  private inFlightOnKernel(kernel: DshKernel): number {
+    let count = 0
+    for (const [dshId, holder] of this.kernelByDsh) {
+      if (holder === kernel && this.controllersByDsh.has(dshId)) count += 1
+    }
+    return count
   }
 
   private rememberTurnInputs(slot: DshRuntimeSlot, input: DshTurnInput, options?: DshEnsureKernelOptions): void {
@@ -785,13 +905,19 @@ export class DshTurnHub {
             { runtime: slot.key, changed: changedKeys, inFlight })
           return slot.kernel
         }
+        // The caller needs a config the running process cannot serve (e.g.
+        // the first v4-pro turn on a flash-only slot). Waiting a bounded 90s
+        // and restarting anyway killed turns that legitimately ran longer
+        // (incident: "DSH runtime stream closed", exit 0, exactly 90s after
+        // the config diff). Instead boot a successor process immediately and
+        // let the old one drain its in-flight turns.
         this.opts.log?.('warn',
-          'config change needs a runtime restart; waiting (bounded) for in-flight turns',
+          'config change with in-flight turns; booting a successor runtime and draining the old one',
           { runtime: slot.key, changed: changedKeys, inFlight })
-        const deadline = Date.now() + (this.opts.configRestartQuiescenceMs ?? 90000)
-        while (this.inFlightOnSlot(slot.key) > 0 && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 100))
-        }
+        const successor = this.supersedeKernel(slot)
+        await successor.ensureRuntime(config)
+        slot.lastConfigJson = nextJson
+        return successor
       }
     }
     await slot.kernel.ensureRuntime(config)
@@ -799,10 +925,12 @@ export class DshTurnHub {
     return slot.kernel
   }
 
-  private hubHandlers(runtime: DshRuntimeSlot): DshKernelOptions['handlers'] {
+  private hubHandlers(slot: DshRuntimeSlot, kernelOf: () => DshKernel): DshKernelOptions['handlers'] {
     // Kernel event callbacks carry the DSH session id.
     const controllerOf = (dshSessionId: string) => this.controllersByDsh.get(dshSessionId)
-    const kernelOf = () => runtime.kernel
+    // Bound to THIS kernel instance: while a drained kernel coexists with its
+    // successor, responses (approvals/tools/policy) must reach the process
+    // that raised the request.
     return {
       onMessage: (sessionId, message, streamSlot) => {
         const controller = controllerOf(sessionId)
@@ -843,11 +971,13 @@ export class DshTurnHub {
         controllerOf(event.sessionId)?.cb.onSubagentEvent?.(event)
       },
       onError: (error) => {
-        this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message, runtime: runtime.key })
-        // Only settle turns on THIS kernel. A DeepSeek process dying must
-        // not fail Lucy's in-flight OpenCode turn (and vice versa).
+        this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message, runtime: slot.key })
+        // Only settle turns on THIS kernel instance — a drained kernel dying
+        // must not fail turns already re-pinned to its successor (and vice
+        // versa; the slot key alone cannot tell them apart).
+        const kernel = kernelOf()
         for (const [dshId, controller] of this.controllersByDsh) {
-          if (this.runtimeKeyByDsh.get(dshId) !== runtime.key) continue
+          if (this.kernelByDsh.get(dshId) !== kernel) continue
           controller.handleTurnEnd({ kind: 'error', reason: `DSH runtime stream closed: ${error.message}` })
         }
       },
@@ -860,7 +990,13 @@ export class DshTurnHub {
         }
         void this.opts.evaluatePolicy(coworkId, request.name, request.arguments ?? {})
           .then((result) => kernelOf().respondPolicy(request.id, result.decision, result.reason))
-          .catch(() => kernelOf().respondPolicy(request.id, 'deny', 'policy evaluation failed'))
+          .catch(() => {
+            try {
+              kernelOf().respondPolicy(request.id, 'deny', 'policy evaluation failed')
+            } catch {
+              // Drained kernel already closed — nothing left to answer.
+            }
+          })
       },
       onToolRequest: (request) => {
         // Map the DSH session id back to the cowork id for the executor.
@@ -868,7 +1004,14 @@ export class DshTurnHub {
         if (!coworkId || !this.opts.executeTool) return
         void this.opts.executeTool(coworkId, request.name, request.arguments ?? {})
           .then((result) => kernelOf().respondTool(request.id, result))
-          .catch((error) => kernelOf().respondTool(request.id, { ok: false, error: error instanceof Error ? error.message : String(error) }))
+          .catch((error) => {
+            // The kernel may have drained and closed while the host tool ran.
+            try {
+              kernelOf().respondTool(request.id, { ok: false, error: error instanceof Error ? error.message : String(error) })
+            } catch {
+              // Process already gone — nothing left to answer.
+            }
+          })
       },
     }
   }

@@ -72,9 +72,6 @@ test('a second provider boots its own runtime and does not kill an in-flight tur
     runtimeDir,
     sessionRoot,
     log: (level, message, detail) => logs.push({ level, message, detail: detail ?? {} }),
-    // If the old shared-process path still ran, this budget would expire
-    // during sleep 5 and kill turn A. The new path never waits.
-    configRestartQuiescenceMs: 500,
   })
   const callbacks = () => ({
     onMessage: () => `m-${Math.random().toString(36).slice(2)}`,

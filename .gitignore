@@ -67,6 +67,7 @@ tests/*
 !tests/metaidRpcTokenFile.test.mjs
 !tests/httpListenWithRetry.test.mjs
 !tests/coworkDshRestartDefer.test.mjs
+!tests/coworkDshRuntimeDrain.test.mjs
 !tests/coworkDshPerRouteCredential.test.mjs
 !tests/dshHostToolRegistry.test.mjs
 !tests/promptComposer.test.mjs

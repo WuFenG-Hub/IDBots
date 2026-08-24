@@ -6,7 +6,8 @@
 // 90s after the turn started. Fix under test: when the calling turn's
 // provider route is already served by the running runtime, the restart is
 // deferred to the next quiescent ensureKernel (lastConfigJson keeps the
-// running config so the diff stays visible).
+// running config so the diff stays visible). When it is NOT served, the
+// successor/drain handover covers it (coworkDshRuntimeDrain.test.mjs).
 // Requires: npm run compile:electron + dsh-runtime/node_modules.
 
 import assert from 'node:assert/strict'
@@ -74,9 +75,6 @@ test('config flap during a long tool call defers the restart; the in-flight turn
     runtimeDir,
     sessionRoot,
     log: (level, message, detail) => logs.push({ level, message, detail: detail ?? {} }),
-    // Incident timing compressed: the old code killed the in-flight turn once
-    // this budget expired; the fix never reaches the wait for a same-route turn.
-    configRestartQuiescenceMs: 500,
     mcpServersProvider: () => mcpServers,
   })
   const callbacks = () => ({
