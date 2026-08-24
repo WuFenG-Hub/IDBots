@@ -578,6 +578,195 @@ test('compaction/start is silent; compaction/end only reports failures', () => {
   assert.match(failed[0].message.content, /Compaction failed: summary unavailable/)
 })
 
+// ---- Effort-"off" tool-call commentary (reasoning-disabled route) ---------
+// With thinking disabled, native DeepSeek has no reasoning channel: text that
+// rides alongside tool calls is the only process text. It streams as ordinary
+// text until the tool-call block starts, then must fold into the thinking
+// display immediately (not at assistant/message finalize — that late fold is
+// the "thinking flashes as body copy, then retracts into a Think row" bug).
+
+test('off-mode commentary converts at block-start tool-call and streams as thinking', () => {
+  const mapper = new DshEventMapper()
+  // Commentary starts as an optimistic body bubble (it may yet prove to be
+  // the reply)…
+  const opened = mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '现在' } },
+  })
+  assert.deepEqual(kinds(opened), ['message', 'messageUpdate'])
+  assert.equal(opened[0].slot, 'text')
+
+  // …the tool-call block-start is the earliest proof it is commentary.
+  const converted = mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 1, step: 1, chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
+  })
+  assert.deepEqual(kinds(converted), ['messageFinalize'])
+  assert.equal(converted[0].slot, 'text')
+  assert.equal(converted[0].content, '现在')
+  assert.equal(converted[0].metadata.isThinking, true)
+  assert.equal(converted[0].metadata.isStreaming, true, 'converted bubble keeps the streaming pulse')
+
+  // Remaining deltas of the round stream into the SAME message (text slot id).
+  const more = mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '查一下' } },
+  })
+  assert.deepEqual(kinds(more), ['messageUpdate'])
+  assert.equal(more[0].slot, 'text')
+  assert.equal(more[0].content, '现在查一下')
+
+  // Round finalize: assembled text is authoritative; display stays streaming.
+  const round1 = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 1, step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '现在查一下' },
+          { type: 'tool-call', id: 'c1', name: 'search_metaweb', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  const ride1 = round1.find((a) => a.kind === 'messageFinalize')
+  assert.equal(ride1.slot, 'text')
+  assert.equal(ride1.content, '现在查一下')
+  assert.equal(ride1.metadata.isThinking, true)
+  assert.equal(ride1.metadata.isStreaming, true, 'thinking display stays open across the tool round')
+  assert.equal(round1.some((a) => a.kind === 'message' && a.slot === 'thinking'), false, 'no second Think bubble')
+
+  mapper.consume({ type: 'tool/call', data: { callId: 'c1', name: 'search_metaweb', arguments: '{}' } })
+
+  // Round 2 text is held while streaming (thinking already held — same
+  // contract as the reasoning path) and appended at finalize.
+  const held = mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 1, step: 2, chunk: { type: 'text-delta', index: 0, text: '继续读' } },
+  })
+  assert.deepEqual(held, [])
+  const round2 = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 1, step: 2,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '继续读。' },
+          { type: 'tool-call', id: 'c2', name: 'bash', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  const ride2 = round2.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(ride2.content, '现在查一下\n\n继续读。')
+  assert.equal(ride2.metadata.isStreaming, true)
+
+  // The pure reply settles the thinking display with the commentary only…
+  const reply = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 1, step: 3,
+      message: { role: 'assistant', content: [{ type: 'text', text: '## 汇总' }] },
+    },
+  })
+  const settles = reply.filter((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(settles.length, 2, 'ride message settles, then the reply bubble finalizes')
+  assert.equal(settles[0].content, '现在查一下\n\n继续读。')
+  assert.equal(settles[0].metadata.isThinking, true)
+  assert.equal(settles[0].metadata.isStreaming, undefined, 'pulse off once the reply lands')
+  assert.equal(settles[0].content.includes('汇总'), false, 'the reply never enters the thinking display')
+  assert.equal(settles[1].content, '## 汇总')
+  assert.equal(settles[1].metadata, undefined, 'the reply is plain visible text')
+
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
+  const turnEnd = ended.find((a) => a.kind === 'turnEnd')
+  assert.equal(turnEnd.emptyTerminal, undefined)
+  assert.equal(ended.some((a) => a.kind === 'messageFinalize'), false, 'nothing left to close')
+})
+
+test('off-mode turn aborted mid-round settles the converted thinking display', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 0, text: '让我' } },
+  })
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
+  })
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: 'cancel' } } })
+  const settled = ended.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(settled.content, '让我')
+  assert.equal(settled.metadata.isThinking, true)
+  assert.equal(settled.metadata.isStreaming, undefined, 'isStreaming cannot stick across the abort')
+  assert.equal(ended.some((a) => a.kind === 'turnEnd'), true)
+})
+
+test('block-start tool-call without streaming text converts nothing', () => {
+  const mapper = new DshEventMapper()
+  const actions = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 0, blockType: 'tool-call' } },
+  })
+  assert.deepEqual(actions, [])
+})
+
+test('conversion is skipped while a native reasoning block keeps text held', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } } })
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'reasoning-delta', index: 0, text: 'plan' } } })
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 1, text: '先看仓库。' } } })
+  const atTool = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 2, blockType: 'tool-call' } },
+  })
+  assert.deepEqual(atTool, [])
+})
+
+test('tool-call-chunks (DSH web stream) also triggers the conversion', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 0, text: '先看' } },
+  })
+  const converted = mapper.consume({
+    type: 'tool-call-chunks',
+    data: { turn: 1, step: 1, index: 1, id: 'call_1', name: 'bash', args: [''] },
+  })
+  const finalize = converted.find((a) => a.kind === 'messageFinalize')
+  assert.equal(finalize.slot, 'text')
+  assert.equal(finalize.content, '先看')
+  assert.equal(finalize.metadata.isThinking, true)
+})
+
+test('fallback: commentary with no block-start signal still folds at finalize', () => {
+  const mapper = new DshEventMapper()
+  // Route that never emits block-start tool-call chunks: the pre-fix behavior
+  // (fold at assistant/message) remains as the safety net.
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 0, text: '本地没装 tsx，用 npx 跑：' } },
+  })
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 1, step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '本地没装 tsx，用 npx 跑：' },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  const finalize = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(finalize.content, '本地没装 tsx，用 npx 跑：')
+  assert.equal(finalize.metadata.isThinking, true)
+})
+
 test('splitThinkTaggedContent extracts think and thinking tags', () => {
   assert.deepEqual(splitThinkTaggedContent('plain reply'), { thinking: '', text: 'plain reply' })
   assert.deepEqual(
