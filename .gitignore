@@ -93,6 +93,7 @@ tests/*
 !tests/groupTaskSession.test.mjs
 !tests/groupTaskStatusEvents.test.mjs
 !tests/groupTaskUtils.test.mjs
+!tests/groupTaskGoalCollapse.test.mjs
 !tests/groupTaskKickMember.test.mjs
 !tests/groupTaskKickMemberRpc.test.mjs
 !tests/groupTaskCheckpoints.test.mjs
