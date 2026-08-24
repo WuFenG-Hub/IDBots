@@ -5884,7 +5884,7 @@ export class CoworkStore implements MemoryBackend {
     return normalizeMemoryHygieneConfig(parsed);
   }
 
-  setMemoryHygieneConfig(update: Partial<MemoryHygieneConfig>): MemoryHygieneConfig {
+  setMemoryHygieneConfig(update: Partial<MemoryHygieneConfig> | Record<string, unknown>): MemoryHygieneConfig {
     const next = normalizeMemoryHygieneConfig({ ...this.getMemoryHygieneConfig(), ...update });
     this.db.run(`
       INSERT INTO cowork_config (key, value, updated_at)

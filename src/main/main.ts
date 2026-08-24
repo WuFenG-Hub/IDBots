@@ -220,7 +220,7 @@ import {
 } from './services/cognitiveChatCompletion';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
-import { startMemoryHygieneService, stopMemoryHygieneService } from './services/memoryHygieneService';
+import { startMemoryHygieneService, stopMemoryHygieneService, getMemoryHygieneService } from './services/memoryHygieneService';
 import { KnowledgeBaseService } from './services/knowledgeBaseService';
 import { KnowledgeBaseStore } from './knowledgeBaseStore';
 import {
@@ -9685,6 +9685,7 @@ if (!gotTheLock) {
     memoryLlmJudgeEnabled?: boolean;
     memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems?: number;
+    hygieneEnabled?: boolean;
   }) => {
     try {
       const store = getCoworkStore();
@@ -9706,9 +9707,10 @@ if (!gotTheLock) {
             ? input.memoryGuardLevel
             : undefined,
         memoryUserMemoriesMaxItems:
-          typeof input?.memoryUserMemoriesMaxItems === 'number' && Number.isFinite(input.memoryUserMemoriesMaxItems)
+          typeof input?.memoryUserMemoriesMaxItems === 'number' && Number.isFinite(input?.memoryUserMemoriesMaxItems)
             ? input.memoryUserMemoriesMaxItems
             : undefined,
+        hygieneEnabled: typeof input?.hygieneEnabled === 'boolean' ? input.hygieneEnabled : undefined,
       });
       return { success: true, policy };
     } catch (error) {
@@ -10368,6 +10370,54 @@ if (!gotTheLock) {
         return { success: false, error: error instanceof Error ? error.message : 'Failed to run dream' };
       }
     });
+  });
+
+  // ==================== Memory Hygiene IPC Handlers ====================
+
+  ipcMain.handle('memoryHygiene:get', async () => {
+    try {
+      const store = getCoworkStore();
+      return {
+        success: true,
+        config: store.getMemoryHygieneConfig(),
+        lastRun: store.getMemoryHygieneLastRun(),
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get memory hygiene config',
+      };
+    }
+  });
+
+  ipcMain.handle('memoryHygiene:setConfig', async (_event, input: Record<string, unknown>) => {
+    try {
+      const store = getCoworkStore();
+      // The store normalizes and clamps every field, so untyped IPC input is safe.
+      const config = store.setMemoryHygieneConfig(input as Record<string, never>);
+      return { success: true, config };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to save memory hygiene config',
+      };
+    }
+  });
+
+  ipcMain.handle('memoryHygiene:runNow', async () => {
+    try {
+      const service = getMemoryHygieneService();
+      if (!service) {
+        return { success: false, error: 'Memory hygiene service is not running' };
+      }
+      const stats = await service.runNow();
+      return { success: true, stats };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to run memory hygiene',
+      };
+    }
   });
 
   // ==================== Knowledge Base IPC Handlers ====================
