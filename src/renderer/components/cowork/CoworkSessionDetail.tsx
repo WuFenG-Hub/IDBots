@@ -1589,7 +1589,7 @@ const UserMessageItem: React.FC<{
               <div className="w-fit max-w-[42rem] rounded-2xl px-4 py-2.5 dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text shadow-subtle">
                 <MarkdownContent
                   content={message.content}
-                  className="max-w-none whitespace-pre-wrap break-words"
+                  className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
                 />
               </div>
               <div className="flex items-center justify-end gap-1.5 mt-1">

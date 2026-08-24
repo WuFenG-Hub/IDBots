@@ -210,8 +210,10 @@ const CoworkPermissionModal: React.FC<CoworkPermissionModalProps> = ({
           </button>
         </div>
 
-        {/* Content */}
-        <div className="px-6 py-4 space-y-4 max-h-[60vh] overflow-y-auto">
+        {/* Content — [overflow-wrap:anywhere] keeps long unbroken strings
+            (metafile://… URIs in question/option text) from stretching the
+            dialog and forcing a horizontal scrollbar. */}
+        <div className="px-6 py-4 space-y-4 max-h-[60vh] overflow-y-auto [overflow-wrap:anywhere]">
           {isQuestionTool ? (
             <>
               {questions.map((question) => {
