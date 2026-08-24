@@ -474,6 +474,10 @@ export interface CoworkMetaIDImpressionSnapshot {
   relationshipTemperature: string | null;
   communicationGuidance: string | null;
   uncertaintyText: string | null;
+  /** Recency-weighted cooperation score 0-100 distilled from collaboration outcomes. */
+  reputationScore: number | null;
+  reputationSamples: number;
+  reputationUpdatedAt: number | null;
   latestObservationId: string;
   snapshotVersion: number;
   createdAt: number;

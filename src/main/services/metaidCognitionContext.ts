@@ -308,6 +308,9 @@ function renderGroupMemberCognitionBlock(
     snapshot
       ? [
           `  - Current impression (observer-owned): ${truncate(snapshot.summaryText, MAX_SNAPSHOT_SUMMARY_CHARS)}`,
+          snapshot.reputationScore != null
+            ? `  - Cooperation temperature: ${snapshot.reputationScore}/100${snapshot.reputationSamples < 3 ? ' (low confidence: few samples)' : ` (${snapshot.reputationSamples} samples)`} — recency-weighted record of accepted vs rejected collaboration; use it to weigh member disputes, not as a verdict by itself.`
+            : '',
           descriptors.length > 0 ? `  - Style descriptors: ${descriptors.join(', ')}` : '',
           snapshot.uncertaintyText
             ? `  - Uncertainty: ${truncate(snapshot.uncertaintyText, MAX_UNCERTAINTY_CHARS)}`

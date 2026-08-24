@@ -260,3 +260,34 @@ test('group projection is observer-relative, labels experience provenance, and s
     db.close();
   }
 });
+
+test('group cognition block surfaces the per-member reputation temperature', async () => {
+  const db = await createLegacyMemoryDb();
+  try {
+    const experience = new MetaIDExperienceStore(db, () => {}, () => 1_800_000_000_000);
+    const impressions = new MetaIDImpressionStore(db, () => {}, () => 1_800_000_000_000);
+    const source = createInteraction(experience, { sourceKey: 'reputation-group' });
+    impressions.appendObservation({
+      observerGlobalMetaID: OWNER,
+      subjectGlobalMetaID: PEER,
+      episodeId: source.episode.id,
+      evidenceIds: [source.evidence.id],
+      observationText: 'Delivered reliably across the sprint.',
+      interpretationText: 'Reliable collaborator.',
+      dimensions: { deliverablesAccepted: 3, deliverablesRejected: 1 },
+      dreamDate: '2026-08-01',
+      dreamVersion: 10,
+      sourceHash: sha('7'),
+    });
+    impressions.rebuildSnapshot(OWNER, PEER);
+    const service = createService(experience, impressions);
+    const block = await service.buildGroupPromptBlock({
+      observerGlobalMetaID: OWNER,
+      roster: [{ globalMetaID: PEER, name: 'Peer Bot', role: 'worker' }],
+    });
+    // Single 0.75 sample from a neutral 0.5 prior: 0.5*0.7 + 0.75*0.3 = 0.575.
+    assert.match(block, /Cooperation temperature: 57\.5\/100 \(low confidence: few samples\)/);
+  } finally {
+    db.close();
+  }
+});

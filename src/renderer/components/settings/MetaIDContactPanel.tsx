@@ -265,6 +265,16 @@ const MetaIDContactPanel: React.FC<MetaIDContactPanelProps> = ({
           </div>
         ) : (
           <div className="mt-2 space-y-2">
+            {snapshot.reputationScore != null && (
+              <div className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text">
+                <span className="font-medium">{i18nService.t('metaidContactReputation')}</span>
+                <span className="text-claude-accent dark:text-claude-darkAccent">{snapshot.reputationScore}/100</span>
+                <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  · {snapshot.reputationSamples} {i18nService.t('metaidContactReputationSamples')}
+                  {snapshot.reputationSamples < 3 ? ` · ${i18nService.t('metaidContactReputationLowConfidence')}` : ''}
+                </span>
+              </div>
+            )}
             <div className="text-sm dark:text-claude-darkText text-claude-text break-words whitespace-pre-wrap">
               {snapshot.summaryText}
             </div>
