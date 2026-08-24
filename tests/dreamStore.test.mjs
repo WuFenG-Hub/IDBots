@@ -419,3 +419,39 @@ test('getActivityForDate includes same-day group chat and in-progress group task
     cleanup();
   }
 });
+
+test('purgeOldRunsAndFragments removes only completed history past the horizon', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = new DreamStore(db, () => {});
+    const seedRun = (id, metabotId, date, status) => db.run(
+      `INSERT INTO metabot_dream_runs (id, metabot_id, dream_date, status, attempt_count, started_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 1, 1, 1, 1)`,
+      [id, metabotId, date, status]
+    );
+    seedRun('run-old-done', 1, '2026-01-01', 'completed');
+    seedRun('run-old-failed', 1, '2026-01-02', 'failed');
+    seedRun('run-new-done', 1, '2026-08-20', 'completed');
+    const seedFragment = (id, metabotId, date) => db.run(
+      `INSERT INTO metabot_dream_fragments (id, metabot_id, dream_date, fragment_key, session_id, content_hash, status, dream_version, created_at, updated_at)
+       VALUES (?, ?, ?, 'k', 's', 'h', 'ready', 1, 1, 1)`,
+      [id, metabotId, date]
+    );
+    seedFragment('frag-old', 1, '2026-01-01');
+    seedFragment('frag-new', 1, '2026-08-20');
+    seedFragment('frag-excluded', 2, '2026-01-01');
+
+    const result = store.purgeOldRunsAndFragments({
+      cutoffDateKey: '2026-05-25',
+      excludeMetabotIds: new Set([2]),
+    });
+    assert.equal(result.runsDeleted, 1);
+    assert.equal(result.fragmentsDeleted, 1);
+    const remainingRuns = db.exec('SELECT id FROM metabot_dream_runs').flatMap((r) => r.values.map((v) => v[0]));
+    assert.deepEqual([...remainingRuns].sort(), ['run-new-done', 'run-old-failed']);
+    const remainingFrags = db.exec('SELECT id FROM metabot_dream_fragments').flatMap((r) => r.values.map((v) => v[0]));
+    assert.deepEqual([...remainingFrags].sort(), ['frag-excluded', 'frag-new']);
+  } finally {
+    cleanup();
+  }
+});

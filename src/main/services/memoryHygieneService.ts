@@ -136,6 +136,34 @@ export class MemoryHygieneService {
         return { memoriesArchived: archived, tombstonesPurged: purged };
       },
     });
+    // Knowledge revision overflow: keep the newest N historical revisions per
+    // entry, physically remove older redundant copies.
+    this.steps.push({
+      name: 'knowledge-revisions',
+      run: (context) => {
+        if (!context.knowledgeStore) return {};
+        const result = context.knowledgeStore.pruneKnowledgeRevisions({
+          keepPerEntry: context.config.knowledgeRevisionKeep,
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        return { knowledgeRevisionsPruned: result.revisionsDeleted };
+      },
+    });
+    // Dream bookkeeping: completed runs and fragment caches past the horizon
+    // are pure history (the scheduler only looks back 7 days).
+    this.steps.push({
+      name: 'dream-runs',
+      run: (context) => {
+        if (!context.dreamStore) return {};
+        const result = context.dreamStore.purgeOldRunsAndFragments({
+          cutoffDateKey: formatBotWorkspaceDate(
+            new Date(context.nowMs - context.config.dreamRunRetentionDays * 86_400_000)
+          ),
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        return { dreamRunsPurged: result.runsDeleted, dreamFragmentsPurged: result.fragmentsDeleted };
+      },
+    });
   }
 
   start(): void {

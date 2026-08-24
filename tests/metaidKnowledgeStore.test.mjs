@@ -250,3 +250,50 @@ test('invalid kind/origin values are rejected by the schema CHECK constraints', 
     db.run('UPDATE metaid_knowledge_entries SET kind = ? WHERE id = ?', ['bogus', entry.id]);
   }, /constraint/i);
 });
+
+test('pruneKnowledgeRevisions keeps the newest N revisions per entry', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new MetaIDKnowledgeStore(db, () => {});
+    for (let version = 1; version <= 5; version += 1) {
+      store.upsertKnowledge({
+        metabotId: 1,
+        topic: 'release checklist',
+        summary: `checklist v${version}`,
+        kind: 'know_how',
+        origin: 'dream',
+      });
+    }
+    for (let version = 1; version <= 2; version += 1) {
+      store.upsertKnowledge({
+        metabotId: 1,
+        topic: 'small topic',
+        summary: `small v${version}`,
+        kind: 'principle',
+        origin: 'dream',
+      });
+    }
+    const count = (where = '') => Number(
+      db.exec(`SELECT COUNT(*) AS n FROM metaid_knowledge_revisions ${where}`)[0]?.values?.[0]?.[0]
+    );
+    assert.equal(count(), 5, 'main topic 4 rewrites + small topic 1 rewrite leave 5 revisions');
+
+    const result = store.pruneKnowledgeRevisions({ keepPerEntry: 2 });
+    assert.equal(result.entriesPruned, 1, 'only the overflowing entry prunes');
+    assert.equal(result.revisionsDeleted, 2);
+    assert.equal(count(), 3, 'newest two main revisions plus the small one survive');
+    assert.ok(
+      db.exec("SELECT summary FROM metaid_knowledge_revisions WHERE summary LIKE 'checklist v%'")
+        [0]?.values?.every((row) => ['checklist v3', 'checklist v4'].includes(row[0])),
+      'kept revisions are the newest by version'
+    );
+    const live = store.listKnowledgeForDream(1).find((entry) => entry.topic.includes('release'));
+    assert.equal(live?.summary, 'checklist v5', 'the live entry text is untouched');
+
+    const again = store.pruneKnowledgeRevisions({ keepPerEntry: 2 });
+    assert.equal(again.revisionsDeleted, 0, 'idempotent');
+  } finally {
+    harness.cleanup();
+  }
+});
