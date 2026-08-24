@@ -120,3 +120,31 @@ The `man-p2p` binary runs as a managed subprocess. Key services:
 - `AGENTS.md` — extended repo guidance with known useful files and runtime rules.
 - `localdocs/` — local-only working notes (disposable, not committed).
 - `docs/superpowers/` — specs and plans from P2P/alpha integration work.
+
+## Workspace Instructions (AGENTS.md / CLAUDE.md Injection)
+
+When a cowork session's working directory (the per-session `cwd` passed to
+`session/ensure`, which bash/fs tools resolve from) has an `AGENTS.md` or
+`CLAUDE.md` at its root — or anywhere between the project root and the cwd —
+the DSH runtime injects those files into the conversation before the first
+model request, so the agent follows the repository's conventions just like
+other harness projects do.
+
+- Mechanism: the pinned `@deepseek-ai/dsh-agent-instructions` package, mounted
+  by `dsh-runtime/lib/generate-runtime-config.mjs` whenever the composition has
+  a workspace (the fs provider it reads through). Same package and defaults the
+  DeepSeek Harness web UI uses.
+- Discovery: user-global `$DSH_HOME/AGENTS.md` (default `~/.dsh`), then the
+  root-to-cwd ancestor chain found by walking up to the first `.git` marker.
+  In each directory the ordered candidates `AGENTS.md`, `CLAUDE.md` (plus the
+  `.local` overlays `AGENTS.local.md`, `CLAUDE.local.md`) are loaded; `AGENTS.md`
+  renders before `CLAUDE.md`, and more specific (deeper) directories override
+  broader ones.
+- Injection: rendered as a durable user-role baseline message
+  (`<system-reminder>` frame, "Instructions from: <path>" per file) with a
+  64 KiB byte budget; fs tool edits to instruction files are reconciled into
+  the session automatically.
+- Controls: `workspaceInstructions.maxBytes` / `workspaceInstructions.dshHome`
+  in the runtime config input (defaults match the official bundle).
+- Not injected when the session has no workspace cwd or the composition mounts
+  no fs provider — providerless runs stay hermetic.

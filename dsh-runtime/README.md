@@ -41,7 +41,11 @@ see `spikes/dsh-phase0/PHASE0_REPORT.md` F1). No forks.
   apiFormats (`openai`→`openai-completions`, `responses`→`openai-responses`,
   `anthropic`→`anthropic-messages`), resolving the Phase 0 Responses-API question.
   Plugin paths are absolute and the bin passes `bareModuleBaseUrl`, so the generated
-  config is location-independent (the app writes it into userData).
+  config is location-independent (the app writes it into userData). The workspace
+  branch also mounts the official `@deepseek-ai/dsh-agent-instructions` plugin:
+  AGENTS.md/CLAUDE.md discovered from the session cwd are injected as a user-role
+  baseline before the first model request (64 KiB budget, `workspaceInstructions`
+  input overrides), the same mechanism the DeepSeek Harness web UI uses.
 - `cordis.test.yml` — M1/M2 test composition (core services, JSONL persistence,
   user-approval, fake LLM fixture, fixture tools, our server)
 - `test/wire-extension.test.mjs` — steer/cancel wire test (8 checks)
@@ -49,6 +53,9 @@ see `spikes/dsh-phase0/PHASE0_REPORT.md` F1). No forks.
 - `test/m3-config.test.mjs` — generated-config E2E against a mock OpenAI gateway:
   sections in the system prompt, real pi-ai tool round trip, shaping bounds the
   60k blob before history (12 checks)
+- `test/workspace-instructions.test.mjs` — AGENTS.md/CLAUDE.md injection E2E:
+  git-root discovery, empty-repo non-injection, ancestor-chain discovery from a
+  sub-cwd, and LLM-request visibility (13 checks)
 
 ## Notes for later milestones
 
