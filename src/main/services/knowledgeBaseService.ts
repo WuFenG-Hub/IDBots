@@ -167,13 +167,17 @@ export class KnowledgeBaseService {
       }
       return existing;
     }
+    // knowledge_bases.id is a global PRIMARY KEY, so the default KB id must be
+    // unique per bot — a shared literal ('default') makes the second bot's
+    // INSERT fail with a UNIQUE constraint violation.
+    const id = `default_${metabotId}`;
     const nowIso = this.now().toISOString();
     const record: KnowledgeBaseRecord = {
-      id: 'default',
+      id,
       metabotId,
       name: 'Default',
       description: 'Default knowledge base. Documents saved by the bot land here when no specific knowledge base is chosen.',
-      rawDir: this.defaultRawDir(metabotId, 'default'),
+      rawDir: this.defaultRawDir(metabotId, id),
       isDefault: true,
       autoLearn: true,
       docCount: 0,

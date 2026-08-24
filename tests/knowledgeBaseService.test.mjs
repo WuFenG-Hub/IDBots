@@ -51,13 +51,48 @@ test('listing lazily creates the default knowledge base with its raw dir', async
   try {
     const list = service.listKnowledgeBases(7);
     assert.equal(list.length, 1);
-    assert.equal(list[0].id, 'default');
+    assert.equal(list[0].id, 'default_7');
     assert.equal(list[0].isDefault, true);
     assert.equal(list[0].autoLearn, true);
-    assert.ok(list[0].rawDir.includes(path.join('knowledge-bases', '7', 'default')));
+    assert.ok(list[0].rawDir.includes(path.join('knowledge-bases', '7', 'default_7')));
     assert.ok(fs.existsSync(list[0].rawDir));
     // idempotent: no duplicate rows on a second call
     assert.equal(service.listKnowledgeBases(7).length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('default KB creation does not collide with a legacy global "default" row', async (t) => {
+  const { service, store, tmpDir, cleanup } = setup();
+  try {
+    // Pre-fix databases already hold one row with the literal id 'default'
+    // (whichever bot opened the knowledge-base panel first). knowledge_bases.id
+    // is a global PRIMARY KEY, so creating another bot's default KB used to
+    // fail with "UNIQUE constraint failed: knowledge_bases.id".
+    const nowIso = new Date().toISOString();
+    store.insert({
+      id: 'default',
+      metabotId: 7,
+      name: 'Default',
+      description: '',
+      rawDir: path.join(tmpDir, 'legacy-raw'),
+      isDefault: true,
+      autoLearn: true,
+      docCount: 0,
+      chunkCount: 0,
+      lastLearnedAt: null,
+      lastAutoLearnDate: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    // The legacy row is still picked up as its bot's default KB.
+    assert.equal(service.ensureDefaultKnowledgeBase(7).id, 'default');
+    // A second bot gets its own unique default KB instead of a UNIQUE error.
+    const created = service.ensureDefaultKnowledgeBase(8);
+    assert.notEqual(created.id, 'default');
+    assert.equal(created.isDefault, true);
+    assert.equal(service.listKnowledgeBases(8).length, 1);
   } finally {
     cleanup();
   }
@@ -180,7 +215,7 @@ test('addDocument wraps free-form content as simplenote JSON and lands in metabo
       content: '法院认为：合同违约方应当承担损害赔偿责任。',
       source: { type: 'web', url: 'https://example.com/case' },
     });
-    assert.equal(saved.kbId, 'default');
+    assert.equal(saved.kbId, 'default_7');
     assert.ok(saved.filePath.includes('metabot-inbox'));
     const payload = JSON.parse(fs.readFileSync(saved.filePath, 'utf8'));
     assert.equal(payload.contentType, 'text/markdown');
@@ -188,7 +223,7 @@ test('addDocument wraps free-form content as simplenote JSON and lands in metabo
     assert.equal(payload['x-kb-source'].url, 'https://example.com/case');
 
     // learning picks the new document up incrementally
-    const summary = await service.learnKnowledgeBase(7, 'default');
+    const summary = await service.learnKnowledgeBase(7, 'default_7');
     assert.equal(summary.added, 1);
     const hits = service.queryKnowledgeBase(7, { query: '损害赔偿' });
     assert.ok(hits.length > 0);
@@ -226,10 +261,10 @@ test('importFiles copies supported types, skips others and de-dupes names', asyn
     const src = path.join(tmpDir, 'picked');
     const md = writeRaw(src, 'doc.md', '导入的文档');
     const exe = writeRaw(src, 'tool.exe', 'MZ');
-    const result = service.importFiles(7, 'default', [md, exe]);
+    const result = service.importFiles(7, 'default_7', [md, exe]);
     assert.equal(result.imported.length, 1);
     assert.equal(result.skipped.length, 1);
-    const again = service.importFiles(7, 'default', [md]);
+    const again = service.importFiles(7, 'default_7', [md]);
     assert.ok(again.imported[0].endsWith('doc-2.md'), again.imported[0]);
   } finally {
     cleanup();
@@ -240,7 +275,7 @@ test('removeKnowledgeBase refuses the default and preserves external raw dirs', 
   const { service, tmpDir, cleanup } = setup();
   try {
     service.ensureDefaultKnowledgeBase(7);
-    assert.throws(() => service.removeKnowledgeBase(7, 'default'), /default/);
+    assert.throws(() => service.removeKnowledgeBase(7, 'default_7'), /default/);
 
     const external = path.join(tmpDir, 'keep-me');
     writeRaw(external, 'a.md', '内容');
@@ -258,10 +293,10 @@ test('updateKnowledgeBase edits name/description/autoLearn with validation', asy
   const { service, cleanup } = setup();
   try {
     service.ensureDefaultKnowledgeBase(7);
-    const updated = service.updateKnowledgeBase(7, 'default', { name: '通用知识', autoLearn: false });
+    const updated = service.updateKnowledgeBase(7, 'default_7', { name: '通用知识', autoLearn: false });
     assert.equal(updated.name, '通用知识');
     assert.equal(updated.autoLearn, false);
-    assert.throws(() => service.updateKnowledgeBase(7, 'default', { name: ' ' }), /name is required/);
+    assert.throws(() => service.updateKnowledgeBase(7, 'default_7', { name: ' ' }), /name is required/);
   } finally {
     cleanup();
   }
@@ -279,8 +314,8 @@ test('auto-learn tick only runs inside the nightly window and once per day', asy
 
     setNow(new Date('2026-08-24T01:30:00'));
     assert.deepEqual(await service.runAutoLearnTick(), { learned: 1 });
-    assert.equal(service.store.getById(7, 'default').docCount, 1);
-    assert.equal(service.store.getById(7, 'default').lastAutoLearnDate, '2026-08-24');
+    assert.equal(service.store.getById(7, 'default_7').docCount, 1);
+    assert.equal(service.store.getById(7, 'default_7').lastAutoLearnDate, '2026-08-24');
 
     setNow(new Date('2026-08-24T02:00:00'));
     assert.deepEqual(await service.runAutoLearnTick(), { learned: 0 }, 'already learned today');
@@ -288,7 +323,7 @@ test('auto-learn tick only runs inside the nightly window and once per day', asy
     setNow(new Date('2026-08-25T05:59:00'));
     writeRaw(kb.rawDir, 'nightly2.md', '第二天的新文档。');
     assert.deepEqual(await service.runAutoLearnTick(), { learned: 1 });
-    assert.equal(service.store.getById(7, 'default').docCount, 2);
+    assert.equal(service.store.getById(7, 'default_7').docCount, 2);
   } finally {
     cleanup();
   }

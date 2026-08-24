@@ -129,7 +129,7 @@ test('knowledge_base_list auto-creates and lists the default KB even at 0 docs',
     assert.equal(result.isError, undefined);
     const text = result.content[0].text;
     assert.match(text, /1 knowledge base\(s\)/);
-    assert.match(text, /Default \(id: default\) \[default\]/);
+    assert.match(text, /Default \(id: default_5\) \[default\]/);
     assert.match(text, /documents: 0 \| chunks: 0 \| last learned: never/);
     assert.match(text, /knowledge_base_query/);
   } finally {
@@ -149,13 +149,13 @@ test('add_document -> learn -> query roundtrip returns the saved content with KB
       url: 'https://example.com/civil-code',
     });
     assert.equal(added.isError, undefined);
-    assert.match(added.content[0].text, /Saved document "民法典合同编要点" into knowledge base "default"/);
+    assert.match(added.content[0].text, /Saved document "民法典合同编要点" into knowledge base "default_5"/);
     assert.match(added.content[0].text, /metabot-inbox\//);
     assert.match(added.content[0].text, /knowledge_base_learn/);
 
     const learned = await tools.knowledge_base_learn.handler({});
     assert.equal(learned.isError, undefined);
-    assert.match(learned.content[0].text, /Learned knowledge base "default" \(incremental\): 1 added/);
+    assert.match(learned.content[0].text, /Learned knowledge base "default_5" \(incremental\): 1 added/);
     assert.match(learned.content[0].text, /1 doc\(s\)/);
 
     const hit = await tools.knowledge_base_query.handler({ query: '合同 生效' });
@@ -216,7 +216,7 @@ test('knowledge_base_learn reports failures without failing the whole run', asyn
     const kb = service.listKnowledgeBases(METABOT_ID)[0];
     fs.writeFileSync(path.join(kb.rawDir, 'broken.pdf'), '%PDF-garbage-not-a-real-pdf', 'utf8');
     const tools = buildTools(session.id);
-    const result = await tools.knowledge_base_learn.handler({ knowledgeBaseId: 'default' });
+    const result = await tools.knowledge_base_learn.handler({ knowledgeBaseId: 'default_5' });
     assert.equal(result.isError, undefined);
     assert.match(result.content[0].text, /failed files:/);
     assert.match(result.content[0].text, /broken\.pdf/);
