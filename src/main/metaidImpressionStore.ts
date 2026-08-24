@@ -894,4 +894,82 @@ export class MetaIDImpressionStore {
     this.saveDb();
     return this.getSnapshot(observer, subject);
   }
+
+  /**
+   * Compaction stroke for impression observations: the snapshot is the
+   * compressed state, so stale raw observations are retired (status
+   * 'superseded') once nothing needs them. Per (observer, subject) pair the
+   * newest `anchorsPerPair` active observations always stay as episodic
+   * anchors (minimum 1 so the pair's snapshot never loses its latest row);
+   * among the rest, only observations older than `cutoffMs` are superseded.
+   * Affected snapshots are rebuilt from the remaining actives. Nothing is
+   * ever deleted — flipping the status back restores a prior state.
+   */
+  compactObservations(input: {
+    cutoffMs: number;
+    anchorsPerPair: number;
+    /** Pair owners whose bots opted out of hygiene are skipped entirely. */
+    excludeObservers?: ReadonlySet<string>;
+  }): { pairsCompacted: number; observationsSuperseded: number; snapshotsRebuilt: number } {
+    const cutoff = Math.floor(input.cutoffMs);
+    const anchors = Math.max(1, Math.min(50, Math.floor(input.anchorsPerPair)));
+    const pairs = this.getAll<{ observer_globalmetaid: string; subject_globalmetaid: string }>(
+      `SELECT DISTINCT observer_globalmetaid, subject_globalmetaid
+       FROM metaid_impression_observations
+       WHERE status = 'active' AND created_at < ?`,
+      [cutoff],
+    );
+    let pairsCompacted = 0;
+    let observationsSuperseded = 0;
+    let snapshotsRebuilt = 0;
+    for (const pair of pairs) {
+      if (input.excludeObservers?.has(pair.observer_globalmetaid)) continue;
+      const rows = this.getAll<{ id: string; created_at: number | string }>(
+        `SELECT id, created_at FROM metaid_impression_observations
+         WHERE observer_globalmetaid = ? AND subject_globalmetaid = ? AND status = 'active'
+         ORDER BY created_at DESC, id DESC`,
+        [pair.observer_globalmetaid, pair.subject_globalmetaid],
+      );
+      const toSupersede = rows
+        .slice(anchors)
+        .filter((row) => Number(row.created_at) < cutoff)
+        .map((row) => row.id);
+      if (toSupersede.length === 0) continue;
+
+      this.db.run('BEGIN IMMEDIATE');
+      try {
+        for (const id of toSupersede) {
+          this.db.run(
+            `UPDATE metaid_impression_observations
+             SET status = 'superseded'
+             WHERE id = ? AND status = 'active'`,
+            [id],
+          );
+        }
+        this.db.run('COMMIT');
+      } catch (error) {
+        try {
+          this.db.run('ROLLBACK');
+        } catch {
+          // Preserve the original write error.
+        }
+        throw error;
+      }
+      observationsSuperseded += toSupersede.length;
+      pairsCompacted += 1;
+      try {
+        this.rebuildSnapshot(pair.observer_globalmetaid, pair.subject_globalmetaid);
+        snapshotsRebuilt += 1;
+      } catch (error) {
+        console.warn(
+          `[MetaIDImpression] Snapshot rebuild failed after compaction for ${pair.observer_globalmetaid} -> ${pair.subject_globalmetaid}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (observationsSuperseded > 0) {
+      this.saveDb();
+    }
+    return { pairsCompacted, observationsSuperseded, snapshotsRebuilt };
+  }
 }

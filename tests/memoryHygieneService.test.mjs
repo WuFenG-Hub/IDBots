@@ -48,7 +48,7 @@ const insertMetabot = (db, id, globalMetaId) => {
   );
 };
 
-const setup = async (now) => {
+const setup = async (now, extraDeps = {}) => {
   const { db, cleanup } = await createSqliteStore();
   insertMetabot(db, 9, 'metaid://stub-owner');
   const coworkStore = createCoworkStore(db);
@@ -60,6 +60,7 @@ const setup = async (now) => {
     },
     emitToRenderer: (channel, payload) => events.push({ channel, payload }),
     now: () => new Date(now),
+    ...extraDeps,
   });
   return { db, cleanup, coworkStore, service, events, botId: 9 };
 };
@@ -194,6 +195,96 @@ test('resolveDisabledOwners reflects per-bot opt-out', async () => {
     const owners = service.resolveDisabledOwners();
     assert.equal(owners.size, 1);
     assert.ok(owners.has('metaid://stub-owner'));
+  } finally {
+    cleanup();
+  }
+});
+
+const loadImpressionStoreModule = async () => {
+  try {
+    return await import('../dist-electron/main/metaidImpressionStore.js');
+  } catch {
+    return import('../dist-electron/metaidImpressionStore.js');
+  }
+};
+
+const loadExperienceStoreModule = async () => {
+  try {
+    return await import('../dist-electron/main/metaidExperienceStore.js');
+  } catch {
+    return import('../dist-electron/metaidExperienceStore.js');
+  }
+};
+
+test('impression compaction step is wired into the nightly run', async () => {
+  const { MetaIDImpressionStore } = await loadImpressionStoreModule();
+  const { MetaIDExperienceStore } = await loadExperienceStoreModule();
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  const oldNow = 1_700_000_000_000;
+  let now = oldNow;
+  const experience = new MetaIDExperienceStore(db, () => {}, () => now);
+  const impressions = new MetaIDImpressionStore(db, () => {}, () => now);
+  for (const [index, source] of ['a', 'b', 'c'].entries()) {
+    now = oldNow + index * 1_000;
+    const episode = experience.createEpisode({
+      ownerGlobalMetaID: 'idq1observer',
+      episodeType: 'direct_interaction',
+      sourceChannel: 'test',
+      sourceKey: `hygiene-step:${index}`,
+      startedAt: oldNow + index * 1_000,
+    }).episode;
+    experience.addParticipant({
+      episodeId: episode.id,
+      globalMetaID: 'idq1observer',
+      role: 'observer',
+      source: 'test',
+    });
+    experience.addParticipant({
+      episodeId: episode.id,
+      globalMetaID: 'idq1subject',
+      role: 'counterparty',
+      source: 'test',
+    });
+    const evidence = experience.addEvidence({
+      episodeId: episode.id,
+      evidenceType: 'message',
+      sourceKey: `evidence:${episode.id}`,
+      publisherGlobalMetaID: 'idq1subject',
+      contentHash: source.repeat(64),
+      occurredAt: oldNow + index * 1_000,
+    });
+    impressions.appendObservation({
+      observerGlobalMetaID: 'idq1observer',
+      subjectGlobalMetaID: 'idq1subject',
+      episodeId: episode.id,
+      evidenceIds: [evidence.id],
+      observationText: `raw ${source}`,
+      interpretationText: `interp ${source}`,
+      dreamDate: `2023-11-0${index + 1}`,
+      dreamVersion: 1,
+      sourceHash: source.repeat(64),
+    });
+  }
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, globalmetaid: 'metaid://stub-owner' }] },
+    metaidImpressionStore: impressions,
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    coworkStore.setMemoryHygieneConfig({ observationAnchorsPerPair: 1 });
+    const stats = await service.runNow();
+    assert.equal(stats.counts.observationPairsCompacted, 1);
+    assert.equal(stats.counts.observationsSuperseded, 2);
+    assert.equal(stats.counts.observationSnapshotsRebuilt, 1);
+    const active = impressions.listObservations({
+      observerGlobalMetaID: 'idq1observer',
+      subjectGlobalMetaID: 'idq1subject',
+    });
+    assert.equal(active.length, 1);
+    assert.equal(active[0].interpretationText, 'interp c');
   } finally {
     cleanup();
   }

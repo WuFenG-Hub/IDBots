@@ -76,7 +76,31 @@ export class MemoryHygieneService {
   /** Steps registered by later commits (observation compaction, episode archival, …). */
   protected readonly steps: MemoryHygieneStep[] = [];
 
-  constructor(private readonly deps: MemoryHygieneDeps) {}
+  constructor(private readonly deps: MemoryHygieneDeps) {
+    this.registerSteps();
+  }
+
+  /** One entry per compaction mechanism; each is error-isolated by runAll. */
+  protected registerSteps(): void {
+    // Impression observations: supersede stale ones past the per-pair anchors;
+    // the snapshot survives as the compressed state.
+    this.steps.push({
+      name: 'impression-observations',
+      run: (context) => {
+        if (!context.impressionStore) return {};
+        const result = context.impressionStore.compactObservations({
+          cutoffMs: context.nowMs - context.config.observationRetentionDays * 86_400_000,
+          anchorsPerPair: context.config.observationAnchorsPerPair,
+          excludeObservers: context.disabledOwners,
+        });
+        return {
+          observationPairsCompacted: result.pairsCompacted,
+          observationsSuperseded: result.observationsSuperseded,
+          observationSnapshotsRebuilt: result.snapshotsRebuilt,
+        };
+      },
+    });
+  }
 
   start(): void {
     this.stopTimer();
