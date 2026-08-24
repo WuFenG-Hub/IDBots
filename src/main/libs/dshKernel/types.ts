@@ -24,7 +24,18 @@ export type DshStreamSlot = 'text' | 'thinking'
  * leaked text placeholder has to be closed; tool-step commentary otherwise
  * stays in the thinking slot without a second message.
  */
-export type DshFinalizeMetadata = { isThinking?: boolean }
+export type DshFinalizeMetadata = {
+  isThinking?: boolean
+  /**
+   * Keep the streaming pulse on a finalized message. Normally finalize marks
+   * the message settled; a message converted mid-stream into the thinking
+   * display (tool-call commentary, effort "off") keeps accumulating content
+   * across tool rounds, so it must stay visually streaming until the turn's
+   * reply or turn/end settles it. The gate spreads metadata AFTER its own
+   * isStreaming:false, so this flag wins.
+   */
+  isStreaming?: boolean
+}
 
 /** Actions the adapter applies to the store + event surface. */
 export type DshMapperAction =
