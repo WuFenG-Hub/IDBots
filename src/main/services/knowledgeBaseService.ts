@@ -10,7 +10,7 @@ import {
   chunkKnowledgeBaseText,
   cleanKnowledgeBaseText,
   extractKbDocTitle,
-  extractKnowledgeBaseTextAsync,
+  extractKnowledgeBaseText,
   phraseScore,
   sha256FileAsync,
   sha256Text,
@@ -389,7 +389,7 @@ export class KnowledgeBaseService {
             summary.unchanged += 1;
             continue;
           }
-          const extraction = await extractKnowledgeBaseTextAsync(file.absPath);
+          const extraction = await extractKnowledgeBaseText(file.absPath);
           const text = cleanKnowledgeBaseText(extraction.text);
           const title = extraction.title || extractKbDocTitle(file.absPath, text);
           const chunks = chunkKnowledgeBaseText(text).map((chunk, ord) => ({

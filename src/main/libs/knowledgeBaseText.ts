@@ -1,7 +1,19 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { execFile, spawnSync } from 'child_process';
+import {
+  extractDocxText,
+  extractEpubText,
+  extractHtmlText,
+  extractPdfText,
+  extractPptxText,
+  extractSpreadsheetText,
+  KnowledgeBaseTextError,
+  type KnowledgeBaseExtraction,
+} from './knowledgeBaseConverters';
+
+export { KnowledgeBaseTextError };
+export type { KnowledgeBaseExtraction };
 
 /**
  * Pure text processing for the built-in MetaBot knowledge base.
@@ -15,30 +27,42 @@ import { execFile, spawnSync } from 'child_process';
  *  3. `.json` files that look like a SimpleNote-protocol payload
  *     ({ title, contentType, content }) index only title + content as the
  *     document body; other JSON (e.g. raw MetaWeb pins) is indexed verbatim.
+ *
+ * Office/binary formats are converted in-process by knowledgeBaseConverters.ts
+ * with bundled pure-JS packages (markitdown-style coverage) — no external
+ * tools such as pdftotext/textutil are required anymore.
  */
 
-export const SUPPORTED_KB_EXTENSIONS: ReadonlySet<string> = new Set([
+/** Extensions indexed verbatim as utf8 plain text (note-shaped JSON still unwraps to title+content). */
+const TEXT_KB_EXTENSIONS: ReadonlySet<string> = new Set([
   '.md',
+  '.markdown',
   '.txt',
   '.json',
   '.csv',
+  '.tsv',
+  '.yaml',
+  '.yml',
+  '.xml',
+  '.log',
+  '.rst',
+]);
+
+export const SUPPORTED_KB_EXTENSIONS: ReadonlySet<string> = new Set([
+  ...TEXT_KB_EXTENSIONS,
   '.pdf',
   '.docx',
+  '.pptx',
+  '.xlsx',
+  '.xls',
+  '.html',
+  '.htm',
+  '.epub',
 ]);
 
 export const KB_DEFAULT_CHUNK_SIZE = 1200;
 export const KB_DEFAULT_CHUNK_OVERLAP = 180;
 export const KB_SNIPPET_MAX_CHARS = 220;
-
-export class KnowledgeBaseTextError extends Error {
-  readonly code: 'dependency_missing' | 'unsupported_format' | 'extract_failed';
-
-  constructor(code: KnowledgeBaseTextError['code'], detail: string) {
-    super(detail);
-    this.name = 'KnowledgeBaseTextError';
-    this.code = code;
-  }
-}
 
 export function cleanKnowledgeBaseText(value: string): string {
   return String(value || '')
@@ -56,36 +80,6 @@ export function sha256Text(value: string): string {
 
 export function sha256File(filePath: string): string {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
-}
-
-export function commandExists(command: string): boolean {
-  const checker = process.platform === 'win32' ? 'where' : 'which';
-  const result = spawnSync(checker, [command], { stdio: 'ignore' });
-  return result.status === 0;
-}
-
-export function getPdftotextInstallHint(): string {
-  if (process.platform === 'darwin') return 'Install with: brew install poppler';
-  if (process.platform === 'win32') {
-    return 'Install Poppler and ensure pdftotext is in PATH. Example: choco install poppler or scoop install poppler';
-  }
-  if (process.platform === 'linux') {
-    return 'Install poppler-utils. Examples: sudo apt install poppler-utils | sudo dnf install poppler-utils | sudo pacman -S poppler';
-  }
-  return 'Install Poppler and ensure the pdftotext command is available in PATH.';
-}
-
-export function getDocxDependencyHint(): string {
-  if (process.platform === 'darwin') return 'DOCX parsing uses textutil (built-in on macOS).';
-  return 'DOCX parsing currently uses textutil (macOS). On non-macOS, convert DOCX to .md/.txt first.';
-}
-
-function runTextCommand(command: string, args: string[]): { status: number | null; stdout: string } {
-  const result = spawnSync(command, args, {
-    encoding: 'utf8',
-    maxBuffer: 20 * 1024 * 1024,
-  });
-  return { status: result.status, stdout: result.stdout || '' };
 }
 
 /**
@@ -115,91 +109,16 @@ function tryExtractNoteJson(raw: string): { text: string; title?: string } | nul
   };
 }
 
-export interface KnowledgeBaseExtraction {
-  text: string;
-  title?: string;
-}
-
-export function extractKnowledgeBaseText(filePath: string): KnowledgeBaseExtraction {
+/**
+ * Extracts the indexable text of a supported file. Text formats are read
+ * verbatim; office/binary formats go through the pure-JS converters in
+ * knowledgeBaseConverters.ts. Async-only: PDF parsing is promise-based and
+ * the learn loop must never block the main process on big documents.
+ */
+export async function extractKnowledgeBaseText(filePath: string): Promise<KnowledgeBaseExtraction> {
   const ext = path.extname(filePath).toLowerCase();
 
-  if (ext === '.md' || ext === '.txt' || ext === '.json' || ext === '.csv') {
-    const raw = fs.readFileSync(filePath, 'utf8');
-    if (ext === '.json') {
-      const note = tryExtractNoteJson(raw);
-      if (note) return note;
-    }
-    return { text: raw };
-  }
-
-  if (ext === '.pdf') {
-    if (!commandExists('pdftotext')) {
-      throw new KnowledgeBaseTextError(
-        'dependency_missing',
-        `Missing dependency "pdftotext" for PDF parsing. ${getPdftotextInstallHint()}`
-      );
-    }
-    const result = runTextCommand('pdftotext', ['-layout', '-enc', 'UTF-8', filePath, '-']);
-    if (result.status === 0 && result.stdout.trim()) {
-      return { text: result.stdout };
-    }
-    throw new KnowledgeBaseTextError(
-      'extract_failed',
-      `Failed to parse PDF "${filePath}". ${getPdftotextInstallHint()}`
-    );
-  }
-
-  if (ext === '.docx') {
-    if (!commandExists('textutil')) {
-      throw new KnowledgeBaseTextError('dependency_missing', getDocxDependencyHint());
-    }
-    const result = runTextCommand('textutil', ['-convert', 'txt', '-stdout', filePath]);
-    if (result.status === 0 && result.stdout.trim()) {
-      return { text: result.stdout };
-    }
-    throw new KnowledgeBaseTextError(
-      'extract_failed',
-      `Failed to parse DOCX "${filePath}". ${getDocxDependencyHint()}`
-    );
-  }
-
-  throw new KnowledgeBaseTextError('unsupported_format', `Unsupported file extension: ${ext}`);
-}
-
-/**
- * Async command runner for the learn loop: spawnSync freezes the whole main
- * process for the duration of pdftotext/textutil (seconds on big documents,
- * and learn also runs in the nightly window while the user may be active).
- * Exit code maps to status; a spawn failure (ENOENT & co.) maps to null.
- */
-function runTextCommandAsync(command: string, args: string[]): Promise<{ status: number | null; stdout: string }> {
-  return new Promise((resolve) => {
-    execFile(command, args, { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }, (error, stdout) => {
-      const out = typeof stdout === 'string' ? stdout : '';
-      if (!error) {
-        resolve({ status: 0, stdout: out });
-        return;
-      }
-      const code = (error as { code?: unknown }).code;
-      resolve({ status: typeof code === 'number' ? code : null, stdout: out });
-    });
-  });
-}
-
-/** Async sha256File: hashing a large file no longer blocks the event loop on a synchronous read. */
-export async function sha256FileAsync(filePath: string): Promise<string> {
-  return crypto.createHash('sha256').update(await fs.promises.readFile(filePath)).digest('hex');
-}
-
-/**
- * Async extractKnowledgeBaseText — identical semantics, non-blocking I/O. The
- * knowledge-base learn loop uses this so learning a large corpus (manual or
- * nightly auto-learn) never freezes the app.
- */
-export async function extractKnowledgeBaseTextAsync(filePath: string): Promise<KnowledgeBaseExtraction> {
-  const ext = path.extname(filePath).toLowerCase();
-
-  if (ext === '.md' || ext === '.txt' || ext === '.json' || ext === '.csv') {
+  if (TEXT_KB_EXTENSIONS.has(ext)) {
     const raw = await fs.promises.readFile(filePath, 'utf8');
     if (ext === '.json') {
       const note = tryExtractNoteJson(raw);
@@ -208,38 +127,29 @@ export async function extractKnowledgeBaseTextAsync(filePath: string): Promise<K
     return { text: raw };
   }
 
-  if (ext === '.pdf') {
-    if (!commandExists('pdftotext')) {
-      throw new KnowledgeBaseTextError(
-        'dependency_missing',
-        `Missing dependency "pdftotext" for PDF parsing. ${getPdftotextInstallHint()}`
-      );
-    }
-    const result = await runTextCommandAsync('pdftotext', ['-layout', '-enc', 'UTF-8', filePath, '-']);
-    if (result.status === 0 && result.stdout.trim()) {
-      return { text: result.stdout };
-    }
-    throw new KnowledgeBaseTextError(
-      'extract_failed',
-      `Failed to parse PDF "${filePath}". ${getPdftotextInstallHint()}`
-    );
+  switch (ext) {
+    case '.pdf':
+      return extractPdfText(filePath);
+    case '.docx':
+      return extractDocxText(filePath);
+    case '.pptx':
+      return extractPptxText(filePath);
+    case '.xlsx':
+    case '.xls':
+      return extractSpreadsheetText(filePath);
+    case '.html':
+    case '.htm':
+      return extractHtmlText(filePath);
+    case '.epub':
+      return extractEpubText(filePath);
+    default:
+      throw new KnowledgeBaseTextError('unsupported_format', `Unsupported file extension: ${ext}`);
   }
+}
 
-  if (ext === '.docx') {
-    if (!commandExists('textutil')) {
-      throw new KnowledgeBaseTextError('dependency_missing', getDocxDependencyHint());
-    }
-    const result = await runTextCommandAsync('textutil', ['-convert', 'txt', '-stdout', filePath]);
-    if (result.status === 0 && result.stdout.trim()) {
-      return { text: result.stdout };
-    }
-    throw new KnowledgeBaseTextError(
-      'extract_failed',
-      `Failed to parse DOCX "${filePath}". ${getDocxDependencyHint()}`
-    );
-  }
-
-  throw new KnowledgeBaseTextError('unsupported_format', `Unsupported file extension: ${ext}`);
+/** Async sha256File: hashing a large file no longer blocks the event loop on a synchronous read. */
+export async function sha256FileAsync(filePath: string): Promise<string> {
+  return crypto.createHash('sha256').update(await fs.promises.readFile(filePath)).digest('hex');
 }
 
 export function extractKbDocTitle(filePath: string, text: string): string {
