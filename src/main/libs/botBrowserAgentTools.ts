@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
+import { truncateUtf16Units } from './llmSafeText';
 import { parseMetaAppPinIdFromUri } from '../services/botBrowserMetaAppForkService';
 import { readRendererFromEnvelope } from '../services/botBrowserSourceLocator';
 import type { MetaAppSearchItem } from '../services/metaAppSearchService';
@@ -124,7 +125,7 @@ export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string
     const title = item.title || item.appName || item.pinId;
     const linkTitle = title.replace(/[[\]]/g, '');
     const intro = item.intro
-      ? ` — ${item.intro.length > 120 ? `${item.intro.slice(0, 120)}…` : item.intro}`
+      ? ` — ${item.intro.length > 120 ? `${truncateUtf16Units(item.intro, 120)}…` : item.intro}`
       : '';
     const publisherLabel = (item.publisherName || item.publisherGlobalMetaId || 'unknown').replace(/[[\]]/g, '');
     const publisher = item.publisherGlobalMetaId
@@ -367,7 +368,7 @@ export function buildBotBrowserAgentTools(deps: {
         const content = result.content;
         if (content && typeof content.text === 'string' && content.text.trim()) {
           const trimmed = content.text.length > 12000
-            ? `${content.text.slice(0, 12000)}\n…(truncated)`
+            ? `${truncateUtf16Units(content.text, 12000)}\n…(truncated)`
             : content.text;
           return textResult(`Page: ${content.title ?? '(untitled)'}\nURI: ${content.uri ?? '(none)'}\n--- visible text ---\n${trimmed}`);
         }

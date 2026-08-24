@@ -13,6 +13,7 @@ import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, ge
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
 import { DshTurnHub, dshSessionRootFor, type DshTurnProviderRoute } from './coworkDshTurn';
+import { truncateUtf16Units } from './llmSafeText';
 import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
 import { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressure } from './dshUsageProjection';
@@ -4123,14 +4124,14 @@ export class CoworkRunner extends EventEmitter {
     if (normalized.length <= maxChars) {
       return normalized;
     }
-    return `${normalized.slice(0, maxChars)}\n...[truncated ${normalized.length - maxChars} chars]`;
+    return `${truncateUtf16Units(normalized, maxChars)}\n...[truncated ${normalized.length - maxChars} chars]`;
   }
 
   private truncateLargeContent(content: string, maxChars: number): string {
     if (content.length <= maxChars) {
       return content;
     }
-    return `${content.slice(0, maxChars)}${CONTENT_TRUNCATED_HINT}`;
+    return `${truncateUtf16Units(content, maxChars)}${CONTENT_TRUNCATED_HINT}`;
   }
 
   private sanitizeToolPayload(

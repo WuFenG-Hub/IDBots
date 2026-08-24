@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureMetaIDExperienceSchema } from './metaidExperienceStore';
+import { truncateUtf16Units } from './libs/llmSafeText';
 import {
   normalizeGlobalMetaID,
   requireGlobalMetaID,
@@ -354,10 +355,10 @@ function collectCapabilityTags(observations: MetaIDImpressionObservation[]): str
   const tags = new Set<string>();
   for (const observation of observations) {
     for (const tag of extractStringList(observation.dimensions.capabilityTags)) {
-      tags.add(tag.slice(0, 80));
+      tags.add(truncateUtf16Units(tag, 80));
     }
     const weak = extractText(observation.dimensions.weakSeat);
-    if (weak) tags.add(`weak:${weak.slice(0, 60)}`);
+    if (weak) tags.add(`weak:${truncateUtf16Units(weak, 60)}`);
   }
   return [...tags].slice(0, 24);
 }
@@ -816,7 +817,7 @@ export class MetaIDImpressionStore {
     const descriptors = new Set<string>();
     for (const descriptor of descriptorCandidates) {
       if (descriptors.size >= MAX_STYLE_DESCRIPTORS) break;
-      descriptors.add(descriptor.slice(0, 200));
+      descriptors.add(truncateUtf16Units(descriptor, 200));
     }
     const firstSeenAt = asInteger(stats?.first_seen_at, latest.createdAt);
     const lastSeenAt = asInteger(stats?.last_seen_at, firstSeenAt);

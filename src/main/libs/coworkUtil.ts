@@ -2,6 +2,7 @@ import { app, session } from 'electron';
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'fs';
 import { delimiter, dirname, join, resolve } from 'path';
+import { truncateUtf16Units } from './llmSafeText';
 import { buildEnvForConfig, getCurrentApiConfig } from './claudeSettings';
 import type { OpenAICompatProxyTarget } from './coworkOpenAICompatProxy';
 import { getInternalApiBaseURL } from './coworkOpenAICompatProxy';
@@ -1192,7 +1193,7 @@ export function deriveSessionTitle(userIntent: string, maxChars = 50): string {
   const collapsed = userIntent.replace(/\s+/g, ' ').trim();
   if (!collapsed) return 'New Session';
   if (collapsed.length <= maxChars) return collapsed;
-  return `${collapsed.slice(0, maxChars).trimEnd()}...`;
+  return `${truncateUtf16Units(collapsed, maxChars).trimEnd()}...`;
 }
 
 /** Strip quotes/newlines and cap length so a model title is list-safe. */
@@ -1205,7 +1206,7 @@ export function sanitizeGeneratedSessionTitle(raw: string, fallback: string, max
     .trim() ?? '';
   if (!line || /^new session$/i.test(line)) return fallback;
   if (line.length <= maxChars) return line;
-  return line.slice(0, maxChars).trimEnd();
+  return truncateUtf16Units(line, maxChars).trimEnd();
 }
 
 /**
