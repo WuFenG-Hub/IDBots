@@ -197,6 +197,17 @@ body {
   min-height: 100vh;
 }
 
+/* Base UI rule: text must never stretch its container horizontally. Long
+   unbroken strings (metafile://… URIs, URLs, hashes, paths) wrap at arbitrary
+   points instead of forcing horizontal scrollbars. `anywhere` (unlike
+   `break-word`) also shrinks the min-content width, so flex/grid items and
+   shrink-to-fit containers are not stretched either. Inherited by all text;
+   intentionally scrollable surfaces (code blocks use white-space: pre) are
+   unaffected. */
+body {
+  overflow-wrap: anywhere;
+}
+
 #root {
   height: 100vh;
 }
