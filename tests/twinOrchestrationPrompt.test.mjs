@@ -72,8 +72,11 @@ test('Twin sessions receive a host-owned orchestration overlay', () => {
   assert.match(prompt, /local_workers_list/);
   assert.match(prompt, /local_worker_delegate/);
   assert.match(prompt, /metabot-group-task/);
-  assert.match(prompt, /Plan local-first/);
-  assert.match(prompt, /search_remote → invite_remote, one candidate at a time/);
+  // Match-first staffing (50dd3dd8): search_candidates over merged local+online
+  // bots, local preferred only when scores are close, owner confirms the slate.
+  assert.match(prompt, /Match-first: for each seat, call metabot-group-task search_candidates/);
+  assert.match(prompt, /prefers local only when scores are close/);
+  assert.match(prompt, /reject an unconfirmed Twin create/);
   assert.match(prompt, /Do not personally perform specialist execution/);
   assert.match(prompt, /Local Workers are preferred, never mandatory/);
   assert.match(prompt, /fresh machine with only the Twin Bot/);
