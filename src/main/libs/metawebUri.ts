@@ -62,4 +62,4 @@ export function markdownSelfLink(uri: string): string {
  * Wording mirrors the system-prompt worldview rule so the model sees one
  * consistent contract from both surfaces.
  */
-export const METAWEB_CITATION_RULE = 'When you cite this on-chain content in your reply, keep it as a clickable MetaWeb URI markdown link with the scheme shown above (pin:// / metaapp:// / metafile:// for pins, metaid:// for people). NEVER construct Web2 viewer URLs (metaid.io, openagentinternet.org, …) for on-chain content — the user\'s app opens MetaWeb URIs directly in its built-in Bot Browser.';
+export const METAWEB_CITATION_RULE = 'When you cite this on-chain content in your reply, keep it as a clickable MetaWeb URI markdown link with the scheme shown above (pin:// / metaapp:// / metafile:// for pins, metaid:// for people). ALWAYS show the URI in FULL as the link text — never abbreviate or truncate it with an ellipsis; a shortened URI is neither clickable nor copyable. NEVER construct Web2 viewer URLs (metaid.io, openagentinternet.org, …) for on-chain content — the user\'s app opens MetaWeb URIs directly in its built-in Bot Browser.';

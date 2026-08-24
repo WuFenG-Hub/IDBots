@@ -414,8 +414,8 @@ export function buildOrchNotifyCompleted(
   language: AppLanguage = groupTaskLanguage(),
 ): string {
   return language === 'en'
-    ? `[ORCH-NOTIFY] worker ${workerName} completed task ${taskId} → review; please accept`
-    : `[ORCH-NOTIFY] worker ${workerName} 已完成 task ${taskId} → review，请验收`;
+    ? `[ORCH-NOTIFY] worker ${workerName} completed task ${taskId} → review; please verify, then report the delivered result to the owner with each on-chain artifact's complete MetaWeb URI in full text (never abbreviated)`
+    : `[ORCH-NOTIFY] worker ${workerName} 已完成 task ${taskId} → review，请验收；验收后向 owner 交付完整成果，每个链上成果附完整 MetaWeb URI（全文展示，不缩略）`;
 }
 
 export function buildOrchNotifyFailed(
