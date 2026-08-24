@@ -9,6 +9,12 @@ import {
   type MemoryHygieneConfig,
   type MemoryHygieneRunStats,
 } from '../libs/memoryHygienePolicy';
+import {
+  buildDeepConsolidationPrompt,
+  parseDeepConsolidationOutput,
+  shouldRunDeepConsolidation,
+  type DeepConsolidationInventoryItem,
+} from '../libs/deepConsolidationPrompt';
 
 /**
  * Memory hygiene service — the nightly deterministic "compression stroke".
@@ -28,9 +34,12 @@ import {
 
 const HYGIENE_TICK_INTERVAL_MS = 60_000;
 const HYGIENE_STATUS_CHANNEL = 'memoryHygiene:statusChanged';
+const DEEP_CONSOLIDATION_LLM_TIMEOUT_MS = 120_000;
 
 export interface MemoryHygieneMetabotLike {
   id: number;
+  name?: string | null;
+  llm_id?: string | null;
   globalmetaid?: string | null;
 }
 
@@ -58,6 +67,17 @@ interface MemoryHygieneStep {
   run: (context: MemoryHygieneRunContext) => Promise<Record<string, number>> | Record<string, number>;
 }
 
+export type MemoryHygienePerformChat = (
+  systemPrompt: string,
+  userMessage: string,
+  llmId?: string | null,
+  options?: {
+    signal?: AbortSignal;
+    maxTokens?: number;
+    thinking?: 'enabled' | 'disabled';
+  }
+) => Promise<string>;
+
 export interface MemoryHygieneDeps {
   coworkStore: CoworkStore;
   metabotStore: MemoryHygieneMetabotStoreLike;
@@ -65,6 +85,8 @@ export interface MemoryHygieneDeps {
   metaidExperienceStore?: MetaIDExperienceStore;
   metaidImpressionStore?: MetaIDImpressionStore;
   metaidKnowledgeStore?: MetaIDKnowledgeStore;
+  /** Required only for the deep-consolidation step; absent = step no-ops. */
+  performChat?: MemoryHygienePerformChat;
   tickIntervalMs?: number;
   now?: () => Date;
   emitToRenderer?: (channel: string, payload: unknown) => void;
@@ -162,6 +184,122 @@ export class MemoryHygieneService {
           excludeMetabotIds: context.disabledMetabotIds,
         });
         return { dreamRunsPurged: result.runsDeleted, dreamFragmentsPurged: result.fragmentsDeleted };
+      },
+    });
+    // Deep consolidation (the LLM side of the compression stroke): every N
+    // days per bot, review the belief layer and retire/merge what aged out.
+    // Proposals are validated against the listed inventory and applied via
+    // reversible channels (memory archived_at mark / knowledge versioning).
+    this.steps.push({
+      name: 'deep-consolidation',
+      run: async (context) => {
+        if (!this.deps.performChat || !context.config.deepConsolidationEnabled) return {};
+        const intervalMs = context.config.deepConsolidationIntervalDays * 86_400_000;
+        const errors: string[] = [];
+        let botsConsidered = 0;
+        let retiredMemories = 0;
+        let retiredKnowledge = 0;
+        let rewrittenKnowledge = 0;
+        for (const bot of this.deps.metabotStore.listMetabots()) {
+          if (context.disabledMetabotIds.has(bot.id)) continue;
+          const lastRunAt = context.coworkStore.getDeepConsolidationLastRunAt(bot.id);
+          if (lastRunAt != null && context.nowMs - lastRunAt < intervalMs) continue;
+
+          const boundaries = context.coworkStore.listUserMemories({
+            metabotId: bot.id,
+            scopeKind: 'owner',
+            scopeKey: 'owner:self',
+            usageClass: 'value_boundary',
+            status: 'created',
+            limit: 50,
+          });
+          const reviews = context.coworkStore.listUserMemories({
+            metabotId: bot.id,
+            scopeKind: 'owner',
+            scopeKey: 'owner:self',
+            usageClass: 'work_review',
+            status: 'created',
+            limit: 50,
+          });
+          const knowledge = context.knowledgeStore
+            ? context.knowledgeStore.listKnowledgeForDream(bot.id, 60)
+            : [];
+          const items: DeepConsolidationInventoryItem[] = [
+            ...boundaries.map((memory) => ({ id: memory.id, kind: 'value_boundary' as const, text: memory.text })),
+            ...reviews.map((memory) => ({ id: memory.id, kind: 'work_review' as const, text: memory.text })),
+            ...knowledge.map((entry) => ({
+              id: entry.id,
+              kind: 'knowledge' as const,
+              text: `${entry.topic}: ${entry.summary}`,
+              extra: `kind=${entry.kind}, v${entry.version}`,
+            })),
+          ];
+          if (!shouldRunDeepConsolidation(items.length)) continue;
+          botsConsidered += 1;
+
+          let raw: string;
+          try {
+            raw = await this.deps.performChat(
+              'You are a memory consolidation assistant. Respond only with the requested JSON object.',
+              buildDeepConsolidationPrompt({ botName: bot.name ?? `MetaBot ${bot.id}`, items }),
+              bot.llm_id ?? undefined,
+              { thinking: 'disabled', signal: AbortSignal.timeout(DEEP_CONSOLIDATION_LLM_TIMEOUT_MS) },
+            );
+          } catch (error) {
+            errors.push(`deep-consolidation bot ${bot.id}: ${error instanceof Error ? error.message : String(error)}`);
+            continue;
+          }
+          const output = parseDeepConsolidationOutput(raw);
+          if (!output) {
+            errors.push(`deep-consolidation bot ${bot.id}: unparseable output`);
+            continue;
+          }
+
+          const memoryIds = new Set([...boundaries, ...reviews].map((memory) => memory.id));
+          const knowledgeIds = new Set(knowledge.map((entry) => entry.id));
+          const retireMemories = output.retireMemoryIds.filter((id) => memoryIds.has(id));
+          const retireKnowledge = output.retireKnowledgeIds.filter((id) => knowledgeIds.has(id));
+          const rewrites = output.rewriteKnowledge.filter((rewrite) => knowledgeIds.has(rewrite.id));
+
+          retiredMemories += context.coworkStore.archiveUserMemories({
+            ids: retireMemories,
+            archivedAt: context.nowMs,
+          });
+          if (context.knowledgeStore) {
+            for (const id of retireKnowledge) {
+              try {
+                context.knowledgeStore.archiveKnowledge({ id, metabotId: bot.id });
+                retiredKnowledge += 1;
+              } catch (error) {
+                errors.push(`deep-consolidation bot ${bot.id}: archive knowledge ${id} failed`);
+              }
+            }
+            for (const rewrite of rewrites) {
+              try {
+                context.knowledgeStore.upsertKnowledge({
+                  metabotId: bot.id,
+                  topic: rewrite.topic,
+                  summary: rewrite.summary,
+                  kind: rewrite.kind,
+                  origin: 'dream',
+                });
+                rewrittenKnowledge += 1;
+              } catch (error) {
+                errors.push(`deep-consolidation bot ${bot.id}: rewrite knowledge ${rewrite.id} failed`);
+              }
+            }
+          }
+          context.coworkStore.setDeepConsolidationLastRunAt(bot.id, context.nowMs);
+        }
+        if (errors.length > 0) {
+          console.warn(`[MemoryHygiene] Deep consolidation warnings: ${errors.join(' | ')}`);
+        }
+        return {
+          deepConsolidationBots: botsConsidered,
+          deepRetiredMemories: retiredMemories,
+          deepRetiredKnowledge: retiredKnowledge,
+          deepRewrittenKnowledge: rewrittenKnowledge,
+        };
       },
     });
   }

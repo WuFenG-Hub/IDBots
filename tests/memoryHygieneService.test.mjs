@@ -461,3 +461,94 @@ test('dream-memory hygiene steps are wired into the nightly run', async () => {
     cleanup();
   }
 });
+
+const loadKnowledgeStoreModule = async () => {
+  try {
+    return await import('../dist-electron/main/metaidKnowledgeStore.js');
+  } catch {
+    return import('../dist-electron/metaidKnowledgeStore.js');
+  }
+};
+
+test('deep consolidation retires listed beliefs only, stamps cadence, skips within interval', async () => {
+  const { MetaIDKnowledgeStore } = await loadKnowledgeStoreModule();
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  const knowledge = new MetaIDKnowledgeStore(db, () => {});
+  knowledge.upsertKnowledge({ metabotId: 9, topic: 'deploy steps', summary: 'old steps', kind: 'know_how', origin: 'agent' });
+  const knowledgeId = knowledge.listKnowledgeForDream(9)[0].id;
+
+  const boundaryIds = [];
+  for (let index = 0; index < 8; index += 1) {
+    boundaryIds.push(coworkStore.createUserMemory({
+      metabotId: 9,
+      text: `boundary rule ${index}`,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'conversation',
+      forceNew: true,
+    }).id);
+  }
+
+  const calls = [];
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, name: 'Twin', llm_id: null, globalmetaid: 'metaid://stub-owner' }] },
+    metaidKnowledgeStore: knowledge,
+    performChat: async (_system, user) => {
+      calls.push(user);
+      return '```json\n' + JSON.stringify({
+        retire_memory_ids: [boundaryIds[0], 'bogus-memory-id'],
+        retire_knowledge_ids: [knowledgeId, 'bogus-knowledge-id'],
+        rewrite_knowledge: [],
+        notes: 'cleaned up bygone items',
+      }) + '\n```';
+    },
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.deepConsolidationBots, 1);
+    assert.equal(stats.counts.deepRetiredMemories, 1, 'inventory-validated: the bogus id is dropped');
+    assert.equal(stats.counts.deepRetiredKnowledge, 1);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /value_boundary/);
+    assert.match(calls[0], /deploy steps/);
+
+    const visibleBoundaries = coworkStore.listUserMemories({
+      metabotId: 9,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      status: 'created',
+      limit: 50,
+    });
+    assert.equal(visibleBoundaries.length, 7, 'the retired boundary left the listing (soft archive)');
+    assert.equal(knowledge.listKnowledgeForDream(9).length, 0, 'the retired knowledge point is archived');
+
+    const again = await service.runNow();
+    assert.equal(again.counts.deepConsolidationBots, 0, 'cadence gate skips within the interval');
+    assert.equal(calls.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('deep consolidation no-ops without performChat or with the switch off', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, globalmetaid: 'metaid://stub-owner' }] },
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.deepConsolidationBots, undefined, 'no LLM dep means the step is skipped silently');
+  } finally {
+    cleanup();
+  }
+});

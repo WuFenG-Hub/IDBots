@@ -714,6 +714,8 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         tombstonePurgeDays: hygiene.tombstonePurgeDays,
         knowledgeRevisionKeep: hygiene.knowledgeRevisionKeep,
         dreamRunRetentionDays: hygiene.dreamRunRetentionDays,
+        deepConsolidationEnabled: hygiene.deepConsolidationEnabled,
+        deepConsolidationIntervalDays: hygiene.deepConsolidationIntervalDays,
       });
       if (!saved) throw new Error(i18nService.t('memoryHygieneSaveFailed'));
       setHygiene(saved);
@@ -1450,6 +1452,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     { field: 'tombstonePurgeDays', min: 30, max: 3650, labelKey: 'memoryHygieneTombstoneDays', hintKey: 'memoryHygieneTombstoneDaysHint' },
     { field: 'knowledgeRevisionKeep', min: 1, max: 50, labelKey: 'memoryHygieneRevKeep', hintKey: 'memoryHygieneRevKeepHint' },
     { field: 'dreamRunRetentionDays', min: 30, max: 3650, labelKey: 'memoryHygieneRunDays', hintKey: 'memoryHygieneRunDaysHint' },
+    { field: 'deepConsolidationIntervalDays', min: 7, max: 365, labelKey: 'memoryHygieneDeepDays', hintKey: 'memoryHygieneDeepDaysHint' },
   ];
 
   const hygieneCountLabels: Record<string, string> = {
@@ -1461,6 +1464,10 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     knowledgeRevisionsPruned: i18nService.t('memoryHygieneStatRevisions'),
     dreamRunsPurged: i18nService.t('memoryHygieneStatRuns'),
     dreamFragmentsPurged: i18nService.t('memoryHygieneStatFragments'),
+    deepConsolidationBots: i18nService.t('memoryHygieneStatDeepBots'),
+    deepRetiredMemories: i18nService.t('memoryHygieneStatDeepMemories'),
+    deepRetiredKnowledge: i18nService.t('memoryHygieneStatDeepKnowledge'),
+    deepRewrittenKnowledge: i18nService.t('memoryHygieneStatDeepRewrites'),
   };
 
   const renderHygiene = () => {
@@ -1509,6 +1516,15 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                   checked={hygiene.enabled}
                   onChange={(value) => updateHygieneField('enabled', value)}
                   disabled={hygieneSaving}
+                />
+
+                {/* Deep consolidation (LLM belief-layer review) */}
+                <ToggleRow
+                  label={i18nService.t('memoryHygieneDeep')}
+                  hint={i18nService.t('memoryHygieneDeepHint')}
+                  checked={hygiene.deepConsolidationEnabled}
+                  onChange={(value) => updateHygieneField('deepConsolidationEnabled', value)}
+                  disabled={hygieneSaving || !hygiene.enabled}
                 />
 
                 {/* Thresholds */}

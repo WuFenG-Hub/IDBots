@@ -6378,6 +6378,74 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Archive specific memories by id (deep-consolidation retire proposals).
+   * self_identity is always refused; every other class only gets the
+   * reversible archived_at mark.
+   */
+  archiveUserMemories(input: { ids: string[]; archivedAt: number }): number {
+    const ids = input.ids.map((id) => id.trim()).filter(Boolean);
+    if (ids.length === 0) return 0;
+    let archived = 0;
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      this.db.run(
+        `UPDATE user_memories
+         SET archived_at = ?
+         WHERE archived_at IS NULL
+           AND usage_class != 'self_identity'
+           AND status = 'created'
+           AND id IN (${chunk.map(() => '?').join(', ')})`,
+        [Math.floor(input.archivedAt), ...chunk],
+      );
+      archived += this.db.getRowsModified?.() || 0;
+    }
+    if (archived > 0) {
+      this.saveDb();
+    }
+    return archived;
+  }
+
+  // Deep-consolidation cadence: metabot id -> epoch ms of its last run.
+  getDeepConsolidationLastRunAt(metabotId: number): number | null {
+    const row = this.getOne<{ value: string }>(
+      'SELECT value FROM cowork_config WHERE key = ?',
+      ['memoryHygieneDeepConsolidation'],
+    );
+    if (!row?.value) return null;
+    try {
+      const parsed = JSON.parse(row.value) as Record<string, number>;
+      const value = parsed[String(metabotId)];
+      return typeof value === 'number' ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  setDeepConsolidationLastRunAt(metabotId: number, ranAt: number): void {
+    let parsed: Record<string, number> = {};
+    const row = this.getOne<{ value: string }>(
+      'SELECT value FROM cowork_config WHERE key = ?',
+      ['memoryHygieneDeepConsolidation'],
+    );
+    if (row?.value) {
+      try {
+        parsed = JSON.parse(row.value) as Record<string, number>;
+      } catch {
+        parsed = {};
+      }
+    }
+    parsed[String(metabotId)] = Math.floor(ranAt);
+    this.db.run(`
+      INSERT INTO cowork_config (key, value, updated_at)
+      VALUES ('memoryHygieneDeepConsolidation', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `, [JSON.stringify(parsed), Date.now()]);
+    this.saveDb();
+  }
+
+  /**
    * The one low-risk physical delete in the memory layer: tombstones
    * (status='deleted') older than the grace period are removed together with
    * their source rows. They were already deleted content; the grace window

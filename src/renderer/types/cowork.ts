@@ -577,6 +577,8 @@ export interface MemoryHygieneConfig {
   tombstonePurgeDays: number;
   knowledgeRevisionKeep: number;
   dreamRunRetentionDays: number;
+  deepConsolidationEnabled: boolean;
+  deepConsolidationIntervalDays: number;
 }
 
 export interface MemoryHygieneRunStats {

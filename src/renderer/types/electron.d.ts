@@ -487,6 +487,8 @@ interface MemoryHygieneConfig {
   tombstonePurgeDays: number;
   knowledgeRevisionKeep: number;
   dreamRunRetentionDays: number;
+  deepConsolidationEnabled: boolean;
+  deepConsolidationIntervalDays: number;
 }
 
 interface MemoryHygieneRunStats {
