@@ -30,6 +30,9 @@ contextBridge.exposeInMainWorld('electron', {
     download: (source: string) => ipcRenderer.invoke('skills:download', source),
     getRoot: () => ipcRenderer.invoke('skills:getRoot'),
     autoRoutingPrompt: () => ipcRenderer.invoke('skills:autoRoutingPrompt'),
+    getAssignmentInfo: () => ipcRenderer.invoke('skills:getAssignmentInfo'),
+    setScope: (options: { id: string; scope: 'library' | 'global' | 'bots'; metabotIds?: number[] }) =>
+      ipcRenderer.invoke('skills:setScope', options),
     getConfig: (skillId: string) => ipcRenderer.invoke('skills:getConfig', skillId),
     setConfig: (skillId: string, config: Record<string, string>) => ipcRenderer.invoke('skills:setConfig', skillId, config),
     testEmailConnectivity: (skillId: string, config: Record<string, string>) =>

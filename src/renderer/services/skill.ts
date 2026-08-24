@@ -1,4 +1,4 @@
-import { Skill } from '../types/skill';
+import { SkillWithAssignment } from '../types/skill';
 
 type EmailConnectivityCheck = {
   code: 'imap_connection' | 'smtp_connection';
@@ -14,7 +14,7 @@ type EmailConnectivityTestResult = {
 };
 
 class SkillService {
-  private skills: Skill[] = [];
+  private skills: SkillWithAssignment[] = [];
   private initialized = false;
 
   async init(): Promise<void> {
@@ -23,7 +23,7 @@ class SkillService {
     this.initialized = true;
   }
 
-  async loadSkills(): Promise<Skill[]> {
+  async loadSkills(): Promise<SkillWithAssignment[]> {
     try {
       const result = await window.electron.skills.list();
       if (result.success && result.skills) {
@@ -39,7 +39,7 @@ class SkillService {
     }
   }
 
-  async setSkillEnabled(id: string, enabled: boolean): Promise<Skill[]> {
+  async setSkillEnabled(id: string, enabled: boolean): Promise<SkillWithAssignment[]> {
     try {
       const result = await window.electron.skills.setEnabled({ id, enabled });
       if (result.success && result.skills) {
@@ -53,7 +53,7 @@ class SkillService {
     }
   }
 
-  async deleteSkill(id: string): Promise<{ success: boolean; skills?: Skill[]; error?: string }> {
+  async deleteSkill(id: string): Promise<{ success: boolean; skills?: SkillWithAssignment[]; error?: string }> {
     try {
       const result = await window.electron.skills.delete(id);
       if (result.success && result.skills) {
@@ -67,7 +67,7 @@ class SkillService {
     }
   }
 
-  async downloadSkill(source: string): Promise<{ success: boolean; skills?: Skill[]; error?: string }> {
+  async downloadSkill(source: string): Promise<{ success: boolean; skills?: SkillWithAssignment[]; error?: string }> {
     try {
       const result = await window.electron.skills.download(source);
       if (result.success && result.skills) {
@@ -98,15 +98,15 @@ class SkillService {
     return window.electron.skills.onChanged(callback);
   }
 
-  getSkills(): Skill[] {
+  getSkills(): SkillWithAssignment[] {
     return this.skills;
   }
 
-  getEnabledSkills(): Skill[] {
+  getEnabledSkills(): SkillWithAssignment[] {
     return this.skills.filter(s => s.enabled);
   }
 
-  getSkillById(id: string): Skill | undefined {
+  getSkillById(id: string): SkillWithAssignment | undefined {
     return this.skills.find(s => s.id === id);
   }
 

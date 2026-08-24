@@ -24,3 +24,14 @@ export interface Skill {
   prompt: string;         // System prompt content
   skillPath: string;      // Absolute path to SKILL.md
 }
+
+// Assignment-model enrichment (skills:list):
+// - 'bundled': shipped with IDBots, implicitly visible to every bot
+// - 'global':  external skill the owner shared with all bots
+// - 'library': external skill available only to bots it is assigned to
+export type SkillScopeLabel = 'bundled' | 'global' | 'library';
+
+export interface SkillWithAssignment extends Skill {
+  scope?: SkillScopeLabel;
+  assignedMetabotIds?: number[];
+}

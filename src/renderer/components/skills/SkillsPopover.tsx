@@ -14,6 +14,13 @@ interface SkillsPopoverProps {
   onSelectSkill: (skill: Skill) => void;
   onManageSkills: () => void;
   anchorRef: React.RefObject<HTMLElement>;
+  /**
+   * Session's bot binding: when set, the picker only offers skills that bot
+   * may use (bundled + global + assigned). Undefined = no narrowing (hosts
+   * that have not threaded session identity yet); null = bot-less session
+   * (bundled + global only).
+   */
+  metabotId?: number | null;
 }
 
 const SkillsPopover: React.FC<SkillsPopoverProps> = ({
@@ -22,6 +29,7 @@ const SkillsPopover: React.FC<SkillsPopoverProps> = ({
   onSelectSkill,
   onManageSkills,
   anchorRef,
+  metabotId,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [maxListHeight, setMaxListHeight] = useState(256); // default max-h-64 = 256px
@@ -31,9 +39,15 @@ const SkillsPopover: React.FC<SkillsPopoverProps> = ({
   const skills = useSelector((state: RootState) => state.skill.skills);
   const activeSkillIds = useSelector((state: RootState) => state.skill.activeSkillIds);
 
-  // Filter enabled skills based on search query
+  // Filter enabled skills based on search query + the session's skill view
   const filteredSkills = skills
     .filter(s => s.enabled)
+    .filter(s => {
+      if (metabotId === undefined) return true;
+      if (s.isBuiltIn || s.scope === 'global') return true;
+      if (s.scope === 'bundled') return true;
+      return metabotId != null && (s.assignedMetabotIds ?? []).includes(metabotId);
+    })
     .filter(s =>
       s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       s.description.toLowerCase().includes(searchQuery.toLowerCase())

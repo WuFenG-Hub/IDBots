@@ -1,8 +1,8 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { Skill } from '../../types/skill';
+import { SkillWithAssignment } from '../../types/skill';
 
 interface SkillState {
-  skills: Skill[];
+  skills: SkillWithAssignment[]; // carries scope + assignedMetabotIds enrichment
   activeSkillIds: string[]; // Currently selected skills for conversation (multi-select)
 }
 
@@ -15,17 +15,17 @@ const skillSlice = createSlice({
   name: 'skill',
   initialState,
   reducers: {
-    setSkills: (state, action: PayloadAction<Skill[]>) => {
+    setSkills: (state, action: PayloadAction<SkillWithAssignment[]>) => {
       state.skills = action.payload;
       // Remove any active skill IDs that no longer exist
       state.activeSkillIds = state.activeSkillIds.filter(id =>
         action.payload.some(skill => skill.id === id)
       );
     },
-    addSkill: (state, action: PayloadAction<Skill>) => {
+    addSkill: (state, action: PayloadAction<SkillWithAssignment>) => {
       state.skills.push(action.payload);
     },
-    updateSkill: (state, action: PayloadAction<{ id: string; updates: Partial<Skill> }>) => {
+    updateSkill: (state, action: PayloadAction<{ id: string; updates: Partial<SkillWithAssignment> }>) => {
       const index = state.skills.findIndex(s => s.id === action.payload.id);
       if (index !== -1) {
         state.skills[index] = { ...state.skills[index], ...action.payload.updates };

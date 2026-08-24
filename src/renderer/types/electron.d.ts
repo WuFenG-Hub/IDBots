@@ -717,6 +717,17 @@ interface IElectronAPI {
     download: (source: string) => Promise<{ success: boolean; skills?: Skill[]; error?: string }>;
     getRoot: () => Promise<{ success: boolean; path?: string; error?: string }>;
     autoRoutingPrompt: () => Promise<{ success: boolean; prompt?: string | null; error?: string }>;
+    getAssignmentInfo: () => Promise<{
+      success: boolean;
+      info?: Record<string, { scope: 'library' | 'global'; assignedMetabotIds: number[] }>;
+      metabots?: Array<{ id: number; name: string; metabotType: string }>;
+      error?: string;
+    }>;
+    setScope: (options: { id: string; scope: 'library' | 'global' | 'bots'; metabotIds?: number[] }) => Promise<{
+      success: boolean;
+      info?: Record<string, { scope: 'library' | 'global'; assignedMetabotIds: number[] }>;
+      error?: string;
+    }>;
     getConfig: (skillId: string) => Promise<{ success: boolean; config?: Record<string, string>; error?: string }>;
     setConfig: (skillId: string, config: Record<string, string>) => Promise<{ success: boolean; error?: string }>;
     testEmailConnectivity: (
