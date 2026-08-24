@@ -28,6 +28,19 @@ export const GROUP_TASK_SEARCH_MAX_LIMIT = 20;
 /** When |local − remote| is within this margin, local sorts first. */
 export const LOCAL_TIE_MARGIN = 4;
 
+/**
+ * Staffing declarations a chair/Twin can attach to a seat search: a fixed
+ * in-house crew, the previous episode's crew, or a local-only call. Any of
+ * them flips the merge to local-first (see compareLocalFirstCandidates).
+ */
+export type GroupTaskStaffingPreference = 'fixed_team' | 'previous_team' | 'local_only';
+
+export const GROUP_TASK_STAFFING_PREFERENCES: readonly GroupTaskStaffingPreference[] = [
+  'fixed_team',
+  'previous_team',
+  'local_only',
+];
+
 const SEAT_QUERY: Record<Exclude<GroupTaskSeatRole, 'domain'>, string> = {
   content: 'content copy writing 文案 内容 介绍 调研',
   design: 'design image video 设计 图像 视频 海报',
@@ -99,11 +112,14 @@ export interface SearchGroupTaskSeatInput {
   domainLabel?: string;
   skills?: string[];
   limit?: number;
+  /** Staffing declaration: flips the merge to local-first ordering. */
+  staffingPreference?: GroupTaskStaffingPreference;
 }
 
 export interface SearchGroupTaskSeatResult {
   query: string;
   roleHint: GroupTaskSeatRole | null;
+  staffingPreference: GroupTaskStaffingPreference | null;
   primary: GroupTaskSeatCandidate | null;
   backup: GroupTaskSeatCandidate | null;
   candidates: GroupTaskSeatCandidate[];
@@ -414,6 +430,20 @@ function compareCandidates(left: GroupTaskSeatCandidate, right: GroupTaskSeatCan
   return left.name.localeCompare(right.name);
 }
 
+/**
+ * Staffing-declaration mode (fixed team / previous team / local-only): every
+ * hireable local outranks every remote regardless of the raw-score gap, so a
+ * proven in-house crew is never displaced by a higher-scoring stranger (the
+ * LOCAL_TIE_MARGIN gate does not apply). Remotes stay listed after locals as
+ * backup/tail instead of taking primary. Within one source, ordering is still
+ * score-first, so the impression boost keeps ranking proven locals highest.
+ */
+function compareLocalFirstCandidates(left: GroupTaskSeatCandidate, right: GroupTaskSeatCandidate): number {
+  if (left.source !== right.source) return left.source === 'local' ? -1 : 1;
+  if (right.score !== left.score) return right.score - left.score;
+  return left.name.localeCompare(right.name);
+}
+
 function readSnapshot(
   deps: GroupTaskCandidateSearchDeps,
   observer: string | null,
@@ -504,6 +534,11 @@ export async function searchGroupTaskSeatCandidates(
 ): Promise<SearchGroupTaskSeatResult> {
   const deps = getDeps();
   const roleHint = isSeatRole(input.roleHint) ? input.roleHint : null;
+  const staffingPreference = GROUP_TASK_STAFFING_PREFERENCES.includes(
+    input.staffingPreference as GroupTaskStaffingPreference,
+  )
+    ? (input.staffingPreference as GroupTaskStaffingPreference)
+    : null;
   const query = resolveSeatSearchQuery(input);
   if (!query) {
     throw new Error('query or role_hint is required');
@@ -555,9 +590,10 @@ export async function searchGroupTaskSeatCandidates(
 
   const merged = [...locals, ...remotes];
   const blocked = merged.filter((candidate) => candidate.impression.verdict === 'block');
+  const compare = staffingPreference ? compareLocalFirstCandidates : compareCandidates;
   const hireable = merged
     .filter((candidate) => candidate.impression.verdict !== 'block')
-    .sort(compareCandidates)
+    .sort(compare)
     .slice(0, limit);
 
   if (hireable.length === 0 && blocked.length === 0) {
@@ -567,10 +603,11 @@ export async function searchGroupTaskSeatCandidates(
   return {
     query,
     roleHint,
+    staffingPreference,
     primary: hireable[0] ?? null,
     backup: hireable[1] ?? null,
     candidates: hireable,
-    blocked: blocked.sort(compareCandidates),
+    blocked: blocked.sort(compare),
     warnings,
   };
 }

@@ -48,7 +48,11 @@ import { gateChairDrivingSend, gateExternalChairSend, DEFAULT_DRIVER_GRACE_MS } 
 import { resolveTwinSourceSessionFallback } from './groupTaskSourceSession';
 import { GroupTaskStaffingError } from './groupTaskStaffing';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
-import { searchGroupTaskSeatCandidates } from './groupTaskCandidateSearch';
+import {
+  searchGroupTaskSeatCandidates,
+  GROUP_TASK_STAFFING_PREFERENCES,
+  type GroupTaskStaffingPreference,
+} from './groupTaskCandidateSearch';
 import { buildMetabotDirectory } from './metabotDirectoryService';
 import type { GroupTaskStatus, GroupTaskMemberStatus } from '../groupTaskStore';
 import { getAddressBalance } from './addressBalanceService';
@@ -1792,6 +1796,7 @@ export function startMetaidRpcServer(
         domain_label?: string;
         skills?: unknown;
         limit?: number;
+        staffing_preference?: unknown;
       };
       try {
         parsed = JSON.parse(body || '{}') as typeof parsed;
@@ -1806,6 +1811,19 @@ export function startMetaidRpcServer(
         res.end(JSON.stringify({ success: false, error: 'limit must be a positive integer' }));
         return;
       }
+      let staffingPreference: GroupTaskStaffingPreference | undefined;
+      if (parsed.staffing_preference !== undefined && parsed.staffing_preference !== null) {
+        const value = String(parsed.staffing_preference).trim();
+        if (!(GROUP_TASK_STAFFING_PREFERENCES as readonly string[]).includes(value)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({
+            success: false,
+            error: `staffing_preference must be one of: ${GROUP_TASK_STAFFING_PREFERENCES.join(', ')}`,
+          }));
+          return;
+        }
+        staffingPreference = value as GroupTaskStaffingPreference;
+      }
       const skills = Array.isArray(parsed.skills)
         ? parsed.skills.map((item) => String(item ?? '').trim()).filter(Boolean)
         : undefined;
@@ -1816,6 +1834,7 @@ export function startMetaidRpcServer(
           domainLabel: typeof parsed.domain_label === 'string' ? parsed.domain_label : undefined,
           skills,
           limit,
+          staffingPreference,
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, ...result }));

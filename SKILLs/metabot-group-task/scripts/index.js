@@ -240,6 +240,14 @@ async function main() {
         if (!Number.isInteger(limit) || limit <= 0) fail('limit must be a positive integer for search_candidates');
         body.limit = limit;
       }
+      const staffingPreference = String(params.staffing_preference ?? '').trim();
+      if (staffingPreference) {
+        const allowed = ['fixed_team', 'previous_team', 'local_only'];
+        if (!allowed.includes(staffingPreference)) {
+          fail(`staffing_preference must be one of: ${allowed.join(', ')}`);
+        }
+        body.staffing_preference = staffingPreference;
+      }
       break;
     }
     case 'search_remote': {
