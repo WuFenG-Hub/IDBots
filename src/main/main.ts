@@ -220,6 +220,7 @@ import {
 } from './services/cognitiveChatCompletion';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
+import { startMemoryHygieneService, stopMemoryHygieneService } from './services/memoryHygieneService';
 import { KnowledgeBaseService } from './services/knowledgeBaseService';
 import { KnowledgeBaseStore } from './knowledgeBaseStore';
 import {
@@ -3796,6 +3797,26 @@ const startSqliteDaemons = (): void => {
     },
   });
 
+  // Memory hygiene ("记忆整理"): the deterministic compression stroke that
+  // follows the dreams — retires stale impression observations, archives old
+  // episodes and decayed dream memories, prunes revision overflow. LLM-free,
+  // runs late in the dream window so nightly dreams finish first.
+  startMemoryHygieneService({
+    coworkStore: getCoworkStore(),
+    metabotStore: getMetabotStore(),
+    dreamStore: getDreamStore(),
+    metaidExperienceStore: dreamExperienceStore,
+    metaidImpressionStore: dreamImpressionStore,
+    metaidKnowledgeStore: dreamKnowledgeStore,
+    emitToRenderer: (channel, data) => {
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) {
+          try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
+        }
+      });
+    },
+  });
+
   // Knowledge bases ("知识库"): per-bot document corpora learned into a local
   // search index. Nightly auto-learn shares the dream window but is LLM-free
   // and deliberately decoupled from dream gating/success.
@@ -3829,6 +3850,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   await stopCognitiveOrchestrator({ waitForTick: true });
   await stopPrivateChatDaemon({ waitForTick: true });
   stopDreamService();
+  stopMemoryHygieneService();
   knowledgeBaseService?.stopAutoLearnSchedule();
   metawebStudyService?.stopSchedule();
   stopPrivateChatBackfill();
@@ -13766,6 +13788,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       },
       stopCognitiveOrchestrator,
       stopDreamService,
+      stopMemoryHygieneService,
       stopP2P: () => p2pIndexerService.stop(),
       stopProviderDiscovery: () => {
         if (providerDiscoveryService) {
