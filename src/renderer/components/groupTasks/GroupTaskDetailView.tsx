@@ -29,7 +29,7 @@ import {
   shouldStickToBottom,
 } from './groupTaskUtils';
 import { groupTaskStatusLabelKey } from './GroupTasksView';
-import { ArrowLeftIcon, ChatBubbleLeftRightIcon, ClipboardDocumentIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ChatBubbleLeftRightIcon, ChevronRightIcon, ClipboardDocumentIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
@@ -40,6 +40,11 @@ const LOAD_OLDER_THRESHOLD = 48;
 // HITL: the pause-banner decision summary is truncated at this length; the
 // "expand" toggle reveals the full body (the transcript holds it anyway).
 const CHECKPOINT_SUMMARY_MAX_LEN = 120;
+// The header goal renders COLLAPSED by default: only the first paragraph (up to
+// the first line break, capped at this length) shows — long single-paragraph
+// goals stay scannable too (task #33's goal is one 2528-char line). Same cap as
+// the acceptance card's preview (mirrors the backend 160-char message preview).
+const GOAL_PREVIEW_MAX_CHARS = 160;
 
 /**
  * Copyable group/room id pill. The group_id is the room id (stored locally on
@@ -155,6 +160,10 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [sentHint, setSentHint] = useState(false);
   // HITL: whether the pause-banner decision summary shows in full (expand).
   const [checkpointSummaryExpanded, setCheckpointSummaryExpanded] = useState(false);
+  // Goal collapse: default collapsed (first-paragraph preview); expanded shows
+  // the full text. Both the triangle before the label and the inline toggle
+  // drive this single flag.
+  const [goalExpanded, setGoalExpanded] = useState(false);
   const [confirmAction, setConfirmAction] = useState<'done' | 'cancelled' | null>(null);
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
@@ -291,6 +300,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   useEffect(() => {
     setMessages([]);
     setMessagesError(null);
+    setGoalExpanded(false);
     oldestLoadedIdRef.current = null;
     hasMoreRef.current = true;
     loadingOlderRef.current = false;
@@ -552,6 +562,16 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     ? `${openCheckpointSummary.slice(0, CHECKPOINT_SUMMARY_MAX_LEN).trimEnd()}…`
     : openCheckpointSummary;
   const chairMember = members.find((member) => member.role === 'chair');
+  // Goal collapse: preview = first paragraph (up to the first line break),
+  // further capped so a single long line still folds. Anything beyond the
+  // preview stays behind the triangle / inline expand toggle.
+  const goalText = detail.goal ?? '';
+  const goalFirstBreak = goalText.search(/\r?\n/);
+  const goalFirstParagraph = goalFirstBreak === -1 ? goalText : goalText.slice(0, goalFirstBreak);
+  const goalHasMore = goalFirstBreak !== -1 || goalText.length > GOAL_PREVIEW_MAX_CHARS;
+  const goalPreview = goalFirstParagraph.length > GOAL_PREVIEW_MAX_CHARS
+    ? `${goalFirstParagraph.slice(0, GOAL_PREVIEW_MAX_CHARS).trimEnd()}…`
+    : goalFirstParagraph;
   const memberDisplayName = (member: GroupTaskDetail['members'][number]): string =>
     member.name ?? (member.metabotId != null
       ? `bot-${member.metabotId}`
@@ -678,9 +698,36 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
         <div className="flex-1 flex flex-col min-w-0">
           {/* Goal / acceptance */}
           <div className="px-4 py-3 border-b dark:border-claude-darkBorder/50 border-claude-border/50 shrink-0">
-            <p className="text-sm dark:text-claude-darkText text-claude-text whitespace-pre-wrap">
-              {detail.goal}
-            </p>
+            <div className="flex items-start gap-1">
+              {goalHasMore && (
+                <button
+                  type="button"
+                  onClick={() => setGoalExpanded((expanded) => !expanded)}
+                  aria-expanded={goalExpanded}
+                  aria-label={i18nService.t(goalExpanded ? 'groupTasksGoalCollapse' : 'groupTasksGoalExpand')}
+                  title={i18nService.t(goalExpanded ? 'groupTasksGoalCollapse' : 'groupTasksGoalExpand')}
+                  className="non-draggable mt-0.5 shrink-0 inline-flex h-5 w-5 items-center justify-center rounded dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+                >
+                  <ChevronRightIcon
+                    className={`h-4 w-4 transition-transform ${goalExpanded ? 'rotate-90' : ''}`}
+                  />
+                </button>
+              )}
+              <p className="min-w-0 flex-1 text-sm dark:text-claude-darkText text-claude-text whitespace-pre-wrap break-words">
+                <span className="font-medium">{i18nService.t('groupTasksGoalLabel')}</span>
+                {': '}
+                {goalHasMore ? (goalExpanded ? goalText : goalPreview) : goalText}
+                {goalHasMore && (
+                  <button
+                    type="button"
+                    onClick={() => setGoalExpanded((expanded) => !expanded)}
+                    className="ml-1 whitespace-nowrap text-claude-accent hover:underline"
+                  >
+                    {i18nService.t(goalExpanded ? 'groupTasksGoalCollapse' : 'groupTasksGoalExpand')}
+                  </button>
+                )}
+              </p>
+            </div>
             {detail.stall === true && (
               <div className="mt-2 rounded-lg border border-orange-300 dark:border-orange-500/40 bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-xs dark:text-orange-200 text-orange-800">
                 {i18nService
