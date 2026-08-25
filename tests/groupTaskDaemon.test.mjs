@@ -3694,7 +3694,7 @@ const p1CognitionHarness = async () => {
   const cognitionCalls = [];
   const h = await createHarness({
     getMetaIDGroupCognitionPromptBlock: async (input) => {
-      cognitionCalls.push(input.observerGlobalMetaID);
+      cognitionCalls.push({ observerGlobalMetaID: input.observerGlobalMetaID, roster: input.roster });
       return `<metaid_group_cognition>Observer: ${input.observerGlobalMetaID}</metaid_group_cognition>`;
     },
   });
@@ -3719,7 +3719,7 @@ test('entropy P1: cognition block cached per (task, bot) within the TTL, rebuilt
     p1WorkerPing(h, 'p1-b-i0', '@Coder Bot go again');
     await h.loop.runTick();
     assert.equal(
-      cognitionCalls.filter((observer) => observer === 'gmid-w2').length,
+      cognitionCalls.filter((call) => call.observerGlobalMetaID === 'gmid-w2').length,
       1,
       'second turn within the TTL reuses the cached block',
     );
@@ -3728,7 +3728,7 @@ test('entropy P1: cognition block cached per (task, bot) within the TTL, rebuilt
     p1WorkerPing(h, 'p1-c-i0', '@Coder Bot third pass');
     await h.loop.runTick();
     assert.equal(
-      cognitionCalls.filter((observer) => observer === 'gmid-w2').length,
+      cognitionCalls.filter((call) => call.observerGlobalMetaID === 'gmid-w2').length,
       2,
       'block rebuilt after the TTL expires',
     );
@@ -3748,7 +3748,7 @@ test('entropy P1: cognitionCache knob off restores per-turn rebuilds', async () 
     p1WorkerPing(h, 'p1-e-i0', '@Coder Bot go again');
     await h.loop.runTick();
     assert.equal(
-      cognitionCalls.filter((observer) => observer === 'gmid-w2').length,
+      cognitionCalls.filter((call) => call.observerGlobalMetaID === 'gmid-w2').length,
       2,
       'knob off: every turn rebuilds',
     );
@@ -3807,6 +3807,88 @@ test('entropy P1: the chair keeps the full-roster cognition for arbitration', as
       chairInput.roster.map((member) => member.globalMetaID).sort(),
       ['gmid-twin', 'gmid-w2', 'gmid-w3'],
       'chair cognition covers the whole roster',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('entropy P1 review: mid-TTL member join rebuilds the chair block; the worker chair-only view stays cached', async () => {
+  const { h, cognitionCalls } = await p1CognitionHarness();
+  try {
+    const task = h.createTask([2]);
+    p1WorkerPing(h, 'p1-r1-i0', '@Coder Bot go');
+    await h.loop.runTick();
+    assert.equal(cognitionCalls.filter((call) => call.observerGlobalMetaID === 'gmid-twin').length, 1);
+    assert.equal(cognitionCalls.filter((call) => call.observerGlobalMetaID === 'gmid-w2').length, 1);
+
+    h.state.nowMs += 21_000; // inside the TTL, past cooldowns
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 3, role: 'worker' });
+    p1WorkerPing(h, 'p1-r2-i0', '@Coder Bot go again');
+    await h.loop.runTick();
+    assert.equal(
+      cognitionCalls.filter((call) => call.observerGlobalMetaID === 'gmid-twin').length,
+      2,
+      'chair roster changed (join) -> fingerprint miss -> rebuild',
+    );
+    assert.equal(
+      cognitionCalls.filter((call) => call.observerGlobalMetaID === 'gmid-w2').length,
+      1,
+      'worker chair-only view unaffected by a peer join -> stays cached',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('entropy P1 review: chair replaced mid-TTL rebuilds the worker block with the new chair entry', async () => {
+  const { h, cognitionCalls } = await p1CognitionHarness();
+  try {
+    const task = h.createTask([2]);
+    p1WorkerPing(h, 'p1-r3-i0', '@Coder Bot go');
+    await h.loop.runTick();
+
+    h.state.nowMs += 21_000; // inside the TTL
+    h.db.run(
+      'UPDATE group_task_members SET globalmetaid = ? WHERE task_id = ? AND role = ?',
+      ['gmid-twin-2', task.id, 'chair'],
+    );
+    h.db.run('UPDATE metabots SET globalmetaid = ? WHERE id = 1', ['gmid-twin-2']);
+    p1WorkerPing(h, 'p1-r4-i0', '@Coder Bot go again');
+    await h.loop.runTick();
+
+    const workerInputs = cognitionCalls.filter((input) => input.observerGlobalMetaID === 'gmid-w2');
+    assert.equal(workerInputs.length, 2, 'chair change invalidates the cached worker block');
+    assert.deepEqual(
+      workerInputs[1].roster.map((member) => member.globalMetaID),
+      ['gmid-twin-2'],
+      'rebuilt with the NEW chair entry',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('entropy P1 review: chair without a globalMetaID falls back to the full-roster worker cognition', async () => {
+  const cognitionCalls = [];
+  const h = await createHarness({
+    getMetaIDGroupCognitionPromptBlock: async (input) => {
+      cognitionCalls.push(input);
+      return '<metaid_group_cognition>ok</metaid_group_cognition>';
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_task_members SET globalmetaid = NULL WHERE task_id = ? AND role = ?', [task.id, 'chair']);
+    h.db.run('UPDATE metabots SET globalmetaid = NULL WHERE id = 1');
+    p1WorkerPing(h, 'p1-r5-i0', '@Coder Bot go');
+    await h.loop.runTick();
+    const workerInput = cognitionCalls.find((input) => input.observerGlobalMetaID === 'gmid-w2');
+    assert.ok(workerInput, 'worker turn ran');
+    assert.deepEqual(
+      workerInput.roster.map((member) => member.globalMetaID),
+      ['gmid-w2'],
+      'chair-only filter would be empty -> full roster fallback keeps a non-empty view',
     );
   } finally {
     h.cleanup();

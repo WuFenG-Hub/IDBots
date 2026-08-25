@@ -2119,15 +2119,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       .filter((member): member is { globalMetaID: string; name: string; role: 'chair' | 'worker' } =>
         Boolean(member.globalMetaID));
     // Entropy P1: the cognition block is rebuilt per turn per responder but
-    // its inputs (impression snapshots, episode aggregates) change on dream /
-    // task-close cadence — a short TTL cache keyed by (task, bot) with a
-    // roster fingerprint removes the per-tick rebuild. Staleness only lags
-    // interaction-count style statistics, never the impression semantics.
+    // its impression snapshots change on dream / task-close cadence — a short
+    // TTL cache keyed by (task, bot, observer GlobalMetaID) with a roster
+    // fingerprint (id+role+name, so joins/leaves/renames invalidate) removes
+    // the per-tick rebuild. Staleness is bounded by the TTL: contact-state
+    // lines (episode counts, first/last contact) can lag up to 5 minutes;
+    // snapshot-derived content only changes when the dream/close writers run.
     const entropyP1 = parseGroupTaskEntropyP1Config(
       deps.getStore().get<string>('groupTaskEntropyP1'),
     );
-    const rosterKey = roster.map((member) => member.globalMetaID).join('|');
-    const cacheKey = `${task.id}:${bot.id}`;
+    const rosterKey = roster.map((member) => `${member.globalMetaID}:${member.role}:${member.name}`).join('|');
+    const cacheKey = `${task.id}:${bot.id}:${bot.globalmetaid}`;
     const currentTimeMs = now();
     const cached = entropyP1.cognitionCache ? cognitionBlockCache.get(cacheKey) : undefined;
     if (cached && cached.rosterKey === rosterKey && cached.expiresAt > currentTimeMs) {
@@ -2142,13 +2144,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         ? `${block.slice(0, GROUP_COGNITION_BLOCK_MAX_CHARS)}…`
         : block;
       if (entropyP1.cognitionCache) {
-        if (cognitionBlockCache.size >= COGNITION_BLOCK_CACHE_MAX_ENTRIES) {
+        while (cognitionBlockCache.size >= COGNITION_BLOCK_CACHE_MAX_ENTRIES) {
+          // Evict the soonest-expiring entry: freshest knowledge keeps its slot.
+          let oldestKey: string | null = null;
+          let oldestExpiry = Number.POSITIVE_INFINITY;
           for (const [key, entry] of cognitionBlockCache) {
-            if (entry.expiresAt <= currentTimeMs) cognitionBlockCache.delete(key);
+            if (entry.expiresAt < oldestExpiry) {
+              oldestExpiry = entry.expiresAt;
+              oldestKey = key;
+            }
           }
-          if (cognitionBlockCache.size >= COGNITION_BLOCK_CACHE_MAX_ENTRIES) {
-            cognitionBlockCache.clear();
-          }
+          if (oldestKey == null) break;
+          cognitionBlockCache.delete(oldestKey);
         }
         cognitionBlockCache.set(cacheKey, {
           rosterKey,
@@ -2192,9 +2199,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const turnEntropyP1 = parseGroupTaskEntropyP1Config(
       deps.getStore().get<string>('groupTaskEntropyP1'),
     );
-    const cognitionMembers = botRole === 'worker' && turnEntropyP1.workerChairOnly
-      ? promptMembers.filter((member) => member.role === 'chair')
-      : promptMembers;
+    const chairMembers = promptMembers.filter((member) =>
+      member.role === 'chair' && member.globalMetaId?.trim());
+    const useChairOnly = botRole === 'worker' && turnEntropyP1.workerChairOnly && chairMembers.length > 0;
+    const cognitionMembers = useChairOnly ? chairMembers : promptMembers;
     const cognitionBlock = await buildGroupCognitionBlockFor(bot, cognitionMembers, task);
     const cultureBlock = deps.buildTeamCultureBlock?.() ?? null;
     const systemPrompt = buildGroupTaskSystemPrompt({
