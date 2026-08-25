@@ -715,6 +715,12 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
           'The owner asked to change the roster. Update the plan with propose and wait for a new confirmation.',
         );
       }
+      if (gate.decision === 'owner_cancel') {
+        throw new GroupTaskStaffingError(
+          'OWNER_CANCEL_REQUIRED',
+          'The owner cancelled this group before it was created. Create only after they ask again.',
+        );
+      }
       throw new GroupTaskStaffingError(
         'OWNER_CONFIRM_REQUIRED',
         'The owner has not confirmed this roster yet. Show the slate and wait, unless they already said to start without confirming.',

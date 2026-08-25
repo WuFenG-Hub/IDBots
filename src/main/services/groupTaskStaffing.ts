@@ -23,14 +23,14 @@ export const GROUP_TASK_TYPICAL_TEAM_SIZE = 5;
 export const GROUP_TASK_HARD_TEAM_SIZE = 8;
 
 /**
- * All-local slates with fewer seats than this skip the owner confirmation
+ * All-local slates with at most this many seats skip the owner confirmation
  * round automatically: every member runs on this machine and the full team
- * (Twin chair included) stays within the typical team size, so an extra
+ * (Twin chair included) stays within the typical team size of 5, so an extra
  * confirm adds friction without changing the roster's blast radius. The owner
- * can still override afterwards — a revise reply after propose always blocks
- * the auto-start.
+ * can still override afterwards — a revise or cancel reply after propose
+ * always blocks the auto-start.
  */
-export const GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS = 5;
+export const GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS = 4;
 
 export type GroupTaskStaffingProposalStatus =
   | 'pending'
@@ -43,6 +43,7 @@ export type GroupTaskStaffingOwnerDecision =
   | 'skip_authorized'
   | 'owner_confirmed'
   | 'owner_revise'
+  | 'owner_cancel'
   | 'awaiting_owner'
   | 'local_auto_start';
 
@@ -104,6 +105,7 @@ export class GroupTaskStaffingError extends Error {
     | 'STAFFING_PLAN_INVALID'
     | 'OWNER_CONFIRM_REQUIRED'
     | 'OWNER_REVISE_REQUIRED'
+    | 'OWNER_CANCEL_REQUIRED'
     | 'PROPOSAL_NOT_FOUND'
     | 'PROPOSAL_NOT_USABLE'
     | 'ROSTER_CAP_EXCEEDED'
@@ -170,6 +172,19 @@ const REVISE_PATTERNS: RegExp[] = [
   /\bdrop\s+(the\s+)?(seat|role|bot|member|candidate|person)\b/i,
 ];
 
+/**
+ * Whole-decision cancellations ("算了/别开了/never mind"). Anchored so plain
+ * "取消" inside a compound sentence ("取消确认", "取消，换个岗位") does not
+ * flip a normal reply; "算了，就这些人吧" stays a confirm (pattern 3 demands
+ * an explicit 不/别 stop right after the comma).
+ */
+const CANCEL_PATTERNS: RegExp[] = [
+  /^(算了|别开了|不开了|取消|取消吧|取消算|先不弄了|不弄了|先不开|不用开了)[。.!！]*$/u,
+  /^算了吧[。.!！]*$/u,
+  /算了[，,]\s*(不|别)[^。.！!]*$/u,
+  /\b(cancel|abort|never ?mind|forget (it|about it)|call it off|scrap (it|this|the plan))\b/i,
+];
+
 const CONFIRM_EXACT_PATTERNS: RegExp[] = [
   /^(确认|就这样|就这样开|可以开|开吧|开始吧|同意|没问题|好的|好|行|嗯)[。.!！]*$/u,
   /^(ok|okay|yes|yep|go|go ahead|looks good|lgtm|proceed|confirmed?|start)[.!]*$/i,
@@ -215,13 +230,25 @@ export function normalizeStaffingPlan(raw: unknown): GroupTaskStaffingPlan {
   const seats: GroupTaskStaffingSeat[] = seatsRaw.map((item) => {
     const row = item && typeof item === 'object' ? item as Record<string, unknown> : {};
     const metabotId = Number(row.metabotId);
+    const candidateGlobalMetaId = trimText(row.candidateGlobalMetaId) || trimText(row.globalmetaid) || undefined;
+    const rawSource = String(row.source ?? '').trim();
+    // A missing / invalid source label falls back to the global meta id: a
+    // seat carrying one is a remote hire (local seats never carry one), so it
+    // must not be miscounted as local for the auto-start waiver.
+    const source = rawSource === 'local'
+      ? 'local'
+      : rawSource === 'remote'
+        ? 'remote'
+        : candidateGlobalMetaId
+          ? 'remote'
+          : 'local';
     return {
       role: isSeatRole(row.role) ? row.role : 'content',
       domainLabel: trimText(row.domainLabel) || undefined,
       candidateName: trimText(row.candidateName) || trimText(row.name),
-      candidateGlobalMetaId: trimText(row.candidateGlobalMetaId) || trimText(row.globalmetaid) || undefined,
+      candidateGlobalMetaId,
       metabotId: Number.isInteger(metabotId) && metabotId > 0 ? metabotId : undefined,
-      source: row.source === 'remote' ? 'remote' : 'local',
+      source,
       reason: trimText(row.reason),
       backupName: trimText(row.backupName) || undefined,
     };
@@ -292,11 +319,12 @@ export function detectSkipConfirmInWish(text: string): boolean {
   return SKIP_CONFIRM_PATTERNS.some((pattern) => pattern.test(value));
 }
 
-export function classifyOwnerStaffingReply(text: string): 'confirm' | 'revise' | 'unknown' {
+export function classifyOwnerStaffingReply(text: string): 'confirm' | 'revise' | 'cancel' | 'unknown' {
   const value = String(text ?? '').trim();
   if (!value) return 'unknown';
   // "好的，不换人" must not fire /换人/ first-match revise.
   if (KEEP_ROSTER_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
+  if (CANCEL_PATTERNS.some((pattern) => pattern.test(value))) return 'cancel';
   if (REVISE_PATTERNS.some((pattern) => pattern.test(value))) return 'revise';
   if (CONFIRM_EXACT_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
   if (CONFIRM_PHRASE_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
@@ -322,10 +350,11 @@ export function isStaffingProposalExpired(createdAt: number, nowMs: number = Dat
   return nowMs - createdAt > STAFFING_PROPOSAL_TTL_MS;
 }
 
-/** True when the slate is small and every seat is a local bot — such teams
- * start without an owner confirmation round (see GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS). */
+/** True when the slate is non-empty, small, and every seat is a local bot —
+ * such teams start without an owner confirmation round (see GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS). */
 export function isLocalOnlySmallSlate(plan: GroupTaskStaffingPlan): boolean {
-  return plan.seats.length < GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS
+  return plan.seats.length > 0
+    && plan.seats.length <= GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS
     && plan.seats.every((seat) => seat.source === 'local');
 }
 
@@ -340,10 +369,12 @@ export function resolveStaffingOwnerGate(input: {
   for (const reply of input.repliesAfterPropose) {
     const kind = classifyOwnerStaffingReply(reply);
     if (kind === 'revise') lastIntent = 'owner_revise';
+    else if (kind === 'cancel') lastIntent = 'owner_cancel';
     else if (kind === 'confirm') lastIntent = 'owner_confirmed';
     else if (detectSkipConfirmInWish(reply)) lastIntent = 'skip_authorized';
   }
   if (lastIntent === 'owner_revise') return { allowed: false, decision: 'owner_revise' };
+  if (lastIntent === 'owner_cancel') return { allowed: false, decision: 'owner_cancel' };
   if (lastIntent === 'owner_confirmed') return { allowed: true, decision: 'owner_confirmed' };
   if (lastIntent === 'skip_authorized') return { allowed: true, decision: 'skip_authorized' };
   if (detectSkipConfirmInWish(input.triggeringWish) || input.persistedSkip) {
@@ -445,8 +476,8 @@ export function buildStaffingSlateText(input: {
       : 'Please confirm this roster, ask to swap/drop a seat, or say "looks good, start". I will not create the group until you confirm.');
   } else if (input.skipReason === 'local_small') {
     lines.push(zh
-      ? '这份名单全是本机成员且规模不大，无需确认，我将直接开群。想换人或去掉某个岗位，现在说。'
-      : 'This slate is all local and small, so no confirmation is needed — I will create the group with it directly. Speak up now to swap or drop a seat.');
+      ? '这份名单全是本机成员且规模不大，无需确认。我将直接开群；若名单不合适，告诉我换人或去掉某个岗位即可。'
+      : 'This slate is all local and small, so it needs no confirmation. I will create the group with it directly; if the lineup is off, just tell me to swap or drop a seat.');
   } else {
     lines.push(zh
       ? '你已经说了不用确认人选，我将按这份名单直接开群。'
