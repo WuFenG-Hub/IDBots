@@ -445,10 +445,10 @@ test('purgeOldRunsAndFragments removes only completed history past the horizon',
       cutoffDateKey: '2026-05-25',
       excludeMetabotIds: new Set([2]),
     });
-    assert.equal(result.runsDeleted, 1);
+    assert.equal(result.runsDeleted, 2, 'completed AND failed past the horizon are both bookkeeping now');
     assert.equal(result.fragmentsDeleted, 1);
     const remainingRuns = db.exec('SELECT id FROM metabot_dream_runs').flatMap((r) => r.values.map((v) => v[0]));
-    assert.deepEqual([...remainingRuns].sort(), ['run-new-done', 'run-old-failed']);
+    assert.deepEqual([...remainingRuns].sort(), ['run-new-done']);
     const remainingFrags = db.exec('SELECT id FROM metabot_dream_fragments').flatMap((r) => r.values.map((v) => v[0]));
     assert.deepEqual([...remainingFrags].sort(), ['frag-excluded', 'frag-new']);
   } finally {

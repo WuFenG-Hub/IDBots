@@ -487,10 +487,26 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
       scopeKind: 'owner',
       scopeKey: 'owner:self',
       usageClass: 'value_boundary',
-      origin: 'conversation',
+      origin: 'dream',
       forceNew: true,
     }).id);
   }
+  // Conversation-origin rows may carry the user's explicit "remember this" —
+  // the LLM retire path must never archive them.
+  const conversationBoundary = coworkStore.createUserMemory({
+    metabotId: 9,
+    text: 'user said always double-check invoices',
+    scopeKind: 'owner',
+    scopeKey: 'owner:self',
+    usageClass: 'value_boundary',
+    origin: 'conversation',
+    forceNew: true,
+  }).id;
+  // Age every seed row to just before the fixed snapshot clock so (a) the
+  // notUsedSince guard sees them as pre-inventory and (b) they stay inside
+  // the decay window — the deterministic decay step must not eat them first.
+  const recentBeforeSnapshot = new Date(2026, 7, 25, 8, 0).getTime();
+  db.run('UPDATE user_memories SET updated_at = ?, last_used_at = ? WHERE metabot_id = 9', [recentBeforeSnapshot, recentBeforeSnapshot]);
 
   const calls = [];
   const service = new MemoryHygieneService({
@@ -500,7 +516,7 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
     performChat: async (_system, user) => {
       calls.push(user);
       return '```json\n' + JSON.stringify({
-        retire_memory_ids: [boundaryIds[0], 'bogus-memory-id'],
+        retire_memory_ids: [boundaryIds[0], 'bogus-memory-id', conversationBoundary],
         retire_knowledge_ids: [knowledgeId, 'bogus-knowledge-id'],
         rewrite_knowledge: [],
         notes: 'cleaned up bygone items',
@@ -511,7 +527,7 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
   try {
     const stats = await service.runNow();
     assert.equal(stats.counts.deepConsolidationBots, 1);
-    assert.equal(stats.counts.deepRetiredMemories, 1, 'inventory-validated: the bogus id is dropped');
+    assert.equal(stats.counts.deepRetiredMemories, 1, 'inventory-validated + dream-origin only; bogus and conversation-origin ids dropped');
     assert.equal(stats.counts.deepRetiredKnowledge, 1);
     assert.equal(calls.length, 1);
     assert.match(calls[0], /value_boundary/);
@@ -525,12 +541,128 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
       status: 'created',
       limit: 50,
     });
-    assert.equal(visibleBoundaries.length, 7, 'the retired boundary left the listing (soft archive)');
+    assert.equal(visibleBoundaries.length, 8, '7 untouched + the conversation-origin survivor');
+    assert.ok(
+      visibleBoundaries.some((memory) => memory.id === conversationBoundary),
+      'conversation-origin boundary survives the LLM retire list'
+    );
     assert.equal(knowledge.listKnowledgeForDream(9).length, 0, 'the retired knowledge point is archived');
 
     const again = await service.runNow();
     assert.equal(again.counts.deepConsolidationBots, 0, 'cadence gate skips within the interval');
     assert.equal(calls.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('deep consolidation refuses retire lists that exceed the guardrail and skips disabled bots', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  for (let index = 0; index < 8; index += 1) {
+    coworkStore.createUserMemory({
+      metabotId: 9,
+      text: `boundary rule ${index}`,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+      forceNew: true,
+    });
+  }
+  const retireAllIds = coworkStore.listUserMemories({
+    metabotId: 9,
+    scopeKind: 'owner',
+    scopeKey: 'owner:self',
+    usageClass: 'value_boundary',
+    status: 'created',
+    limit: 50,
+  }).map((memory) => memory.id);
+
+  const calls = [];
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: {
+      listMetabots: () => [
+        { id: 9, name: 'Twin', llm_id: null, globalmetaid: 'metaid://stub-owner' },
+        { id: 10, name: 'Off', llm_id: null, enabled: false },
+      ],
+    },
+    performChat: async () => {
+      calls.push('called');
+      return '```json\n' + JSON.stringify({
+        retire_memory_ids: retireAllIds,
+        retire_knowledge_ids: [],
+        rewrite_knowledge: [],
+        notes: 'purge everything',
+      }) + '\n```';
+    },
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.deepRetiredMemories, 0, 'a retire list eating the whole layer is refused');
+    assert.ok(stats.errors.some((line) => line.includes('guardrail')));
+    assert.equal(coworkStore.getDeepConsolidationLastRunAt(9), null, 'no cadence stamp on a refused run');
+    assert.equal(calls.length, 1, 'the disabled bot never reaches the LLM');
+    const visible = coworkStore.listUserMemories({
+      metabotId: 9,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      status: 'created',
+      limit: 50,
+    });
+    assert.equal(visible.length, 8);
+  } finally {
+    cleanup();
+  }
+});
+
+test('archiveUserMemories notUsedSince guard protects rows touched during the LLM window', async () => {
+  const { db, cleanup, coworkStore } = await setup(new Date(2026, 7, 25, 10, 0));
+  try {
+    const stale = coworkStore.createUserMemory({
+      metabotId: 9,
+      text: 'untouched dream memory',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'work_review',
+      origin: 'dream',
+      forceNew: true,
+    });
+    const fresh = coworkStore.createUserMemory({
+      metabotId: 9,
+      text: 'injected-during-window memory',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'work_review',
+      origin: 'dream',
+      forceNew: true,
+    });
+    // Both rows predate the inventory snapshot (but stay inside the decay
+    // window); only the injection touch is newer than the snapshot.
+    const recentBeforeSnapshot = new Date(2026, 7, 25, 8, 0).getTime();
+    db.run('UPDATE user_memories SET updated_at = ?, last_used_at = ? WHERE metabot_id = 9', [recentBeforeSnapshot, recentBeforeSnapshot]);
+    const snapshot = new Date(2026, 7, 25, 9, 59, 0).getTime();
+    // The fresh row was injected (touched) AFTER the inventory snapshot.
+    db.run('UPDATE user_memories SET last_used_at = ? WHERE id = ?', [snapshot + 30_000, fresh.id]);
+    const archived = coworkStore.archiveUserMemories({
+      ids: [stale.id, fresh.id],
+      archivedAt: new Date(2026, 7, 25, 10, 0).getTime(),
+      notUsedSince: snapshot,
+    });
+    assert.equal(archived, 1, 'the touched row survives the stale proposal');
+    const survivors = coworkStore.listUserMemories({
+      metabotId: 9,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'work_review',
+      status: 'created',
+      limit: 50,
+    });
+    assert.ok(survivors.some((memory) => memory.id === fresh.id));
   } finally {
     cleanup();
   }

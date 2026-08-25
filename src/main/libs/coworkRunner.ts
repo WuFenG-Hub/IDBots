@@ -2811,6 +2811,10 @@ export class CoworkRunner extends EventEmitter {
           includeDeleted: false,
           limit: Math.max(memoryPolicy.memoryUserMemoriesMaxItems, 12),
           offset: 0,
+          // Injection IS the usage event for the decay clock: rows surfaced
+          // here keep last_used_at fresh so hygiene never archives memories
+          // the bot still relies on daily.
+          touchLastUsed: true,
         });
     const contactEntries = resolvedScopes.writeScope.kind === 'contact'
       ? this.getMemoryBackend().listUserMemories({
@@ -2820,6 +2824,7 @@ export class CoworkRunner extends EventEmitter {
           includeDeleted: false,
           limit: memoryPolicy.memoryUserMemoriesMaxItems,
           offset: 0,
+          touchLastUsed: true,
         })
       : [];
     const conversationEntries = resolvedScopes.writeScope.kind === 'conversation'
@@ -2830,6 +2835,7 @@ export class CoworkRunner extends EventEmitter {
           includeDeleted: false,
           limit: memoryPolicy.memoryUserMemoriesMaxItems,
           offset: 0,
+          touchLastUsed: true,
         })
       : [];
     const promptBlocksXml = buildScopedMemoryPromptBlocks({

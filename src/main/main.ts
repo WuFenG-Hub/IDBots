@@ -9476,6 +9476,8 @@ if (!gotTheLock) {
     query?: string;
     status?: 'created' | 'stale' | 'deleted' | 'all';
     includeDeleted?: boolean;
+    /** Hygiene-archived rows (Settings → Facts "show archived"). */
+    includeArchived?: boolean;
     limit?: number;
     offset?: number;
   }) => {
@@ -9495,6 +9497,7 @@ if (!gotTheLock) {
         query: input?.query?.trim() || undefined,
         status: input?.status || 'all',
         includeDeleted: Boolean(input?.includeDeleted),
+        includeArchived: Boolean(input?.includeArchived),
         limit: input?.limit,
         offset: input?.offset,
       });
@@ -9503,6 +9506,19 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to list memory entries',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:memory:unarchiveEntry', async (_event, input: { id: string }) => {
+    try {
+      const store = getCoworkStore();
+      const restored = store.unarchiveUserMemories({ ids: [input?.id] });
+      return { success: restored > 0 };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to unarchive memory entry',
       };
     }
   });
