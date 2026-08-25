@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, CheckIcon, Cog6ToothIcon, CpuChipIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../services/i18n';
 import { configService } from '../services/config';
-import { placePopoverAbove } from '../utils/anchoredPopover';
+import { placePopoverAbove, useAnchorMoveWatcher } from '../utils/anchoredPopover';
 import {
   buildModelGroupsFromConfig,
   resolveBrainModelInGroups,
@@ -124,6 +124,10 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
       window.removeEventListener('scroll', handle, true);
     };
   }, [isOpen, useFixedDropdown, updateFixedDropdownPlacement]);
+
+  // Re-place when the trigger MOVES without any window-level event (sidebar
+  // width drag, composer textarea auto-growing and pushing the toolbar up).
+  useAnchorMoveWatcher(triggerRef, isOpen && useFixedDropdown, updateFixedDropdownPlacement);
 
   // Catalog freshness: rebuild when the popover opens and whenever the
   // Settings dialog closes (providers may have been added/edited there).

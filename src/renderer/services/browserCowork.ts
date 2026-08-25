@@ -52,6 +52,7 @@ class BrowserCoworkService {
     cwd?: string,
     modelEffort?: { model?: string | null; modelProvider?: string | null; effort?: string | null },
     skills?: BrowserCoworkSkills,
+    projectId?: string | null,
   ): Promise<CoworkSession | null> {
     if (this.starting) return null;
     const cowork = window.electron?.cowork;
@@ -72,6 +73,10 @@ class BrowserCoworkService {
         ...(typeof metabotId === 'number' ? { metabotId } : {}),
         ...(skills?.activeSkillIds?.length ? { activeSkillIds: skills.activeSkillIds } : {}),
         ...(cwd?.trim() ? { cwd: cwd.trim() } : {}),
+        // Project binding matters even when its source dir is empty or equals
+        // the default working directory: main-side it pins the session to the
+        // project (project dir used as-is, no per-bot workspace redirect).
+        ...(projectId?.trim() ? { projectId: projectId.trim() } : {}),
         ...(modelEffort?.model ? { model: modelEffort.model } : {}),
         ...(modelEffort?.modelProvider ? { modelProvider: modelEffort.modelProvider } : {}),
         ...(modelEffort && modelEffort.effort !== undefined ? { effort: modelEffort.effort } : {}),

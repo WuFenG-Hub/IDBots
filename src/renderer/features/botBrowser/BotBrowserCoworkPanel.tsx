@@ -13,6 +13,7 @@ import { ActiveSkillBadge } from '../../components/skills';
 import { RootState } from '../../store';
 import { clearActiveSkills } from '../../store/slices/skillSlice';
 import { browserCoworkService } from '../../services/browserCowork';
+import { projectsService } from '../../services/projects';
 import { i18nService } from '../../services/i18n';
 import { getCompactFolderName } from '../../utils/path';
 import type { CoworkMessage, CoworkWorkspaceSelection } from '../../types/cowork';
@@ -68,6 +69,40 @@ interface BotBrowserCoworkPanelProps {
   onOpenNewProject?: () => void;
 }
 
+const WORKSPACE_SELECTION_STORAGE_KEY = 'idbots.botBrowser.workspaceSelection';
+
+const parsePersistedWorkspaceSelection = (raw: string | null): CoworkWorkspaceSelection | null => {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<CoworkWorkspaceSelection>;
+    if (parsed.kind === 'botWorkspace') return { kind: 'botWorkspace' };
+    if (parsed.kind === 'folder' && typeof parsed.cwd === 'string' && parsed.cwd.trim()) {
+      return { kind: 'folder', cwd: parsed.cwd };
+    }
+    if (parsed.kind === 'project'
+      && typeof parsed.projectId === 'string' && parsed.projectId.trim()
+      && typeof parsed.name === 'string') {
+      return {
+        kind: 'project',
+        projectId: parsed.projectId,
+        name: parsed.name,
+        cwd: typeof parsed.cwd === 'string' ? parsed.cwd : '',
+      };
+    }
+  } catch {
+    // Malformed stored value: fall through to no selection.
+  }
+  return null;
+};
+
+function loadPersistedWorkspaceSelection(): CoworkWorkspaceSelection | null {
+  try {
+    return parsePersistedWorkspaceSelection(window.localStorage.getItem(WORKSPACE_SELECTION_STORAGE_KEY));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Co-Work chat panel embedded in the Bot Internet sidebar. Stays mounted for
  * Bot Browser, Bot Hub, and Meta Apps so the same panel can drive those pages.
@@ -89,8 +124,13 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
   const [selectedMetabotId, setSelectedMetabotId] = useState<number | null>(null);
   // Workspace choice for the next browser session, same selection model as the
   // cowork home composer (project / folder / bot workspace); the popover is
-  // the shared project-mode FolderSelectorPopover.
-  const [workspaceSelection, setWorkspaceSelection] = useState<CoworkWorkspaceSelection | null>(null);
+  // the shared project-mode FolderSelectorPopover. The last choice is
+  // remembered per surface (own localStorage key — deliberately NOT the
+  // cowork config's lastWorkspaceSelection, which belongs to the home
+  // composer).
+  const [workspaceSelection, setWorkspaceSelection] = useState<CoworkWorkspaceSelection | null>(() =>
+    loadPersistedWorkspaceSelection()
+  );
   const [showFolderMenu, setShowFolderMenu] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const promptInputRef = useRef<CoworkPromptInputRef>(null);
@@ -131,6 +171,36 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
     }
   }, [currentSession?.metabotId]);
 
+  // Remember the workspace choice across panel remounts / app restarts.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(WORKSPACE_SELECTION_STORAGE_KEY, JSON.stringify(workspaceSelection));
+    } catch {
+      // Storage unavailable: the choice stays session-local.
+    }
+  }, [workspaceSelection]);
+
+  // A persisted project binding survives only while the project still exists
+  // (best-effort check; load failures keep the selection).
+  const selectedProjectId = workspaceSelection?.kind === 'project' ? workspaceSelection.projectId : null;
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const projects = await projectsService.loadProjects();
+        if (!cancelled && !projects.some((project) => project.id === selectedProjectId)) {
+          setWorkspaceSelection(null);
+        }
+      } catch {
+        // Best-effort validation; keep the selection on load failure.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProjectId]);
+
   const effectiveMetabotId = selectedMetabotId ?? metabots[0]?.id ?? null;
   const selectedMetabot = metabots.find((m) => m.id === effectiveMetabotId) ?? null;
   // Pending model+effort for the session about to start from this panel;
@@ -161,11 +231,12 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
   const handleSubmit = async (prompt: string, skillPrompt?: string) => {
     setShowHistory(false);
     // Pinned-skill snapshot, same contract as the home composer: the ids ride
-    // the session (persisted main-side, driving per-skill env overrides), the
-    // inlined `## Skill:` blocks ride the base system prompt, and the pins
-    // clear after submitting so they don't leak into the next turn. Steer
-    // turns carry no skills (the composer already drops the prompt while
-    // streaming).
+    // the submitted turn (persisted main-side for the session, driving
+    // per-skill env overrides), and the inlined `## Skill:` blocks embed into
+    // the system prompt sent WITH that turn. Turns without pins never rewrite
+    // the session's persisted prompt, and clearing the pins does not strip
+    // blocks embedded by earlier turns. Steer turns carry no skills (the
+    // composer already drops the prompt while streaming).
     const skillIds = isStreaming ? [] : [...activeSkillIds];
     const skills = skillIds.length > 0
       ? { prompt: skillPrompt, activeSkillIds: skillIds }
@@ -174,17 +245,20 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
       await browserCoworkService.send(prompt, skills);
     } else {
       // Only project/folder selections carry a concrete cwd; bot workspace
-      // (and no selection) start in the default bot workspace chain.
+      // (and no selection) start in the default bot workspace chain. The
+      // projectId binding matters even when cwd is empty: main-side it pins
+      // the session to the project (its dir used as-is, no per-bot redirect).
       const startCwd = workspaceSelection
         && (workspaceSelection.kind === 'folder' || workspaceSelection.kind === 'project')
         && workspaceSelection.cwd.trim()
         ? workspaceSelection.cwd.trim()
         : undefined;
+      const startProjectId = workspaceSelection?.kind === 'project' ? workspaceSelection.projectId : undefined;
       await browserCoworkService.start(prompt, effectiveMetabotId, startCwd, {
         model: pendingModelEffort?.modelId ?? undefined,
         modelProvider: pendingModelEffort?.providerKey ?? undefined,
         effort: pendingModelEffort?.effort ?? undefined,
-      }, skills);
+      }, skills, startProjectId);
       setPendingModelEffort(null);
     }
     if (skillIds.length > 0) {
@@ -364,6 +438,9 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
         showModelSelector={false}
         onManageSkills={() => onShowSkills?.()}
         commands={browserComposerCommands}
+        // Scope the skills picker to the session's bot (live session wins,
+        // draft follows the selector) so pins stay inside that bot's view.
+        sessionMetabotId={currentSession?.metabotId ?? effectiveMetabotId}
       />
 
       {showHistory ? (

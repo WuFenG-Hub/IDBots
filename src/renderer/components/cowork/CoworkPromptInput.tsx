@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
 import { PaperClipIcon, XMarkIcon, SparklesIcon, ChevronDownIcon, PlusIcon, PuzzlePieceIcon, CommandLineIcon } from '@heroicons/react/24/outline';
-import { placePopoverAbove } from '../../utils/anchoredPopover';
+import { placePopoverAbove, useAnchorMoveWatcher } from '../../utils/anchoredPopover';
 import ModelEffortPicker, { type ModelEffortValue } from '../ModelEffortPicker';
 import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
@@ -159,29 +159,34 @@ const PlusMenuButton: React.FC<PlusMenuButtonProps> = ({
   // pattern as the SkillsPopover anchored to this very button.
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties | null>(null);
 
+  const updateMenuPlacement = useCallback(() => {
+    const anchorRect = buttonRef.current?.getBoundingClientRect() ?? null;
+    const menuRect = menuRef.current?.getBoundingClientRect();
+    const placement = placePopoverAbove(
+      anchorRect,
+      menuRect ? { width: menuRect.width, height: menuRect.height } : { width: PLUS_MENU_WIDTH },
+      PLUS_MENU_WIDTH,
+    );
+    setMenuStyle({ position: 'fixed', top: placement.top, left: placement.left, width: placement.width });
+  }, [buttonRef, menuRef]);
+
   useLayoutEffect(() => {
     if (!open) {
       setMenuStyle(null);
       return;
     }
-    const updatePlacement = () => {
-      const anchorRect = buttonRef.current?.getBoundingClientRect() ?? null;
-      const menuRect = menuRef.current?.getBoundingClientRect();
-      const placement = placePopoverAbove(
-        anchorRect,
-        menuRect ? { width: menuRect.width, height: menuRect.height } : { width: PLUS_MENU_WIDTH },
-        PLUS_MENU_WIDTH,
-      );
-      setMenuStyle({ position: 'fixed', top: placement.top, left: placement.left, width: placement.width });
-    };
-    updatePlacement();
-    window.addEventListener('resize', updatePlacement);
-    window.addEventListener('scroll', updatePlacement, true);
+    updateMenuPlacement();
+    window.addEventListener('resize', updateMenuPlacement);
+    window.addEventListener('scroll', updateMenuPlacement, true);
     return () => {
-      window.removeEventListener('resize', updatePlacement);
-      window.removeEventListener('scroll', updatePlacement, true);
+      window.removeEventListener('resize', updateMenuPlacement);
+      window.removeEventListener('scroll', updateMenuPlacement, true);
     };
-  }, [open, buttonRef, menuRef]);
+  }, [open, updateMenuPlacement]);
+
+  // Re-place when the trigger MOVES without any window-level event (sidebar
+  // width drag, the composer textarea auto-growing beneath it).
+  useAnchorMoveWatcher(buttonRef, open, updateMenuPlacement);
 
   return (
     <div className="relative shrink-0">
@@ -354,6 +359,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const [commandNotice, setCommandNotice] = useState<string | null>(null);
     const [isDraggingFiles, setIsDraggingFiles] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    // The composer card anchors the '/' command picker (fixed placement).
+    const composerCardRef = useRef<HTMLDivElement>(null);
     const folderButtonRef = useRef<HTMLButtonElement>(null);
     const dragDepthRef = useRef(0);
     const contextMenuRef = useRef<HTMLDivElement>(null);
@@ -1208,6 +1215,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
         </div>
       )}
       <div
+        ref={composerCardRef}
         className={enhancedContainerClass}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -1226,6 +1234,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             listboxId={COMMAND_PICKER_ID}
             onHighlight={setCommandPickerHighlight}
             onPick={pickCommand}
+            anchorRef={composerCardRef}
           />
         )}
         {isLarge ? (

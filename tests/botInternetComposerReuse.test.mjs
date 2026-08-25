@@ -85,8 +85,8 @@ test('Bot Browser panel forwards pinned skills like the home composer', () => {
   );
   assert.match(
     panelSource,
-    /browserCoworkService\.start\(prompt, effectiveMetabotId, startCwd, \{[\s\S]*?\}, skills\)/,
-    'start path must forward the skills payload',
+    /browserCoworkService\.start\(prompt, effectiveMetabotId, startCwd, \{[\s\S]*?\}, skills, startProjectId\)/,
+    'start path must forward the skills payload and the project binding',
   );
   // Service side: pinned `## Skill:` blocks embed into the base prompt and
   // the ids ride startSession/submitInput (persisted main-side).
@@ -114,4 +114,62 @@ test('ModelEffortPicker exposes an opt-in fixed dropdown mode', () => {
     'fixed dropdown branch must render position:fixed',
   );
   assert.ok(pickerSource.includes('placePopoverAbove'), 'picker should use the shared fixed placement helper');
+});
+
+test('panel scopes the skills picker to the session bot (pinned-skill auth surface)', () => {
+  assert.ok(
+    panelSource.includes('sessionMetabotId={currentSession?.metabotId ?? effectiveMetabotId}'),
+    'panel must thread the session bot binding into the composer skills picker',
+  );
+});
+
+test('workspace choice is remembered per surface and project bindings are validated', () => {
+  assert.ok(
+    panelSource.includes("'idbots.botBrowser.workspaceSelection'"),
+    'panel must persist its workspace selection under its own storage key',
+  );
+  assert.ok(
+    panelSource.includes('projectsService.loadProjects()'),
+    'restored project bindings must be validated against the live project list',
+  );
+  // Project binding rides session start (main-side pins the project dir).
+  assert.ok(
+    browserCoworkSource.includes('{ projectId: projectId.trim() }'),
+    'start must forward the project binding',
+  );
+});
+
+test('anchored popovers stay in the viewport and follow a moving anchor', () => {
+  const utilSource = readSource('../src/renderer/utils/anchoredPopover.ts');
+  assert.match(
+    utilSource,
+    /Math\.max\(MARGIN, unclampedTop\)/,
+    'placePopoverAbove must clamp the top edge into the viewport',
+  );
+  assert.ok(
+    utilSource.includes('export function useAnchorMoveWatcher'),
+    'a move-watcher hook must exist for popovers anchored to shifting triggers',
+  );
+  // Consumers: model picker (fixed mode), plus menu, command picker.
+  assert.ok(pickerSource.includes('useAnchorMoveWatcher'), 'model picker must watch its anchor');
+  assert.ok(promptInputSource.includes('useAnchorMoveWatcher'), 'plus menu must watch its anchor');
+  const commandPickerSource = readSource('../src/renderer/components/cowork/ComposerCommandPicker.tsx');
+  assert.ok(
+    commandPickerSource.includes('placePopoverAbove'),
+    'command picker must use the shared fixed placement helper',
+  );
+  assert.match(
+    commandPickerSource,
+    /'fixed z-50 w-80/,
+    'command picker must render position:fixed when anchored',
+  );
+  assert.match(
+    commandPickerSource,
+    /maxHeight: `\$\{maxListHeight\}px`/,
+    'command picker list must cap its height to the space above the anchor',
+  );
+  assert.ok(
+    promptInputSource.includes('anchorRef={composerCardRef}'),
+    'composer must anchor the command picker to the composer card',
+  );
 });
