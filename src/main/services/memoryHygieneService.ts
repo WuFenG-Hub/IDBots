@@ -3,6 +3,7 @@ import type { DreamStore } from '../dreamStore';
 import type { MetaIDExperienceStore } from '../metaidExperienceStore';
 import type { MetaIDImpressionStore } from '../metaidImpressionStore';
 import type { MetaIDKnowledgeStore } from '../metaidKnowledgeStore';
+import type { TeamCultureStore } from '../teamCultureStore';
 import { formatBotWorkspaceDate } from '../libs/botWorkspace';
 import {
   isMemoryHygieneRunTimeDue,
@@ -60,6 +61,7 @@ export interface MemoryHygieneRunContext {
   experienceStore?: MetaIDExperienceStore;
   impressionStore?: MetaIDImpressionStore;
   knowledgeStore?: MetaIDKnowledgeStore;
+  cultureStore?: TeamCultureStore;
 }
 
 interface MemoryHygieneStep {
@@ -85,6 +87,7 @@ export interface MemoryHygieneDeps {
   metaidExperienceStore?: MetaIDExperienceStore;
   metaidImpressionStore?: MetaIDImpressionStore;
   metaidKnowledgeStore?: MetaIDKnowledgeStore;
+  metaidCultureStore?: TeamCultureStore;
   /** Required only for the deep-consolidation step; absent = step no-ops. */
   performChat?: MemoryHygienePerformChat;
   tickIntervalMs?: number;
@@ -184,6 +187,23 @@ export class MemoryHygieneService {
           excludeMetabotIds: context.disabledMetabotIds,
         });
         return { dreamRunsPurged: result.runsDeleted, dreamFragmentsPurged: result.fragmentsDeleted };
+      },
+    });
+    // Culture layer: emergent entries that stopped earning injection slots
+    // decay to archived (owner entries never auto-archived); revision
+    // overflow is pruned like knowledge revisions.
+    this.steps.push({
+      name: 'culture',
+      run: (context) => {
+        if (!context.cultureStore) return {};
+        const decayed = context.cultureStore.archiveDecayedCulture({
+          cutoffMs: context.nowMs - context.config.memoryDecayDays * 86_400_000,
+          archivedAt: context.nowMs,
+        });
+        const pruned = context.cultureStore.pruneCultureRevisions({
+          keepPerEntry: context.config.knowledgeRevisionKeep,
+        });
+        return { cultureEntriesDecayed: decayed, cultureRevisionsPruned: pruned };
       },
     });
     // Deep consolidation (the LLM side of the compression stroke): every N
@@ -398,6 +418,7 @@ export class MemoryHygieneService {
         experienceStore: this.deps.metaidExperienceStore,
         impressionStore: this.deps.metaidImpressionStore,
         knowledgeStore: this.deps.metaidKnowledgeStore,
+        cultureStore: this.deps.metaidCultureStore,
       };
       for (const step of this.steps) {
         try {

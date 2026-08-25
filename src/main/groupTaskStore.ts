@@ -2037,6 +2037,63 @@ export class GroupTaskStore {
     return Number(row?.n ?? 0);
   }
 
+  /**
+   * P3 communication-entropy metric: stamp the task's inter-agent traffic
+   * (total decrypted content bytes + message count of its on-chain group)
+   * at close, so bytes-per-deliverable can be watched over time as the
+   * shared culture base (hopefully) compresses coordination.
+   */
+  recordTaskCommStats(taskId: number, groupId: string | null): boolean {
+    if (!groupId) return false;
+    const row = this.getOne<{ bytes: number | string | null; messages: number | string | null }>(
+      `SELECT SUM(LENGTH(content)) AS bytes, COUNT(*) AS messages
+       FROM group_chat_messages WHERE group_id = ?`,
+      [groupId],
+    );
+    this.db.run(
+      `UPDATE group_tasks SET comm_total_bytes = ?, comm_message_count = ? WHERE id = ?`,
+      [Number(row?.bytes ?? 0) || 0, Number(row?.messages ?? 0) || 0, taskId],
+    );
+    this.saveDb();
+    return true;
+  }
+
+  listRecentTaskCommStats(limit = 15): Array<{
+    taskId: number;
+    title: string;
+    status: string;
+    commTotalBytes: number | null;
+    commMessageCount: number | null;
+    deliverableCount: number;
+    updatedAt: string | null;
+  }> {
+    return this.getAll<{
+      id: number | string;
+      title: string;
+      status: string;
+      comm_total_bytes: number | string | null;
+      comm_message_count: number | string | null;
+      deliverable_count: number | string;
+      updated_at: string | null;
+    }>(
+      `SELECT t.id, t.title, t.status, t.comm_total_bytes, t.comm_message_count, t.updated_at,
+         (SELECT COUNT(*) FROM group_task_deliverables d WHERE d.task_id = t.id) AS deliverable_count
+       FROM group_tasks t
+       WHERE t.status IN ('done', 'cancelled') AND t.comm_total_bytes IS NOT NULL
+       ORDER BY t.updated_at DESC
+       LIMIT ?`,
+      [Math.min(50, Math.max(1, Math.floor(limit)))],
+    ).map((row) => ({
+      taskId: Number(row.id),
+      title: row.title,
+      status: row.status,
+      commTotalBytes: row.comm_total_bytes == null ? null : Number(row.comm_total_bytes),
+      commMessageCount: row.comm_message_count == null ? null : Number(row.comm_message_count),
+      deliverableCount: Number(row.deliverable_count) || 0,
+      updatedAt: row.updated_at,
+    }));
+  }
+
   /** Round-4: in-place update of a deliverable (correction-first aggregation). */
   updateDeliverableUri(id: number, uri: string | null, kind: string): void {
     this.db.run(

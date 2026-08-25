@@ -893,12 +893,15 @@ export class SqliteStore {
         display_name TEXT,
         pinned INTEGER NOT NULL DEFAULT 0,
         archived_at INTEGER,
-        source_session_id TEXT
+        source_session_id TEXT,
+        comm_total_bytes INTEGER,
+        comm_message_count INTEGER
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
     this.migrateGroupTasksLastDrivenAt();
     this.migrateGroupTasksRatingColumns();
+    this.migrateGroupTasksCommStats();
     this.migrateGroupTasksLocalState();
     this.migrateGroupTasksSourceSessionId();
     this.db.run(`
@@ -2624,6 +2627,28 @@ export class SqliteStore {
    * validated in code), rating_comment (optional free text), rated_at. No-op
    * once present; existing tasks keep NULL (unrated history stays unrated).
    */
+  /** P3 culture metric: communication-entropy columns stamped at task close. */
+  private migrateGroupTasksCommStats(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('comm_total_bytes')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN comm_total_bytes INTEGER');
+        changed = true;
+      }
+      if (!columns.includes('comm_message_count')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN comm_message_count INTEGER');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('[SqliteStore] group_tasks comm-stats migration failed:', error);
+    }
+  }
+
   private migrateGroupTasksRatingColumns(): void {
     try {
       const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');

@@ -40,6 +40,11 @@ import type {
   CoworkMemoryPolicy,
   MemoryHygieneConfig,
   MemoryHygieneRunStats,
+  TeamCultureEntry,
+  TeamCultureActiveCounts,
+  TeamCultureKind,
+  TeamCultureStatus,
+  TaskCommTrendRow,
   CoworkMemoryScopesOverview,
   CoworkSessionMemoryScope,
   CoworkMetaIDContactSummary,
@@ -1106,6 +1111,73 @@ class CoworkService {
     if (!api) return { stats: null, error: 'Memory hygiene API unavailable' };
     const result = await api();
     return { stats: result?.stats ?? null, error: result?.error ?? null };
+  }
+
+  async listTeamCulture(input?: {
+    kind?: TeamCultureKind | 'all';
+    status?: TeamCultureStatus | 'all';
+    query?: string;
+  }): Promise<{ entries: TeamCultureEntry[]; activeCounts: TeamCultureActiveCounts | null }> {
+    const api = window.electron?.cowork?.listTeamCulture;
+    if (!api) return { entries: [], activeCounts: null };
+    const result = await api(input);
+    return { entries: result?.entries ?? [], activeCounts: result?.activeCounts ?? null };
+  }
+
+  async upsertTeamCulture(input: {
+    kind?: TeamCultureKind;
+    topic: string;
+    text: string;
+  }): Promise<{ entry: TeamCultureEntry | null; displacedTopic: string | null; capacitySkipped: boolean; error: string | null }> {
+    const api = window.electron?.cowork?.upsertTeamCulture;
+    if (!api) return { entry: null, displacedTopic: null, capacitySkipped: false, error: 'Team culture API unavailable' };
+    const result = await api(input);
+    return {
+      entry: result?.entry ?? null,
+      displacedTopic: result?.displacedTopic ?? null,
+      capacitySkipped: Boolean(result?.capacitySkipped),
+      error: result?.error ?? null,
+    };
+  }
+
+  async updateTeamCulture(input: {
+    id: string;
+    kind?: TeamCultureKind;
+    topic?: string;
+    text?: string;
+  }): Promise<{ entry: TeamCultureEntry | null; error: string | null }> {
+    const api = window.electron?.cowork?.updateTeamCulture;
+    if (!api) return { entry: null, error: 'Team culture API unavailable' };
+    const result = await api(input);
+    return { entry: result?.entry ?? null, error: result?.error ?? null };
+  }
+
+  async archiveTeamCulture(id: string): Promise<boolean> {
+    const api = window.electron?.cowork?.archiveTeamCulture;
+    if (!api) return false;
+    const result = await api({ id });
+    return Boolean(result?.success);
+  }
+
+  async restoreTeamCulture(id: string): Promise<boolean> {
+    const api = window.electron?.cowork?.restoreTeamCulture;
+    if (!api) return false;
+    const result = await api({ id });
+    return Boolean(result?.success);
+  }
+
+  async deleteTeamCulture(id: string): Promise<boolean> {
+    const api = window.electron?.cowork?.deleteTeamCulture;
+    if (!api) return false;
+    const result = await api({ id });
+    return Boolean(result?.success);
+  }
+
+  async listTaskCommTrend(): Promise<TaskCommTrendRow[]> {
+    const api = window.electron?.cowork?.listTaskCommTrend;
+    if (!api) return [];
+    const result = await api();
+    return result?.tasks ?? [];
   }
 
   async listMetaIDContacts(input: { observerGlobalMetaId: string }): Promise<CoworkMetaIDContactSummary[]> {

@@ -21,6 +21,10 @@ import type {
   CoworkKnowledgeKind,
   MemoryHygieneConfig,
   MemoryHygieneRunStats,
+  TeamCultureEntry,
+  TeamCultureActiveCounts,
+  TeamCultureKind,
+  TaskCommTrendRow,
 } from '../../types/cowork';
 import MetaIDContactPanel, { ContactGlobalMetaIdHint } from './MetaIDContactPanel';
 import BrainIcon from '../icons/BrainIcon';
@@ -33,7 +37,7 @@ type MetabotOption = {
   globalmetaid: string | null;
 };
 
-type MemorySection = 'knowledge' | 'contacts' | 'facts' | 'dream';
+type MemorySection = 'knowledge' | 'contacts' | 'facts' | 'dream' | 'culture';
 
 /** Usage classes a user may assign manually. `self_identity` is dream-protected. */
 type EditableUsageClass = 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
@@ -198,6 +202,21 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [hygieneSaving, setHygieneSaving] = useState(false);
   const [hygieneRunning, setHygieneRunning] = useState(false);
   const [hygieneNotice, setHygieneNotice] = useState<string | null>(null);
+
+  // --- Team culture (fleet-shared; independent of the selected bot) ---
+  const [cultureEntries, setCultureEntries] = useState<TeamCultureEntry[]>([]);
+  const [cultureCounts, setCultureCounts] = useState<TeamCultureActiveCounts | null>(null);
+  const [cultureLoading, setCultureLoading] = useState(false);
+  const [cultureKindFilter, setCultureKindFilter] = useState<TeamCultureKind | 'all'>('all');
+  const [cultureQuery, setCultureQuery] = useState('');
+  const [cultureNotice, setCultureNotice] = useState<string | null>(null);
+  const [editingCultureId, setEditingCultureId] = useState<string | null>(null);
+  const [commTrend, setCommTrend] = useState<TaskCommTrendRow[]>([]);
+  const [cultureDraft, setCultureDraft] = useState<{ kind: TeamCultureKind; topic: string; text: string }>({
+    kind: 'convention',
+    topic: '',
+    text: '',
+  });
 
   const [error, setError] = useState<string | null>(null);
 
@@ -754,6 +773,72 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       setHygieneNotice(`${i18nService.t('memoryHygieneRunFailed')}: ${runError instanceof Error ? runError.message : String(runError)}`);
     } finally {
       setHygieneRunning(false);
+    }
+  };
+
+  // ---- Team culture ----
+  const loadCulture = useCallback(async () => {
+    setCultureLoading(true);
+    try {
+      const { entries, activeCounts } = await coworkService.listTeamCulture({
+        kind: cultureKindFilter,
+        status: 'all',
+        query: cultureQuery.trim() || undefined,
+      });
+      setCultureEntries(entries);
+      setCultureCounts(activeCounts);
+      setCommTrend(await coworkService.listTaskCommTrend());
+    } catch (cultureError) {
+      console.error('Failed to load team culture:', cultureError);
+      setCultureEntries([]);
+    } finally {
+      setCultureLoading(false);
+    }
+  }, [cultureKindFilter, cultureQuery]);
+
+  useEffect(() => {
+    if (activeSection !== 'culture') return;
+    void loadCulture();
+  }, [activeSection, loadCulture]);
+
+  const resetCultureEditor = () => {
+    setEditingCultureId(null);
+    setCultureDraft({ kind: 'convention', topic: '', text: '' });
+  };
+
+  const handleSaveCulture = async () => {
+    if (!cultureDraft.topic.trim() || !cultureDraft.text.trim()) return;
+    setCultureNotice(null);
+    try {
+      if (editingCultureId != null) {
+        const { entry, error } = await coworkService.updateTeamCulture({
+          id: editingCultureId,
+          kind: cultureDraft.kind,
+          topic: cultureDraft.topic,
+          text: cultureDraft.text,
+        });
+        if (error || !entry) throw new Error(error || i18nService.t('memoryCultureSaveFailed'));
+      } else {
+        const { entry, displacedTopic, capacitySkipped, error } = await coworkService.upsertTeamCulture({
+          kind: cultureDraft.kind,
+          topic: cultureDraft.topic,
+          text: cultureDraft.text,
+        });
+        if (error) throw new Error(error);
+        if (!entry && capacitySkipped) {
+          setCultureNotice(i18nService.t('memoryCultureCapacitySkip'));
+          return;
+        }
+        if (!entry) throw new Error(i18nService.t('memoryCultureSaveFailed'));
+        setCultureNotice(displacedTopic
+          ? `${i18nService.t('memoryCultureSaved')} · ${i18nService.t('memoryCultureDisplaced')}: ${displacedTopic}`
+          : i18nService.t('memoryCultureSaved'));
+      }
+      if (editingCultureId != null) setCultureNotice(i18nService.t('memoryCultureSaved'));
+      resetCultureEditor();
+      await loadCulture();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : i18nService.t('memoryCultureSaveFailed'));
     }
   };
 
@@ -1604,6 +1689,203 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     );
   };
 
+  const cultureKindLabels: Record<TeamCultureKind, string> = {
+    glossary: i18nService.t('memoryCultureKindGlossary'),
+    convention: i18nService.t('memoryCultureKindConvention'),
+    team_lesson: i18nService.t('memoryCultureKindTeamLesson'),
+  };
+
+  const renderCulture = () => (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('memoryCultureHint')}
+        </div>
+        {cultureCounts && (
+          <div className="shrink-0 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {`${cultureCounts.glossary + cultureCounts.convention + cultureCounts.team_lesson} ${i18nService.t('memoryCultureActiveEntries')}`}
+          </div>
+        )}
+      </div>
+      {cultureNotice && <div className="text-xs text-green-600 dark:text-green-400">{cultureNotice}</div>}
+
+      <div className="flex flex-wrap items-center gap-2">
+        {(['all', 'glossary', 'convention', 'team_lesson'] as const).map((kind) => {
+          const active = cultureKindFilter === kind;
+          const label = kind === 'all' ? i18nService.t('memoryCultureKindAll') : cultureKindLabels[kind];
+          return (
+            <button
+              key={kind}
+              type="button"
+              onClick={() => setCultureKindFilter(kind)}
+              className={`rounded-lg border px-2.5 py-1 text-xs transition-colors ${
+                active
+                  ? 'border-claude-accent bg-claude-accent/5 text-claude-accent dark:bg-claude-accent/10 dark:text-claude-darkAccent'
+                  : 'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
+              }`}
+            >
+              {label}
+            </button>
+          );
+        })}
+        <input
+          type="text"
+          value={cultureQuery}
+          onChange={(event) => setCultureQuery(event.target.value)}
+          placeholder={i18nService.t('memoryCultureSearchPlaceholder')}
+          className="min-w-[160px] flex-1 rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+        />
+      </div>
+
+      {/* Editor form (add or edit) */}
+      <div className="space-y-2 rounded-lg border px-3 py-3 dark:border-claude-darkBorder border-claude-border">
+        <div className="text-[10px] uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {editingCultureId != null ? i18nService.t('memoryCultureEdit') : i18nService.t('memoryCultureAdd')}
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={cultureDraft.kind}
+            onChange={(event) => setCultureDraft((prev) => ({ ...prev, kind: event.target.value as TeamCultureKind }))}
+            className="rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+          >
+            {(Object.keys(cultureKindLabels) as TeamCultureKind[]).map((kind) => (
+              <option key={kind} value={kind}>{cultureKindLabels[kind]}</option>
+            ))}
+          </select>
+          <input
+            type="text"
+            value={cultureDraft.topic}
+            onChange={(event) => setCultureDraft((prev) => ({ ...prev, topic: event.target.value }))}
+            placeholder={i18nService.t('memoryCultureTopicLabel')}
+            className="flex-1 rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+          />
+        </div>
+        <textarea
+          value={cultureDraft.text}
+          onChange={(event) => setCultureDraft((prev) => ({ ...prev, text: event.target.value }))}
+          placeholder={i18nService.t('memoryCultureTextLabel')}
+          rows={2}
+          className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+        />
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => { void handleSaveCulture(); }}
+            disabled={!cultureDraft.topic.trim() || !cultureDraft.text.trim()}
+            className="btn-idchat-primary-filled inline-flex items-center px-3 py-1 text-xs disabled:opacity-60"
+          >
+            {i18nService.t('memoryCultureSave')}
+          </button>
+          {editingCultureId != null && (
+            <button
+              type="button"
+              onClick={resetCultureEditor}
+              className="rounded-lg border px-3 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text"
+            >
+              {i18nService.t('cancel')}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {cultureLoading ? (
+        <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('loading')}</div>
+      ) : cultureEntries.length === 0 ? (
+        <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('memoryCultureEmpty')}</div>
+      ) : (
+        <div className="space-y-2">
+          {cultureEntries.map((entry) => (            <div
+              key={entry.id}
+              className={`rounded-lg border px-3 py-2 dark:border-claude-darkBorder border-claude-border ${entry.status === 'archived' ? 'opacity-60' : ''}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs font-medium dark:text-claude-darkText text-claude-text">{entry.topic}</span>
+                  <span className="rounded-full border px-1.5 text-[10px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {cultureKindLabels[entry.kind]}
+                  </span>
+                  <span className="rounded-full border px-1.5 text-[10px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {entry.origin === 'owner' ? i18nService.t('memoryCultureOriginOwner') : i18nService.t('memoryCultureOriginDistillation')}
+                  </span>
+                  <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">v{entry.version}</span>
+                  {entry.status === 'archived' && (
+                    <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('memoryCultureArchived')}</span>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5 text-[11px]">
+                  {entry.status === 'archived' ? (
+                    <button
+                      type="button"
+                      onClick={async () => { if (await coworkService.restoreTeamCulture(entry.id)) { await loadCulture(); } }}
+                      className="text-claude-accent hover:underline dark:text-claude-darkAccent"
+                    >
+                      {i18nService.t('memoryCultureRestore')}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingCultureId(entry.id);
+                          setCultureDraft({ kind: entry.kind, topic: entry.topic, text: entry.text });
+                        }}
+                        className="text-claude-accent hover:underline dark:text-claude-darkAccent"
+                      >
+                        {i18nService.t('edit')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => { if (await coworkService.archiveTeamCulture(entry.id)) { await loadCulture(); } }}
+                        className="dark:text-claude-darkTextSecondary text-claude-textSecondary hover:underline"
+                      >
+                        {i18nService.t('memoryCultureArchive')}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="mt-1 text-xs break-words whitespace-pre-wrap dark:text-claude-darkText text-claude-text">
+                {entry.text}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Communication-entropy observation: does the shared prior actually
+          compress coordination? bytes per deliverable per task, over time. */}
+      <div className="rounded-lg border px-3 py-3 dark:border-claude-darkBorder border-claude-border">
+        <div className="text-[10px] uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('memoryCultureCommTrendTitle')}
+        </div>
+        <div className="mt-0.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('memoryCultureCommTrendHint')}
+        </div>
+        {commTrend.length === 0 ? (
+          <div className="mt-1.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('memoryCultureCommTrendEmpty')}
+          </div>
+        ) : (
+          <div className="mt-1.5 space-y-1">
+            {commTrend.map((row) => {
+              const ratio = row.deliverableCount > 0 && row.commTotalBytes != null
+                ? Math.round(row.commTotalBytes / row.deliverableCount)
+                : null;
+              return (
+                <div key={row.taskId} className="flex items-center justify-between gap-2 text-[11px] dark:text-claude-darkText text-claude-text">
+                  <span className="truncate">#{row.taskId} {row.title}</span>
+                  <span className="shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {`${row.commMessageCount ?? 0} ${i18nService.t('memoryCultureCommMsgs')} · ${row.commTotalBytes ?? 0} B · ${row.deliverableCount} ${i18nService.t('memoryCultureCommDeliverables')}${ratio != null ? ` · ${ratio} B/${i18nService.t('memoryCultureCommPerDeliverable')}` : ''}`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-5">
       {/* Header + bot selector */}
@@ -1674,6 +1956,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         {sectionTab('contacts', i18nService.t('memorySectionContacts'), metabotId == null || contacts.length === 0 ? undefined : contacts.length)}
         {sectionTab('facts', i18nService.t('memorySectionFacts'), metabotId == null || !factsStats ? undefined : factsStats.created + factsStats.stale)}
         {sectionTab('dream', i18nService.t('memorySectionDream'), metabotId == null || dreamSummaries.length === 0 ? undefined : dreamSummaries.length)}
+        {sectionTab('culture', i18nService.t('memorySectionCulture'), cultureCounts == null ? undefined : cultureCounts.glossary + cultureCounts.convention + cultureCounts.team_lesson)}
       </div>
 
       {/* Active section */}
@@ -1686,6 +1969,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             {activeSection === 'contacts' && renderContacts()}
             {activeSection === 'facts' && renderFacts()}
             {activeSection === 'dream' && renderDream()}
+            {activeSection === 'culture' && renderCulture()}
           </>
         )}
       </div>

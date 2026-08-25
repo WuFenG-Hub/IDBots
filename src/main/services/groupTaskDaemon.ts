@@ -988,6 +988,9 @@ export interface GroupTaskDaemonDeps {
     roster: Array<{ globalMetaID: string | null; name: string; role: 'chair' | 'worker' }>;
   }) => string | Promise<string>;
   experienceStore?: MetaIDExperienceStore;
+  /** Fleet-shared culture block (glossary/conventions/lessons) injected into
+   * the volatile turn tail and the planning directive; null when empty. */
+  buildTeamCultureBlock?: () => string | null;
   emitLog?: (message: string) => void;
   now?: () => number;
   intervalMs?: number;
@@ -2125,6 +2128,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   ): Promise<{ systemPrompt: string; volatileContext: string }> => {
     const experienceBlock = buildExperienceBlockFor(bot);
     const cognitionBlock = await buildGroupCognitionBlockFor(bot, promptMembers);
+    const cultureBlock = deps.buildTeamCultureBlock?.() ?? null;
     const systemPrompt = buildGroupTaskSystemPrompt({
       metabot: bot,
       task: {
@@ -2136,7 +2140,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       botRole,
       ownerGlobalMetaId: ownerGlobalMetaId || null,
     });
-    const volatileContext = [formatTurnTimeText(), experienceBlock, cognitionBlock]
+    const volatileContext = [formatTurnTimeText(), cultureBlock, experienceBlock, cognitionBlock]
       .filter((section) => section?.trim())
       .join('\n\n');
     return { systemPrompt, volatileContext };
@@ -3364,6 +3368,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       'Full member roster (assign only to these members, by exact name):',
       ...(rosterLines.length > 0 ? rosterLines : ['(no members yet besides the chair)']),
       ...(openTeamStatusBlock ? ['', openTeamStatusBlock] : []),
+      // The shared culture prior rides the planning directive too, so seats
+      // and sequencing respect the fleet's conventions from the first plan.
+      ...(() => {
+        const culture = deps.buildTeamCultureBlock?.() ?? null;
+        return culture ? ['', culture] : [];
+      })(),
       '',
       `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages)]`,
       ...(logLines.length > 0 ? logLines : ['(no messages yet)']),

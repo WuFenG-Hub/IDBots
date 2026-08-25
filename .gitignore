@@ -279,6 +279,8 @@ man_base_data_pebble/
 !tests/groupTaskOrchestrationBridge.test.mjs
 !tests/dreamService.test.mjs
 !tests/memoryHygieneService.test.mjs
+!tests/teamCultureStore.test.mjs
+!tests/teamCultureDistillation.test.mjs
 !tests/groupTaskRating.test.mjs
 !tests/experiencePromptBlocks.test.mjs
 !tests/dreamStoreSearch.test.mjs
