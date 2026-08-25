@@ -134,12 +134,22 @@ other harness projects do.
   by `dsh-runtime/lib/generate-runtime-config.mjs` whenever the composition has
   a workspace (the fs provider it reads through). Same package and defaults the
   DeepSeek Harness web UI uses.
-- Discovery: user-global `$DSH_HOME/AGENTS.md` (default `~/.dsh`), then the
-  root-to-cwd ancestor chain found by walking up to the first `.git` marker.
-  In each directory the ordered candidates `AGENTS.md`, `CLAUDE.md` (plus the
-  `.local` overlays `AGENTS.local.md`, `CLAUDE.local.md`) are loaded; `AGENTS.md`
-  renders before `CLAUDE.md`, and more specific (deeper) directories override
-  broader ones.
+- Discovery: then the root-to-cwd ancestor chain found by walking up to the
+  first `.git` marker. In each directory the ordered candidates `AGENTS.md`,
+  `CLAUDE.md` (plus the `.local` overlays `AGENTS.local.md`, `CLAUDE.local.md`)
+  are loaded; `AGENTS.md` renders before `CLAUDE.md`, and more specific (deeper)
+  directories override broader ones.
+- Boundary (product decision): ancestor discovery is intentional — a session
+  may inject instruction files from OUTSIDE the user-chosen workspace (e.g.
+  the git repo root above the cwd, or anything a symlinked file points at).
+  This matches DeepSeek Harness behavior; the folder selector popover shows a
+  hint telling users sessions follow conventions from the folder AND its
+  parent Git repos. Do not silently disable ancestor discovery.
+- User-global instructions are disabled by design: the host pins
+  `workspaceInstructions.dshHome` to an empty directory under userData
+  (`join(app.getPath('userData'), 'dsh-home')`, see `buildRuntimeConfig` in
+  `coworkDshTurn.ts`), so a `~/.dsh/AGENTS.md` left over from another harness
+  never enters IDBots sessions.
 - Injection: rendered as a durable user-role baseline message
   (`<system-reminder>` frame, "Instructions from: <path>" per file) with a
   64 KiB byte budget; fs tool edits to instruction files are reconciled into

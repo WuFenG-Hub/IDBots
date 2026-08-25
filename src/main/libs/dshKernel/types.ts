@@ -162,6 +162,13 @@ export interface DshRuntimeConfigInput {
   shaping?: { maxChars?: number; tailChars?: number }
   hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
   workspace?: { cwd: string }
+  /**
+   * AGENTS.md/CLAUDE.md discovery controls for the dsh-agent-instructions
+   * plugin. `dshHome` is pinned by the host to a controlled empty directory
+   * under userData so a user-global `~/.dsh/AGENTS.md` (e.g. left over from a
+   * DeepSeek Harness install) never silently leaks into IDBots sessions.
+   */
+  workspaceInstructions?: { maxBytes?: number; dshHome?: string }
   /** User-configured MCP servers mounted as dsh-mcp-client plugin entries. */
   mcpServers?: DshMcpServerDefinition[]
   /**

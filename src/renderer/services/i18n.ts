@@ -1092,6 +1092,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkNewProject: '新建项目',
     coworkOpenFolderPicker: '打开文件夹',
     coworkBotWorkspace: '在该 Bot 工作目录',
+    workspaceInstructionsHint: '会话将遵循所选目录及其上级 Git 仓库中的 AGENTS.md / CLAUDE.md 约定',
 
     // Skills
     skills: '技能',
@@ -3411,6 +3412,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkNewProject: 'New Project',
     coworkOpenFolderPicker: 'Open Folder',
     coworkBotWorkspace: "In this Bot's workspace",
+    workspaceInstructionsHint: 'Sessions follow AGENTS.md / CLAUDE.md conventions from this folder and its parent Git repos',
 
     // Skills
     skills: 'Skills',

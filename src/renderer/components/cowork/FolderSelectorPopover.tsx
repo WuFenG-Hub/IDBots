@@ -389,6 +389,13 @@ const FolderSelectorPopover: React.FC<FolderSelectorPopoverProps> = ({
             </div>
           </>
         )}
+
+        {/* Workspace instructions hint: sessions honor AGENTS.md / CLAUDE.md
+            from the chosen folder AND its ancestor git repositories (the
+            same discovery the DeepSeek Harness web UI applies). */}
+        <div className="px-3 pb-2 pt-0.5 text-[10px] leading-3 dark:text-claude-darkTextSecondary text-claude-textSecondary opacity-70">
+          {i18nService.t('workspaceInstructionsHint')}
+        </div>
       </div>
 
       {/* Recent folders submenu - rendered as a portal-like fixed element */}

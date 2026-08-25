@@ -2435,26 +2435,44 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     setGitBranch(null);
     if (!currentSession?.id || !currentSession.cwd) return;
     const cwd = currentSession.cwd;
+    // In-flight guard: a probe that outlives the 3s interval (git hung on a
+    // network drive despite the 2s main-process timeout) must not pile up
+    // overlapping probes — skip while one is still settling.
+    let probeInFlight = false;
+    // Consecutive failures mean "not a git repo" (the normal case for
+    // arbitrary working dirs). Stop the interval after three to avoid
+    // spawning a failing `git` child every 3s forever; focus/visibility
+    // refreshes still re-probe so a later `git init` is picked up.
+    let consecutiveFailures = 0;
     const refresh = async () => {
       // Skip while the tab is hidden/backgrounded: the branch cannot change
       // through the UI here, and idle git probes waste nothing useful.
-      if (!active || document.visibilityState !== 'visible') return;
+      if (!active || probeInFlight || document.visibilityState !== 'visible') return;
+      probeInFlight = true;
       try {
         const branch = (await window.electron?.getGitBranch?.(cwd)) ?? null;
         if (active) setGitBranch((prev) => (prev === branch ? prev : branch));
+        consecutiveFailures = branch === null ? consecutiveFailures + 1 : 0;
       } catch {
         if (active) setGitBranch(null);
+        consecutiveFailures += 1;
+      } finally {
+        probeInFlight = false;
       }
     };
     void refresh();
-    const timer = window.setInterval(() => { void refresh(); }, 3000);
     const onFocus = () => { void refresh(); };
     const onVisibility = () => { if (document.visibilityState === 'visible') void refresh(); };
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onVisibility);
+    const poll = () => {
+      if (consecutiveFailures >= 3) return;
+      void refresh();
+    };
+    const interval = window.setInterval(poll, 3000);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      window.clearInterval(interval);
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
     };
