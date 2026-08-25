@@ -33,6 +33,7 @@ import { isMentioned } from './groupChatMentionUtils';
 import {
   isCeremonyAckLine,
   parseGroupTaskEntropyP0Config,
+  renderGroupLogLines,
   type GroupTaskEntropyP0Config,
 } from '../libs/groupTaskEntropy';
 import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
@@ -2031,17 +2032,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     triggering: GroupTaskDaemonMessage,
   ): string => {
     const recent = queryRecentMessages(db, task.groupId!, contextMessageCount);
-    const lines = recent.map((row) => {
+    // Entropy P0: every message is head+tail truncated and runs of ceremony
+    // ACK lines fold into one counter line, so the same token stops being
+    // re-paid as recurring input heat every turn (knob: logFold).
+    const logEntropyP0 = parseGroupTaskEntropyP0Config(
+      deps.getStore().get<string>('groupTaskEntropyP0'),
+    );
+    const entries = recent.map((row) => {
       const message = toDaemonMessage(row);
-      // Round-4: SUSPECT senders are flagged in context — the bot must never
-      // mistake a non-member's display name for a member's identity.
-      const line = `${message.senderName}${message.senderSuspect ? ' [SUSPECT]' : ''}: ${message.content}`;
-      return row.id === triggering.id
-        ? `>>> ${line} <<< (the message you are responding to)`
-        : line;
+      return {
+        // Round-4: SUSPECT senders are flagged in context — the bot must never
+        // mistake a non-member's display name for a member's identity.
+        senderName: message.senderName,
+        suspect: Boolean(message.senderSuspect),
+        content: message.content ?? '',
+        isTrigger: row.id === triggering.id,
+      };
     });
+    const lines = renderGroupLogLines(entries, { fold: logEntropyP0.logFold });
     return [
-      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages)]`,
+      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; long messages truncated, acknowledgment lines folded)]`,
       ...lines,
     ].join('\n');
   };
