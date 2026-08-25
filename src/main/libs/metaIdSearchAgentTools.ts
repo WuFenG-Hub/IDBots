@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 import type { MetaIdDetail, MetaIdSearchItem } from '../services/metaIdSearchService';
 
 /** A search candidate from the MetaID aggregation API, marked when it is one of the user's own MetaBots. */
@@ -53,7 +54,8 @@ function sanitizeLinkLabel(value: string): string {
 }
 
 function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  const clean = stripLoneSurrogates(value);
+  return clean.length > max ? `${truncateUtf16Units(clean, max)}…` : clean;
 }
 
 /** Ready-to-quote markdown bullets for MetaID search candidates: names are already metaid:// links. */

@@ -48,6 +48,7 @@ function loadModules() {
       twinWorkerDirectoryService: require('../dist-electron/main/services/twinWorkerDirectoryService.js'),
       coworkDshTurn: require('../dist-electron/main/libs/coworkDshTurn.js'),
       coworkToolResultSnip: require('../dist-electron/main/libs/coworkToolResultSnip.js'),
+      coworkToolResultFold: require('../dist-electron/main/libs/coworkToolResultFold.js'),
       experiencePromptBlocks: require('../dist-electron/main/libs/experiencePromptBlocks.js'),
     }
   } finally {
@@ -246,4 +247,44 @@ test('read-side pollution coverage: stored rows are sanitized before prompts (re
     /const goal = stripLoneSurrogates\(task\.goal\)/,
     'open-team invite goal must strip on EVERY branch, not only over-cap',
   )
+})
+
+test('tool-result fold preview: middle cut never strands surrogate halves (review round 4)', () => {
+  const { foldLowValueToolResults } = loadModules().coworkToolResultFold
+  // 79 code units, then an emoji straddling the naive 80-unit head cut.
+  const polluted = `状态: executing | ${'x'.repeat(63)}\uD83C\uDF10${'y'.repeat(100)}`
+  const messages = [0, 1, 2].map((i) => ({
+    role: 'user',
+    content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: polluted }],
+  }))
+  const { messages: folded, stats } = foldLowValueToolResults(messages)
+  assert.equal(stats.folded, 1)
+  assert.notEqual(folded, messages)
+  assert.equal(LONE_SURROGATE_RE.test(JSON.stringify(folded)), false)
+})
+
+test('review round-4 sweep: every converted chokepoint routes through llmSafeText', () => {
+  const anchors = [
+    ['src/main/services/groupTaskDaemon.ts', /truncateUtf16Units\(block, EXPERIENCE_BLOCK_MAX_CHARS\)/],
+    ['src/main/libs/dreamPrompt.ts', /truncateUtf16Units\(normalized, maxChars\)/],
+    ['src/main/skillManager.ts', /const window = truncateUtf16Units\(text, maxChars\)/],
+    ['src/main/libs/coworkToolResultFold.ts', /truncateUtf16UnitsFromEnd\(clean, Math\.floor\(maxChars \/ 2\)\)/],
+    ['src/main/services/privateChatDaemon.ts', /truncateUtf16UnitsFromEnd\(text, tailLength\)/],
+    ['src/main/services/a2aGuidanceRestart.ts', /truncateUtf16Units\(clean, A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS\)/],
+    ['src/main/services/cognitiveOrchestrator.ts', /truncateUtf16Units\(content, READ_FILE_MAX_CHARS\)/],
+    ['src/main/libs/coworkSessionActivity.ts', /truncateUtf16Units\(trimmed, max - 1\)/],
+    ['src/main/services/botSearchService.ts', /return truncateUtf16Units\(clean, maxLen\)/],
+    ['src/main/services/metabotManageService.ts', /truncateUtf16Units\(text, maxLength - 1\)/],
+    ['src/main/services/metawebStudyService.ts', /truncateUtf16Units\(clean, max\)/],
+    ['src/main/libs/metaIdSearchAgentTools.ts', /truncateUtf16Units\(clean, max\)/],
+    ['src/main/libs/networkServicesAgentTools.ts', /truncateUtf16Units\(clean, max\)/],
+    ['src/main/libs/knowledgeBaseAgentTools.ts', /truncateUtf16Units\(clean, max\)/],
+    ['src/main/libs/metawebLearningAgentTools.ts', /truncateUtf16Units\(clean, max\)/],
+    ['src/main/libs/metabotManageAgentTools.ts', /truncateUtf16Units\(clean, max - 1\)/],
+  ]
+  for (const [file, pattern] of anchors) {
+    const source = readSource(file)
+    assert.match(source, /llmSafeText/, `${file} must import the llmSafeText helpers`)
+    assert.match(source, pattern, `${file} keeps an unswept raw truncation`)
+  }
 })

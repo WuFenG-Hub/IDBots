@@ -20,6 +20,7 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 
 export interface CoworkSessionActivityMessage {
   type: string;
@@ -70,9 +71,9 @@ const COMMIT_PATTERNS: RegExp[] = [
 const execFileAsync = promisify(execFile);
 
 function truncate(text: string, max: number): string {
-  const trimmed = String(text ?? '').trim();
+  const trimmed = stripLoneSurrogates(String(text ?? '').trim());
   if (trimmed.length <= max) return trimmed;
-  return `${trimmed.slice(0, max - 1)}…`;
+  return `${truncateUtf16Units(trimmed, max - 1)}…`;
 }
 
 function unique(values: string[]): string[] {

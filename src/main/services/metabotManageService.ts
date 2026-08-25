@@ -15,6 +15,7 @@ import type { MetabotStore } from '../metabotStore';
 import type { Metabot } from '../types/metabot';
 import { getMetabotLimitError } from '../shared/metabotLimit';
 import { normalizeMetabotLlmId } from './llmFallback';
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 import { toLlmEffortLevel } from '../libs/llmEffort';
 
 // ---------------------------------------------------------------------------
@@ -296,9 +297,9 @@ export function assertCanCreateMetabot(store: MetabotStore): void {
 const MAX_TEXT_LENGTH = 4_000;
 
 function boundText(value: string | null | undefined, maxLength = MAX_TEXT_LENGTH): string {
-  const text = String(value ?? '').trim();
+  const text = stripLoneSurrogates(String(value ?? '').trim());
   if (!text) return '';
-  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+  return text.length <= maxLength ? text : `${truncateUtf16Units(text, maxLength - 1)}…`;
 }
 
 function normalizedList(values: string[] | null | undefined): string[] {

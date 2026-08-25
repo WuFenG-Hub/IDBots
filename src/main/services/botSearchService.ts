@@ -6,6 +6,8 @@
  * {code, data, message}. Business codes 1001 / 1002 / 1003.
  */
 
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
+
 export const DEFAULT_BOT_SEARCH_BASE_URL = 'https://so.metaid.io';
 export const BOT_SEARCH_PATH = '/api/bots/search';
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -90,7 +92,8 @@ function text(value: unknown): string {
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
 function untrustedText(value: unknown, maxLen: number): string {
-  return text(value).replace(CONTROL_CHARS, '').replace(/\s+/g, ' ').trim().slice(0, maxLen);
+  const clean = stripLoneSurrogates(text(value).replace(CONTROL_CHARS, '').replace(/\s+/g, ' ').trim());
+  return truncateUtf16Units(clean, maxLen);
 }
 
 function textList(value: unknown): string[] {

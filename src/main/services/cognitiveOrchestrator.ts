@@ -7,6 +7,7 @@
 
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -342,9 +343,9 @@ function executeRead(filePath: string, allowedRoots: string[]): string {
       console.error('[Orchestrator] [Read] Path escapes SKILLs roots:', filePath);
       return `Error: path must be under SKILLs root.`;
     }
-    const content = fs.readFileSync(realPath, 'utf-8');
+    const content = stripLoneSurrogates(fs.readFileSync(realPath, 'utf-8'));
     if (content.length > READ_FILE_MAX_CHARS) {
-      return content.slice(0, READ_FILE_MAX_CHARS) + '\n...[truncated to ' + READ_FILE_MAX_CHARS + ' chars]';
+      return truncateUtf16Units(content, READ_FILE_MAX_CHARS) + '\n...[truncated to ' + READ_FILE_MAX_CHARS + ' chars]';
     }
     return content;
   } catch (err) {

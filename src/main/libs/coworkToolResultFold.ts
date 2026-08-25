@@ -20,6 +20,8 @@
  *   at least MIN_COUNT such results before anything is folded.
  */
 
+import { stripLoneSurrogates, truncateUtf16Units, truncateUtf16UnitsFromEnd } from './llmSafeText';
+
 /** A result longer than this is never treated as low-value polling output. */
 export const LOW_VALUE_TOOL_RESULT_MAX_CHARS = 1024;
 /** Only fold when at least this many polling-shaped results exist in the replay. */
@@ -62,11 +64,12 @@ export function isLowValuePollingToolResult(content: unknown): boolean {
 const FOLD_PLACEHOLDER = '[轮询类 tool_result 已折叠，摘要见前文]';
 
 function truncateMiddle(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
+  const clean = stripLoneSurrogates(value);
+  if (clean.length <= maxChars) {
+    return clean;
   }
-  const head = value.slice(0, Math.floor(maxChars / 2)).trimEnd();
-  const tail = value.slice(-Math.floor(maxChars / 2)).trimStart();
+  const head = truncateUtf16Units(clean, Math.floor(maxChars / 2)).trimEnd();
+  const tail = truncateUtf16UnitsFromEnd(clean, Math.floor(maxChars / 2)).trimStart();
   return `${head}...${tail}`;
 }
 

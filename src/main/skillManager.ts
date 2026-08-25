@@ -2,6 +2,7 @@ import { app, BrowserWindow, session } from 'electron';
 import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { stripLoneSurrogates, truncateUtf16Units } from './libs/llmSafeText';
 import yaml from 'js-yaml';
 import extractZip from 'extract-zip';
 import { SqliteStore } from './sqliteStore';
@@ -1142,9 +1143,9 @@ export class SkillManager {
    * no boundary sits in the last 40%) so trailing keywords are not half-cut.
    */
   private truncateSkillDescriptionForListing(description: string, maxChars = 500): string {
-    const text = String(description ?? '').trim();
+    const text = stripLoneSurrogates(String(description ?? '').trim());
     if (text.length <= maxChars) return text;
-    const window = text.slice(0, maxChars);
+    const window = truncateUtf16Units(text, maxChars);
     const boundary = Math.max(
       window.lastIndexOf('。'),
       window.lastIndexOf('！'),
@@ -1154,8 +1155,8 @@ export class SkillManager {
       window.lastIndexOf('；'),
       window.lastIndexOf('\n')
     );
-    const cut = boundary >= maxChars * 0.6 ? boundary + 1 : maxChars;
-    return `${text.slice(0, cut).trim()}…`;
+    const cut = boundary >= maxChars * 0.6 ? window.slice(0, boundary + 1) : window;
+    return `${cut.trim()}…`;
   }
 
   private buildSkillEntries(skills: SkillRecord[]): string {

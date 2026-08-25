@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 import type { MetawebSearchItem, MetawebSearchProtocol } from '../services/metawebSearchService';
 import type { MetawebPin } from '../services/metawebPinService';
 import { METAWEB_CITATION_RULE, buildPinBrowserUri, buildSearchItemBrowserUri, markdownSelfLink } from './metawebUri';
@@ -41,7 +42,8 @@ function textResult(text: string, isError = false) {
 }
 
 function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  const clean = stripLoneSurrogates(value);
+  return clean.length > max ? `${truncateUtf16Units(clean, max)}…` : clean;
 }
 
 /** UTC "YYYY-MM-DD HH:MM" — the MetaWeb APIs return Unix seconds. */
