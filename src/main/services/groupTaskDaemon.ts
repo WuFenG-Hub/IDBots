@@ -1619,19 +1619,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       `The assignment: ${objective}`,
     ].join('\n');
     let ackText = '';
-    try {
-      ackText = (await deps.performChat(baseSystemPrompt, directive, llmId, {
-        fallbackLlmId,
-        thinking: 'disabled',
-      })).trim();
-    } catch (error) {
-      emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: worker ACK chat failed for bot ${bot.id}; using template: ` +
-        `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    if (!ackText || NO_REPLY_PATTERN.test(ackText) || !WORKING_TAG.test(ackText)) {
+    // Entropy P0: the ACK is protocol, not prose — template by default (zero
+    // LLM); the phrased version stays available as an opt-in enhancement via
+    // the groupTaskEntropyP0 kv knob (ackTemplate:false).
+    const ackEntropyP0 = parseGroupTaskEntropyP0Config(sqlite.get<string>('groupTaskEntropyP0'));
+    if (ackEntropyP0.ackTemplate) {
       ackText = copyWorkingAckFallback(objective);
+    } else {
+      try {
+        ackText = (await deps.performChat(baseSystemPrompt, directive, llmId, {
+          fallbackLlmId,
+          thinking: 'disabled',
+        })).trim();
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: worker ACK chat failed for bot ${bot.id}; using template: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (!ackText || NO_REPLY_PATTERN.test(ackText) || !WORKING_TAG.test(ackText)) {
+        ackText = copyWorkingAckFallback(objective);
+      }
     }
     try {
       const sent = await postGroupMessage(task.id, bot.id, ackText, {

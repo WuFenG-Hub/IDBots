@@ -1308,11 +1308,10 @@ test('[NO_REPLY] also applies on the skill-turn path', async () => {
     await h.loop.runTick();
 
     assert.equal(h.skillTurnCalls.length, 1, 'skill turn ran');
-    // P0-2 round-5: the host auto-ACK (one fast chat call) still posts the
-    // "[WORKING] 已接单" signal even when the turn itself opts out with
-    // [NO_REPLY] — the group must not see a silent worker.
-    assert.equal(h.chatCalls.length, 1, 'one chat call (the worker ACK)');
-    assert.match(h.chatCalls[0].userMessage, /\[SYSTEM ACK directive/);
+    // Entropy P0: the host auto-ACK is templated by default — the
+    // "[WORKING] 已接单" signal still posts (the group must not see a silent
+    // worker) but costs zero LLM calls; the phrased ACK is an opt-in knob.
+    assert.equal(h.chatCalls.length, 0, 'ACK is templated — no chat call');
     assert.equal(h.sends.length, 1, 'ACK posted; the [NO_REPLY] turn reply suppressed on-chain');
     assert.match(h.sends[0].content, /^\[WORKING\]/, 'the only send is the ACK status line');
   } finally {
