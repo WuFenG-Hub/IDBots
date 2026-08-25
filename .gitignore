@@ -241,6 +241,7 @@ man_base_data_pebble/
 !tests/botBrowserMetaAppPublish.test.mjs
 !tests/botBrowserCoworkPanel.test.ts
 !tests/botInternetComposerReuse.test.mjs
+!tests/pinnedSkillBackstop.test.mjs
 !tests/botBrowserSourceLocator.test.mjs
 !tests/metaAppSearchService.test.mjs
 !tests/metaIdSearchService.test.mjs

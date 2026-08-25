@@ -91,7 +91,7 @@ class FakeRunner extends EventEmitter {
   }
 }
 
-function createHarness({ capability = 'inactive', sessionOverrides, configureRunner, onEmitMessage } = {}) {
+function createHarness({ capability = 'inactive', sessionOverrides, configureRunner, onEmitMessage, sanitizeSkillIds } = {}) {
   const store = new FakeStore(sessionOverrides);
   const runner = new FakeRunner(capability);
   configureRunner?.(runner, store);
@@ -100,6 +100,7 @@ function createHarness({ capability = 'inactive', sessionOverrides, configureRun
   const controller = new CoworkTurnSubmissionController({
     store,
     runner,
+    ...(sanitizeSkillIds ? { sanitizeSkillIds } : {}),
     emitMessage: (sessionId, message) => {
       emitted.push({ sessionId, message });
       onEmitMessage?.(sessionId, message);
@@ -154,6 +155,56 @@ test('inactive sessions continue once with the requested system prompt and skill
   }]);
   assert.equal(result.message.metadata.interactionKind, undefined);
   assert.equal(result.message.metadata.submissionMode, 'continue');
+});
+
+test('pinned-skill backstop: sanitized ids flow into the continue turn, scoped to the session bot', async () => {
+  const sanitizeCalls = [];
+  // Mimics the main.ts wiring around SkillManager.filterSkillIdsForMetabotView:
+  // undefined in → undefined out; ids outside the bot's visible set drop.
+  const visibleForBot = new Set(['skill-a']);
+  const sanitizeSkillIds = (skillIds, metabotId) => {
+    sanitizeCalls.push({ skillIds, metabotId });
+    if (!skillIds) return undefined;
+    return skillIds.filter((id) => visibleForBot.has(id));
+  };
+  const harness = createHarness({ sessionOverrides: { metabotId: 7 }, sanitizeSkillIds });
+  const result = await harness.controller.submit(input({
+    systemPrompt: 'skills-carrying prompt',
+    activeSkillIds: ['skill-a', 'skill-forbidden'],
+  }));
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'continue');
+  assert.deepEqual(sanitizeCalls, [
+    { skillIds: ['skill-a', 'skill-forbidden'], metabotId: 7 },
+  ]);
+  assert.deepEqual(harness.runner.continueCalls, [{
+    sessionId: 'session-1',
+    text: 'next direction',
+    options: {
+      skipUserMessage: true,
+      systemPrompt: 'skills-carrying prompt',
+      skillIds: ['skill-a'],
+    },
+  }]);
+});
+
+test('pinned-skill backstop: turns without pins stay "no pins" (undefined passes through)', async () => {
+  const sanitizeCalls = [];
+  const sanitizeSkillIds = (skillIds, metabotId) => {
+    sanitizeCalls.push({ skillIds, metabotId });
+    return skillIds;
+  };
+  const harness = createHarness({ sessionOverrides: { metabotId: 3, systemPrompt: 'persisted prompt' }, sanitizeSkillIds });
+  const result = await harness.controller.submit(input({}));
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'continue');
+  assert.deepEqual(sanitizeCalls, [{ skillIds: undefined, metabotId: 3 }]);
+    assert.equal(harness.runner.continueCalls[0].options.skillIds, undefined);
+  // No requested prompt and no pins → undefined = keep the persisted prompt
+  // (the runner treats an undefined prompt as "no change").
+  assert.equal(harness.runner.continueCalls[0].options.systemPrompt, undefined);
 });
 
 test('waits for the exact closing turn then continues exactly once', async () => {

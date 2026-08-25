@@ -87,6 +87,13 @@ interface SubmissionRunner {
 export type CoworkTurnSubmissionDependencies = {
   store: SubmissionStore;
   runner: SubmissionRunner;
+  /**
+   * Pinned-skill backstop at the IPC boundary: intersect renderer-supplied
+   * activeSkillIds with the session bot's visible skill set (undefined in,
+   * undefined out — "no pins this turn" must stay distinguishable). Wired
+   * from main.ts via SkillManager.filterSkillIdsForMetabotView.
+   */
+  sanitizeSkillIds?: (skillIds: string[] | undefined, metabotId: number | null) => string[] | undefined;
   emitMessage: (sessionId: string, message: CoworkMessage) => void;
   emitMessageUpdate: (
     sessionId: string,
@@ -178,6 +185,7 @@ function toQueuedSteerMetadata(
 export class CoworkTurnSubmissionController {
   private readonly store: SubmissionStore;
   private readonly runner: SubmissionRunner;
+  private readonly sanitizeSkillIds: CoworkTurnSubmissionDependencies['sanitizeSkillIds'];
   private readonly emitMessage: CoworkTurnSubmissionDependencies['emitMessage'];
   private readonly emitMessageUpdate: CoworkTurnSubmissionDependencies['emitMessageUpdate'];
   private readonly inFlightSubmissions = new Map<string, {
@@ -206,6 +214,7 @@ export class CoworkTurnSubmissionController {
   constructor(dependencies: CoworkTurnSubmissionDependencies) {
     this.store = dependencies.store;
     this.runner = dependencies.runner;
+    this.sanitizeSkillIds = dependencies.sanitizeSkillIds;
     this.emitMessage = dependencies.emitMessage;
     this.emitMessageUpdate = dependencies.emitMessageUpdate;
 
@@ -468,16 +477,21 @@ export class CoworkTurnSubmissionController {
       // whole context. Keep the persisted prompt unless the skill set actually
       // changed this turn (see coworkPromptStrategy). currentSession is the
       // freshest read — the steer wait above can span a whole prior turn.
+      // Pinned-skill backstop first: renderer-supplied ids are intersected
+      // with the session bot's visible set before any consumer below.
+      const requestedSkillIds = this.sanitizeSkillIds
+        ? this.sanitizeSkillIds(input.activeSkillIds, currentSession.metabotId ?? null)
+        : input.activeSkillIds;
       const resolvedSystemPrompt = resolveContinueSystemPrompt({
         persistedSystemPrompt: currentSession.systemPrompt,
         requestedSystemPrompt: input.systemPrompt,
-        activeSkillIds: input.activeSkillIds,
+        activeSkillIds: requestedSkillIds,
         persistedActiveSkillIds: currentSession.activeSkillIds,
       });
       await this.runner.continueSession(sessionId, text, {
         skipUserMessage: true,
         systemPrompt: resolvedSystemPrompt,
-        skillIds: input.activeSkillIds,
+        skillIds: requestedSkillIds,
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'Failed to continue Cowork session';
