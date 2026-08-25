@@ -330,15 +330,25 @@ export interface ParsedWorkingAck {
 }
 
 /**
- * Parse a [WORKING] ACK line: `[WORKING] 已接单：<subtask>，预计 <N> 分钟`.
+ * P2-2: the [WORKING] tag optionally carries in-tag qualifiers, e.g.
+ * `[WORKING long-task, ETA 45 min]` / `[WORKING 长任务 预计剩余45分钟]` — a
+ * long-task heartbeat. Matches the tag with or without the qualifier body.
+ */
+const WORKING_TAG_RE = /\[WORKING(?:\s[^\]]*)?\]/i;
+
+/**
+ * Parse a [WORKING] ACK line: `[WORKING] 已接单：<subtask>，预计 <N> 分钟`,
+ * or a long-task heartbeat: `[WORKING long-task, ETA <N> min]`.
  * Returns null when the message carries no [WORKING] tag.
  */
 export function parseWorkingAck(content: string): ParsedWorkingAck | null {
   const text = String(content ?? '');
-  const match = /\[WORKING\]/i.exec(text);
+  const match = WORKING_TAG_RE.exec(text);
   if (!match) return null;
   const rest = text.slice(match.index + match[0].length);
-  const minutesMatch = /\b(\d{1,3})\s*(?:分钟|min(?:ute)?s?)/i.exec(rest);
+  // The ETA may live inside the tag (heartbeat form) or after it (ACK form) —
+  // scan the whole message for it.
+  const minutesMatch = /\b(\d{1,3})\s*(?:分钟|min(?:ute)?s?)/i.exec(text);
   const description = rest.replace(/^[：:\s-]+/, '').trim().slice(0, 120);
   return {
     acknowledged: true,

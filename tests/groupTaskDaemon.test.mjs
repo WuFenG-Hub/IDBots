@@ -2960,6 +2960,30 @@ test('P0-3: chair assignment records pending ACK; worker [WORKING] ACK clears it
   }
 });
 
+test('P2-2: a [WORKING long-task] heartbeat arms the liveness lease and counts as working', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-heartbeat-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING long-task, ETA 45 min] VoxCPM synthesis in background',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working');
+    const lease = Number(h.store.get('group_task_working_heartbeat:1:2'));
+    assert.ok(Number.isFinite(lease), 'heartbeat lease recorded');
+    assert.equal(lease, startMs + 45 * 60_000 + 5 * 60_000, 'ETA + 5-min grace');
+    // the heartbeat also arms the delivery deadline (same as any ETA ACK)
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'));
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('P0-3: missing ACK past the timeout posts ONE chair reminder, never auto-fails', async () => {
   const h = await createHarness({ ackTimeoutMs: 180_000 });
   try {

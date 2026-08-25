@@ -147,8 +147,31 @@ const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
  * P0-2: worker ACK/progress status tag, e.g.
  * `[WORKING] 已接单，正在做X，预计N分钟` — the worker-to-group "I am alive and
  * working" signal. The tag also feeds the member workStatus readout (P1-4).
+ * P2-2: the tag may carry in-tag qualifiers (`[WORKING long-task, ETA 45 min]`)
+ * — a long-task heartbeat; matching is prefix-based so both forms count.
  */
-const WORKING_TAG = /\[WORKING\]/i;
+const WORKING_TAG = /\[WORKING(?:\s[^\]]*)?\]/i;
+/**
+ * P2-2: kv heartbeat lease per (task, member): a `[WORKING ... ETA N min]`
+ * message extends the member's liveness lease to now + N min + grace. While
+ * the lease is valid the host watchdogs must not flag the member unreachable
+ * (a running long task is not silence).
+ */
+export const WORKING_HEARTBEAT_PREFIX = 'group_task_working_heartbeat:';
+/** P2-2: grace period appended to a heartbeat ETA before the lease expires. */
+export const WORKING_HEARTBEAT_GRACE_MS = 5 * 60_000;
+/**
+ * P2-2: heartbeat lease expiry for an ETA in minutes. Pure + exported for
+ * unit tests.
+ */
+export function computeWorkingHeartbeatUntil(
+  estimatedMinutes: number,
+  nowMs: number,
+  graceMs: number = WORKING_HEARTBEAT_GRACE_MS,
+): number {
+  const minutes = Math.max(0, Math.trunc(estimatedMinutes));
+  return nowMs + minutes * 60_000 + Math.max(0, graceMs);
+}
 /** P0-2: kv guard so one dispatch produces at most ONE host ACK. */
 const ACK_KV_PREFIX = 'group_task_ack:';
 /**
@@ -4221,6 +4244,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
       clearPendingAck();
+      // P2-2: an ETA-bearing [WORKING] (ACK or long-task heartbeat) extends the
+      // member's liveness lease — the watchdogs honor it before flagging
+      // unreachable/timeout.
+      if (ack.estimatedMinutes != null && ack.estimatedMinutes > 0) {
+        sqlite.set(
+          `${WORKING_HEARTBEAT_PREFIX}${task.id}:${member.metabotId}`,
+          String(computeWorkingHeartbeatUntil(ack.estimatedMinutes, now())),
+        );
+      }
       // P0-4 arming: an explicit ETA arms its own deadline; a numberless ACK
       // (the entropy-P0 template ACK carries no ETA) falls back to the member
       // timeout so the delivery reminder still fires — without this the

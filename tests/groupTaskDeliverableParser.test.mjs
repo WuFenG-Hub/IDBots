@@ -307,6 +307,38 @@ test('P0-3: parseWorkingAck extracts subtask + estimated minutes; no tag → nul
   assert.equal(hasStandbyMarker('nothing'), false);
 });
 
+test('P2-2: parseWorkingAck accepts long-task heartbeat forms with the ETA inside the tag', () => {
+  const { parseWorkingAck } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const zh = parseWorkingAck('[WORKING 长任务 预计剩余45分钟] VoxCPM synthesis running in background');
+  assert.equal(zh.acknowledged, true);
+  assert.equal(zh.estimatedMinutes, 45);
+
+  const en = parseWorkingAck('[WORKING long-task, ETA 45 min] rendering scene 2');
+  assert.equal(en.acknowledged, true);
+  assert.equal(en.estimatedMinutes, 45);
+  assert.match(en.taskDescription, /rendering scene 2/);
+
+  // a qualifier without an ETA still ACKs, with no estimated minutes
+  const bare = parseWorkingAck('[WORKING long-task] downloading the model');
+  assert.equal(bare.acknowledged, true);
+  assert.equal(bare.estimatedMinutes, null);
+
+  // lookalikes without a real tag stay null
+  assert.equal(parseWorkingAck('[WORKING'), null);
+  assert.equal(parseWorkingAck('[WORKINGNESS] not a tag'), null);
+});
+
+test('P2-2: computeWorkingHeartbeatUntil adds the ETA plus the grace window', () => {
+  const { computeWorkingHeartbeatUntil, WORKING_HEARTBEAT_GRACE_MS } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const nowMs = 1_700_000_000_000;
+  assert.equal(
+    computeWorkingHeartbeatUntil(45, nowMs),
+    nowMs + 45 * 60_000 + WORKING_HEARTBEAT_GRACE_MS,
+  );
+  assert.equal(computeWorkingHeartbeatUntil(0, nowMs), nowMs + WORKING_HEARTBEAT_GRACE_MS);
+  assert.equal(computeWorkingHeartbeatUntil(10, nowMs, 0), nowMs + 10 * 60_000);
+});
+
 // ---------------------------------------------------------------------------
 // P0-8: integrity declarations
 // ---------------------------------------------------------------------------
