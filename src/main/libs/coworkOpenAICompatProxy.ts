@@ -1797,7 +1797,10 @@ function readRequestBody(req: http.IncomingMessage): Promise<string> {
       totalBytes += chunk.length;
       if (totalBytes > 20 * 1024 * 1024) {
         fail(new Error('Request body too large'));
-        req.destroy();
+        // Do NOT destroy the socket here: the caller still needs to answer
+        // (413). The settled guard above makes every further chunk a no-op,
+        // so the oversized body drains to the floor while the error response
+        // reaches the client (destroying first would EPIPE the caller).
         return;
       }
       chunks.push(chunk);
@@ -3380,12 +3383,22 @@ function handleGetScheduledTask(res: http.ServerResponse, id: string): void {
   }
 }
 
-async function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<Record<string, unknown> | null> {
+async function readJsonBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<Record<string, unknown> | null> {
   let body: string;
   try {
     body = await readRequestBody(req);
-  } catch {
-    writeJSON(res, 400, { success: false, error: 'Invalid request body' } as any);
+  } catch (error) {
+    // Distinguish a rejected oversized body (readRequestBody caps at 20MB)
+    // from a genuinely malformed stream: 413 vs 400.
+    const message = error instanceof Error ? error.message : String(error);
+    if (/too large/i.test(message)) {
+      writeJSON(res, 413, { success: false, error: message } as any);
+    } else {
+      writeJSON(res, 400, { success: false, error: `Invalid request body: ${message}` } as any);
+    }
     return null;
   }
   try {
@@ -3422,6 +3435,14 @@ function validateScheduledTaskPartialInput(input: Record<string, unknown>): stri
     if (schedule.type === 'at' && !schedule.datetime) {
       return 'At schedule requires datetime field';
     }
+    // Parity with create: a one-time "at" schedule must still be in the
+    // future at update time (an update can move a task to a new schedule).
+    if (schedule.type === 'at' && schedule.datetime) {
+      const targetMs = new Date(String(schedule.datetime)).getTime();
+      if (Number.isFinite(targetMs) && targetMs <= Date.now()) {
+        return 'Execution time must be in the future for one-time (at) tasks';
+      }
+    }
   }
   if (input.expiresAt !== undefined && input.expiresAt) {
     const todayStr = new Date().toISOString().slice(0, 10);
@@ -3455,6 +3476,14 @@ async function handleUpdateScheduledTask(
     return;
   }
   const normalizedInput: Record<string, unknown> = { ...input };
+  // Parity with create: name/prompt are stored trimmed (create builds its
+  // taskInput via .trim(); an update must not sneak whitespace back in).
+  if (normalizedInput.name !== undefined) {
+    normalizedInput.name = String(normalizedInput.name).trim();
+  }
+  if (normalizedInput.prompt !== undefined) {
+    normalizedInput.prompt = String(normalizedInput.prompt).trim();
+  }
   if (Object.prototype.hasOwnProperty.call(normalizedInput, 'workingDirectory')) {
     normalizedInput.workingDirectory = normalizeScheduledTaskWorkingDirectory(
       normalizedInput.workingDirectory,

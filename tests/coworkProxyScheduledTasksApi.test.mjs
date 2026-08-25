@@ -196,3 +196,41 @@ test('unrelated paths still return the Anthropic-style 404', async () => {
   assert.equal(body.type, 'error');
   assert.equal(body.error.type, 'not_found_error');
 });
+
+test('PUT rejects an "at" schedule datetime in the past', async () => {
+  const { base, seedId } = await setup();
+  const past = new Date(Date.now() - 3600_000).toISOString();
+  const res = await fetch(`${base}/api/scheduled-tasks/${seedId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ schedule: { type: 'at', datetime: past } }),
+  });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.match(body.error, /must be in the future/);
+});
+
+test('PUT trims name and prompt before storing', async () => {
+  const { base, seedId, store } = await setup();
+  const res = await fetch(`${base}/api/scheduled-tasks/${seedId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '  Daily skill  ', prompt: '  run the pipeline  ' }),
+  });
+  assert.equal(res.status, 200);
+  const stored = store.getTask(seedId);
+  assert.equal(stored.name, 'Daily skill');
+  assert.equal(stored.prompt, 'run the pipeline');
+});
+
+test('oversized update body gets 413, not 400', async () => {
+  const { base, seedId } = await setup();
+  const res = await fetch(`${base}/api/scheduled-tasks/${seedId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: 'a'.repeat(21 * 1024 * 1024 + 1),
+  });
+  assert.equal(res.status, 413);
+  const body = await res.json();
+  assert.match(body.error, /too large/i);
+});
