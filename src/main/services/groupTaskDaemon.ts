@@ -356,6 +356,29 @@ const GROUP_COGNITION_BLOCK_MAX_CHARS = 3000;
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_WORKER_COOLDOWN_MS = 20_000;
 const DEFAULT_CHAIR_COOLDOWN_MS = 10_000;
+
+/** Entropy P1 knobs (cognition TTL cache / worker chair-only cognition). */
+interface GroupTaskEntropyP1Config {
+  cognitionCache: boolean;
+  workerChairOnly: boolean;
+}
+
+function parseGroupTaskEntropyP1Config(raw: string | null | undefined): GroupTaskEntropyP1Config {
+  if (!raw) return { cognitionCache: true, workerChairOnly: true };
+  try {
+    const parsed = JSON.parse(raw) as Partial<Record<keyof GroupTaskEntropyP1Config, unknown>>;
+    return {
+      cognitionCache: typeof parsed.cognitionCache === 'boolean' ? parsed.cognitionCache : true,
+      workerChairOnly: typeof parsed.workerChairOnly === 'boolean' ? parsed.workerChairOnly : true,
+    };
+  } catch {
+    return { cognitionCache: true, workerChairOnly: true };
+  }
+}
+
+const COGNITION_BLOCK_CACHE_TTL_MS = 5 * 60_000;
+const COGNITION_BLOCK_CACHE_MAX_ENTRIES = 200;
+
 /**
  * OpenTeam M2: an offline remote teammate (metabotId == null) whose latest
  * group message is older than this window counts as "unreachable" — injected
@@ -1308,6 +1331,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
+  // Entropy P1: per-(task, bot) TTL cache for the group cognition block.
+  const cognitionBlockCache = new Map<string, { rosterKey: string; block: string; expiresAt: number }>();
 
   /**
    * Round-4 default link probe: HEAD with a GET fallback (some hosts reject
@@ -2082,24 +2107,56 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const buildGroupCognitionBlockFor = async (
     bot: GroupTaskDaemonBotFull,
     promptMembers: DaemonPromptMember[],
+    task: GroupTask,
   ): Promise<string> => {
     if (!deps.getMetaIDGroupCognitionPromptBlock || !bot.globalmetaid?.trim()) return '';
+    const roster = promptMembers
+      .map((member) => ({
+        globalMetaID: member.globalMetaId?.trim() ?? null,
+        name: member.name,
+        role: member.role,
+      }))
+      .filter((member): member is { globalMetaID: string; name: string; role: 'chair' | 'worker' } =>
+        Boolean(member.globalMetaID));
+    // Entropy P1: the cognition block is rebuilt per turn per responder but
+    // its inputs (impression snapshots, episode aggregates) change on dream /
+    // task-close cadence — a short TTL cache keyed by (task, bot) with a
+    // roster fingerprint removes the per-tick rebuild. Staleness only lags
+    // interaction-count style statistics, never the impression semantics.
+    const entropyP1 = parseGroupTaskEntropyP1Config(
+      deps.getStore().get<string>('groupTaskEntropyP1'),
+    );
+    const rosterKey = roster.map((member) => member.globalMetaID).join('|');
+    const cacheKey = `${task.id}:${bot.id}`;
+    const currentTimeMs = now();
+    const cached = entropyP1.cognitionCache ? cognitionBlockCache.get(cacheKey) : undefined;
+    if (cached && cached.rosterKey === rosterKey && cached.expiresAt > currentTimeMs) {
+      return cached.block;
+    }
     try {
-      const roster = promptMembers
-        .map((member) => ({
-          globalMetaID: member.globalMetaId?.trim() ?? null,
-          name: member.name,
-          role: member.role,
-        }))
-        .filter((member): member is { globalMetaID: string; name: string; role: 'chair' | 'worker' } =>
-          Boolean(member.globalMetaID));
       const block = (await deps.getMetaIDGroupCognitionPromptBlock({
         observerGlobalMetaID: bot.globalmetaid,
         roster,
       })).trim();
-      return block.length > GROUP_COGNITION_BLOCK_MAX_CHARS
+      const bounded = block.length > GROUP_COGNITION_BLOCK_MAX_CHARS
         ? `${block.slice(0, GROUP_COGNITION_BLOCK_MAX_CHARS)}…`
         : block;
+      if (entropyP1.cognitionCache) {
+        if (cognitionBlockCache.size >= COGNITION_BLOCK_CACHE_MAX_ENTRIES) {
+          for (const [key, entry] of cognitionBlockCache) {
+            if (entry.expiresAt <= currentTimeMs) cognitionBlockCache.delete(key);
+          }
+          if (cognitionBlockCache.size >= COGNITION_BLOCK_CACHE_MAX_ENTRIES) {
+            cognitionBlockCache.clear();
+          }
+        }
+        cognitionBlockCache.set(cacheKey, {
+          rosterKey,
+          block: bounded,
+          expiresAt: currentTimeMs + COGNITION_BLOCK_CACHE_TTL_MS,
+        });
+      }
+      return bounded;
     } catch (error) {
       deps.emitLog?.(
         `[GroupTaskDaemon] MetaID group cognition projection unavailable for bot ${bot.id}; continuing without impression context: ` +
@@ -2127,7 +2184,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     ownerGlobalMetaId: string,
   ): Promise<{ systemPrompt: string; volatileContext: string }> => {
     const experienceBlock = buildExperienceBlockFor(bot);
-    const cognitionBlock = await buildGroupCognitionBlockFor(bot, promptMembers);
+    const cognitionBlock = await buildGroupCognitionBlockFor(bot, promptMembers, task);
     const cultureBlock = deps.buildTeamCultureBlock?.() ?? null;
     const systemPrompt = buildGroupTaskSystemPrompt({
       metabot: bot,

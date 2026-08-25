@@ -3682,3 +3682,74 @@ test('team culture block is omitted when the store is empty', async () => {
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Entropy P1: cognition block TTL cache
+// ---------------------------------------------------------------------------
+
+const p1CognitionHarness = async () => {
+  const cognitionCalls = [];
+  const h = await createHarness({
+    getMetaIDGroupCognitionPromptBlock: async (input) => {
+      cognitionCalls.push(input.observerGlobalMetaID);
+      return `<metaid_group_cognition>Observer: ${input.observerGlobalMetaID}</metaid_group_cognition>`;
+    },
+  });
+  return { h, cognitionCalls };
+};
+
+const p1WorkerPing = (h, pinId, content) => insertGroupMessage(h.db, {
+  pinId,
+  senderMetaId: 'metaid-h',
+  senderGlobalMetaId: 'gmid-boss',
+  senderName: 'Human',
+  content,
+});
+
+test('entropy P1: cognition block cached per (task, bot) within the TTL, rebuilt after expiry', async () => {
+  const { h, cognitionCalls } = await p1CognitionHarness();
+  try {
+    h.createTask([2]);
+    p1WorkerPing(h, 'p1-a-i0', '@Coder Bot go');
+    await h.loop.runTick();
+    h.state.nowMs += 21_000; // past the worker cooldown
+    p1WorkerPing(h, 'p1-b-i0', '@Coder Bot go again');
+    await h.loop.runTick();
+    assert.equal(
+      cognitionCalls.filter((observer) => observer === 'gmid-w2').length,
+      1,
+      'second turn within the TTL reuses the cached block',
+    );
+
+    h.state.nowMs += 5 * 60_000 + 1_000; // past the cache TTL
+    p1WorkerPing(h, 'p1-c-i0', '@Coder Bot third pass');
+    await h.loop.runTick();
+    assert.equal(
+      cognitionCalls.filter((observer) => observer === 'gmid-w2').length,
+      2,
+      'block rebuilt after the TTL expires',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('entropy P1: cognitionCache knob off restores per-turn rebuilds', async () => {
+  const { h, cognitionCalls } = await p1CognitionHarness();
+  try {
+    h.store.set('groupTaskEntropyP1', JSON.stringify({ cognitionCache: false }));
+    h.createTask([2]);
+    p1WorkerPing(h, 'p1-d-i0', '@Coder Bot go');
+    await h.loop.runTick();
+    h.state.nowMs += 21_000;
+    p1WorkerPing(h, 'p1-e-i0', '@Coder Bot go again');
+    await h.loop.runTick();
+    assert.equal(
+      cognitionCalls.filter((observer) => observer === 'gmid-w2').length,
+      2,
+      'knob off: every turn rebuilds',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
