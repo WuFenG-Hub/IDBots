@@ -8,6 +8,8 @@
  * into the cacheable system-prompt head.
  */
 
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
+
 export const KNOWLEDGE_BASES_PROMPT_MAX_ITEMS = 5;
 const KB_NAME_MAX_CHARS = 80;
 const KB_DESCRIPTION_MAX_CHARS = 200;
@@ -29,8 +31,8 @@ const escapeXml = (value: string): string =>
     .replace(/'/g, '&apos;');
 
 function truncate(value: unknown, maxLength: number): string {
-  const text = typeof value === 'string' ? value.trim() : '';
-  return text.length > maxLength ? `${text.slice(0, maxLength).trim()}…` : text;
+  const text = stripLoneSurrogates(typeof value === 'string' ? value.trim() : '');
+  return text.length > maxLength ? `${truncateUtf16Units(text, maxLength).trim()}…` : text;
 }
 
 /**

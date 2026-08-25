@@ -11,6 +11,8 @@
  * stays the only place that touches the store.
  */
 
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
+
 export const KNOWLEDGE_PROMPT_MAX_ITEMS = 8;
 export const KNOWLEDGE_PROMPT_MAX_CHARS = 2400;
 const KNOWLEDGE_ENTRY_MAX_CHARS = 500;
@@ -40,8 +42,10 @@ const escapeXml = (value: string): string =>
     .replace(/'/g, '&apos;');
 
 function truncate(value: unknown, maxLength: number): string {
-  const text = typeof value === 'string' ? value.trim() : '';
-  return text.length > maxLength ? `${text.slice(0, maxLength).trim()}…` : text;
+  // Stored knowledge rows may already carry the pre-fix lone-surrogate
+  // pollution — sanitize on render as well as cutting surrogate-safe.
+  const text = stripLoneSurrogates(typeof value === 'string' ? value.trim() : '');
+  return text.length > maxLength ? `${truncateUtf16Units(text, maxLength).trim()}…` : text;
 }
 
 /**
@@ -92,7 +96,7 @@ export function buildKnowledgeBlock(
   const rendered = lines.join('\n');
   return rendered.length <= maxChars
     ? rendered
-    : `${rendered.slice(0, Math.max(0, maxChars - 1)).trim()}…`;
+    : `${truncateUtf16Units(rendered, Math.max(0, maxChars - 1)).trim()}…`;
 }
 
 /** Plain-text rendering of recall results for the knowledge_recall tool response. */

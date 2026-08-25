@@ -1,4 +1,5 @@
 import { formatBotWorkspaceDate } from './botWorkspace';
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 
 /**
  * Experience prompt blocks — the hot layer of the tiered experience system.
@@ -235,8 +236,8 @@ export function formatExperienceRecallResults(
 function formatDailyRecall(summaries: ExperienceSummaryLike[]): string {
   const lines: string[] = [];
   for (const summary of summaries) {
-    const text = summary.summaryText.replace(/\s+/g, ' ').trim();
-    const truncated = text.length > RECALL_ENTRY_MAX_CHARS ? `${text.slice(0, RECALL_ENTRY_MAX_CHARS)}…` : text;
+    const text = stripLoneSurrogates(summary.summaryText.replace(/\s+/g, ' ').trim());
+    const truncated = text.length > RECALL_ENTRY_MAX_CHARS ? `${truncateUtf16Units(text, RECALL_ENTRY_MAX_CHARS)}…` : text;
     lines.push(`${summary.summaryDate}: ${truncated}`);
     for (const ref of summary.sessionRefs ?? []) {
       const title = ref.title?.trim();
@@ -270,8 +271,8 @@ function formatGroupedRecall(summaries: ExperienceSummaryLike[], granularity: Ex
     const span = dates.length > 1 ? `${dates[dates.length - 1]}..${dates[0]}` : dates[0];
     lines.push(`${label} ${key} (${group.length} day${group.length > 1 ? 's' : ''}, ${span}):`);
     for (const summary of group) {
-      const text = summary.summaryText.replace(/\s+/g, ' ').trim();
-      const truncated = text.length > RECALL_ENTRY_MAX_CHARS ? `${text.slice(0, RECALL_ENTRY_MAX_CHARS)}…` : text;
+      const text = stripLoneSurrogates(summary.summaryText.replace(/\s+/g, ' ').trim());
+      const truncated = text.length > RECALL_ENTRY_MAX_CHARS ? `${truncateUtf16Units(text, RECALL_ENTRY_MAX_CHARS)}…` : text;
       lines.push(`  - ${summary.summaryDate}: ${truncated}`);
     }
   }

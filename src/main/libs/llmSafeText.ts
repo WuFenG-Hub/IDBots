@@ -10,7 +10,16 @@
 // a plain `.slice(0, n)` cuts on code-unit boundaries and can split a
 // surrogate pair in half.
 
-/** Remove unpaired high/low surrogates (half an emoji, corrupted tails). */
+/**
+ * Remove unpaired high/low surrogates (half an emoji, corrupted tails).
+ *
+ * Greedy left-to-right pairing: in a corrupt run like high + low + high the
+ * first two halves recombine into a DIFFERENT (invalid but whole) pair and
+ * only the tail is dropped. The result therefore never contains a lone
+ * surrogate — the guarantee the upstream JSON parsers need — but callers who
+ * require byte-identical cleanup of already-corrupted rows should not rely on
+ * recombined halves vanishing.
+ */
 export function stripLoneSurrogates(text: string): string {
   // eslint-disable-next-line no-misleading-character-class
   return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
