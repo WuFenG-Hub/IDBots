@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, CheckIcon, Cog6ToothIcon, CpuChipIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../services/i18n';
 import { configService } from '../services/config';
+import { placePopoverAbove } from '../utils/anchoredPopover';
 import {
   buildModelGroupsFromConfig,
   resolveBrainModelInGroups,
@@ -48,9 +49,18 @@ interface ModelEffortPickerProps {
   globalDefaultModel?: string | null;
   /** Opens Settings > Models from a sticky footer on the model list pane. */
   onManageModels?: () => void;
+  /**
+   * Render the dropdown with `position: fixed` anchored above the trigger so
+   * it escapes `overflow-hidden` ancestors and overlapping sibling panes
+   * (e.g. the Bot Browser sidebar next to the browser view). `dropdownDirection`
+   * is ignored in this mode — the fixed popover always opens above the trigger.
+   */
+  useFixedDropdown?: boolean;
 }
 
 type Pane = 'root' | 'model' | 'effort';
+
+const MODEL_POPOVER_WIDTH = 288; // w-72
 
 const EFFORT_OPTIONS: Array<{ value: LlmEffortLevel | null; labelKey: string; descKey: string }> = [
   { value: null, labelKey: 'modelPickerEffortDefault', descKey: 'modelPickerEffortDefaultDesc' },
@@ -74,10 +84,46 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
   placeholder,
   globalDefaultModel = null,
   onManageModels,
+  useFixedDropdown = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [pane, setPane] = useState<Pane>('root');
   const containerRef = React.useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  // Fixed-mode placement (see useFixedDropdown): computed after the dropdown
+  // lays out so the measured height anchors its bottom edge to the trigger.
+  const [fixedDropdownStyle, setFixedDropdownStyle] = useState<React.CSSProperties | null>(null);
+
+  const updateFixedDropdownPlacement = useCallback(() => {
+    const anchorRect = triggerRef.current?.getBoundingClientRect() ?? null;
+    const dropdownRect = dropdownRef.current?.getBoundingClientRect();
+    const placement = placePopoverAbove(
+      anchorRect,
+      dropdownRect ? { width: dropdownRect.width, height: dropdownRect.height } : { width: MODEL_POPOVER_WIDTH },
+      MODEL_POPOVER_WIDTH,
+    );
+    setFixedDropdownStyle({ position: 'fixed', top: placement.top, left: placement.left, width: placement.width });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!isOpen || !useFixedDropdown) {
+      setFixedDropdownStyle(null);
+      return;
+    }
+    updateFixedDropdownPlacement();
+  }, [isOpen, useFixedDropdown, pane, updateFixedDropdownPlacement]);
+
+  useEffect(() => {
+    if (!isOpen || !useFixedDropdown) return;
+    const handle = () => updateFixedDropdownPlacement();
+    window.addEventListener('resize', handle);
+    window.addEventListener('scroll', handle, true);
+    return () => {
+      window.removeEventListener('resize', handle);
+      window.removeEventListener('scroll', handle, true);
+    };
+  }, [isOpen, useFixedDropdown, updateFixedDropdownPlacement]);
 
   // Catalog freshness: rebuild when the popover opens and whenever the
   // Settings dialog closes (providers may have been added/edited there).
@@ -191,6 +237,7 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
   return (
     <div ref={containerRef} className={isField ? 'relative w-full' : 'relative'}>
       <button
+        ref={triggerRef}
         type="button"
         id={id}
         onClick={openPicker}
@@ -233,7 +280,11 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
 
       {isOpen && (
         <div
-          className={`absolute ${dropdownPositionClass} left-0 ${isField ? 'right-0' : 'w-72'} dark:bg-claude-darkSurface bg-claude-surface rounded-xl popover-enter shadow-popover z-50 dark:border-claude-darkBorder border-claude-border border overflow-hidden`}
+          ref={dropdownRef}
+          className={useFixedDropdown
+            ? 'fixed w-72 dark:bg-claude-darkSurface bg-claude-surface rounded-xl popover-enter shadow-popover z-50 dark:border-claude-darkBorder border-claude-border border overflow-hidden'
+            : `absolute ${dropdownPositionClass} left-0 ${isField ? 'right-0' : 'w-72'} dark:bg-claude-darkSurface bg-claude-surface rounded-xl popover-enter shadow-popover z-50 dark:border-claude-darkBorder border-claude-border border overflow-hidden`}
+          style={useFixedDropdown ? (fixedDropdownStyle ?? { visibility: 'hidden' }) : undefined}
         >
           {pane !== 'root' && (
             <div className="flex items-center gap-2 px-3 py-2 dark:border-claude-darkBorder border-b border-claude-border">
