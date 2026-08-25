@@ -56,9 +56,10 @@ test('SqliteStore.create() upgrades legacy user_memories scope columns before cr
     return originalLoad(request, parent, isMain);
   };
 
+  let sqliteStore;
   try {
     const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
-    const sqliteStore = await SqliteStore.create(userDataPath);
+    sqliteStore = await SqliteStore.create(userDataPath);
     const db = sqliteStore.getDatabase();
 
     const columns = getColumns(db, 'user_memories');
@@ -73,6 +74,11 @@ test('SqliteStore.create() upgrades legacy user_memories scope columns before cr
     assert(indexNames.includes('idx_user_memories_usage_visibility'));
   } finally {
     Module._load = originalLoad;
+    try {
+      sqliteStore?.close();
+    } catch {
+      // best-effort close before removing the temp dir (Windows file locks)
+    }
     fs.rmSync(userDataPath, { recursive: true, force: true });
   }
 });
