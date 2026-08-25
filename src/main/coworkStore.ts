@@ -5952,7 +5952,12 @@ export class CoworkStore implements MemoryBackend {
   private mapMemoryRow(row: CoworkUserMemoryRow): CoworkUserMemory {
     return {
       id: row.id,
-      text: row.text,
+      // Read-side sanitize: rows written before the surrogate-safe truncate
+      // fix may still carry a split-emoji half; this view feeds the scoped
+      // memory prompt blocks on EVERY turn, so polluted text 400'd strict
+      // upstream parsers until the row was rewritten. Fingerprinting and
+      // match keys keep using the stored raw text (write path strips).
+      text: stripLoneSurrogates(row.text ?? ''),
       confidence: Number.isFinite(Number(row.confidence)) ? Number(row.confidence) : 0.7,
       isExplicit: Number(row.is_explicit) !== 0,
       status: (row.status === 'stale' || row.status === 'deleted' ? row.status : 'created') as CoworkUserMemoryStatus,

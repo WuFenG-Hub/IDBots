@@ -501,9 +501,12 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
   const requiredSkills = (input.requiredSkills ?? [])
     .map((skill) => String(skill ?? '').trim())
     .filter((skill) => skill.length > 0);
-  const goalSummary = task.goal.length > GOAL_SUMMARY_MAX_CHARS
-    ? `${truncateUtf16Units(stripLoneSurrogates(task.goal), GOAL_SUMMARY_MAX_CHARS)}…`
-    : task.goal;
+  // Strip ALWAYS (a polluted goal under the cap would pass the old
+  // over-cap-only branch raw into the invite message), cut only over cap.
+  const goal = stripLoneSurrogates(task.goal);
+  const goalSummary = goal.length > GOAL_SUMMARY_MAX_CHARS
+    ? `${truncateUtf16Units(goal, GOAL_SUMMARY_MAX_CHARS)}…`
+    : goal;
   const inviteeName = input.inviteeName?.trim() || detail.name || '';
   const plaintext = buildOpenTeamInviteMessage({
     v: 1,
