@@ -6,6 +6,7 @@ import type {
 } from '../dreamStore';
 import { formatBotWorkspaceDate } from './botWorkspace';
 import { estimateCoworkTextTokens } from './coworkContextBudget';
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 import type { DreamActivityChunk } from './dreamFragments';
 
 /**
@@ -245,9 +246,9 @@ export function computeDueDreamDates(input: {
 }
 
 const truncateText = (text: string, maxChars: number): string => {
-  const normalized = String(text ?? '').replace(/\s+/g, ' ').trim();
+  const normalized = stripLoneSurrogates(String(text ?? '').replace(/\s+/g, ' ').trim());
   if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, maxChars)}…`;
+  return `${truncateUtf16Units(normalized, maxChars)}…`;
 };
 
 function truncateToTokenBudget(text: string, maxTokens: number): string {

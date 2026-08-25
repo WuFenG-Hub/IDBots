@@ -1,5 +1,6 @@
 import type { CoworkMessage } from '../coworkStore';
 import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 
 export type A2APrivateChatControlState = 'active' | 'ended' | null;
 
@@ -58,8 +59,9 @@ export const shouldRestartA2APrivateChatForGuidance = (input: {
 export const A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS = 400;
 
 const truncateContextLine = (line: string): string => {
-  if (line.length <= A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS) return line;
-  return `${line.slice(0, A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS)}…`;
+  const clean = stripLoneSurrogates(line);
+  if (clean.length <= A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS) return clean;
+  return `${truncateUtf16Units(clean, A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS)}…`;
 };
 
 export const buildA2AGuidanceRestartPrompt = (input: {

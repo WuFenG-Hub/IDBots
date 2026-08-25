@@ -7,6 +7,7 @@
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 import { getPrivateKeyBufferForEcdh } from './metabotWalletService';
+import { stripLoneSurrogates, truncateUtf16Units, truncateUtf16UnitsFromEnd } from '../libs/llmSafeText';
 import {
   computeEcdhSharedSecret,
   computeEcdhSharedSecretSha256,
@@ -2204,7 +2205,7 @@ async function generateRatingChainConfirmation(params: {
 }
 
 function formatRatingPromptText(value: string, maxChars: number): string {
-  const text = String(value || '').trim();
+  const text = stripLoneSurrogates(String(value || '').trim());
   if (text.length <= maxChars) {
     return text;
   }
@@ -2218,9 +2219,9 @@ function formatRatingPromptText(value: string, maxChars: number): string {
   const tailLength = Math.min(RATING_PROMPT_EXCERPT_TAIL_CHARS, Math.floor(maxChars / 3));
   const headLength = Math.max(0, maxChars - excerptNotice.length - tailLength);
   return [
-    text.slice(0, headLength).trimEnd(),
+    truncateUtf16Units(text, headLength).trimEnd(),
     excerptNotice.trim(),
-    text.slice(-tailLength).trimStart(),
+    truncateUtf16UnitsFromEnd(text, tailLength).trimStart(),
   ].filter(Boolean).join('\n\n');
 }
 

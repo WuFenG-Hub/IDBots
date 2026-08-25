@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 
 /**
  * One currently-orderable MetaWeb service whose provider is online.
@@ -68,7 +69,8 @@ function escapeTableCell(value: string): string {
 }
 
 function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  const clean = stripLoneSurrogates(value);
+  return clean.length > max ? `${truncateUtf16Units(clean, max)}…` : clean;
 }
 
 function clampLimit(value: unknown): number {

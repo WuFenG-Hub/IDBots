@@ -38,6 +38,7 @@ import {
   type GroupTaskEntropyP0Config,
 } from '../libs/groupTaskEntropy';
 import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
+import { truncateUtf16Units } from '../libs/llmSafeText';
 import {
   formatWorkerEmptyHandoffError,
   hasSubstantiveActivity,
@@ -2133,7 +2134,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }).trim();
       if (!block) return '';
       return block.length > EXPERIENCE_BLOCK_MAX_CHARS
-        ? `${block.slice(0, EXPERIENCE_BLOCK_MAX_CHARS)}…`
+        ? `${truncateUtf16Units(block, EXPERIENCE_BLOCK_MAX_CHARS)}…`
         : block;
     } catch {
       return '';

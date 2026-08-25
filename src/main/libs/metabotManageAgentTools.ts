@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 import {
   applyChatSkillOp,
   type CreateMetaBotOnChainResult,
@@ -126,7 +127,8 @@ function formatBotLine(m: ManagedMetabotSummary): string {
 }
 
 function truncate(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  const clean = stripLoneSurrogates(text);
+  return clean.length <= max ? clean : `${truncateUtf16Units(clean, max - 1)}…`;
 }
 
 function formatCreateResult(result: CreateMetaBotOnChainResult): string {

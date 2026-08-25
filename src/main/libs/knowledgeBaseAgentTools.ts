@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 import type { KnowledgeBaseRecord } from '../knowledgeBaseStore';
 import type {
   KnowledgeBaseCitation,
@@ -51,7 +52,8 @@ function textResult(text: string, isError = false) {
 }
 
 function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  const clean = stripLoneSurrogates(value);
+  return clean.length > max ? `${truncateUtf16Units(clean, max)}…` : clean;
 }
 
 /** "YYYY-MM-DD HH:MM UTC" from an ISO timestamp; '' when never learned. */

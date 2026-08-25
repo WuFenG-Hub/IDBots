@@ -9,6 +9,7 @@ import {
   type MetawebStudyJobStatus,
 } from '../metawebStudyJobStore';
 import { KNOWLEDGE_BASE_AUTO_LEARN_WINDOW } from './knowledgeBaseService';
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 
 /**
  * MetaWeb study service ("自主学习任务", M4) — the queue + nightly scheduler
@@ -63,7 +64,8 @@ function inStudyWindow(date: Date): boolean {
 }
 
 function truncateMiddle(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  const clean = stripLoneSurrogates(value);
+  return clean.length > max ? `${truncateUtf16Units(clean, max)}…` : clean;
 }
 
 /**
