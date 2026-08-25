@@ -207,9 +207,12 @@ export type MetabotManageViewer = 'twin' | 'welcome' | 'standard';
  *   metabot_getinfo, registered for Twin sessions.
  * - viewer 'welcome': a reduced list+create suite for the built-in Welcome
  *   Bot during initial setup.
- * - viewer 'standard': chat-skill whitelist update + metabot_getinfo, so a
- *   Worker in an ordinary Chat can install a skill onto itself without the
- *   Twin-only create/delete tools.
+ * - viewer 'standard': metabot_getinfo only. Skill-assignment writes are
+ *   OWNER-only (Twin sessions + My Bots UI): under the per-bot assignment
+ *   model allow_chat_skills/chat_skill_op replace authorization rows, so a
+ *   worker self-assigning skills would grant itself (or any bot) arbitrary
+ *   installed skills. The worker install→use loop is covered by skill_tool
+ *   install_skill, which auto-assigns to the calling bot (B2).
  *
  * Every mutating tool delegates to services/metabotManageService.ts, the same
  * code the manual UI uses.
@@ -225,7 +228,7 @@ export function buildMetabotManageAgentTools(deps: {
   const audience = isWelcomeViewer
     ? 'Welcome Bot during initial setup (this machine has no Twin Bot yet).'
     : isStandardViewer
-      ? 'Available in ordinary Chat sessions. Use chat_skill_op to assign or unassign a single skill; use metabot_getinfo to read the assigned list back.'
+      ? 'Available in ordinary Chat sessions: metabot_getinfo to read the current bot\'s config. Skill assignment changes are owner-only (the Twin Bot or My Bots > Edit); use skill_tool install_skill to gain a new skill — it auto-assigns to the current bot.'
       : 'Twin Bot only.';
 
   const metabotList = tool(
@@ -365,18 +368,12 @@ export function buildMetabotManageAgentTools(deps: {
 
   const metabotUpdate = tool(
     'metabot_update',
-    isStandardViewer
-      ? [
-          'Update ONE local MetaBot\'s assigned skills only. Available in ordinary Chat sessions.',
-          'metabot_id required. chat_skill_op adds/removes ONE skill (action "add"|"remove", skill = name from list_installed_skills) without replacing the list; allow_chat_skills replaces the whole list — prefer chat_skill_op. No other fields: not for rename, persona, or delete.',
-          'No confirmation prompt. Returns updated bot name/id and on-chain sync outcome.',
-        ].join(' ')
-      : [
-          'Update ONE existing local MetaBot: rename, persona, LLM, enabled, chat skills, homepage, a2a. Twin Bot only.',
-          'metabot_id required (resolve names via metabot_list); pass only changed fields; omitted keep values.',
-          'metabot_type "twin" is allowed only when no Twin currently exists; the Welcome Bot can never become Twin. The current Twin may demote itself to "worker". chat_skill_op adds/removes one skill (no confirmation); allow_chat_skills replaces the list — never pass both. homepage null or "default" resets.',
-          'Owner (boss_global_metaid) NOT settable here — user sets it in My Bots > Edit; never attempt. Info-pin edits re-publish on-chain (best-effort, reports txids/partial); a2a/enabled/type stay local.',
-        ].join(' '),
+    [
+      'Update ONE existing local MetaBot: rename, persona, LLM, enabled, chat skills, homepage, a2a. Twin Bot only.',
+      'metabot_id required (resolve names via metabot_list); pass only changed fields; omitted keep values.',
+      'metabot_type "twin" is allowed only when no Twin currently exists; the Welcome Bot can never become Twin. The current Twin may demote itself to "worker". chat_skill_op adds/removes one skill (no confirmation); allow_chat_skills replaces the list — never pass both. homepage null or "default" resets.',
+      'Owner (boss_global_metaid) NOT settable here — user sets it in My Bots > Edit; never attempt. Info-pin edits re-publish on-chain (best-effort, reports txids/partial); a2a/enabled/type stay local.',
+    ].join(' '),
     {
       metabot_id: z.number().int().positive().describe('id of the bot to update (from metabot_list, or the current bot\'s id).'),
       name: z.string().optional().describe('New display name.'),
@@ -444,21 +441,21 @@ export function buildMetabotManageAgentTools(deps: {
       if (!Number.isInteger(id) || id <= 0) {
         return textResult('metabot_update requires a positive integer `metabot_id`.', true);
       }
-      const chatSkillOp = args.chat_skill_op as ChatSkillOp | undefined;
+      // B2 hard gate (defense in depth — the standard viewer's tool set no
+      // longer registers metabot_update at all). allow_chat_skills /
+      // chat_skill_op write the per-bot skill ASSIGNMENT rows, i.e. the
+      // authorization source of truth: a worker session self-assigning skills
+      // would grant itself (or any bot, by metabot_id) arbitrary installed
+      // skills with no owner in the loop. Assignment management is owner-only
+      // (Twin sessions + My Bots UI); workers gain skills via skill_tool
+      // install_skill, which auto-assigns to the calling bot.
       if (isStandardViewer) {
-        const extraKeys = Object.keys(args).filter((key) => (
-          key !== 'metabot_id'
-          && key !== 'chat_skill_op'
-          && key !== 'allow_chat_skills'
-          && args[key] !== undefined
-        ));
-        if (extraKeys.length > 0) {
-          return textResult(
-            `Ordinary Chat sessions may only change chat skills via metabot_update (got extra fields: ${extraKeys.join(', ')}). Use chat_skill_op.`,
-            true,
-          );
-        }
+        return textResult(
+          'metabot_update is not available in ordinary Chat sessions. Skill assignment changes are owner-only: ask the Twin Bot (metabot_update) or the owner (My Bots > Edit). To gain a NEW skill, use skill_tool install_skill — it auto-assigns the skill to the current bot.',
+          true,
+        );
       }
+      const chatSkillOp = args.chat_skill_op as ChatSkillOp | undefined;
       if (chatSkillOp && args.allow_chat_skills !== undefined) {
         return textResult(
           'metabot_update cannot take both chat_skill_op and allow_chat_skills. Use chat_skill_op for a single add/remove.',
@@ -584,7 +581,9 @@ export function buildMetabotManageAgentTools(deps: {
     return [metabotList, metabotCreate];
   }
   if (isStandardViewer) {
-    return [metabotUpdate, metabotGetinfo];
+    // B2: read-only for ordinary Chat sessions. metabot_update (even
+    // chat-skill-only) would let a worker self-write its skill assignments.
+    return [metabotGetinfo];
   }
   return [metabotList, metabotCreate, metabotUpdate, metabotDelete, metabotGetinfo];
 }

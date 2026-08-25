@@ -474,18 +474,24 @@ test('metabot_getinfo list_bot_chat_skills returns the whitelist', async () => {
   assert.match(textOf(res), /beta/);
 });
 
-test('standard viewer: exposes update + getinfo only', () => {
+test('standard viewer: read-only (getinfo only) — no self-service assignment writes (B2)', () => {
   const { byName } = makeHarness({}, { viewer: 'standard' });
-  assert.ok(byName.metabot_update);
-  assert.ok(byName.metabot_getinfo);
+  // metabot_update must NOT be registered for ordinary sessions: its
+  // allow_chat_skills / chat_skill_op writes replace the per-bot skill
+  // assignment rows (the authorization source of truth), so a worker
+  // self-assigning skills would defeat the owner-only boundary.
+  assert.equal(byName.metabot_update, undefined, 'standard viewer must not expose metabot_update');
   assert.equal(byName.metabot_list, undefined);
   assert.equal(byName.metabot_create, undefined);
   assert.equal(byName.metabot_delete, undefined);
+  assert.ok(byName.metabot_getinfo);
 });
 
-test('standard viewer: rejects non-chat-skill update fields', async () => {
-  const { byName } = makeHarness({}, { viewer: 'standard' });
-  const res = await byName.metabot_update.handler({ metabot_id: 5, name: 'Nope' });
-  assert.equal(res.isError, true);
-  assert.match(textOf(res), /chat skills/);
+test('twin viewer keeps the full update suite including chat_skill_op', () => {
+  const { byName } = makeHarness({}, { viewer: 'twin' });
+  assert.ok(byName.metabot_update);
+  assert.ok(byName.metabot_list);
+  assert.ok(byName.metabot_create);
+  assert.ok(byName.metabot_delete);
+  assert.ok(byName.metabot_getinfo);
 });
