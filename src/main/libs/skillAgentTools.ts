@@ -37,7 +37,8 @@ export type SkillToolControl = {
    * Load one enabled skill's full SKILL.md plus its directory (for relative
    * path resolution), scoped to the caller's visible set. Backs the
    * read_skill action; null when the name/id does not resolve to a skill the
-   * caller's bot may use.
+   * caller's bot may use. Tool-level lookup gate only — not a filesystem
+   * boundary (session Read/Bash access stays prompt-gated).
    */
   readSkill(nameOrId: string, perspective: SkillToolPerspective): {
     id: string;
@@ -100,7 +101,7 @@ export function buildSkillAgentTools(deps: {
         'Use action "install_skill" to install one skill into the user-data SKILLs directory (never the source tree). Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). Package must contain SKILL.md; installed as SKILLs/<name from SKILL.md>/; 4MB limit. Skills belong to bots: when called from a bot session the install is auto-assigned to that bot; from a bot-less session it lands in the library unassigned — tell the owner to assign it via the Skills UI if it should be usable.',
         'Use action "list_installed_skills" to list the skills THIS session\'s bot can use (bundled / global / assigned) and verify a skill is usable after install.',
         'Use action "read_skill" with name (id or name from the <available_skills> catalog) to load a skill\'s full SKILL.md plus its on-disk directory; resolve the SKILL.md\'s relative paths against that directory.',
-        'Assigning skills to other bots belongs on metabot_update (chat_skill_op), not here. Returns JSON per action.',
+        'Assigning already-installed skills to bots is owner-only (the Twin Bot\'s metabot_update chat_skill_op, or My Bots > Edit) — this tool never changes assignments; installs auto-assign to the calling bot. Returns JSON per action.',
       ].join(' '),
       {
         action: z.enum(['extract_metaapp', 'install_skill', 'list_installed_skills', 'read_skill']),

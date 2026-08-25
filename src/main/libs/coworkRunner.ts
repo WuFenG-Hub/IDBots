@@ -1658,9 +1658,10 @@ export interface CoworkRunnerOptions {
    * When set, Twin cowork sessions get the metabot_manage tools (metabot_list,
    * metabot_create, metabot_update, metabot_delete, metabot_getinfo) backed by
    * the shared core functions in services/metabotManageService.ts — the same
-   * code the manual UI uses. Ordinary Chat sessions get a reduced suite
-   * (metabot_update chat_skill_op + metabot_getinfo) so a Worker can whitelist
-   * a just-installed skill onto itself.
+   * code the manual UI uses. Ordinary Chat sessions get metabot_getinfo only:
+   * assignment writes are owner-only (B2 — a worker self-assigning skills via
+   * chat_skill_op would write the authorization rows itself), and the
+   * install→use loop is covered by skill_tool install_skill auto-assignment.
    */
   metabotManage?: MetabotManageControl;
   /**
@@ -5117,6 +5118,10 @@ export class CoworkRunner extends EventEmitter {
     // skills catalog) must not suppress the split, or every default session
     // would lose skills entirely.
     if (hasEmbeddedSkillCatalog(baseSystemPrompt)) {
+      // Sessions created before the per-bot assignment model embedded the
+      // FULL skill catalog in their stored system prompt; they keep that
+      // un-narrowed legacy view until the session resets (new session /
+      // claudeSessionId cleared) — worth a line in release notes.
       return { skillsSection: null, skillsCatalogMode: 'legacy' };
     }
     // The session's REAL metabot binding (no twin fallback): bot-less user
@@ -8591,8 +8596,10 @@ export class CoworkRunner extends EventEmitter {
     // MetaBot management tools:
     // - Twin: full list/create/update/delete + metabot_getinfo
     // - Welcome Bot (initial setup): list/create only
-    // - Ordinary Chat (Worker): metabot_update (chat_skill_op) + metabot_getinfo
-    //   so the skill-install loop can whitelist a skill onto the current bot.
+    // - Ordinary Chat (Worker): metabot_getinfo only (read). Assignment writes
+    //   are owner-only (B2): a worker self-assigning skills via chat_skill_op
+    //   would write its own authorization rows; the install→use loop is
+    //   covered by skill_tool install_skill auto-assignment.
     const welcomeSession = this.isWelcomeSession(sessionId);
     if (this.metabotManage && (this.isTwinSession(sessionId) || welcomeSession)) {
       memoryTools.push(

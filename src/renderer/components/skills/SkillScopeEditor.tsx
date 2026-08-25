@@ -78,11 +78,13 @@ const SkillScopeEditor: React.FC<SkillScopeEditorProps> = ({ skill, metabots, on
   };
 
   const handleSave = async () => {
-    // Leaving "all bots" (or dropping bots) takes effect immediately for
-    // unchecked bots — require one extra explicit confirmation click.
+    // Leaving "all bots" (or dropping ANY currently-assigned bot — including
+    // same-count swaps) takes effect immediately for the dropped bots —
+    // require one extra explicit confirmation click.
+    const assigned = new Set(assignedIds);
     const narrowing =
       (currentScope === 'global' && mode !== 'all')
-      || (mode === 'bots' && checked.size < assignedIds.length)
+      || (mode === 'bots' && Array.from(assigned).some((id) => !checked.has(id)))
       || mode === 'library';
     if (narrowing && !confirming) {
       setConfirming(true);

@@ -189,6 +189,16 @@ export function assignSkillToMetabot(
   saveDb();
 }
 
+/** Bot-deletion cleanup: drop every assignment row the bot owned. */
+export function removeMetabotAssignments(
+  db: SqliteDatabase,
+  saveDb: () => void,
+  metabotId: number
+): void {
+  db.run(`DELETE FROM ${ASSIGNMENT_TABLE} WHERE metabot_id = ?`, [metabotId]);
+  saveDb();
+}
+
 /** Uninstall cleanup: drop every assignment row plus the scope entry. */
 export function removeSkillFromAssignmentStore(
   db: SqliteDatabase,
@@ -259,11 +269,33 @@ export type SkillAssignmentMigrationResult = {
  * New installs after this point land library-scoped until explicitly
  * assigned or globalized by the owner.
  */
+/**
+ * Raw kv-row probe: distinguishes "never ran" (no row) from "ran but the KV
+ * value no longer parses" (row present, JSON broken). A corrupt flag must be
+ * treated as RAN — re-running would re-seed scope=global over skills the
+ * owner has deliberately de-globalized since the migration.
+ */
+function migrationFlagRowExists(store: SqliteStore): boolean {
+  try {
+    const rows = store.getDatabase().exec(
+      'SELECT value FROM kv WHERE key = ?',
+      [SKILL_ASSIGNMENT_MIGRATION_KEY]
+    );
+    return (rows[0]?.values?.length ?? 0) > 0;
+  } catch {
+    // kv unreadable — safest is also "already ran" (never re-seed blindly).
+    return true;
+  }
+}
+
 export function runSkillAssignmentMigration(
   input: SkillAssignmentMigrationInput
 ): SkillAssignmentMigrationResult {
   const { db, saveDb, store, listSkills, listMetabots, resolveSkillId } = input;
-  if (store.get(SKILL_ASSIGNMENT_MIGRATION_KEY) === true) {
+  if (migrationFlagRowExists(store)) {
+    if (store.get(SKILL_ASSIGNMENT_MIGRATION_KEY) !== true) {
+      console.warn('[skills] Assignment-migration flag present but unreadable — treating as already run (no re-seed).');
+    }
     return { ran: false, globalSeeded: 0, assignmentsMigrated: 0 };
   }
 

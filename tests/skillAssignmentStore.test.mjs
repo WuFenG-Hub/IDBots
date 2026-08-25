@@ -16,6 +16,7 @@ const {
   listAssignedSkillIds,
   listAssignmentMetabotIds,
   listAssignments,
+  removeMetabotAssignments,
   setMetabotAssignedSkills,
   setSkillAssignments,
   assignSkillToMetabot,
@@ -57,6 +58,10 @@ class TestSqliteDb {
 class MemoryKvStore {
   constructor(initial = {}) {
     this.values = { ...initial };
+    // Mirror writes into a real kv table so the migration's raw-row probe
+    // (corrupt-flag detection) behaves like the production SqliteStore.
+    this.db = new TestSqliteDb();
+    this.db.run('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER)');
   }
 
   get(key) {
@@ -65,6 +70,14 @@ class MemoryKvStore {
 
   set(key, value) {
     this.values[key] = value;
+    this.db.run(
+      'INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, ?)',
+      [key, JSON.stringify(value), 1]
+    );
+  }
+
+  getDatabase() {
+    return this.db;
   }
 }
 
@@ -180,4 +193,68 @@ test('migration seeds global scope for external skills and converts allowlists o
   assert.equal(second.ran, false);
   assert.equal(getSkillScope(kv, 'external-one'), 'library');
   assert.equal(kv.get(SKILL_SCOPE_KEY)['external-one'], undefined);
+});
+
+
+test('removeMetabotAssignments drops every row the deleted bot owned', () => {
+  const { db, saveDb } = createFixture();
+  setSkillAssignments(db, saveDb, 'skill-a', [1, 2], 'ui');
+  setSkillAssignments(db, saveDb, 'skill-b', [2, 3], 'ui');
+
+  removeMetabotAssignments(db, saveDb, 2);
+
+  assert.deepEqual(listAssignmentMetabotIds(db, 'skill-a'), [1]);
+  assert.deepEqual(listAssignmentMetabotIds(db, 'skill-b'), [3]);
+});
+
+test('migration flag: corrupt KV row counts as already-run (no re-seed over owner changes)', () => {
+  const db = new TestSqliteDb();
+  ensureSkillAssignmentSchema(db);
+  // A kv row whose JSON no longer parses — SqliteStore.get would return
+  // undefined, which must NOT be treated as "never ran".
+  db.run(
+    'CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER)'
+  );
+  db.run(
+    'INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)',
+    [SKILL_ASSIGNMENT_MIGRATION_KEY, '{corrupt json', 1]
+  );
+  const kv = {
+    get: () => undefined,
+    set: () => {},
+    getDatabase: () => db,
+  };
+
+  const result = runSkillAssignmentMigration({
+    db, saveDb: () => {}, store: kv,
+    listSkills: () => [{ id: 'external-one', isBuiltIn: false }],
+    listMetabots: () => [],
+    resolveSkillId: () => null,
+  });
+
+  assert.equal(result.ran, false, 'corrupt flag row must suppress re-seeding');
+});
+
+test('migration flag: absent row runs the migration (fresh install)', () => {
+  const db = new TestSqliteDb();
+  ensureSkillAssignmentSchema(db);
+  db.run(
+    'CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER)'
+  );
+  const values = {};
+  const kv = {
+    get: (key) => values[key],
+    set: (key, value) => { values[key] = value; },
+    getDatabase: () => db,
+  };
+
+  const result = runSkillAssignmentMigration({
+    db, saveDb: () => {}, store: kv,
+    listSkills: () => [{ id: 'external-one', isBuiltIn: false }],
+    listMetabots: () => [],
+    resolveSkillId: () => null,
+  });
+
+  assert.equal(result.ran, true);
+  assert.equal(result.globalSeeded, 1);
 });

@@ -126,8 +126,6 @@ export type ChatWithToolsFn = (
 ) => Promise<{ content?: string; tool_calls?: ToolCallResult[] }>;
 
 /** Build skill-list prompt for given ids (from SkillManager.buildAutoRoutingPromptForSkillIds). */
-export type GetSkillsPromptForIdsFn = (skillIds: string[]) => string | null;
-
 export type ChatSkillsRoutingPromptInput = {
   metabotId?: number | null;
   widened?: boolean;
@@ -168,18 +166,6 @@ function parseMentionArray(mentionJson: string | null): string[] {
   try {
     const arr = JSON.parse(mentionJson);
     return Array.isArray(arr) ? arr.map(String) : [];
-  } catch {
-    return [];
-  }
-}
-
-function parseAllowedSkillIds(allowedSkillsJson: string | null): string[] {
-  if (allowedSkillsJson == null || allowedSkillsJson === '') return [];
-  try {
-    const arr = JSON.parse(allowedSkillsJson);
-    return Array.isArray(arr)
-      ? arr.map(String).map((id) => id.trim()).filter(Boolean)
-      : [];
   } catch {
     return [];
   }
@@ -581,7 +567,6 @@ async function runReplyPipeline(
   performChatCompletion: PerformChatCompletionFn,
   broadcastGroupChat: BroadcastGroupChatFn,
   options?: {
-    getSkillsPromptForIds?: GetSkillsPromptForIdsFn;
     getChatSkillsRoutingPrompt?: GetChatSkillsRoutingPromptFn;
     skillsRoot?: string;
     skillsRoots?: string[];
@@ -591,7 +576,6 @@ async function runReplyPipeline(
   triggerReason: TriggerReason = 'Probability'
 ): Promise<void> {
   const {
-    getSkillsPromptForIds,
     getChatSkillsRoutingPrompt,
     skillsRoot,
     skillsRoots,
@@ -638,7 +622,6 @@ async function runReplyPipeline(
     ownerGlobalMetaid
   );
 
-  const deprecatedAllowedSkillIds = parseAllowedSkillIds(task.allowed_skills);
   const chatSkillRouting =
     getChatSkillsRoutingPrompt && allowedRoots.length > 0
       ? getChatSkillsRoutingPrompt({
@@ -649,12 +632,12 @@ async function runReplyPipeline(
           widened: triggerReason === 'Boss',
         })
       : null;
-  const skillsPrompt =
-    chatSkillRouting?.prompt
-    ?? (triggerReason === 'Boss' && getSkillsPromptForIds && allowedRoots.length > 0
-      ? getSkillsPromptForIds(deprecatedAllowedSkillIds)
-      : null);
-  const activeSkillIds = chatSkillRouting?.activeSkillIds ?? deprecatedAllowedSkillIds;
+  // The legacy task.allowed_skills fallback is gone: under the per-bot
+  // assignment model the bot's assignment rows are the only routing source —
+  // resolving legacy ids against the full registry would leak every enabled
+  // skill into a Boss turn (review B-followup).
+  const skillsPrompt = chatSkillRouting?.prompt ?? null;
+  const activeSkillIds = chatSkillRouting?.activeSkillIds ?? [];
   const useToolLoop = Boolean(skillsPrompt);
 
   const skillsSection = useToolLoop
@@ -830,7 +813,6 @@ async function runReplyPipeline(
  */
 /** Optional: skill-list prompt and SKILLs root(s). */
 export interface OrchestratorOptions {
-  getSkillsPromptForIds?: GetSkillsPromptForIdsFn;
   getChatSkillsRoutingPrompt?: GetChatSkillsRoutingPromptFn;
   skillsRoot?: string;
   /** Multiple roots (userData + bundled); preferred over skillsRoot for Read/Bash. */
@@ -997,7 +979,7 @@ async function tick(
 /**
  * Start the Cognitive Orchestrator daemon. Runs tick every 10 seconds.
  * performChatCompletion and broadcastGroupChat are injected for LLM and chain send.
- * options.getSkillsPromptForIds and options.skillsRoots enable Cowork-style Read/Bash only when triggerReason === 'Boss'.
+ * options.getChatSkillsRoutingPrompt and options.skillsRoots enable Cowork-style skill routing/Read-Bash.
  */
 export function startOrchestrator(
   db: Database,

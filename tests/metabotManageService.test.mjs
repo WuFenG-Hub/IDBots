@@ -102,6 +102,8 @@ const mockDeps = (store, overrides = {}) => ({
   getOwnerGlobalMetaId: overrides.getOwnerGlobalMetaId ?? (() => 'owner_gmid'),
   // Default: provider catalog unavailable -> the legacy provider-key guard is skipped.
   getLlmProviders: overrides.getLlmProviders ?? (() => undefined),
+  // Assignment seam: absent by default (bare-embedding callers).
+  ...(overrides.applyChatSkillAssignments ? { applyChatSkillAssignments: overrides.applyChatSkillAssignments } : {}),
 });
 
 // ---------------------------------------------------------------------------
@@ -602,4 +604,71 @@ test('applyChatSkillOp: remove drops only the named skill', () => {
   assert.deepEqual(applyChatSkillOp(['alpha', 'beta', 'gamma'], { action: 'remove', skill: 'beta' }), ['alpha', 'gamma']);
   assert.deepEqual(applyChatSkillOp(['alpha'], { action: 'remove', skill: 'missing' }), ['alpha']);
   assert.deepEqual(applyChatSkillOp([], { action: 'remove', skill: 'x' }), []);
+});
+
+
+// ---------------------------------------------------------------------------
+// skill assignment absorption (per-bot assignment model)
+// ---------------------------------------------------------------------------
+
+test('createMetaBotOnChainCore: allow_chat_skills input seeds assignment rows', async () => {
+  const store = await openStore();
+  const calls = [];
+  const deps = mockDeps(store, {
+    applyChatSkillAssignments: (metabotId, entries) => {
+      calls.push({ metabotId, entries });
+      return ['skill-a', 'skill-b'];
+    },
+  });
+  const res = await createMetaBotOnChainCore(
+    { name: 'Seeded', llm_id: 'deepseek-v4-flash', allow_chat_skills: ['skill-a', 'skill-b'] },
+    deps,
+  );
+  assert.equal(res.success, true);
+  assert.deepEqual(calls, [{ metabotId: res.metabot.id, entries: ['skill-a', 'skill-b'] }]);
+});
+
+test('createMetaBotOnChainCore: assignment seeding failure rolls the bot back', async () => {
+  const store = await openStore();
+  const deps = mockDeps(store, {
+    applyChatSkillAssignments: () => {
+      throw new Error('kv locked');
+    },
+  });
+  const res = await createMetaBotOnChainCore(
+    { name: 'Forked', llm_id: 'deepseek-v4-flash', allow_chat_skills: ['skill-a'] },
+    deps,
+  );
+  assert.equal(res.success, false);
+  assert.match(res.error, /assignment seeding failed/i);
+  assert.equal(store.listMetabots().length, 0, 'bot row rolled back');
+});
+
+test('updateMetaBotCore: assignment write failure fails the whole update (fail-closed)', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'Stale', llm_id: 'deepseek-v4-pro' });
+  const deps = mockDeps(store, {
+    applyChatSkillAssignments: () => {
+      throw new Error('sqlite busy');
+    },
+  });
+  const res = await updateMetaBotCore(m.id, { allow_chat_skills: ['skill-x'] }, deps);
+  assert.equal(res.success, false);
+  assert.match(res.error, /assignment write failed/i);
+  // Column keeps the previous value — no fork between projection and rows.
+  assert.deepEqual(store.getMetabotById(m.id).allow_chat_skills, []);
+});
+
+test('updateMetaBotCore: assignment dep result replaces the raw whitelist (names resolved, builtins dropped)', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'Mirrored', llm_id: 'deepseek-v4-pro' });
+  const deps = mockDeps(store, {
+    applyChatSkillAssignments: (_metabotId, entries) => {
+      assert.deepEqual(entries, ['friendly', 'official-thing']);
+      return ['friendly-skill'];
+    },
+  });
+  const res = await updateMetaBotCore(m.id, { allow_chat_skills: ['friendly', 'official-thing'] }, deps);
+  assert.equal(res.success, true);
+  assert.deepEqual(res.metabot.allow_chat_skills, ['friendly-skill'], 'column mirrors resolved rows');
 });
