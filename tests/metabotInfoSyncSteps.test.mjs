@@ -366,11 +366,11 @@ test('renderer chat skill hint copy references the /info/chatSkills protocol pat
 
   assert.match(
     source,
-    /metabotAllowChatSkillsHint:\s*'这些技能会写入 \/info\/chatSkills，供私聊和群聊流程读取。'/,
+    /metabotAllowChatSkillsHint:\s*'分配给该 Bot 的外部技能：私聊、群聊与干活会话均可用，并同步发布到 \/info\/chatSkills。/,
   );
   assert.match(
     source,
-    /metabotAllowChatSkillsHint:\s*'These skills are published to \/info\/chatSkills for private-chat and group-chat replies\.'/,
+    /metabotAllowChatSkillsHint:\s*'External skills assigned to this bot: usable in private chats, group chats and work sessions, and published to \/info\/chatSkills\./,
   );
   assert.match(source, /metabotSyncStepChatSkills:\s*'聊天技能'/);
   assert.doesNotMatch(source, /bio\.allowChatSkills/);

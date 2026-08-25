@@ -1057,7 +1057,7 @@ test('skill path: routing hit runs the skill turn in the existing session, plain
   try {
     const task = h.createTask([2, 3]);
     // Round-4: a member WORKER (Designer Bot) mentions a colleague — the
-    // sender is neither boss nor chair, so allowAllEnabled stays false.
+    // sender is neither boss nor chair, so the widened flag stays false.
     insertGroupMessage(h.db, {
       pinId: 'skill-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
       senderName: 'Designer Bot', content: '@Coder Bot search for MetaID docs',
@@ -1075,8 +1075,8 @@ test('skill path: routing hit runs the skill turn in the existing session, plain
       0,
       'no template ACK posted',
     );
-    assert.deepEqual(h.routingCalls[0].allowChatSkills, ['web-search']);
-    assert.equal(h.routingCalls[0].allowAllEnabled, false, 'human sender: no owner privilege');
+    assert.equal(h.routingCalls[0].metabotId, 2, 'routing scoped to the responding bot');
+    assert.equal(h.routingCalls[0].widened, false, 'human sender: no owner privilege');
 
     // ran inside the existing metaweb_group_task session for (task, worker)
     const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
@@ -1118,7 +1118,7 @@ test('skill path: no routing hit falls back to the plain completion', async () =
   }
 });
 
-test('skill routing: owner message grants allowAllEnabled to the responding bot', async () => {
+test('skill routing: owner message widens to the responding bot\'s full set', async () => {
   const h = await createHarness({
     routing: () => ({ prompt: '<available_skills>x</available_skills>', activeSkillIds: ['x'] }),
   });
@@ -1131,7 +1131,7 @@ test('skill routing: owner message grants allowAllEnabled to the responding bot'
     await h.loop.runTick();
 
     assert.equal(h.routingCalls.length, 1, 'only the chair responds to the owner message');
-    assert.equal(h.routingCalls[0].allowAllEnabled, true, 'owner privilege for skill scope');
+    assert.equal(h.routingCalls[0].widened, true, 'owner privilege widens to the bot\'s full set');
     assert.equal(h.skillTurnCalls.length, 1);
   } finally {
     h.cleanup();
@@ -1423,7 +1423,7 @@ test('chair planning turn: posted plan flips status via [STATUS:EXECUTING] on ro
   }
 });
 
-test('chair trust: worker responding to a chair-sender message gets allowAllEnabled', async () => {
+test('chair trust: worker responding to a chair-sender message gets widened routing', async () => {
   const h = await createHarness({
     routing: () => ({ prompt: '<available_skills>x</available_skills>', activeSkillIds: ['x'] }),
   });
@@ -1436,7 +1436,7 @@ test('chair trust: worker responding to a chair-sender message gets allowAllEnab
     await h.loop.runTick();
 
     assert.equal(h.routingCalls.length, 1);
-    assert.equal(h.routingCalls[0].allowAllEnabled, true, 'chair assignments unlock the full skill set');
+    assert.equal(h.routingCalls[0].widened, true, 'chair assignments unlock the full skill set');
     assert.equal(h.skillTurnCalls.length, 1);
   } finally {
     h.cleanup();

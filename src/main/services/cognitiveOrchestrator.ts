@@ -129,8 +129,8 @@ export type ChatWithToolsFn = (
 export type GetSkillsPromptForIdsFn = (skillIds: string[]) => string | null;
 
 export type ChatSkillsRoutingPromptInput = {
-  allowChatSkills?: unknown;
-  allowAllEnabled?: boolean;
+  metabotId?: number | null;
+  widened?: boolean;
 };
 
 export type ChatSkillsRoutingPromptResult = {
@@ -641,11 +641,13 @@ async function runReplyPipeline(
   const deprecatedAllowedSkillIds = parseAllowedSkillIds(task.allowed_skills);
   const chatSkillRouting =
     getChatSkillsRoutingPrompt && allowedRoots.length > 0
-      ? getChatSkillsRoutingPrompt(
-          triggerReason === 'Boss'
-            ? { allowAllEnabled: true }
-            : { allowChatSkills: metabot.allow_chat_skills ?? [] }
-        )
+      ? getChatSkillsRoutingPrompt({
+          metabotId: metabot.id,
+          // Boss-triggered turns widen to the bot's FULL visible set
+          // (bundled + global + assigned) — capped at the bot, never the
+          // whole library.
+          widened: triggerReason === 'Boss',
+        })
       : null;
   const skillsPrompt =
     chatSkillRouting?.prompt

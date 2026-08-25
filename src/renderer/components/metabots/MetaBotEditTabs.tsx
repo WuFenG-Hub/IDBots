@@ -387,8 +387,10 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
     e.target.value = '';
   };
 
+  // Assignment model: bundled skills are implicitly available to every bot,
+  // so only external (installed) skills are assignable here.
   const availableSkillOptions = useMemo(
-    () => skillOptions.filter((skill) => skill.enabled),
+    () => skillOptions.filter((skill) => skill.enabled && !skill.isBuiltIn),
     [skillOptions],
   );
   const skillNameById = useMemo(

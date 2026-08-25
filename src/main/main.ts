@@ -28,6 +28,7 @@ import {
   type DelegationRequest,
 } from './libs/coworkRunner';
 import { SkillManager } from './skillManager';
+import { runSkillAssignmentMigration } from './libs/skillAssignmentStore';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from './libs/coworkPermissionTypes';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
@@ -319,7 +320,6 @@ import {
 import {
   extractMetaApp as extractMetaAppPackage,
   installSkill as installSkillPackage,
-  listInstalledSkills as listInstalledSkillPackages,
 } from './services/skillInstallService';
 import {
   searchMetaIds as searchMetaIdsRemote,
@@ -4901,7 +4901,7 @@ const getCoworkRunner = () => {
       // and sandbox sessions get the legacy inline-catalog section for
       // guest-path rewriting. The renderer no longer bakes the catalog into
       // the stored session prompt.
-      coworkSkillPromptsProvider: () => getSkillManager().buildCoworkSkillPromptParts(),
+      coworkSkillPromptsProvider: (metabotId) => getSkillManager().buildCoworkSkillPromptParts(metabotId),
       // User-managed DSH plugin directory (userData/dsh-plugins): entries are
       // re-resolved every turn, so an install applies on the next turn and a
       // config change restarts the runtime only after in-flight turns settle.
@@ -5430,16 +5430,43 @@ const getCoworkRunner = () => {
           getSkillsRoot: () => getSkillManager().getSkillsRoot(),
           workspaceDir,
         }),
-        installSkill: async (input) => installSkillPackage(input, {
-          fetchPin: (id) => getPinData(id, false),
-          getSkillsRoot: () => getSkillManager().getSkillsRoot(),
-          reloadSkills: () => getSkillManager().reloadAfterInstall(),
-          workspaceDir: os.tmpdir(),
-        }),
-        listInstalledSkills: () => listInstalledSkillPackages({
-          getSkillsRoot: () => getSkillManager().getSkillsRoot(),
-        }),
-        readSkill: (nameOrId) => getSkillManager().readSkillCatalogEntry(nameOrId),
+        // Perspective-aware install: a bot session auto-assigns the freshly
+        // installed skill to that bot; a bot-less user session leaves it in
+        // the library unassigned (the owner assigns via the Skills UI).
+        installSkill: async (input, perspective) => {
+          const result = await installSkillPackage(input, {
+            fetchPin: (id) => getPinData(id, false),
+            getSkillsRoot: () => getSkillManager().getSkillsRoot(),
+            reloadSkills: () => getSkillManager().reloadAfterInstall(),
+            workspaceDir: os.tmpdir(),
+          });
+          if (!result.ok) {
+            return result;
+          }
+          const skillId = path.basename(result.dest);
+          let assignedToMetabotId: number | null = null;
+          if (perspective?.metabotId != null && skillId) {
+            getSkillManager().assignInstalledSkill(skillId, perspective.metabotId);
+            assignedToMetabotId = perspective.metabotId;
+          }
+          return { ...result, skillId, assignedToMetabotId };
+        },
+        // The caller's view: bundled + global + (for bot sessions) assigned.
+        listInstalledSkills: (perspective) => {
+          const manager = getSkillManager();
+          const info = manager.getSkillAssignmentInfo();
+          return manager.listSkillsForMetabot(perspective.metabotId ?? null).map((skill) => ({
+            id: skill.id,
+            name: skill.name,
+            origin: skill.isBuiltIn
+              ? ('bundled' as const)
+              : info[skill.id]?.scope === 'global'
+                ? ('global' as const)
+                : ('assigned' as const),
+          }));
+        },
+        readSkill: (nameOrId, perspective) =>
+          getSkillManager().readSkillCatalogEntry(nameOrId, perspective.metabotId ?? null),
       },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
         const coworkStoreInstance = getCoworkStore();
@@ -5646,8 +5673,44 @@ const getCoworkTurnSubmissionController = (): CoworkTurnSubmissionController => 
 const getSkillManager = () => {
   if (!skillManager) {
     skillManager = new SkillManager(getStore);
+    runSkillAssignmentMigrationSafe();
   }
   return skillManager;
+};
+
+/**
+ * One-time legacy→assignment migration (idempotent, KV-flagged): every
+ * already-installed external skill is seeded scope=global (pre-upgrade
+ * behavior: all bots see everything) and each metabot's allow_chat_skills
+ * allowlist becomes that bot's assignment rows. New installs after the
+ * upgrade land library-scoped until explicitly assigned or globalized.
+ */
+const runSkillAssignmentMigrationSafe = (): void => {
+  try {
+    const store = getStore();
+    const result = runSkillAssignmentMigration({
+      db: store.getDatabase(),
+      saveDb: store.getSaveFunction(),
+      store,
+      listSkills: () => skillManager!.listSkills(),
+      listMetabots: () => getMetabotStore().listMetabots().map((m) => ({
+        id: m.id,
+        allow_chat_skills: m.allow_chat_skills ?? [],
+      })),
+      resolveSkillId: (idOrName) => skillManager!.resolveSkillIdForAssignment(idOrName),
+    });
+    if (result.ran) {
+      console.log(
+        `[skills] Assignment migration: ${result.globalSeeded} external skill(s) seeded global, ` +
+        `${result.assignmentsMigrated} allow_chat_skills entr(y/ies) converted to assignments`
+      );
+    }
+  } catch (error) {
+    console.warn(
+      '[skills] Assignment migration failed (will retry on next launch):',
+      error instanceof Error ? error.message : String(error)
+    );
+  }
 };
 
 const getMetaAppManager = () => {
@@ -6038,6 +6101,10 @@ function getMetabotManageDeps(): MetabotManageDeps {
       }
     },
     getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
+    // Skill-assignment seam: whitelist writes through metabot updates replace
+    // that bot's assignment rows (the local authorization source of truth).
+    applyChatSkillAssignments: (metabotId, skillIdsOrNames) =>
+      getSkillManager().applyMetabotAssignedSkills(metabotId, skillIdsOrNames, 'metabot_update'),
     // Provider catalog for legacy provider-key validation on brain writes.
     getLlmProviders: () =>
       getStore()?.get<{
@@ -7195,10 +7262,62 @@ if (!gotTheLock) {
   // Skills IPC handlers
   ipcMain.handle('skills:list', () => {
     try {
-      const skills = getSkillManager().listSkills();
-      return { success: true, skills };
+      const manager = getSkillManager();
+      const skills = manager.listSkills();
+      // Assignment enrichment: bundled skills are implicitly all-bots; external
+      // skills carry their scope + assigned bots for the Library UI and the
+      // per-session skill picker.
+      const info = manager.getSkillAssignmentInfo();
+      const enriched = skills.map((skill) => ({
+        ...skill,
+        scope: skill.isBuiltIn ? 'bundled' : (info[skill.id]?.scope ?? 'library'),
+        assignedMetabotIds: info[skill.id]?.assignedMetabotIds ?? [],
+      }));
+      return { success: true, skills: enriched };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to load skills' };
+    }
+  });
+
+  ipcMain.handle('skills:getAssignmentInfo', () => {
+    try {
+      const manager = getSkillManager();
+      return {
+        success: true,
+        info: manager.getSkillAssignmentInfo(),
+        metabots: getMetabotStore().listMetabots().map((m) => ({
+          id: m.id,
+          name: m.name,
+          metabotType: m.metabot_type,
+        })),
+      };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to load skill assignments' };
+    }
+  });
+
+  // Scope editor write: 'global' = share with every bot; 'bots' = exactly the
+  // given bots (scope flips to library + assignment rows replaced); 'library'
+  // = nobody (rows cleared).
+  ipcMain.handle('skills:setScope', (
+    _event,
+    options: { id: string; scope: 'library' | 'global' | 'bots'; metabotIds?: number[] }
+  ) => {
+    try {
+      const manager = getSkillManager();
+      if (options.scope === 'global') {
+        manager.setSkillScopeForSkill(options.id, 'global');
+      } else {
+        manager.setSkillScopeForSkill(options.id, 'library');
+        manager.setAssignmentsForSkill(
+          options.id,
+          options.scope === 'bots' ? (options.metabotIds ?? []) : [],
+          'ui'
+        );
+      }
+      return { success: true, info: manager.getSkillAssignmentInfo() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to update skill scope' };
     }
   });
 

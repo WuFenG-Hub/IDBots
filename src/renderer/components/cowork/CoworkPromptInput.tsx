@@ -297,6 +297,8 @@ interface CoworkPromptInputProps {
    * the '+' menu then only offers attachments and skills.
    */
   commands?: ComposerCommand[];
+  /** Session's bot binding; narrows the skills picker to that bot's view. */
+  sessionMetabotId?: number | null;
 }
 
 const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInputProps>(
@@ -327,6 +329,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       permissionMode,
       onPermissionModeChange,
       commands,
+      sessionMetabotId,
     } = props;
     const isMac = (window as { electron?: { platform?: string } }).electron?.platform === 'darwin';
     const dispatch = useDispatch();
@@ -1440,6 +1443,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
         onSelectSkill={handleSelectSkill}
         onManageSkills={handleManageSkills}
         anchorRef={plusButtonRef as React.RefObject<HTMLElement>}
+        metabotId={sessionMetabotId}
       />
       {showFolderRequiredWarning && (
         <div className="mt-2 text-xs text-red-500 dark:text-red-400">

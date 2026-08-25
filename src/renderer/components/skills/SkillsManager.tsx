@@ -18,6 +18,7 @@ import { skillService } from '../../services/skill';
 import { setSkills } from '../../store/slices/skillSlice';
 import { RootState } from '../../store';
 import { Skill, OfficialSkillItem } from '../../types/skill';
+import SkillScopeEditor, { type AssignableMetabot } from './SkillScopeEditor';
 import ErrorMessage from '../ErrorMessage';
 import Tooltip from '../ui/Tooltip';
 
@@ -57,6 +58,8 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({
   const [communitySkillPendingDownload, setCommunitySkillPendingDownload] = useState<OfficialSkillItem | null>(null);
   const [installingSkillName, setInstallingSkillName] = useState<string | null>(null);
   const [isSyncingAll, setIsSyncingAll] = useState(false);
+  // Assignment model: bots available for per-skill scope assignment.
+  const [assignableMetabots, setAssignableMetabots] = useState<AssignableMetabot[]>([]);
 
   const addSkillMenuRef = useRef<HTMLDivElement>(null);
   const addSkillButtonRef = useRef<HTMLButtonElement>(null);
@@ -78,6 +81,18 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({
       dispatch(setSkills(loadedSkills));
     };
     loadSkills();
+
+    const loadMetabots = async () => {
+      try {
+        const result = await window.electron.skills.getAssignmentInfo();
+        if (isActive && result.success && result.metabots) {
+          setAssignableMetabots(result.metabots);
+        }
+      } catch {
+        // Scope editor degrades to "no bots" until the next successful load.
+      }
+    };
+    loadMetabots();
 
     const unsubscribe = skillService.onSkillsChanged(async () => {
       const loadedSkills = await skillService.loadSkills();
@@ -757,6 +772,15 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({
                       <span>·</span>
                     </>
                   )}
+                  <SkillScopeEditor
+                    skill={skill}
+                    metabots={assignableMetabots}
+                    onSaved={() => {
+                      // Scope writes broadcast skills:changed; refresh eagerly
+                      // so the chip reflects the new state immediately.
+                      skillService.loadSkills().then((loaded) => dispatch(setSkills(loaded)));
+                    }}
+                  />
                   <span className="truncate">{formatSkillDate(skill.updatedAt)}</span>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">

@@ -173,7 +173,7 @@ type ChatSkillsRoutingPromptResult = {
   activeSkillIds: string[];
 };
 type GetChatSkillsRoutingPromptFn = (
-  input: { allowChatSkills?: unknown; allowAllEnabled?: boolean }
+  input: { metabotId?: number | null; widened?: boolean }
 ) => ChatSkillsRoutingPromptResult | Promise<ChatSkillsRoutingPromptResult>;
 type RunPrivateChatSkillTurnFn = (params: {
   sessionId: string;
@@ -4424,8 +4424,10 @@ async function processOne(
     if (shouldUseChatSkills) {
       try {
         chatSkillsRouting = await getChatSkillsRoutingPrompt({
-          allowChatSkills: metabot.allow_chat_skills ?? [],
-          allowAllEnabled: autoReplyPolicy.reason === 'owner',
+          metabotId: metabot.id,
+          // Owner turns widen to the bot's full visible set (bundled + global
+          // + assigned); peer turns route over the assigned baseline only.
+          widened: autoReplyPolicy.reason === 'owner',
         });
       } catch (error) {
         rethrowSqliteWasmBoundsError(error);

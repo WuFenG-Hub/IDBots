@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createRequire } from 'node:module';
+import { DatabaseSync } from 'node:sqlite';
 
 const require = createRequire(import.meta.url);
 const skillManagerPath = (() => {
@@ -15,9 +16,36 @@ const skillManagerPath = (() => {
 })();
 const { SkillManager } = require(skillManagerPath);
 
+/** Minimal SqliteDatabase-shape adapter over node:sqlite for store-level tests. */
+class TestSqliteDb {
+  constructor() {
+    this.db = new DatabaseSync(':memory:');
+  }
+
+  exec(sql, params = []) {
+    if (/^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(sql)) {
+      this.db.exec(sql);
+      return [];
+    }
+    const stmt = this.db.prepare(sql);
+    if (/^\s*(SELECT|PRAGMA)/i.test(sql)) {
+      const rows = stmt.all(...params);
+      const columns = stmt.columns().map((column) => column.name || column.column || '');
+      return [{ columns, values: rows.map((row) => columns.map((column) => row[column])) }];
+    }
+    stmt.run(...params);
+    return [];
+  }
+
+  run(sql, params = []) {
+    this.exec(sql, params);
+  }
+}
+
 class MemoryStore {
   constructor(initial = {}) {
     this.values = { ...initial };
+    this.db = new TestSqliteDb();
   }
 
   get(key) {
@@ -26,6 +54,14 @@ class MemoryStore {
 
   set(key, value) {
     this.values[key] = value;
+  }
+
+  getDatabase() {
+    return this.db;
+  }
+
+  getSaveFunction() {
+    return () => {};
   }
 }
 
@@ -39,16 +75,23 @@ function writeSkill(root, id, name = id) {
   );
 }
 
+const BOT_ID = 7;
+
 function createManager(initialStoreValues = {}) {
+  // Bundled root: official skills, implicitly visible to every bot.
+  const bundledRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-bundled-skills-'));
+  writeSkill(bundledRoot, 'official-core-skill', 'Official Core Skill');
+
+  // Writable root: external installs gated by scope/assignment.
   const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-chat-skills-'));
-  writeSkill(skillRoot, 'allowed-chat-skill', 'Allowed Chat Skill');
-  writeSkill(skillRoot, 'display-name-skill', 'Friendly Display Skill');
-  writeSkill(skillRoot, 'disabled-chat-skill', 'Disabled Chat Skill');
-  writeSkill(skillRoot, 'unlisted-chat-skill', 'Unlisted Chat Skill');
+  writeSkill(skillRoot, 'assigned-skill', 'Assigned Skill');
+  writeSkill(skillRoot, 'assigned-by-name', 'Friendly Display Skill');
+  writeSkill(skillRoot, 'disabled-skill', 'Disabled Skill');
+  writeSkill(skillRoot, 'library-skill', 'Library Skill');
 
   const store = new MemoryStore({
     skills_state: {
-      'disabled-chat-skill': { enabled: false },
+      'disabled-skill': { enabled: false },
     },
     ...initialStoreValues,
   });
@@ -56,88 +99,151 @@ function createManager(initialStoreValues = {}) {
 
   manager.getSkillsRoot = () => skillRoot;
   manager.ensureSkillsRoot = () => skillRoot;
-  manager.getBundledSkillsRoot = () => skillRoot;
-  manager.getSkillRoots = () => [skillRoot];
+  manager.getBundledSkillsRoot = () => bundledRoot;
+  manager.getSkillRoots = () => [bundledRoot, skillRoot];
+  // No Electron BrowserWindow in node:test.
+  manager.notifySkillsChanged = () => {};
 
-  return { manager };
+  return { manager, skillRoot };
 }
 
 function extractSkillIds(prompt) {
   return Array.from(prompt.matchAll(/<id>([^<]+)<\/id>/g), (match) => match[1]);
 }
 
-test('buildChatSkillsRoutingPrompt resolves allowed chat skill ids and names while filtering disabled skills', () => {
+test('applyMetabotAssignedSkills resolves names, drops bundled skills, and replaces the set', () => {
   const { manager } = createManager();
 
-  const result = manager.buildChatSkillsRoutingPrompt({
-    allowChatSkills: [
-      'allowed-chat-skill',
-      'Friendly Display Skill',
-      'disabled-chat-skill',
-      'missing-chat-skill',
-      'allowed-chat-skill',
-    ],
-  });
+  const resolved = manager.applyMetabotAssignedSkills(BOT_ID, [
+    'assigned-skill',
+    'Friendly Display Skill',
+    'official-core-skill',
+    'missing-skill',
+    'assigned-skill',
+  ], 'ui');
 
-  assert.deepEqual(result.activeSkillIds, ['allowed-chat-skill', 'display-name-skill']);
-  assert.deepEqual(extractSkillIds(result.prompt), ['allowed-chat-skill', 'display-name-skill']);
-  assert.doesNotMatch(result.prompt, /disabled-chat-skill/);
-  assert.doesNotMatch(result.prompt, /unlisted-chat-skill/);
+  assert.deepEqual(resolved, ['assigned-skill', 'assigned-by-name']);
+
+  // Replace-set semantics: second call drops the first entry.
+  manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-by-name'], 'ui');
+  assert.deepEqual(
+    manager.resolveChatSkillIds({ metabotId: BOT_ID }),
+    ['assigned-by-name']
+  );
 });
 
-test('buildChatSkillsRoutingPrompt parses JSON and comma separated chat allowlists', () => {
+test('chat routing baseline: only the bot\'s assigned enabled skills are routable', () => {
   const { manager } = createManager();
+  manager.applyMetabotAssignedSkills(BOT_ID, [
+    'assigned-skill',
+    'Friendly Display Skill',
+    'disabled-skill',
+    'official-core-skill',
+  ], 'ui');
 
-  const jsonResult = manager.buildChatSkillsRoutingPrompt({
-    allowChatSkills: '["allowed_chat_skill", "Friendly Display Skill"]',
-  });
-  assert.deepEqual(jsonResult.activeSkillIds, ['allowed-chat-skill', 'display-name-skill']);
+  const result = manager.buildChatSkillsRoutingPrompt({ metabotId: BOT_ID });
 
-  const commaResult = manager.buildChatSkillsRoutingPrompt({
-    allowChatSkills: 'allowed_chat_skill, Friendly Display Skill',
-  });
-  assert.deepEqual(commaResult.activeSkillIds, ['allowed-chat-skill', 'display-name-skill']);
+  assert.deepEqual(result.activeSkillIds, ['assigned-skill', 'assigned-by-name']);
+  assert.deepEqual(extractSkillIds(result.prompt), result.activeSkillIds);
+  assert.doesNotMatch(result.prompt, /disabled-skill/);
+  assert.doesNotMatch(result.prompt, /library-skill/);
+  assert.doesNotMatch(result.prompt, /official-core-skill/);
 });
 
-test('buildChatSkillsRoutingPrompt can authorize all currently enabled skills for Boss chat turns', () => {
+test('chat routing widened: capped at the bot\'s full visible set (bundled + global + assigned)', () => {
   const { manager } = createManager();
+  manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-skill'], 'ui');
+  manager.setSkillScopeForSkill('library-skill', 'global');
 
-  const result = manager.buildChatSkillsRoutingPrompt({
-    allowAllEnabled: true,
-  });
+  const result = manager.buildChatSkillsRoutingPrompt({ metabotId: BOT_ID, widened: true });
 
   assert.deepEqual(result.activeSkillIds, [
-    'allowed-chat-skill',
-    'display-name-skill',
-    'unlisted-chat-skill',
+    'assigned-skill',
+    'library-skill',
+    'official-core-skill',
   ]);
-  assert.deepEqual(extractSkillIds(result.prompt), result.activeSkillIds);
-  assert.doesNotMatch(result.prompt, /disabled-chat-skill/);
+  assert.doesNotMatch(result.prompt, /disabled-skill/);
+  assert.doesNotMatch(result.prompt, /assigned-by-name/);
 });
 
-test('resolveChatSkillIds returns all enabled skills for owner chat turns', () => {
+test('unassigned bot and bot-less sessions route no assigned-only skills', () => {
   const { manager } = createManager();
+  manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-skill'], 'ui');
 
-  const result = manager.resolveChatSkillIds({
-    isOwner: true,
-  });
+  assert.deepEqual(manager.resolveChatSkillIds({ metabotId: BOT_ID + 1 }), []);
+  assert.deepEqual(manager.resolveChatSkillIds({ metabotId: null }), []);
+  assert.deepEqual(manager.resolveChatSkillIds({}), []);
+});
 
-  assert.deepEqual(result, [
-    'allowed-chat-skill',
-    'display-name-skill',
-    'unlisted-chat-skill',
-  ]);
+test('listSkillsForMetabot: bot-less view = bundled + global only', () => {
+  const { manager } = createManager();
+  manager.setSkillScopeForSkill('library-skill', 'global');
+
+  const visible = manager.listSkillsForMetabot(null).map((skill) => skill.id);
+  assert.deepEqual(visible, ['library-skill', 'official-core-skill']);
+});
+
+test('listSkillsForMetabot: bot view = bundled + global + assigned, library-enabled gated', () => {
+  const { manager } = createManager();
+  manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-skill', 'disabled-skill'], 'ui');
+
+  const visible = manager.listSkillsForMetabot(BOT_ID).map((skill) => skill.id);
+  assert.deepEqual(visible, ['assigned-skill', 'official-core-skill']);
+
+  // A global skill stays invisible to everyone while library-level disabled.
+  manager.setSkillScopeForSkill('library-skill', 'global');
+  const visibleAfterGlobal = manager.listSkillsForMetabot(null).map((skill) => skill.id);
+  assert.deepEqual(visibleAfterGlobal, ['library-skill', 'official-core-skill']);
+});
+
+test('buildCoworkSkillPromptParts scopes the catalog to the session bot', () => {
+  const { manager } = createManager();
+  manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-skill'], 'ui');
+
+  const botParts = manager.buildCoworkSkillPromptParts(BOT_ID);
+  assert.match(botParts.catalog, /Official Core Skill/);
+  assert.match(botParts.catalog, /Assigned Skill/);
+  assert.doesNotMatch(botParts.catalog, /Library Skill/);
+
+  const botlessParts = manager.buildCoworkSkillPromptParts(null);
+  assert.match(botlessParts.catalog, /Official Core Skill/);
+  assert.doesNotMatch(botlessParts.catalog, /Assigned Skill/);
+  assert.doesNotMatch(botlessParts.catalog, /Library Skill/);
+});
+
+test('readSkillCatalogEntry is scoped to the bot view when a metabotId is given', () => {
+  const { manager } = createManager();
+  manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-skill'], 'ui');
+
+  assert.ok(manager.readSkillCatalogEntry('assigned-skill', BOT_ID));
+  assert.equal(manager.readSkillCatalogEntry('assigned-skill', BOT_ID + 1), null);
+  // Bundled skills stay readable for every bot.
+  assert.ok(manager.readSkillCatalogEntry('official-core-skill', BOT_ID + 1));
+  // Unscoped read (legacy callers) still resolves.
+  assert.ok(manager.readSkillCatalogEntry('library-skill'));
+});
+
+test('getSkillAssignmentInfo reports scope + assigned bots for external skills only', () => {
+  const { manager } = createManager();
+  manager.setSkillScopeForSkill('library-skill', 'global');
+  manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-skill'], 'ui');
+
+  const info = manager.getSkillAssignmentInfo();
+
+  assert.equal(info['official-core-skill'], undefined);
+  assert.deepEqual(info['library-skill'], { scope: 'global', assignedMetabotIds: [] });
+  assert.deepEqual(info['assigned-skill'], { scope: 'library', assignedMetabotIds: [BOT_ID] });
 });
 
 test('buildAutoRoutingPromptForSkillIds excludes disabled skills from chat routing prompts', () => {
   const { manager } = createManager();
 
   const prompt = manager.buildAutoRoutingPromptForSkillIds([
-    'allowed-chat-skill',
-    'disabled-chat-skill',
+    'assigned-skill',
+    'disabled-skill',
   ]);
 
   assert.ok(prompt);
-  assert.deepEqual(extractSkillIds(prompt), ['allowed-chat-skill']);
-  assert.doesNotMatch(prompt, /disabled-chat-skill/);
+  assert.deepEqual(extractSkillIds(prompt), ['assigned-skill']);
+  assert.doesNotMatch(prompt, /disabled-skill/);
 });

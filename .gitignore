@@ -323,3 +323,4 @@ man_base_data_pebble/
 !tests/metawebStudyJobStore.test.mjs
 !tests/metawebStudyService.test.mjs
 !tests/procedureRecall.test.mjs
+!tests/skillAssignmentStore.test.mjs

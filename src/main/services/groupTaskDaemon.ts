@@ -849,8 +849,8 @@ export type GroupTaskDaemonSendFn = (
 
 /** Narrow skill-routing seam (mirrors how privateChatDaemon calls skillManager). */
 export type GroupTaskDaemonSkillRoutingFn = (input: {
-  allowChatSkills?: unknown;
-  allowAllEnabled?: boolean;
+  metabotId?: number | null;
+  widened?: boolean;
 }) =>
   | { prompt: string | null; activeSkillIds: string[] }
   | Promise<{ prompt: string | null; activeSkillIds: string[] }>;
@@ -3630,9 +3630,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       try {
         const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
         const bossGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
-        // Trust the owner AND the chair: the twin chairs on the owner's behalf, so
-        // its assignments unlock the worker's full enabled skill set (routing still
-        // decides WHICH skills; no routing hit -> plain path remains).
+        // Trust the owner AND the chair: the twin chairs on the owner's behalf.
+        // Widened turns unlock the worker's FULL visible set (bundled + global
+        // + assigned) — capped at the bot, never the whole library; routing
+        // still decides WHICH skills; no routing hit -> plain path remains.
         const senderIsBoss = Boolean(
           senderGlobalMetaId && bossGlobalMetaId && senderGlobalMetaId === bossGlobalMetaId,
         );
@@ -3640,8 +3641,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           senderGlobalMetaId && chairGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId,
         );
         routing = await deps.getChatSkillsRoutingPrompt({
-          allowChatSkills: bot.allow_chat_skills ?? [],
-          allowAllEnabled: senderIsBoss || senderIsChair,
+          metabotId: bot.id,
+          widened: senderIsBoss || senderIsChair,
         });
       } catch (error) {
         emitLog(

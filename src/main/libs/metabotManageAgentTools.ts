@@ -185,10 +185,10 @@ function formatGetInfoResult(bot: ManagedMetabotSummary | undefined, id: number)
   }
   const skills = bot.allow_chat_skills;
   if (skills.length === 0) {
-    return `MetaBot ${bot.name} (id=${bot.id}) chatSkills whitelist is empty.`;
+    return `MetaBot ${bot.name} (id=${bot.id}) has no assigned skills.`;
   }
   return [
-    `MetaBot ${bot.name} (id=${bot.id}) chatSkills whitelist (${skills.length}):`,
+    `MetaBot ${bot.name} (id=${bot.id}) assigned skills (${skills.length}):`,
     ...skills.map((skill) => `- ${skill}`),
   ].join('\n');
 }
@@ -225,7 +225,7 @@ export function buildMetabotManageAgentTools(deps: {
   const audience = isWelcomeViewer
     ? 'Welcome Bot during initial setup (this machine has no Twin Bot yet).'
     : isStandardViewer
-      ? 'Available in ordinary Chat sessions. Use chat_skill_op to add or remove a single chat skill; use metabot_getinfo to read the whitelist back.'
+      ? 'Available in ordinary Chat sessions. Use chat_skill_op to assign or unassign a single skill; use metabot_getinfo to read the assigned list back.'
       : 'Twin Bot only.';
 
   const metabotList = tool(
@@ -367,7 +367,7 @@ export function buildMetabotManageAgentTools(deps: {
     'metabot_update',
     isStandardViewer
       ? [
-          'Update ONE local MetaBot\'s chat-skill whitelist only. Available in ordinary Chat sessions.',
+          'Update ONE local MetaBot\'s assigned skills only. Available in ordinary Chat sessions.',
           'metabot_id required. chat_skill_op adds/removes ONE skill (action "add"|"remove", skill = name from list_installed_skills) without replacing the list; allow_chat_skills replaces the whole list — prefer chat_skill_op. No other fields: not for rename, persona, or delete.',
           'No confirmation prompt. Returns updated bot name/id and on-chain sync outcome.',
         ].join(' ')
@@ -399,14 +399,14 @@ export function buildMetabotManageAgentTools(deps: {
       allow_chat_skills: z
         .array(z.string())
         .optional()
-        .describe('Full replacement list of skill ids allowed in this bot\'s private chats. Prefer chat_skill_op for a single add/remove.'),
+        .describe('Full replacement list of skill ids assigned to this bot (used across its chats and work sessions). Prefer chat_skill_op for a single add/remove.'),
       chat_skill_op: z
         .object({
-          action: z.enum(['add', 'remove']).describe('Add or remove one skill without replacing the rest of the whitelist.'),
+          action: z.enum(['add', 'remove']).describe('Assign or unassign one skill without replacing the rest of the list.'),
           skill: z.string().min(1).describe('Skill name or skill id (from list_installed_skills / SKILL.md name).'),
         })
         .optional()
-        .describe('Incremental chat-skill whitelist change. Does not prompt for confirmation.'),
+        .describe('Incremental assigned-skill change. Does not prompt for confirmation.'),
       homepage: z
         .object({
           source: z

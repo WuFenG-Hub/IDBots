@@ -162,8 +162,8 @@ export type OpenTeamGuestSendGroupMessageFn = (
 
 /** Narrow skill-routing seam (same shape as groupTaskDaemon's; wired to skillManager.buildChatSkillsRoutingPrompt). */
 export type OpenTeamGuestSkillRoutingFn = (input: {
-  allowChatSkills?: unknown;
-  allowAllEnabled?: boolean;
+  metabotId?: number | null;
+  widened?: boolean;
 }) =>
   | { prompt: string | null; activeSkillIds: string[] }
   | Promise<{ prompt: string | null; activeSkillIds: string[] }>;
@@ -534,11 +534,11 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     if (deps.getChatSkillsRoutingPrompt && deps.runSkillTurn && deps.getCoworkStore) {
       try {
         routing = await deps.getChatSkillsRoutingPrompt({
-          allowChatSkills: bot.allow_chat_skills ?? [],
-          // External group members are never the owner: only the bot's own
-          // configured allow_chat_skills are routable — the exact permission
-          // surface a non-owner private-chat peer gets. Nothing is widened.
-          allowAllEnabled: false,
+          metabotId: bot.id,
+          // External group members are never the owner: only the bot's
+          // assigned skills are routable — the exact permission surface a
+          // non-owner private-chat peer gets. Nothing is widened.
+          widened: false,
         });
       } catch (error) {
         emitLog(
