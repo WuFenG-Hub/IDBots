@@ -512,6 +512,7 @@ interface TeamCultureEntry {
   status: TeamCultureStatus;
   version: number;
   origin: TeamCultureOrigin;
+  pendingApproval: boolean;
   timesInjected: number;
   lastUsedAt: number | null;
   createdAt: number;
@@ -1223,6 +1224,21 @@ interface IElectronAPI {
     listTaskCommTrend: () => Promise<{
       success: boolean;
       tasks?: TaskCommTrendRow[];
+      error?: string;
+    }>;
+    getTeamCultureConfig: () => Promise<{
+      success: boolean;
+      config?: { enabled: boolean };
+      error?: string;
+    }>;
+    setTeamCultureConfig: (input: { enabled: boolean }) => Promise<{
+      success: boolean;
+      config?: { enabled: boolean };
+      error?: string;
+    }>;
+    approveTeamCulture: (input: { id: string }) => Promise<{
+      success: boolean;
+      entry?: TeamCultureEntry;
       error?: string;
     }>;
     listKnowledge: (input: {

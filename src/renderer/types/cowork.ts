@@ -609,6 +609,8 @@ export interface TeamCultureEntry {
   status: TeamCultureStatus;
   version: number;
   origin: TeamCultureOrigin;
+  /** true = distilled convention awaiting owner approval; never injected. */
+  pendingApproval: boolean;
   timesInjected: number;
   lastUsedAt: number | null;
   createdAt: number;

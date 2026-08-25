@@ -213,6 +213,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [cultureNotice, setCultureNotice] = useState<string | null>(null);
   const [editingCultureId, setEditingCultureId] = useState<string | null>(null);
   const [commTrend, setCommTrend] = useState<TaskCommTrendRow[]>([]);
+  const [cultureEnabled, setCultureEnabled] = useState<boolean>(true);
   const [cultureDraft, setCultureDraft] = useState<{ kind: TeamCultureKind; topic: string; text: string }>({
     kind: 'convention',
     topic: '',
@@ -808,6 +809,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       setCultureEntries(entries);
       setCultureCounts(activeCounts);
       setCommTrend(await coworkService.listTaskCommTrend());
+      setCultureEnabled((await coworkService.getTeamCultureConfig()).enabled);
     } catch (cultureError) {
       console.error('Failed to load team culture:', cultureError);
       setCultureEntries([]);
@@ -1759,6 +1761,18 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       </div>
       {cultureNotice && <div className="text-xs text-green-600 dark:text-green-400">{cultureNotice}</div>}
 
+      {/* Master switch: one gate for both group-task injection and
+          task-close distillation LLM calls. */}
+      <ToggleRow
+        label={i18nService.t('memoryCultureEnabled')}
+        hint={i18nService.t('memoryCultureEnabledHint')}
+        checked={cultureEnabled}
+        onChange={(value) => {
+          setCultureEnabled(value);
+          void coworkService.setTeamCultureConfig(value);
+        }}
+      />
+
       <div className="flex flex-wrap items-center gap-2">
         {(['all', 'glossary', 'convention', 'team_lesson'] as const).map((kind) => {
           const active = cultureKindFilter === kind;
@@ -1857,12 +1871,30 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                   <span className="rounded-full border px-1.5 text-[10px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {entry.origin === 'owner' ? i18nService.t('memoryCultureOriginOwner') : i18nService.t('memoryCultureOriginDistillation')}
                   </span>
+                  {entry.pendingApproval && (
+                    <span className="rounded-full border px-1.5 text-[10px] text-amber-600 dark:text-amber-400 dark:border-claude-darkBorder border-claude-border">
+                      {i18nService.t('memoryCulturePendingBadge')}
+                    </span>
+                  )}
                   <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">v{entry.version}</span>
                   {entry.status === 'archived' && (
                     <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('memoryCultureArchived')}</span>
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5 text-[11px]">
+                  {entry.pendingApproval && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (await coworkService.approveTeamCulture(entry.id)) {
+                          await loadCulture();
+                        }
+                      }}
+                      className="rounded border px-2 py-1 text-[10px] text-claude-accent hover:underline dark:text-claude-darkAccent dark:border-claude-darkBorder border-claude-border"
+                    >
+                      {i18nService.t('memoryCultureApprove')}
+                    </button>
+                  )}
                   {entry.status === 'archived' ? (
                     <button
                       type="button"

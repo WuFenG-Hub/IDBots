@@ -212,11 +212,12 @@ test('task comm stats: stamped at close and listed for the trend view', async ()
       `INSERT INTO group_tasks (id, group_id, title, goal, chair_metabot_id, status, updated_at)
        VALUES (31, 'grp-comm', 'Poster', 'Make it', 1, 'done', '2026-08-25 10:00:00')`,
     );
-    for (const [index, size] of [120, 80, 200].entries()) {
+    const seeds = [[120, false], [80, false], [200, false], [100, true]];
+    for (const [index, [size, chinese]] of seeds.entries()) {
       db.run(
         `INSERT INTO group_chat_messages (pin_id, group_id, sender_metaid, sender_global_metaid, protocol, content, chain_timestamp)
          VALUES (?, 'grp-comm', ?, ?, 'simplechat', ?, 1)`,
-        [`pin-cm-${index}`, `metaid-${index}`, `gmid-${index}`, 'x'.repeat(size)],
+        [`pin-cm-${index}`, `metaid-${index}`, `gmid-${index}`, chinese ? '好'.repeat(size) : 'x'.repeat(size)],
       );
     }
     db.run(
@@ -227,10 +228,38 @@ test('task comm stats: stamped at close and listed for the trend view', async ()
     assert.equal(store.recordTaskCommStats(31, 'grp-comm'), true);
     const trend = store.listRecentTaskCommStats(15);
     assert.equal(trend.length, 1);
-    assert.equal(trend[0].commTotalBytes, 400);
-    assert.equal(trend[0].commMessageCount, 3);
+    assert.equal(trend[0].commTotalBytes, 700, 'ASCII 400 + Chinese 100 chars = 300 UTF-8 bytes (BLOB length)');
+    assert.equal(trend[0].commMessageCount, 4);
     assert.equal(trend[0].deliverableCount, 1);
     assert.equal(store.recordTaskCommStats(31, null), false, 'no group id → skip');
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('prompt block respects the line budget, always closes the tag, and honors the master switch', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new TeamCultureStore(db, () => {}, () => 1_800_000_000_000);
+    for (let index = 0; index < 6; index += 1) {
+      store.upsertCulture({
+        kind: 'glossary',
+        topic: `term ${index}`,
+        text: `A fairly long definition line for term ${index} that eats budget quickly. ${'细节 '.repeat(10)}`,
+      });
+    }
+    const block = store.buildCulturePromptBlock(600);
+    assert.ok(block, 'block is emitted');
+    assert.ok(block.length <= 600, 'respects the budget');
+    assert.ok(block.endsWith('</team_culture>'), 'closing tag is always emitted, never cut');
+    assert.equal((block.match(/<\/team_culture>/g) ?? []).length, 1);
+
+    assert.deepEqual(store.getCultureConfig(), { enabled: true }, 'default enabled');
+    store.setCultureConfig(false);
+    assert.deepEqual(store.getCultureConfig(), { enabled: false });
+    store.setCultureConfig(true);
+    assert.deepEqual(store.getCultureConfig(), { enabled: true });
   } finally {
     harness.cleanup();
   }

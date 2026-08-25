@@ -1188,6 +1188,27 @@ class CoworkService {
     return result?.tasks ?? [];
   }
 
+  async getTeamCultureConfig(): Promise<{ enabled: boolean }> {
+    const api = window.electron?.cowork?.getTeamCultureConfig;
+    if (!api) return { enabled: true };
+    const result = await api();
+    return result?.config ?? { enabled: true };
+  }
+
+  async setTeamCultureConfig(enabled: boolean): Promise<{ enabled: boolean }> {
+    const api = window.electron?.cowork?.setTeamCultureConfig;
+    if (!api) return { enabled: true };
+    const result = await api({ enabled });
+    return result?.config ?? { enabled: true };
+  }
+
+  async approveTeamCulture(id: string): Promise<boolean> {
+    const api = window.electron?.cowork?.approveTeamCulture;
+    if (!api) return false;
+    const result = await api({ id });
+    return Boolean(result?.success);
+  }
+
   async listMetaIDContacts(input: { observerGlobalMetaId: string }): Promise<CoworkMetaIDContactSummary[]> {
     const api = window.electron?.p2p?.listContacts;
     if (!api) return [];

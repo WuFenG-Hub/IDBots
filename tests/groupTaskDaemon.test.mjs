@@ -3668,7 +3668,12 @@ test('planning directive and turn tail carry the team culture block', async () =
     const planningCall = h.chatCalls[0];
     assert.match(planningCall.userMessage, /<team_culture>/);
     assert.match(planningCall.userMessage, /Shared glossary \(use these exact terms\):/,
-      'the planning directive carries the culture block so the first plan already respects it');
+      'the planning turn carries the culture block via the volatile tail');
+    assert.equal(
+      (planningCall.userMessage.match(/<team_culture>/g) ?? []).length,
+      1,
+      'exactly one culture block per turn — never duplicated by the directive',
+    );
   } finally {
     h.cleanup();
   }
