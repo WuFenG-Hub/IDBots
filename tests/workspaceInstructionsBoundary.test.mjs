@@ -31,13 +31,15 @@ test('git branch probe timeout stays below the 3s poll interval', () => {
 
 test('folder selector popover shows the ancestor-discovery hint', () => {
   // Product decision: ancestor discovery is intentional; users must see that
-  // sessions follow conventions from the folder AND its parent git repos.
+  // sessions follow conventions from the folder AND its parent git repos
+  // (including symlinked files).
   const popover = read('src/renderer/components/cowork/FolderSelectorPopover.tsx');
   assert.match(popover, /workspaceInstructionsHint/);
   assert.match(popover, /its ancestor git repositories/);
+  assert.match(popover, /symlinked files/);
   const i18n = read('src/renderer/services/i18n.ts');
-  assert.match(i18n, /workspaceInstructionsHint: 'Sessions follow AGENTS.md \/ CLAUDE\.md conventions from this folder and its parent Git repos'/);
-  assert.match(i18n, /workspaceInstructionsHint: '会话将遵循所选目录及其上级 Git 仓库中的 AGENTS\.md \/ CLAUDE\.md 约定'/);
+  assert.match(i18n, /workspaceInstructionsHint: 'Sessions follow AGENTS\.md \/ CLAUDE\.md conventions from this folder, its parent Git repos, and symlinked files'/);
+  assert.match(i18n, /workspaceInstructionsHint: '会话将遵循所选目录、其上级 Git 仓库及符号链接指向文件中的 AGENTS\.md \/ CLAUDE\.md 约定'/);
 });
 
 test('CLAUDE.md documents the boundary and the disabled user-global home', () => {
