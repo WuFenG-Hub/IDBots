@@ -125,6 +125,7 @@ tests/*
 !tests/serviceDeliveryArtifacts.test.mjs
 !tests/coworkAnthropicDirectRouting.test.mjs
 !tests/coworkProxySessionUpstream.test.mjs
+!tests/coworkProxyScheduledTasksApi.test.mjs
 !tests/coworkStreamForwarding.test.mjs
 !tests/coworkStreamPresentation.test.mjs
 !tests/coworkEmptyTerminalTurn.test.mjs

@@ -119,6 +119,8 @@ export function groupTaskWorkStatusLabelKey(status) {
       return 'groupTasksWorkStatusTimeout';
     case 'idle':
       return 'groupTasksWorkStatusIdle';
+    case 'done':
+      return 'groupTasksWorkStatusDone';
     case 'unknown':
       return 'groupTasksWorkStatusUnknown';
     default:

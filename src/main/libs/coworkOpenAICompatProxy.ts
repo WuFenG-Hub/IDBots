@@ -3335,6 +3335,208 @@ async function handleCreateScheduledTask(
   }
 }
 
+/** Scheduled-task management helpers backing the skill scripts (list/get/
+ * update/delete/toggle). They mirror the IPC handlers in main.ts — same store
+ * calls, same reschedule side effects — so HTTP callers and the renderer see
+ * identical state without a separate data path. */
+
+function broadcastScheduledTaskState(taskId: string, state: unknown): void {
+  try {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('scheduledTask:statusUpdate', { taskId, state });
+    }
+  } catch {
+    // Best-effort refresh hint; never fail the API response on it.
+  }
+}
+
+function handleListScheduledTasks(res: http.ServerResponse): void {
+  if (!scheduledTaskDeps) {
+    writeJSON(res, 503, { success: false, error: 'Scheduled task service not available' } as any);
+    return;
+  }
+  try {
+    const tasks = scheduledTaskDeps.getScheduledTaskStore().listTasks();
+    writeJSON(res, 200, { success: true, tasks } as any);
+  } catch (err: any) {
+    writeJSON(res, 500, { success: false, error: err.message } as any);
+  }
+}
+
+function handleGetScheduledTask(res: http.ServerResponse, id: string): void {
+  if (!scheduledTaskDeps) {
+    writeJSON(res, 503, { success: false, error: 'Scheduled task service not available' } as any);
+    return;
+  }
+  try {
+    const task = scheduledTaskDeps.getScheduledTaskStore().getTask(id);
+    if (!task) {
+      writeJSON(res, 404, { success: false, error: `Task not found: ${id}` } as any);
+      return;
+    }
+    writeJSON(res, 200, { success: true, task } as any);
+  } catch (err: any) {
+    writeJSON(res, 500, { success: false, error: err.message } as any);
+  }
+}
+
+async function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<Record<string, unknown> | null> {
+  let body: string;
+  try {
+    body = await readRequestBody(req);
+  } catch {
+    writeJSON(res, 400, { success: false, error: 'Invalid request body' } as any);
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(body);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('body must be a JSON object');
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Invalid JSON';
+    writeJSON(res, 400, { success: false, error: message } as any);
+    return null;
+  }
+}
+
+function validateScheduledTaskPartialInput(input: Record<string, unknown>): string | null {
+  if (input.name !== undefined && !String(input.name).trim()) {
+    return 'name must be a non-empty string';
+  }
+  if (input.prompt !== undefined && !String(input.prompt).trim()) {
+    return 'prompt must be a non-empty string';
+  }
+  const schedule = input.schedule as { type?: unknown; expression?: unknown; datetime?: unknown } | undefined;
+  if (schedule !== undefined) {
+    if (!schedule || typeof schedule !== 'object' || !schedule.type) {
+      return 'schedule requires a type field';
+    }
+    if (!['at', 'interval', 'cron'].includes(String(schedule.type))) {
+      return 'Invalid schedule type. Must be: at, interval, cron';
+    }
+    if (schedule.type === 'cron' && !schedule.expression) {
+      return 'Cron schedule requires expression field';
+    }
+    if (schedule.type === 'at' && !schedule.datetime) {
+      return 'At schedule requires datetime field';
+    }
+  }
+  if (input.expiresAt !== undefined && input.expiresAt) {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    if (String(input.expiresAt) <= todayStr) {
+      return 'Expiration date must be in the future';
+    }
+  }
+  return null;
+}
+
+async function handleUpdateScheduledTask(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  id: string
+): Promise<void> {
+  if (!scheduledTaskDeps) {
+    writeJSON(res, 503, { success: false, error: 'Scheduled task service not available' } as any);
+    return;
+  }
+  const store = scheduledTaskDeps.getScheduledTaskStore();
+  const existing = store.getTask(id);
+  if (!existing) {
+    writeJSON(res, 404, { success: false, error: `Task not found: ${id}` } as any);
+    return;
+  }
+  const input = await readJsonBody(req, res);
+  if (!input) return;
+  const validationError = validateScheduledTaskPartialInput(input);
+  if (validationError) {
+    writeJSON(res, 400, { success: false, error: validationError } as any);
+    return;
+  }
+  const normalizedInput: Record<string, unknown> = { ...input };
+  if (Object.prototype.hasOwnProperty.call(normalizedInput, 'workingDirectory')) {
+    normalizedInput.workingDirectory = normalizeScheduledTaskWorkingDirectory(
+      normalizedInput.workingDirectory,
+    ) || existing.workingDirectory;
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedInput, 'metabotId')) {
+    normalizedInput.metabotId = normalizeScheduledTaskMetabotId(normalizedInput.metabotId);
+  }
+  try {
+    const task = store.updateTask(id, normalizedInput as Partial<ScheduledTaskInput>);
+    if (!task) {
+      writeJSON(res, 404, { success: false, error: `Task not found: ${id}` } as any);
+      return;
+    }
+    scheduledTaskDeps.getScheduler().reschedule();
+    broadcastScheduledTaskState(task.id, task.state);
+    console.log(`[CoworkProxy] Scheduled task updated via API: ${task.id} "${task.name}"`);
+    writeJSON(res, 200, { success: true, task } as any);
+  } catch (err: any) {
+    console.error('[CoworkProxy] Failed to update scheduled task:', err);
+    writeJSON(res, 500, { success: false, error: err.message } as any);
+  }
+}
+
+async function handleDeleteScheduledTask(
+  _req: http.IncomingMessage,
+  res: http.ServerResponse,
+  id: string
+): Promise<void> {
+  if (!scheduledTaskDeps) {
+    writeJSON(res, 503, { success: false, error: 'Scheduled task service not available' } as any);
+    return;
+  }
+  const store = scheduledTaskDeps.getScheduledTaskStore();
+  const existing = store.getTask(id);
+  if (!existing) {
+    writeJSON(res, 404, { success: false, error: `Task not found: ${id}` } as any);
+    return;
+  }
+  try {
+    scheduledTaskDeps.getScheduler().stopTask(id);
+    const result = store.deleteTask(id);
+    scheduledTaskDeps.getScheduler().reschedule();
+    console.log(`[CoworkProxy] Scheduled task deleted via API: ${id} "${existing.name}"`);
+    writeJSON(res, 200, { success: true, result } as any);
+  } catch (err: any) {
+    console.error('[CoworkProxy] Failed to delete scheduled task:', err);
+    writeJSON(res, 500, { success: false, error: err.message } as any);
+  }
+}
+
+async function handleToggleScheduledTask(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  id: string
+): Promise<void> {
+  if (!scheduledTaskDeps) {
+    writeJSON(res, 503, { success: false, error: 'Scheduled task service not available' } as any);
+    return;
+  }
+  const input = await readJsonBody(req, res);
+  if (!input) return;
+  if (typeof input.enabled !== 'boolean') {
+    writeJSON(res, 400, { success: false, error: 'enabled must be a boolean' } as any);
+    return;
+  }
+  try {
+    const { task, warning } = scheduledTaskDeps.getScheduledTaskStore().toggleTask(id, input.enabled);
+    if (!task) {
+      writeJSON(res, 404, { success: false, error: `Task not found: ${id}` } as any);
+      return;
+    }
+    scheduledTaskDeps.getScheduler().reschedule();
+    broadcastScheduledTaskState(task.id, task.state);
+    console.log(`[CoworkProxy] Scheduled task toggled via API: ${task.id} "${task.name}" -> ${input.enabled ? 'enabled' : 'disabled'}`);
+    writeJSON(res, 200, { success: true, task, warning } as any);
+  } catch (err: any) {
+    console.error('[CoworkProxy] Failed to toggle scheduled task:', err);
+    writeJSON(res, 500, { success: false, error: err.message } as any);
+  }
+}
+
 const MESSAGES_ROUTE_PATH = '/v1/messages';
 const SESSION_MESSAGES_ROUTE_PATTERN = /^\/s\/([^/]+)\/v1\/messages$/;
 // Snipping runs on every session-scoped request while a boundary is set; skip
@@ -3385,6 +3587,30 @@ async function handleRequest(
   // Scheduled task creation API
   if (method === 'POST' && url.pathname === '/api/scheduled-tasks') {
     await handleCreateScheduledTask(req, res);
+    return;
+  }
+
+  // Scheduled task management API (skill scripts: list/get/update/delete/toggle)
+  const scheduledTaskIdMatch = /^\/api\/scheduled-tasks\/([^/]+)$/.exec(url.pathname);
+  const scheduledTaskToggleMatch = /^\/api\/scheduled-tasks\/([^/]+)\/toggle$/.exec(url.pathname);
+  if (scheduledTaskToggleMatch && method === 'POST') {
+    await handleToggleScheduledTask(req, res, decodeURIComponent(scheduledTaskToggleMatch[1]));
+    return;
+  }
+  if (scheduledTaskIdMatch && method === 'GET') {
+    handleGetScheduledTask(res, decodeURIComponent(scheduledTaskIdMatch[1]));
+    return;
+  }
+  if (scheduledTaskIdMatch && method === 'PUT') {
+    await handleUpdateScheduledTask(req, res, decodeURIComponent(scheduledTaskIdMatch[1]));
+    return;
+  }
+  if (scheduledTaskIdMatch && method === 'DELETE') {
+    await handleDeleteScheduledTask(req, res, decodeURIComponent(scheduledTaskIdMatch[1]));
+    return;
+  }
+  if (method === 'GET' && url.pathname === '/api/scheduled-tasks') {
+    handleListScheduledTasks(res);
     return;
   }
 

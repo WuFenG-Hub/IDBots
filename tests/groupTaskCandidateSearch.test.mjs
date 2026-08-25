@@ -307,3 +307,77 @@ test('searchGroupTaskSeatCandidates requires a query or role hint', async () => 
     setGroupTaskCandidateSearchDepsGetter(null);
   }
 });
+
+test('staffing preference puts locals first regardless of the score gap', async () => {
+  // Fixture mirrors the 2026-08-24 engineering seat: a stranger remote with a
+  // stronger keyword resume (score gap > LOCAL_TIE_MARGIN) vs the in-house
+  // engineer carrying a delivered-episode boost impression.
+  const snapshots = new Map([
+    [`${TWIN}:${LOCAL}`, impression({
+      collaborationFacts: [{
+        taskId: 9, title: 'MetaApp 介绍页', seatRole: 'engineering', outcome: 'done', pinIds: ['p'],
+      }],
+    })],
+  ]);
+  const locals = [{
+    metabotId: 3,
+    name: 'Builder',
+    enabled: true,
+    type: 'worker',
+    globalMetaId: LOCAL,
+    bio: '工程 开发',
+    role: '工程',
+    goal: null,
+    chatSkills: [],
+  }];
+  const searchRemote = async () => [{
+    globalMetaId: REMOTE,
+    name: '工程开发 MetaApp 工作室',
+    bio: '工程 开发 组装 上链',
+    chatSkills: [],
+    chainName: 'mvc',
+    isOnline: true,
+    lastSeenAgoSeconds: 5,
+  }];
+  wire({ locals, snapshots, searchRemote });
+  try {
+    // Baseline (no declaration): the stranger remote wins on raw score.
+    const baseline = await searchGroupTaskSeatCandidates({ query: '工程 开发', roleHint: 'engineering' });
+    assert.equal(baseline.staffingPreference, null);
+    assert.equal(baseline.primary?.source, 'remote');
+
+    for (const staffingPreference of ['fixed_team', 'previous_team', 'local_only']) {
+      const result = await searchGroupTaskSeatCandidates({
+        query: '工程 开发',
+        roleHint: 'engineering',
+        staffingPreference,
+      });
+      assert.equal(result.staffingPreference, staffingPreference);
+      assert.equal(result.primary?.source, 'local', `${staffingPreference}: primary must be local`);
+      assert.equal(result.primary?.name, 'Builder');
+      // Every local outranks every remote in the ordered list; the remote
+      // stays visible as backup/tail instead of taking primary.
+      const firstRemote = result.candidates.findIndex((row) => row.source === 'remote');
+      const lastLocal = result.candidates.map((row) => row.source).lastIndexOf('local');
+      assert.ok(firstRemote !== -1, 'remote remains listed');
+      assert.ok(lastLocal < firstRemote, 'locals sort ahead of remotes');
+    }
+  } finally {
+    setGroupTaskCandidateSearchDepsGetter(null);
+  }
+});
+
+test('an invalid staffing preference falls back to the default merge', async () => {
+  wire({ searchRemote: async () => [] });
+  try {
+    const result = await searchGroupTaskSeatCandidates({
+      query: '文案',
+      roleHint: 'content',
+      staffingPreference: 'global_team',
+    });
+    assert.equal(result.staffingPreference, null);
+    assert.equal(result.primary?.source, 'local');
+  } finally {
+    setGroupTaskCandidateSearchDepsGetter(null);
+  }
+});

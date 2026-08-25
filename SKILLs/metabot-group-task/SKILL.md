@@ -50,7 +50,7 @@ Staff like a human lead: **decompose the work → define coarse seats → hire o
 
 1. **Enrich the wish**: rewrite it into an executable `goal` plus measurable `acceptance_criteria`. NEVER copy the wish verbatim. Research (official site, GitHub, docs) is a **basic capability of every seat**, not its own seat. If the owner explicitly asks to review an intermediate result, record that HITL point in `acceptance_criteria`. Do not invent checkpoints they did not ask for.
 2. **Decompose into stages, then coarse seats — one bot per seat.** Allowed seats: `content` (copy + the research that seat needs), `design` (images AND video — never split those), `engineering` (code + MetaApp + on-chain publish), `promotion`, `domain` (only when a named specialty is required, e.g. legal). Do not invent finer jobs (no "image designer" vs "video designer", no frontend vs backend). Typical team is **at most 5 including you (the chair)**; hard cap is **8 including you**. More people is not better.
-3. **Find people match-first**: for each seat, run `search_candidates` once (`query` = seat keywords, `role_hint` = that seat). The host already merges local workers + online bots, applies your impressions (`weak:<seat>` is dropped into `blocked`), and prefers local only when scores are close. Use `primary` / `backup`. Remote rows have `source: "remote"` — mark them 非本机 on the slate. Do not dump `bots` or call `search_remote` separately for staffing.
+3. **Find people match-first**: for each seat, run `search_candidates` once (`query` = seat keywords, `role_hint` = that seat). The host already merges local workers + online bots, applies your impressions (`weak:<seat>` is dropped into `blocked`), and prefers local only when scores are close. Use `primary` / `backup`. Remote rows have `source: "remote"` — mark them 非本机 on the slate. Do not dump `bots` or call `search_remote` separately for staffing. When the owner declares a **fixed crew** (固定班子), **reuse the previous episode's crew** (沿用上期班子), or **local-only** (仅本地), pass `staffing_preference` (`fixed_team` / `previous_team` / `local_only`) — every local then outranks every remote regardless of score gap, so the in-house crew takes `primary` and remotes only appear as `backup`/tail.
 4. **Propose**: run `propose` with the stages + seats. The host returns `slateText` and `ownerConfirmRequired`. **Show that slate to the owner in this conversation.** Do NOT call `create` yet.
 5. **Wait for the owner** unless **this** wish (the latest user message that triggered `propose`) already said to start without confirming (e.g. "不用确认直接开", "just start"). A question such as "能直接开发吗？" does **not** skip confirm. An older skip phrase in the same session does **not** authorize a later propose. After the slate is up, the same skip phrase in a later owner reply also authorizes `create` on this `proposal_id` — do not re-propose only to unlock skip. The host uses the **last** decisive owner reply (revise / confirm / skip). If they later ask to swap a seat (`换人` / replace / swap / remove / "drop the seat") — including after a skip phrase — `propose` again. "好的，不换人" is a confirm, not a revise. "ok, use B instead of A" is **not** an automatic revise. If they confirm ("确认人选", "就这样开", "looks good"), then `create` with that `proposal_id`. The host **rejects** Twin `create` without a confirmed (or skip-authorized) proposal.
 6. **Create + invite remotes**: `create` joins only the confirmed **local** seats. Then `invite_remote` each confirmed remote seat, one at a time, and wait for the join before assigning work.
@@ -184,15 +184,17 @@ Staff like a human lead: **decompose the work → define coarse seats → hire o
   "query": "法律 合同 条款",
   "role_hint": "domain",
   "domain_label": "legal",
+  "staffing_preference": "fixed_team",
   "limit": 10
 }
 ```
 
 - Required: `query` **or** `role_hint` (`content` / `design` / `engineering` / `promotion` / `domain`). For `domain`, also pass `domain_label` or a specific `query`.
 - `limit` defaults to 10 (max 20). `skills` optional extra tokens.
+- `staffing_preference` optional (`fixed_team` / `previous_team` / `local_only`): declare it when the owner names a fixed crew, asks to reuse the previous episode's crew, or wants local-only staffing. Every hireable local then outranks every remote regardless of the score gap (no more tie-margin), so `primary` is the in-house bot; remotes stay listed as `backup`/tail. Without it, ranking is unchanged.
 - Host merges **local enabled workers + production `POST /api/bots/search`** (online, ranked, `matchReasons` + `recentGroupTasks`), then applies Twin impressions: `blocked` = `weak:<this seat>` or a rejected/kicked fact on that seat; `boost` / `demote` adjust rank; unknown = résumé only.
-- Local wins only as a **tie-break** (scores within 4). Remote rows are `source: "remote"`.
-- Response: `primary`, `backup`, `candidates`, `blocked`, `warnings`. If online search fails, locals still return and `warnings` says so.
+- Local wins only as a **tie-break** (scores within 4) — unless `staffing_preference` is declared. Remote rows are `source: "remote"`.
+- Response: `primary`, `backup`, `candidates`, `blocked`, `warnings`, `staffingPreference` (echoed back). If online search fails, locals still return and `warnings` says so.
 - Call **once per seat**. Do not also dump the full local roster for hiring.
 
 ### `search_remote` (OpenTeam, online-only)
