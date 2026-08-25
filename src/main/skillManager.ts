@@ -1342,13 +1342,16 @@ export class SkillManager {
   /**
    * Load one enabled skill's full SKILL.md on demand, backing the cowork
    * skill_tool read_skill action. Accepts an id or a (case-insensitive) name.
-   * With a metabotId the lookup is scoped to that bot's visible set — a bot
-   * cannot read skills it has not been assigned (or that are not bundled /
-   * global). Returns the skill directory so the caller can tell the model
-   * where to resolve the relative paths SKILL.md files routinely contain.
-   * Disabled skills are not routed and are not loadable through this path.
+   * The metabotId is REQUIRED and scopes the lookup to that bot's visible
+   * set (null = bot-less session: bundled + global). This is a TOOL-LEVEL
+   * gate only — it decides which entries this API resolves, not a filesystem
+   * boundary: the session's Read/Bash file access is prompt-gated, so a
+   * determined model could still open another skill's path directly. Returns
+   * the skill directory so the caller can tell the model where to resolve
+   * the relative paths SKILL.md files routinely contain. Disabled skills are
+   * not routed and are not loadable through this path.
    */
-  readSkillCatalogEntry(nameOrId: string, metabotId?: number | null): {
+  readSkillCatalogEntry(nameOrId: string, metabotId: number | null): {
     id: string;
     name: string;
     directory: string;
@@ -1357,9 +1360,7 @@ export class SkillManager {
   } | null {
     const trimmed = String(nameOrId ?? '').trim();
     if (!trimmed) return null;
-    const pool = metabotId === undefined
-      ? this.listSkills()
-      : this.listSkillsForMetabot(metabotId);
+    const pool = this.listSkillsForMetabot(metabotId);
     const enabled = pool.filter((skill) => skill.enabled && skill.prompt);
     const match = this.resolveSkillById(trimmed, enabled) ?? this.resolveSkillByName(trimmed, enabled);
     if (!match) return null;

@@ -28,7 +28,7 @@ import {
   type DelegationRequest,
 } from './libs/coworkRunner';
 import { SkillManager } from './skillManager';
-import { runSkillAssignmentMigration } from './libs/skillAssignmentStore';
+import { removeMetabotAssignments, runSkillAssignmentMigration } from './libs/skillAssignmentStore';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from './libs/coworkPermissionTypes';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
@@ -3321,7 +3321,6 @@ const startSqliteDaemons = (): void => {
       await sendGroupChatMessage(metabotId, groupId, { content, nickName });
     },
     {
-      getSkillsPromptForIds: (ids: string[]) => skillMgr.buildAutoRoutingPromptForSkillIds(ids),
       getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
       skillsRoots: skillMgr.getAllSkillRoots(),
       runSkillTurnViaCowork: (params) =>
@@ -3726,8 +3725,8 @@ const startSqliteDaemons = (): void => {
     // never arrives.
     fetchGroupMembers,
     // OpenTeam M3: same chat-skill routing + skill-turn seams as the
-    // group-task daemon, scoped to the guest bot's own allow_chat_skills
-    // (allowAllEnabled stays false inside the daemon — external members are
+    // group-task daemon, scoped to the guest bot's assigned skills
+    // (widened stays false inside the daemon — external members are
     // never the owner).
     getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
     runSkillTurn: async (params) => {
@@ -6098,6 +6097,17 @@ function getMetabotManageDeps(): MetabotManageDeps {
       // during initial setup; drop it once the Welcome Bot retires.
       if (deletedMetabot.metabot_type === 'welcome') {
         deleteBootstrapDoc();
+      }
+      // Assignment-model hygiene: a deleted bot must not keep skill
+      // assignment rows (they would resurrect if a restore reuses the id).
+      try {
+        const store = getStore();
+        removeMetabotAssignments(store.getDatabase(), store.getSaveFunction(), deletedMetabot.id);
+      } catch (error) {
+        console.warn(
+          `[metabotManageService] assignment cleanup after bot ${deletedMetabot.id} deletion failed:`,
+          error instanceof Error ? error.message : String(error)
+        );
       }
     },
     getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
@@ -11303,6 +11313,23 @@ if (!gotTheLock) {
         allow_chat_skills: profile.bio.allowChatSkills ?? [],
       });
 
+      // Assignment-model backfill: the restored row's allow_chat_skills column
+      // is the on-chain projection — mirror it into the assignment table (the
+      // local authorization source of truth) or the bot silently loses every
+      // chat skill (IM baseline = assigned-only). Best-effort: restore has no
+      // rollback, and a retried restore would duplicate the bot row.
+      try {
+        getSkillManager().applyMetabotAssignedSkills(
+          metabot.id,
+          profile.bio.allowChatSkills ?? [],
+          'migration'
+        );
+      } catch (assignmentError) {
+        console.warn(
+          '[MetaBot] restore: chat-skill assignment backfill failed (re-save the bot\'s skills in My Bots to heal):',
+          assignmentError instanceof Error ? assignmentError.message : String(assignmentError)
+        );
+      }
       console.log('[MetaBot] restore success', { id: metabot.id, name: metabot.name });
       // Restore hardcodes 'worker'; heal the zero-Twin edge (e.g. first-ever bot).
       store.ensureTwinExists();

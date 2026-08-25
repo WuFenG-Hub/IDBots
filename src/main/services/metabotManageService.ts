@@ -405,6 +405,26 @@ export async function createMetaBotOnChainCore(
     });
     metabotId = metabot.id;
 
+    // Assignment-model backfill: a creation input carrying allow_chat_skills
+    // (on-chain projection) must also seed the assignment rows (the local
+    // authorization source of truth). Fail-closed with the same rollback the
+    // other hard steps use — a column/row fork at creation never self-heals.
+    if (
+      input.allow_chat_skills !== undefined
+      && normalizedList(input.allow_chat_skills).length > 0
+      && deps.applyChatSkillAssignments
+    ) {
+      try {
+        deps.applyChatSkillAssignments(metabot.id, normalizedList(input.allow_chat_skills));
+      } catch (error) {
+        store.deleteMetabot(metabot.id);
+        return {
+          success: false,
+          error: `Chat-skill assignment seeding failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+
     // 4. Sign the owner binding when a boss GlobalMetaID was requested; it
     // must belong to the local user identity (signed consent).
     let ownerBindingPayload: string | undefined;
@@ -675,15 +695,20 @@ export async function updateMetaBotCore(
   // resolved id list (bundled skills dropped, names resolved) replaces the
   // raw input so the published column and the assignment rows never diverge.
   if (input.allow_chat_skills !== undefined && deps.applyChatSkillAssignments) {
+    // Fail-closed: assignment rows are the authorization source of truth, so
+    // a failed write must abort the whole update — continuing would publish
+    // the column on-chain while the local rows keep the OLD (possibly
+    // revoked) grants, a permanent fork the user cannot see.
+    let resolvedSkillIds: string[];
     try {
-      const resolvedSkillIds = deps.applyChatSkillAssignments(id, normalizedList(input.allow_chat_skills));
-      input = { ...input, allow_chat_skills: resolvedSkillIds };
+      resolvedSkillIds = deps.applyChatSkillAssignments(id, normalizedList(input.allow_chat_skills));
     } catch (error) {
-      console.warn(
-        `[metabotManageService] chat-skill assignment write failed for bot ${id}:`,
-        error instanceof Error ? error.message : String(error),
-      );
+      return {
+        success: false,
+        error: `Chat-skill assignment write failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
+    input = { ...input, allow_chat_skills: resolvedSkillIds };
   }
 
   const local = applyMetabotUpdateLocal(store, id, input, deps);

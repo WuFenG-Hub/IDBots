@@ -819,6 +819,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
             permissionMode={permissionMode}
             onPermissionModeChange={setPermissionMode}
             commands={composerCommands}
+            sessionMetabotId={selectedMetabotId}
           />
         </div>
       </div>

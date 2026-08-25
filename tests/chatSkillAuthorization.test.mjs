@@ -190,7 +190,8 @@ test('listSkillsForMetabot: bot view = bundled + global + assigned, library-enab
   const visible = manager.listSkillsForMetabot(BOT_ID).map((skill) => skill.id);
   assert.deepEqual(visible, ['assigned-skill', 'official-core-skill']);
 
-  // A global skill stays invisible to everyone while library-level disabled.
+  // Globalizing the library skill also makes it visible to bot-less sessions
+  // (the assignment write broadcasts skills:changed; no library toggle moved).
   manager.setSkillScopeForSkill('library-skill', 'global');
   const visibleAfterGlobal = manager.listSkillsForMetabot(null).map((skill) => skill.id);
   assert.deepEqual(visibleAfterGlobal, ['library-skill', 'official-core-skill']);
@@ -219,8 +220,8 @@ test('readSkillCatalogEntry is scoped to the bot view when a metabotId is given'
   assert.equal(manager.readSkillCatalogEntry('assigned-skill', BOT_ID + 1), null);
   // Bundled skills stay readable for every bot.
   assert.ok(manager.readSkillCatalogEntry('official-core-skill', BOT_ID + 1));
-  // Unscoped read (legacy callers) still resolves.
-  assert.ok(manager.readSkillCatalogEntry('library-skill'));
+  // Bot-less read keeps the bundled + global view.
+  assert.equal(manager.readSkillCatalogEntry('library-skill', null), null);
 });
 
 test('getSkillAssignmentInfo reports scope + assigned bots for external skills only', () => {

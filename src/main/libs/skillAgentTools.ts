@@ -37,7 +37,8 @@ export type SkillToolControl = {
    * Load one enabled skill's full SKILL.md plus its directory (for relative
    * path resolution), scoped to the caller's visible set. Backs the
    * read_skill action; null when the name/id does not resolve to a skill the
-   * caller's bot may use.
+   * caller's bot may use. Tool-level lookup gate only — not a filesystem
+   * boundary (session Read/Bash access stays prompt-gated).
    */
   readSkill(nameOrId: string, perspective: SkillToolPerspective): {
     id: string;

@@ -5112,6 +5112,10 @@ export class CoworkRunner extends EventEmitter {
     // skills catalog) must not suppress the split, or every default session
     // would lose skills entirely.
     if (hasEmbeddedSkillCatalog(baseSystemPrompt)) {
+      // Sessions created before the per-bot assignment model embedded the
+      // FULL skill catalog in their stored system prompt; they keep that
+      // un-narrowed legacy view until the session resets (new session /
+      // claudeSessionId cleared) — worth a line in release notes.
       return { skillsSection: null, skillsCatalogMode: 'legacy' };
     }
     // The session's REAL metabot binding (no twin fallback): bot-less user

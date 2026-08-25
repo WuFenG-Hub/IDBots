@@ -25,7 +25,7 @@
  * M3 scope note: chat-skill turns are wired through the same narrow seams the
  * group-task daemon uses (getChatSkillsRoutingPrompt + runSkillTurn, backed by
  * runSkillTurnInExistingSession in main.ts). Routing stays on the bot's OWN
- * allow_chat_skills (allowAllEnabled is never set — external group members are
+ * assigned skills (widened is never set — external group members are
  * not the owner, so the permission surface matches a non-owner private-chat
  * peer). Any routing/execution failure degrades to the plain LLM completion
  * path so skill assembly can never silence the guest. Files produced by a
