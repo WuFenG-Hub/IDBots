@@ -10,6 +10,7 @@ const readSource = (relative) => readFileSync(join(here, relative), 'utf8');
 const panelSource = readSource('../src/renderer/features/botBrowser/BotBrowserCoworkPanel.tsx');
 const promptInputSource = readSource('../src/renderer/components/cowork/CoworkPromptInput.tsx');
 const pickerSource = readSource('../src/renderer/components/ModelEffortPicker.tsx');
+const browserCoworkSource = readSource('../src/renderer/services/browserCowork.ts');
 
 test('Bot Browser panel toolbar keeps only the model picker (+badge) and drives the rest via the composer', () => {
   // The standalone attachment / skills toolbar buttons are gone.
@@ -65,6 +66,43 @@ test('slash commands are not large-composer-only anymore', () => {
     promptInputSource,
     /const commandsEnabled = !disabled && commands !== undefined && commands\.length > 0;/,
     'commandsEnabled must not depend on isLarge',
+  );
+});
+
+test('Bot Browser panel forwards pinned skills like the home composer', () => {
+  // The panel must accept the composer's second onSubmit argument instead of
+  // dropping it.
+  assert.match(
+    panelSource,
+    /const handleSubmit = async \(prompt: string, skillPrompt\?: string\) =>/,
+    'handleSubmit must accept the pinned-skill prompt argument',
+  );
+  // Snapshot + clear semantics, and the payload rides both submit paths.
+  assert.ok(panelSource.includes('clearActiveSkills'), 'pins must clear after submitting');
+  assert.ok(
+    panelSource.includes('browserCoworkService.send(prompt, skills)'),
+    'send path must forward the skills payload',
+  );
+  assert.match(
+    panelSource,
+    /browserCoworkService\.start\(prompt, effectiveMetabotId, startCwd, \{[\s\S]*?\}, skills\)/,
+    'start path must forward the skills payload',
+  );
+  // Service side: pinned `## Skill:` blocks embed into the base prompt and
+  // the ids ride startSession/submitInput (persisted main-side).
+  assert.ok(
+    browserCoworkSource.includes('return [skillPrompt, config.systemPrompt]'),
+    'pinned skill blocks must embed into the browser session system prompt',
+  );
+  assert.ok(
+    browserCoworkSource.includes('{ activeSkillIds: skills.activeSkillIds }'),
+    'activeSkillIds must flow into the session/turn submission',
+  );
+  // Ordinary turns keep the persisted prompt (DeepSeek prefix-cache policy).
+  assert.match(
+    browserCoworkSource,
+    /const systemPrompt = skills\?\.activeSkillIds\?\.length/,
+    'continue path must only rebuild the system prompt when skills are pinned',
   );
 });
 
