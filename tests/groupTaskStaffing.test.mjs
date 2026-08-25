@@ -11,6 +11,8 @@ const {
   splitSessionMessagesForStaffingGate,
   buildStaffingSlateText,
   isStaffingProposalExpired,
+  isLocalOnlySmallSlate,
+  GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS,
   STAFFING_PROPOSAL_TTL_MS,
 } = require('../dist-electron/main/services/groupTaskStaffing.js');
 
@@ -122,4 +124,96 @@ test('staffing proposals expire after 24 hours', () => {
   const now = 1_800_000_000_000;
   assert.equal(isStaffingProposalExpired(now - STAFFING_PROPOSAL_TTL_MS + 1, now), false);
   assert.equal(isStaffingProposalExpired(now - STAFFING_PROPOSAL_TTL_MS - 1, now), true);
+});
+
+const localSeat = (role, name) => ({ role, candidateName: name, source: 'local', reason: 'local' });
+const remoteSeat = (role, name) => ({
+  role,
+  candidateName: name,
+  candidateGlobalMetaId: 'idq1remote0000000000000000000000000000000',
+  source: 'remote',
+  reason: 'online',
+});
+
+test('isLocalOnlySmallSlate: all-local and under the cap, remote or big slates excluded', () => {
+  assert.equal(GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS, 5);
+  const fourLocal = {
+    stages: [],
+    seats: [
+      localSeat('content', 'A'),
+      localSeat('design', 'B'),
+      localSeat('engineering', 'C'),
+      localSeat('promotion', 'D'),
+    ],
+  };
+  assert.equal(isLocalOnlySmallSlate(fourLocal), true);
+  const fiveLocal = {
+    stages: [],
+    seats: [
+      ...fourLocal.seats,
+      { role: 'domain', domainLabel: 'legal', candidateName: 'E', source: 'local', reason: 'local' },
+    ],
+  };
+  assert.equal(isLocalOnlySmallSlate(fiveLocal), false);
+  const withRemote = {
+    stages: [],
+    seats: [localSeat('content', 'A'), remoteSeat('design', 'B')],
+  };
+  assert.equal(isLocalOnlySmallSlate(withRemote), false);
+});
+
+test('a local-only small slate auto-starts instead of awaiting the owner', () => {
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: [],
+      localSmallSlate: true,
+    }),
+    { allowed: true, decision: 'local_auto_start' },
+  );
+});
+
+test('an owner revise beats the local-only auto-start', () => {
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['换人，用设计师'],
+      localSmallSlate: true,
+    }),
+    { allowed: false, decision: 'owner_revise' },
+  );
+});
+
+test('an explicit skip wish still records skip_authorized, not the auto-start', () => {
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '开个群任务做技能介绍，不用确认直接开',
+      repliesAfterPropose: [],
+      localSmallSlate: true,
+    }),
+    { allowed: true, decision: 'skip_authorized' },
+  );
+});
+
+test('slate tail-line explains the all-local small-team auto-start', () => {
+  const zh = buildStaffingSlateText({
+    title: '技能介绍',
+    goal: '写出介绍',
+    plan,
+    ownerConfirmRequired: false,
+    skipReason: 'local_small',
+  });
+  assert.match(zh, /无需确认/);
+  assert.match(zh, /本机/);
+  assert.doesNotMatch(zh, /你已经说了不用确认人选/);
+  const en = buildStaffingSlateText({
+    title: 'Skill intro',
+    goal: 'Write it',
+    plan,
+    ownerConfirmRequired: false,
+    skipReason: 'local_small',
+    language: 'en',
+  });
+  assert.match(en, /all local and small/i);
+  assert.doesNotMatch(en, /You asked to skip roster confirmation/);
 });
