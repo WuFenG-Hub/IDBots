@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { SocialPostItem, SocialCommentItem } from '../services/socialRecallService';
 import { buildPinBrowserUri, markdownSelfLink } from './metawebUri';
+import { truncateUtf16Units } from './llmSafeText';
 
 /** A feed candidate from the Social Recall API, marked when authored by one of the user's own MetaBots. */
 export type SocialPostCandidate = SocialPostItem & { isOwn?: boolean };
@@ -58,7 +59,7 @@ function sanitizeLinkLabel(value: string): string {
 }
 
 function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  return value.length > max ? `${truncateUtf16Units(value, max)}…` : value;
 }
 
 /** UTC "YYYY-MM-DD HH:MM" — the Social Recall API timestamps are Unix seconds. */

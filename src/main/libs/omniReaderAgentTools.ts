@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { truncateUtf16Units } from './llmSafeText';
 
 /**
  * Control surface the host (main.ts) provides for the omni_read tool. Pure
@@ -42,7 +43,7 @@ const MAX_RESULT_CHARS = 20000;
 function formatData(data: unknown): string {
   const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
   if (text.length > MAX_RESULT_CHARS) {
-    return `${text.slice(0, MAX_RESULT_CHARS)}\n...(truncated, narrow the query with cursor/size)`;
+    return `${truncateUtf16Units(text, MAX_RESULT_CHARS)}\n...(truncated, narrow the query with cursor/size)`;
   }
   return text;
 }
@@ -358,7 +359,7 @@ export function buildOmniReaderAgentTools(deps: {
             const url = buildUrl(MANAPI_BASE, `content/${encodeURIComponent(pinId)}`);
             const body = await control.fetchText(url);
             const text = body.length > MAX_RESULT_CHARS
-              ? `${body.slice(0, MAX_RESULT_CHARS)}\n...(truncated, narrow the query with cursor/size)`
+              ? `${truncateUtf16Units(body, MAX_RESULT_CHARS)}\n...(truncated, narrow the query with cursor/size)`
               : body;
             return textResult(text);
           }

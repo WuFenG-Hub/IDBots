@@ -6,6 +6,7 @@ import path from 'path';
 import initSqlJs, { SqlJsStatic } from 'sql.js';
 import type { Database as SqlJsDatabase } from 'sql.js';
 import { DB_FILENAME } from './appConstants';
+import { truncateUtf16Units } from './libs/llmSafeText';
 import { OWNER_SCOPE_KEY } from './memory/memoryScope';
 import { findNearestExistingFile } from './libs/runtimePaths';
 import { writeFileAtomicSync } from './libs/atomicFile';
@@ -3372,7 +3373,7 @@ export class SqliteStore {
       const key = text.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      entries.push(text.length > 360 ? `${text.slice(0, 359)}…` : text);
+      entries.push(text.length > 360 ? `${truncateUtf16Units(text, 359)}…` : text);
     }
 
     return entries.slice(0, 200);

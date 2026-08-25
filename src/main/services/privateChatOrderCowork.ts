@@ -6,6 +6,7 @@ import type { CoworkRunner, PermissionRequest } from '../libs/coworkRunner';
 import type { CoworkStore, CoworkMessage } from '../coworkStore';
 import type { MetabotStore } from '../metabotStore';
 import type { OrderSource } from './orderPayment';
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { generateSessionTitle } from '../libs/coworkUtil';
@@ -1167,7 +1168,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
     if (text.length <= TIMEOUT_FALLBACK_MAX_CHARS) {
       return text;
     }
-    return `${text.slice(0, TIMEOUT_FALLBACK_MAX_CHARS)}\n...[truncated]`;
+    return `${truncateUtf16Units(text, TIMEOUT_FALLBACK_MAX_CHARS)}\n...[truncated]`;
   }
 
   private buildMissingTextDeliveryFailureReply(): string {
@@ -1232,8 +1233,8 @@ export class PrivateChatOrderCowork extends EventEmitter {
       'The message should reflect your personality and reference the service you just delivered.',
       'Use the same language as the client\'s original request whenever its language is clear from the service-order context.',
       'Keep it to 1-2 sentences. Be genuine, not robotic.',
-      request?.prompt ? `Original service-order context: "${request.prompt.slice(0, 500)}"` : '',
-      `The service result you delivered: "${serviceReply.slice(0, 200)}"`,
+      request?.prompt ? `Original service-order context: "${truncateUtf16Units(stripLoneSurrogates(request.prompt), 500)}"` : '',
+      `The service result you delivered: "${truncateUtf16Units(stripLoneSurrogates(serviceReply), 200)}"`,
     ].filter(Boolean).join('\n');
 
     const brain = metabot ? metabotBrainOptions(metabot) : null;

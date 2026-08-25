@@ -1227,7 +1227,7 @@ export async function generateSessionTitle(userIntent: string | null): Promise<s
         },
         {
           role: 'user',
-          content: `User input:\n${userIntent.slice(0, 2000)}`,
+          content: `User input:\n${truncateUtf16Units(userIntent, 2000)}`,
         },
       ],
       {
