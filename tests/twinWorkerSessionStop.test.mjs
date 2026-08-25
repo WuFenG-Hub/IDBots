@@ -100,3 +100,29 @@ test('worker_session_stop: only worker-type sessions are valid targets', async (
   assert.equal(JSON.parse(noArg.text).code, 'SESSION_ID_REQUIRED')
   assert.equal(stopped.length, 0, 'nothing stopped')
 })
+
+// P1-2 (task #36 incident): a DSH tool call whose result never arrives used
+// to re-arm the stall watchdog forever. collectExpiredToolCalls is the pure
+// age check behind the hard cap that now cancels + force-settles such turns.
+test('collectExpiredToolCalls: counts only calls older than the cap; cap <= 0 disables', () => {
+  const { collectExpiredToolCalls } = loadRunner()
+  const nowMs = 1_700_000_000_000
+  const capMs = 60 * 60_000
+  assert.equal(collectExpiredToolCalls([], nowMs, capMs), 0)
+  assert.equal(
+    collectExpiredToolCalls([nowMs - 5 * 60_000, nowMs - 30 * 60_000], nowMs, capMs),
+    0,
+    'fresh in-flight calls never expire',
+  )
+  assert.equal(
+    collectExpiredToolCalls([nowMs - 5 * 60_000, nowMs - 61 * 60_000, nowMs - 120 * 60_000], nowMs, capMs),
+    2,
+    'only over-cap calls count',
+  )
+  assert.equal(collectExpiredToolCalls([nowMs - 999 * 60_000], nowMs, 0), 0, 'cap disabled')
+  // Map values (the named-tool ledger shape) are accepted as-is.
+  assert.equal(
+    collectExpiredToolCalls(new Map([['tool-1', nowMs - 90 * 60_000]]).values(), nowMs, capMs),
+    1,
+  )
+})

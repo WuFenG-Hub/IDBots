@@ -405,6 +405,38 @@ export const COWORK_LOCAL_TURN_STALL_TIMEOUT_MS = 180_000;
  */
 export const DSH_TURN_STALL_TIMEOUT_MS = 10 * 60_000;
 
+/**
+ * Hard cap for a single in-flight DSH tool call whose result never arrives
+ * (e.g. the runtime lost the subprocess: the process died but no tool_result
+ * event ever comes back). The stall watchdog used to re-arm forever while any
+ * tool call was in flight, pinning the session in "running" for hours after
+ * the underlying work was already dead (task #36 incident: 6.5h of zero
+ * activity). Past this cap the watchdog cancels + force-settles the turn so
+ * the session gets a timeout error written back instead of hanging forever.
+ * The cap only bites when the turn has ALSO been silent for a full stall
+ * window (the watchdog must fire first), so a streaming long command that
+ * keeps emitting events is never touched; workers are steered to background
+ * execution + heartbeat protocol for anything genuinely long.
+ */
+export const DSH_TOOL_CALL_HARD_CAP_MS = 60 * 60_000;
+
+/**
+ * Count tool calls older than the hard cap. Pure + exported for unit tests.
+ * `capMs <= 0` disables the cap (nothing ever expires).
+ */
+export function collectExpiredToolCalls(
+  startedAts: Iterable<number>,
+  nowMs: number,
+  capMs: number,
+): number {
+  if (capMs <= 0) return 0;
+  let expired = 0;
+  for (const startedAt of startedAts) {
+    if (nowMs - startedAt > capMs) expired++;
+  }
+  return expired;
+}
+
 export function isSdkResultEvent(event: unknown): event is { type: 'result' } & Record<string, unknown> {
   return Boolean(event && typeof event === 'object' && (event as Record<string, unknown>).type === 'result');
 }
@@ -1722,6 +1754,14 @@ export interface CoworkRunnerOptions {
    * A value <= 0 disables the watchdog.
    */
   dshTurnStallTimeoutMs?: number;
+  /**
+   * Hard cap for one in-flight DSH tool call with no result (runtime lost
+   * the subprocess). Past the cap the stall watchdog cancels + force-settles
+   * the turn instead of re-arming forever. Defaults to
+   * DSH_TOOL_CALL_HARD_CAP_MS; tests override it. A value <= 0 disables the
+   * cap (legacy behavior).
+   */
+  dshToolCallHardCapMs?: number;
 }
 
 /**
@@ -1791,6 +1831,7 @@ export class CoworkRunner extends EventEmitter {
   private screenshotHost?: ScreenshotHost;
   private readonly localTurnStallTimeoutMs: number;
   private readonly dshTurnStallTimeoutMs: number;
+  private readonly dshToolCallHardCapMs: number;
   private activeSessions: Map<string, ActiveSession> = new Map();
   /**
    * Per-session accumulated usage stats, keyed by sessionId. Independent of the
@@ -1903,6 +1944,10 @@ export class CoworkRunner extends EventEmitter {
     this.dshTurnStallTimeoutMs = Math.max(
       0,
       options?.dshTurnStallTimeoutMs ?? DSH_TURN_STALL_TIMEOUT_MS
+    );
+    this.dshToolCallHardCapMs = Math.max(
+      0,
+      options?.dshToolCallHardCapMs ?? DSH_TOOL_CALL_HARD_CAP_MS
     );
   }
 
@@ -7153,22 +7198,27 @@ export class CoworkRunner extends EventEmitter {
       // ring value (onUsage refines it over the wire; guards out-of-order).
       let liveUsageAsOfSeq = -1;
       // In-flight DSH tool calls: tool/call message seen, matching
-      // tool/result not yet. Keyed by toolUseId (null-id calls fall back to a
-      // counter). Cleared at every guarded-turn start so a cancelled or
-      // steered previous attempt whose results never settle cannot pin the
-      // watchdog open forever.
-      const dshInFlightToolUses = new Set<string>();
-      let dshAnonInFlightToolUses = 0;
-      const dshInFlightToolCallCount = () => dshInFlightToolUses.size + dshAnonInFlightToolUses;
+      // tool/result not yet. Keyed by toolUseId with the start timestamp
+      // (null-id calls fall back to a list of start timestamps). Cleared at
+      // every guarded-turn start so a cancelled or steered previous attempt
+      // whose results never settle cannot pin the watchdog open forever. The
+      // timestamps feed the P1-2 hard cap: a call whose result never arrives
+      // must not exempt the stall watchdog indefinitely.
+      const dshInFlightToolUses = new Map<string, number>();
+      let dshAnonInFlightToolStarts: number[] = [];
+      const dshInFlightToolCallCount = () => dshInFlightToolUses.size + dshAnonInFlightToolStarts.length;
       const trackDshToolActivity = (message: unknown) => {
         const type = (message as { type?: string } | null)?.type;
         const toolUseId = (message as { metadata?: { toolUseId?: string | null } } | null)?.metadata?.toolUseId ?? null;
         if (type === 'tool_use') {
-          if (toolUseId) dshInFlightToolUses.add(toolUseId);
-          else dshAnonInFlightToolUses++;
+          if (toolUseId) {
+            if (!dshInFlightToolUses.has(toolUseId)) dshInFlightToolUses.set(toolUseId, Date.now());
+          } else {
+            dshAnonInFlightToolStarts.push(Date.now());
+          }
         } else if (type === 'tool_result') {
           if (toolUseId) dshInFlightToolUses.delete(toolUseId);
-          else dshAnonInFlightToolUses = Math.max(0, dshAnonInFlightToolUses - 1);
+          else dshAnonInFlightToolStarts = dshAnonInFlightToolStarts.slice(1);
         }
       };
       const clearDshStallWatchdog = () => {
@@ -7184,6 +7234,27 @@ export class CoworkRunner extends EventEmitter {
           dshStallTimer = null;
           if (activeSession.abortController.signal.aborted) return;
           if (activeSession.pendingPermission || dshInFlightToolCallCount() > 0) {
+            // P1-2 hard cap: an in-flight tool call whose result never
+            // arrives (runtime lost the subprocess) used to re-arm this
+            // watchdog forever, pinning the session in "running" for hours.
+            // Past the cap, cancel + force-settle so the turn ends with a
+            // timeout error written back to the session. A pending
+            // permission dialog alone (a human is the slow party) still
+            // re-arms forever — only aged tool calls trip the cap.
+            const expiredCount =
+              collectExpiredToolCalls(dshInFlightToolUses.values(), Date.now(), this.dshToolCallHardCapMs)
+              + collectExpiredToolCalls(dshAnonInFlightToolStarts, Date.now(), this.dshToolCallHardCapMs);
+            if (expiredCount > 0) {
+              coworkLog(
+                'WARN',
+                'runDshSessionLocal',
+                'In-flight DSH tool call(s) exceeded the hard cap; cancelling the turn',
+                { sessionId, expiredCount, capMs: this.dshToolCallHardCapMs }
+              );
+              void hub.cancel(sessionId, 'tool call hard cap').catch(() => undefined);
+              hub.forceSettle(sessionId, 'tool call hard cap');
+              return;
+            }
             armDshStallWatchdog();
             return;
           }
@@ -7206,7 +7277,7 @@ export class CoworkRunner extends EventEmitter {
         // Fresh guarded attempt → clean tool ledger (a cancelled/steered
         // previous attempt may leave calls whose results never settle).
         dshInFlightToolUses.clear();
-        dshAnonInFlightToolUses = 0;
+        dshAnonInFlightToolStarts = [];
         armDshStallWatchdog();
         // Active session goal (/goal command): its own prompt section every
         // turn until paused or cleared; a goal set mid-run applies here.
