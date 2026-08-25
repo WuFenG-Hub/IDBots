@@ -876,6 +876,12 @@ export class DshTurnHub {
       // scoped registration) — keeping them out of the config is what stops
       // every new session's prompt from restarting this slot's runtime.
       workspace: slot.workspaceSeen ?? input.workspace,
+      // Pin the user-global AGENTS.md home to an empty directory under
+      // userData: the host never reads ~/.dsh, so a global instruction file
+      // left over from another harness cannot silently enter every session.
+      ...(slot.workspaceSeen ?? input.workspace) ? {
+        workspaceInstructions: { dshHome: join(app.getPath('userData'), 'dsh-home') },
+      } : {},
       mcpServers: [...slot.mcpServersSeen.values()],
       ...(this.webSearchSeen ? {
         webSearch: {

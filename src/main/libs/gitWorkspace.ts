@@ -4,6 +4,14 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 /**
+ * Per-probe budget for one `git` invocation. The renderer polls the branch
+ * every 3s, so a probe must never outlive the poll interval: a hung git call
+ * (network drive, antivirus hook) would otherwise pile up overlapping
+ * probes faster than they settle.
+ */
+const GIT_PROBE_TIMEOUT_MS = 2000;
+
+/**
  * Best-effort current git branch for a workspace directory.
  *
  * Returns the branch name (e.g. "master") when the directory lives inside a
@@ -19,7 +27,7 @@ export async function getGitBranch(cwd: string | null | undefined): Promise<stri
     // so a detached checkout at least surfaces the raw ref rather than nothing.
     const { stdout } = await execFileAsync('git', ['branch', '--show-current'], {
       cwd: trimmed,
-      timeout: 5000,
+      timeout: GIT_PROBE_TIMEOUT_MS,
       windowsHide: true,
     });
     const branch = stdout.trim();
@@ -30,7 +38,7 @@ export async function getGitBranch(cwd: string | null | undefined): Promise<stri
   try {
     const { stdout } = await execFileAsync('git', ['symbolic-ref', '--short', '-q', 'HEAD'], {
       cwd: trimmed,
-      timeout: 5000,
+      timeout: GIT_PROBE_TIMEOUT_MS,
       windowsHide: true,
     });
     const branch = stdout.trim();
