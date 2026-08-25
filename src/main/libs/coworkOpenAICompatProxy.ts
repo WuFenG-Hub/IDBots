@@ -133,7 +133,17 @@ type ResponsesStreamContext = {
   observedEventTypes: Set<string>;
 };
 
-const PROXY_BIND_HOST = '0.0.0.0';
+/**
+ * Loopback only. This proxy serves unauthenticated internal APIs (scheduled
+ * task CRUD) and relays the user's upstream API key (/v1/messages); binding
+ * all interfaces exposed both to the LAN. Sandbox sessions still reach it:
+ * QEMU user networking maps the guest's 10.0.2.2 to the HOST LOOPBACK, and
+ * the loopback-bound web-search server (127.0.0.1:8923, reached by guests as
+ * http://10.0.2.2:8923) already proves that path. (Restores the hardening
+ * from upstream 83ab8646 "bind OpenAI compat proxy to 127.0.0.1 to prevent
+ * remote unauthenticated RCE", which the genesis import rolled back.)
+ */
+const PROXY_BIND_HOST = '127.0.0.1';
 const LOCAL_HOST = '127.0.0.1';
 const SANDBOX_HOST = '10.0.2.2';
 const GEMINI_FALLBACK_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
