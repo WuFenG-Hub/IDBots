@@ -12,8 +12,7 @@ const promptInputSource = readSource('../src/renderer/components/cowork/CoworkPr
 const pickerSource = readSource('../src/renderer/components/ModelEffortPicker.tsx');
 
 test('Bot Browser panel toolbar keeps only the model picker (+badge) and drives the rest via the composer', () => {
-  // The standalone attachment / skills / folder toolbar buttons are gone.
-  assert.ok(!panelSource.includes('FolderSelectorPopover'), 'folder popover should be removed from the panel');
+  // The standalone attachment / skills toolbar buttons are gone.
   assert.ok(!panelSource.includes('SkillsButton'), 'standalone skills button should be removed from the panel');
   assert.ok(!panelSource.includes('PaperClipIcon'), 'standalone attachment button should be removed from the panel');
   // The model picker stays in the toolbar and escapes the overflow-hidden sidebar.
@@ -23,6 +22,24 @@ test('Bot Browser panel toolbar keeps only the model picker (+badge) and drives 
   assert.ok(!panelSource.includes('showAttachmentButton={false}'), 'composer attachment affordance must stay enabled');
   assert.ok(panelSource.includes('onManageSkills='), 'composer must be able to open skill management');
   assert.ok(panelSource.includes('commands={browserComposerCommands}'), 'composer must receive the slash-command catalog');
+});
+
+test('Bot Browser panel folder button reuses the cowork project-mode workspace popover', () => {
+  // Same FolderSelectorPopover as the cowork home composer, with the full
+  // project-mode menu: projects / new project / add folder / bot workspace.
+  assert.ok(panelSource.includes('FolderSelectorPopover'), 'workspace popover must stay in the panel');
+  assert.ok(panelSource.includes('onSelectProject='), 'workspace popover must offer projects');
+  assert.ok(panelSource.includes('onOpenNewProject='), 'workspace popover must offer creating a project');
+  assert.ok(panelSource.includes('onSelectBotWorkspace='), 'workspace popover must offer the bot workspace');
+  assert.ok(
+    panelSource.includes("setWorkspaceSelection({ kind: 'folder'"),
+    'folder picks must flow into the workspace selection state',
+  );
+  // The selection feeds the session start cwd (project/folder only).
+  assert.ok(
+    panelSource.includes('browserCoworkService.start(prompt, effectiveMetabotId, startCwd'),
+    'workspace selection must resolve to the session start cwd',
+  );
 });
 
 test('Bot Browser panel wires the session slash-command catalog for live sessions', () => {
