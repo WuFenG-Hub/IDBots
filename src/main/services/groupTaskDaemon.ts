@@ -30,6 +30,11 @@ import type {
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
+import {
+  isCeremonyAckLine,
+  parseGroupTaskEntropyP0Config,
+  type GroupTaskEntropyP0Config,
+} from '../libs/groupTaskEntropy';
 import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
 import {
   formatWorkerEmptyHandoffError,
@@ -498,6 +503,7 @@ export function decideGroupTaskResponders(
   task: GroupTaskDaemonTask,
   members: GroupTaskDaemonMember[],
   botsById: Map<number, GroupTaskDaemonBot>,
+  options: { entropyFloorGate?: boolean } = {},
 ): GroupTaskResponderDecision[] {
   const decisions: GroupTaskResponderDecision[] = [];
   const content = (message.content ?? '').trim();
@@ -579,6 +585,22 @@ export function decideGroupTaskResponders(
       continue;
     }
     if (!addressedToSpecificMember) {
+      // Entropy P0 floor gate: a ceremony-shaped ACK from a worker
+      // ([WORKING]/[STANDBY], no question) never warrants a chair LLM turn —
+      // the missing-ACK/timeout monitors track those tags deterministically.
+      // A real question inside the line still reaches the chair (guard in
+      // isCeremonyAckLine), and @-mention/owner/deliverable paths above are
+      // untouched.
+      if (options.entropyFloorGate !== false) {
+        const senderIsWorker = members.some((candidate) =>
+          candidate.role === 'worker'
+          && Boolean(senderGlobalMetaId)
+          && (candidate.globalmetaid ?? '').trim() === senderGlobalMetaId,
+        );
+        if (senderIsWorker && isCeremonyAckLine(content)) {
+          continue;
+        }
+      }
       decisions.push({ metabotId: member.metabotId, reason: 'chair_floor_control' });
     }
   }
@@ -4498,6 +4520,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const store = deps.getGroupTaskStore();
     const sqlite = deps.getStore();
     const db = sqlite.getDatabase();
+    // Entropy P0 knobs (floor gate / template ACK / log folding), read once
+    // per task pass; defaults are all-on, kv exists for per-knob rollback.
+    const entropyP0: GroupTaskEntropyP0Config = parseGroupTaskEntropyP0Config(
+      sqlite.get<string>('groupTaskEntropyP0'),
+    );
 
     // P2-8: multi-driver mutex — when another daemon instance holds a fresh
     // driver claim for this task, yield the whole tick (no heartbeat, no
@@ -4763,7 +4790,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const freshStatus = store.getTaskById(task.id)?.status ?? task.status;
         const hasOpenCheckpoint = store.getOpenCheckpoint(task.id) != null;
         const gatingTask: GroupTaskDaemonTask = { ...task, status: freshStatus, hasOpenCheckpoint };
-        const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById);
+        const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById, {
+          entropyFloorGate: entropyP0.floorGate,
+        });
         // P0-1: review-phase silence hint — a chair dispatch to workers during
         // review is intentionally unanswered (workers are gated silent); log
         // it so the operator/chair reopens the task instead of assuming the
