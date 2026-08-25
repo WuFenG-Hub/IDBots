@@ -222,6 +222,7 @@ import {
 import { metabotBrainOptions, normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { startMemoryHygieneService, stopMemoryHygieneService, getMemoryHygieneService } from './services/memoryHygieneService';
+import { setTeamCultureDistillationDeps } from './services/teamCultureDistillation';
 import { KnowledgeBaseService } from './services/knowledgeBaseService';
 import { KnowledgeBaseStore } from './knowledgeBaseStore';
 import {
@@ -3829,6 +3830,13 @@ const startSqliteDaemons = (): void => {
         }
       });
     },
+  });
+
+  // P3 culture base: task-close distillation rides the same orchestrator chat.
+  setTeamCultureDistillationDeps({
+    getTeamCultureStore: () => getTeamCultureStore(),
+    getGroupTaskStore: () => getGroupTaskStore(),
+    performChat: performChatCompletionForOrchestrator,
   });
 
   // Knowledge bases ("知识库"): per-bot document corpora learned into a local
