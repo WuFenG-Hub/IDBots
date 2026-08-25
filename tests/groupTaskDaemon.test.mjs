@@ -1752,15 +1752,18 @@ test('group cognition projection is observer-relative and wired into per-bot pro
     assert.match(workerCall.userMessage, /<metaid_group_cognition>/);
     assert.match(workerCall.userMessage, /Observer: gmid-w2/);
     assert.match(workerCall.userMessage, /- Twin Bot gmid-twin \(chair\)/);
-    assert.match(workerCall.userMessage, /- Coder Bot gmid-w2 \(worker\)/);
+    assert.doesNotMatch(workerCall.userMessage, /- Coder Bot gmid-w2 \(worker\)/,
+      'entropy P1: worker cognition is chair-only');
     assert.ok(!workerCall.systemPrompt.includes('<metaid_group_cognition>'),
       'cognition block must not sit in the system prompt (volatile, cache-prefix breaker)');
 
     const workerInput = cognitionCalls.find((input) => input.observerGlobalMetaID === 'gmid-w2');
     assert.ok(workerInput, 'cognition dep called for the responding worker');
+    // Entropy P1: workers get a chair-only cognition roster (narrow specific
+    // heat); the full roster stays reserved for the chair's arbitration view.
     assert.deepEqual(
-      workerInput.roster.map((member) => member.globalMetaID).sort(),
-      ['gmid-twin', 'gmid-w2'],
+      workerInput.roster.map((member) => member.globalMetaID),
+      ['gmid-twin'],
     );
   } finally {
     h.cleanup();
@@ -3748,6 +3751,62 @@ test('entropy P1: cognitionCache knob off restores per-turn rebuilds', async () 
       cognitionCalls.filter((observer) => observer === 'gmid-w2').length,
       2,
       'knob off: every turn rebuilds',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('entropy P1: workerChairOnly knob off restores the full-roster worker cognition', async () => {
+  const cognitionCalls = [];
+  const h = await createHarness({
+    getMetaIDGroupCognitionPromptBlock: async (input) => {
+      cognitionCalls.push(input);
+      return '<metaid_group_cognition>ok</metaid_group_cognition>';
+    },
+  });
+  try {
+    h.store.set('groupTaskEntropyP1', JSON.stringify({ workerChairOnly: false }));
+    h.createTask([2]);
+    p1WorkerPing(h, 'p1-f-i0', '@Coder Bot go');
+    await h.loop.runTick();
+    const workerInput = cognitionCalls.find((input) => input.observerGlobalMetaID === 'gmid-w2');
+    assert.ok(workerInput);
+    assert.deepEqual(
+      workerInput.roster.map((member) => member.globalMetaID).sort(),
+      ['gmid-twin', 'gmid-w2'],
+      'knob off: worker sees the full roster again',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('entropy P1: the chair keeps the full-roster cognition for arbitration', async () => {
+  const cognitionCalls = [];
+  const h = await createHarness({
+    getMetaIDGroupCognitionPromptBlock: async (input) => {
+      cognitionCalls.push(input);
+      return '<metaid_group_cognition>ok</metaid_group_cognition>';
+    },
+  });
+  try {
+    h.createTask([2, 3]);
+    // Unaddressed floor-control message from a non-owner triggers a chair turn.
+    insertGroupMessage(h.db, {
+      pinId: 'p1-g-i0',
+      senderMetaId: 'metaid-w2',
+      senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '环境已就绪，随时可以开工',
+    });
+    await h.loop.runTick();
+    const chairInput = cognitionCalls.find((input) => input.observerGlobalMetaID === 'gmid-twin');
+    assert.ok(chairInput, 'chair turn ran');
+    assert.deepEqual(
+      chairInput.roster.map((member) => member.globalMetaID).sort(),
+      ['gmid-twin', 'gmid-w2', 'gmid-w3'],
+      'chair cognition covers the whole roster',
     );
   } finally {
     h.cleanup();

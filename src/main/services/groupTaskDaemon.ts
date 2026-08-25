@@ -2184,7 +2184,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     ownerGlobalMetaId: string,
   ): Promise<{ systemPrompt: string; volatileContext: string }> => {
     const experienceBlock = buildExperienceBlockFor(bot);
-    const cognitionBlock = await buildGroupCognitionBlockFor(bot, promptMembers, task);
+    // Entropy P1 (narrow specific heat): a worker's collaboration partner is
+    // the chair — dispatch, verification and arbitration all flow through it —
+    // so peer impressions are loaded history the worker never acts on. Workers
+    // get a chair-only cognition roster; the chair keeps the full roster
+    // because arbitration needs every member's temperature.
+    const turnEntropyP1 = parseGroupTaskEntropyP1Config(
+      deps.getStore().get<string>('groupTaskEntropyP1'),
+    );
+    const cognitionMembers = botRole === 'worker' && turnEntropyP1.workerChairOnly
+      ? promptMembers.filter((member) => member.role === 'chair')
+      : promptMembers;
+    const cognitionBlock = await buildGroupCognitionBlockFor(bot, cognitionMembers, task);
     const cultureBlock = deps.buildTeamCultureBlock?.() ?? null;
     const systemPrompt = buildGroupTaskSystemPrompt({
       metabot: bot,
