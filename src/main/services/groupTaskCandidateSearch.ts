@@ -30,8 +30,10 @@ export const LOCAL_TIE_MARGIN = 4;
 
 /**
  * Staffing declarations a chair/Twin can attach to a seat search: a fixed
- * in-house crew, the previous episode's crew, or a local-only call. Any of
- * them flips the merge to local-first (see compareLocalFirstCandidates).
+ * in-house crew, the previous episode's crew, or a local-only call.
+ * fixed_team / previous_team flip the merge to local-first sorting (see
+ * compareLocalFirstCandidates); local_only is a hard filter — the remote
+ * search is skipped, so no remote ever reaches the result.
  */
 export type GroupTaskStaffingPreference = 'fixed_team' | 'previous_team' | 'local_only';
 
@@ -556,36 +558,43 @@ export async function searchGroupTaskSeatCandidates(
   }
 
   let remotes: GroupTaskSeatCandidate[] = [];
-  try {
-    const searchRemote = deps.searchRemote ?? searchRemoteBotsForSeat;
-    const skills = (input.skills ?? []).map((item) => text(item)).filter(Boolean);
-    const remoteQuery = text(input.query) || (roleHint === 'domain' ? text(input.domainLabel) : '');
-    const found = await searchRemote({
-      query: remoteQuery,
-      roleHint: roleHint ?? undefined,
-      skills: skills.length ? skills : undefined,
-      excludeGlobalMetaIds: collectExcludeGlobalMetaIds(deps, observer),
-      limit: Math.min(GROUP_TASK_SEARCH_MAX_LIMIT, limit * 2),
-    });
-    remotes = found.map((remote) =>
-      toRemoteCandidate(remote, tokens, roleHint, readSnapshot(deps, observer, remote.globalMetaId)),
-    );
-    const localIds = new Set(
-      locals
-        .map((row) => (row.globalMetaId ? normalizeGlobalMetaID(row.globalMetaId) : null))
-        .filter((id): id is string => Boolean(id)),
-    );
-    remotes = remotes.filter((row) => {
-      const id = row.globalMetaId ? normalizeGlobalMetaID(row.globalMetaId) : null;
-      return !id || !localIds.has(id);
-    });
-  } catch (error) {
-    const presenceDown = error instanceof BotSearchError && error.code === BOT_SEARCH_CODE_PRESENCE_UNAVAILABLE;
-    warnings.push(
-      presenceDown
-        ? 'online search failed; local matches only: presence_unavailable'
-        : `online search failed; local matches only: ${error instanceof Error ? error.message : String(error)}`,
-    );
+  // local_only is a hard filter, not a sort preference: the remote search is
+  // skipped entirely so no remote ever reaches primary/candidates/backup
+  // (fixed_team / previous_team keep the sort-only local-first behavior).
+  if (staffingPreference === 'local_only') {
+    warnings.push('staffing_preference=local_only: online search skipped');
+  } else {
+    try {
+      const searchRemote = deps.searchRemote ?? searchRemoteBotsForSeat;
+      const skills = (input.skills ?? []).map((item) => text(item)).filter(Boolean);
+      const remoteQuery = text(input.query) || (roleHint === 'domain' ? text(input.domainLabel) : '');
+      const found = await searchRemote({
+        query: remoteQuery,
+        roleHint: roleHint ?? undefined,
+        skills: skills.length ? skills : undefined,
+        excludeGlobalMetaIds: collectExcludeGlobalMetaIds(deps, observer),
+        limit: Math.min(GROUP_TASK_SEARCH_MAX_LIMIT, limit * 2),
+      });
+      remotes = found.map((remote) =>
+        toRemoteCandidate(remote, tokens, roleHint, readSnapshot(deps, observer, remote.globalMetaId)),
+      );
+      const localIds = new Set(
+        locals
+          .map((row) => (row.globalMetaId ? normalizeGlobalMetaID(row.globalMetaId) : null))
+          .filter((id): id is string => Boolean(id)),
+      );
+      remotes = remotes.filter((row) => {
+        const id = row.globalMetaId ? normalizeGlobalMetaID(row.globalMetaId) : null;
+        return !id || !localIds.has(id);
+      });
+    } catch (error) {
+      const presenceDown = error instanceof BotSearchError && error.code === BOT_SEARCH_CODE_PRESENCE_UNAVAILABLE;
+      warnings.push(
+        presenceDown
+          ? 'online search failed; local matches only: presence_unavailable'
+          : `online search failed; local matches only: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   const merged = [...locals, ...remotes];
