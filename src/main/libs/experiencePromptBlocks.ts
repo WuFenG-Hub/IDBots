@@ -116,7 +116,8 @@ export function buildRecentDailySummariesBlock(
   const dayBlocks: string[] = [];
   let used = 0;
   for (const summary of summaries) {
-    const text = summary.summaryText?.trim();
+    // Dream-written text is stored free text — sanitize halves on render.
+    const text = summary.summaryText ? stripLoneSurrogates(summary.summaryText.trim()) : '';
     if (!text) continue;
     const block = `  <day date="${escapeXml(summary.summaryDate)}">${escapeXml(text)}</day>`;
     if (dayBlocks.length > 0 && used + block.length > maxChars) break;

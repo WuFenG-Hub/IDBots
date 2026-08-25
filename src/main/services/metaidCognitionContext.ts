@@ -9,6 +9,7 @@ import {
   type HardRelationshipFact,
 } from './metaidRelationshipResolver';
 import { normalizeGlobalMetaID, type GlobalMetaID } from '../shared/globalMetaId';
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 
 const MAX_RECENT_EVIDENCE = 8;
 const MAX_PROMPT_CHARS = 6_000;
@@ -62,8 +63,10 @@ function text(value: unknown): string {
 }
 
 function truncate(value: unknown, maxLength: number): string {
-  const normalized = text(value);
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength).trim()}…` : normalized;
+  // Group-cognition prompt chokepoint: dream/impression free text renders
+  // here, so sanitize stored pollution AND cut surrogate-safe (llmSafeText).
+  const normalized = stripLoneSurrogates(text(value));
+  return normalized.length > maxLength ? `${truncateUtf16Units(normalized, maxLength).trim()}…` : normalized;
 }
 
 function normalizeEvidence(evidence: MetaIDExperienceEvidence): MetaIDCognitionEvidenceRef {
@@ -259,7 +262,7 @@ export class MetaIDCognitionContextService {
     const rendered = lines.join('\n');
     return rendered.length <= maxTotalChars
       ? rendered
-      : `${rendered.slice(0, Math.max(0, maxTotalChars - 1)).trim()}…`;
+      : `${truncateUtf16Units(rendered, Math.max(0, maxTotalChars - 1)).trim()}…`;
   }
 }
 

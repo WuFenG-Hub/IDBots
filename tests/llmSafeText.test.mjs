@@ -17,11 +17,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import Module from 'node:module'
+import fs from 'node:fs'
 
 const require = Module.createRequire(import.meta.url)
 
 // eslint-disable-next-line no-misleading-character-class
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+function readSource(relativePath) {
+  return fs.readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8')
+}
 
 function loadModules() {
   const originalLoad = Module._load
@@ -43,6 +48,7 @@ function loadModules() {
       twinWorkerDirectoryService: require('../dist-electron/main/services/twinWorkerDirectoryService.js'),
       coworkDshTurn: require('../dist-electron/main/libs/coworkDshTurn.js'),
       coworkToolResultSnip: require('../dist-electron/main/libs/coworkToolResultSnip.js'),
+      experiencePromptBlocks: require('../dist-electron/main/libs/experiencePromptBlocks.js'),
     }
   } finally {
     Module._load = originalLoad
@@ -205,4 +211,39 @@ test('tool-result snipping: head/tail cuts never strand surrogate halves', () =>
   const snipPlain = snip(plain)
   assert.match(snipPlain, /\[snipped tool result/)
   assert.equal(LONE_SURROGATE_RE.test(snipPlain), false)
+})
+
+test('read-side pollution coverage: stored rows are sanitized before prompts (review round 3)', async () => {
+  // Behavioral: the exported dream-daily block sanitizes a polluted summary.
+  const { buildRecentDailySummariesBlock } = loadModules().experiencePromptBlocks
+  const pollutedBlock = buildRecentDailySummariesBlock([
+    { summaryDate: '2026-08-20', summaryText: 'helped the owner ship a release \uD83C and wrote docs' },
+  ])
+  assert.equal(LONE_SURROGATE_RE.test(pollutedBlock), false)
+  assert.match(pollutedBlock, /helped the owner ship a release/)
+
+  // Static anchors for the non-exported read-side chokepoints.
+  const coworkStore = readSource('src/main/coworkStore.ts')
+  assert.match(
+    coworkStore,
+    /text: stripLoneSurrogates\(row\.text \?\? ''\)/,
+    'mapMemoryRow must sanitize stored memory text on read (user_memories prompt path)',
+  )
+  const cognition = readSource('src/main/services/metaidCognitionContext.ts')
+  assert.match(
+    cognition,
+    /const normalized = stripLoneSurrogates\(text\(value\)\)/,
+    'group-cognition truncate must sanitize dream/impression free text',
+  )
+  assert.match(
+    cognition,
+    /truncateUtf16Units\(rendered, Math\.max\(0, maxTotalChars - 1\)\)/,
+    'group-cognition rendered cap must cut surrogate-safe',
+  )
+  const openTeam = readSource('src/main/services/openTeamService.ts')
+  assert.match(
+    openTeam,
+    /const goal = stripLoneSurrogates\(task\.goal\)/,
+    'open-team invite goal must strip on EVERY branch, not only over-cap',
+  )
 })
