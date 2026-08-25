@@ -24,6 +24,7 @@
  */
 
 import { estimateCoworkTextTokens } from './coworkContextBudget';
+import { truncateUtf16Units, truncateUtf16UnitsFromEnd } from './llmSafeText';
 
 /** Marker prefix injected into every snipped tool_result; doubles as the idempotency guard. */
 export const COWORK_TOOL_RESULT_SNIP_MARKER = '[snipped tool result';
@@ -122,9 +123,13 @@ function shouldSnipText(text: string): boolean {
 }
 
 function buildSnippedText(text: string): string {
-  const head = text.slice(0, COWORK_TOOL_RESULT_SNIP_HEAD_CHARS);
-  const tail = text.slice(text.length - COWORK_TOOL_RESULT_SNIP_TAIL_CHARS);
-  const omitted = text.slice(COWORK_TOOL_RESULT_SNIP_HEAD_CHARS, text.length - COWORK_TOOL_RESULT_SNIP_TAIL_CHARS);
+  // Surrogate-safe cuts: a head/tail slicing through an emoji pair would
+  // strand a lone surrogate in the rewired message — corrupting the very
+  // request bytes snipping is meant to keep stable (and 400'ing strict
+  // upstream JSON parsers). Identical inputs still produce identical bytes.
+  const head = truncateUtf16Units(text, COWORK_TOOL_RESULT_SNIP_HEAD_CHARS);
+  const tail = truncateUtf16UnitsFromEnd(text, COWORK_TOOL_RESULT_SNIP_TAIL_CHARS);
+  const omitted = text.slice(head.length, text.length - tail.length);
   const omittedBytes = Buffer.byteLength(omitted, 'utf8');
   return `${head}\n${COWORK_TOOL_RESULT_SNIP_MARKER} — ${omittedBytes} bytes omitted; re-read or re-run if needed]\n${tail}`;
 }

@@ -6,6 +6,8 @@
 // already ran on DSH stays on DSH (its handle is stored with the `dsh:`
 // prefix in cowork_sessions.claudeSessionId).
 
+import { truncateUtf16Units } from './llmSafeText';
+
 export const DSH_SESSION_PREFIX = 'dsh:'
 
 export type CoworkKernelChoice = 'dsh' | 'unavailable'
@@ -74,7 +76,7 @@ export function buildClaudeToDshHandoff(
     const text = String(message.content ?? '').replace(/\s+/g, ' ').trim();
     if (!text) continue;
     const role = message.type === 'user' ? 'User' : 'Assistant';
-    const clipped = text.length > HANDOFF_LINE_CHARS ? `${text.slice(0, HANDOFF_LINE_CHARS - 1)}…` : text;
+    const clipped = text.length > HANDOFF_LINE_CHARS ? `${truncateUtf16Units(text, HANDOFF_LINE_CHARS - 1)}…` : text;
     const line = `${role}: ${clipped}`;
     if (used + line.length + 1 > HANDOFF_MAX_CHARS) break;
     lines.push(line);

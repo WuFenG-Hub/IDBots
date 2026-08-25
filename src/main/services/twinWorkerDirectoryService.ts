@@ -1,4 +1,5 @@
 import type { Metabot } from '../types/metabot';
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 
 export interface TwinWorkerDirectorySession {
   id: string;
@@ -84,9 +85,11 @@ const ROSTER_SKILLS_CAP = 8;
 const IMPRESSION_SUMMARY_CAP = 240;
 
 function boundedText(value: string | null | undefined, maxLength = MAX_TEXT_LENGTH): string | null {
-  const text = String(value ?? '').trim();
+  // Roster/directory fields ride the Twin system prompt — the cut must never
+  // split a surrogate pair (llmSafeText header for the DeepSeek 400 mode).
+  const text = stripLoneSurrogates(String(value ?? '').trim());
   if (!text) return null;
-  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+  return text.length <= maxLength ? text : `${truncateUtf16Units(text, maxLength - 1)}…`;
 }
 
 function normalizedList(values: string[] | null | undefined): string[] {
@@ -94,9 +97,9 @@ function normalizedList(values: string[] | null | undefined): string[] {
 }
 
 function capText(value: string | null | undefined, maxLength: number): string {
-  const text = String(value ?? '').trim();
+  const text = stripLoneSurrogates(String(value ?? '').trim());
   if (!text) return '';
-  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+  return text.length <= maxLength ? text : `${truncateUtf16Units(text, maxLength - 1)}…`;
 }
 
 export function authorizeTwinSession(

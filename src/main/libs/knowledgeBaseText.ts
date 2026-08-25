@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { truncateUtf16Units } from './llmSafeText';
 import {
   extractDocxText,
   extractEpubText,
@@ -264,7 +265,7 @@ export function chunkKnowledgeBaseText(
 export function buildKbCitationSnippet(text: string, maxChars: number = KB_SNIPPET_MAX_CHARS): string {
   const normalized = cleanKnowledgeBaseText(text);
   if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, maxChars - 1)}…`;
+  return `${truncateUtf16Units(normalized, maxChars - 1)}…`;
 }
 
 function cjkBigramsOf(text: string): string[] {

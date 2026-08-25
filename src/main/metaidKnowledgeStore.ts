@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import { tokenizeKnowledgeBaseText } from './libs/knowledgeBaseText';
+import { truncateUtf16Units } from './libs/llmSafeText';
 
 /**
  * Knowledge-point anchored memory ("经验/知识点").
@@ -405,7 +406,7 @@ function normalizeTags(value: unknown): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
   for (const raw of value) {
-    const tag = asText(raw).slice(0, MAX_TAG_LEN);
+    const tag = truncateUtf16Units(asText(raw), MAX_TAG_LEN);
     if (!tag || seen.has(tag.toLowerCase())) continue;
     seen.add(tag.toLowerCase());
     result.push(tag);
@@ -534,7 +535,7 @@ function normalizeStringArray(value: unknown, maxItems: number, maxItemLength: n
   if (!Array.isArray(value)) return [];
   const result: string[] = [];
   for (const raw of value) {
-    const item = asText(raw).slice(0, maxItemLength);
+    const item = truncateUtf16Units(asText(raw), maxItemLength);
     if (item) result.push(item);
     if (result.length >= maxItems) break;
   }

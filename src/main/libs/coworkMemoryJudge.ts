@@ -1,6 +1,7 @@
 import { resolveCurrentApiConfig } from './claudeSettings';
 import type { CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
 import { isQuestionLikeMemoryText } from './coworkMemoryExtractor';
+import { truncateUtf16Units } from './llmSafeText';
 
 const FACTUAL_PROFILE_RE = /(我叫|我是|我的名字|我名字|我来自|我住在|我的职业|我有(?!\s*(?:一个|个)?问题)|我养了|我喜欢|我偏好|我习惯|\bmy\s+name\s+is\b|\bi\s+am\b|\bi['’]?m\b|\bi\s+live\s+in\b|\bi['’]?m\s+from\b|\bi\s+work\s+as\b|\bi\s+have\b|\bi\s+prefer\b|\bi\s+like\b|\bi\s+usually\b)/i;
 const TRANSIENT_RE = /(今天|昨日|昨天|刚刚|刚才|本周|本月|临时|暂时|这次|当前|today|yesterday|this\s+week|this\s+month|temporary|for\s+now)/i;
@@ -206,7 +207,7 @@ async function judgeWithLlm(
   if (!config) return null;
 
   const url = buildAnthropicMessagesUrl(config.baseURL);
-  const normalizedText = normalizeText(input.text).slice(0, LLM_INPUT_MAX_CHARS);
+  const normalizedText = truncateUtf16Units(normalizeText(input.text), LLM_INPUT_MAX_CHARS);
   if (!normalizedText) return null;
 
   const controller = new AbortController();

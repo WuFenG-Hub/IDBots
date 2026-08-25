@@ -95,6 +95,26 @@ export function isOfficialDeepSeekRoute(provider: Pick<DshTurnProviderRoute, 'ke
 }
 
 /**
+ * True when the route rides the first-party dsh-llm-deepseek adapter. That
+ * adapter speaks the OFFICIAL chat-completions dialect (thinking /
+ * reasoning_effort ladder, root-path `/chat/completions` after the config
+ * generator strips `/v1`), so it is only valid against api.deepseek.com. A
+ * provider keyed 'deepseek' with a custom base URL — proxy relays preserved
+ * by the model-settings migration, which hides the field but keeps stored
+ * values — must stay on the generic pi-ai route: the official dialect sent
+ * to an OpenAI-compatible relay is an HTTP 400 the relay reports without
+ * DeepSeek's `{"error":{...}}` body, surfacing as the generic
+ * "DeepSeek API error (HTTP 400)" turn failure.
+ */
+export function isNativeDeepSeekChatRoute(
+  route: { provider?: string | null; baseUrl?: string | null; apiFormat?: string | null },
+): boolean {
+  return route.provider === 'deepseek'
+    && route.apiFormat !== 'anthropic'
+    && hostnameOf(String(route.baseUrl ?? '')) === 'api.deepseek.com'
+}
+
+/**
  * Normalize any DeepSeek provider base URL onto the Anthropic-compatible root
  * the web-search provider expects (`/messages` is appended by the package):
  * `https://api.deepseek.com` / `.../v1` / `.../anthropic` / `.../responses`-style

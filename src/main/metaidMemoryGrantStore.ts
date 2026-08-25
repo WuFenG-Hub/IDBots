@@ -5,6 +5,7 @@ import {
   type GlobalMetaID,
 } from './shared/globalMetaId';
 import type { SqliteDatabase as Database } from './sqliteTypes';
+import { truncateUtf16Units } from './libs/llmSafeText';
 
 export const METAID_MEMORY_GRANT_CAPABILITIES = [
   'read_summary',
@@ -132,7 +133,7 @@ function asNumber(value: unknown, fieldName: string): number {
 function asBoundedText(value: unknown, fieldName: string, maxLength: number): string {
   const normalized = typeof value === 'string' ? value.trim() : '';
   if (!normalized) throw new Error(`${fieldName} must be a non-empty string`);
-  return normalized.length > maxLength ? normalized.slice(0, maxLength) : normalized;
+  return normalized.length > maxLength ? truncateUtf16Units(normalized, maxLength) : normalized;
 }
 
 function parseJsonArray<T>(value: string): T[] {

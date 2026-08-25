@@ -4,6 +4,7 @@ import {
   estimateCoworkTextTokens,
   shouldIncludeCoworkContextMessage,
 } from './coworkContextBudget';
+import { truncateUtf16Units } from './llmSafeText';
 
 const DEFAULT_RECENT_MESSAGES = 16;
 const DEFAULT_SUMMARY_CHARS = 12_000;
@@ -35,9 +36,9 @@ function truncateText(value: string, maxChars: number): string {
     return value;
   }
   if (maxChars <= 16) {
-    return value.slice(0, Math.max(0, maxChars));
+    return truncateUtf16Units(value, Math.max(0, maxChars));
   }
-  return `${value.slice(0, maxChars - 16).trimEnd()}... [truncated]`;
+  return `${truncateUtf16Units(value, maxChars - 16).trimEnd()}... [truncated]`;
 }
 
 function toKbLabel(charCount: number): string {
