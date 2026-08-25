@@ -1,7 +1,8 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
 import { PaperClipIcon, XMarkIcon, SparklesIcon, ChevronDownIcon, PlusIcon, PuzzlePieceIcon, CommandLineIcon } from '@heroicons/react/24/outline';
+import { placePopoverAbove } from '../../utils/anchoredPopover';
 import ModelEffortPicker, { type ModelEffortValue } from '../ModelEffortPicker';
 import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
@@ -134,6 +135,8 @@ interface PlusMenuButtonProps {
   onUseCommand: () => void;
 }
 
+const PLUS_MENU_WIDTH = 256; // w-64
+
 /**
  * The composer's '+' trigger with its quick-action menu (add attachment /
  * use a skill / pick a '/' command), ported from the DSH composer layout:
@@ -151,8 +154,37 @@ const PlusMenuButton: React.FC<PlusMenuButtonProps> = ({
   onUseCommand,
 }) => {
   const itemClass = 'w-full flex items-center gap-3 px-3 py-2 text-left text-sm dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors';
+  // The menu floats with position:fixed above the trigger so it escapes
+  // overflow-hidden ancestors (the Bot Browser sidebar); same placement
+  // pattern as the SkillsPopover anchored to this very button.
+  const [menuStyle, setMenuStyle] = useState<React.CSSProperties | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuStyle(null);
+      return;
+    }
+    const updatePlacement = () => {
+      const anchorRect = buttonRef.current?.getBoundingClientRect() ?? null;
+      const menuRect = menuRef.current?.getBoundingClientRect();
+      const placement = placePopoverAbove(
+        anchorRect,
+        menuRect ? { width: menuRect.width, height: menuRect.height } : { width: PLUS_MENU_WIDTH },
+        PLUS_MENU_WIDTH,
+      );
+      setMenuStyle({ position: 'fixed', top: placement.top, left: placement.left, width: placement.width });
+    };
+    updatePlacement();
+    window.addEventListener('resize', updatePlacement);
+    window.addEventListener('scroll', updatePlacement, true);
+    return () => {
+      window.removeEventListener('resize', updatePlacement);
+      window.removeEventListener('scroll', updatePlacement, true);
+    };
+  }, [open, buttonRef, menuRef]);
+
   return (
-    <div className="relative">
+    <div className="relative shrink-0">
       <button
         ref={buttonRef}
         type="button"
@@ -169,7 +201,8 @@ const PlusMenuButton: React.FC<PlusMenuButtonProps> = ({
         <div
           ref={menuRef}
           role="menu"
-          className="absolute left-0 bottom-full mb-2 z-50 w-64 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg shadow-lg overflow-hidden py-1"
+          className="fixed z-50 w-64 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg shadow-lg overflow-hidden py-1"
+          style={menuStyle ?? { visibility: 'hidden' }}
         >
           {showAttachment && (
             <button type="button" role="menuitem" onClick={onAddAttachment} className={itemClass}>
@@ -470,7 +503,9 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
   // ----- Slash commands (DSH-style '+' menu / picker / claim token) -----
 
-  const commandsEnabled = isLarge && !disabled && commands !== undefined && commands.length > 0;
+  // Any size composer can carry commands: the large home/session composers
+  // and the normal Bot Browser panel alike.
+  const commandsEnabled = !disabled && commands !== undefined && commands.length > 0;
   const slashQuery = commandsEnabled && !isStreaming ? slashQueryOf(value) : null;
   const commandPickerOpen = slashQuery !== null && !commandPickerDismissed;
   const filteredCommands = React.useMemo(
@@ -1297,6 +1332,17 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
           </>
         ) : (
           <>
+            <PlusMenuButton
+              open={plusMenuOpen}
+              showAttachment={showAttachmentButton}
+              showCommands={commandsEnabled}
+              buttonRef={plusButtonRef}
+              menuRef={plusMenuRef}
+              onToggle={() => setPlusMenuOpen(!plusMenuOpen)}
+              onAddAttachment={handlePlusMenuAddAttachment}
+              onUseSkill={handlePlusMenuUseSkill}
+              onUseCommand={handlePlusMenuUseCommand}
+            />
             <textarea
               ref={textareaRef}
               value={value}
@@ -1309,20 +1355,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               rows={1}
               className={textareaClass}
             />
-
-            <div className="flex items-center gap-1">
-              <PlusMenuButton
-                open={plusMenuOpen}
-                showAttachment={showAttachmentButton}
-                showCommands={commandsEnabled}
-                buttonRef={plusButtonRef}
-                menuRef={plusMenuRef}
-                onToggle={() => setPlusMenuOpen(!plusMenuOpen)}
-                onAddAttachment={handlePlusMenuAddAttachment}
-                onUseSkill={handlePlusMenuUseSkill}
-                onUseCommand={handlePlusMenuUseCommand}
-              />
-            </div>
 
             {showStopButton ? (
               <button
