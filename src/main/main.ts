@@ -3546,6 +3546,9 @@ const startSqliteDaemons = (): void => {
     // "search + invite a remote bot" as a subtask after the chair invited.
     getOpenTeamMembershipStore,
     orchestrationBridge: getGroupTaskOrchestrationBridge(),
+    // P1-2: the daemon's stuck-session reclaim stops the inert worker session
+    // through the runner (working directory + artifacts preserved).
+    stopWorkerSession: (sessionId) => getCoworkRunner().stopSession(sessionId, { finalStatus: 'stopped' }),
     performChat: performChatCompletionForOrchestrator,
     postGroupTaskMessage: (taskId, metabotId, content, opts) => postGroupTaskMessage(taskId, metabotId, content, opts),
     getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),

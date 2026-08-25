@@ -549,6 +549,134 @@ test('R6: stale [WORKING] local worker → timeout status + L3 owner brief (idem
   }
 });
 
+test('P1-2: fresh cowork-session activity exempts a silent long-task worker from unreachable/timeout', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Stale [WORKING] signal (2 min old, past the 1-min test windows)…
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-live-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const staleId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['working-stale-live-i0'])[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, staleId);
+    // …but the worker's cowork session shows FRESH tool activity (long task
+    // running) — the member must not be flagged or reclaimed.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'active long-task member keeps its working status');
+    assert.equal(stoppedSessions.length, 0, 'no reclaim while the session is active');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P2-2: a valid [WORKING long-task] heartbeat lease exempts a silent worker', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-hb-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const staleId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['working-stale-hb-i0'])[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, staleId);
+    // Heartbeat lease valid for another 30 min (normally written by the
+    // [WORKING long-task, ETA N min] protocol marker handler).
+    h.store.set('group_task_working_heartbeat:1:2', String(startMs + 30 * 60_000));
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'heartbeat-leased member keeps its working status');
+    assert.equal(stoppedSessions.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-2/P1-3: a genuinely inert worker session is reclaimed once per streak (stop + chair directive)', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-dead-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const staleId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['working-stale-dead-i0'])[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, staleId);
+    // Session exists but its last activity is an hour old — the stuck case.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'unreachable', 'inert member is flagged');
+    assert.deepEqual(stoppedSessions, [session.id], 'stuck session stopped (cwd/artifacts preserved by stopSession)');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), '1', 'reclaim recorded');
+
+    // Idempotent: a second tick does not stop again.
+    await h.loop.runTick();
+    assert.equal(stoppedSessions.length, 1, 'reclaim fires once per streak');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('classifyMemberLiveness: heartbeat lease, speech, and session activity each keep a member alive', () => {
+  const { classifyMemberLiveness } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const nowMs = 1_700_000_000_000;
+  const thresholdMs = 20 * 60_000;
+  // everything absent → stale
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: null, lastSessionActivityMs: null, heartbeatUntilMs: null, nowMs, thresholdMs,
+  }), 'stale');
+  // valid heartbeat lease → alive even with nothing else
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: null, lastSessionActivityMs: null, heartbeatUntilMs: nowMs + 10 * 60_000, nowMs, thresholdMs,
+  }), 'alive');
+  // expired lease → stale
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: null, lastSessionActivityMs: null, heartbeatUntilMs: nowMs - 1, nowMs, thresholdMs,
+  }), 'stale');
+  // fresh speech → alive
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: nowMs - 5 * 60_000, lastSessionActivityMs: null, heartbeatUntilMs: null, nowMs, thresholdMs,
+  }), 'alive');
+  // fresh session activity (the long-task case) → alive
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: nowMs - 60 * 60_000, lastSessionActivityMs: nowMs - 60_000, heartbeatUntilMs: null, nowMs, thresholdMs,
+  }), 'alive');
+  // old everything → stale
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: nowMs - 60 * 60_000, lastSessionActivityMs: nowMs - 60 * 60_000, heartbeatUntilMs: null, nowMs, thresholdMs,
+  }), 'stale');
+});
+
 test('cursor advances on no-reply messages; a failing message holds the batch (fail-stop) until it recovers', async () => {
   // Cooldowns off: this test isolates the fail-stop/retry ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
