@@ -8,6 +8,8 @@
  * anchor's `getBoundingClientRect()`.
  */
 
+import React from 'react';
+
 export type PopoverPlacement = {
   top: number;
   left: number;
@@ -77,9 +79,55 @@ export function placePopoverAbove(
   const bottomEdge = anchorTop - gap;
   // top = bottomEdge - height. If we don't have a height yet, fall back to
   // placing the bottom edge near the anchor (browsers will lay out downward).
-  const top = popoverSize.height
+  const unclampedTop = popoverSize.height
     ? bottomEdge - popoverSize.height
-    : Math.max(bottomEdge - 200, MARGIN);
+    : bottomEdge - 200;
+  // In a short viewport the computed top can be negative; keep the popover's
+  // top edge inside the window (it may then overlap the anchor, which is
+  // still readable — being pushed out of the window is not).
+  const top = Math.max(MARGIN, unclampedTop);
 
   return { top: Math.round(top), left: Math.round(left), width: Math.round(width) };
+}
+
+/**
+ * Keep an anchored popover glued to its anchor while the anchor MOVES. Resize
+ * and scroll listeners only catch window-level changes; they miss layout
+ * shifts inside the sidebar (sidebar width drag, the composer textarea
+ * auto-growing and pushing the toolbar up). A ResizeObserver on the anchor
+ * cannot catch those either — the anchor's own box does not change, only its
+ * position does. So while the popover is open we watch the anchor's rect on
+ * every animation frame and re-place when it actually moved.
+ */
+export function useAnchorMoveWatcher(
+  anchorRef: React.RefObject<HTMLElement | null>,
+  enabled: boolean,
+  onMove: () => void,
+): void {
+  React.useEffect(() => {
+    if (!enabled) return;
+    let frame = 0;
+    let last: { left: number; top: number; width: number; height: number } | null = null;
+    const tick = () => {
+      const rect = anchorRef.current?.getBoundingClientRect();
+      if (rect) {
+        const snapshot = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+        if (last && (
+          Math.abs(snapshot.left - last.left) > 0.5
+          || Math.abs(snapshot.top - last.top) > 0.5
+          || Math.abs(snapshot.width - last.width) > 0.5
+          || Math.abs(snapshot.height - last.height) > 0.5
+        )) {
+          onMove();
+          last = snapshot;
+        } else if (!last) {
+          last = snapshot;
+        }
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+    // onMove is expected to be a stable callback (from useCallback).
+  }, [enabled, anchorRef, onMove]);
 }
