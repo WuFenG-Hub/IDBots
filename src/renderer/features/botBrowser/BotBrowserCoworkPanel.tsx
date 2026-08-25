@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useSelector } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { ClockIcon, XMarkIcon, TrashIcon, FolderIcon } from '@heroicons/react/24/outline';
 import ComposeIcon from '../../components/icons/ComposeIcon';
 import MarkdownContent from '../../components/MarkdownContent';
@@ -11,6 +11,7 @@ import ModelEffortPicker from '../../components/ModelEffortPicker';
 import { convertLegacyEffortLevel } from '../../services/modelCatalog';
 import { ActiveSkillBadge } from '../../components/skills';
 import { RootState } from '../../store';
+import { clearActiveSkills } from '../../store/slices/skillSlice';
 import { browserCoworkService } from '../../services/browserCowork';
 import { i18nService } from '../../services/i18n';
 import { getCompactFolderName } from '../../utils/path';
@@ -78,9 +79,11 @@ interface BotBrowserCoworkPanelProps {
  * were about.
  */
 const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSkills, onOpenNewProject }) => {
+  const dispatch = useDispatch();
   const currentSession = useSelector((state: RootState) => state.browserCowork.currentSession);
   const isStreaming = useSelector((state: RootState) => state.browserCowork.isStreaming);
   const sessions = useSelector((state: RootState) => state.cowork.sessions);
+  const activeSkillIds = useSelector((state: RootState) => state.skill.activeSkillIds);
   const [showHistory, setShowHistory] = useState(false);
   const [metabots, setMetabots] = useState<PanelMetabot[]>([]);
   const [selectedMetabotId, setSelectedMetabotId] = useState<number | null>(null);
@@ -155,10 +158,20 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
     }
   }, [visibleMessages.length, isStreaming]);
 
-  const handleSubmit = async (prompt: string) => {
+  const handleSubmit = async (prompt: string, skillPrompt?: string) => {
     setShowHistory(false);
+    // Pinned-skill snapshot, same contract as the home composer: the ids ride
+    // the session (persisted main-side, driving per-skill env overrides), the
+    // inlined `## Skill:` blocks ride the base system prompt, and the pins
+    // clear after submitting so they don't leak into the next turn. Steer
+    // turns carry no skills (the composer already drops the prompt while
+    // streaming).
+    const skillIds = isStreaming ? [] : [...activeSkillIds];
+    const skills = skillIds.length > 0
+      ? { prompt: skillPrompt, activeSkillIds: skillIds }
+      : undefined;
     if (currentSession) {
-      await browserCoworkService.send(prompt);
+      await browserCoworkService.send(prompt, skills);
     } else {
       // Only project/folder selections carry a concrete cwd; bot workspace
       // (and no selection) start in the default bot workspace chain.
@@ -171,8 +184,11 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
         model: pendingModelEffort?.modelId ?? undefined,
         modelProvider: pendingModelEffort?.providerKey ?? undefined,
         effort: pendingModelEffort?.effort ?? undefined,
-      });
+      }, skills);
       setPendingModelEffort(null);
+    }
+    if (skillIds.length > 0) {
+      dispatch(clearActiveSkills());
     }
   };
 

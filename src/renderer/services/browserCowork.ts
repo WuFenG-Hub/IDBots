@@ -16,18 +16,32 @@ import type { CoworkSession } from '../types/cowork';
  * The panel keeps its own current-session pointer in `browserCoworkSlice`;
  * history is derived from the shared `cowork.sessions` list filtered by type.
  */
+/**
+ * Pinned-skill payload for a browser-session turn, mirroring the home
+ * composer's contract (CoworkView.handleStartSession/handleContinueSession):
+ * the inlined `## Skill:` blocks ride the base system prompt, and the ids are
+ * persisted onto the session so per-skill env overrides keep applying.
+ */
+export interface BrowserCoworkSkills {
+  /** Inlined `## Skill:` blocks for the pinned skills (undefined = none). */
+  prompt?: string;
+  /** Store ids of the pinned skills. */
+  activeSkillIds?: string[];
+}
+
 class BrowserCoworkService {
   private starting = false;
 
-  private async buildCombinedSystemPrompt(): Promise<string | undefined> {
+  private async buildCombinedSystemPrompt(skillPrompt?: string): Promise<string | undefined> {
     const config = store.getState().cowork.config;
     // NOTE: the local MetaApp auto-routing prompt (<available_metaapps> →
     // open_metaapp) is deliberately excluded for browser sessions — in this
     // surface apps are opened on-chain via search_metaapps + metaapp:// URIs.
     // Skill routing rules/catalog are composed main-side (SKILLS prompt
-    // section + volatile catalog tail), so only the user's custom prompt is
-    // embedded here.
-    return [config.systemPrompt]
+    // section + volatile catalog tail), so only the user's pinned skill
+    // blocks and custom prompt are embedded here — same split as the home
+    // composer's buildCombinedSystemPrompt.
+    return [skillPrompt, config.systemPrompt]
       .filter((part) => part?.trim())
       .join('\n\n') || undefined;
   }
@@ -37,6 +51,7 @@ class BrowserCoworkService {
     metabotId?: number | null,
     cwd?: string,
     modelEffort?: { model?: string | null; modelProvider?: string | null; effort?: string | null },
+    skills?: BrowserCoworkSkills,
   ): Promise<CoworkSession | null> {
     if (this.starting) return null;
     const cowork = window.electron?.cowork;
@@ -47,7 +62,7 @@ class BrowserCoworkService {
       const fallbackTitle = prompt.split('\n')[0].slice(0, 50) || 'Bot Browser';
       const [generatedTitle, systemPrompt] = await Promise.all([
         coworkService.generateSessionTitle(prompt).catch(() => null),
-        this.buildCombinedSystemPrompt(),
+        this.buildCombinedSystemPrompt(skills?.prompt),
       ]);
       const result = await cowork.startSession({
         prompt,
@@ -55,6 +70,7 @@ class BrowserCoworkService {
         systemPrompt,
         sessionType: 'browser',
         ...(typeof metabotId === 'number' ? { metabotId } : {}),
+        ...(skills?.activeSkillIds?.length ? { activeSkillIds: skills.activeSkillIds } : {}),
         ...(cwd?.trim() ? { cwd: cwd.trim() } : {}),
         ...(modelEffort?.model ? { model: modelEffort.model } : {}),
         ...(modelEffort?.modelProvider ? { modelProvider: modelEffort.modelProvider } : {}),
@@ -74,13 +90,22 @@ class BrowserCoworkService {
     }
   }
 
-  async send(prompt: string): Promise<boolean> {
+  async send(prompt: string, skills?: BrowserCoworkSkills): Promise<boolean> {
     const session = store.getState().browserCowork.currentSession;
     if (!session) return false;
+    // Fresh system prompt only when skills were pinned for this turn;
+    // ordinary turns keep the session's persisted prompt so the cacheable
+    // head never rewrites mid-session (same policy as the home composer's
+    // continue path).
+    const systemPrompt = skills?.activeSkillIds?.length
+      ? await this.buildCombinedSystemPrompt(skills.prompt)
+      : undefined;
     const result = await coworkService.submitInput({
       sessionId: session.id,
       submissionId: crypto.randomUUID(),
       text: prompt,
+      ...(systemPrompt ? { systemPrompt } : {}),
+      ...(skills?.activeSkillIds?.length ? { activeSkillIds: skills.activeSkillIds } : {}),
     });
     return result.success !== false;
   }
