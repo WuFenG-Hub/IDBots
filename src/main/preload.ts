@@ -547,6 +547,33 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('memoryHygiene:setConfig', input),
     runMemoryHygieneNow: () =>
       ipcRenderer.invoke('memoryHygiene:runNow'),
+    listTeamCulture: (input?: {
+      kind?: 'glossary' | 'convention' | 'team_lesson' | 'all';
+      status?: 'active' | 'superseded' | 'archived' | 'all';
+      query?: string;
+      limit?: number;
+      offset?: number;
+    }) =>
+      ipcRenderer.invoke('teamCulture:list', input),
+    upsertTeamCulture: (input: {
+      kind?: 'glossary' | 'convention' | 'team_lesson';
+      topic: string;
+      text: string;
+    }) =>
+      ipcRenderer.invoke('teamCulture:upsert', input),
+    updateTeamCulture: (input: {
+      id: string;
+      kind?: 'glossary' | 'convention' | 'team_lesson';
+      topic?: string;
+      text?: string;
+    }) =>
+      ipcRenderer.invoke('teamCulture:update', input),
+    archiveTeamCulture: (input: { id: string }) =>
+      ipcRenderer.invoke('teamCulture:archive', input),
+    restoreTeamCulture: (input: { id: string }) =>
+      ipcRenderer.invoke('teamCulture:restore', input),
+    deleteTeamCulture: (input: { id: string }) =>
+      ipcRenderer.invoke('teamCulture:delete', input),
     listKnowledge: (input: {
       metabotId: number;
       kind?: 'know_how' | 'pitfall' | 'principle';

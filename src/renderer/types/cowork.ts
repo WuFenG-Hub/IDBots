@@ -593,6 +593,32 @@ export interface MemoryHygieneRunStats {
   errors: string[];
 }
 
+/** Fleet-shared culture entry (Settings → Memory → Team culture). */
+export type TeamCultureKind = 'glossary' | 'convention' | 'team_lesson';
+export type TeamCultureOrigin = 'owner' | 'distillation';
+export type TeamCultureStatus = 'active' | 'superseded' | 'archived';
+
+export interface TeamCultureEntry {
+  id: string;
+  kind: TeamCultureKind;
+  topic: string;
+  topicFingerprint: string;
+  text: string;
+  status: TeamCultureStatus;
+  version: number;
+  origin: TeamCultureOrigin;
+  timesInjected: number;
+  lastUsedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TeamCultureActiveCounts {
+  glossary: number;
+  convention: number;
+  team_lesson: number;
+}
+
 /** Knowledge-point anchored memory entry (Settings → Memory → Knowledge). */
 export type CoworkKnowledgeKind = 'know_how' | 'pitfall' | 'principle';
 export type CoworkKnowledgeStatus = 'active' | 'superseded' | 'archived';

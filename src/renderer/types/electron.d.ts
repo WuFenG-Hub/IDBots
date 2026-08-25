@@ -499,6 +499,31 @@ interface MemoryHygieneRunStats {
   errors: string[];
 }
 
+type TeamCultureKind = 'glossary' | 'convention' | 'team_lesson';
+type TeamCultureOrigin = 'owner' | 'distillation';
+type TeamCultureStatus = 'active' | 'superseded' | 'archived';
+
+interface TeamCultureEntry {
+  id: string;
+  kind: TeamCultureKind;
+  topic: string;
+  topicFingerprint: string;
+  text: string;
+  status: TeamCultureStatus;
+  version: number;
+  origin: TeamCultureOrigin;
+  timesInjected: number;
+  lastUsedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface TeamCultureActiveCounts {
+  glossary: number;
+  convention: number;
+  team_lesson: number;
+}
+
 interface CoworkPermissionRequest {
   sessionId: string;
   toolName: string;
@@ -1122,6 +1147,53 @@ interface IElectronAPI {
     runMemoryHygieneNow: () => Promise<{
       success: boolean;
       stats?: MemoryHygieneRunStats;
+      error?: string;
+    }>;
+    listTeamCulture: (input?: {
+      kind?: TeamCultureKind | 'all';
+      status?: TeamCultureStatus | 'all';
+      query?: string;
+      limit?: number;
+      offset?: number;
+    }) => Promise<{
+      success: boolean;
+      entries?: TeamCultureEntry[];
+      activeCounts?: TeamCultureActiveCounts;
+      error?: string;
+    }>;
+    upsertTeamCulture: (input: {
+      kind?: TeamCultureKind;
+      topic: string;
+      text: string;
+    }) => Promise<{
+      success: boolean;
+      entry?: TeamCultureEntry | null;
+      displacedTopic?: string | null;
+      capacitySkipped?: boolean;
+      error?: string;
+    }>;
+    updateTeamCulture: (input: {
+      id: string;
+      kind?: TeamCultureKind;
+      topic?: string;
+      text?: string;
+    }) => Promise<{
+      success: boolean;
+      entry?: TeamCultureEntry;
+      error?: string;
+    }>;
+    archiveTeamCulture: (input: { id: string }) => Promise<{
+      success: boolean;
+      entry?: TeamCultureEntry;
+      error?: string;
+    }>;
+    restoreTeamCulture: (input: { id: string }) => Promise<{
+      success: boolean;
+      entry?: TeamCultureEntry;
+      error?: string;
+    }>;
+    deleteTeamCulture: (input: { id: string }) => Promise<{
+      success: boolean;
       error?: string;
     }>;
     listKnowledge: (input: {

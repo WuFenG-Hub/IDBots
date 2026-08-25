@@ -59,6 +59,7 @@ import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore'
 import { MetaIDExperienceStore } from './metaidExperienceStore';
 import { MetaIDImpressionStore } from './metaidImpressionStore';
 import { MetaIDKnowledgeStore } from './metaidKnowledgeStore';
+import { TeamCultureStore, type TeamCultureEntry, type TeamCultureKind } from './teamCultureStore';
 import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
 import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
 import { MetaIDContactViewService } from './services/metaidContactViewService';
@@ -2607,6 +2608,7 @@ let serviceOrderStore: ServiceOrderStore | null = null;
 let metaidExperienceStore: MetaIDExperienceStore | null = null;
 let metaidImpressionStore: MetaIDImpressionStore | null = null;
 let metaidKnowledgeStore: MetaIDKnowledgeStore | null = null;
+let teamCultureStore: TeamCultureStore | null = null;
 let knowledgeBaseStore: KnowledgeBaseStore | null = null;
 let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
@@ -3049,6 +3051,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   metaidExperienceStore = null;
   metaidImpressionStore = null;
   metaidKnowledgeStore = null;
+  teamCultureStore = null;
   knowledgeBaseStore = null;
   knowledgeBaseService = null;
   metawebStudyJobStore = null;
@@ -6151,6 +6154,17 @@ const getMetaIDKnowledgeStore = (): MetaIDKnowledgeStore => {
     );
   }
   return metaidKnowledgeStore;
+};
+
+const getTeamCultureStore = (): TeamCultureStore => {
+  if (!teamCultureStore) {
+    const sqliteStore = getStore();
+    teamCultureStore = new TeamCultureStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return teamCultureStore;
 };
 
 const getKnowledgeBaseStore = (): KnowledgeBaseStore => {
@@ -10417,6 +10431,125 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to run memory hygiene',
+      };
+    }
+  });
+
+  // ==================== Team Culture IPC Handlers ====================
+  // Fleet-shared coordination prior (glossary / conventions / lessons).
+
+  ipcMain.handle('teamCulture:list', async (_event, input?: {
+    kind?: TeamCultureKind | 'all';
+    status?: 'active' | 'superseded' | 'archived' | 'all';
+    query?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    try {
+      const store = getTeamCultureStore();
+      const entries = store.listCulture({
+        kind: input?.kind ?? 'all',
+        status: input?.status ?? 'all',
+        query: input?.query,
+        limit: input?.limit,
+        offset: input?.offset,
+      });
+      return { success: true, entries, activeCounts: store.countCultureByKind('active') };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list team culture',
+      };
+    }
+  });
+
+  ipcMain.handle('teamCulture:upsert', async (_event, input: {
+    kind?: TeamCultureKind;
+    topic: string;
+    text: string;
+  }) => {
+    try {
+      const store = getTeamCultureStore();
+      const result = store.upsertCulture({
+        kind: input?.kind,
+        topic: input?.topic,
+        text: input?.text,
+        origin: 'owner',
+      });
+      return {
+        success: true,
+        entry: result.entry,
+        displacedTopic: result.displacedTopic,
+        capacitySkipped: result.capacitySkipped,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to save team culture entry',
+      };
+    }
+  });
+
+  ipcMain.handle('teamCulture:update', async (_event, input: {
+    id: string;
+    kind?: TeamCultureKind;
+    topic?: string;
+    text?: string;
+  }) => {
+    try {
+      const store = getTeamCultureStore();
+      const entry: TeamCultureEntry | null = store.updateCulture({
+        id: input?.id,
+        kind: input?.kind,
+        topic: input?.topic,
+        text: input?.text,
+      });
+      if (!entry) {
+        return { success: false, error: 'Team culture entry not found' };
+      }
+      return { success: true, entry };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to update team culture entry',
+      };
+    }
+  });
+
+  ipcMain.handle('teamCulture:archive', async (_event, input: { id: string }) => {
+    try {
+      const entry = getTeamCultureStore().archiveCulture(input?.id);
+      if (!entry) return { success: false, error: 'Team culture entry not found' };
+      return { success: true, entry };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to archive team culture entry',
+      };
+    }
+  });
+
+  ipcMain.handle('teamCulture:restore', async (_event, input: { id: string }) => {
+    try {
+      const entry = getTeamCultureStore().restoreCulture(input?.id);
+      if (!entry) return { success: false, error: 'Team culture entry not found' };
+      return { success: true, entry };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to restore team culture entry',
+      };
+    }
+  });
+
+  ipcMain.handle('teamCulture:delete', async (_event, input: { id: string }) => {
+    try {
+      const removed = getTeamCultureStore().deleteCulture(input?.id);
+      return { success: removed };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to delete team culture entry',
       };
     }
   });
