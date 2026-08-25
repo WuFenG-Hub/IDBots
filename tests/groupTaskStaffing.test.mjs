@@ -10,6 +10,7 @@ const {
   resolveStaffingOwnerGate,
   splitSessionMessagesForStaffingGate,
   buildStaffingSlateText,
+  normalizeStaffingPlan,
   isStaffingProposalExpired,
   isLocalOnlySmallSlate,
   GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS,
@@ -135,8 +136,8 @@ const remoteSeat = (role, name) => ({
   reason: 'online',
 });
 
-test('isLocalOnlySmallSlate: all-local and under the cap, remote or big slates excluded', () => {
-  assert.equal(GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS, 5);
+test('isLocalOnlySmallSlate: all-local at or under the cap, empty/remote/big slates excluded', () => {
+  assert.equal(GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS, 4);
   const fourLocal = {
     stages: [],
     seats: [
@@ -160,6 +161,26 @@ test('isLocalOnlySmallSlate: all-local and under the cap, remote or big slates e
     seats: [localSeat('content', 'A'), remoteSeat('design', 'B')],
   };
   assert.equal(isLocalOnlySmallSlate(withRemote), false);
+  // An empty slate must not vacuous-truth into a chair-only auto-start.
+  assert.equal(isLocalOnlySmallSlate({ stages: [], seats: [] }), false);
+});
+
+test('normalizeStaffingPlan: a missing source label falls back to the global meta id', () => {
+  const remote = normalizeStaffingPlan({ stages: [], seats: [
+    {
+      role: 'design',
+      candidateName: 'Remote Artist',
+      candidateGlobalMetaId: 'idq1remotea00000000000000000000000000000',
+    },
+  ]});
+  assert.equal(remote.seats[0].source, 'remote');
+  assert.equal(isLocalOnlySmallSlate(remote), false);
+  // A local seat (no global meta id) with a missing source stays local.
+  const local = normalizeStaffingPlan({ stages: [], seats: [
+    { role: 'content', candidateName: 'Coder Bot' },
+  ]});
+  assert.equal(local.seats[0].source, 'local');
+  assert.equal(isLocalOnlySmallSlate(local), true);
 });
 
 test('a local-only small slate auto-starts instead of awaiting the owner', () => {
@@ -181,6 +202,39 @@ test('an owner revise beats the local-only auto-start', () => {
       localSmallSlate: true,
     }),
     { allowed: false, decision: 'owner_revise' },
+  );
+});
+
+test('an owner cancel is classified and blocks create even under a waiver', () => {
+  for (const cancelReply of ['算了', '别开了', '不开了', '取消吧', '算了，不开了', 'never mind', 'cancel it']) {
+    assert.equal(classifyOwnerStaffingReply(cancelReply), 'cancel', cancelReply);
+  }
+  // "算了，就这些人吧" is a confirm; "取消确认" is not a whole-decision cancel.
+  assert.equal(classifyOwnerStaffingReply('算了，就这些人吧'), 'confirm');
+  assert.equal(classifyOwnerStaffingReply('取消确认'), 'unknown');
+
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['算了，不开了'],
+      localSmallSlate: true,
+    }),
+    { allowed: false, decision: 'owner_cancel' },
+  );
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '开个群任务做技能介绍，不用确认直接开',
+      repliesAfterPropose: ['cancel this'],
+    }),
+    { allowed: false, decision: 'owner_cancel' },
+  );
+  // Last decisive reply wins: a confirm after a cancel re-authorizes.
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['算了', '确认人选'],
+    }),
+    { allowed: true, decision: 'owner_confirmed' },
   );
 });
 
@@ -206,6 +260,7 @@ test('slate tail-line explains the all-local small-team auto-start', () => {
   assert.match(zh, /无需确认/);
   assert.match(zh, /本机/);
   assert.doesNotMatch(zh, /你已经说了不用确认人选/);
+  assert.doesNotMatch(zh, /现在说/);
   const en = buildStaffingSlateText({
     title: 'Skill intro',
     goal: 'Write it',
@@ -216,4 +271,5 @@ test('slate tail-line explains the all-local small-team auto-start', () => {
   });
   assert.match(en, /all local and small/i);
   assert.doesNotMatch(en, /You asked to skip roster confirmation/);
+  assert.doesNotMatch(en, /Speak up now/i);
 });

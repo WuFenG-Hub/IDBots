@@ -1376,6 +1376,41 @@ test('an owner revise reply blocks the all-local auto-start', async () => {
   }
 });
 
+test('an owner cancel reply blocks the all-local auto-start', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: contentPlan(),
+      sourceSessionId: 'session-local-cancel',
+    });
+    assert.equal(proposed.ownerConfirmRequired, false);
+    messages.push({
+      type: 'user',
+      content: '算了，不开了',
+      timestamp: proposed.proposal.createdAt + 10,
+    });
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-local-cancel',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'OWNER_CANCEL_REQUIRED',
+    );
+    assert.equal(h.calls.create.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('Twin create joins local seats only and returns pending remote seats', async () => {
   const h = await createHarness();
   try {
