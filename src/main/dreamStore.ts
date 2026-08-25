@@ -987,11 +987,11 @@ export class DreamStore {
   }
 
   /**
-   * Hygiene retention for dream bookkeeping: completed runs and their
-   * fragment caches older than the cutoff date key are physically removed.
-   * The dream scheduler only looks back DREAM_LOOKBACK_DAYS (7), so purged
-   * dates can never become due again — the rows are pure bookkeeping after
-   * that. Non-completed runs are always kept (they still drive retries).
+   * Hygiene retention for dream bookkeeping: terminal runs (completed AND
+   * failed — failed rows still drive retries, but only inside the 7-day
+   * lookback, so past the horizon they are dead weight) and their fragment
+   * caches older than the cutoff date key are physically removed. Running
+   * rows are always kept: they may belong to an in-flight dream.
    */
   purgeOldRunsAndFragments(input: {
     cutoffDateKey: string;
@@ -1008,7 +1008,7 @@ export class DreamStore {
     try {
       this.db.run(
         `DELETE FROM metabot_dream_runs
-         WHERE status = 'completed' AND dream_date < ?${metabotExclusion}`,
+         WHERE status IN ('completed', 'failed') AND dream_date < ?${metabotExclusion}`,
         [cutoffDate, ...excluded],
       );
       const runsDeleted = this.db.getRowsModified?.() || 0;

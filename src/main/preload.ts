@@ -494,10 +494,30 @@ contextBridge.exposeInMainWorld('electron', {
       query?: string;
       status?: 'created' | 'stale' | 'deleted' | 'all';
       includeDeleted?: boolean;
+      includeArchived?: boolean;
       limit?: number;
       offset?: number;
     }) =>
       ipcRenderer.invoke('cowork:memory:listEntries', input),
+    unarchiveMemoryEntry: (input: { id: string }) =>
+      ipcRenderer.invoke('cowork:memory:unarchiveEntry', input),
+    onMemoryHygieneStatusChanged: (callback: (stats: {
+      dateKey: string;
+      ranAt: number;
+      trigger: 'scheduled' | 'manual';
+      counts: Record<string, number>;
+      errors: string[];
+    }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, stats: {
+        dateKey: string;
+        ranAt: number;
+        trigger: 'scheduled' | 'manual';
+        counts: Record<string, number>;
+        errors: string[];
+      }) => callback(stats);
+      ipcRenderer.on('memoryHygiene:statusChanged', handler);
+      return () => ipcRenderer.removeListener('memoryHygiene:statusChanged', handler);
+    },
     createMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;

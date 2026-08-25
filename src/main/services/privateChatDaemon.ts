@@ -1379,6 +1379,8 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
         includeDeleted: false,
         limit: Math.max(params.limit, 12),
         offset: 0,
+        // Injection IS the usage event for the hygiene decay clock.
+        touchLastUsed: true,
       });
   const contactEntries = resolved.writeScope.kind === 'contact'
     ? params.memoryBackend.listUserMemories({
@@ -1388,6 +1390,7 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
         includeDeleted: false,
         limit: params.limit,
         offset: 0,
+        touchLastUsed: true,
       })
     : [];
   const conversationEntries = resolved.writeScope.kind === 'conversation'
@@ -1398,6 +1401,7 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
         includeDeleted: false,
         limit: params.limit,
         offset: 0,
+        touchLastUsed: true,
       })
     : [];
 

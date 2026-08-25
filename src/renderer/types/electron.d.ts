@@ -1113,9 +1113,12 @@ interface IElectronAPI {
       query?: string;
       status?: 'created' | 'stale' | 'deleted' | 'all';
       includeDeleted?: boolean;
+      includeArchived?: boolean;
       limit?: number;
       offset?: number;
     }) => Promise<{ success: boolean; entries?: CoworkUserMemoryEntry[]; error?: string }>;
+    unarchiveMemoryEntry: (input: { id: string }) => Promise<{ success: boolean; error?: string }>;
+    onMemoryHygieneStatusChanged: (callback: (stats: MemoryHygieneRunStats) => void) => () => void;
     createMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;

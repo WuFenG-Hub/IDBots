@@ -1073,6 +1073,8 @@ export class CoworkStore implements MemoryBackend {
   private db: Database;
   private saveDb: () => void;
   private memoryBackend: MemoryBackend | null = null;
+  /** Debounce anchor for last_used_at touch saves (full-file writes on wasm). */
+  private lastMemoryTouchSaveAt: number | null = null;
 
   // In-memory tracking of delegation-blocked sessions
   private delegationBlockedSessions: Map<string, { orderId: string }> = new Map();
@@ -6194,7 +6196,13 @@ export class CoworkStore implements MemoryBackend {
         AND id IN (${placeholders})
     `, [now, metabotId, ...uniqueIds]);
     if ((this.db.getRowsModified?.() || 0) > 0) {
-      this.saveDb();
+      // Injection touches fire on every turn; on the wasm backend saveDb is a
+      // full-file atomic write, so debounce to one write per window. A lost
+      // tail of last_used_at ticks is cosmetic (it only feeds the decay clock).
+      if (now - (this.lastMemoryTouchSaveAt ?? 0) >= 10_000) {
+        this.lastMemoryTouchSaveAt = now;
+        this.saveDb();
+      }
     }
   }
 
@@ -6380,11 +6388,16 @@ export class CoworkStore implements MemoryBackend {
   /**
    * Archive specific memories by id (deep-consolidation retire proposals).
    * self_identity is always refused; every other class only gets the
-   * reversible archived_at mark.
+   * reversible archived_at mark. `notUsedSince` guards against the LLM await
+   * window: rows edited or injection-touched after that snapshot survive.
    */
-  archiveUserMemories(input: { ids: string[]; archivedAt: number }): number {
+  archiveUserMemories(input: { ids: string[]; archivedAt: number; notUsedSince?: number }): number {
     const ids = input.ids.map((id) => id.trim()).filter(Boolean);
     if (ids.length === 0) return 0;
+    const usageGuard = input.notUsedSince != null
+      ? ' AND COALESCE(last_used_at, updated_at) <= ?'
+      : '';
+    const guardParams = input.notUsedSince != null ? [Math.floor(input.notUsedSince)] : [];
     let archived = 0;
     for (let offset = 0; offset < ids.length; offset += 500) {
       const chunk = ids.slice(offset, offset + 500);
@@ -6394,8 +6407,8 @@ export class CoworkStore implements MemoryBackend {
          WHERE archived_at IS NULL
            AND usage_class != 'self_identity'
            AND status = 'created'
-           AND id IN (${chunk.map(() => '?').join(', ')})`,
-        [Math.floor(input.archivedAt), ...chunk],
+           AND id IN (${chunk.map(() => '?').join(', ')})${usageGuard}`,
+        [Math.floor(input.archivedAt), ...chunk, ...guardParams],
       );
       archived += this.db.getRowsModified?.() || 0;
     }

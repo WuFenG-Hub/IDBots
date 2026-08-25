@@ -984,6 +984,7 @@ class CoworkService {
     query?: string;
     status?: 'created' | 'stale' | 'deleted' | 'all';
     includeDeleted?: boolean;
+    includeArchived?: boolean;
     limit?: number;
     offset?: number;
   }): Promise<CoworkUserMemoryEntry[]> {
@@ -1168,6 +1169,13 @@ class CoworkService {
 
   async deleteTeamCulture(id: string): Promise<boolean> {
     const api = window.electron?.cowork?.deleteTeamCulture;
+    if (!api) return false;
+    const result = await api({ id });
+    return Boolean(result?.success);
+  }
+
+  async unarchiveMemoryEntry(id: string): Promise<boolean> {
+    const api = window.electron?.cowork?.unarchiveMemoryEntry;
     if (!api) return false;
     const result = await api({ id });
     return Boolean(result?.success);

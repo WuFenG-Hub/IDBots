@@ -465,12 +465,16 @@ export class MetaIDExperienceStore {
         || nextExternalConversationId !== existing.external_conversation_id
         || nextTaskId !== existing.task_id
         || nextOrderId !== existing.order_id
-        || nextStartedAt !== asTimestamp(existing.started_at, 0);
+        || nextStartedAt !== asTimestamp(existing.started_at, 0)
+        // Recurring activity on the same source key revives a hygiene-archived
+        // episode — new evidence means the episode is hot again, not a ghost
+        // row that keeps updating while staying invisible to hot paths.
+        || existing.archived_at != null;
       if (changed) {
         this.db.run(
           `UPDATE metaid_experience_episodes
            SET session_id = ?, external_conversation_id = ?, task_id = ?, order_id = ?,
-               started_at = ?, updated_at = ?
+               started_at = ?, archived_at = NULL, updated_at = ?
            WHERE id = ?`,
           [
             nextSessionId,

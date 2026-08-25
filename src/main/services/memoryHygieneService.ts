@@ -42,6 +42,7 @@ export interface MemoryHygieneMetabotLike {
   name?: string | null;
   llm_id?: string | null;
   globalmetaid?: string | null;
+  enabled?: boolean;
 }
 
 export interface MemoryHygieneMetabotStoreLike {
@@ -64,9 +65,15 @@ export interface MemoryHygieneRunContext {
   cultureStore?: TeamCultureStore;
 }
 
+/** Steps return flat counters, or { counts, errors } when they collect
+ *  non-fatal diagnostics the stats view should surface. */
 interface MemoryHygieneStep {
   name: string;
-  run: (context: MemoryHygieneRunContext) => Promise<Record<string, number>> | Record<string, number>;
+  run: (context: MemoryHygieneRunContext) =>
+    | Promise<Record<string, number>>
+    | Record<string, number>
+    | Promise<{ counts: Record<string, number>; errors?: string[] }>
+    | { counts: Record<string, number>; errors?: string[] };
 }
 
 export type MemoryHygienePerformChat = (
@@ -213,7 +220,7 @@ export class MemoryHygieneService {
     this.steps.push({
       name: 'deep-consolidation',
       run: async (context) => {
-        if (!this.deps.performChat || !context.config.deepConsolidationEnabled) return {};
+        if (!this.deps.performChat || !context.config.deepConsolidationEnabled) return { counts: {} };
         const intervalMs = context.config.deepConsolidationIntervalDays * 86_400_000;
         const errors: string[] = [];
         let botsConsidered = 0;
@@ -222,6 +229,8 @@ export class MemoryHygieneService {
         let rewrittenKnowledge = 0;
         for (const bot of this.deps.metabotStore.listMetabots()) {
           if (context.disabledMetabotIds.has(bot.id)) continue;
+          // Align with the dream gate: no consolidation tokens for disabled bots.
+          if (bot.enabled === false) continue;
           const lastRunAt = context.coworkStore.getDeepConsolidationLastRunAt(bot.id);
           if (lastRunAt != null && context.nowMs - lastRunAt < intervalMs) continue;
 
@@ -274,16 +283,43 @@ export class MemoryHygieneService {
             errors.push(`deep-consolidation bot ${bot.id}: unparseable output`);
             continue;
           }
+          const errorsBeforeApply = errors.length;
 
           const memoryIds = new Set([...boundaries, ...reviews].map((memory) => memory.id));
           const knowledgeIds = new Set(knowledge.map((entry) => entry.id));
-          const retireMemories = output.retireMemoryIds.filter((id) => memoryIds.has(id));
+          // Retire protection aligned with the deterministic decay stroke:
+          // only dream-origin rows are ever auto-archived — conversation-origin
+          // entries may carry the user's explicit "remember this".
+          const dreamMemoryIds = new Set(
+            [...boundaries, ...reviews]
+              .filter((memory) => memory.origin === 'dream')
+              .map((memory) => memory.id),
+          );
+          const retireMemories = output.retireMemoryIds.filter((id) => dreamMemoryIds.has(id));
           const retireKnowledge = output.retireKnowledgeIds.filter((id) => knowledgeIds.has(id));
           const rewrites = output.rewriteKnowledge.filter((rewrite) => knowledgeIds.has(rewrite.id));
+
+          // Guardrail: a VALIDATED retire list eating more than a quarter of
+          // the belief layer in one pass smells like a hallucinated purge —
+          // refuse the whole proposal and let the cadence retry later.
+          // (Bogus and conversation-origin ids are already filtered out, so
+          // junk output cannot trip the guardrail by itself.)
+          const retireCap = Math.ceil(items.length * 0.25);
+          if (retireMemories.length + retireKnowledge.length > retireCap) {
+            errors.push(
+              `deep-consolidation bot ${bot.id}: retire list exceeds guardrail` +
+                ` (${retireMemories.length + retireKnowledge.length} > ${retireCap}); refusing`
+            );
+            continue;
+          }
+          void memoryIds;
 
           retiredMemories += context.coworkStore.archiveUserMemories({
             ids: retireMemories,
             archivedAt: context.nowMs,
+            // The LLM call had an await window: anything edited or injected
+            // (touched) since the inventory snapshot must survive the proposal.
+            notUsedSince: context.nowMs,
           });
           if (context.knowledgeStore) {
             for (const id of retireKnowledge) {
@@ -296,29 +332,45 @@ export class MemoryHygieneService {
             }
             for (const rewrite of rewrites) {
               try {
-                context.knowledgeStore.upsertKnowledge({
+                // Rewrite IN PLACE by id (version bump + revision kept). A
+                // topic-fingerprint upsert here would fork a new entry whenever
+                // the LLM rephrases the topic, growing the layer it should
+                // shrink.
+                const updated = context.knowledgeStore.updateKnowledge({
+                  id: rewrite.id,
                   metabotId: bot.id,
                   topic: rewrite.topic,
                   summary: rewrite.summary,
                   kind: rewrite.kind,
-                  origin: 'dream',
                 });
-                rewrittenKnowledge += 1;
+                if (updated) {
+                  rewrittenKnowledge += 1;
+                } else {
+                  errors.push(`deep-consolidation bot ${bot.id}: rewrite knowledge ${rewrite.id} not found`);
+                }
               } catch (error) {
                 errors.push(`deep-consolidation bot ${bot.id}: rewrite knowledge ${rewrite.id} failed`);
               }
             }
           }
-          context.coworkStore.setDeepConsolidationLastRunAt(bot.id, context.nowMs);
+          // Stamp the cadence only for clean runs: a bot with errors retries
+          // on the next pass instead of waiting out the whole interval.
+          if (errors.length === errorsBeforeApply) {
+            context.coworkStore.setDeepConsolidationLastRunAt(bot.id, context.nowMs);
+          }
         }
+        void errors;
         if (errors.length > 0) {
           console.warn(`[MemoryHygiene] Deep consolidation warnings: ${errors.join(' | ')}`);
         }
         return {
-          deepConsolidationBots: botsConsidered,
-          deepRetiredMemories: retiredMemories,
-          deepRetiredKnowledge: retiredKnowledge,
-          deepRewrittenKnowledge: rewrittenKnowledge,
+          counts: {
+            deepConsolidationBots: botsConsidered,
+            deepRetiredMemories: retiredMemories,
+            deepRetiredKnowledge: retiredKnowledge,
+            deepRewrittenKnowledge: rewrittenKnowledge,
+          },
+          errors,
         };
       },
     });
@@ -422,9 +474,22 @@ export class MemoryHygieneService {
       };
       for (const step of this.steps) {
         try {
-          const counts = await step.run(context);
-          for (const [key, value] of Object.entries(counts)) {
+          const result = await step.run(context);
+          const isEnvelope = Boolean(
+            result && typeof result === 'object' && 'counts' in result
+              && (result as { counts?: unknown }).counts
+              && typeof (result as { counts?: unknown }).counts === 'object',
+          );
+          const stepCounts = isEnvelope
+            ? (result as { counts: Record<string, number> }).counts
+            : ((result ?? {}) as Record<string, number>);
+          for (const [key, value] of Object.entries(stepCounts)) {
             stats.counts[key] = value;
+          }
+          if (isEnvelope) {
+            for (const stepError of (result as { errors?: string[] }).errors ?? []) {
+              stats.errors.push(stepError);
+            }
           }
         } catch (error) {
           const message = `${step.name}: ${error instanceof Error ? error.message : String(error)}`;

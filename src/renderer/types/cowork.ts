@@ -427,6 +427,8 @@ export interface CoworkUserMemoryEntry {
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+  /** Hygiene decay mark: archived rows leave injection but stay restorable. */
+  archivedAt?: number | null;
 }
 
 export interface CoworkMemoryScopeSummary {

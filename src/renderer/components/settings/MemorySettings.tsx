@@ -149,6 +149,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [factsStats, setFactsStats] = useState<CoworkMemoryStats | null>(null);
   const [factsLoading, setFactsLoading] = useState(false);
   const [factsQuery, setFactsQuery] = useState('');
+  const [factsShowArchived, setFactsShowArchived] = useState(false);
   const [scopes, setScopes] = useState<CoworkMemoryScopesOverview | null>(null);
 
   // --- Self-identity (the bot's self-cognition; dream-managed) ---
@@ -389,6 +390,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           scopeKind: 'owner',
           scopeKey: scopes?.owner?.key ?? 'owner:self',
           query: factsQuery.trim() || undefined,
+          includeArchived: factsShowArchived,
         }),
         coworkService.getMemoryStats({
           metabotId,
@@ -405,7 +407,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     } finally {
       setFactsLoading(false);
     }
-  }, [metabotId, factsQuery, scopes]);
+  }, [metabotId, factsQuery, factsShowArchived, scopes]);
 
   const loadScopes = useCallback(async () => {
     if (metabotId == null) {
@@ -766,15 +768,33 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     setHygieneNotice(null);
     try {
       const { stats, error } = await coworkService.runMemoryHygieneNow();
-      if (error || !stats) throw new Error(error || i18nService.t('memoryHygieneRunFailed'));
+      if (error) {
+        throw new Error(/already in progress/i.test(error) ? i18nService.t('memoryHygieneInProgress') : error);
+      }
+      if (!stats) throw new Error(i18nService.t('memoryHygieneRunFailed'));
       setHygieneLastRun(stats);
-      setHygieneNotice(i18nService.t('memoryHygieneRunDone'));
+      setHygieneNotice(stats.errors.length > 0
+        ? `${i18nService.t('memoryHygieneRunPartial')} (${stats.errors.length}): ${stats.errors[0]}`
+        : i18nService.t('memoryHygieneRunDone'));
     } catch (runError) {
       setHygieneNotice(`${i18nService.t('memoryHygieneRunFailed')}: ${runError instanceof Error ? runError.message : String(runError)}`);
     } finally {
       setHygieneRunning(false);
     }
   };
+
+  // A scheduled nightly pass may land while the page is open — keep the
+  // last-run panel live.
+  useEffect(() => {
+    const unsubscribe = window.electron?.cowork?.onMemoryHygieneStatusChanged?.((stats) => {
+      if (stats) {
+        setHygieneLastRun(stats);
+      }
+    });
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
 
   // ---- Team culture ----
   const loadCulture = useCallback(async () => {
@@ -1178,6 +1198,14 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           {i18nService.t('memoryFactsHint')}
         </div>
         <div className="flex items-center gap-2">
+          <label className="flex cursor-pointer items-center gap-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            <input
+              type="checkbox"
+              checked={factsShowArchived}
+              onChange={(event) => setFactsShowArchived(event.target.checked)}
+            />
+            {i18nService.t('memoryFactsShowArchived')}
+          </label>
           <input
             type="text"
             value={factsQuery}
@@ -1219,6 +1247,11 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                           {entry.status === 'created' ? i18nService.t('coworkMemoryStatusActive') : i18nService.t('coworkMemoryStatusInactive')}
                         </span>
                       )}
+                      {entry.archivedAt != null && (
+                        <span className="rounded-full border px-2 py-0.5 text-amber-600 dark:text-amber-400 dark:border-claude-darkBorder border-claude-border">
+                          {i18nService.t('memoryFactsArchivedBadge')}
+                        </span>
+                      )}
                       {getUsageClassLabel(entry.usageClass) && (
                         <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border text-claude-accent dark:text-claude-darkAccent">
                           {getUsageClassLabel(entry.usageClass)}
@@ -1229,6 +1262,20 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                   </div>
                   {entry.usageClass !== 'self_identity' && (
                     <div className="flex items-center gap-1 flex-shrink-0">
+                      {entry.archivedAt != null && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const ok = await coworkService.unarchiveMemoryEntry(entry.id);
+                            if (ok) {
+                              await loadFacts();
+                            }
+                          }}
+                          className="rounded border px-2 py-1 text-[10px] text-claude-accent dark:text-claude-darkAccent dark:border-claude-darkBorder border-claude-border hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+                        >
+                          {i18nService.t('memoryFactsRestore')}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleEditFact(entry)}
@@ -1549,6 +1596,9 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     knowledgeRevisionsPruned: i18nService.t('memoryHygieneStatRevisions'),
     dreamRunsPurged: i18nService.t('memoryHygieneStatRuns'),
     dreamFragmentsPurged: i18nService.t('memoryHygieneStatFragments'),
+    cultureEntriesDecayed: i18nService.t('memoryHygieneStatCultureDecayed'),
+    cultureRevisionsPruned: i18nService.t('memoryHygieneStatCultureRevisions'),
+    skippedDisabled: i18nService.t('memoryHygieneStatSkipped'),
     deepConsolidationBots: i18nService.t('memoryHygieneStatDeepBots'),
     deepRetiredMemories: i18nService.t('memoryHygieneStatDeepMemories'),
     deepRetiredKnowledge: i18nService.t('memoryHygieneStatDeepKnowledge'),
