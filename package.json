@@ -22,6 +22,7 @@
     "test:knowledge-base": "npm run compile:electron && node --test tests/knowledgeBaseText.test.mjs tests/knowledgeBaseIndexStore.test.mjs tests/knowledgeBaseService.test.mjs tests/knowledgeBaseAgentTools.test.mjs",
     "test:metaweb": "npm run compile:electron && node --test tests/metawebUriLinks.test.mjs tests/postSimpleNoteAgentTools.test.mjs tests/postBuzzAgentTools.test.mjs tests/omniCasterAgentTools.test.mjs tests/privateChatAgentTools.test.mjs tests/groupChatAgentTools.test.mjs tests/groupTaskDeliverableParser.test.mjs tests/socialRecallAgentTools.test.mjs && npx tsx --test tests/markdownContentBotBrowserUri.test.tsx",
     "test:metaweb-study": "npm run compile:electron && node --test tests/metawebStudyJobStore.test.mjs tests/metawebStudyService.test.mjs",
+    "test:workspace-instructions": "node --test tests/workspaceInstructionsBoundary.test.mjs tests/coworkSessionDetailGitBranch.test.mjs",
     "test:update": "npx rimraf dist-electron && npm run compile:electron && node --test tests/appUpdateResumableDownload.test.mjs tests/appUpdateSilentFlowStatic.test.mjs tests/appUpdateUi.test.mjs",
     "test:cognitive-phase2": "npm run compile:electron && node scripts/test_cognitive_phase2.mjs",
     "test:cognitive-hook": "npm run compile:electron && node scripts/test_cognitive_hook.mjs",

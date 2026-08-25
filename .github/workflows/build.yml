@@ -80,6 +80,12 @@ jobs:
       - name: Validate runtime dependency contracts
         run: node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs
 
+      # Static source-contract tests for the workspace-instructions line
+      # (AGENTS.md/CLAUDE.md injection + git branch chip). Pure file-read +
+      # regex assertions: no compile step needed, safe on every matrix OS.
+      - name: Run workspace-instructions contract tests
+        run: node --test tests/workspaceInstructionsBoundary.test.mjs tests/coworkSessionDetailGitBranch.test.mjs
+
       - name: Run MetaWeb agent-tool tests
         run: npm run test:metaweb
 
