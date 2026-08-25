@@ -5653,11 +5653,37 @@ const getCoworkRunner = () => {
   return coworkRunner;
 };
 
+/**
+ * Pinned-skill backstop for renderer-supplied activeSkillIds at the cowork IPC
+ * boundary: intersect with the session bot's visible skill set (bundled +
+ * global + assigned; a bot-less session maps to bundled + global — never an
+ * empty set). The renderer scopes its own skills picker, but the boundary
+ * cannot trust it: a bypassed or forged renderer must not be able to pin
+ * arbitrary library skills onto any bot's session (same boundary as the B2
+ * assignment-write hole). undefined stays undefined — "no pins this turn"
+ * drives the continue-prompt policy.
+ */
+function sanitizePinnedSkillIds(
+  skillIds: string[] | undefined,
+  metabotId: number | null,
+  context: string,
+): string[] | undefined {
+  if (!skillIds || skillIds.length === 0) return skillIds;
+  const allowed = getSkillManager().filterSkillIdsForMetabotView(skillIds, metabotId);
+  if (allowed.length !== skillIds.length) {
+    const dropped = skillIds.filter((id) => !allowed.includes(id));
+    console.warn(`[${context}] dropped pinned skills outside the bot's visible set:`, dropped, `(metabotId=${metabotId ?? 'none'})`);
+  }
+  return allowed;
+}
+
 const getCoworkTurnSubmissionController = (): CoworkTurnSubmissionController => {
   if (!coworkTurnSubmissionController) {
     coworkTurnSubmissionController = new CoworkTurnSubmissionController({
       store: getCoworkStore(),
       runner: getCoworkRunner(),
+      sanitizeSkillIds: (skillIds, metabotId) =>
+        sanitizePinnedSkillIds(skillIds, metabotId, 'cowork:session:submitInput'),
       emitMessage: emitCoworkStreamMessage,
       emitMessageUpdate: (
         sessionId: string,
@@ -7949,6 +7975,13 @@ if (!gotTheLock) {
     try {
       const coworkStoreInstance = getCoworkStore();
       const config = coworkStoreInstance.getConfig();
+      // Pinned-skill backstop happens before any consumer: createSession,
+      // the first message metadata, and the runner all see the sanitized ids.
+      const sanitizedSkillIds = sanitizePinnedSkillIds(
+        options.activeSkillIds,
+        options.metabotId ?? null,
+        'cowork:session:start',
+      ) ?? [];
       const systemPrompt = options.systemPrompt ?? config.systemPrompt;
       const sessionType = options.sessionType === 'browser' ? 'browser' : 'standard';
       let selectedWorkspaceRoot = (options.cwd || config.workingDirectory || '').trim();
@@ -8004,7 +8037,7 @@ if (!gotTheLock) {
         taskWorkingDirectory,
         systemPrompt,
         config.executionMode || 'local',
-        options.activeSkillIds || [],
+        sanitizedSkillIds,
         options.metabotId ?? null,
         sessionType,
         null,
@@ -8027,9 +8060,9 @@ if (!gotTheLock) {
       coworkStoreInstance.addMessage(session.id, {
         type: 'user',
         content: options.prompt,
-        metadata: (options.activeSkillIds?.length || options.source)
+        metadata: (sanitizedSkillIds.length || options.source)
           ? {
-              ...(options.activeSkillIds?.length ? { skillIds: options.activeSkillIds } : {}),
+              ...(sanitizedSkillIds.length ? { skillIds: sanitizedSkillIds } : {}),
               ...(options.source ? { source: options.source } : {}),
             }
           : undefined,
@@ -8046,7 +8079,7 @@ if (!gotTheLock) {
       }
       runner.startSession(session.id, options.prompt, {
         skipInitialUserMessage: true,
-        skillIds: options.activeSkillIds,
+        skillIds: sanitizedSkillIds,
         workspaceRoot: selectedWorkspaceRoot,
         confirmationMode: 'modal',
         permissionMode: resolvedPermissionMode,
@@ -8117,13 +8150,20 @@ if (!gotTheLock) {
     try {
       const runner = getCoworkRunner();
       const session = getCoworkStore().getSession(options.sessionId);
+      // Pinned-skill backstop: scope renderer-supplied ids to the session
+      // bot's visible set; undefined stays undefined ("no pins this turn").
+      const sanitizedSkillIds = sanitizePinnedSkillIds(
+        options.activeSkillIds,
+        session?.metabotId ?? null,
+        'cowork:session:continue',
+      );
       const systemPrompt = resolveContinueSystemPrompt({
         persistedSystemPrompt: session?.systemPrompt,
         requestedSystemPrompt: options.systemPrompt,
-        activeSkillIds: options.activeSkillIds,
+        activeSkillIds: sanitizedSkillIds,
         persistedActiveSkillIds: session?.activeSkillIds,
       });
-      runner.continueSession(options.sessionId, options.prompt, { systemPrompt, skillIds: options.activeSkillIds, permissionMode: options.permissionMode }).catch(error => {
+      runner.continueSession(options.sessionId, options.prompt, { systemPrompt, skillIds: sanitizedSkillIds, permissionMode: options.permissionMode }).catch(error => {
         console.error('Cowork continue error:', error);
       });
 

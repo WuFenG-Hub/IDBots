@@ -4,7 +4,7 @@ import { MagnifyingGlassIcon, Cog6ToothIcon, PuzzlePieceIcon, CheckIcon } from '
 import { i18nService } from '../../services/i18n';
 import { RootState } from '../../store';
 import { Skill } from '../../types/skill';
-import { placePopoverAbove } from '../../utils/anchoredPopover';
+import { placePopoverAbove, useAnchorMoveWatcher } from '../../utils/anchoredPopover';
 
 const SKILLS_POPOVER_WIDTH = 288; // w-72
 
@@ -78,6 +78,10 @@ const SkillsPopover: React.FC<SkillsPopoverProps> = ({
     if (!isOpen) return;
     updatePlacement();
   }, [isOpen, updatePlacement, filteredSkills.length]);
+
+  // Re-place when the anchor MOVES without any window-level event (sidebar
+  // width drag, the composer textarea auto-growing beneath it).
+  useAnchorMoveWatcher(anchorRef, isOpen, updatePlacement);
 
   useEffect(() => {
     if (!isOpen) return;

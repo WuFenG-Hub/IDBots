@@ -1030,6 +1030,21 @@ export class SkillManager {
     );
   }
 
+  /**
+   * Pinned-skill backstop for the cowork IPC boundary: intersect a
+   * renderer-supplied skill-id list with the bot's visible set (bundled +
+   * global + assigned; a null metabotId maps to bundled + global — never an
+   * empty set). The renderer scopes its own skills picker, but the boundary
+   * cannot trust it: a bypassed or forged renderer must not be able to pin
+   * arbitrary library skills onto any bot's session (same boundary as the
+   * B2 assignment-write hole).
+   */
+  filterSkillIdsForMetabotView(skillIds: readonly string[], metabotId: number | null): string[] {
+    if (skillIds.length === 0) return [];
+    const visibleIds = new Set(this.listSkillsForMetabot(metabotId).map((skill) => skill.id));
+    return skillIds.filter((id) => visibleIds.has(id));
+  }
+
   /** The bot's assigned external skills (chat-routing baseline; no bundled/global). */
   private listAssignedSkillRecordsForMetabot(metabotId: number): SkillRecord[] {
     this.ensureAssignmentSchema();

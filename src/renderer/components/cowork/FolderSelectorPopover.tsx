@@ -4,7 +4,7 @@ import { i18nService } from '../../services/i18n';
 import { coworkService } from '../../services/cowork';
 import { projectsService } from '../../services/projects';
 import { getCompactFolderName } from '../../utils/path';
-import { placePopoverAbove } from '../../utils/anchoredPopover';
+import { placePopoverAbove, useAnchorMoveWatcher } from '../../utils/anchoredPopover';
 import type { ProjectRecord } from '../../types/project';
 
 // Custom tooltip for folder paths
@@ -110,6 +110,10 @@ const FolderSelectorPopover: React.FC<FolderSelectorPopoverProps> = ({
     if (!isOpen) return;
     updatePlacement();
   }, [isOpen, updatePlacement]);
+
+  // Re-place when the anchor MOVES without any window-level event (sidebar
+  // width drag, the composer textarea auto-growing beneath it).
+  useAnchorMoveWatcher(anchorRef, isOpen, updatePlacement);
 
   useEffect(() => {
     if (!isOpen) return;
