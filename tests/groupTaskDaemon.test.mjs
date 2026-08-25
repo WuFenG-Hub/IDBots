@@ -178,7 +178,7 @@ const createHarness = async (overrides = {}) => {
       return state.chatReply ?? `reply-for-${llmId}`;
     },
     postGroupTaskMessage: async (taskId, metabotId, content, opts) => {
-      sends.push({ taskId, metabotId, content, replyPin: opts?.replyPin });
+      sends.push({ taskId, metabotId, content, replyPin: opts?.replyPin, mention: opts?.mention });
       if (state.sendFailures?.has(metabotId)) {
         throw new Error(`on-chain send failed for bot ${metabotId}`);
       }
@@ -1352,6 +1352,61 @@ test('chair planning turn: fires once for a new planning task (kv, directive, ro
   } finally {
     h.cleanup();
   }
+});
+
+test('chair planning turn: dispatch post carries a mention array for the assigned workers (P1-1)', async () => {
+  const h = await createHarness({
+    // Bare name, no '@' token — the wake-up must come from the mention array.
+    chatReply: 'Plan: Coder Bot researches first, then hands off. [STATUS:EXECUTING]',
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.deepEqual(
+      h.sends[0].mention,
+      ['gmid-w2'],
+      'assigned worker globalMetaId rides the mention array even without an @ token',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('chair planning turn: plan addressing nobody carries no mention array', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: I draft the outline myself first. [STATUS:EXECUTING]',
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.sends[0].mention, undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('resolveMentionIdsForWorkers: maps mentioned worker names to globalMetaIds', () => {
+  const { resolveMentionIdsForWorkers } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  assert.deepEqual(
+    resolveMentionIdsForWorkers(GATE_MEMBERS, ['Coder Bot', 'Designer Bot']),
+    ['gmid-w2', 'gmid-w3'],
+  );
+  // chair names never resolve, unknown names are skipped, case-insensitive
+  assert.deepEqual(
+    resolveMentionIdsForWorkers(GATE_MEMBERS, ['Twin Bot', 'coder bot', 'Nobody']),
+    ['gmid-w2'],
+  );
+  // members without a globalMetaId cannot be mentioned
+  assert.deepEqual(
+    resolveMentionIdsForWorkers(
+      [{ metabotId: 9, globalmetaid: null, role: 'worker', name: 'Ghost Bot' }],
+      ['Ghost Bot'],
+    ),
+    [],
+  );
+  assert.deepEqual(resolveMentionIdsForWorkers(GATE_MEMBERS, []), []);
 });
 
 test('chair planning turn: not attempted for executing tasks', async () => {

@@ -658,6 +658,32 @@ export function checkPlanningCoverage(reply: string, workerNames: string[]): Pla
 }
 
 /**
+ * Map worker names that the chair's dispatch text addresses to their
+ * globalMetaIds, for the mention array on the outgoing group pin. The daemon
+ * wake-up gate (`isMentioned`) honors the mention array, so an auto-generated
+ * dispatch wakes the assigned workers even when the LLM wrote bare names
+ * instead of explicit `@Name` tokens. Pure + exported for unit tests.
+ */
+export function resolveMentionIdsForWorkers(
+  members: Array<{ role: string; name?: string | null; globalmetaid?: string | null }>,
+  mentionedNames: string[],
+): string[] {
+  const wanted = new Set(
+    mentionedNames.map((name) => name.trim().toLowerCase()).filter(Boolean),
+  );
+  if (wanted.size === 0) return [];
+  const ids: string[] = [];
+  for (const member of members) {
+    if (member.role !== 'worker') continue;
+    const name = (member.name ?? '').trim().toLowerCase();
+    const gmid = (member.globalmetaid ?? '').trim();
+    if (!name || !gmid || !wanted.has(name)) continue;
+    if (!ids.includes(gmid)) ids.push(gmid);
+  }
+  return ids;
+}
+
+/**
  * F1 (GT#11): deterministic signature of the ACTIVE member roster as seen by
  * the chair planning turn. Any member add / remove / role change produces a
  * new signature, so the planning-turn settle gate can detect a roster that is
@@ -3601,21 +3627,34 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const workerNames = promptMembers
         .filter((member) => member.role === 'worker')
         .map((member) => member.name);
-      if (workerNames.length > 1) {
-        const coverage = checkPlanningCoverage(reply, workerNames);
-        if (coverage.unmentionedWorkers.length > 0) {
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: planning mentions ` +
-            `${coverage.mentionedWorkers.join(', ') || 'nobody'}; ` +
-            `unmentioned seats stay idle on purpose: ${coverage.unmentionedWorkers.join(', ')}`,
-          );
-        }
+      // Coverage is computed unconditionally: mentionedWorkers also drives the
+      // mention array on the outgoing dispatch so assigned workers are woken
+      // even when the plan text uses bare names instead of `@Name` tokens.
+      const coverage = checkPlanningCoverage(reply, workerNames);
+      if (workerNames.length > 1 && coverage.unmentionedWorkers.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: planning mentions ` +
+          `${coverage.mentionedWorkers.join(', ') || 'nobody'}; ` +
+          `unmentioned seats stay idle on purpose: ${coverage.unmentionedWorkers.join(', ')}`,
+        );
       }
 
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
       coworkStore.addMessage(session.id, { type: 'user', content: directive });
       coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
-      const posted = await postGroupMessage(task.id, bot.id, reply);
+      const dispatchMention = resolveMentionIdsForWorkers(members, coverage.mentionedWorkers);
+      const posted = await postGroupMessage(
+        task.id,
+        bot.id,
+        reply,
+        dispatchMention.length > 0 ? { mention: dispatchMention } : undefined,
+      );
+      if (dispatchMention.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: planning dispatch carries mention array for ` +
+          `${coverage.mentionedWorkers.join(', ')}`,
+        );
+      }
       // P2-7 r2: the daemon's own kickoff must not count as "Twin activity".
       rememberDaemonChairPin(task.id, posted.pinId);
       sqlite.set(plannedKey, '1');

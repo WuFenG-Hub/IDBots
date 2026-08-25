@@ -794,6 +794,14 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
   });
 
   const memberNames: string[] = [];
+  // P1-1: when the create call carries an explicit assignment list
+  // (activeMemberNames), resolve those workers' globalMetaIds so the kickoff
+  // can carry a mention array — the daemon wake-up gate honors it and the
+  // assigned workers wake without the roster line needing `@` prefixes.
+  const activeNameSet = new Set(
+    (opts.activeMemberNames ?? []).map((name) => name.trim().toLowerCase()).filter(Boolean),
+  );
+  const kickoffMentionIds: string[] = [];
   for (const workerId of workerIds) {
     const worker = metabotStore.getMetabotById(workerId);
     if (!worker) {
@@ -806,7 +814,16 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
       globalmetaid: worker.globalmetaid ?? null,
       role: 'worker',
     });
-    memberNames.push(worker.name?.trim() || `bot-${workerId}`);
+    const workerName = worker.name?.trim() || `bot-${workerId}`;
+    memberNames.push(workerName);
+    const workerGmid = (worker.globalmetaid ?? '').trim();
+    if (
+      workerGmid
+      && activeNameSet.has(workerName.toLowerCase())
+      && !kickoffMentionIds.includes(workerGmid)
+    ) {
+      kickoffMentionIds.push(workerGmid);
+    }
     try {
       const { pinId: joinPinId } = await joinGroupChatFn(workerId, groupId);
       store.updateMemberJoinedPinId(task.id, workerId, joinPinId);
@@ -858,6 +875,9 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
         activeMemberNames: opts.activeMemberNames,
       }),
       nickName: chairName,
+      // Mention array only — the roster text stays @-free (P0-3); the wake-up
+      // gate reads the mention array, so assigned workers wake at creation.
+      mention: kickoffMentionIds.length > 0 ? kickoffMentionIds : undefined,
     });
   } catch (error) {
     console.warn(
