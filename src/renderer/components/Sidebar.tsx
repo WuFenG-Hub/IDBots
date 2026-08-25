@@ -19,9 +19,10 @@ import BotBrowserCoworkPanel from '../features/botBrowser/BotBrowserCoworkPanel'
 import { defaultSidebarWidth } from '../utils/sidebarWidth';
 import type { BotBrowserSurfaceMode, BotInternetPane } from '../features/botBrowser/types';
 import type { CoworkSessionSummary } from '../types/cowork';
+import type { SettingsOpenOptions } from './Settings';
 
 interface SidebarProps {
-  onShowSettings: () => void;
+  onShowSettings: (options?: SettingsOpenOptions) => void;
   onShowLogin?: () => void;
   activeView: 'cowork' | 'skills' | 'scheduledTasks' | 'groupTasks' | 'metabots';
   onShowSkills: () => void;
@@ -467,7 +468,10 @@ const Sidebar: React.FC<SidebarProps> = ({
         </div>
       ) : (
         <div className="flex-1 min-h-0 px-2.5 pb-3 pt-2 mt-1 flex flex-col">
-          <BotBrowserCoworkPanel onShowSkills={onShowSkills} />
+          <BotBrowserCoworkPanel
+            onShowSkills={onShowSkills}
+            onOpenNewProject={() => onShowSettings({ initialTab: 'projects', openNewProjectForm: true })}
+          />
         </div>
       )}
       <CoworkSearchModal
