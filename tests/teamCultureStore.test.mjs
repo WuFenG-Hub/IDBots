@@ -196,3 +196,42 @@ test('culture hygiene: revision pruning and emergent-entry decay', async () => {
     harness.cleanup();
   }
 });
+
+test('task comm stats: stamped at close and listed for the trend view', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    let GroupTaskStoreCtor;
+    try {
+      ({ GroupTaskStore: GroupTaskStoreCtor } = await import('../dist-electron/main/groupTaskStore.js'));
+    } catch {
+      ({ GroupTaskStore: GroupTaskStoreCtor } = await import('../dist-electron/groupTaskStore.js'));
+    }
+    const store = new GroupTaskStoreCtor(db, () => {});
+    db.run(
+      `INSERT INTO group_tasks (id, group_id, title, goal, chair_metabot_id, status, updated_at)
+       VALUES (31, 'grp-comm', 'Poster', 'Make it', 1, 'done', '2026-08-25 10:00:00')`,
+    );
+    for (const [index, size] of [120, 80, 200].entries()) {
+      db.run(
+        `INSERT INTO group_chat_messages (pin_id, group_id, sender_metaid, sender_global_metaid, protocol, content, chain_timestamp)
+         VALUES (?, 'grp-comm', ?, ?, 'simplechat', ?, 1)`,
+        [`pin-cm-${index}`, `metaid-${index}`, `gmid-${index}`, 'x'.repeat(size)],
+      );
+    }
+    db.run(
+      `INSERT INTO group_task_deliverables (task_id, author_globalmetaid, kind, uri, status, created_at)
+       VALUES (31, 'gmid-0', 'metafile', 'metafile://x', 'accepted', 1)`,
+    );
+
+    assert.equal(store.recordTaskCommStats(31, 'grp-comm'), true);
+    const trend = store.listRecentTaskCommStats(15);
+    assert.equal(trend.length, 1);
+    assert.equal(trend[0].commTotalBytes, 400);
+    assert.equal(trend[0].commMessageCount, 3);
+    assert.equal(trend[0].deliverableCount, 1);
+    assert.equal(store.recordTaskCommStats(31, null), false, 'no group id → skip');
+  } finally {
+    harness.cleanup();
+  }
+});

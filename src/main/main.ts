@@ -10573,6 +10573,18 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('teamCulture:commTrend', async () => {
+    try {
+      const tasks = getGroupTaskStore().listRecentTaskCommStats(15);
+      return { success: true, tasks };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list comm trend',
+      };
+    }
+  });
+
   // ==================== Knowledge Base IPC Handlers ====================
 
   ipcMain.handle('knowledgeBase:list', async (_event, metabotId: number) =>

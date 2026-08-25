@@ -44,6 +44,7 @@ import type {
   TeamCultureActiveCounts,
   TeamCultureKind,
   TeamCultureStatus,
+  TaskCommTrendRow,
   CoworkMemoryScopesOverview,
   CoworkSessionMemoryScope,
   CoworkMetaIDContactSummary,
@@ -1170,6 +1171,13 @@ class CoworkService {
     if (!api) return false;
     const result = await api({ id });
     return Boolean(result?.success);
+  }
+
+  async listTaskCommTrend(): Promise<TaskCommTrendRow[]> {
+    const api = window.electron?.cowork?.listTaskCommTrend;
+    if (!api) return [];
+    const result = await api();
+    return result?.tasks ?? [];
   }
 
   async listMetaIDContacts(input: { observerGlobalMetaId: string }): Promise<CoworkMetaIDContactSummary[]> {

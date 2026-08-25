@@ -619,6 +619,17 @@ export interface TeamCultureActiveCounts {
   team_lesson: number;
 }
 
+/** Communication-entropy observation row (bytes-per-deliverable per task). */
+export interface TaskCommTrendRow {
+  taskId: number;
+  title: string;
+  status: string;
+  commTotalBytes: number | null;
+  commMessageCount: number | null;
+  deliverableCount: number;
+  updatedAt: string | null;
+}
+
 /** Knowledge-point anchored memory entry (Settings → Memory → Knowledge). */
 export type CoworkKnowledgeKind = 'know_how' | 'pitfall' | 'principle';
 export type CoworkKnowledgeStatus = 'active' | 'superseded' | 'archived';

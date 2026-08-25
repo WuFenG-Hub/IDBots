@@ -2060,6 +2060,16 @@ export async function closeGroupTask(
   // P3 culture base: distill team-level glossary/conventions/lessons from the
   // acceptance summary. Fire-and-forget; best-effort, never blocks the close.
   distillTeamCultureFromTaskClose(taskId, opts.status, closed.title, closed.goal);
+  // P3 metric: stamp inter-agent traffic so bytes-per-deliverable can be
+  // watched as the shared culture base compresses coordination.
+  try {
+    getGroupTaskStore().recordTaskCommStats(taskId, closed.groupId ?? null);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Failed to record comm stats on close of task ${taskId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   // R2: relay the acceptance result back to the originating CoWork session
   // (covers cancelled and automated/RPC closes without a rating).
   notifySourceSession(closed, opts.status, opts.rating, opts.ratingComment);

@@ -574,6 +574,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('teamCulture:restore', input),
     deleteTeamCulture: (input: { id: string }) =>
       ipcRenderer.invoke('teamCulture:delete', input),
+    listTaskCommTrend: () =>
+      ipcRenderer.invoke('teamCulture:commTrend'),
     listKnowledge: (input: {
       metabotId: number;
       kind?: 'know_how' | 'pitfall' | 'principle';

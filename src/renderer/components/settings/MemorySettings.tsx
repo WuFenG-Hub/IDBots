@@ -24,6 +24,7 @@ import type {
   TeamCultureEntry,
   TeamCultureActiveCounts,
   TeamCultureKind,
+  TaskCommTrendRow,
 } from '../../types/cowork';
 import MetaIDContactPanel, { ContactGlobalMetaIdHint } from './MetaIDContactPanel';
 import BrainIcon from '../icons/BrainIcon';
@@ -210,6 +211,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [cultureQuery, setCultureQuery] = useState('');
   const [cultureNotice, setCultureNotice] = useState<string | null>(null);
   const [editingCultureId, setEditingCultureId] = useState<string | null>(null);
+  const [commTrend, setCommTrend] = useState<TaskCommTrendRow[]>([]);
   const [cultureDraft, setCultureDraft] = useState<{ kind: TeamCultureKind; topic: string; text: string }>({
     kind: 'convention',
     topic: '',
@@ -785,6 +787,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       });
       setCultureEntries(entries);
       setCultureCounts(activeCounts);
+      setCommTrend(await coworkService.listTaskCommTrend());
     } catch (cultureError) {
       console.error('Failed to load team culture:', cultureError);
       setCultureEntries([]);
@@ -1791,8 +1794,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('memoryCultureEmpty')}</div>
       ) : (
         <div className="space-y-2">
-          {cultureEntries.map((entry) => (
-            <div
+          {cultureEntries.map((entry) => (            <div
               key={entry.id}
               className={`rounded-lg border px-3 py-2 dark:border-claude-darkBorder border-claude-border ${entry.status === 'archived' ? 'opacity-60' : ''}`}
             >
@@ -1849,6 +1851,38 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           ))}
         </div>
       )}
+
+      {/* Communication-entropy observation: does the shared prior actually
+          compress coordination? bytes per deliverable per task, over time. */}
+      <div className="rounded-lg border px-3 py-3 dark:border-claude-darkBorder border-claude-border">
+        <div className="text-[10px] uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('memoryCultureCommTrendTitle')}
+        </div>
+        <div className="mt-0.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('memoryCultureCommTrendHint')}
+        </div>
+        {commTrend.length === 0 ? (
+          <div className="mt-1.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('memoryCultureCommTrendEmpty')}
+          </div>
+        ) : (
+          <div className="mt-1.5 space-y-1">
+            {commTrend.map((row) => {
+              const ratio = row.deliverableCount > 0 && row.commTotalBytes != null
+                ? Math.round(row.commTotalBytes / row.deliverableCount)
+                : null;
+              return (
+                <div key={row.taskId} className="flex items-center justify-between gap-2 text-[11px] dark:text-claude-darkText text-claude-text">
+                  <span className="truncate">#{row.taskId} {row.title}</span>
+                  <span className="shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {`${row.commMessageCount ?? 0} ${i18nService.t('memoryCultureCommMsgs')} · ${row.commTotalBytes ?? 0} B · ${row.deliverableCount} ${i18nService.t('memoryCultureCommDeliverables')}${ratio != null ? ` · ${ratio} B/${i18nService.t('memoryCultureCommPerDeliverable')}` : ''}`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 

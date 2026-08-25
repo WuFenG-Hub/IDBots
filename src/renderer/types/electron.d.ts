@@ -524,6 +524,16 @@ interface TeamCultureActiveCounts {
   team_lesson: number;
 }
 
+interface TaskCommTrendRow {
+  taskId: number;
+  title: string;
+  status: string;
+  commTotalBytes: number | null;
+  commMessageCount: number | null;
+  deliverableCount: number;
+  updatedAt: string | null;
+}
+
 interface CoworkPermissionRequest {
   sessionId: string;
   toolName: string;
@@ -1194,6 +1204,11 @@ interface IElectronAPI {
     }>;
     deleteTeamCulture: (input: { id: string }) => Promise<{
       success: boolean;
+      error?: string;
+    }>;
+    listTaskCommTrend: () => Promise<{
+      success: boolean;
+      tasks?: TaskCommTrendRow[];
       error?: string;
     }>;
     listKnowledge: (input: {
