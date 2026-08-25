@@ -1201,6 +1201,19 @@ export async function getGroupTask(
   // stamped, and not a liveness-derived workStatus ('timeout'/'unknown').
   // Projection-only, so historical closed tasks (#33/#34) repair themselves
   // without a data migration; closeGroupTask additionally persists 'done'.
+  //
+  // Semantics (2026-08-25 review):
+  // - Cancelled tasks deliberately do NOT settle — a cancelled crew member
+  //   keeps whatever stamp the abort left.
+  // - A deliverable verdict flipped AFTER close (e.g. rejected post-mortem)
+  //   does not unset the persisted 'done': no legal app path flips a verdict
+  //   on a closed task (owner acceptance precedes close-as-done, and reopen
+  //   only exists from review), so this asymmetry is unreachable in practice
+  //   and explicitly unsupported.
+  // - Read-path audit: every owner/chair-visible member.status consumer
+  //   (detail view, RPC show/member-status) flows through getGroupTask; the
+  //   daemon skips terminal tasks, and worker-session context injection only
+  //   carries name/role — no other reader needs the projection.
   const taskDone = task.status === 'done';
   const deliveredAuthorIds = new Set(
     deliverables
@@ -2051,7 +2064,9 @@ export function notifySourceSessionReview(
  * Without this, a watchdog 'unreachable' or a 'standby' stamped during the
  * final turn survives the acceptance and misleads the owner's review. Best
  * effort per member: never throws into the close flow. Rejected deliverables
- * do NOT settle the author.
+ * do NOT settle the author. Cancelled closes never settle. One-way by design:
+ * a verdict flipped after close cannot unset the persisted 'done' (no legal
+ * app path does that — see the projection comment in getGroupTask).
  */
 function normalizeDeliveredMemberStatuses(taskId: number): void {
   try {

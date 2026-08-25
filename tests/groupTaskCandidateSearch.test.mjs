@@ -339,14 +339,25 @@ test('staffing preference puts locals first regardless of the score gap', async 
     isOnline: true,
     lastSeenAgoSeconds: 5,
   }];
-  wire({ locals, snapshots, searchRemote });
+  let remoteSearchCalls = 0;
+  wire({
+    locals,
+    snapshots,
+    searchRemote: async (...args) => {
+      remoteSearchCalls += 1;
+      return searchRemote(...args);
+    },
+  });
   try {
     // Baseline (no declaration): the stranger remote wins on raw score.
     const baseline = await searchGroupTaskSeatCandidates({ query: '工程 开发', roleHint: 'engineering' });
     assert.equal(baseline.staffingPreference, null);
     assert.equal(baseline.primary?.source, 'remote');
+    assert.ok(remoteSearchCalls >= 1, 'baseline performs the online search');
 
-    for (const staffingPreference of ['fixed_team', 'previous_team', 'local_only']) {
+    // fixed_team / previous_team: local-first ORDER — the in-house bot takes
+    // primary, the remote stays visible as backup/tail after every local.
+    for (const staffingPreference of ['fixed_team', 'previous_team']) {
       const result = await searchGroupTaskSeatCandidates({
         query: '工程 开发',
         roleHint: 'engineering',
@@ -355,13 +366,26 @@ test('staffing preference puts locals first regardless of the score gap', async 
       assert.equal(result.staffingPreference, staffingPreference);
       assert.equal(result.primary?.source, 'local', `${staffingPreference}: primary must be local`);
       assert.equal(result.primary?.name, 'Builder');
-      // Every local outranks every remote in the ordered list; the remote
-      // stays visible as backup/tail instead of taking primary.
       const firstRemote = result.candidates.findIndex((row) => row.source === 'remote');
       const lastLocal = result.candidates.map((row) => row.source).lastIndexOf('local');
       assert.ok(firstRemote !== -1, 'remote remains listed');
       assert.ok(lastLocal < firstRemote, 'locals sort ahead of remotes');
     }
+
+    // local_only: hard FILTER — no remote anywhere, and the online search is
+    // never even issued.
+    const callsBefore = remoteSearchCalls;
+    const localOnly = await searchGroupTaskSeatCandidates({
+      query: '工程 开发',
+      roleHint: 'engineering',
+      staffingPreference: 'local_only',
+    });
+    assert.equal(localOnly.staffingPreference, 'local_only');
+    assert.equal(remoteSearchCalls, callsBefore, 'local_only skips the online search');
+    assert.ok(localOnly.candidates.every((row) => row.source === 'local'));
+    assert.ok(localOnly.blocked.every((row) => row.source === 'local'));
+    assert.equal(localOnly.primary?.name, 'Builder');
+    assert.match(localOnly.warnings.join('; '), /local_only/);
   } finally {
     setGroupTaskCandidateSearchDepsGetter(null);
   }
