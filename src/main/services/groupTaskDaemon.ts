@@ -30,6 +30,12 @@ import type {
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
+import {
+  isCeremonyAckLine,
+  parseGroupTaskEntropyP0Config,
+  renderGroupLogLines,
+  type GroupTaskEntropyP0Config,
+} from '../libs/groupTaskEntropy';
 import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
 import {
   formatWorkerEmptyHandoffError,
@@ -521,6 +527,7 @@ export function decideGroupTaskResponders(
   task: GroupTaskDaemonTask,
   members: GroupTaskDaemonMember[],
   botsById: Map<number, GroupTaskDaemonBot>,
+  options: { entropyFloorGate?: boolean } = {},
 ): GroupTaskResponderDecision[] {
   const decisions: GroupTaskResponderDecision[] = [];
   const content = (message.content ?? '').trim();
@@ -602,6 +609,22 @@ export function decideGroupTaskResponders(
       continue;
     }
     if (!addressedToSpecificMember) {
+      // Entropy P0 floor gate: a ceremony-shaped ACK from a worker
+      // ([WORKING]/[STANDBY], no question) never warrants a chair LLM turn —
+      // the missing-ACK/timeout monitors track those tags deterministically.
+      // A real question inside the line still reaches the chair (guard in
+      // isCeremonyAckLine), and @-mention/owner/deliverable paths above are
+      // untouched.
+      if (options.entropyFloorGate !== false) {
+        const senderIsWorker = members.some((candidate) =>
+          candidate.role === 'worker'
+          && Boolean(senderGlobalMetaId)
+          && (candidate.globalmetaid ?? '').trim() === senderGlobalMetaId,
+        );
+        if (senderIsWorker && isCeremonyAckLine(content)) {
+          continue;
+        }
+      }
       decisions.push({ metabotId: member.metabotId, reason: 'chair_floor_control' });
     }
   }
@@ -1622,19 +1645,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       `The assignment: ${objective}`,
     ].join('\n');
     let ackText = '';
-    try {
-      ackText = (await deps.performChat(baseSystemPrompt, directive, llmId, {
-        fallbackLlmId,
-        thinking: 'disabled',
-      })).trim();
-    } catch (error) {
-      emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: worker ACK chat failed for bot ${bot.id}; using template: ` +
-        `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    if (!ackText || NO_REPLY_PATTERN.test(ackText) || !WORKING_TAG.test(ackText)) {
+    // Entropy P0: the ACK is protocol, not prose — template by default (zero
+    // LLM); the phrased version stays available as an opt-in enhancement via
+    // the groupTaskEntropyP0 kv knob (ackTemplate:false).
+    const ackEntropyP0 = parseGroupTaskEntropyP0Config(sqlite.get<string>('groupTaskEntropyP0'));
+    if (ackEntropyP0.ackTemplate) {
       ackText = copyWorkingAckFallback(objective);
+    } else {
+      try {
+        ackText = (await deps.performChat(baseSystemPrompt, directive, llmId, {
+          fallbackLlmId,
+          thinking: 'disabled',
+        })).trim();
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: worker ACK chat failed for bot ${bot.id}; using template: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (!ackText || NO_REPLY_PATTERN.test(ackText) || !WORKING_TAG.test(ackText)) {
+        ackText = copyWorkingAckFallback(objective);
+      }
     }
     try {
       const sent = await postGroupMessage(task.id, bot.id, ackText, {
@@ -2026,17 +2057,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     triggering: GroupTaskDaemonMessage,
   ): string => {
     const recent = queryRecentMessages(db, task.groupId!, contextMessageCount);
-    const lines = recent.map((row) => {
+    // Entropy P0: every message is head+tail truncated and runs of ceremony
+    // ACK lines fold into one counter line, so the same token stops being
+    // re-paid as recurring input heat every turn (knob: logFold).
+    const logEntropyP0 = parseGroupTaskEntropyP0Config(
+      deps.getStore().get<string>('groupTaskEntropyP0'),
+    );
+    const entries = recent.map((row) => {
       const message = toDaemonMessage(row);
-      // Round-4: SUSPECT senders are flagged in context — the bot must never
-      // mistake a non-member's display name for a member's identity.
-      const line = `${message.senderName}${message.senderSuspect ? ' [SUSPECT]' : ''}: ${message.content}`;
-      return row.id === triggering.id
-        ? `>>> ${line} <<< (the message you are responding to)`
-        : line;
+      return {
+        // Round-4: SUSPECT senders are flagged in context — the bot must never
+        // mistake a non-member's display name for a member's identity.
+        senderName: message.senderName,
+        suspect: Boolean(message.senderSuspect),
+        content: message.content ?? '',
+        isTrigger: row.id === triggering.id,
+      };
     });
+    const lines = renderGroupLogLines(entries, { fold: logEntropyP0.logFold });
     return [
-      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages)]`,
+      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; long messages truncated, acknowledgment lines folded)]`,
       ...lines,
     ].join('\n');
   };
@@ -4575,6 +4615,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const store = deps.getGroupTaskStore();
     const sqlite = deps.getStore();
     const db = sqlite.getDatabase();
+    // Entropy P0 knobs (floor gate / template ACK / log folding), read once
+    // per task pass; defaults are all-on, kv exists for per-knob rollback.
+    const entropyP0: GroupTaskEntropyP0Config = parseGroupTaskEntropyP0Config(
+      sqlite.get<string>('groupTaskEntropyP0'),
+    );
 
     // P2-8: multi-driver mutex — when another daemon instance holds a fresh
     // driver claim for this task, yield the whole tick (no heartbeat, no
@@ -4840,7 +4885,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const freshStatus = store.getTaskById(task.id)?.status ?? task.status;
         const hasOpenCheckpoint = store.getOpenCheckpoint(task.id) != null;
         const gatingTask: GroupTaskDaemonTask = { ...task, status: freshStatus, hasOpenCheckpoint };
-        const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById);
+        const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById, {
+          entropyFloorGate: entropyP0.floorGate,
+        });
         // P0-1: review-phase silence hint — a chair dispatch to workers during
         // review is intentionally unanswered (workers are gated silent); log
         // it so the operator/chair reopens the task instead of assuming the
