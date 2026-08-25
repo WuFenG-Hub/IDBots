@@ -95,8 +95,7 @@ jobs:
       # daemon/staffing/entropy, per-bot skill assignment, cowork proxy.
       # Each script runs compile:electron first (project convention).
       - name: Run group-task / skill-assignment / cowork-proxy regression tests
-        shell: bash
-        run: npm run test:group-tasks && npm run test:skill-assignment && npm run test:cowork-proxy
+        run: npm run test:release-regressions
 
       - name: Run memory and team-culture tests
         run: npm run test:memory
