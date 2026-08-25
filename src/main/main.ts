@@ -3822,6 +3822,7 @@ const startSqliteDaemons = (): void => {
     metaidExperienceStore: dreamExperienceStore,
     metaidImpressionStore: dreamImpressionStore,
     metaidKnowledgeStore: dreamKnowledgeStore,
+    metaidCultureStore: getTeamCultureStore(),
     performChat: performChatCompletionForOrchestrator,
     emitToRenderer: (channel, data) => {
       BrowserWindow.getAllWindows().forEach(win => {

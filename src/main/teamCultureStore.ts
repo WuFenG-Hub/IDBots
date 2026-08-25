@@ -458,6 +458,72 @@ export class TeamCultureStore {
   }
 
   /**
+   * Hygiene revision overflow, mirroring the knowledge store: each entry keeps
+   * its newest `keepPerEntry` revisions; older redundant copies of
+   * already-superseded text are physically removed.
+   */
+  pruneCultureRevisions(input: { keepPerEntry: number }): number {
+    const keep = Math.max(1, Math.min(50, Math.floor(input.keepPerEntry)));
+    const candidates = this.getAll<{ entry_id: string }>(
+      `SELECT entry_id, COUNT(*) AS revision_count
+       FROM team_culture_revisions
+       GROUP BY entry_id
+       HAVING COUNT(*) > ?
+       LIMIT 5000`,
+      [keep],
+    );
+    let revisionsDeleted = 0;
+    for (const candidate of candidates) {
+      this.db.run(
+        `DELETE FROM team_culture_revisions
+         WHERE entry_id = ?
+           AND id NOT IN (
+             SELECT id FROM team_culture_revisions
+             WHERE entry_id = ?
+             ORDER BY version DESC, created_at DESC
+             LIMIT ?
+           )`,
+        [candidate.entry_id, candidate.entry_id, keep],
+      );
+      revisionsDeleted += this.db.getRowsModified?.() || 0;
+    }
+    if (revisionsDeleted > 0) {
+      this.saveDb();
+    }
+    return revisionsDeleted;
+  }
+
+  /**
+   * Hygiene decay: emergent entries that stopped earning injection slots
+   * (last_used_at older than the cutoff, falling back to updated_at) are
+   * archived. Owner-authored entries are never auto-archived — the owner
+   * decides their fate.
+   */
+  archiveDecayedCulture(input: { cutoffMs: number; archivedAt: number }): number {
+    const ids = this.getAll<{ id: string }>(
+      `SELECT id FROM team_culture_entries
+       WHERE status = 'active'
+         AND origin = 'distillation'
+         AND COALESCE(last_used_at, updated_at) < ?
+       ORDER BY COALESCE(last_used_at, updated_at) ASC
+       LIMIT 5000`,
+      [Math.floor(input.cutoffMs)],
+    ).map((row) => row.id);
+    if (ids.length === 0) return 0;
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      this.db.run(
+        `UPDATE team_culture_entries
+         SET status = 'archived', updated_at = ?
+         WHERE status = 'active' AND origin = 'distillation' AND id IN (${chunk.map(() => '?').join(', ')})`,
+        [Math.floor(input.archivedAt), ...chunk],
+      );
+    }
+    this.saveDb();
+    return ids.length;
+  }
+
+  /**
    * The prompt block injected into group tasks: all glossary (small, high
    * leverage) + top conventions + top lessons, within a character budget.
    * Building the block also refreshes usage counters (times_injected /

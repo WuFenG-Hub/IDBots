@@ -155,3 +155,44 @@ test('buildCulturePromptBlock renders sections, bumps usage, and stays null when
     harness.cleanup();
   }
 });
+
+test('culture hygiene: revision pruning and emergent-entry decay', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    let now = 1_700_000_000_000;
+    const store = new TeamCultureStore(db, () => {}, () => now);
+    for (let version = 1; version <= 5; version += 1) {
+      now += 1_000;
+      store.upsertCulture({ kind: 'convention', topic: 'evolving rule', text: `rule v${version}`, origin: 'distillation', taskId: 1 });
+    }
+    store.upsertCulture({ kind: 'glossary', topic: 'owner term', text: 'never decays' });
+    assert.equal(
+      Number(db.exec('SELECT COUNT(*) AS n FROM team_culture_revisions')[0]?.values?.[0]?.[0]),
+      4,
+    );
+
+    const pruned = store.pruneCultureRevisions({ keepPerEntry: 2 });
+    assert.equal(pruned, 2);
+    assert.equal(
+      Number(db.exec("SELECT COUNT(*) AS n FROM team_culture_revisions WHERE text IN ('rule v3', 'rule v4')")[0]?.values?.[0]?.[0]),
+      2,
+      'newest two revisions survive',
+    );
+
+    now = 1_800_000_000_000;
+    const fresh = new TeamCultureStore(db, () => {}, () => now);
+    const decayed = fresh.archiveDecayedCulture({
+      cutoffMs: now - 30 * 86_400_000,
+      archivedAt: now,
+    });
+    assert.equal(decayed, 1, 'the stale emergent entry decays; the owner entry stays');
+    const statuses = fresh.listCulture({ status: 'all' });
+    const evolving = statuses.find((entry) => entry.topic === 'evolving rule');
+    const ownerTerm = statuses.find((entry) => entry.topic === 'owner term');
+    assert.equal(evolving.status, 'archived');
+    assert.equal(ownerTerm.status, 'active');
+  } finally {
+    harness.cleanup();
+  }
+});
