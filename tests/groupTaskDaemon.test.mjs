@@ -3898,3 +3898,39 @@ test('entropy P1 review: chair without a globalMetaID falls back to the full-ros
     h.cleanup();
   }
 });
+
+test('entropy P0 review: numberless template ACK still arms the delivery deadline with the timeout default', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-t1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    // Numberless ACK — exactly what the entropy-P0 template posts.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-ack-t1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，正在处理「build the metaapp」，预计需要一些时间。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const raw = h.store.get('group_task_expected_delivery:1:2');
+    assert.ok(raw, 'deadline armed even without a numeric ETA');
+    const entry = JSON.parse(raw);
+    assert.ok(entry.dueAt > h.state.nowMs, 'armed with a positive default window');
+
+    // Past the default member timeout (20 min) with no deliverable -> the
+    // P0-4 chair reminder must fire (it never did before this fix).
+    h.state.nowMs += 21 * 60_000;
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.some((send) => /estimated delivery/.test(send.content)),
+      'chair delivery reminder fired for the template-ACK deadline',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

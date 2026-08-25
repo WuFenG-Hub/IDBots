@@ -1,3 +1,5 @@
+import { truncateUtf16Units, truncateUtf16UnitsFromEnd } from './llmSafeText';
+
 /**
  * Group-task entropy P0 helpers — deterministic cuts at the biggest waste
  * taps found by the thermodynamic audit:
@@ -44,14 +46,20 @@ export function parseGroupTaskEntropyP0Config(raw: string | null | undefined): G
 }
 
 /**
- * Ceremony-shaped ACK line: starts with [WORKING] or [STANDBY] and carries no
- * question mark. The question guard is deliberate — a worker smuggling a real
- * question into its ACK still reaches the chair.
+ * Ceremony-shaped ACK line: starts with [WORKING] or [STANDBY], carries no
+ * question mark, no deliverable-style URI, and stays short — substantive
+ * status updates (blockers, switch-overs, anything >200 chars) must reach
+ * the chair. The question guard is deliberate too — a worker smuggling a
+ * real question into its ACK still reaches the chair.
  */
+const CEREMONY_ACK_MAX_CHARS = 200;
+
 export function isCeremonyAckLine(content: string): boolean {
   const trimmed = (content ?? '').trim();
   if (!trimmed) return false;
   if (!(trimmed.startsWith('[WORKING]') || trimmed.startsWith('[STANDBY]'))) return false;
+  if (trimmed.length > CEREMONY_ACK_MAX_CHARS) return false;
+  if (/(pin|metafile|metaapp|https?):\/\//.test(trimmed)) return false;
   return !trimmed.includes('?') && !trimmed.includes('？');
 }
 
@@ -61,13 +69,16 @@ const GROUP_LOG_TAIL_CHARS = 200;
 /**
  * Head+tail truncation for one group-log message: heads carry the intent,
  * tails carry deliverable URIs / verdict tags, so both ends are kept and the
- * middle is elided with an explicit marker.
+ * middle is elided with an explicit marker. Truncation goes through the
+ * llmSafeText code-unit helpers — a bare slice can split a surrogate pair
+ * and produce the lone-surrogate payload that JSON-rejecting providers
+ * refuse (see the llmSafeText.ts header rules).
  */
 export function truncateGroupLogLine(content: string, maxChars = GROUP_LOG_MESSAGE_MAX_CHARS): string {
   const text = content ?? '';
   if (text.length <= maxChars) return text;
   const headChars = Math.max(1, maxChars - GROUP_LOG_TAIL_CHARS - 3);
-  return `${text.slice(0, headChars)} … ${text.slice(text.length - GROUP_LOG_TAIL_CHARS)}`;
+  return `${truncateUtf16Units(text, headChars)} … ${truncateUtf16UnitsFromEnd(text, GROUP_LOG_TAIL_CHARS)}`;
 }
 
 export interface GroupLogEntry {

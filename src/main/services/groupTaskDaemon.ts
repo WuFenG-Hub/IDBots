@@ -34,6 +34,7 @@ import {
   isCeremonyAckLine,
   parseGroupTaskEntropyP0Config,
   renderGroupLogLines,
+  truncateGroupLogLine,
   type GroupTaskEntropyP0Config,
 } from '../libs/groupTaskEntropy';
 import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
@@ -3456,7 +3457,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const recent = queryRecentMessages(db, task.groupId!, contextMessageCount);
     const logLines = recent.map((row) => {
       const message = toDaemonMessage(row);
-      return `${message.senderName}${message.senderSuspect ? ' [SUSPECT]' : ''}: ${message.content}`;
+      return `${message.senderName}${message.senderSuspect ? ' [SUSPECT]' : ''}: ${truncateGroupLogLine(message.content ?? '')}`;
     });
     const rosterLines = promptMembers.map((member) => {
       const profile = [member.bio, member.roleProfile].filter(Boolean).join(' — ');
@@ -4180,19 +4181,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
       clearPendingAck();
-      if (ack.estimatedMinutes != null && ack.estimatedMinutes > 0) {
-        sqlite.set(
-          `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
-          JSON.stringify({
-            dueAt: now() + ack.estimatedMinutes * 60_000,
-            ackedAt: now(),
-            taskDescription: ack.taskDescription,
-          }),
-        );
-      }
+      // P0-4 arming: an explicit ETA arms its own deadline; a numberless ACK
+      // (the entropy-P0 template ACK carries no ETA) falls back to the member
+      // timeout so the delivery reminder still fires — without this the
+      // reminder silently never triggers for template ACKs.
+      const etaMinutes = ack.estimatedMinutes != null && ack.estimatedMinutes > 0
+        ? ack.estimatedMinutes
+        : memberTimeoutAfterMinutes;
+      sqlite.set(
+        `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+        JSON.stringify({
+          dueAt: now() + etaMinutes * 60_000,
+          ackedAt: now(),
+          taskDescription: ack.taskDescription,
+        }),
+      );
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING]` +
-        (ack.estimatedMinutes != null ? ` (est. ${ack.estimatedMinutes} min)` : ''),
+        `(est. ${etaMinutes} min)`,
       );
       return;
     }

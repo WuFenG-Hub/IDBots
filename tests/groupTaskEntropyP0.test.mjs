@@ -168,3 +168,42 @@ test('floor gate: other paths untouched (plain chatter still floor-controls)', (
   );
   assert.deepEqual(owner.map((decision) => decision.reason), ['chair_owner_message'], 'owner in review still reaches the chair');
 });
+
+test('review: truncateGroupLogLine never splits surrogate pairs (llmSafeText rules)', () => {
+  // Emoji straddling the head boundary and the tail boundary.
+  const text = `A${'😀'.repeat(150)}B${'x'.repeat(600)}C${'🎉'.repeat(150)}Z`;
+  const truncated = truncateGroupLogLine(text);
+  assert.ok(truncated.length < text.length);
+  assert.ok(truncated.startsWith('A'));
+  assert.ok(truncated.endsWith('Z') || truncated.includes(' … '));
+  // No lone surrogates anywhere: every code unit in a surrogate range must
+  // be immediately paired (the DeepSeek-400 class of payload bug).
+  for (let index = 0; index < truncated.length; index += 1) {
+    const code = truncated.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = truncated.charCodeAt(index + 1);
+      assert.ok(next >= 0xDC00 && next <= 0xDFFF, `high surrogate at ${index} must be paired`);
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      const prev = truncated.charCodeAt(index - 1);
+      assert.ok(prev >= 0xD800 && prev <= 0xDBFF, `low surrogate at ${index} must be paired`);
+    }
+  }
+});
+
+test('review: substantive [WORKING] lines are exempt from the ceremony gate', () => {
+  assert.equal(isCeremonyAckLine('[WORKING] 已接单，正在制作'), true, 'short pure ACK stays ceremony');
+  assert.equal(
+    isCeremonyAckLine(`[WORKING] API 限流，已切换备用源，正在重试第 3 次，若 10 分钟内仍失败将降级为本地缓存版本，此为状态通报${'详'.repeat(180)}`),
+    false,
+    'long blocker-style update is NOT ceremony',
+  );
+  assert.equal(isCeremonyAckLine('[WORKING] 已接单，见 pin://abcdef123'), false, 'carries a reference URI');
+});
+
+test('review: substantive [WORKING] lines still reach the chair via floor control', () => {
+  const blocker = decideGroupTaskResponders(
+    gateMessage({ content: `[WORKING] API 限流，已切换备用源，正在重试${'，细节'.repeat(60)}` }),
+    TASK, GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(blocker.map((decision) => decision.reason), ['chair_floor_control']);
+});
