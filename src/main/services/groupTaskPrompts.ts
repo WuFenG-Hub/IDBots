@@ -6,6 +6,7 @@
  */
 
 import { buildMetabotPersonaPrompt } from '../libs/metabotPersonaPrompt';
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 import {
   copyOwnerLanguageName,
   copyStandbyExample,
@@ -45,9 +46,9 @@ export interface GroupTaskPromptMember {
 const PROFILE_FIELD_CAP = 200;
 
 function capProfileField(value: string | null | undefined): string {
-  const text = (value ?? '').trim();
+  const text = stripLoneSurrogates((value ?? '').trim());
   if (!text) return '';
-  return text.length > PROFILE_FIELD_CAP ? `${text.slice(0, PROFILE_FIELD_CAP - 3)}...` : text;
+  return text.length > PROFILE_FIELD_CAP ? `${truncateUtf16Units(text, PROFILE_FIELD_CAP - 3)}...` : text;
 }
 
 /**

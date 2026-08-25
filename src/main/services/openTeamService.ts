@@ -37,6 +37,7 @@
  */
 
 import { randomBytes } from 'crypto';
+import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 import type { MetabotStore } from '../metabotStore';
 import type { GroupTaskStore } from '../groupTaskStore';
 import type {
@@ -501,7 +502,7 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
     .map((skill) => String(skill ?? '').trim())
     .filter((skill) => skill.length > 0);
   const goalSummary = task.goal.length > GOAL_SUMMARY_MAX_CHARS
-    ? `${task.goal.slice(0, GOAL_SUMMARY_MAX_CHARS)}…`
+    ? `${truncateUtf16Units(stripLoneSurrogates(task.goal), GOAL_SUMMARY_MAX_CHARS)}…`
     : task.goal;
   const inviteeName = input.inviteeName?.trim() || detail.name || '';
   const plaintext = buildOpenTeamInviteMessage({

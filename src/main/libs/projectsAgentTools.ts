@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { z } from 'zod';
 import type { ProjectRecord, ProjectResource } from '../projectStore';
+import { truncateUtf16Units } from './llmSafeText';
 
 /**
  * Control surface the host (main.ts) provides for the local Projects tool.
@@ -26,7 +27,7 @@ function textResult(text: string, isError = false) {
 }
 
 function truncate(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+  return value.length > max ? `${truncateUtf16Units(value, max)}…` : value;
 }
 
 function escapeXmlText(value: string): string {

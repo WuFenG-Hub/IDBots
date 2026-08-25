@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { SqliteDatabase as Database } from './sqliteTypes';
+import { stripLoneSurrogates, truncateUtf16Units } from './libs/llmSafeText';
 
 /**
  * Team culture store — the fleet-shared, low-entropy coordination prior
@@ -112,7 +113,7 @@ export function teamCultureFingerprintOf(topic: string): string {
 function boundedText(value: unknown, label: string, max: number): string {
   const text = String(value ?? '').trim();
   if (!text) throw new Error(`${label} must not be empty`);
-  return text.slice(0, max);
+  return stripLoneSurrogates(truncateUtf16Units(text, max));
 }
 
 function rowToEntry(row: CultureEntryRow): TeamCultureEntry {
@@ -567,6 +568,6 @@ export class TeamCultureStore {
       ...sections,
       '</team_culture>',
     ].join('\n');
-    return body.length > maxChars ? body.slice(0, maxChars) : body;
+    return body.length > maxChars ? stripLoneSurrogates(truncateUtf16Units(body, maxChars)) : body;
   }
 }

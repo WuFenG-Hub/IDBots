@@ -42,6 +42,7 @@ function loadModules() {
       llmSafeText: require('../dist-electron/main/libs/llmSafeText.js'),
       twinWorkerDirectoryService: require('../dist-electron/main/services/twinWorkerDirectoryService.js'),
       coworkDshTurn: require('../dist-electron/main/libs/coworkDshTurn.js'),
+      coworkToolResultSnip: require('../dist-electron/main/libs/coworkToolResultSnip.js'),
     }
   } finally {
     Module._load = originalLoad
@@ -78,6 +79,31 @@ test('truncateUtf16UnitsFromEnd: tail never starts on a stranded low surrogate',
   assert.equal(truncateUtf16UnitsFromEnd('abcdef', 3), 'def')
   assert.equal(truncateUtf16UnitsFromEnd('abcdef', 10), 'abcdef')
   assert.equal(truncateUtf16UnitsFromEnd('abcdef', 0), '')
+})
+
+test('truncate edge: maxUnits=1 still never strands a surrogate half', () => {
+  const { truncateUtf16Units, truncateUtf16UnitsFromEnd } = loadModules().llmSafeText
+  assert.equal(truncateUtf16Units('a🌐', 1), 'a')
+  // The pair occupies units 0-1; cutting to 1 would keep only the high half.
+  assert.equal(truncateUtf16Units('🌐b', 1), '')
+  assert.equal(truncateUtf16UnitsFromEnd('b🌐', 1), '')
+  assert.equal(truncateUtf16Units('🌐', 1), '')
+  assert.equal(truncateUtf16Units('ab', 1), 'a')
+})
+
+test('stripLoneSurrogates: consecutive corrupt halves cannot leak a lone surrogate', () => {
+  const { stripLoneSurrogates } = loadModules().llmSafeText
+  for (const input of [
+    '\uD83C\uD83C',
+    '\uDC00\uDC00',
+    '\uD83C\uD83C\uDC00',
+    '\uDC00\uD83C\uDC00',
+    '\uD83C\uDC00\uD83C',
+    'a\uD83C\uD83Cb\uDC00c',
+  ]) {
+    const out = stripLoneSurrogates(input)
+    assert.equal(LONE_SURROGATE_RE.test(out), false, `input ${JSON.stringify(input)} -> ${JSON.stringify(out)}`)
+  }
 })
 
 test('stripLoneSurrogates: drops halves, keeps valid pairs and BMP', () => {
@@ -140,4 +166,43 @@ test('isNativeDeepSeekChatRoute: only the official api.deepseek.com host rides t
   assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com/anthropic', apiFormat: 'anthropic' }), false)
   // Another provider keyed on the official host is not the deepseek route.
   assert.equal(isNativeDeepSeekChatRoute({ provider: 'opencode', baseUrl: 'https://api.deepseek.com/v1', apiFormat: 'openai' }), false)
+})
+
+test('isNativeDeepSeekChatRoute: host parsing is robust to shape noise', () => {
+  const { isNativeDeepSeekChatRoute } = loadModules().coworkDshTurn
+  // Case-insensitive hostname, explicit port, whitespace padding.
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'https://API.DEEPSEEK.COM/v1', apiFormat: 'openai' }), true)
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'https://api.deepseek.com:443/v1', apiFormat: 'openai' }), true)
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: '  https://api.deepseek.com/v1  ', apiFormat: 'openai' }), true)
+  // Null/empty/garbage base URLs can never be native (provider may still be 'deepseek').
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: null, apiFormat: 'openai' }), false)
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: '', apiFormat: 'openai' }), false)
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'not-a-url', apiFormat: 'openai' }), false)
+  // Port-bearing custom relay stays on pi-ai.
+  assert.equal(isNativeDeepSeekChatRoute({ provider: 'deepseek', baseUrl: 'https://relay.example.com:8443/v1', apiFormat: 'openai' }), false)
+})
+
+test('tool-result snipping: head/tail cuts never strand surrogate halves', () => {
+  const { snipStaleToolResultBlocks, COWORK_TOOL_RESULT_SNIP_HEAD_CHARS, COWORK_TOOL_RESULT_SNIP_TAIL_CHARS } = loadModules().coworkToolResultSnip
+  const snip = (text) => {
+    const { messages, stats } = snipStaleToolResultBlocks(
+      [{ role: 'assistant', content: [{ type: 'tool_result', tool_use_id: 't1', content: text }] }],
+      10_000_000,
+    )
+    assert.equal(stats.snippedBlocks, 1, 'fixture must exceed the snip threshold')
+    return messages[0].content[0].content
+  }
+  // Emoji exactly at the head cut boundary (pre-fix: lone high surrogate).
+  const headSplit = 'a'.repeat(COWORK_TOOL_RESULT_SNIP_HEAD_CHARS - 1) + '🌐' + 'x'.repeat(COWORK_TOOL_RESULT_SNIP_TAIL_CHARS + 400)
+  const snipHead = snip(headSplit)
+  assert.equal(LONE_SURROGATE_RE.test(snipHead), false)
+  // Emoji exactly at the tail start (pre-fix: lone low surrogate).
+  const tailSplit = 'x'.repeat(COWORK_TOOL_RESULT_SNIP_HEAD_CHARS + 320) + '🌐' + 'y'.repeat(COWORK_TOOL_RESULT_SNIP_TAIL_CHARS - 1)
+  const snipTail = snip(tailSplit)
+  assert.equal(LONE_SURROGATE_RE.test(snipTail), false)
+  // Both cuts land on clean boundaries: deterministic shape unchanged.
+  const plain = 'p'.repeat(COWORK_TOOL_RESULT_SNIP_HEAD_CHARS + COWORK_TOOL_RESULT_SNIP_TAIL_CHARS + 400)
+  const snipPlain = snip(plain)
+  assert.match(snipPlain, /\[snipped tool result/)
+  assert.equal(LONE_SURROGATE_RE.test(snipPlain), false)
 })

@@ -74,6 +74,9 @@ jobs:
       - name: Compile Electron main process
         run: npm run compile:electron
 
+      - name: Run LLM-safe text tests
+        run: node --test tests/llmSafeText.test.mjs
+
       - name: Validate runtime dependency contracts
         run: node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs
 

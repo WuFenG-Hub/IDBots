@@ -10,6 +10,7 @@ import {
   type CoworkMemoryGuardLevel,
 } from './libs/coworkMemoryExtractor';
 import { judgeMemoryCandidate } from './libs/coworkMemoryJudge';
+import { stripLoneSurrogates, truncateUtf16Units } from './libs/llmSafeText';
 import {
   parseSessionGoal,
   serializeSessionGoal,
@@ -383,8 +384,12 @@ function buildMemoryFingerprint(text: string): string {
 }
 
 function truncate(value: string, maxChars: number): string {
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars - 1)}…`;
+  // Memory text is persisted AND re-rendered into prompts on every turn, so
+  // the cut must never split a surrogate pair (see llmSafeText) — and any
+  // rows polluted by the pre-fix hard cut are sanitized on read here too.
+  const text = stripLoneSurrogates(value);
+  if (text.length <= maxChars) return text;
+  return `${truncateUtf16Units(text, maxChars - 1)}…`;
 }
 
 const MEMORY_TEXT_MAX_CHARS = 360;
