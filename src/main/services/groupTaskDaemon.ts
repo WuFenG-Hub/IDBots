@@ -3484,12 +3484,6 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       'Full member roster (assign only to these members, by exact name):',
       ...(rosterLines.length > 0 ? rosterLines : ['(no members yet besides the chair)']),
       ...(openTeamStatusBlock ? ['', openTeamStatusBlock] : []),
-      // The shared culture prior rides the planning directive too, so seats
-      // and sequencing respect the fleet's conventions from the first plan.
-      ...(() => {
-        const culture = deps.buildTeamCultureBlock?.() ?? null;
-        return culture ? ['', culture] : [];
-      })(),
       '',
       `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages)]`,
       ...(logLines.length > 0 ? logLines : ['(no messages yet)']),

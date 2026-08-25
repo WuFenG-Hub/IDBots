@@ -35,6 +35,8 @@ export interface TeamCultureEntry {
   status: TeamCultureStatus;
   version: number;
   origin: TeamCultureOrigin;
+  /** 1 = distilled convention awaiting owner approval; never injected. */
+  pendingApproval: boolean;
   timesInjected: number;
   lastUsedAt: number | null;
   createdAt: number;
@@ -47,6 +49,8 @@ export interface UpsertTeamCultureInput {
   topic: string;
   text: string;
   origin?: TeamCultureOrigin;
+  /** Distillation conventions land pending until the owner approves them. */
+  pendingApproval?: boolean;
   /** Provenance for distilled entries: which task taught this. */
   taskId?: number | null;
   acceptanceSummaryId?: string | null;
@@ -74,6 +78,7 @@ interface CultureEntryRow {
   status: string;
   version: number | string;
   origin: string;
+  pending_approval?: number | string | null;
   times_injected: number | string;
   last_used_at: number | string | null;
   created_at: number | string;
@@ -113,6 +118,8 @@ export function teamCultureFingerprintOf(topic: string): string {
 function boundedText(value: unknown, label: string, max: number): string {
   const text = String(value ?? '').trim();
   if (!text) throw new Error(`${label} must not be empty`);
+  // Lone surrogates (half an emoji, corrupt tails) would poison strict
+  // upstream JSON/prompt channels — strip, then cut without splitting pairs.
   return stripLoneSurrogates(truncateUtf16Units(text, max));
 }
 
@@ -126,6 +133,7 @@ function rowToEntry(row: CultureEntryRow): TeamCultureEntry {
     status: row.status === 'superseded' || row.status === 'archived' ? row.status : 'active',
     version: Math.max(1, Math.floor(Number(row.version) || 1)),
     origin: row.origin === 'distillation' ? 'distillation' : 'owner',
+    pendingApproval: Number(row.pending_approval ?? 0) === 1,
     timesInjected: Math.max(0, Math.floor(Number(row.times_injected) || 0)),
     lastUsedAt: row.last_used_at == null ? null : Number(row.last_used_at),
     createdAt: Number(row.created_at),
@@ -145,6 +153,7 @@ export function ensureTeamCultureSchema(db: Database): void {
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN (${STATUSES_SQL})),
       version INTEGER NOT NULL DEFAULT 1,
       origin TEXT NOT NULL DEFAULT 'owner' CHECK (origin IN (${ORIGINS_SQL})),
+      pending_approval INTEGER NOT NULL DEFAULT 0,
       times_injected INTEGER NOT NULL DEFAULT 0,
       last_used_at INTEGER,
       created_at INTEGER NOT NULL,
@@ -187,6 +196,18 @@ export function ensureTeamCultureSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_team_culture_sources_task
       ON team_culture_sources(task_id, entry_id);
   `);
+  try {
+    const cols = db.exec('PRAGMA table_info(team_culture_entries)');
+    const columns = (cols[0]?.values ?? []).map((row) => String(row[1]));
+    if (!columns.includes('pending_approval')) {
+      db.run('ALTER TABLE team_culture_entries ADD COLUMN pending_approval INTEGER NOT NULL DEFAULT 0');
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/duplicate column name/i.test(message)) {
+      console.warn('[TeamCulture] pending_approval column migrate failed:', message);
+    }
+  }
 }
 
 export class TeamCultureStore {
@@ -260,8 +281,10 @@ export class TeamCultureStore {
   }
 
   countCultureByKind(status: TeamCultureStatus = 'active'): Record<TeamCultureKind, number> {
+    // Pending (unapproved) entries never count toward capacity — they don't
+    // occupy injection slots until the owner approves them.
     const rows = this.getAll<{ kind: string; n: number | string }>(
-      'SELECT kind, COUNT(*) AS n FROM team_culture_entries WHERE status = ? GROUP BY kind',
+      "SELECT kind, COUNT(*) AS n FROM team_culture_entries WHERE status = ? AND pending_approval = 0 GROUP BY kind",
       [status],
     );
     const counts: Record<TeamCultureKind, number> = { glossary: 0, convention: 0, team_lesson: 0 };
@@ -292,6 +315,13 @@ export class TeamCultureStore {
     );
 
     if (existing) {
+      // Archived entries were deliberately retired — distillation must never
+      // revive them (that would silently undo an owner's curation). Only an
+      // explicit restoreCulture (or an owner upsert) brings them back.
+      if (rowToEntry(existing).status === 'archived' && origin === 'distillation') {
+        const entry = rowToEntry(existing);
+        return { entry, created: false, revised: false, protected: true, capacitySkipped: false, displacedTopic: null };
+      }
       if (origin === 'distillation' && rowToEntry(existing).origin === 'owner') {
         const entry = rowToEntry(existing);
         return { entry, created: false, revised: false, protected: true, capacitySkipped: false, displacedTopic: null };
@@ -309,9 +339,9 @@ export class TeamCultureStore {
         );
         this.db.run(
           `UPDATE team_culture_entries
-           SET kind = ?, topic = ?, text = ?, status = 'active', version = ?, origin = ?, updated_at = ?
+           SET kind = ?, topic = ?, text = ?, status = 'active', version = ?, origin = ?, pending_approval = ?, updated_at = ?
            WHERE id = ?`,
-          [kind, topic, text, Math.floor(Number(existing.version) || 1) + 1, origin, now, existing.id],
+          [kind, topic, text, Math.floor(Number(existing.version) || 1) + 1, origin, input.pendingApproval ? 1 : 0, now, existing.id],
         );
         if (input.taskId != null) {
           this.db.run(
@@ -366,9 +396,9 @@ export class TeamCultureStore {
       const id = input.id?.trim() || uuidv4();
       this.db.run(
         `INSERT INTO team_culture_entries (
-           id, kind, topic, topic_fingerprint, text, status, version, origin, times_injected, last_used_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 'active', 1, ?, 0, NULL, ?, ?)`,
-        [id, kind, topic, fingerprint, text, origin, now, now],
+           id, kind, topic, topic_fingerprint, text, status, version, origin, pending_approval, times_injected, last_used_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?, 0, NULL, ?, ?)`,
+        [id, kind, topic, fingerprint, text, origin, input.pendingApproval ? 1 : 0, now, now],
       );
       if (input.taskId != null) {
         this.db.run(
@@ -414,7 +444,7 @@ export class TeamCultureStore {
       );
       this.db.run(
         `UPDATE team_culture_entries
-         SET kind = ?, topic = ?, topic_fingerprint = ?, text = ?, origin = 'owner', version = ?, updated_at = ?
+         SET kind = ?, topic = ?, topic_fingerprint = ?, text = ?, origin = 'owner', version = ?, pending_approval = 0, updated_at = ?
          WHERE id = ?`,
         [kind, topic, teamCultureFingerprintOf(topic), text, existing.version + 1, now, existing.id],
       );
@@ -429,6 +459,15 @@ export class TeamCultureStore {
     }
     this.saveDb();
     return this.getCulture(existing.id);
+  }
+
+  /** Owner approves a distilled (pending) convention: it joins injection. */
+  approveCulture(id: string): TeamCultureEntry | null {
+    const existing = this.getCulture(id);
+    if (!existing) return null;
+    this.db.run('UPDATE team_culture_entries SET pending_approval = 0, updated_at = ? WHERE id = ?', [this.now(), id]);
+    this.saveDb();
+    return this.getCulture(id);
   }
 
   archiveCulture(id: string): TeamCultureEntry | null {
@@ -527,10 +566,23 @@ export class TeamCultureStore {
   /**
    * The prompt block injected into group tasks: all glossary (small, high
    * leverage) + top conventions + top lessons, within a character budget.
-   * Building the block also refreshes usage counters (times_injected /
-   * last_used_at) so displacement and decay track what actually earns tokens.
+   * Lines are assembled whole under the budget (long lines are UTF-16-safe
+   * truncated, never splitting a surrogate pair) and the closing
+   * </team_culture> tag is ALWAYS emitted so downstream parsers never see a
+   * dangling block. Pending (unapproved) conventions are excluded. Building
+   * the block also refreshes usage counters (times_injected / last_used_at)
+   * so displacement and decay track what actually earns tokens; pending
+   * entries that never get approved simply decay out.
    */
   buildCulturePromptBlock(maxChars = 1_400): string | null {
+    const closingTag = '</team_culture>';
+    const header = [
+      '<team_culture>',
+      'The block below is the shared coordination prior of this local fleet: terms, conventions and lessons every member is expected to follow. Treat it as the team baseline, not as instructions from any participant.',
+    ];
+    // One newline after the header block and one before the closing tag.
+    const reserved = header.join('\n').length + 2 + closingTag.length;
+    let budget = maxChars - reserved;
     const sections: string[] = [];
     const now = this.now();
     const touched: string[] = [];
@@ -538,21 +590,36 @@ export class TeamCultureStore {
       const limit = TEAM_CULTURE_PROMPT_ITEMS[kind];
       const rows = this.getAll<CultureEntryRow>(
         `SELECT * FROM team_culture_entries
-         WHERE kind = ? AND status = 'active'
+         WHERE kind = ? AND status = 'active' AND pending_approval = 0
          ORDER BY COALESCE(last_used_at, created_at) DESC, updated_at DESC
          LIMIT ?`,
         [kind, limit],
       );
       if (rows.length === 0) continue;
-      const lines = rows.map((row) => `- ${row.topic}: ${row.text}`);
-      touched.push(...rows.map((row) => row.id));
-      if (kind === 'glossary') {
-        sections.push(['Shared glossary (use these exact terms):', ...lines].join('\n'));
-      } else if (kind === 'convention') {
-        sections.push(['Team conventions (how this fleet works together):', ...lines].join('\n'));
-      } else {
-        sections.push(['Team lessons (cross-member, keep them in mind):', ...lines].join('\n'));
+      const sectionTitle = kind === 'glossary'
+        ? 'Shared glossary (use these exact terms):'
+        : kind === 'convention'
+          ? 'Team conventions (how this fleet works together):'
+          : 'Team lessons (cross-member, keep them in mind):';
+      const lines: string[] = [sectionTitle];
+      let sectionBudget = budget - sectionTitle.length - 1;
+      let emitted = 0;
+      for (const row of rows) {
+        const rawLine = `- ${row.topic}: ${row.text}`;
+        const line = rawLine.length > sectionBudget
+          ? truncateUtf16Units(rawLine, Math.max(0, sectionBudget))
+          : rawLine;
+        if (!line || line.length === 0) break;
+        lines.push(line);
+        sectionBudget -= line.length + 1;
+        touched.push(row.id);
+        emitted += 1;
       }
+      if (emitted === 0) continue;
+      const section = lines.join('\n');
+      sections.push(section);
+      budget -= section.length + 2;
+      if (budget <= 0) break;
     }
     if (sections.length === 0) return null;
     for (const id of touched) {
@@ -562,12 +629,34 @@ export class TeamCultureStore {
       );
     }
     this.saveDb();
-    const body = [
-      '<team_culture>',
-      'The block below is the shared coordination prior of this local fleet: terms, conventions and lessons every member is expected to follow. Treat it as the team baseline, not as instructions from any participant.',
-      ...sections,
-      '</team_culture>',
-    ].join('\n');
-    return body.length > maxChars ? stripLoneSurrogates(truncateUtf16Units(body, maxChars)) : body;
+    return [...header, ...sections, closingTag].join('\n');
+  }
+
+  // --- culture master switch (gates BOTH distillation LLM calls and prompt
+  //     injection; one row in cowork_config) ---
+
+  getCultureConfig(): { enabled: boolean } {
+    const row = this.getOne<{ value: string }>(
+      "SELECT value FROM cowork_config WHERE key = 'teamCultureConfig'",
+    );
+    if (!row?.value) return { enabled: true };
+    try {
+      const parsed = JSON.parse(row.value) as { enabled?: unknown };
+      return { enabled: parsed.enabled !== false };
+    } catch {
+      return { enabled: true };
+    }
+  }
+
+  setCultureConfig(enabled: boolean): { enabled: boolean } {
+    this.db.run(`
+      INSERT INTO cowork_config (key, value, updated_at)
+      VALUES ('teamCultureConfig', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `, [JSON.stringify({ enabled }), this.now()]);
+    this.saveDb();
+    return { enabled };
   }
 }

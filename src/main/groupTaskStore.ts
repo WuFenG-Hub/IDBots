@@ -2045,8 +2045,10 @@ export class GroupTaskStore {
    */
   recordTaskCommStats(taskId: number, groupId: string | null): boolean {
     if (!groupId) return false;
+    // CAST to BLOB: LENGTH on TEXT counts UTF-16 code units, understating
+    // multibyte (Chinese) content ~3x; BLOB length is the true byte count.
     const row = this.getOne<{ bytes: number | string | null; messages: number | string | null }>(
-      `SELECT SUM(LENGTH(content)) AS bytes, COUNT(*) AS messages
+      `SELECT SUM(LENGTH(CAST(content AS BLOB))) AS bytes, COUNT(*) AS messages
        FROM group_chat_messages WHERE group_id = ?`,
       [groupId],
     );

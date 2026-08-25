@@ -3660,7 +3660,10 @@ const startSqliteDaemons = (): void => {
     listDailySummaries: (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
     buildTeamCultureBlock: () => {
       try {
-        return getTeamCultureStore().buildCulturePromptBlock();
+        const cultureStore = getTeamCultureStore();
+        // Master switch: one gate for both injection and distillation.
+        if (!cultureStore.getCultureConfig().enabled) return null;
+        return cultureStore.buildCulturePromptBlock();
       } catch (error) {
         console.warn(
           `[GroupTaskDaemon] Team culture block unavailable: ${error instanceof Error ? error.message : String(error)}`,
@@ -10726,6 +10729,45 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to list comm trend',
+      };
+    }
+  });
+
+  ipcMain.handle('teamCulture:getConfig', async () => {
+    try {
+      return { success: true, config: getTeamCultureStore().getCultureConfig() };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get team culture config',
+      };
+    }
+  });
+
+  ipcMain.handle('teamCulture:setConfig', async (_event, input: { enabled?: boolean }) => {
+    try {
+      const current = getTeamCultureStore().getCultureConfig();
+      const config = getTeamCultureStore().setCultureConfig(
+        typeof input?.enabled === 'boolean' ? input.enabled : current.enabled,
+      );
+      return { success: true, config };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to save team culture config',
+      };
+    }
+  });
+
+  ipcMain.handle('teamCulture:approve', async (_event, input: { id: string }) => {
+    try {
+      const entry = getTeamCultureStore().approveCulture(input?.id);
+      if (!entry) return { success: false, error: 'Team culture entry not found' };
+      return { success: true, entry };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to approve team culture entry',
       };
     }
   });

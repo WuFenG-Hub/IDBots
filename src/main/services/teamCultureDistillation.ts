@@ -34,6 +34,8 @@ export interface CultureDistillationCounts {
   applied: number;
   protectedEntries: number;
   capacitySkipped: number;
+  /** Distilled conventions stored pending owner approval (never injected until approved). */
+  pendingConventions: number;
 }
 
 const MAX_PROPOSALS_PER_KIND = 3;
@@ -44,6 +46,7 @@ export function buildCultureDistillationPrompt(input: {
   goal: string;
   summary: NonNullable<CultureDistillationTaskInput['summary']>;
   existingTopics: string[];
+  archivedTopics: string[];
 }): string {
   const deliverableLines = input.summary.deliverables.map(
     (deliverable) => `- ${deliverable.authorName ?? 'unknown'}: ${deliverable.status}`,
@@ -58,6 +61,7 @@ export function buildCultureDistillationPrompt(input: {
     `- At most ${MAX_PROPOSALS_PER_KIND} entries per kind. If nothing qualifies, return empty arrays — silence is a valid answer.`,
     '- Topics are short stable labels (2-6 words); text is one precise sentence.',
     '- Existing culture topics are listed below; never propose a duplicate of those.',
+    '- Archived topics below were deliberately retired — NEVER re-propose them in any wording.',
     '- Output ONLY a JSON object, no prose around it.',
     '',
     'Output JSON shape:',
@@ -70,6 +74,7 @@ export function buildCultureDistillationPrompt(input: {
     `Deliverable verdicts: ${deliverableLines.length > 0 ? deliverableLines.join(' ; ') : '(none)'}`,
     `Members: ${memberNames || '(unknown)'}`,
     `Existing culture topics: ${input.existingTopics.length > 0 ? input.existingTopics.join(' ; ') : '(none)'}`,
+    `Archived (retired, do NOT revive): ${input.archivedTopics.length > 0 ? input.archivedTopics.join(' ; ') : '(none)'}`,
   ];
   return lines.join('\n');
 }
@@ -125,7 +130,7 @@ export async function runCultureDistillation(input: {
   cultureStore: TeamCultureStore;
   performChat: CultureDistillationPerformChat;
 }): Promise<CultureDistillationCounts> {
-  const counts: CultureDistillationCounts = { applied: 0, protectedEntries: 0, capacitySkipped: 0 };
+  const counts: CultureDistillationCounts = { applied: 0, protectedEntries: 0, capacitySkipped: 0, pendingConventions: 0 };
   if (input.task.status !== 'done' || !input.task.summary) {
     return counts;
   }
@@ -136,6 +141,9 @@ export async function runCultureDistillation(input: {
   const existingTopics = input.cultureStore
     .listCulture({ status: 'active', limit: 200 })
     .map((entry) => entry.topic);
+  const archivedTopics = input.cultureStore
+    .listCulture({ status: 'archived', limit: 200 })
+    .map((entry) => entry.topic);
   const raw = await input.performChat(
     'You are a team-culture distillation assistant. Respond only with the requested JSON object.',
     buildCultureDistillationPrompt({
@@ -143,6 +151,7 @@ export async function runCultureDistillation(input: {
       goal: input.task.goal,
       summary: input.task.summary,
       existingTopics,
+      archivedTopics,
     }),
     undefined,
     { thinking: 'disabled', signal: AbortSignal.timeout(DISTILLATION_LLM_TIMEOUT_MS) },
@@ -162,11 +171,21 @@ export async function runCultureDistillation(input: {
       topic: proposal.topic,
       text: proposal.text,
       origin: 'distillation',
+      // Conventions steer every future task's prompt — task content is an
+      // untrusted injection surface, so distilled conventions land pending
+      // and only join injection after the owner approves them. Glossary
+      // terms and lessons stay low-risk and auto-activate.
+      pendingApproval: proposal.kind === 'convention',
       taskId: input.task.taskId,
     });
     if (result.protected) counts.protectedEntries += 1;
     else if (result.capacitySkipped) counts.capacitySkipped += 1;
-    else if (result.created || result.revised) counts.applied += 1;
+    else if (result.created || result.revised) {
+      counts.applied += 1;
+      if (proposal.kind === 'convention' && result.entry?.pendingApproval) {
+        counts.pendingConventions += 1;
+      }
+    }
   }
   return counts;
 }
@@ -202,6 +221,9 @@ export function distillTeamCultureFromTaskClose(
   void (async () => {
     try {
       if (!cultureStoreProvider || !performChatProvider || !groupTaskStoreProvider) return;
+      const cultureStore = cultureStoreProvider();
+      // Master switch gates BOTH the distillation LLM spend and injection.
+      if (!cultureStore.getCultureConfig().enabled) return;
       const groupTaskStore = groupTaskStoreProvider();
       const summaryRow = groupTaskStore.getLatestAcceptanceSummary(taskId);
       if (!summaryRow) return;
@@ -225,13 +247,14 @@ export function distillTeamCultureFromTaskClose(
             })),
           },
         },
-        cultureStore: cultureStoreProvider(),
+        cultureStore: cultureStore,
         performChat: performChatProvider,
       });
       if (counts.applied > 0) {
         console.log(
           `[TeamCulture] Distilled ${counts.applied} culture entr(ies) from task ${taskId}` +
-            ` (protected: ${counts.protectedEntries}, capacity-skipped: ${counts.capacitySkipped})`,
+            ` (protected: ${counts.protectedEntries}, capacity-skipped: ${counts.capacitySkipped}` +
+            `, pending approval: ${counts.pendingConventions})`,
         );
       }
     } catch (error) {

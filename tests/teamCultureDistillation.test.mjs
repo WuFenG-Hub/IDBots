@@ -49,15 +49,64 @@ test('distillation applies capped proposals through the governed upsert channel'
     });
     assert.equal(counts.applied, 3);
     assert.equal(counts.protectedEntries, 0);
+    assert.equal(counts.pendingConventions, 1, 'distilled conventions land pending owner approval');
 
     const entries = store.listCulture({ status: 'active' });
     assert.equal(entries.length, 3);
     const lesson = entries.find((entry) => entry.kind === 'team_lesson');
     assert.equal(lesson.origin, 'distillation');
+    assert.equal(lesson.pendingApproval, false, 'lessons are low-risk and auto-activate');
+    const convention = entries.find((entry) => entry.kind === 'convention');
+    assert.equal(convention.pendingApproval, true);
+    const pendingBlock = store.buildCulturePromptBlock();
+    assert.ok(!pendingBlock.includes(convention.topic), 'pending conventions never join injection');
+    const approved = store.approveCulture(convention.id);
+    assert.equal(approved.pendingApproval, false);
+    const approvedBlock = store.buildCulturePromptBlock();
+    assert.ok(approvedBlock.includes(convention.topic), 'approval joins injection');
     const sourced = db.exec(
       'SELECT COUNT(*) AS n FROM team_culture_sources WHERE task_id = 7',
     )[0]?.values?.[0]?.[0];
     assert.equal(Number(sourced), 3, 'task provenance recorded for every applied entry');
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('distillation never revives archived entries', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new TeamCultureStore(db, () => {}, () => 1_800_000_000_000);
+    const retired = store.upsertCulture({
+      kind: 'team_lesson',
+      topic: 'SVG fallback for text',
+      text: 'When a renderer misses fonts, switching headline text to SVG preserves the deadline.',
+      origin: 'distillation',
+      taskId: 5,
+    }).entry;
+    store.archiveCulture(retired.id);
+
+    let prompt = '';
+    const counts = await runCultureDistillation({
+      task: { taskId: 9, title: 'Poster v3', goal: 'Again', status: 'done', summary: SUMMARY },
+      cultureStore: store,
+      performChat: async (_system, user) => {
+        prompt = user;
+        return '```json\n' + JSON.stringify({
+          glossary: [],
+          conventions: [],
+          lessons: [{ topic: 'SVG fallback for text', text: 'reworded revival attempt.' }],
+        }) + '\n```';
+      },
+    });
+    assert.equal(counts.protectedEntries, 1, 'the archived entry shields itself');
+    assert.equal(counts.applied, 0);
+    const still = store.getCulture(retired.id);
+    assert.equal(still.status, 'archived');
+    assert.equal(still.text.includes('revival attempt'), false);
+    assert.match(prompt, /Archived \(retired, do NOT revive\): SVG fallback for text/,
+      'the prompt lists archived topics so the LLM avoids them');
   } finally {
     harness.cleanup();
   }
@@ -134,7 +183,7 @@ test('unparseable output is a silent no-op and the prompt carries existing topic
     assert.match(capturedPrompt, /Existing culture topics: .*seat/s,
       'the LLM sees current topics so it avoids duplicates');
     const staticPrompt = buildCultureDistillationPrompt({
-      title: 't', goal: 'g', summary: SUMMARY, existingTopics: [],
+      title: 't', goal: 'g', summary: SUMMARY, existingTopics: [], archivedTopics: [],
     });
     assert.match(staticPrompt, /silence is a valid answer/);
   } finally {
