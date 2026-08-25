@@ -64,6 +64,11 @@ export interface MetaIDImpressionSnapshot {
   uncertaintyText: string | null;
   capabilityTags: string[];
   collaborationFacts: MetaIDCollaborationFact[];
+  /** Deterministic cooperation score 0-100 distilled from collaboration outcomes (null before any sample). */
+  reputationScore: number | null;
+  /** How many outcome samples feed the score; below ~3 treat as low confidence. */
+  reputationSamples: number;
+  reputationUpdatedAt: number | null;
   latestObservationId: string;
   snapshotVersion: number;
   sourceHash: string;
@@ -133,6 +138,9 @@ interface SnapshotRow {
   uncertainty_text: string | null;
   capability_tags_json?: string | null;
   collaboration_facts_json?: string | null;
+  reputation_score?: number | string | null;
+  reputation_samples?: number | string | null;
+  reputation_updated_at?: number | string | null;
   latest_observation_id: string;
   snapshot_version: number | string;
   source_hash: string;
@@ -251,6 +259,15 @@ export function ensureMetaIDImpressionSchema(db: Database): void {
     if (!columns.includes('collaboration_facts_json')) {
       db.run(`ALTER TABLE metaid_impression_snapshots ADD COLUMN collaboration_facts_json TEXT NOT NULL DEFAULT '[]'`);
     }
+    if (!columns.includes('reputation_score')) {
+      db.run('ALTER TABLE metaid_impression_snapshots ADD COLUMN reputation_score REAL');
+    }
+    if (!columns.includes('reputation_samples')) {
+      db.run('ALTER TABLE metaid_impression_snapshots ADD COLUMN reputation_samples INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!columns.includes('reputation_updated_at')) {
+      db.run('ALTER TABLE metaid_impression_snapshots ADD COLUMN reputation_updated_at INTEGER');
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (/duplicate column name/i.test(message)) return;
@@ -360,6 +377,57 @@ function collectCapabilityTags(observations: MetaIDImpressionObservation[]): str
     if (weak) tags.add(`weak:${weak.slice(0, 60)}`);
   }
   return [...tags].slice(0, 24);
+}
+
+/**
+ * Deterministic "reputation temperature": a 0-100 scalar distilled from
+ * collaboration outcomes so arbitration can decide without replaying the
+ * underlying memories. Samples come from two sources already in the store:
+ *  - collaborationFacts outcome strings (dream-distilled, free text),
+ *  - per-event participation stats the deterministic task-close/verdict
+ *    writer stores in observation dimensions (deliverablesAccepted/Rejected).
+ * Each sample is 1 (cooperative outcome) / 0 (failed or rejected) / 0.5
+ * (neutral/unknown); an EWMA (alpha 0.3, newest-weighted) folds them in
+ * chronological order, so old outcomes decay naturally — a temperature, not
+ * a permanent record. Exported for direct unit testing.
+ */
+export const REPUTATION_EWMA_ALPHA = 0.3;
+
+function collaborationOutcomeToSample(outcome: string): number {
+  const normalized = outcome.trim().toLowerCase();
+  if (!normalized) return 0.5;
+  if (/(accept|done|success|complete|通过|验收通过|交付成功)/.test(normalized)) return 1;
+  if (/(reject|rework|fail|cancel|退回|不通过|失败)/.test(normalized)) return 0;
+  return 0.5;
+}
+
+export function computeReputationTemperature(input: {
+  observations: Pick<MetaIDImpressionObservation, 'createdAt' | 'dimensions'>[];
+  collaborationFacts: MetaIDCollaborationFact[];
+}): { score: number; samples: number } {
+  const samples: Array<{ at: number; value: number }> = [];
+  for (const fact of input.collaborationFacts) {
+    samples.push({ at: fact.at, value: collaborationOutcomeToSample(fact.outcome) });
+  }
+  for (const observation of input.observations) {
+    const accepted = Number(observation.dimensions.deliverablesAccepted);
+    const rejected = Number(observation.dimensions.deliverablesRejected);
+    if (Number.isFinite(accepted) && Number.isFinite(rejected) && accepted + rejected > 0) {
+      samples.push({
+        at: Number(observation.createdAt) || 0,
+        value: accepted / (accepted + rejected),
+      });
+    }
+  }
+  if (samples.length === 0) {
+    return { score: 0, samples: 0 };
+  }
+  samples.sort((a, b) => a.at - b.at);
+  let ewma = 0.5;
+  for (const sample of samples) {
+    ewma = ewma * (1 - REPUTATION_EWMA_ALPHA) + sample.value * REPUTATION_EWMA_ALPHA;
+  }
+  return { score: Math.round(ewma * 1000) / 10, samples: samples.length };
 }
 
 function collectCollaborationFacts(observations: MetaIDImpressionObservation[]): MetaIDCollaborationFact[] {
@@ -473,6 +541,9 @@ function rowToSnapshot(row: SnapshotRow): MetaIDImpressionSnapshot {
     uncertaintyText: row.uncertainty_text ?? null,
     capabilityTags: parseStringArray(row.capability_tags_json),
     collaborationFacts: parseCollaborationFacts(row.collaboration_facts_json),
+    reputationScore: row.reputation_score == null ? null : Number(row.reputation_score),
+    reputationSamples: asInteger(row.reputation_samples),
+    reputationUpdatedAt: row.reputation_updated_at == null ? null : asInteger(row.reputation_updated_at),
     latestObservationId: row.latest_observation_id,
     snapshotVersion: asInteger(row.snapshot_version),
     sourceHash: row.source_hash,
@@ -824,6 +895,7 @@ export class MetaIDImpressionStore {
     const directInteractionCount = asInteger(stats?.direct_interaction_count);
     const capabilityTags = collectCapabilityTags(observations);
     const collaborationFacts = collectCollaborationFacts(observations);
+    const reputation = computeReputationTemperature({ observations, collaborationFacts });
     const subjectKind = latestDimensionText(latestDimensions, ['subjectKind', 'subject_kind']);
     const relationshipTemperature = subjectKind === 'owner'
       ? latestDimensionText(latestDimensions, ['relationshipTemperature', 'relationship_temperature', 'temperature'])
@@ -849,9 +921,10 @@ export class MetaIDImpressionStore {
          interaction_count, direct_interaction_count, summary_text,
          style_descriptors_json, cooperation_context, relationship_temperature,
          communication_guidance, uncertainty_text, capability_tags_json,
-         collaboration_facts_json, latest_observation_id,
+         collaboration_facts_json, reputation_score, reputation_samples,
+         reputation_updated_at, latest_observation_id,
          snapshot_version, source_hash, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(observer_globalmetaid, subject_globalmetaid) DO UPDATE SET
          first_seen_at = excluded.first_seen_at,
          last_seen_at = excluded.last_seen_at,
@@ -865,6 +938,9 @@ export class MetaIDImpressionStore {
          uncertainty_text = excluded.uncertainty_text,
          capability_tags_json = excluded.capability_tags_json,
          collaboration_facts_json = excluded.collaboration_facts_json,
+         reputation_score = excluded.reputation_score,
+         reputation_samples = excluded.reputation_samples,
+         reputation_updated_at = excluded.reputation_updated_at,
          latest_observation_id = excluded.latest_observation_id,
          snapshot_version = excluded.snapshot_version,
          source_hash = excluded.source_hash,
@@ -884,6 +960,9 @@ export class MetaIDImpressionStore {
         uncertaintyText,
         JSON.stringify(capabilityTags),
         JSON.stringify(collaborationFacts),
+        reputation.samples > 0 ? reputation.score : null,
+        reputation.samples,
+        reputation.samples > 0 ? now : null,
         latest.id,
         METAID_IMPRESSION_SNAPSHOT_VERSION,
         sourceHash,
@@ -893,5 +972,83 @@ export class MetaIDImpressionStore {
     );
     this.saveDb();
     return this.getSnapshot(observer, subject);
+  }
+
+  /**
+   * Compaction stroke for impression observations: the snapshot is the
+   * compressed state, so stale raw observations are retired (status
+   * 'superseded') once nothing needs them. Per (observer, subject) pair the
+   * newest `anchorsPerPair` active observations always stay as episodic
+   * anchors (minimum 1 so the pair's snapshot never loses its latest row);
+   * among the rest, only observations older than `cutoffMs` are superseded.
+   * Affected snapshots are rebuilt from the remaining actives. Nothing is
+   * ever deleted — flipping the status back restores a prior state.
+   */
+  compactObservations(input: {
+    cutoffMs: number;
+    anchorsPerPair: number;
+    /** Pair owners whose bots opted out of hygiene are skipped entirely. */
+    excludeObservers?: ReadonlySet<string>;
+  }): { pairsCompacted: number; observationsSuperseded: number; snapshotsRebuilt: number } {
+    const cutoff = Math.floor(input.cutoffMs);
+    const anchors = Math.max(1, Math.min(50, Math.floor(input.anchorsPerPair)));
+    const pairs = this.getAll<{ observer_globalmetaid: string; subject_globalmetaid: string }>(
+      `SELECT DISTINCT observer_globalmetaid, subject_globalmetaid
+       FROM metaid_impression_observations
+       WHERE status = 'active' AND created_at < ?`,
+      [cutoff],
+    );
+    let pairsCompacted = 0;
+    let observationsSuperseded = 0;
+    let snapshotsRebuilt = 0;
+    for (const pair of pairs) {
+      if (input.excludeObservers?.has(pair.observer_globalmetaid)) continue;
+      const rows = this.getAll<{ id: string; created_at: number | string }>(
+        `SELECT id, created_at FROM metaid_impression_observations
+         WHERE observer_globalmetaid = ? AND subject_globalmetaid = ? AND status = 'active'
+         ORDER BY created_at DESC, id DESC`,
+        [pair.observer_globalmetaid, pair.subject_globalmetaid],
+      );
+      const toSupersede = rows
+        .slice(anchors)
+        .filter((row) => Number(row.created_at) < cutoff)
+        .map((row) => row.id);
+      if (toSupersede.length === 0) continue;
+
+      this.db.run('BEGIN IMMEDIATE');
+      try {
+        for (const id of toSupersede) {
+          this.db.run(
+            `UPDATE metaid_impression_observations
+             SET status = 'superseded'
+             WHERE id = ? AND status = 'active'`,
+            [id],
+          );
+        }
+        this.db.run('COMMIT');
+      } catch (error) {
+        try {
+          this.db.run('ROLLBACK');
+        } catch {
+          // Preserve the original write error.
+        }
+        throw error;
+      }
+      observationsSuperseded += toSupersede.length;
+      pairsCompacted += 1;
+      try {
+        this.rebuildSnapshot(pair.observer_globalmetaid, pair.subject_globalmetaid);
+        snapshotsRebuilt += 1;
+      } catch (error) {
+        console.warn(
+          `[MetaIDImpression] Snapshot rebuild failed after compaction for ${pair.observer_globalmetaid} -> ${pair.subject_globalmetaid}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (observationsSuperseded > 0) {
+      this.saveDb();
+    }
+    return { pairsCompacted, observationsSuperseded, snapshotsRebuilt };
   }
 }

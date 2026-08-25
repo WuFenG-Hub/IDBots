@@ -985,4 +985,51 @@ export class DreamStore {
       groupChats,
     };
   }
+
+  /**
+   * Hygiene retention for dream bookkeeping: completed runs and their
+   * fragment caches older than the cutoff date key are physically removed.
+   * The dream scheduler only looks back DREAM_LOOKBACK_DAYS (7), so purged
+   * dates can never become due again — the rows are pure bookkeeping after
+   * that. Non-completed runs are always kept (they still drive retries).
+   */
+  purgeOldRunsAndFragments(input: {
+    cutoffDateKey: string;
+    excludeMetabotIds?: ReadonlySet<number>;
+  }): { runsDeleted: number; fragmentsDeleted: number } {
+    const cutoffDate = input.cutoffDateKey.trim();
+    if (!cutoffDate) return { runsDeleted: 0, fragmentsDeleted: 0 };
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const metabotExclusion = excluded.length > 0
+      ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : '';
+
+    this.db.run('BEGIN IMMEDIATE');
+    try {
+      this.db.run(
+        `DELETE FROM metabot_dream_runs
+         WHERE status = 'completed' AND dream_date < ?${metabotExclusion}`,
+        [cutoffDate, ...excluded],
+      );
+      const runsDeleted = this.db.getRowsModified?.() || 0;
+      this.db.run(
+        `DELETE FROM metabot_dream_fragments
+         WHERE dream_date < ?${metabotExclusion}`,
+        [cutoffDate, ...excluded],
+      );
+      const fragmentsDeleted = this.db.getRowsModified?.() || 0;
+      this.db.run('COMMIT');
+      if (runsDeleted > 0 || fragmentsDeleted > 0) {
+        this.saveDb();
+      }
+      return { runsDeleted, fragmentsDeleted };
+    } catch (error) {
+      try {
+        this.db.run('ROLLBACK');
+      } catch {
+        // Preserve the original write error.
+      }
+      throw error;
+    }
+  }
 }

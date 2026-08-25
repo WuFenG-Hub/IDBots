@@ -473,7 +473,30 @@ interface CoworkMemoryPolicy {
   memoryGuardLevel: 'strict' | 'standard' | 'relaxed';
   memoryUserMemoriesMaxItems: number;
   memoryPromptMaxChars: number;
+  dreamEnabled: boolean;
+  hygieneEnabled: boolean;
   source: 'global' | 'metabot';
+}
+
+interface MemoryHygieneConfig {
+  enabled: boolean;
+  observationRetentionDays: number;
+  observationAnchorsPerPair: number;
+  episodeArchiveDays: number;
+  memoryDecayDays: number;
+  tombstonePurgeDays: number;
+  knowledgeRevisionKeep: number;
+  dreamRunRetentionDays: number;
+  deepConsolidationEnabled: boolean;
+  deepConsolidationIntervalDays: number;
+}
+
+interface MemoryHygieneRunStats {
+  dateKey: string;
+  ranAt: number;
+  trigger: 'scheduled' | 'manual';
+  counts: Record<string, number>;
+  errors: string[];
 }
 
 interface CoworkPermissionRequest {
@@ -1083,7 +1106,24 @@ interface IElectronAPI {
       memoryLlmJudgeEnabled?: boolean;
       memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
       memoryUserMemoriesMaxItems?: number;
+      hygieneEnabled?: boolean;
     }) => Promise<{ success: boolean; policy?: CoworkMemoryPolicy; error?: string }>;
+    getMemoryHygiene: () => Promise<{
+      success: boolean;
+      config?: MemoryHygieneConfig;
+      lastRun?: MemoryHygieneRunStats | null;
+      error?: string;
+    }>;
+    setMemoryHygieneConfig: (input: Partial<MemoryHygieneConfig>) => Promise<{
+      success: boolean;
+      config?: MemoryHygieneConfig;
+      error?: string;
+    }>;
+    runMemoryHygieneNow: () => Promise<{
+      success: boolean;
+      stats?: MemoryHygieneRunStats;
+      error?: string;
+    }>;
     listKnowledge: (input: {
       metabotId: number;
       kind?: 'know_how' | 'pitfall' | 'principle';

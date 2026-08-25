@@ -12,6 +12,8 @@ export interface AppCleanupDeps {
   stopScheduler: () => void;
   stopCognitiveOrchestrator: () => void;
   stopDreamService: () => void;
+  /** Optional so older cleanup callers that predate the hygiene service still type-check. */
+  stopMemoryHygieneService?: () => void;
   stopP2P: () => Promise<void>;
   stopProviderDiscovery: () => void;
   deactivateGroupChatTasks: () => void;
@@ -48,6 +50,7 @@ export async function runAppCleanup(deps: AppCleanupDeps): Promise<void> {
   deps.stopScheduler();
   deps.stopCognitiveOrchestrator();
   deps.stopDreamService();
+  deps.stopMemoryHygieneService?.();
   deps.stopProviderDiscovery();
   deps.deactivateGroupChatTasks();
 }

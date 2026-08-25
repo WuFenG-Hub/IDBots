@@ -67,6 +67,8 @@ export interface MemoryListUserMemoriesOptions extends MemoryScopeSelectorInput 
   limit?: number;
   offset?: number;
   includeDeleted?: boolean;
+  /** Include hygiene-archived rows (admin/stats surfaces); default hides them. */
+  includeArchived?: boolean;
   touchLastUsed?: boolean;
 }
 
@@ -114,6 +116,7 @@ export interface MemoryPolicy {
   memoryGuardLevel: CoworkMemoryGuardLevel;
   memoryUserMemoriesMaxItems: number;
   dreamEnabled: boolean;
+  hygieneEnabled: boolean;
   updatedAt: number;
 }
 
@@ -127,6 +130,8 @@ export interface MemoryEffectivePolicy {
   /** Combined char budget for injected memory blocks (oldest-first eviction; global-only). */
   memoryPromptMaxChars: number;
   dreamEnabled: boolean;
+  /** Whether the nightly hygiene (active-forgetting) pass covers this bot. */
+  hygieneEnabled: boolean;
   source: 'global' | 'metabot';
 }
 
@@ -138,6 +143,7 @@ export type MemoryPolicyUpdates = Partial<Pick<
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
   | 'dreamEnabled'
+  | 'hygieneEnabled'
 >>;
 
 export interface ApplyTurnMemoryUpdatesOptions {

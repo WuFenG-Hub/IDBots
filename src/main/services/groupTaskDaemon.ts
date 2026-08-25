@@ -2279,6 +2279,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       `- FORMAT REQUIREMENT: ${copyConclusionTagInstruction()} The host extracts that line verbatim as the single conclusion string reused by the Tasks acceptance-card headline, the group summary, and the origin-session notice. When the verdict rules below allow a recommendation, make it the verdict (accept & close, or rework and of what); under the facts-only rules make it a one-line factual deferral. Never a question.`,
       '- Restate the goal briefly.',
       '- Say what each member did (by name) and whether the deliverables are on-chain confirmed.',
+      // Reputation temperature arbitration: the roster cognition block carries
+      // a recency-weighted cooperation score per member; disputes resolve
+      // toward the higher temperature instead of burning communication rounds.
+      '- If members disagree on the verdict or on credit, weigh the cooperation temperature shown in the roster cognition block: higher temperature (more recent accepted collaboration) earns the benefit of the doubt, lower temperature gets specific verifiable asks instead of bare trust.',
       ...verdictInstruction,
       ...(planChangeBlock.length > 0
         ? [

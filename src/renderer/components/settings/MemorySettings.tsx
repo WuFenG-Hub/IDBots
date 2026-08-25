@@ -19,6 +19,8 @@ import type {
   CoworkMetaIDContactDetail,
   CoworkKnowledgeEntry,
   CoworkKnowledgeKind,
+  MemoryHygieneConfig,
+  MemoryHygieneRunStats,
 } from '../../types/cowork';
 import MetaIDContactPanel, { ContactGlobalMetaIdHint } from './MetaIDContactPanel';
 import BrainIcon from '../icons/BrainIcon';
@@ -188,6 +190,14 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     memoryGuardLevel: 'strict',
     memoryUserMemoriesMaxItems: 20,
   });
+
+  // --- Memory hygiene (active-forgetting / compression stroke) ---
+  const [hygiene, setHygiene] = useState<MemoryHygieneConfig | null>(null);
+  const [hygieneLastRun, setHygieneLastRun] = useState<MemoryHygieneRunStats | null>(null);
+  const [hygieneOpen, setHygieneOpen] = useState(false);
+  const [hygieneSaving, setHygieneSaving] = useState(false);
+  const [hygieneRunning, setHygieneRunning] = useState(false);
+  const [hygieneNotice, setHygieneNotice] = useState<string | null>(null);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -669,6 +679,82 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       }
     }
     setUseOverride(next);
+  };
+
+  // ---- Memory hygiene (active forgetting) ----
+  const loadHygiene = useCallback(async () => {
+    try {
+      const { config, lastRun } = await coworkService.getMemoryHygiene();
+      setHygiene(config);
+      setHygieneLastRun(lastRun);
+    } catch (hygieneError) {
+      console.error('Failed to load memory hygiene config:', hygieneError);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadHygiene();
+  }, [loadHygiene]);
+
+  const updateHygieneField = (field: keyof MemoryHygieneConfig, value: number | boolean) => {
+    setHygiene((prev) => (prev ? { ...prev, [field]: value } : prev));
+  };
+
+  const handleSaveHygiene = async () => {
+    if (!hygiene) return;
+    setHygieneSaving(true);
+    setHygieneNotice(null);
+    try {
+      const saved = await coworkService.setMemoryHygieneConfig({
+        enabled: hygiene.enabled,
+        observationRetentionDays: hygiene.observationRetentionDays,
+        observationAnchorsPerPair: hygiene.observationAnchorsPerPair,
+        episodeArchiveDays: hygiene.episodeArchiveDays,
+        memoryDecayDays: hygiene.memoryDecayDays,
+        tombstonePurgeDays: hygiene.tombstonePurgeDays,
+        knowledgeRevisionKeep: hygiene.knowledgeRevisionKeep,
+        dreamRunRetentionDays: hygiene.dreamRunRetentionDays,
+        deepConsolidationEnabled: hygiene.deepConsolidationEnabled,
+        deepConsolidationIntervalDays: hygiene.deepConsolidationIntervalDays,
+      });
+      if (!saved) throw new Error(i18nService.t('memoryHygieneSaveFailed'));
+      setHygiene(saved);
+      setHygieneNotice(i18nService.t('memoryHygieneSaved'));
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : i18nService.t('memoryHygieneSaveFailed'));
+    } finally {
+      setHygieneSaving(false);
+    }
+  };
+
+  const handleToggleBotHygiene = async (next: boolean) => {
+    if (metabotId == null) return;
+    setHygieneSaving(true);
+    try {
+      const saved = await coworkService.setMemoryPolicy({ metabotId, hygieneEnabled: next });
+      if (!saved) throw new Error(i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
+      setPolicy(saved);
+      setHygieneNotice(i18nService.t(next ? 'memoryHygieneBotEnabled' : 'memoryHygieneBotDisabled'));
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
+    } finally {
+      setHygieneSaving(false);
+    }
+  };
+
+  const handleRunHygieneNow = async () => {
+    setHygieneRunning(true);
+    setHygieneNotice(null);
+    try {
+      const { stats, error } = await coworkService.runMemoryHygieneNow();
+      if (error || !stats) throw new Error(error || i18nService.t('memoryHygieneRunFailed'));
+      setHygieneLastRun(stats);
+      setHygieneNotice(i18nService.t('memoryHygieneRunDone'));
+    } catch (runError) {
+      setHygieneNotice(`${i18nService.t('memoryHygieneRunFailed')}: ${runError instanceof Error ? runError.message : String(runError)}`);
+    } finally {
+      setHygieneRunning(false);
+    }
   };
 
   // ---- Memory entry modal (Facts CRUD) ----
@@ -1358,6 +1444,166 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     );
   };
 
+  const hygieneThresholdFields: Array<{ field: keyof MemoryHygieneConfig; min: number; max: number; labelKey: string; hintKey: string }> = [
+    { field: 'observationRetentionDays', min: 14, max: 3650, labelKey: 'memoryHygieneObsRetention', hintKey: 'memoryHygieneObsRetentionHint' },
+    { field: 'observationAnchorsPerPair', min: 0, max: 50, labelKey: 'memoryHygieneObsAnchors', hintKey: 'memoryHygieneObsAnchorsHint' },
+    { field: 'episodeArchiveDays', min: 14, max: 3650, labelKey: 'memoryHygieneEpisodeDays', hintKey: 'memoryHygieneEpisodeDaysHint' },
+    { field: 'memoryDecayDays', min: 14, max: 3650, labelKey: 'memoryHygieneDecayDays', hintKey: 'memoryHygieneDecayDaysHint' },
+    { field: 'tombstonePurgeDays', min: 30, max: 3650, labelKey: 'memoryHygieneTombstoneDays', hintKey: 'memoryHygieneTombstoneDaysHint' },
+    { field: 'knowledgeRevisionKeep', min: 1, max: 50, labelKey: 'memoryHygieneRevKeep', hintKey: 'memoryHygieneRevKeepHint' },
+    { field: 'dreamRunRetentionDays', min: 30, max: 3650, labelKey: 'memoryHygieneRunDays', hintKey: 'memoryHygieneRunDaysHint' },
+    { field: 'deepConsolidationIntervalDays', min: 7, max: 365, labelKey: 'memoryHygieneDeepDays', hintKey: 'memoryHygieneDeepDaysHint' },
+  ];
+
+  const hygieneCountLabels: Record<string, string> = {
+    observationsSuperseded: i18nService.t('memoryHygieneStatObs'),
+    observationPairsCompacted: i18nService.t('memoryHygieneStatObsPairs'),
+    episodesArchived: i18nService.t('memoryHygieneStatEpisodes'),
+    memoriesArchived: i18nService.t('memoryHygieneStatMemories'),
+    tombstonesPurged: i18nService.t('memoryHygieneStatTombstones'),
+    knowledgeRevisionsPruned: i18nService.t('memoryHygieneStatRevisions'),
+    dreamRunsPurged: i18nService.t('memoryHygieneStatRuns'),
+    dreamFragmentsPurged: i18nService.t('memoryHygieneStatFragments'),
+    deepConsolidationBots: i18nService.t('memoryHygieneStatDeepBots'),
+    deepRetiredMemories: i18nService.t('memoryHygieneStatDeepMemories'),
+    deepRetiredKnowledge: i18nService.t('memoryHygieneStatDeepKnowledge'),
+    deepRewrittenKnowledge: i18nService.t('memoryHygieneStatDeepRewrites'),
+  };
+
+  const renderHygiene = () => {
+    const lastRunText = hygieneLastRun
+      ? `${i18nService.t('memoryHygieneLastRun')}: ${new Date(hygieneLastRun.ranAt).toLocaleString()} (${hygieneLastRun.trigger === 'manual' ? i18nService.t('memoryHygieneTriggerManual') : i18nService.t('memoryHygieneTriggerScheduled')})`
+      : i18nService.t('memoryHygieneNeverRun');
+    return (
+      <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border">
+        <button
+          type="button"
+          onClick={() => setHygieneOpen((open) => !open)}
+          className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+        >
+          <div className="flex items-center gap-2">
+            <BrainIcon className="h-4 w-4 text-claude-accent dark:text-claude-darkAccent" />
+            <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('memoryHygieneTitle')}</span>
+            <span className="rounded-full border px-2 py-0.5 text-[10px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {hygiene?.enabled ? i18nService.t('memoryHygieneEnabledBadge') : i18nService.t('memoryHygieneDisabledBadge')}
+            </span>
+          </div>
+          <ChevronRightIcon className={`h-4 w-4 transition-transform dark:text-claude-darkTextSecondary text-claude-textSecondary ${hygieneOpen ? 'rotate-90' : ''}`} />
+        </button>
+        {hygieneOpen && (
+          <div className="space-y-4 border-t dark:border-claude-darkBorder border-claude-border px-4 py-4">
+            <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('memoryHygieneHint')}
+            </div>
+            <div className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{lastRunText}</div>
+            {hygieneNotice && <div className="text-xs text-green-600 dark:text-green-400">{hygieneNotice}</div>}
+
+            {hygiene && (
+              <>
+                {/* Per-bot participation toggle */}
+                <ToggleRow
+                  label={i18nService.t('memoryHygieneBotToggle')}
+                  hint={i18nService.t('memoryHygieneBotToggleHint')}
+                  checked={policy?.hygieneEnabled ?? true}
+                  onChange={(value) => { void handleToggleBotHygiene(value); }}
+                  disabled={metabotId == null || hygieneSaving}
+                />
+
+                {/* Global master switch */}
+                <ToggleRow
+                  label={i18nService.t('memoryHygieneEnabled')}
+                  hint={i18nService.t('memoryHygieneEnabledHint')}
+                  checked={hygiene.enabled}
+                  onChange={(value) => updateHygieneField('enabled', value)}
+                  disabled={hygieneSaving}
+                />
+
+                {/* Deep consolidation (LLM belief-layer review) */}
+                <ToggleRow
+                  label={i18nService.t('memoryHygieneDeep')}
+                  hint={i18nService.t('memoryHygieneDeepHint')}
+                  checked={hygiene.deepConsolidationEnabled}
+                  onChange={(value) => updateHygieneField('deepConsolidationEnabled', value)}
+                  disabled={hygieneSaving || !hygiene.enabled}
+                />
+
+                {/* Thresholds */}
+                <div className="space-y-3 rounded-lg border px-3 py-3 dark:border-claude-darkBorder border-claude-border">
+                  <div className="text-[10px] uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('memoryHygieneThresholds')}
+                  </div>
+                  {hygieneThresholdFields.map(({ field, min, max, labelKey, hintKey }) => (
+                    <label key={field} className="flex items-center justify-between gap-3">
+                      <span className="text-xs dark:text-claude-darkText text-claude-text">
+                        <span className="block">{i18nService.t(labelKey)}</span>
+                        <span className="block text-[11px] font-normal dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t(hintKey)}</span>
+                      </span>
+                      <input
+                        type="number"
+                        min={min}
+                        max={max}
+                        value={Number(hygiene[field])}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          updateHygieneField(field, Number.isFinite(next) ? Math.max(min, Math.min(max, Math.floor(next))) : min);
+                        }}
+                        className="w-20 rounded border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                        disabled={hygieneSaving}
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                {/* Last-run stats */}
+                {hygieneLastRun && (
+                  <div className="rounded-lg border px-3 py-3 text-[11px] dark:border-claude-darkBorder border-claude-border">
+                    <div className="mb-1 uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {i18nService.t('memoryHygieneStatsTitle')}
+                    </div>
+                    {Object.keys(hygieneCountLabels).length > 0 && (
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 dark:text-claude-darkText text-claude-text">
+                        {Object.entries(hygieneLastRun.counts)
+                          .filter(([key]) => hygieneCountLabels[key])
+                          .map(([key, value]) => (
+                            <span key={key}>{`${hygieneCountLabels[key]}: ${value}`}</span>
+                          ))}
+                      </div>
+                    )}
+                    {hygieneLastRun.errors.length > 0 && (
+                      <div className="mt-1 text-red-500">
+                        {i18nService.t('memoryHygieneErrors')}: {hygieneLastRun.errors.join('; ')}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { void handleSaveHygiene(); }}
+                    disabled={hygieneSaving}
+                    className="btn-idchat-primary-filled inline-flex items-center justify-center px-4 py-1.5 text-xs disabled:opacity-60"
+                  >
+                    {hygieneSaving ? i18nService.t('saving') : i18nService.t('memoryHygieneSave')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { void handleRunHygieneNow(); }}
+                    disabled={hygieneRunning}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg border px-4 py-1.5 text-xs disabled:opacity-60 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text"
+                  >
+                    <ArrowPathIcon className={`h-3.5 w-3.5 ${hygieneRunning ? 'animate-spin' : ''}`} />
+                    {hygieneRunning ? i18nService.t('memoryHygieneRunning') : i18nService.t('memoryHygieneRunNow')}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-5">
       {/* Header + bot selector */}
@@ -1395,6 +1641,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       </div>
 
       {renderPolicy()}
+      {renderHygiene()}
 
       {/* Self-cognition (dream-managed self-identity), surfaced on its own */}
       {metabotId != null && (

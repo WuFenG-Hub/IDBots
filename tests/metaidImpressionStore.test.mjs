@@ -331,3 +331,214 @@ test('SqliteStore initializes impression tables on a normal database upgrade', a
     harness.cleanup();
   }
 });
+
+const OLD_TS = 1_700_000_000_000;
+const RECENT_TS = 1_800_000_000_000;
+const THIRTY_DAYS_MS = 30 * 86_400_000;
+
+const setupCompactionPair = async (owner, subject, seeds) => {
+  const db = await createLegacyMemoryDb();
+  ensureMetaIDImpressionSchema(db);
+  let now = OLD_TS;
+  const experience = new MetaIDExperienceStore(db, () => {}, () => now);
+  const impressions = new MetaIDImpressionStore(db, () => {}, () => now);
+  for (const [index, seed] of seeds.entries()) {
+    now = seed.recent ? RECENT_TS + index * 1_000 : OLD_TS + index * 1_000;
+    const source = createEvidence(experience, {
+      owner,
+      subject,
+      sourceKey: `compaction:${owner}:${index}`,
+      occurredAt: now,
+    });
+    impressions.appendObservation({
+      observerGlobalMetaID: owner,
+      subjectGlobalMetaID: subject,
+      episodeId: source.episode.id,
+      evidenceIds: [source.evidence.id],
+      observationText: `raw ${seed.source}`,
+      interpretationText: `interp ${seed.source}`,
+      dimensions: { styleDescriptors: [`style-${seed.source}`] },
+      dreamDate: seed.recent ? '2027-01-10' : `2023-11-${String(index + 1).padStart(2, '0')}`,
+      dreamVersion: 1,
+      sourceHash: seed.source.repeat(64),
+    });
+  }
+  return { db, impressions, experience };
+};
+
+test('compactObservations supersedes stale observations beyond anchors and rebuilds the snapshot', async () => {
+  const { db, impressions } = await setupCompactionPair(OWNER, SUBJECT, [
+    { source: 'a' }, { source: 'b' }, { source: 'c' }, { source: 'd' }, { source: 'e' },
+    { source: 'f', recent: true }, { source: '9', recent: true },
+  ]);
+  try {
+    const snapshotBefore = impressions.rebuildSnapshot(OWNER, SUBJECT);
+    assert.equal(impressions.listObservations({ observerGlobalMetaID: OWNER, subjectGlobalMetaID: SUBJECT }).length, 7);
+
+    const result = impressions.compactObservations({
+      cutoffMs: RECENT_TS - THIRTY_DAYS_MS,
+      anchorsPerPair: 2,
+    });
+    assert.equal(result.pairsCompacted, 1);
+    assert.equal(result.observationsSuperseded, 5);
+    assert.equal(result.snapshotsRebuilt, 1);
+
+    const active = impressions.listObservations({ observerGlobalMetaID: OWNER, subjectGlobalMetaID: SUBJECT });
+    assert.deepEqual(active.map((observation) => observation.interpretationText), ['interp 9', 'interp f']);
+    const all = impressions.listObservations({
+      observerGlobalMetaID: OWNER,
+      subjectGlobalMetaID: SUBJECT,
+      includeSuperseded: true,
+    });
+    assert.equal(all.length, 7, 'superseded rows are retained, never deleted');
+
+    const snapshot = impressions.getSnapshot(OWNER, SUBJECT);
+    assert.ok(snapshot, 'snapshot survives compaction as the compressed state');
+    assert.equal(snapshot.latestObservationId, snapshotBefore.latestObservationId);
+    assert.deepEqual(snapshot.styleDescriptors, ['style-f', 'style-9']);
+    assert.equal(snapshot.summaryText, 'interp 9');
+
+    // Idempotent: a second pass with the same policy has nothing left to do.
+    const again = impressions.compactObservations({
+      cutoffMs: RECENT_TS - THIRTY_DAYS_MS,
+      anchorsPerPair: 2,
+    });
+    assert.equal(again.pairsCompacted, 0);
+    assert.equal(again.observationsSuperseded, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test('compactObservations keeps at least one anchor so the snapshot never loses its latest row', async () => {
+  const { db, impressions } = await setupCompactionPair(OWNER, SUBJECT, [
+    { source: 'a' }, { source: 'b' },
+  ]);
+  try {
+    impressions.rebuildSnapshot(OWNER, SUBJECT);
+    const result = impressions.compactObservations({
+      cutoffMs: RECENT_TS,
+      anchorsPerPair: 0,
+    });
+    assert.equal(result.observationsSuperseded, 1);
+    const active = impressions.listObservations({ observerGlobalMetaID: OWNER, subjectGlobalMetaID: SUBJECT });
+    assert.equal(active.length, 1);
+    assert.equal(active[0].interpretationText, 'interp b');
+    assert.ok(impressions.getSnapshot(OWNER, SUBJECT));
+  } finally {
+    db.close();
+  }
+});
+
+test('compactObservations leaves recent observations alone and honors excludeObservers', async () => {
+  const { db, impressions, experience } = await setupCompactionPair(OWNER, SUBJECT, [
+    { source: 'a' }, { source: 'b' }, { source: 'f', recent: true },
+  ]);
+  try {
+    const otherSource = createEvidence(experience, {
+      owner: OTHER_OWNER,
+      subject: SUBJECT,
+      sourceKey: 'compaction:other:0',
+      occurredAt: OLD_TS,
+    });
+    impressions.appendObservation({
+      observerGlobalMetaID: OTHER_OWNER,
+      subjectGlobalMetaID: SUBJECT,
+      episodeId: otherSource.episode.id,
+      evidenceIds: [otherSource.evidence.id],
+      observationText: 'excluded raw',
+      interpretationText: 'excluded interp',
+      dreamDate: '2023-11-01',
+      dreamVersion: 1,
+      sourceHash: 'f'.repeat(64),
+    });
+    const result = impressions.compactObservations({
+      cutoffMs: RECENT_TS - THIRTY_DAYS_MS,
+      anchorsPerPair: 1,
+      excludeObservers: new Set([OTHER_OWNER]),
+    });
+    assert.equal(result.pairsCompacted, 1);
+    assert.equal(result.observationsSuperseded, 2, 'both stale rows go; the recent row is the anchor');
+    assert.equal(
+      impressions.listObservations({ observerGlobalMetaID: OTHER_OWNER, subjectGlobalMetaID: SUBJECT }).length,
+      1,
+      'excluded observer pair untouched',
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('reputation temperature distills outcomes deterministically with recency weighting', async () => {
+  const db = await createLegacyMemoryDb();
+  ensureMetaIDImpressionSchema(db);
+  try {
+    assert.ok(getColumns(db, 'metaid_impression_snapshots').includes('reputation_score'));
+    assert.ok(getColumns(db, 'metaid_impression_snapshots').includes('reputation_samples'));
+
+    let now = OLD_TS;
+    const experience = new MetaIDExperienceStore(db, () => {}, () => now);
+    const impressions = new MetaIDImpressionStore(db, () => {}, () => now);
+    const seedOutcome = (index, source, dimensions) => {
+      now = OLD_TS + index * 10_000;
+      const evidenceRow = createEvidence(experience, {
+        sourceKey: `reputation:${index}`,
+        occurredAt: now,
+      });
+      impressions.appendObservation({
+        observerGlobalMetaID: OWNER,
+        subjectGlobalMetaID: SUBJECT,
+        episodeId: evidenceRow.episode.id,
+        evidenceIds: [evidenceRow.evidence.id],
+        observationText: `raw ${source}`,
+        interpretationText: `interp ${source}`,
+        dimensions,
+        dreamDate: `2023-11-${String(index + 1).padStart(2, '0')}`,
+        dreamVersion: 1,
+        sourceHash: source.repeat(64),
+      });
+    };
+    seedOutcome(0, 'a', { collaborationFacts: [{ taskId: 1, title: 'task one', outcome: 'rejected', pinIds: ['pin-1'], at: OLD_TS + 1 }] });
+    seedOutcome(1, 'b', { collaborationFacts: [{ taskId: 2, title: 'task two', outcome: 'accepted', pinIds: ['pin-2'], at: OLD_TS + 2 }] });
+    seedOutcome(2, 'c', { deliverablesAccepted: 3, deliverablesRejected: 1 });
+    seedOutcome(3, 'd', { deliverablesAccepted: 2, deliverablesRejected: 0 });
+
+    const snapshot = impressions.rebuildSnapshot(OWNER, SUBJECT);
+    // Samples ordered by time: fact(rejected,0) -> fact(accepted,1) -> stats(0.75) -> stats(1.0).
+    // EWMA alpha .3 from .5: .35 -> .545 -> .6065 -> .72455 → 72.5 (rounded to one decimal).
+    assert.equal(snapshot.reputationSamples, 4);
+    assert.equal(snapshot.reputationScore, 72.5);
+    assert.ok(snapshot.reputationUpdatedAt > 0);
+  } finally {
+    db.close();
+  }
+});
+
+test('reputation temperature stays null before any outcome sample', async () => {
+  const db = await createLegacyMemoryDb();
+  ensureMetaIDImpressionSchema(db);
+  try {
+    let now = OLD_TS;
+    const experience = new MetaIDExperienceStore(db, () => {}, () => now);
+    const impressions = new MetaIDImpressionStore(db, () => {}, () => now);
+    const evidenceRow = createEvidence(experience, { sourceKey: 'reputation:none', occurredAt: now });
+    impressions.appendObservation({
+      observerGlobalMetaID: OWNER,
+      subjectGlobalMetaID: SUBJECT,
+      episodeId: evidenceRow.episode.id,
+      evidenceIds: [evidenceRow.evidence.id],
+      observationText: 'plain note',
+      interpretationText: 'no collaboration outcome here',
+      dimensions: { styleDescriptors: ['concise'] },
+      dreamDate: '2023-11-01',
+      dreamVersion: 1,
+      sourceHash: 'e'.repeat(64),
+    });
+    const snapshot = impressions.rebuildSnapshot(OWNER, SUBJECT);
+    assert.equal(snapshot.reputationScore, null);
+    assert.equal(snapshot.reputationSamples, 0);
+    assert.equal(snapshot.reputationUpdatedAt, null);
+  } finally {
+    db.close();
+  }
+});

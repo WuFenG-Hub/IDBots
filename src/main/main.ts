@@ -220,6 +220,7 @@ import {
 } from './services/cognitiveChatCompletion';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
+import { startMemoryHygieneService, stopMemoryHygieneService, getMemoryHygieneService } from './services/memoryHygieneService';
 import { KnowledgeBaseService } from './services/knowledgeBaseService';
 import { KnowledgeBaseStore } from './knowledgeBaseStore';
 import {
@@ -3796,6 +3797,27 @@ const startSqliteDaemons = (): void => {
     },
   });
 
+  // Memory hygiene ("记忆整理"): the deterministic compression stroke that
+  // follows the dreams — retires stale impression observations, archives old
+  // episodes and decayed dream memories, prunes revision overflow. LLM-free,
+  // runs late in the dream window so nightly dreams finish first.
+  startMemoryHygieneService({
+    coworkStore: getCoworkStore(),
+    metabotStore: getMetabotStore(),
+    dreamStore: getDreamStore(),
+    metaidExperienceStore: dreamExperienceStore,
+    metaidImpressionStore: dreamImpressionStore,
+    metaidKnowledgeStore: dreamKnowledgeStore,
+    performChat: performChatCompletionForOrchestrator,
+    emitToRenderer: (channel, data) => {
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) {
+          try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
+        }
+      });
+    },
+  });
+
   // Knowledge bases ("知识库"): per-bot document corpora learned into a local
   // search index. Nightly auto-learn shares the dream window but is LLM-free
   // and deliberately decoupled from dream gating/success.
@@ -3829,6 +3851,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   await stopCognitiveOrchestrator({ waitForTick: true });
   await stopPrivateChatDaemon({ waitForTick: true });
   stopDreamService();
+  stopMemoryHygieneService();
   knowledgeBaseService?.stopAutoLearnSchedule();
   metawebStudyService?.stopSchedule();
   stopPrivateChatBackfill();
@@ -9663,6 +9686,7 @@ if (!gotTheLock) {
     memoryLlmJudgeEnabled?: boolean;
     memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems?: number;
+    hygieneEnabled?: boolean;
   }) => {
     try {
       const store = getCoworkStore();
@@ -9684,9 +9708,10 @@ if (!gotTheLock) {
             ? input.memoryGuardLevel
             : undefined,
         memoryUserMemoriesMaxItems:
-          typeof input?.memoryUserMemoriesMaxItems === 'number' && Number.isFinite(input.memoryUserMemoriesMaxItems)
+          typeof input?.memoryUserMemoriesMaxItems === 'number' && Number.isFinite(input?.memoryUserMemoriesMaxItems)
             ? input.memoryUserMemoriesMaxItems
             : undefined,
+        hygieneEnabled: typeof input?.hygieneEnabled === 'boolean' ? input.hygieneEnabled : undefined,
       });
       return { success: true, policy };
     } catch (error) {
@@ -10346,6 +10371,54 @@ if (!gotTheLock) {
         return { success: false, error: error instanceof Error ? error.message : 'Failed to run dream' };
       }
     });
+  });
+
+  // ==================== Memory Hygiene IPC Handlers ====================
+
+  ipcMain.handle('memoryHygiene:get', async () => {
+    try {
+      const store = getCoworkStore();
+      return {
+        success: true,
+        config: store.getMemoryHygieneConfig(),
+        lastRun: store.getMemoryHygieneLastRun(),
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get memory hygiene config',
+      };
+    }
+  });
+
+  ipcMain.handle('memoryHygiene:setConfig', async (_event, input: Record<string, unknown>) => {
+    try {
+      const store = getCoworkStore();
+      // The store normalizes and clamps every field, so untyped IPC input is safe.
+      const config = store.setMemoryHygieneConfig(input as Record<string, never>);
+      return { success: true, config };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to save memory hygiene config',
+      };
+    }
+  });
+
+  ipcMain.handle('memoryHygiene:runNow', async () => {
+    try {
+      const service = getMemoryHygieneService();
+      if (!service) {
+        return { success: false, error: 'Memory hygiene service is not running' };
+      }
+      const stats = await service.runNow();
+      return { success: true, stats };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to run memory hygiene',
+      };
+    }
   });
 
   // ==================== Knowledge Base IPC Handlers ====================
@@ -13766,6 +13839,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       },
       stopCognitiveOrchestrator,
       stopDreamService,
+      stopMemoryHygieneService,
       stopP2P: () => p2pIndexerService.stop(),
       stopProviderDiscovery: () => {
         if (providerDiscoveryService) {

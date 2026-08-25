@@ -291,7 +291,7 @@ function formatGroupedRecall(summaries: ExperienceSummaryLike[], granularity: Ex
 export function formatExperienceTimelineFallback(input: {
   dateFrom?: string;
   dateTo?: string;
-  episodes: Array<{ startedAt: number; sourceChannel: string; episodeType: string; title?: string | null }>;
+  episodes: Array<{ startedAt: number; sourceChannel: string; episodeType: string; title?: string | null; archived?: boolean }>;
 }): string {
   if (!input.episodes.length) {
     return `No raw episodes found for ${input.dateFrom ?? 'the range'}${input.dateTo ? `..${input.dateTo}` : ''} either — there may genuinely be no activity in that window.`;
@@ -299,7 +299,8 @@ export function formatExperienceTimelineFallback(input: {
   const lines = input.episodes.map((episode) => {
     const when = new Date(episode.startedAt).toISOString().slice(0, 10);
     const title = typeof episode.title === 'string' && episode.title.trim() ? episode.title.trim() : `${episode.sourceChannel}/${episode.episodeType}`;
-    return `- ${when} [${episode.episodeType}]: ${title}`;
+    const archivedMark = episode.archived ? ' (archived)' : '';
+    return `- ${when} [${episode.episodeType}]${archivedMark}: ${title}`;
   });
   return [
     `No dream summaries were consolidated for ${input.dateFrom ?? 'this range'}${input.dateTo ? `..${input.dateTo}` : ''}, but the raw activity timeline shows ${input.episodes.length} episode(s):`,

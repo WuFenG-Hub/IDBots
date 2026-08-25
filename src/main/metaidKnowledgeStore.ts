@@ -1018,6 +1018,61 @@ export class MetaIDKnowledgeStore {
   }
 
   /**
+   * Hygiene revision overflow: each entry keeps its newest `keepPerEntry`
+   * historical revisions; older ones are physically removed. Revisions are
+   * redundant historical copies of text that is itself superseded — the live
+   * entry and the recent undo trail stay intact. Bounded per pass.
+   */
+  pruneKnowledgeRevisions(input: {
+    keepPerEntry: number;
+    excludeMetabotIds?: ReadonlySet<number>;
+    limit?: number;
+  }): { entriesPruned: number; revisionsDeleted: number } {
+    const keep = Math.max(1, Math.min(50, Math.floor(input.keepPerEntry)));
+    const limit = Math.min(20_000, Math.max(1, Math.floor(input.limit ?? 5_000)));
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const candidates = this.getAll<{ knowledge_id: string }>(
+      `SELECT knowledge_id, COUNT(*) AS revision_count
+       FROM metaid_knowledge_revisions
+       GROUP BY knowledge_id
+       HAVING COUNT(*) > ?
+       LIMIT ?`,
+      [keep, limit],
+    );
+    let entriesPruned = 0;
+    let revisionsDeleted = 0;
+    for (const candidate of candidates) {
+      if (excluded.length > 0) {
+        const owner = this.getOne<{ metabot_id: number }>(
+          'SELECT metabot_id FROM metaid_knowledge_entries WHERE id = ? LIMIT 1',
+          [candidate.knowledge_id],
+        );
+        if (owner && excluded.includes(Number(owner.metabot_id))) continue;
+      }
+      const result = this.db.run(
+        `DELETE FROM metaid_knowledge_revisions
+         WHERE knowledge_id = ?
+           AND id NOT IN (
+             SELECT id FROM metaid_knowledge_revisions
+             WHERE knowledge_id = ?
+             ORDER BY version DESC, created_at DESC
+             LIMIT ?
+           )`,
+        [candidate.knowledge_id, candidate.knowledge_id, keep],
+      );
+      const removed = this.db.getRowsModified?.() || 0;
+      if (removed > 0) {
+        entriesPruned += 1;
+        revisionsDeleted += removed;
+      }
+    }
+    if (revisionsDeleted > 0) {
+      this.saveDb();
+    }
+    return { entriesPruned, revisionsDeleted };
+  }
+
+  /**
    * Compact active set handed to the dream prompt so the model can decide
    * create-vs-revise: it sees what the bot already believes about each topic
    * and either extends the list or rewrites an existing entry.

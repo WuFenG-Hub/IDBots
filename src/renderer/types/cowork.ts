@@ -474,6 +474,10 @@ export interface CoworkMetaIDImpressionSnapshot {
   relationshipTemperature: string | null;
   communicationGuidance: string | null;
   uncertaintyText: string | null;
+  /** Recency-weighted cooperation score 0-100 distilled from collaboration outcomes. */
+  reputationScore: number | null;
+  reputationSamples: number;
+  reputationUpdatedAt: number | null;
   latestObservationId: string;
   snapshotVersion: number;
   createdAt: number;
@@ -563,7 +567,30 @@ export interface CoworkMemoryPolicy {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: 'strict' | 'standard' | 'relaxed';
   memoryUserMemoriesMaxItems: number;
+  hygieneEnabled: boolean;
   source: 'global' | 'metabot';
+}
+
+/** Nightly "compression stroke" config (Settings → Memory → Hygiene). */
+export interface MemoryHygieneConfig {
+  enabled: boolean;
+  observationRetentionDays: number;
+  observationAnchorsPerPair: number;
+  episodeArchiveDays: number;
+  memoryDecayDays: number;
+  tombstonePurgeDays: number;
+  knowledgeRevisionKeep: number;
+  dreamRunRetentionDays: number;
+  deepConsolidationEnabled: boolean;
+  deepConsolidationIntervalDays: number;
+}
+
+export interface MemoryHygieneRunStats {
+  dateKey: string;
+  ranAt: number;
+  trigger: 'scheduled' | 'manual';
+  counts: Record<string, number>;
+  errors: string[];
 }
 
 /** Knowledge-point anchored memory entry (Settings → Memory → Knowledge). */

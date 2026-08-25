@@ -1,0 +1,475 @@
+import type { CoworkStore } from '../coworkStore';
+import type { DreamStore } from '../dreamStore';
+import type { MetaIDExperienceStore } from '../metaidExperienceStore';
+import type { MetaIDImpressionStore } from '../metaidImpressionStore';
+import type { MetaIDKnowledgeStore } from '../metaidKnowledgeStore';
+import { formatBotWorkspaceDate } from '../libs/botWorkspace';
+import {
+  isMemoryHygieneRunTimeDue,
+  type MemoryHygieneConfig,
+  type MemoryHygieneRunStats,
+} from '../libs/memoryHygienePolicy';
+import {
+  buildDeepConsolidationPrompt,
+  parseDeepConsolidationOutput,
+  shouldRunDeepConsolidation,
+  type DeepConsolidationInventoryItem,
+} from '../libs/deepConsolidationPrompt';
+
+/**
+ * Memory hygiene service — the nightly deterministic "compression stroke".
+ *
+ * The dream pass abstracts raw experience into summaries, memories,
+ * impressions and knowledge. This service retires what nothing will read
+ * again: supersede stale impression observations, soft-archive old episodes
+ * and decayed dream memories, prune knowledge-revision overflow and purge
+ * low-risk tombstones. LLM-free and fully deterministic; every step is
+ * isolated so one failure never blocks the others, and nothing here can
+ * interfere with the dream pipeline (worst case a step retries next night).
+ *
+ * Scheduling: one pass per local date, eligible from 04:00 (late in the dream
+ * window so nightly dreams finish first) and any time later as catch-up.
+ * Manual runs (settings UI / IPC) bypass every gate.
+ */
+
+const HYGIENE_TICK_INTERVAL_MS = 60_000;
+const HYGIENE_STATUS_CHANNEL = 'memoryHygiene:statusChanged';
+const DEEP_CONSOLIDATION_LLM_TIMEOUT_MS = 120_000;
+
+export interface MemoryHygieneMetabotLike {
+  id: number;
+  name?: string | null;
+  llm_id?: string | null;
+  globalmetaid?: string | null;
+}
+
+export interface MemoryHygieneMetabotStoreLike {
+  listMetabots(): MemoryHygieneMetabotLike[];
+}
+
+/** Shared context handed to every step; steps are added one per commit. */
+export interface MemoryHygieneRunContext {
+  config: MemoryHygieneConfig;
+  nowMs: number;
+  /** Owner GlobalMetaIDs of bots whose per-bot policy opted out of hygiene. */
+  disabledOwners: ReadonlySet<string>;
+  /** MetaBot ids of the same opt-out set (stores keyed by metabot_id). */
+  disabledMetabotIds: ReadonlySet<number>;
+  coworkStore: CoworkStore;
+  dreamStore?: DreamStore;
+  experienceStore?: MetaIDExperienceStore;
+  impressionStore?: MetaIDImpressionStore;
+  knowledgeStore?: MetaIDKnowledgeStore;
+}
+
+interface MemoryHygieneStep {
+  name: string;
+  run: (context: MemoryHygieneRunContext) => Promise<Record<string, number>> | Record<string, number>;
+}
+
+export type MemoryHygienePerformChat = (
+  systemPrompt: string,
+  userMessage: string,
+  llmId?: string | null,
+  options?: {
+    signal?: AbortSignal;
+    maxTokens?: number;
+    thinking?: 'enabled' | 'disabled';
+  }
+) => Promise<string>;
+
+export interface MemoryHygieneDeps {
+  coworkStore: CoworkStore;
+  metabotStore: MemoryHygieneMetabotStoreLike;
+  dreamStore?: DreamStore;
+  metaidExperienceStore?: MetaIDExperienceStore;
+  metaidImpressionStore?: MetaIDImpressionStore;
+  metaidKnowledgeStore?: MetaIDKnowledgeStore;
+  /** Required only for the deep-consolidation step; absent = step no-ops. */
+  performChat?: MemoryHygienePerformChat;
+  tickIntervalMs?: number;
+  now?: () => Date;
+  emitToRenderer?: (channel: string, payload: unknown) => void;
+}
+
+export class MemoryHygieneService {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private running = false;
+  private stopped = false;
+
+  /** Steps registered by later commits (observation compaction, episode archival, …). */
+  protected readonly steps: MemoryHygieneStep[] = [];
+
+  constructor(private readonly deps: MemoryHygieneDeps) {
+    this.registerSteps();
+  }
+
+  /** One entry per compaction mechanism; each is error-isolated by runAll. */
+  protected registerSteps(): void {
+    // Impression observations: supersede stale ones past the per-pair anchors;
+    // the snapshot survives as the compressed state.
+    this.steps.push({
+      name: 'impression-observations',
+      run: (context) => {
+        if (!context.impressionStore) return {};
+        const result = context.impressionStore.compactObservations({
+          cutoffMs: context.nowMs - context.config.observationRetentionDays * 86_400_000,
+          anchorsPerPair: context.config.observationAnchorsPerPair,
+          excludeObservers: context.disabledOwners,
+        });
+        return {
+          observationPairsCompacted: result.pairsCompacted,
+          observationsSuperseded: result.observationsSuperseded,
+          observationSnapshotsRebuilt: result.snapshotsRebuilt,
+        };
+      },
+    });
+    // Episodes: soft-archive terminal episodes past the retention horizon so
+    // dream candidates / contact views / cognition context stop scanning them;
+    // explicit experience_recall keeps them visible with an (archived) mark.
+    this.steps.push({
+      name: 'episodes',
+      run: (context) => {
+        if (!context.experienceStore) return {};
+        const archived = context.experienceStore.archiveEpisodes({
+          cutoffMs: context.nowMs - context.config.episodeArchiveDays * 86_400_000,
+          archivedAt: context.nowMs,
+          excludeOwners: context.disabledOwners,
+        });
+        return { episodesArchived: archived };
+      },
+    });
+    // Dream memories: decay-archive entries untouched past the horizon
+    // (self_identity and conversation-origin rows never auto-archive), then
+    // physically purge tombstones that outlived the grace period — the one
+    // low-risk delete in the memory layer.
+    this.steps.push({
+      name: 'dream-memories',
+      run: (context) => {
+        const archived = context.coworkStore.archiveDecayedDreamMemories({
+          cutoffMs: context.nowMs - context.config.memoryDecayDays * 86_400_000,
+          archivedAt: context.nowMs,
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        const purged = context.coworkStore.purgeDeletedMemoryTombstones({
+          cutoffMs: context.nowMs - context.config.tombstonePurgeDays * 86_400_000,
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        return { memoriesArchived: archived, tombstonesPurged: purged };
+      },
+    });
+    // Knowledge revision overflow: keep the newest N historical revisions per
+    // entry, physically remove older redundant copies.
+    this.steps.push({
+      name: 'knowledge-revisions',
+      run: (context) => {
+        if (!context.knowledgeStore) return {};
+        const result = context.knowledgeStore.pruneKnowledgeRevisions({
+          keepPerEntry: context.config.knowledgeRevisionKeep,
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        return { knowledgeRevisionsPruned: result.revisionsDeleted };
+      },
+    });
+    // Dream bookkeeping: completed runs and fragment caches past the horizon
+    // are pure history (the scheduler only looks back 7 days).
+    this.steps.push({
+      name: 'dream-runs',
+      run: (context) => {
+        if (!context.dreamStore) return {};
+        const result = context.dreamStore.purgeOldRunsAndFragments({
+          cutoffDateKey: formatBotWorkspaceDate(
+            new Date(context.nowMs - context.config.dreamRunRetentionDays * 86_400_000)
+          ),
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        return { dreamRunsPurged: result.runsDeleted, dreamFragmentsPurged: result.fragmentsDeleted };
+      },
+    });
+    // Deep consolidation (the LLM side of the compression stroke): every N
+    // days per bot, review the belief layer and retire/merge what aged out.
+    // Proposals are validated against the listed inventory and applied via
+    // reversible channels (memory archived_at mark / knowledge versioning).
+    this.steps.push({
+      name: 'deep-consolidation',
+      run: async (context) => {
+        if (!this.deps.performChat || !context.config.deepConsolidationEnabled) return {};
+        const intervalMs = context.config.deepConsolidationIntervalDays * 86_400_000;
+        const errors: string[] = [];
+        let botsConsidered = 0;
+        let retiredMemories = 0;
+        let retiredKnowledge = 0;
+        let rewrittenKnowledge = 0;
+        for (const bot of this.deps.metabotStore.listMetabots()) {
+          if (context.disabledMetabotIds.has(bot.id)) continue;
+          const lastRunAt = context.coworkStore.getDeepConsolidationLastRunAt(bot.id);
+          if (lastRunAt != null && context.nowMs - lastRunAt < intervalMs) continue;
+
+          const boundaries = context.coworkStore.listUserMemories({
+            metabotId: bot.id,
+            scopeKind: 'owner',
+            scopeKey: 'owner:self',
+            usageClass: 'value_boundary',
+            status: 'created',
+            limit: 50,
+          });
+          const reviews = context.coworkStore.listUserMemories({
+            metabotId: bot.id,
+            scopeKind: 'owner',
+            scopeKey: 'owner:self',
+            usageClass: 'work_review',
+            status: 'created',
+            limit: 50,
+          });
+          const knowledge = context.knowledgeStore
+            ? context.knowledgeStore.listKnowledgeForDream(bot.id, 60)
+            : [];
+          const items: DeepConsolidationInventoryItem[] = [
+            ...boundaries.map((memory) => ({ id: memory.id, kind: 'value_boundary' as const, text: memory.text })),
+            ...reviews.map((memory) => ({ id: memory.id, kind: 'work_review' as const, text: memory.text })),
+            ...knowledge.map((entry) => ({
+              id: entry.id,
+              kind: 'knowledge' as const,
+              text: `${entry.topic}: ${entry.summary}`,
+              extra: `kind=${entry.kind}, v${entry.version}`,
+            })),
+          ];
+          if (!shouldRunDeepConsolidation(items.length)) continue;
+          botsConsidered += 1;
+
+          let raw: string;
+          try {
+            raw = await this.deps.performChat(
+              'You are a memory consolidation assistant. Respond only with the requested JSON object.',
+              buildDeepConsolidationPrompt({ botName: bot.name ?? `MetaBot ${bot.id}`, items }),
+              bot.llm_id ?? undefined,
+              { thinking: 'disabled', signal: AbortSignal.timeout(DEEP_CONSOLIDATION_LLM_TIMEOUT_MS) },
+            );
+          } catch (error) {
+            errors.push(`deep-consolidation bot ${bot.id}: ${error instanceof Error ? error.message : String(error)}`);
+            continue;
+          }
+          const output = parseDeepConsolidationOutput(raw);
+          if (!output) {
+            errors.push(`deep-consolidation bot ${bot.id}: unparseable output`);
+            continue;
+          }
+
+          const memoryIds = new Set([...boundaries, ...reviews].map((memory) => memory.id));
+          const knowledgeIds = new Set(knowledge.map((entry) => entry.id));
+          const retireMemories = output.retireMemoryIds.filter((id) => memoryIds.has(id));
+          const retireKnowledge = output.retireKnowledgeIds.filter((id) => knowledgeIds.has(id));
+          const rewrites = output.rewriteKnowledge.filter((rewrite) => knowledgeIds.has(rewrite.id));
+
+          retiredMemories += context.coworkStore.archiveUserMemories({
+            ids: retireMemories,
+            archivedAt: context.nowMs,
+          });
+          if (context.knowledgeStore) {
+            for (const id of retireKnowledge) {
+              try {
+                context.knowledgeStore.archiveKnowledge({ id, metabotId: bot.id });
+                retiredKnowledge += 1;
+              } catch (error) {
+                errors.push(`deep-consolidation bot ${bot.id}: archive knowledge ${id} failed`);
+              }
+            }
+            for (const rewrite of rewrites) {
+              try {
+                context.knowledgeStore.upsertKnowledge({
+                  metabotId: bot.id,
+                  topic: rewrite.topic,
+                  summary: rewrite.summary,
+                  kind: rewrite.kind,
+                  origin: 'dream',
+                });
+                rewrittenKnowledge += 1;
+              } catch (error) {
+                errors.push(`deep-consolidation bot ${bot.id}: rewrite knowledge ${rewrite.id} failed`);
+              }
+            }
+          }
+          context.coworkStore.setDeepConsolidationLastRunAt(bot.id, context.nowMs);
+        }
+        if (errors.length > 0) {
+          console.warn(`[MemoryHygiene] Deep consolidation warnings: ${errors.join(' | ')}`);
+        }
+        return {
+          deepConsolidationBots: botsConsidered,
+          deepRetiredMemories: retiredMemories,
+          deepRetiredKnowledge: retiredKnowledge,
+          deepRewrittenKnowledge: rewrittenKnowledge,
+        };
+      },
+    });
+  }
+
+  start(): void {
+    this.stopTimer();
+    this.stopped = false;
+    void this.tick();
+    this.timer = setInterval(() => {
+      void this.tick();
+    }, this.deps.tickIntervalMs ?? HYGIENE_TICK_INTERVAL_MS);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.stopTimer();
+  }
+
+  private stopTimer(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private now(): Date {
+    return this.deps.now?.() ?? new Date();
+  }
+
+  private emitStatus(stats: MemoryHygieneRunStats): void {
+    try {
+      this.deps.emitToRenderer?.(HYGIENE_STATUS_CHANNEL, stats);
+    } catch {
+      // Renderer notification is best-effort.
+    }
+  }
+
+  getLastRun(): MemoryHygieneRunStats | null {
+    return this.deps.coworkStore.getMemoryHygieneLastRun();
+  }
+
+  /** Scheduled gate: run-time check plus once-per-local-date dedupe. */
+  async tick(): Promise<void> {
+    if (this.stopped || this.running) {
+      return;
+    }
+    const now = this.now();
+    if (!isMemoryHygieneRunTimeDue(now)) {
+      return;
+    }
+    const dateKey = formatBotWorkspaceDate(now);
+    const lastRun = this.deps.coworkStore.getMemoryHygieneLastRun();
+    if (lastRun && lastRun.dateKey === dateKey) {
+      return;
+    }
+    await this.runAll('scheduled');
+  }
+
+  /** Manual trigger (settings UI / IPC): bypasses the window and dedupe gates. */
+  async runNow(): Promise<MemoryHygieneRunStats> {
+    return this.runAll('manual');
+  }
+
+  async runAll(trigger: 'scheduled' | 'manual'): Promise<MemoryHygieneRunStats> {
+    if (this.running) {
+      throw new Error('Memory hygiene run already in progress');
+    }
+    const config = this.deps.coworkStore.getMemoryHygieneConfig();
+    if (trigger === 'scheduled' && !config.enabled) {
+      // Do not stamp the last-run record: a later enable still runs tonight.
+      return {
+        dateKey: formatBotWorkspaceDate(this.now()),
+        ranAt: this.now().getTime(),
+        trigger,
+        counts: { skippedDisabled: 1 },
+        errors: [],
+      };
+    }
+
+    this.running = true;
+    const stats: MemoryHygieneRunStats = {
+      dateKey: formatBotWorkspaceDate(this.now()),
+      ranAt: this.now().getTime(),
+      trigger,
+      counts: {},
+      errors: [],
+    };
+    try {
+      const context: MemoryHygieneRunContext = {
+        config,
+        nowMs: stats.ranAt,
+        disabledOwners: this.resolveDisabledOwners(),
+        disabledMetabotIds: this.resolveDisabledMetabotIds(),
+        coworkStore: this.deps.coworkStore,
+        dreamStore: this.deps.dreamStore,
+        experienceStore: this.deps.metaidExperienceStore,
+        impressionStore: this.deps.metaidImpressionStore,
+        knowledgeStore: this.deps.metaidKnowledgeStore,
+      };
+      for (const step of this.steps) {
+        try {
+          const counts = await step.run(context);
+          for (const [key, value] of Object.entries(counts)) {
+            stats.counts[key] = value;
+          }
+        } catch (error) {
+          const message = `${step.name}: ${error instanceof Error ? error.message : String(error)}`;
+          stats.errors.push(message);
+          console.warn(`[MemoryHygiene] Step "${step.name}" failed: ${message}`);
+        }
+      }
+      this.deps.coworkStore.setMemoryHygieneLastRun(stats);
+      this.emitStatus(stats);
+      return stats;
+    } finally {
+      this.running = false;
+    }
+  }
+
+  /** Bots whose per-bot policy opts out; their owned stores are skipped by steps. */
+  protected resolveDisabledOwners(): Set<string> {
+    const owners = new Set<string>();
+    try {
+      for (const bot of this.deps.metabotStore.listMetabots()) {
+        const policy = this.deps.coworkStore.getEffectiveMemoryPolicyForMetabot(bot.id);
+        if (!policy.hygieneEnabled && bot.globalmetaid) {
+          owners.add(String(bot.globalmetaid));
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[MemoryHygiene] Failed to resolve per-bot hygiene policy: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    return owners;
+  }
+
+  /** The same opt-out set expressed as metabot ids for metabot-keyed stores. */
+  protected resolveDisabledMetabotIds(): Set<number> {
+    const ids = new Set<number>();
+    try {
+      for (const bot of this.deps.metabotStore.listMetabots()) {
+        const policy = this.deps.coworkStore.getEffectiveMemoryPolicyForMetabot(bot.id);
+        if (!policy.hygieneEnabled) {
+          ids.add(bot.id);
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[MemoryHygiene] Failed to resolve per-bot hygiene policy ids: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    return ids;
+  }
+}
+
+let memoryHygieneServiceInstance: MemoryHygieneService | null = null;
+
+export function startMemoryHygieneService(deps: MemoryHygieneDeps): MemoryHygieneService {
+  stopMemoryHygieneService();
+  memoryHygieneServiceInstance = new MemoryHygieneService(deps);
+  memoryHygieneServiceInstance.start();
+  return memoryHygieneServiceInstance;
+}
+
+export function stopMemoryHygieneService(): void {
+  memoryHygieneServiceInstance?.stop();
+  memoryHygieneServiceInstance = null;
+}
+
+export function getMemoryHygieneService(): MemoryHygieneService | null {
+  return memoryHygieneServiceInstance;
+}

@@ -43,6 +43,11 @@ import {
 import { resolveMemoryScopes, type ResolveMemoryScopesInput } from './memory/memoryScopeResolver';
 import { clampMemoryPromptMaxChars } from './memory/memoryPromptBlocks';
 import { BOT_WORKSPACE_DIR_NAME } from './libs/botWorkspace';
+import {
+  normalizeMemoryHygieneConfig,
+  type MemoryHygieneConfig,
+  type MemoryHygieneRunStats,
+} from './libs/memoryHygienePolicy';
 import { resolveCoworkExecutionMode } from './libs/coworkExecutionMode';
 import {
   buildA2AChainMetadata,
@@ -104,7 +109,7 @@ const METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebOrderSimplem
 const METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebPrivateSimplemsgMetadata.v1.completed';
 const MEMORY_ROW_SELECT_COLUMNS = `
   id, text, fingerprint, confidence, is_explicit, status,
-  created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin
+  created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin, archived_at
 `;
 const PRIVATE_CHAT_SIMPLEMSG_BACKFILL_TIME_WINDOW_MS = 10 * 60 * 1000;
 
@@ -763,6 +768,8 @@ export interface CoworkUserMemory {
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+  /** Hygiene decay mark: archived dream memories leave injection but stay restorable. */
+  archivedAt?: number | null;
 }
 
 export interface CoworkUserMemorySource {
@@ -834,6 +841,7 @@ export interface CoworkMemoryPolicy {
   memoryGuardLevel: CoworkMemoryGuardLevel;
   memoryUserMemoriesMaxItems: number;
   dreamEnabled: boolean;
+  hygieneEnabled: boolean;
   updatedAt: number;
 }
 
@@ -846,6 +854,7 @@ export interface CoworkEffectiveMemoryPolicy {
   memoryUserMemoriesMaxItems: number;
   memoryPromptMaxChars: number;
   dreamEnabled: boolean;
+  hygieneEnabled: boolean;
   source: 'global' | 'metabot';
 }
 
@@ -995,6 +1004,7 @@ interface CoworkUserMemoryRow {
   usage_class?: string | null;
   visibility?: string | null;
   origin?: string | null;
+  archived_at?: number | string | null;
 }
 
 interface CoworkUserMemorySourceRow {
@@ -1012,6 +1022,7 @@ interface CoworkMemoryPolicyRow {
   memory_guard_level: string | null;
   memory_user_memories_max_items: number | string | null;
   dream_enabled?: number | string | null;
+  hygiene_enabled?: number | string | null;
   updated_at: number | string | null;
 }
 
@@ -1288,6 +1299,10 @@ export class CoworkStore implements MemoryBackend {
         this.db.run("ALTER TABLE user_memories ADD COLUMN origin TEXT NOT NULL DEFAULT 'conversation';");
         changed = true;
       }
+      if (!memoryColumns.includes('archived_at')) {
+        this.db.run('ALTER TABLE user_memories ADD COLUMN archived_at INTEGER;');
+        changed = true;
+      }
       this.db.run(`
         CREATE INDEX IF NOT EXISTS idx_user_memories_scope_status_updated
         ON user_memories(metabot_id, scope_kind, scope_key, status, updated_at DESC)
@@ -1374,6 +1389,7 @@ export class CoworkStore implements MemoryBackend {
           memory_llm_judge_enabled INTEGER NOT NULL DEFAULT 1,
           memory_guard_level TEXT NOT NULL DEFAULT 'strict',
           memory_user_memories_max_items INTEGER NOT NULL DEFAULT 12,
+          hygiene_enabled INTEGER NOT NULL DEFAULT 1,
           updated_at INTEGER NOT NULL,
           FOREIGN KEY (metabot_id) REFERENCES metabots(id) ON DELETE CASCADE
         )
@@ -1413,6 +1429,10 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!columns.includes('dream_enabled')) {
         this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN dream_enabled INTEGER NOT NULL DEFAULT 1');
+        changed = true;
+      }
+      if (!columns.includes('hygiene_enabled')) {
+        this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN hygiene_enabled INTEGER NOT NULL DEFAULT 1');
         changed = true;
       }
       if (!columns.includes('updated_at')) {
@@ -2295,13 +2315,14 @@ export class CoworkStore implements MemoryBackend {
         memoryUserMemoriesMaxItems: config.memoryUserMemoriesMaxItems,
         memoryPromptMaxChars: config.memoryPromptMaxChars,
         dreamEnabled: true,
+        hygieneEnabled: true,
         source: 'global',
       };
     }
 
     const row = this.getOne<CoworkMemoryPolicyRow>(`
       SELECT metabot_id, memory_enabled, memory_implicit_update_enabled, memory_llm_judge_enabled,
-             memory_guard_level, memory_user_memories_max_items, dream_enabled, updated_at
+             memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled, updated_at
       FROM metabot_memory_policies
       WHERE metabot_id = ?
       LIMIT 1
@@ -2317,6 +2338,7 @@ export class CoworkStore implements MemoryBackend {
         memoryUserMemoriesMaxItems: config.memoryUserMemoriesMaxItems,
         memoryPromptMaxChars: config.memoryPromptMaxChars,
         dreamEnabled: true,
+        hygieneEnabled: true,
         source: 'global',
       };
     }
@@ -2337,6 +2359,7 @@ export class CoworkStore implements MemoryBackend {
       // count limit, the prompt budget stays the global value either way.
       memoryPromptMaxChars: config.memoryPromptMaxChars,
       dreamEnabled: normalizeDbBoolean(row.dream_enabled, true),
+      hygieneEnabled: normalizeDbBoolean(row.hygiene_enabled, true),
       source: 'metabot',
     };
   }
@@ -2356,6 +2379,7 @@ export class CoworkStore implements MemoryBackend {
       | 'memoryGuardLevel'
       | 'memoryUserMemoriesMaxItems'
       | 'dreamEnabled'
+      | 'hygieneEnabled'
     >>
   ): CoworkMemoryPolicy {
     const resolvedMetabotId = parseIdNumber(metabotId);
@@ -2389,13 +2413,16 @@ export class CoworkStore implements MemoryBackend {
     const nextDreamEnabled = updates.dreamEnabled !== undefined
       ? Boolean(updates.dreamEnabled)
       : base.dreamEnabled;
+    const nextHygieneEnabled = updates.hygieneEnabled !== undefined
+      ? Boolean(updates.hygieneEnabled)
+      : base.hygieneEnabled;
     const now = Date.now();
 
     this.db.run(`
       INSERT INTO metabot_memory_policies (
         metabot_id, memory_enabled, memory_implicit_update_enabled, memory_llm_judge_enabled,
-        memory_guard_level, memory_user_memories_max_items, dream_enabled, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(metabot_id) DO UPDATE SET
         memory_enabled = excluded.memory_enabled,
         memory_implicit_update_enabled = excluded.memory_implicit_update_enabled,
@@ -2403,6 +2430,7 @@ export class CoworkStore implements MemoryBackend {
         memory_guard_level = excluded.memory_guard_level,
         memory_user_memories_max_items = excluded.memory_user_memories_max_items,
         dream_enabled = excluded.dream_enabled,
+        hygiene_enabled = excluded.hygiene_enabled,
         updated_at = excluded.updated_at
     `, [
       resolvedMetabotId,
@@ -2412,6 +2440,7 @@ export class CoworkStore implements MemoryBackend {
       nextGuard,
       nextMaxItems,
       nextDreamEnabled ? 1 : 0,
+      nextHygieneEnabled ? 1 : 0,
       now,
     ]);
     this.saveDb();
@@ -2424,6 +2453,7 @@ export class CoworkStore implements MemoryBackend {
       memoryGuardLevel: nextGuard,
       memoryUserMemoriesMaxItems: nextMaxItems,
       dreamEnabled: nextDreamEnabled,
+      hygieneEnabled: nextHygieneEnabled,
       updatedAt: now,
     };
   }
@@ -5838,6 +5868,62 @@ export class CoworkStore implements MemoryBackend {
     this.saveDb();
   }
 
+  // Memory hygiene ("记忆整理"): global thresholds as one JSON row plus the
+  // persisted last-run record that drives once-per-night scheduling and the
+  // settings stats view.
+  getMemoryHygieneConfig(): MemoryHygieneConfig {
+    const row = this.getOne<{ value: string }>('SELECT value FROM cowork_config WHERE key = ?', ['memoryHygiene']);
+    let parsed: unknown = {};
+    if (row?.value) {
+      try {
+        parsed = JSON.parse(row.value);
+      } catch {
+        parsed = {};
+      }
+    }
+    return normalizeMemoryHygieneConfig(parsed);
+  }
+
+  setMemoryHygieneConfig(update: Partial<MemoryHygieneConfig> | Record<string, unknown>): MemoryHygieneConfig {
+    const next = normalizeMemoryHygieneConfig({ ...this.getMemoryHygieneConfig(), ...update });
+    this.db.run(`
+      INSERT INTO cowork_config (key, value, updated_at)
+      VALUES ('memoryHygiene', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `, [JSON.stringify(next), Date.now()]);
+    this.saveDb();
+    return next;
+  }
+
+  getMemoryHygieneLastRun(): MemoryHygieneRunStats | null {
+    const row = this.getOne<{ value: string }>('SELECT value FROM cowork_config WHERE key = ?', ['memoryHygieneLastRun']);
+    if (!row?.value) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(row.value) as MemoryHygieneRunStats;
+      if (!parsed || typeof parsed.dateKey !== 'string' || typeof parsed.ranAt !== 'number') {
+        return null;
+      }
+      return { ...parsed, counts: parsed.counts ?? {}, errors: parsed.errors ?? [] };
+    } catch {
+      return null;
+    }
+  }
+
+  setMemoryHygieneLastRun(stats: MemoryHygieneRunStats): void {
+    this.db.run(`
+      INSERT INTO cowork_config (key, value, updated_at)
+      VALUES ('memoryHygieneLastRun', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `, [JSON.stringify(stats), Date.now()]);
+    this.saveDb();
+  }
+
   getAppLanguage(): 'zh' | 'en' {
     interface KvRow {
       value: string;
@@ -5871,6 +5957,7 @@ export class CoworkStore implements MemoryBackend {
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
       lastUsedAt: row.last_used_at === null ? null : Number(row.last_used_at),
+      archivedAt: row.archived_at == null ? null : Number(row.archived_at),
     };
   }
 
@@ -6056,6 +6143,11 @@ export class CoworkStore implements MemoryBackend {
     if (!includeDeleted && status === 'all') {
       clauses.push(`status != 'deleted'`);
     }
+    // Hygiene decay: archived dream memories leave injection and default
+    // listings; admin/UI surfaces opt back in with includeArchived.
+    if (!options.includeArchived) {
+      clauses.push('archived_at IS NULL');
+    }
     if (status !== 'all') {
       clauses.push('status = ?');
       params.push(status);
@@ -6221,6 +6313,188 @@ export class CoworkStore implements MemoryBackend {
     }
     this.saveDb();
     return memoryRowsModified > 0;
+  }
+
+  /**
+   * Hygiene decay stroke: dream-origin memories (never self_identity, never
+   * conversation-origin rows that may carry the user's explicit "remember
+   * this") untouched for longer than the cutoff get a reversible archived_at
+   * mark so they leave injection and default listings. Bounded per pass.
+   */
+  archiveDecayedDreamMemories(input: {
+    cutoffMs: number;
+    archivedAt: number;
+    excludeMetabotIds?: ReadonlySet<number>;
+    limit?: number;
+  }): number {
+    const cutoff = Math.floor(input.cutoffMs);
+    const limit = Math.min(20_000, Math.max(1, Math.floor(input.limit ?? 5_000)));
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const metabotExclusion = excluded.length > 0
+      ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : '';
+    const ids = this.getAll<{ id: string }>(
+      `SELECT id FROM user_memories
+       WHERE archived_at IS NULL
+         AND status = 'created'
+         AND origin = 'dream'
+         AND usage_class != 'self_identity'
+         AND COALESCE(last_used_at, updated_at) < ?${metabotExclusion}
+       ORDER BY COALESCE(last_used_at, updated_at) ASC
+       LIMIT ?`,
+      [cutoff, ...excluded, limit],
+    ).map((row) => row.id);
+    if (ids.length === 0) return 0;
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      this.db.run(
+        `UPDATE user_memories
+         SET archived_at = ?
+         WHERE archived_at IS NULL AND id IN (${chunk.map(() => '?').join(', ')})`,
+        [Math.floor(input.archivedAt), ...chunk],
+      );
+    }
+    this.saveDb();
+    return ids.length;
+  }
+
+  /** Reverse the hygiene decay mark on specific memories. */
+  unarchiveUserMemories(input: { ids: string[] }): number {
+    const ids = input.ids.map((id) => id.trim()).filter(Boolean);
+    if (ids.length === 0) return 0;
+    let restored = 0;
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      this.db.run(
+        `UPDATE user_memories
+         SET archived_at = NULL
+         WHERE archived_at IS NOT NULL AND id IN (${chunk.map(() => '?').join(', ')})`,
+        chunk,
+      );
+      restored += chunk.length;
+    }
+    this.saveDb();
+    return restored;
+  }
+
+  /**
+   * Archive specific memories by id (deep-consolidation retire proposals).
+   * self_identity is always refused; every other class only gets the
+   * reversible archived_at mark.
+   */
+  archiveUserMemories(input: { ids: string[]; archivedAt: number }): number {
+    const ids = input.ids.map((id) => id.trim()).filter(Boolean);
+    if (ids.length === 0) return 0;
+    let archived = 0;
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      this.db.run(
+        `UPDATE user_memories
+         SET archived_at = ?
+         WHERE archived_at IS NULL
+           AND usage_class != 'self_identity'
+           AND status = 'created'
+           AND id IN (${chunk.map(() => '?').join(', ')})`,
+        [Math.floor(input.archivedAt), ...chunk],
+      );
+      archived += this.db.getRowsModified?.() || 0;
+    }
+    if (archived > 0) {
+      this.saveDb();
+    }
+    return archived;
+  }
+
+  // Deep-consolidation cadence: metabot id -> epoch ms of its last run.
+  getDeepConsolidationLastRunAt(metabotId: number): number | null {
+    const row = this.getOne<{ value: string }>(
+      'SELECT value FROM cowork_config WHERE key = ?',
+      ['memoryHygieneDeepConsolidation'],
+    );
+    if (!row?.value) return null;
+    try {
+      const parsed = JSON.parse(row.value) as Record<string, number>;
+      const value = parsed[String(metabotId)];
+      return typeof value === 'number' ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  setDeepConsolidationLastRunAt(metabotId: number, ranAt: number): void {
+    let parsed: Record<string, number> = {};
+    const row = this.getOne<{ value: string }>(
+      'SELECT value FROM cowork_config WHERE key = ?',
+      ['memoryHygieneDeepConsolidation'],
+    );
+    if (row?.value) {
+      try {
+        parsed = JSON.parse(row.value) as Record<string, number>;
+      } catch {
+        parsed = {};
+      }
+    }
+    parsed[String(metabotId)] = Math.floor(ranAt);
+    this.db.run(`
+      INSERT INTO cowork_config (key, value, updated_at)
+      VALUES ('memoryHygieneDeepConsolidation', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `, [JSON.stringify(parsed), Date.now()]);
+    this.saveDb();
+  }
+
+  /**
+   * The one low-risk physical delete in the memory layer: tombstones
+   * (status='deleted') older than the grace period are removed together with
+   * their source rows. They were already deleted content; the grace window
+   * exists only so recent deletions stay undoable.
+   */
+  purgeDeletedMemoryTombstones(input: {
+    cutoffMs: number;
+    excludeMetabotIds?: ReadonlySet<number>;
+    limit?: number;
+  }): number {
+    const cutoff = Math.floor(input.cutoffMs);
+    const limit = Math.min(20_000, Math.max(1, Math.floor(input.limit ?? 5_000)));
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const metabotExclusion = excluded.length > 0
+      ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : '';
+    const ids = this.getAll<{ id: string }>(
+      `SELECT id FROM user_memories
+       WHERE status = 'deleted' AND updated_at < ?${metabotExclusion}
+       ORDER BY updated_at ASC
+       LIMIT ?`,
+      [cutoff, ...excluded, limit],
+    ).map((row) => row.id);
+    if (ids.length === 0) return 0;
+    this.db.run('BEGIN IMMEDIATE');
+    try {
+      for (let offset = 0; offset < ids.length; offset += 500) {
+        const chunk = ids.slice(offset, offset + 500);
+        this.db.run(
+          `DELETE FROM user_memory_sources WHERE memory_id IN (${chunk.map(() => '?').join(', ')})`,
+          chunk,
+        );
+        this.db.run(
+          `DELETE FROM user_memories
+           WHERE status = 'deleted' AND id IN (${chunk.map(() => '?').join(', ')})`,
+          chunk,
+        );
+      }
+      this.db.run('COMMIT');
+    } catch (error) {
+      try {
+        this.db.run('ROLLBACK');
+      } catch {
+        // Preserve the original write error.
+      }
+      throw error;
+    }
+    this.saveDb();
+    return ids.length;
   }
 
   /**

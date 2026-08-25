@@ -538,8 +538,15 @@ contextBridge.exposeInMainWorld('electron', {
       memoryLlmJudgeEnabled?: boolean;
       memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
       memoryUserMemoriesMaxItems?: number;
+      hygieneEnabled?: boolean;
     }) =>
       ipcRenderer.invoke('cowork:memory:setPolicy', input),
+    getMemoryHygiene: () =>
+      ipcRenderer.invoke('memoryHygiene:get'),
+    setMemoryHygieneConfig: (input: Record<string, unknown>) =>
+      ipcRenderer.invoke('memoryHygiene:setConfig', input),
+    runMemoryHygieneNow: () =>
+      ipcRenderer.invoke('memoryHygiene:runNow'),
     listKnowledge: (input: {
       metabotId: number;
       kind?: 'know_how' | 'pitfall' | 'principle';

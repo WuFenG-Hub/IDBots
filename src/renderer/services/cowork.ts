@@ -38,6 +38,8 @@ import type {
   CoworkUserMemoryEntry,
   CoworkMemoryStats,
   CoworkMemoryPolicy,
+  MemoryHygieneConfig,
+  MemoryHygieneRunStats,
   CoworkMemoryScopesOverview,
   CoworkSessionMemoryScope,
   CoworkMetaIDContactSummary,
@@ -1076,12 +1078,34 @@ class CoworkService {
     memoryLlmJudgeEnabled?: boolean;
     memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems?: number;
+    hygieneEnabled?: boolean;
   }): Promise<CoworkMemoryPolicy | null> {
     const api = window.electron?.cowork?.setMemoryPolicy;
     if (!api) return null;
     const result = await api(input);
     if (!result?.success || !result.policy) return null;
     return result.policy;
+  }
+
+  async getMemoryHygiene(): Promise<{ config: MemoryHygieneConfig | null; lastRun: MemoryHygieneRunStats | null }> {
+    const api = window.electron?.cowork?.getMemoryHygiene;
+    if (!api) return { config: null, lastRun: null };
+    const result = await api();
+    return { config: result?.config ?? null, lastRun: result?.lastRun ?? null };
+  }
+
+  async setMemoryHygieneConfig(input: Partial<MemoryHygieneConfig>): Promise<MemoryHygieneConfig | null> {
+    const api = window.electron?.cowork?.setMemoryHygieneConfig;
+    if (!api) return null;
+    const result = await api(input);
+    return result?.config ?? null;
+  }
+
+  async runMemoryHygieneNow(): Promise<{ stats: MemoryHygieneRunStats | null; error: string | null }> {
+    const api = window.electron?.cowork?.runMemoryHygieneNow;
+    if (!api) return { stats: null, error: 'Memory hygiene API unavailable' };
+    const result = await api();
+    return { stats: result?.stats ?? null, error: result?.error ?? null };
   }
 
   async listMetaIDContacts(input: { observerGlobalMetaId: string }): Promise<CoworkMetaIDContactSummary[]> {
