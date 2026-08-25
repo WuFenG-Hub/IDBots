@@ -164,6 +164,7 @@ const createHarness = async (overrides = {}) => {
     getGroupTaskStore: () => groupTaskStore,
     getMetabotStore: () => metabotStore,
     getCoworkStore: () => coworkStore,
+    buildTeamCultureBlock: overrides.buildTeamCultureBlock ?? null,
     orchestrationBridge,
     performChat: async (systemPrompt, userMessage, llmId) => {
       chatCalls.push({ systemPrompt, userMessage, llmId });
@@ -3645,6 +3646,38 @@ test('canonical: empty worker reply + bare session keeps the plain WORKER_EMPTY_
     const attempt = h.orchestrationStore.listAttempts(step.id)[0];
     assert.equal(attempt.status, 'failed');
     assert.equal(attempt.error, 'WORKER_EMPTY_HANDOFF');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Team culture injection (P3: shared coordination base)
+// ---------------------------------------------------------------------------
+
+test('planning directive and turn tail carry the team culture block', async () => {
+  const h = await createHarness({
+    buildTeamCultureBlock: () => '<team_culture>\nShared glossary (use these exact terms):\n- deliverable: An on-chain metafile with verification JSON.\n</team_culture>',
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+
+    const planningCall = h.chatCalls[0];
+    assert.match(planningCall.userMessage, /<team_culture>/);
+    assert.match(planningCall.userMessage, /Shared glossary \(use these exact terms\):/,
+      'the planning directive carries the culture block so the first plan already respects it');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('team culture block is omitted when the store is empty', async () => {
+  const h = await createHarness({ buildTeamCultureBlock: () => null });
+  try {
+    const task = h.createTask([2], { activate: false });
+    await h.loop.runTick();
+    assert.doesNotMatch(h.chatCalls[0].userMessage, /<team_culture>/);
   } finally {
     h.cleanup();
   }

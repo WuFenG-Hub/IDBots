@@ -3658,6 +3658,16 @@ const startSqliteDaemons = (): void => {
         offset: 0,
       }).map((entry) => ({ text: entry.text })),
     listDailySummaries: (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
+    buildTeamCultureBlock: () => {
+      try {
+        return getTeamCultureStore().buildCulturePromptBlock();
+      } catch (error) {
+        console.warn(
+          `[GroupTaskDaemon] Team culture block unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      }
+    },
     ...(cognitionContextService
       ? {
           getMetaIDGroupCognitionPromptBlock: (input: {
