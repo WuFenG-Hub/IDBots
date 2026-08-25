@@ -86,6 +86,20 @@ jobs:
       - name: Run workspace-instructions contract tests
         run: node --test tests/workspaceInstructionsBoundary.test.mjs tests/coworkSessionDetailGitBranch.test.mjs
 
+      # Static source-contract tests for the pinned-skill backstop and the
+      # bot-internet composer reuse (pure file-read assertions, no compile).
+      - name: Run pinned-skill contract tests
+        run: npm run test:pinned-skills
+
+      # Behavioral regression suites for the review-round fixes: group-task
+      # daemon/staffing/entropy, per-bot skill assignment, cowork proxy.
+      # Each script runs compile:electron first (project convention).
+      - name: Run group-task / skill-assignment / cowork-proxy regression tests
+        run: npm run test:group-tasks && npm run test:skill-assignment && npm run test:cowork-proxy
+
+      - name: Run memory and team-culture tests
+        run: npm run test:memory
+
       - name: Run MetaWeb agent-tool tests
         run: npm run test:metaweb
 
