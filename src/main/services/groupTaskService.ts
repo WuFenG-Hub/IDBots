@@ -68,6 +68,7 @@ import {
   GROUP_TASK_DRIVER_KV_PREFIX,
   GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX,
   GROUP_TASK_REWORK_AT_KV_PREFIX,
+  WORKING_HEARTBEAT_PREFIX,
 } from './groupTaskDaemon';
 import { getMetaIdDetail, type MetaIdDetail } from './metaIdSearchService';
 import {
@@ -1026,6 +1027,13 @@ export interface GroupTaskMemberSummary extends GroupTaskMember {
   lastSpeakAt: number | null;
   /** P1-4: epoch seconds of the member's last `[WORKING]` tag message. */
   lastWorkingAt: number | null;
+  /**
+   * P2-1: epoch ms of the member's last REAL activity — the newest of group
+   * speech, `[WORKING]` signal, and (for local members) cowork-session
+   * activity. Powers the panel's "last active" line so a member mid long-task
+   * reads as recently active instead of silently stale.
+   */
+  lastActivityAt?: number | null;
   /** P1-4: host-computed work state — the chair can query instead of guessing. */
   workStatus: GroupTaskMemberWorkStatus;
   /**
@@ -1086,6 +1094,10 @@ function toEpochMs(value: number | null | undefined): number | null {
  * P1-4: pure workStatus derivation. Priority:
  *  1. a RUNNING canonical attempt => working;
  *  2. a fresh `[WORKING]` tag (working window) => working;
+ *  2b. P2-2: a valid `[WORKING long-task]` heartbeat lease => working;
+ *  2c. P2-1: fresh cowork-session activity (working window) on a
+ *      working/assigned member => working (a long task in flight, e.g. tool
+ *      calls streaming into the session, is not silence);
  *  3. a recent FAILED attempt (error window) with a NEWER success record
  *     (lastSpeakAt / lastWorkingAt strictly AFTER attemptAtMs) => idle
  *     (a fresh `[WORKING]` already returned at 2);
@@ -1110,6 +1122,12 @@ export function computeGroupTaskMemberWorkStatus(input: {
    * (a working/assigned member who went silent) from 'idle' (never expected to
    * be working). Optional so existing callers/tests keep their behavior. */
   memberStatus?: GroupTaskMemberStatus;
+  /** P2-1: epoch ms of the member's last cowork-session activity (local
+   * members only; null/absent when no session or the store is unwired). */
+  lastSessionActivityAt?: number | null;
+  /** P2-2: epoch ms the member's `[WORKING long-task]` heartbeat lease is
+   * valid until; null/absent when no lease is armed. */
+  heartbeatUntilMs?: number | null;
 }): GroupTaskMemberWorkStatus {
   const nowMs = input.nowMs ?? Date.now();
   const lastSpeakAtMs = toEpochMs(input.lastSpeakAt);
@@ -1123,6 +1141,25 @@ export function computeGroupTaskMemberWorkStatus(input: {
 
   if (input.attemptStatus === 'running') return 'working';
   if (hasFreshWorkingTag) return 'working';
+  // P2-2: a valid [WORKING long-task] heartbeat lease — the member declared a
+  // long task; the panel reads working until the lease expires.
+  if (
+    input.heartbeatUntilMs != null
+    && Number.isFinite(input.heartbeatUntilMs)
+    && nowMs < input.heartbeatUntilMs
+  ) {
+    return 'working';
+  }
+  // P2-1: fresh cowork-session activity on a working/assigned member is a
+  // long task in flight (tool calls streaming), not silence.
+  const lastSessionActivityMs = toEpochMs(input.lastSessionActivityAt);
+  if (
+    (input.memberStatus === 'working' || input.memberStatus === 'assigned')
+    && lastSessionActivityMs != null
+    && nowMs - lastSessionActivityMs <= workingWindowMs
+  ) {
+    return 'working';
+  }
   if (
     input.attemptStatus === 'failed'
     && attemptAtMs != null
@@ -1255,13 +1292,52 @@ export async function getGroupTask(
       member.metabotId != null && bridge?.getWorkerAttemptStatus
         ? bridge.getWorkerAttemptStatus(id, member.metabotId)
         : { status: null, atMs: null };
+    // P2-1/P2-2: local members — real cowork-session activity + the
+    // [WORKING long-task] heartbeat lease. Best-effort reads: an unwired
+    // store (unit tests) or a missing session yields null, never throws.
+    const lastSessionActivityAt = ((): number | null => {
+      if (member.metabotId == null) return null;
+      try {
+        const coworkStore = coworkStoreGetter?.();
+        if (!coworkStore) return null;
+        const mapping = coworkStore.getConversationMapping(
+          GROUP_TASK_CONVERSATION_CHANNEL,
+          `group-task:${id}`,
+          member.metabotId,
+        );
+        if (!mapping) return null;
+        const session = coworkStore.getSessionWithoutMessages(mapping.coworkSessionId);
+        const ts = Number(session?.updatedAt);
+        return Number.isFinite(ts) && ts > 0 ? ts : null;
+      } catch {
+        return null;
+      }
+    })();
+    const heartbeatUntilMs = ((): number | null => {
+      if (member.metabotId == null || !kvStoreGetter) return null;
+      try {
+        const raw = getKvStore().get<string>(`${WORKING_HEARTBEAT_PREFIX}${id}:${member.metabotId}`);
+        const parsed = raw == null ? Number.NaN : Number(raw);
+        return Number.isFinite(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    })();
     const invite = inviteByGmid.get(gmid);
     const memberDelivered = taskDone && gmid !== '' && deliveredAuthorIds.has(gmid);
+    // P2-1: newest real activity across every signal, epoch ms.
+    const activityCandidates = [
+      lastSpeakAt != null ? lastSpeakAt * 1000 : null,
+      lastWorkingAt != null ? lastWorkingAt * 1000 : null,
+      lastSessionActivityAt,
+    ].filter((value): value is number => value != null);
+    const lastActivityAt = activityCandidates.length > 0 ? Math.max(...activityCandidates) : null;
     return {
       ...member,
       avatar: member.metabotId != null ? (avatarById.get(member.metabotId) ?? null) : null,
       lastSpeakAt,
       lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
+      lastActivityAt,
       status: memberDelivered && member.status !== 'done' ? 'done' : member.status,
       workStatus: memberDelivered
         ? 'done'
@@ -1272,6 +1348,8 @@ export async function getGroupTask(
             attemptStatus: attempt.status,
             attemptAtMs: attempt.atMs,
             memberStatus: member.status,
+            lastSessionActivityAt,
+            heartbeatUntilMs,
           }),
       inviteStatus: deriveGroupTaskMemberInviteStatus({
         metabotId: member.metabotId,

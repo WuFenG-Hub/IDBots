@@ -188,6 +188,12 @@ export interface GroupTaskMemberSummary extends GroupTaskMember {
   lastSpeakAt?: number | null;
   /** Epoch ms of the member's last `[WORKING]` tag message (P1-4). */
   lastWorkingAt?: number | null;
+  /**
+   * Epoch ms of the member's last real activity (P2-1) — newest of chain
+   * speech, `[WORKING]` signal, and cowork-session activity for local
+   * members. A member mid long-task reads as recently active.
+   */
+  lastActivityAt?: number | null;
   /** Host-computed work state (P1-4): idle/working/error/unknown. */
   workStatus?: GroupTaskMemberWorkStatus;
 }

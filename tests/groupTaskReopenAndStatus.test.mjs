@@ -308,6 +308,57 @@ test('computeGroupTaskMemberWorkStatus pure derivation', () => {
     'idle',
     'stale [WORKING] without a working self-report stays idle (back-compat)',
   );
+  // P2-1: fresh cowork-session activity on a working member (a long task in
+  // flight) reads working even when the [WORKING] signal is past the timeout
+  // window — the panel must not show timeout for an active long task.
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: 'working',
+      lastWorkingAt: 1_700_000_000_000, lastSessionActivityAt: 1_700_000_000_000 + 28 * 60_000,
+      nowMs: 1_700_000_000_000 + 30 * 60_000,
+    }),
+    'working',
+    'fresh session activity beats the stale [WORKING] timeout',
+  );
+  // …but session activity does not rescue a member nobody expects to work.
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: undefined, lastSpeakAt: null,
+      lastSessionActivityAt: 1_700_000_000_000 + 29 * 60_000,
+      nowMs: 1_700_000_000_000 + 30 * 60_000,
+    }),
+    'unknown',
+    'session activity alone never flips a non-working member to working',
+  );
+  // stale session activity + stale [WORKING] + working member → timeout.
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: 'working',
+      lastWorkingAt: 1_700_000_000_000, lastSessionActivityAt: 1_700_000_000_000,
+      nowMs: 1_700_000_000_000 + 30 * 60_000,
+    }),
+    'timeout',
+    'stalled session + stale [WORKING] reads timeout',
+  );
+  // P2-2: a valid heartbeat lease reads working; an expired one does not.
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: 'working', lastWorkingAt: 1_700_000_000_000,
+      heartbeatUntilMs: 1_700_000_000_000 + 40 * 60_000,
+      nowMs: 1_700_000_000_000 + 30 * 60_000,
+    }),
+    'working',
+    'valid heartbeat lease reads working',
+  );
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: 'working', lastWorkingAt: 1_700_000_000_000,
+      heartbeatUntilMs: 1_700_000_000_000 + 20 * 60_000,
+      nowMs: 1_700_000_000_000 + 30 * 60_000,
+    }),
+    'timeout',
+    'expired heartbeat lease falls through to timeout',
+  );
 });
 
 test('getGroupTaskMemberStatus surfaces [WORKING]-tag working state from the transcript', async () => {
