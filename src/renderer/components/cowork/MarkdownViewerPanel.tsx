@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { ArrowTopRightOnSquareIcon, DocumentIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import MarkdownContent from '../MarkdownContent';
 import { i18nService } from '../../services/i18n';
@@ -22,6 +22,57 @@ const getFileName = (filePath: string): string => {
   return segments[segments.length - 1] ?? filePath;
 };
 
+const getDirName = (filePath: string): string => {
+  const match = filePath.match(/^(.*)[\\/][^\\/]*$/);
+  return match?.[1] ?? filePath;
+};
+
+// Mirrors the TLD exclusion in MarkdownContent's isLikelyLocalFilePath so a
+// bare `[x](example.com)` keeps rendering as a plain link, not a file path.
+const COMMON_TLDS = new Set(['com', 'net', 'org', 'io', 'cn', 'co', 'ai', 'app', 'dev', 'gov', 'edu']);
+
+/**
+ * Resolve a markdown link target against the directory of the document shown
+ * in the panel, so relative links (./other.md, ../docs/a.md, sub/b.md or a
+ * bare sibling.md) inside the opened file stay navigable. Absolute paths,
+ * file:// URLs and scheme-ful hrefs return null and keep their default
+ * handling in MarkdownContent.
+ */
+const resolveRelativeToDocument = (documentPath: string, href: string): string | null => {
+  const trimmed = href.trim();
+  if (!trimmed) return null;
+  if (/^file:\/\//i.test(trimmed)) return null;
+  if (/^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('/')) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null;
+  // Keep %-escapes intact: MarkdownContent decodes the resolved value itself.
+  const clean = trimmed.split('#')[0].split('?')[0].trim();
+  if (!clean) return null;
+
+  const isRelative = clean.startsWith('./') || clean.startsWith('../')
+    || clean.includes('/') || clean.includes('\\');
+  if (!isRelative) {
+    const extMatch = clean.match(/\.([A-Za-z0-9]{1,6})$/);
+    if (!extMatch || COMMON_TLDS.has(extMatch[1].toLowerCase())) return null;
+  }
+
+  const segments = `${getDirName(documentPath)}/${clean}`.split(/[\\/]/);
+  const resolved: string[] = [];
+  for (const segment of segments) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      // Never climb above the filesystem root.
+      if (resolved.length > 1 || (resolved.length === 1 && !/^[A-Za-z]:$/.test(resolved[0]))) {
+        resolved.pop();
+      }
+      continue;
+    }
+    resolved.push(segment);
+  }
+  if (resolved.length === 0) return null;
+  const prefix = documentPath.startsWith('/') ? '/' : '';
+  return `${prefix}${resolved.join('/')}`;
+};
+
 const showToast = (message: string): void => {
   window.dispatchEvent(new CustomEvent('app:showToast', { detail: message }));
 };
@@ -35,6 +86,10 @@ const showToast = (message: string): void => {
  */
 const MarkdownViewerPanel: React.FC<MarkdownViewerPanelProps> = ({ filePath, onClose, onOpenFile }) => {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
+  const resolveLocalFilePath = useCallback(
+    (href: string) => resolveRelativeToDocument(filePath, href),
+    [filePath]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -141,6 +196,7 @@ const MarkdownViewerPanel: React.FC<MarkdownViewerPanelProps> = ({ filePath, onC
           <MarkdownContent
             content={state.content}
             compact
+            resolveLocalFilePath={resolveLocalFilePath}
             onOpenLocalFile={(path) => {
               if (/\.(md|markdown)$/i.test(path)) {
                 onOpenFile(path);
