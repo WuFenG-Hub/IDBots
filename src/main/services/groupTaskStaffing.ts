@@ -410,6 +410,28 @@ export function localSeatMetabotIds(plan: GroupTaskStaffingPlan): number[] {
   )];
 }
 
+/**
+ * Canonical signature of a propose payload (title + goal + acceptance
+ * criteria + NORMALIZED plan). Two proposes with the same signature describe
+ * the exact same slate, so the second one must reuse the first proposal
+ * instead of stacking a new row (propose idempotency; task #38 incident).
+ * Both sides must pass the plan through normalizeStaffingPlan first — the
+ * normalizer emits deterministic key order, making the JSON a stable key.
+ */
+export function staffingProposalPayloadKey(input: {
+  title: string;
+  goal: string;
+  acceptanceCriteria?: string | null;
+  plan: GroupTaskStaffingPlan;
+}): string {
+  return JSON.stringify({
+    title: input.title,
+    goal: input.goal,
+    acceptanceCriteria: input.acceptanceCriteria?.trim() || null,
+    plan: input.plan,
+  });
+}
+
 export function localSeatNames(plan: GroupTaskStaffingPlan): string[] {
   return plan.seats
     .filter((seat) => seat.source === 'local' && seat.candidateName)

@@ -1628,6 +1628,116 @@ test('a new propose cancels the previous open slate for the same session', async
   }
 });
 
+test('an identical re-propose reuses the open proposal instead of stacking a new one', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ]);
+    const first = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-idem',
+    });
+    assert.equal(first.reusedExistingProposal, undefined);
+    // Same payload, chair simply re-ran propose (e.g. it lost the id).
+    const second = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-idem',
+    });
+    assert.equal(second.proposal.id, first.proposal.id);
+    assert.equal(second.reusedExistingProposal, true);
+    assert.equal(second.proposal.createdAt, first.proposal.createdAt);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(first.proposal.id).status, 'pending');
+    // A trimmed acceptance-criteria difference is still "identical" (normalize).
+    const third = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      acceptanceCriteria: '   ',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-idem',
+    });
+    assert.equal(third.proposal.id, first.proposal.id);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('an owner confirmation given before an identical re-propose still authorizes create (task #38)', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-idem-confirm',
+    });
+    // Owner confirms with a bare natural reply BEFORE the chair re-proposes.
+    messages.push({ type: 'user', content: '确认', timestamp: proposed.proposal.createdAt + 10 });
+    // The chair re-runs propose with the identical payload (task #38: it lost
+    // the proposal id in CLI output parsing). The re-propose must NOT reset
+    // the confirmation window past the owner's reply.
+    const reproposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-idem-confirm',
+    });
+    assert.equal(reproposed.proposal.id, proposed.proposal.id);
+    assert.equal(reproposed.reusedExistingProposal, true);
+
+    const detail = await createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: reproposed.proposal.id,
+      sourceSessionId: 'session-idem-confirm',
+    });
+    assert.equal(detail.staffingProposalId, proposed.proposal.id);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).status, 'consumed');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('an identical re-propose does not reuse an expired open proposal', async () => {
+  const h = await createHarness();
+  try {
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ]);
+    const first = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-idem-expired',
+    });
+    h.db.run(
+      'UPDATE group_task_staffing_proposals SET created_at = ? WHERE id = ?',
+      [Date.now() - (25 * 60 * 60 * 1000), first.proposal.id],
+    );
+    h.store.getSaveFunction()();
+    const second = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-idem-expired',
+    });
+    assert.notEqual(second.proposal.id, first.proposal.id);
+    assert.equal(second.reusedExistingProposal, undefined);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(first.proposal.id).status, 'cancelled');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('an expired pending proposal cannot be used to create', async () => {
   const h = await createHarness();
   try {

@@ -89,6 +89,7 @@ import {
   remoteSeats,
   resolveStaffingOwnerGate,
   splitSessionMessagesForStaffingGate,
+  staffingProposalPayloadKey,
   validateStaffingPlan,
   type GroupTaskStaffingPlan,
   type GroupTaskStaffingProposal,
@@ -144,6 +145,15 @@ export interface ProposeGroupTaskStaffingResult {
   ownerConfirmRequired: boolean;
   slateText: string;
   warnings: string[];
+  /**
+   * True when an identical still-open proposal already existed and was
+   * returned as-is instead of inserting a new row: a re-propose must never
+   * reset the owner-confirmation window (task #38: the chair re-ran propose
+   * after the owner had already said 确认, stacking proposal ids 6→7→8 and
+   * orphaning the in-window confirmation behind the new proposals' later
+   * createdAt).
+   */
+  reusedExistingProposal?: boolean;
 }
 
 export interface GroupTaskDetail extends GroupTask {
@@ -560,12 +570,49 @@ export function proposeGroupTaskStaffing(
   // 'local_auto_start', keeping the audit trail honest about who waived what.
   const localAutoStart = isLocalOnlySmallSlate(plan);
   const confirmWaived = wishSkip || localAutoStart;
-  const proposal = getGroupTaskStore().createStaffingProposal({
+  // Propose idempotency (task #38): a re-propose with the IDENTICAL payload
+  // must return the existing still-open proposal instead of inserting a new
+  // row. Inserting would cancel the open one and anchor a LATER confirm
+  // window, orphaning a confirmation the owner already gave between the two
+  // proposes (the chair then has to drag a second confirmation out of the
+  // owner). A genuinely changed slate (revise) still creates a fresh
+  // proposal with a fresh window — that reset is the point of a re-propose.
+  const acceptanceCriteria = opts.acceptanceCriteria?.trim() || null;
+  const payloadKey = staffingProposalPayloadKey({ title, goal, acceptanceCriteria, plan });
+  const store = getGroupTaskStore();
+  const existing = store.getLatestOpenStaffingProposalForSession(sourceSessionId);
+  if (
+    existing
+    && !isStaffingProposalExpired(existing.createdAt)
+    && staffingProposalPayloadKey({
+      title: existing.title,
+      goal: existing.goal,
+      acceptanceCriteria: existing.acceptanceCriteria,
+      plan: existing.plan,
+    }) === payloadKey
+  ) {
+    return {
+      proposal: existing,
+      ownerConfirmRequired: !confirmWaived,
+      slateText: buildStaffingSlateText({
+        title,
+        goal,
+        acceptanceCriteria: opts.acceptanceCriteria,
+        plan,
+        ownerConfirmRequired: !confirmWaived,
+        skipReason: wishSkip ? 'wish' : 'local_small',
+        language: opts.language,
+      }),
+      warnings: validation.warnings,
+      reusedExistingProposal: true,
+    };
+  }
+  const proposal = store.createStaffingProposal({
     sourceSessionId,
     twinMetabotId,
     title,
     goal,
-    acceptanceCriteria: opts.acceptanceCriteria?.trim() || null,
+    acceptanceCriteria,
     plan,
     status: wishSkip ? 'skip_authorized' : 'pending',
     createdAt: now,
