@@ -287,6 +287,7 @@ class GroupTaskService {
       avatar: member.avatar ?? null,
       role: member.role,
       metabotId: member.metabotId,
+      globalMetaId: member.globalmetaid ?? null,
     }));
     return {
       ...task,
