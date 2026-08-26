@@ -1728,6 +1728,11 @@ const translations: Record<LanguageType, Record<string, string>> = {
     outputFiles: '输出文件',
     openFileFailed: '打开文件失败',
     fileCreated: '文件已创建',
+    markdownViewerOpenExternal: '用外部应用打开',
+    markdownViewerLoading: '正在加载文档…',
+    markdownViewerLoadFailed: '文档加载失败。',
+    markdownViewerFileMissing: '文件不存在或已被移动。',
+    markdownViewerTooLarge: '文档过大（超过 {limit}），请用外部应用打开。',
 
     // IM Bot
     imBot: 'IM 机器人',
@@ -4048,6 +4053,11 @@ const translations: Record<LanguageType, Record<string, string>> = {
     outputFiles: 'Output Files',
     openFileFailed: 'Failed to open file',
     fileCreated: 'File created',
+    markdownViewerOpenExternal: 'Open externally',
+    markdownViewerLoading: 'Loading document…',
+    markdownViewerLoadFailed: 'Failed to load the document.',
+    markdownViewerFileMissing: 'The file does not exist or has been moved.',
+    markdownViewerTooLarge: 'The document is too large (over {limit}); open it externally.',
 
     // IM Bot
     imBot: 'IM Bot',

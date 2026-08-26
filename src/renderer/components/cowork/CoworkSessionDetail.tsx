@@ -37,6 +37,7 @@ import {
   type TodoStatus,
 } from './coworkTodoList';
 import MarkdownContent from '../MarkdownContent';
+import MarkdownViewerPanel from './MarkdownViewerPanel';
 import LocalFileLink from '../ui/LocalFileLink';
 import {
   CheckIcon,
@@ -100,6 +101,29 @@ const AUTO_SCROLL_THRESHOLD = 120;
 /** Machine error code of the free-quota relay, preserved in error text by the proxy. */
 const FREE_QUOTA_EXHAUSTED_CODE = 'free_quota_exhausted';
 const REFUND_STATUS_DISMISS_STORAGE_KEY = 'idbots.cowork.dismissedRefundStatusCards.v1';
+/** In-app markdown viewer sidebar: width fraction of the session area. */
+const MARKDOWN_VIEWER_WIDTH_STORAGE_KEY = 'idbots.cowork.markdownViewerWidth';
+const MARKDOWN_VIEWER_DEFAULT_FRACTION = 0.25;
+const MARKDOWN_VIEWER_MAX_FRACTION = 0.5;
+const MARKDOWN_VIEWER_MIN_WIDTH_PX = 280;
+const MARKDOWN_FILE_RE = /\.(md|markdown)$/i;
+
+const clampMarkdownViewerWidth = (width: number, containerWidth: number): number => {
+  const maxWidth = Math.max(MARKDOWN_VIEWER_MIN_WIDTH_PX, containerWidth * MARKDOWN_VIEWER_MAX_FRACTION);
+  return Math.min(Math.max(width, MARKDOWN_VIEWER_MIN_WIDTH_PX), maxWidth);
+};
+
+const loadPersistedMarkdownViewerFraction = (): number => {
+  try {
+    const raw = window.localStorage.getItem(MARKDOWN_VIEWER_WIDTH_STORAGE_KEY);
+    if (!raw) return MARKDOWN_VIEWER_DEFAULT_FRACTION;
+    const parsed = Number.parseFloat(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) return MARKDOWN_VIEWER_DEFAULT_FRACTION;
+    return Math.min(parsed, MARKDOWN_VIEWER_MAX_FRACTION);
+  } catch {
+    return MARKDOWN_VIEWER_DEFAULT_FRACTION;
+  }
+};
 const INVALID_FILE_NAME_PATTERN = /[<>:"/\\|?*\u0000-\u001F]/g;
 const ORDER_TAG_TXID_RE = /^\[(?:ORDER_STATUS|DELIVERY|NeedsRating):([0-9a-f]{64})(?:\s+[^\]]*)?\]/i;
 const ORDER_END_TAG_TXID_RE = /^\[ORDER_END:([0-9a-f]{64})(?:\s+[^\]]*)?\]/i;
@@ -1739,11 +1763,13 @@ const AssistantMessageItem: React.FC<{
   resolveLocalFilePath?: (href: string, text: string) => string | null;
   mapDisplayText?: (value: string) => string;
   showCopyButton?: boolean;
+  onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
 }> = ({
   message,
   resolveLocalFilePath,
   mapDisplayText,
   showCopyButton = false,
+  onOpenLocalFile,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
@@ -1788,6 +1814,7 @@ const AssistantMessageItem: React.FC<{
             content={replyContent}
             className="prose dark:prose-invert max-w-none"
             resolveLocalFilePath={resolveLocalFilePath}
+            onOpenLocalFile={onOpenLocalFile}
           />
         </div>
       ) : null}
@@ -2036,6 +2063,7 @@ const AssistantTurnBlock: React.FC<{
   showTypingIndicator?: boolean;
   showCopyButtons?: boolean;
   showImagePreviews?: boolean;
+  onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
 }> = ({
   turn,
   resolveLocalFilePath,
@@ -2043,6 +2071,7 @@ const AssistantTurnBlock: React.FC<{
   showTypingIndicator = false,
   showCopyButtons = true,
   showImagePreviews = true,
+  onOpenLocalFile,
 }) => {
   const visibleAssistantItems = getVisibleAssistantItems(turn.assistantItems);
   // Collapsed by default once a turn completes; the header expands to reveal
@@ -2210,6 +2239,7 @@ const AssistantTurnBlock: React.FC<{
           resolveLocalFilePath={resolveLocalFilePath}
           mapDisplayText={mapDisplayText}
           showCopyButton={showCopyButtons && !hasToolGroupAfter}
+          onOpenLocalFile={onOpenLocalFile}
         />
       );
     }
@@ -2316,6 +2346,7 @@ const AssistantTurnBlock: React.FC<{
                   resolveLocalFilePath={resolveLocalFilePath}
                   mapDisplayText={mapDisplayText}
                   showCopyButton={showCopyButtons}
+                  onOpenLocalFile={onOpenLocalFile}
                 />
               </>
             ) : (
@@ -2512,6 +2543,72 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   };
   const [branchActionError, setBranchActionError] = useState<string | null>(null);
   const detailRootRef = useRef<HTMLDivElement>(null);
+  // Markdown viewer sidebar: .md/.markdown file links in assistant messages
+  // open in this right-hand panel instead of an external app. The width is a
+  // fraction of the session area (default 1/4, clamped to at most 1/2) and is
+  // persisted across sessions.
+  const [markdownViewerPath, setMarkdownViewerPath] = useState<string | null>(null);
+  const [markdownViewerFraction, setMarkdownViewerFraction] = useState<number>(loadPersistedMarkdownViewerFraction);
+  const markdownViewerFractionRef = useRef(markdownViewerFraction);
+  const markdownViewerResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const [isMarkdownViewerResizing, setIsMarkdownViewerResizing] = useState(false);
+
+  const handleOpenLocalFile = useCallback((filePath: string): boolean => {
+    if (!MARKDOWN_FILE_RE.test(filePath)) return false;
+    setMarkdownViewerPath(filePath);
+    return true;
+  }, []);
+
+  const handleMarkdownViewerResizeStart = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    const containerWidth = detailRootRef.current?.clientWidth ?? 0;
+    if (containerWidth <= 0) return;
+    markdownViewerResizeRef.current = {
+      startX: event.clientX,
+      startWidth: containerWidth * markdownViewerFractionRef.current,
+    };
+    setIsMarkdownViewerResizing(true);
+  }, []);
+
+  const handleMarkdownViewerResizeReset = useCallback(() => {
+    markdownViewerFractionRef.current = MARKDOWN_VIEWER_DEFAULT_FRACTION;
+    setMarkdownViewerFraction(MARKDOWN_VIEWER_DEFAULT_FRACTION);
+    try {
+      window.localStorage.setItem(MARKDOWN_VIEWER_WIDTH_STORAGE_KEY, String(MARKDOWN_VIEWER_DEFAULT_FRACTION));
+    } catch {
+      // Storage unavailable: keep the in-memory default.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isMarkdownViewerResizing) return;
+    const handleMouseMove = (event: MouseEvent) => {
+      const resizeState = markdownViewerResizeRef.current;
+      const containerWidth = detailRootRef.current?.clientWidth ?? 0;
+      if (!resizeState || containerWidth <= 0) return;
+      // The panel is pinned to the right edge: dragging left grows it.
+      const nextWidth = resizeState.startWidth + (resizeState.startX - event.clientX);
+      const nextFraction = clampMarkdownViewerWidth(nextWidth, containerWidth) / containerWidth;
+      markdownViewerFractionRef.current = nextFraction;
+      setMarkdownViewerFraction(nextFraction);
+    };
+    const handleMouseUp = () => {
+      setIsMarkdownViewerResizing(false);
+      markdownViewerResizeRef.current = null;
+      try {
+        window.localStorage.setItem(MARKDOWN_VIEWER_WIDTH_STORAGE_KEY, String(markdownViewerFractionRef.current));
+      } catch {
+        // Storage unavailable: the width stays session-local.
+      }
+    };
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isMarkdownViewerResizing]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messageElementRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -3475,6 +3572,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             showTypingIndicator
             showCopyButtons={!isStreaming}
             showImagePreviews
+            onOpenLocalFile={handleOpenLocalFile}
           />
         </div>
       );
@@ -3520,6 +3618,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 showTypingIndicator={showTypingIndicator}
                 showCopyButtons={!isStreaming}
                 showImagePreviews
+                onOpenLocalFile={handleOpenLocalFile}
               />
             </div>
           )}
@@ -3539,6 +3638,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       );
     });
   };
+
+  // Pixel width of the markdown viewer sidebar, derived from the stored
+  // fraction and the live container width (falls back to the window before
+  // the first layout measurement).
+  const markdownViewerContainerWidth = detailRootRef.current?.clientWidth ?? 0;
+  const markdownViewerWidthPx = markdownViewerContainerWidth > 0
+    ? clampMarkdownViewerWidth(markdownViewerContainerWidth * markdownViewerFraction, markdownViewerContainerWidth)
+    : Math.max(MARKDOWN_VIEWER_MIN_WIDTH_PX, Math.round(window.innerWidth * markdownViewerFraction));
 
   return (
     <div ref={detailRootRef} className="flex-1 flex flex-col dark:bg-claude-darkBg bg-claude-bg h-full">
@@ -3795,6 +3902,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         </div>
       )}
 
+      {/* Body row: chat column + optional markdown viewer sidebar */}
+      <div className="flex min-h-0 flex-1">
+      <div className="flex min-w-0 flex-1 flex-col">
       {/* Messages */}
       <div
         ref={scrollContainerRef}
@@ -4049,6 +4159,35 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             )}
           </div>
         </div>
+      )}
+      </div>
+
+      {markdownViewerPath && (
+        <>
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            onMouseDown={handleMarkdownViewerResizeStart}
+            onDoubleClick={handleMarkdownViewerResizeReset}
+            className="w-1 shrink-0 cursor-col-resize transition-colors hover:bg-claude-accent/40"
+          />
+          <div
+            className="h-full shrink-0 border-l dark:border-claude-darkBorder border-claude-border"
+            style={{ width: markdownViewerWidthPx }}
+          >
+            <MarkdownViewerPanel
+              filePath={markdownViewerPath}
+              onClose={() => setMarkdownViewerPath(null)}
+              onOpenFile={setMarkdownViewerPath}
+            />
+          </div>
+        </>
+      )}
+      </div>
+
+      {/* Drag overlay so mouse events are not swallowed mid-resize */}
+      {isMarkdownViewerResizing && (
+        <div className="fixed inset-0 z-50 cursor-col-resize" />
       )}
     </div>
   );
