@@ -50,6 +50,7 @@ import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
 import {
   buildCheckpointPauseLine,
   buildCheckpointResumeLine,
+  buildDispatchHeldLine,
   buildLongTurnStandbyNote,
   buildMemberJoinWelcomeText,
   buildReviewClosingLine,
@@ -62,6 +63,7 @@ import {
   copyWorkingAckExample,
   copyWorkingAckFallback,
   copyCheckpointNeedDecision,
+  hasGroupTaskNotice,
   isRollCallPresenceCheck,
 } from '../libs/groupTaskCopy';
 import {
@@ -2801,6 +2803,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const content = message.content;
     let verificationNotes: string[] = [];
 
+    // Host-authored notices ([GROUP_TASK_NOTICE:…]) are documentation for the
+    // group, never protocol input: their bodies may legitimately cite tag
+    // syntax (e.g. a dispatch-held notice explaining how to post
+    // [CHECKPOINT_RESOLVED: …]) and must not be re-interpreted as that tag
+    // when the notice round-trips through the daemon.
+    if (hasGroupTaskNotice(content)) return verificationNotes;
+
     // Deliverable collection is worker-only: a chair message that merely quotes
     // an example (`metaapp://<pinId>`) or recap must never become a deliverable.
     const chairGlobalMetaId = (
@@ -4911,6 +4920,43 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               `${silencedWorkers.map((candidate) => candidate.name ?? candidate.metabotId).join(', ')} ` +
               `ignored (${gateHint})`,
             );
+            // P1-2 (task #39): the log line above is invisible to the chair.
+            // A dispatch swallowed by a human-gate phase otherwise reads as
+            // "members ignore @mentions" — the chair spent hours on Twin
+            // direct-connect fallbacks for exactly this. Tell the GROUP, once
+            // per held message, what happened and how to resume.
+            const heldKey = `group_task_dispatch_held:${task.id}:${message.id}`;
+            if (sqlite.get<string>(heldKey) !== '1') {
+              const chairMemberForNotice = members.find((candidate) => candidate.role === 'chair');
+              if (chairMemberForNotice?.metabotId != null) {
+                sqlite.set(heldKey, '1');
+                try {
+                  const heldLine = buildDispatchHeldLine({
+                    taskId: task.id,
+                    taskTitle: task.title,
+                    senderName: message.senderName?.trim() || 'chair',
+                    memberNames: silencedWorkers
+                      .map((candidate) => candidate.name ?? `bot-${candidate.metabotId}`)
+                      .filter(Boolean),
+                    gate: freshStatus === 'review' ? 'review' : 'checkpoint',
+                    checkpointTopic: freshStatus === 'review'
+                      ? null
+                      : store.getOpenCheckpoint(task.id)?.topic ?? null,
+                  });
+                  const heldSent = await postGroupMessage(task.id, chairMemberForNotice.metabotId, heldLine);
+                  emitLog(
+                    `[GroupTaskDaemon] Task ${task.id}: dispatch-held notice posted for message ` +
+                    `${message.id} (pin ${heldSent.pinId})`,
+                  );
+                } catch (error) {
+                  sqlite.delete(heldKey); // transient post failure: retry on a later tick
+                  emitLog(
+                    `[GroupTaskDaemon] Task ${task.id}: dispatch-held notice post failed: ` +
+                    `${error instanceof Error ? error.message : String(error)}`,
+                  );
+                }
+              }
+            }
           }
         }
         for (const decision of decisions) {

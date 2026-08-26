@@ -1212,9 +1212,12 @@ test('mid-batch [STATUS:REVIEW] flip gates subsequent messages with the new stat
       [[2, 'reply-for-llm-2']],
       'worker answered the pre-flip mention only; the post-flip mention is gated silent',
     );
-    assert.equal(sends.length, 2, 'plus the review-entry system closing line (#14)');
     assert.equal(sends[1][0], 1, 'closing posted as the chair');
     assert.match(sends[1][1], /进入验收阶段/, 'closing line content');
+    // P1-2: the swallowed post-flip dispatch now produces a host dispatch-held
+    // notice (as the chair) instead of vanishing silently.
+    assert.equal(sends.length, 3, 'closing line + dispatch-held notice for the gated mention');
+    assert.match(sends[2][1], /\[GROUP_TASK_NOTICE:dispatch_held\]/, 'dispatch-held notice');
     assert.equal(
       h.chatCalls.filter((c) => c.llmId === 'llm-2').length, 1,
       'no LLM call for the post-flip message (the other call is the owner-report turn)',
@@ -3930,6 +3933,112 @@ test('entropy P0 review: numberless template ACK still arms the delivery deadlin
       h.sends.some((send) => /estimated delivery/.test(send.content)),
       'chair delivery reminder fired for the template-ACK deadline',
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-2: a dispatch swallowed by an open checkpoint posts a dispatch_held notice, workers stay silent', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    h.groupTaskStore.openCheckpoint({
+      taskId: task.id,
+      topic: 'owner 需在火山方舟开通 doubao-seedance-2-0',
+      msgPinId: 'pin-checkpoint',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-held-dispatch', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '账号已开通，@Coder Bot 继续 7 镜动画，@Designer Bot 对齐素材。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    // Workers are gated silent by the open checkpoint: no worker replies.
+    assert.equal(
+      h.sends.filter((send) => send.metabotId === 2 || send.metabotId === 3).length,
+      0,
+      'workers stay silent while the checkpoint is open',
+    );
+    // The host told the group the dispatch was held, as the chair, once.
+    const held = h.sends.filter((send) =>
+      send.metabotId === 1 && send.content.includes('[GROUP_TASK_NOTICE:dispatch_held]'));
+    assert.equal(held.length, 1, 'exactly one dispatch-held notice');
+    assert.match(held[0].content, /Coder Bot/);
+    assert.match(held[0].content, /CHECKPOINT_RESOLVED/);
+    assert.match(held[0].content, /doubao-seedance-2-0/, 'notice carries the checkpoint topic');
+    // A second idempotent tick must not repost the notice for the same message.
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => send.content.includes('[GROUP_TASK_NOTICE:dispatch_held]')).length,
+      1,
+      'notice is posted once per held message',
+    );
+    // The checkpoint is still open — the notice's literal tag citation must
+    // not be re-interpreted as a resolution when processed (host-notice tag
+    // exemption).
+    assert.ok(h.groupTaskStore.getOpenCheckpoint(task.id), 'checkpoint still open after the notice');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-2: a review-phase dispatch posts a dispatch_held notice with the reopen instruction', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    h.groupTaskStore.updateTaskStatus(task.id, 'review');
+    insertGroupMessage(h.db, {
+      pinId: 'pin-review-dispatch', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot one more fix before we close.',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => send.metabotId === 2).length,
+      0,
+      'workers stay silent in review',
+    );
+    const held = h.sends.filter((send) =>
+      send.metabotId === 1 && send.content.includes('[GROUP_TASK_NOTICE:dispatch_held]'));
+    assert.equal(held.length, 1);
+    assert.match(held[0].content, /STATUS:EXECUTING/, 'review variant explains the reopen path');
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review', 'task stays in review');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-2: host notices citing protocol tags are never re-interpreted as those tags', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    h.groupTaskStore.openCheckpoint({
+      taskId: task.id,
+      topic: 'waiting for owner decision',
+      msgPinId: 'pin-checkpoint-2',
+    });
+    h.groupTaskStore.updateTaskStatus(task.id, 'review');
+    // The dispatch-held notice body itself, arriving on-chain from the chair:
+    // it cites [CHECKPOINT_RESOLVED: …] and [STATUS:EXECUTING] as INSTRUCTIONS.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-notice-roundtrip', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: [
+        '[GROUP_TASK_NOTICE:dispatch_held]',
+        '⏸️ A dispatch was HELD: a human checkpoint is open (waiting for owner decision).',
+        'Once the owner has weighed in, post `[CHECKPOINT_RESOLVED: <decision>]` in the group.',
+        'Reopen execution with `[STATUS:EXECUTING]` (or the Tasks panel Back-to-work action).',
+      ].join('\n'),
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.groupTaskStore.getOpenCheckpoint(task.id), 'cited CHECKPOINT_RESOLVED did not resolve the checkpoint');
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review', 'cited STATUS:EXECUTING did not reopen the task');
   } finally {
     h.cleanup();
   }
