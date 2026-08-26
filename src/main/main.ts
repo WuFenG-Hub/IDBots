@@ -163,6 +163,7 @@ import {
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceCoworkStoreGetter,
+  setGroupTaskServiceStaffingOwnerConfirmJudge,
   setGroupTaskServiceTransport,
   setGroupTaskAcceptanceNotifier,
   notifySourceSessionReview,
@@ -3205,6 +3206,42 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupTaskServiceCoworkStoreGetter(getCoworkStore);
+  // Task #38: owner confirmation is LLM-judged natural language, not a phrase
+  // vocabulary. One small one-shot completion per create attempt that reaches
+  // the confirm gate; deterministic revise/cancel/skip matching stays regex
+  // (see groupTaskStaffing.classifyOwnerStaffingReply).
+  setGroupTaskServiceStaffingOwnerConfirmJudge(async ({ slateText, replies }) => {
+    const numbered = replies.map((reply, index) => `[${index}] ${reply}`).join('\n');
+    const systemPrompt = [
+      'You judge whether a human owner clearly approved a proposed team roster.',
+      'The assistant showed the owner this roster proposal:',
+      '<slate>',
+      slateText,
+      '</slate>',
+      'The owner then replied, in order:',
+      numbered,
+      '',
+      'A reply counts as confirmation only when, in context, the owner clearly approves proceeding with this exact roster.',
+      'Questions ("可以吗?"), conditions, requests to change/swap/drop seats, topic changes, and ambiguous acknowledgments do NOT count.',
+      'Answer with strict JSON only: {"lastConfirmIndex": <integer index of the LAST confirming reply, or -1>}',
+    ].join('\n');
+    const raw = await performChatCompletionForOrchestrator(systemPrompt, 'Judge the owner replies now.', undefined, {
+      maxTokens: 200,
+      thinking: 'disabled',
+    });
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) return { lastConfirmIndex: -1 };
+    try {
+    const parsed = JSON.parse(match[0]) as { lastConfirmIndex?: unknown };
+    const index = Number(parsed.lastConfirmIndex);
+    if (!Number.isInteger(index) || index < 0 || index >= replies.length) {
+      return { lastConfirmIndex: -1 };
+    }
+    return { lastConfirmIndex: index };
+    } catch {
+      return { lastConfirmIndex: -1 };
+    }
+  });
   setGroupTaskCandidateSearchDepsGetter(() => buildGroupTaskCandidateSearchDeps({
     metabotStore: getMetabotStore(),
     impressionStore: getMetaIDImpressionStore(),

@@ -496,10 +496,36 @@ function loadStaffingSessionMessages(sessionId: string): StaffingSessionMessage[
   }
 }
 
-function evaluateProposalOwnerGate(
+/**
+ * Host LLM judge for natural-language owner confirmation (task #38): given
+ * the slate the owner saw and their post-propose replies in order, return
+ * the index of the LAST reply that clearly approves proceeding with this
+ * exact roster (-1 when none does). Plain approvals ("确认", "可以", "OK",
+ * "就这样吧", …) are intentionally NOT matched by regex vocabulary — see
+ * classifyOwnerStaffingReply. Wired in main.ts to a one-shot completion;
+ * tests inject deterministic fakes.
+ */
+export type StaffingOwnerConfirmJudge = (input: {
+  slateText: string;
+  replies: string[];
+}) => Promise<{ lastConfirmIndex: number }>;
+
+let staffingOwnerConfirmJudge: StaffingOwnerConfirmJudge | null = null;
+
+export function setGroupTaskServiceStaffingOwnerConfirmJudge(
+  judge: StaffingOwnerConfirmJudge | null,
+): void {
+  staffingOwnerConfirmJudge = judge;
+}
+
+async function evaluateProposalOwnerGate(
   proposal: GroupTaskStaffingProposal,
   sourceSessionId?: string,
-): { allowed: boolean; decision: ReturnType<typeof resolveStaffingOwnerGate>['decision'] } {
+): Promise<{
+  allowed: boolean;
+  decision: ReturnType<typeof resolveStaffingOwnerGate>['decision'];
+  judgeError?: string;
+}> {
   if (proposal.status === 'consumed' || proposal.status === 'cancelled') {
     return { allowed: false, decision: 'awaiting_owner' };
   }
@@ -508,12 +534,54 @@ function evaluateProposalOwnerGate(
     loadStaffingSessionMessages(sessionId),
     proposal.createdAt,
   );
-  return resolveStaffingOwnerGate({
+  const gateInput = {
     triggeringWish: split.triggeringWish,
     repliesAfterPropose: split.repliesAfterPropose,
     persistedSkip: proposal.status === 'skip_authorized' || proposal.skipAuthorized,
     localSmallSlate: isLocalOnlySmallSlate(proposal.plan),
-  });
+  };
+  const base = resolveStaffingOwnerGate(gateInput);
+  // The deterministic pass decides allow-side signals (skip waiver, local
+  // auto-start, keep-roster confirm) and blocking revise/cancel on its own.
+  // Plain confirmation, however, is LLM-judged: when the regex pass cannot
+  // allow the create and the owner said anything after the propose, consult
+  // the judge — its confirm index still loses to a same-or-later regex
+  // revise/cancel (see resolveStaffingOwnerGate).
+  if (base.allowed || split.repliesAfterPropose.length === 0) {
+    return { allowed: base.allowed, decision: base.decision };
+  }
+  const judge = staffingOwnerConfirmJudge;
+  if (!judge) {
+    return {
+      allowed: false,
+      decision: base.decision,
+      judgeError: 'owner-confirmation intent judge is not available',
+    };
+  }
+  try {
+    const slateText = buildStaffingSlateText({
+      title: proposal.title,
+      goal: proposal.goal,
+      acceptanceCriteria: proposal.acceptanceCriteria,
+      plan: proposal.plan,
+      ownerConfirmRequired: true,
+    });
+    const { lastConfirmIndex } = await judge({
+      slateText,
+      replies: split.repliesAfterPropose,
+    });
+    const merged = resolveStaffingOwnerGate({
+      ...gateInput,
+      llmLastConfirmIndex: lastConfirmIndex,
+    });
+    return { allowed: merged.allowed, decision: merged.decision };
+  } catch (error) {
+    return {
+      allowed: false,
+      decision: base.decision,
+      judgeError: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function resolveLocalWorkerIdsFromPlan(plan: GroupTaskStaffingPlan, extraIds: number[]): number[] {
@@ -754,7 +822,7 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
         `Staffing proposal ${proposalId} expired`,
       );
     }
-    const gate = evaluateProposalOwnerGate(proposal, opts.sourceSessionId);
+    const gate = await evaluateProposalOwnerGate(proposal, opts.sourceSessionId);
     if (!gate.allowed) {
       if (gate.decision === 'owner_revise') {
         throw new GroupTaskStaffingError(
@@ -770,7 +838,9 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
       }
       throw new GroupTaskStaffingError(
         'OWNER_CONFIRM_REQUIRED',
-        'The owner has not confirmed this roster yet. Show the slate and wait, unless they already said to start without confirming.',
+        gate.judgeError
+          ? `The owner's confirmation could not be evaluated (${gate.judgeError}). Show the slate and ask the owner to confirm again.`
+          : 'The owner has not confirmed this roster yet. Any clear approval ("确认", "可以", "OK", "looks good") counts — show the slate and wait, unless they already said to start without confirming.',
       );
     }
     // Resolve names before claiming so a bad local seat does not burn the slate.

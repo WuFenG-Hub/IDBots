@@ -185,20 +185,18 @@ const CANCEL_PATTERNS: RegExp[] = [
   /\b(cancel|abort|never ?mind|forget (it|about it)|call it off|scrap (it|this|the plan))\b/i,
 ];
 
-const CONFIRM_EXACT_PATTERNS: RegExp[] = [
-  /^(确认|就这样|就这样开|可以开|开吧|开始吧|同意|没问题|好的|好|行|嗯)[。.!！]*$/u,
-  /^(ok|okay|yes|yep|go|go ahead|looks good|lgtm|proceed|confirmed?|start)[.!]*$/i,
-];
-
-const CONFIRM_PHRASE_PATTERNS: RegExp[] = [
-  /确认人选/,
-  /按这个(名单|人选|班子)/,
-  /就这些人/,
-  /就这样开/,
-  /可以开(群|了|吧)?/,
-  /confirmed the (roster|slate|team)/i,
-  /looks good,? (start|go|proceed)/i,
-];
+/**
+ * Owner CONFIRMATION is no longer matched by a hardcoded phrase vocabulary
+ * (task #38: bare 「确认」 was in the list but 「可以」/「就这样吧」 were not, and
+ * no finite list covers natural language). The deterministic classifier below
+ * only carries the STRUCTURAL intents: keep-roster (an idiom guard so
+ * 「好的，不换人」 never mis-fires the /换人/ revise rule), revise, and cancel.
+ * Clear natural-language confirmation is judged by the host LLM at create
+ * time (see evaluateProposalOwnerGate) and reaches this gate as
+ * `llmLastConfirmIndex` — the index of the last reply the judge classified
+ * as a clear approval. Blocking regex intents still win ties at the same
+ * index (safety: mis-judge toward blocking, never toward auto-starting).
+ */
 
 function isSeatRole(value: unknown): value is GroupTaskSeatRole {
   return typeof value === 'string' && (GROUP_TASK_SEAT_ROLES as readonly string[]).includes(value);
@@ -326,8 +324,10 @@ export function classifyOwnerStaffingReply(text: string): 'confirm' | 'revise' |
   if (KEEP_ROSTER_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
   if (CANCEL_PATTERNS.some((pattern) => pattern.test(value))) return 'cancel';
   if (REVISE_PATTERNS.some((pattern) => pattern.test(value))) return 'revise';
-  if (CONFIRM_EXACT_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
-  if (CONFIRM_PHRASE_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
+  // A plain confirmation ("确认", "可以", "OK", "就这样吧", …) is NOT decided
+  // here — natural-language approval is LLM-judged upstream and injected as
+  // llmLastConfirmIndex. This keeps a deterministic vocabulary out of the
+  // confirm path while revise/cancel stay regex-exact (safety side).
   return 'unknown';
 }
 
@@ -364,19 +364,43 @@ export function resolveStaffingOwnerGate(input: {
   persistedSkip?: boolean;
   /** Set when the slate qualifies for the all-local small-team auto-start. */
   localSmallSlate?: boolean;
+  /**
+   * Index into repliesAfterPropose of the LAST reply the host LLM judged to
+   * be a clear natural-language confirmation of the roster (-1 / null / out
+   * of range = no confirming reply). See classifyOwnerStaffingReply: plain
+   * approvals are never matched by regex, only by this judgment.
+   */
+  llmLastConfirmIndex?: number | null;
 }): { allowed: boolean; decision: GroupTaskStaffingOwnerDecision } {
-  let lastIntent: GroupTaskStaffingOwnerDecision | null = null;
-  for (const reply of input.repliesAfterPropose) {
+  let lastRegexIntent: { intent: GroupTaskStaffingOwnerDecision; index: number } | null = null;
+  input.repliesAfterPropose.forEach((reply, index) => {
     const kind = classifyOwnerStaffingReply(reply);
-    if (kind === 'revise') lastIntent = 'owner_revise';
-    else if (kind === 'cancel') lastIntent = 'owner_cancel';
-    else if (kind === 'confirm') lastIntent = 'owner_confirmed';
-    else if (detectSkipConfirmInWish(reply)) lastIntent = 'skip_authorized';
+    if (kind === 'revise') lastRegexIntent = { intent: 'owner_revise', index };
+    else if (kind === 'cancel') lastRegexIntent = { intent: 'owner_cancel', index };
+    else if (kind === 'confirm') lastRegexIntent = { intent: 'owner_confirmed', index };
+    else if (detectSkipConfirmInWish(reply)) lastRegexIntent = { intent: 'skip_authorized', index };
+  });
+  const replies = input.repliesAfterPropose;
+  const rawLlmIndex = Number.isInteger(input.llmLastConfirmIndex as number)
+    ? (input.llmLastConfirmIndex as number)
+    : -1;
+  // An out-of-range judge answer is untrustworthy: read as "no confirming
+  // reply" rather than clamped onto some reply the judge never approved.
+  const llmIndex = rawLlmIndex >= 0 && rawLlmIndex < replies.length ? rawLlmIndex : -1;
+  // Last decisive signal wins, same as the single-classifier era. A regex
+  // intent at the same or later index beats the LLM confirm — a reply the
+  // judge read as approval but that also carries a revise/cancel reading
+  // blocks (fail toward asking the owner again, never toward auto-start).
+  let decided: GroupTaskStaffingOwnerDecision | null = null;
+  if (lastRegexIntent && lastRegexIntent.index >= llmIndex) {
+    decided = lastRegexIntent.intent;
+  } else if (llmIndex >= 0) {
+    decided = 'owner_confirmed';
   }
-  if (lastIntent === 'owner_revise') return { allowed: false, decision: 'owner_revise' };
-  if (lastIntent === 'owner_cancel') return { allowed: false, decision: 'owner_cancel' };
-  if (lastIntent === 'owner_confirmed') return { allowed: true, decision: 'owner_confirmed' };
-  if (lastIntent === 'skip_authorized') return { allowed: true, decision: 'skip_authorized' };
+  if (decided === 'owner_revise') return { allowed: false, decision: 'owner_revise' };
+  if (decided === 'owner_cancel') return { allowed: false, decision: 'owner_cancel' };
+  if (decided === 'owner_confirmed') return { allowed: true, decision: 'owner_confirmed' };
+  if (decided === 'skip_authorized') return { allowed: true, decision: 'skip_authorized' };
   if (detectSkipConfirmInWish(input.triggeringWish) || input.persistedSkip) {
     return { allowed: true, decision: 'skip_authorized' };
   }
@@ -494,8 +518,8 @@ export function buildStaffingSlateText(input: {
   lines.push('');
   if (input.ownerConfirmRequired) {
     lines.push(zh
-      ? '请看是否合理。可以说换人、去掉某岗，或回复「确认人选 / 就这样开」。没确认前我不会建群。'
-      : 'Please confirm this roster, ask to swap/drop a seat, or say "looks good, start". I will not create the group until you confirm.');
+      ? '请看是否合理。可以说换人、去掉某岗，或直接回复确认——任何明确同意的表述都可以（如「确认 / 可以 / 就这样吧 / OK」）。没确认前我不会建群。'
+      : 'Please confirm this roster, ask to swap/drop a seat, or reply with any clear approval ("OK", "looks good", "确认"). I will not create the group until you confirm.');
   } else if (input.skipReason === 'local_small') {
     lines.push(zh
       ? '这份名单全是本机成员且规模不大，无需确认。我将直接开群；若名单不合适，告诉我换人或去掉某个岗位即可。'

@@ -34,11 +34,17 @@ test('skip-confirm does not match 开发 or interrogatives', () => {
   assert.equal(detectSkipConfirmInWish('just start without confirmation'), true);
 });
 
-test('不换人 is confirm; 换人 is revise', () => {
+test('不换人 is confirm; 换人 is revise; plain confirm words are LLM-judged, not regex', () => {
   assert.equal(classifyOwnerStaffingReply('好的，不换人'), 'confirm');
   assert.equal(classifyOwnerStaffingReply('不用换'), 'confirm');
   assert.equal(classifyOwnerStaffingReply('换人，用设计师'), 'revise');
-  assert.equal(classifyOwnerStaffingReply('确认人选'), 'confirm');
+  // Plain approvals are intentionally NOT classified here (task #38): the
+  // host LLM judges natural-language confirmation and injects it into the
+  // gate as llmLastConfirmIndex. The vocabulary is gone for good.
+  assert.equal(classifyOwnerStaffingReply('确认人选'), 'unknown');
+  assert.equal(classifyOwnerStaffingReply('确认'), 'unknown');
+  assert.equal(classifyOwnerStaffingReply('可以'), 'unknown');
+  assert.equal(classifyOwnerStaffingReply('OK'), 'unknown');
 });
 
 test('bare English instead/drop are not automatic revise', () => {
@@ -110,7 +116,7 @@ test('slate language follows Settings when omitted', () => {
     plan,
     ownerConfirmRequired: true,
   });
-  assert.match(zh, /确认人选/);
+  assert.match(zh, /直接回复确认/);
   const en = buildStaffingSlateText({
     title: 'Skill intro',
     goal: 'Write it',
@@ -209,8 +215,10 @@ test('an owner cancel is classified and blocks create even under a waiver', () =
   for (const cancelReply of ['算了', '别开了', '不开了', '取消吧', '算了，不开了', 'never mind', 'cancel it']) {
     assert.equal(classifyOwnerStaffingReply(cancelReply), 'cancel', cancelReply);
   }
-  // "算了，就这些人吧" is a confirm; "取消确认" is not a whole-decision cancel.
-  assert.equal(classifyOwnerStaffingReply('算了，就这些人吧'), 'confirm');
+  // "算了，就这些人吧" is a natural confirm — LLM-judged now, so the regex
+  // classifier itself reads it as unknown (only the cancel regex must NOT
+  // mis-fire on it); "取消确认" is not a whole-decision cancel either.
+  assert.equal(classifyOwnerStaffingReply('算了，就这些人吧'), 'unknown');
   assert.equal(classifyOwnerStaffingReply('取消确认'), 'unknown');
 
   assert.deepEqual(
@@ -228,13 +236,75 @@ test('an owner cancel is classified and blocks create even under a waiver', () =
     }),
     { allowed: false, decision: 'owner_cancel' },
   );
-  // Last decisive reply wins: a confirm after a cancel re-authorizes.
+  // Last decisive reply wins: a confirm after a cancel re-authorizes (the
+  // confirm now arrives via the LLM judge index, the cancel via regex).
   assert.deepEqual(
     resolveStaffingOwnerGate({
       triggeringWish: '帮我开个群任务做技能介绍',
       repliesAfterPropose: ['算了', '确认人选'],
+      llmLastConfirmIndex: 1,
     }),
     { allowed: true, decision: 'owner_confirmed' },
+  );
+});
+
+test('llmLastConfirmIndex: semantic confirm, ordering, and tie-safety', () => {
+  // Any clear approval passes the gate via the judge index.
+  for (const reply of ['确认', '可以', '行', 'OK', '就这样吧']) {
+    assert.deepEqual(
+      resolveStaffingOwnerGate({
+        triggeringWish: '帮我开个群任务做技能介绍',
+        repliesAfterPropose: [reply],
+        llmLastConfirmIndex: 0,
+      }),
+      { allowed: true, decision: 'owner_confirmed' },
+      `reply ${reply} should authorize via the LLM confirm index`,
+    );
+  }
+  // No confirming reply judged (-1) still awaits the owner.
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['可以吗？'],
+      llmLastConfirmIndex: -1,
+    }),
+    { allowed: false, decision: 'awaiting_owner' },
+  );
+  // A later regex revise beats an earlier LLM confirm.
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['确认', '换人，用设计师'],
+      llmLastConfirmIndex: 0,
+    }),
+    { allowed: false, decision: 'owner_revise' },
+  );
+  // A later LLM confirm beats an earlier regex revise (recovery flow).
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['换人，用设计师', '确认'],
+      llmLastConfirmIndex: 1,
+    }),
+    { allowed: true, decision: 'owner_confirmed' },
+  );
+  // Same-index tie: the blocking regex reading wins over the LLM confirm.
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['换成 B 吧，可以吗'],
+      llmLastConfirmIndex: 0,
+    }),
+    { allowed: false, decision: 'owner_revise' },
+  );
+  // Out-of-range judge answers read as "no confirm" (untrustworthy index).
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['确认'],
+      llmLastConfirmIndex: 5,
+    }),
+    { allowed: false, decision: 'awaiting_owner' },
   );
 });
 
