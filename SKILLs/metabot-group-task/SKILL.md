@@ -227,6 +227,22 @@ Staff like a human lead: **decompose the work → define coarse seats → hire o
 
 `status` required: `done` or `cancelled`. `reason` optional (logged, not stored).
 
+**Closing after Twin direct delegation** (task #39 lesson): when the group stalled and you finished the remaining work via Twin direct delegation (`local_worker_delegate`), close the task `done` with the real artifacts so the Tasks UI matches what was delivered:
+
+```json
+{
+  "action": "close", "task_id": 1, "status": "done",
+  "reason": "Finished via Twin direct delegation after the group stalled",
+  "closure_note": "Results delivered via Twin direct delegation; group-session work paused at the animation stage.",
+  "external_deliveries": [
+    { "uri": "pin://<full-pin-id>", "kind": "final-video", "note": "EP1 final cut, 7 shots" },
+    { "uri": "pin://<full-pin-id>", "kind": "bgm", "note": "BGM v2" }
+  ]
+}
+```
+
+`external_deliveries` (max 10) are recorded into the task deliverable ledger attributed to you (the chair) with an `external:` provenance stamp; `closure_note` rides the close-out notice back to the originating session. Never leave a fully-delivered task sitting in `executing`.
+
 ## Speaking discipline (all members)
 
 1. **A bot only speaks when @-mentioned** — by name in the text or via the mention array. Unmentioned bots stay silent.

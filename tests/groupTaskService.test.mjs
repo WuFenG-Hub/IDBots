@@ -49,6 +49,7 @@ const {
   setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceStaffingSessionMessagesLoader,
   setGroupTaskServiceStaffingOwnerConfirmJudge,
+  setGroupTaskAcceptanceNotifier,
   setGroupTaskServiceTransport,
   resetGroupTaskServiceTransport,
   deriveGroupTaskMemberInviteStatus,
@@ -472,6 +473,63 @@ test('closeGroupTask: state machine transitions and terminal lock', async () => 
     await assert.rejects(closeGroupTask(9999, { status: 'done' }), /not found/);
     await assert.rejects(closeGroupTask(detail.id, { status: 'executing' }), /done.*cancelled/);
   } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-4: closing with external deliveries records chair-attributed ledger rows (task #39)', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({ title: 'T', goal: 'G', memberMetabotIds: [2], createdBy: 'user' });
+    const closed = await closeGroupTask(detail.id, {
+      status: 'done',
+      reason: 'finished via Twin direct delegation',
+      closureNote: 'Results delivered via Twin direct delegation after the group stalled.',
+      externalDeliveries: [
+        { uri: 'pin://abcd0000000000000000000000000000000000000000000000000000000000i0', kind: 'final-video', note: 'EP1 final cut' },
+        { uri: '', kind: 'skipped-empty-uri' },
+        { uri: 'pin://ffff0000000000000000000000000000000000000000000000000000000000i0' },
+      ],
+    });
+    assert.equal(closed.status, 'done');
+    const external = closed.deliverables.filter((d) => (d.kind ?? '').startsWith('external:'));
+    assert.equal(external.length, 2, 'empty-uri entry skipped, two recorded');
+    assert.ok(external.every((d) => d.authorGlobalmetaid === 'gmid-twin'), 'attributed to the chair');
+    assert.equal(external[0].kind, 'external:final-video');
+    assert.match(external[0].verification ?? '', /chair-attested.*EP1 final cut/);
+    assert.match(external[1].verification ?? '', /produced outside the group session/);
+
+    // A repeat (no-op) close of the terminal task must not stack duplicates.
+    await closeGroupTask(detail.id, {
+      status: 'done',
+      externalDeliveries: [{ uri: 'pin://abcd0000000000000000000000000000000000000000000000000000000000i0' }],
+    });
+    const after = await getGroupTask(detail.id);
+    assert.equal(after.deliverables.filter((d) => (d.kind ?? '').startsWith('external:')).length, 2);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-4: the closure note rides the close-out notice to the source session', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'T', goal: 'G', memberMetabotIds: [2], createdBy: 'user', sourceSessionId: 'session-close-note',
+    });
+    const notices = [];
+    setGroupTaskAcceptanceNotifier(({ message }) => {
+      notices.push(message);
+      return { ok: true };
+    });
+    await closeGroupTask(detail.id, {
+      status: 'done',
+      closureNote: 'Results delivered via Twin direct delegation.',
+    });
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /Results delivered via Twin direct delegation\./);
+  } finally {
+    setGroupTaskAcceptanceNotifier(null);
     h.cleanup();
   }
 });

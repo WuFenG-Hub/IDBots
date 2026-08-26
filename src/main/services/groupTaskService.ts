@@ -2029,11 +2029,64 @@ export async function recordGroupTaskIntegrityEvent(
  * target session gone) only logs — the task is already closed and never rolls
  * back; NULL sourceSessionId silently skips (degrades to owner-private-only).
  */
+/** P1-4: hard cap on external deliveries per close — the chair summarizes,
+ * not dumps; a runaway list must never flood the ledger. */
+const MAX_EXTERNAL_DELIVERIES_PER_CLOSE = 10;
+
+/**
+ * P1-4 (task #39): record deliverables produced outside the group session
+ * (Twin direct delegation) into the task ledger, attributed to the chair with
+ * an external provenance stamp. Idempotent per close call by construction (a
+ * repeated close of a terminal task never re-reaches this path); malformed
+ * entries are skipped, never thrown — a bad URI must not block the close.
+ */
+function recordExternalDeliveries(
+  taskId: number,
+  entries: Array<{ uri?: string; kind?: string; note?: string }>,
+): void {
+  const store = getGroupTaskStore();
+  const chairGlobalMetaId = store.listMembers(taskId)
+    .find((member) => member.role === 'chair')
+    ?.globalmetaid ?? null;
+  let recorded = 0;
+  for (const entry of entries.slice(0, MAX_EXTERNAL_DELIVERIES_PER_CLOSE)) {
+    const uri = (entry?.uri ?? '').trim();
+    if (!uri) continue;
+    try {
+      const kind = (entry.kind ?? '').trim() || 'twin-delegation';
+      const deliverable = store.addDeliverable({
+        taskId,
+        msgPinId: null,
+        authorGlobalmetaid: chairGlobalMetaId,
+        kind: `external:${kind}`.slice(0, 100),
+        uri: uri.slice(0, 500),
+      });
+      const note = (entry.note ?? '').trim().slice(0, 200);
+      store.updateDeliverableVerification(
+        deliverable.id,
+        note
+          ? `external (chair-attested): ${note}`
+          : 'external (chair-attested): produced outside the group session',
+      );
+      recorded += 1;
+    } catch (error) {
+      console.warn(
+        `[GroupTask] External deliverable record failed for task ${taskId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  console.log(
+    `[GroupTask] Task ${taskId}: recorded ${recorded} external deliverable(s) attributed to the chair`,
+  );
+}
+
 function notifySourceSession(
   task: GroupTask,
   outcome: 'done' | 'cancelled',
   rating?: number | null,
   ratingComment?: string | null,
+  closureNote?: string | null,
 ): void {
   const targetSessionId = (task.sourceSessionId ?? '').trim();
   if (!targetSessionId) return; // panel-created / pre-R2 task — no originating session
@@ -2064,7 +2117,7 @@ function notifySourceSession(
     commentLine,
     deliverableCount,
     summaryVersion: summary?.version ?? null,
-  });
+  }) + (closureNote?.trim() ? `\n${closureNote.trim()}` : '');
 
   try {
     const result = acceptanceNotifier({ taskId: task.id, targetSessionId, message });
@@ -2223,13 +2276,39 @@ function normalizeDeliveredMemberStatuses(taskId: number): void {
 
 export async function closeGroupTask(
   taskId: number,
-  opts: { status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string; actor?: GroupTaskStatusEventActor },
+  opts: {
+    status: 'done' | 'cancelled';
+    reason?: string;
+    rating?: number;
+    ratingComment?: string;
+    actor?: GroupTaskStatusEventActor;
+    /**
+     * P1-4 (task #39): deliverables produced OUTSIDE the group session (the
+     * chair ran the remaining work via Twin direct delegation after the group
+     * stalled). Recorded as ledger rows attributed to the chair with an
+     * external provenance stamp, BEFORE the terminal flip so the acceptance
+     * summary includes them — the Tasks UI then matches what was actually
+     * delivered instead of showing an empty checklist on a done task.
+     */
+    externalDeliveries?: Array<{ uri?: string; kind?: string; note?: string }>;
+    /** P1-4: one-line provenance note for the close-out (e.g. "results came
+     * from Twin direct delegation"); relayed to the source session notice. */
+    closureNote?: string;
+  },
 ): Promise<GroupTaskDetail> {
   if (opts.status !== 'done' && opts.status !== 'cancelled') {
     throw new Error(`closeGroupTask status must be 'done' or 'cancelled'`);
   }
   if (opts.reason?.trim()) {
     console.log(`[GroupTask] Closing task ${taskId} as ${opts.status}: ${opts.reason.trim()}`);
+  }
+  if (opts.externalDeliveries && opts.externalDeliveries.length > 0) {
+    // Guard: a repeat close of an already-terminal task is a no-op below —
+    // it must not stack a second copy of the external ledger rows.
+    const current = getGroupTaskStore().getTaskById(taskId);
+    if (current && !TERMINAL_STATUSES.has(current.status)) {
+      recordExternalDeliveries(taskId, opts.externalDeliveries);
+    }
   }
   const closed = await (() => {
     if (orchestrationBridgeGetter) {
@@ -2261,7 +2340,7 @@ export async function closeGroupTask(
     // R2: relay the acceptance result back to the originating CoWork session
     // (best-effort; never throws into the close flow). Done after the rating is
     // persisted so the notification carries the final rating.
-    notifySourceSession(rated, opts.status, opts.rating, opts.ratingComment);
+    notifySourceSession(rated, opts.status, opts.rating, opts.ratingComment, opts.closureNote);
     return getGroupTask(taskId);
   }
   // OpenTeam M3: the chair sediments one participation impression per REMOTE
@@ -2283,7 +2362,7 @@ export async function closeGroupTask(
   }
   // R2: relay the acceptance result back to the originating CoWork session
   // (covers cancelled and automated/RPC closes without a rating).
-  notifySourceSession(closed, opts.status, opts.rating, opts.ratingComment);
+  notifySourceSession(closed, opts.status, opts.rating, opts.ratingComment, opts.closureNote);
   return getGroupTask(taskId);
 }
 
