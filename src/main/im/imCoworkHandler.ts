@@ -216,7 +216,7 @@ export class IMCoworkHandler extends EventEmitter {
         this.imSessionIds.delete(stale.coworkSessionId);
         this.sessionConversationMap.delete(stale.coworkSessionId);
         this.clearPendingPermissionsBySessionId(stale.coworkSessionId);
-        this.coworkRunner.stopSession(stale.coworkSessionId);
+        this.coworkRunner.stopSession(stale.coworkSessionId, { reason: 'stale IM session mapping replaced' });
       }
     }
 
@@ -267,7 +267,7 @@ export class IMCoworkHandler extends EventEmitter {
         this.imSessionIds.delete(existing.coworkSessionId);
         this.sessionConversationMap.delete(existing.coworkSessionId);
         this.clearPendingPermissionsBySessionId(existing.coworkSessionId);
-        this.coworkRunner.stopSession(existing.coworkSessionId);
+        this.coworkRunner.stopSession(existing.coworkSessionId, { reason: 'IM session mapping replaced' });
       } else {
         const session = this.coworkStore.getSession(existing.coworkSessionId);
         if (!session) {
@@ -280,7 +280,7 @@ export class IMCoworkHandler extends EventEmitter {
           this.imSessionIds.delete(existing.coworkSessionId);
           this.sessionConversationMap.delete(existing.coworkSessionId);
           this.clearPendingPermissionsBySessionId(existing.coworkSessionId);
-          this.coworkRunner.stopSession(existing.coworkSessionId);
+          this.coworkRunner.stopSession(existing.coworkSessionId, { reason: 'IM session mapping replaced' });
         } else {
           this.imStore.updateSessionLastActive(imConversationId, platform);
           this.coworkStore.upsertConversationMapping({
@@ -522,7 +522,7 @@ export class IMCoworkHandler extends EventEmitter {
         const accumulator = this.messageAccumulators.get(sessionId);
         if (accumulator) {
           this.messageAccumulators.delete(sessionId);
-          this.coworkRunner.stopSession(sessionId);
+          this.coworkRunner.stopSession(sessionId, { reason: 'IM message accumulation timed out' });
           reject(new Error('Request timed out'));
         }
       }, this.timeout);

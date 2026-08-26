@@ -1004,7 +1004,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
   private async resolveTimeoutFallback(sessionId: string, accumulator: MessageAccumulator): Promise<void> {
     if (this.accumulators.get(sessionId) !== accumulator) return;
     this.cleanupAccumulator(sessionId);
-    this.coworkRunner.stopSession(sessionId, { finalStatus: 'completed' });
+    this.coworkRunner.stopSession(sessionId, { finalStatus: 'completed', reason: 'private chat order finished (timeout fallback)' });
     const displaySessionId = this.getDisplaySessionId(sessionId, accumulator.request);
 
     if (this.shouldAttemptTimeoutFinalization(sessionId, accumulator)) {

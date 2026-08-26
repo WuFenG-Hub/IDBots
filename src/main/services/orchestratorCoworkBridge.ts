@@ -340,17 +340,22 @@ export async function runOrchestratorSkillTurn(
     // session status (stopSession already recorded the deliberate 'stopped'
     // terminal state; fail() would clobber it with 'error'). Covers both the
     // pre-watchdog phase (Twin cancelled the task / stopped the worker) and
-    // the recovery window via recoveryActive.
-    const onStopped = (sid: string) => {
+    // the recovery window via recoveryActive. P1-3 (task #39): the runner
+    // carries the stop REASON on the event — reject with it so the attempt
+    // record and the Twin notification can explain WHY the session died
+    // (host storage recovery, app shutdown, Twin request…) instead of a bare
+    // WORKER_SESSION_STOPPED.
+    const onStopped = (sid: string, reason?: string) => {
       if (sid !== sessionId) return;
       if (recoveryActive) {
-        reportLateTermination('stopped');
+        reportLateTermination('stopped', reason);
         return;
       }
       if (settled) return;
       settled = true;
       cleanup();
-      reject(new Error('WORKER_SESSION_STOPPED'));
+      const detail = (reason ?? '').trim();
+      reject(new Error(detail ? `WORKER_SESSION_STOPPED: ${detail}` : 'WORKER_SESSION_STOPPED'));
     };
 
     const enterRecovery = () => {
@@ -508,9 +513,13 @@ export function runSkillTurnInExistingSession(
       fail(errorMessage);
     };
 
-    const onStopped = (sid: string) => {
+    const onStopped = (sid: string, reason?: string) => {
       if (sid !== sessionId) return;
-      cancelWithoutSessionError('Private chat skill turn stopped before assistant output so queued A2A guidance can be applied');
+      const detail = (reason ?? '').trim();
+      cancelWithoutSessionError(
+        'Private chat skill turn stopped before assistant output so queued A2A guidance can be applied'
+        + (detail ? ` (${detail})` : ''),
+      );
     };
 
     let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {

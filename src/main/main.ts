@@ -3025,7 +3025,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   coworkTurnSubmissionController = null;
   if (coworkRunner) {
     try {
-      coworkRunner.stopAllSessions();
+      coworkRunner.stopAllSessions('host storage recovery restart');
     } catch (error) {
       console.warn('[SQLiteRecovery] Failed to stop cowork sessions before reset:', error);
     }
@@ -8224,7 +8224,7 @@ if (!gotTheLock) {
   ipcMain.handle('cowork:session:stop', async (_event, sessionId: string) => {
     try {
       const runner = getCoworkRunner();
-      runner.stopSession(sessionId);
+      runner.stopSession(sessionId, { reason: 'user requested stop' });
       return { success: true };
     } catch (error) {
       return {
@@ -14258,7 +14258,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       stopCoworkSessions: () => {
         if (coworkRunner) {
           console.log('[Main] Stopping cowork sessions...');
-          coworkRunner.stopAllSessions();
+          coworkRunner.stopAllSessions('app shutdown');
         }
       },
       closeDshRuntime: async () => {

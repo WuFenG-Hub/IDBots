@@ -304,6 +304,68 @@ test('r6: late failure settlement (onLateTermination) notifies the Twin with the
   }
 });
 
+test('P1-3: a host-initiated session stop carries its reason and the non-fault hint to the Twin (task #39)', async () => {
+  const cross = makeCrossSessionHarness();
+  const kv = makeKv();
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    // What the orchestrator bridge now rejects with when the host stops the
+    // session (stopSession reason rides the 'stopped' event).
+    throw new Error('WORKER_SESSION_STOPPED: host storage recovery restart');
+  }, {
+    insertCrossSessionUserMessage: (input) => cross.service.insertUserMessage(input),
+    kv,
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'stopped by host', idempotencyKey: 'p13-host-stop',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'failed'));
+
+    assert.equal(
+      orchestrationStore.getAttempt(result.attempt.id).error,
+      'WORKER_SESSION_STOPPED: host storage recovery restart',
+      'attempt record keeps the stop reason',
+    );
+    assert.equal(cross.inserted.length, 1);
+    const notifyText = cross.inserted[0].message.content;
+    assert.match(notifyText, /WORKER_SESSION_STOPPED: host storage recovery restart/);
+    assert.match(notifyText, /not a worker fault/, 'non-fault hint present');
+    assert.match(notifyText, /re-dispatching should succeed/, 'recovery guidance present');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('P1-3: late stop settlement maps the stop reason into WORKER_SESSION_STOPPED:<reason>', async () => {
+  const cross = makeCrossSessionHarness();
+  const kv = makeKv();
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    params.onLateTermination({ reason: 'stopped', message: 'app shutdown' });
+    throw { name: 'SkillTurnTimeoutError', sessionId: 'worker-session-2', timeoutMs: 300000, message: 'watchdog' };
+  }, {
+    insertCrossSessionUserMessage: (input) => cross.service.insertUserMessage(input),
+    kv,
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'late stop', idempotencyKey: 'p13-late-stop',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'failed'));
+
+    assert.equal(
+      orchestrationStore.getAttempt(result.attempt.id).error,
+      'WORKER_SESSION_STOPPED: app shutdown',
+      'late stop keeps the reason instead of the bare code',
+    );
+    assert.match(cross.inserted[0].message.content, /WORKER_SESSION_STOPPED: app shutdown/);
+    assert.match(cross.inserted[0].message.content, /not a worker fault/);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
 test('r6: pre-set kv guard suppresses a second notification for the same terminal state', async () => {
   const cross = makeCrossSessionHarness();
   const kv = makeKv();
@@ -834,8 +896,12 @@ test('cancelTask stops the live worker sessions of the cancelled attempts (UI ne
     const cancelledTask = service.cancelTask('twin-session', result.task.id);
     assert.equal(cancelledTask.status, 'cancelled');
     assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'cancelled');
-    // The live worker session was stopped with the deliberate terminal state.
-    assert.deepEqual(stopped, [{ sessionId: 'worker-session-2', options: { finalStatus: 'stopped' } }]);
+    // The live worker session was stopped with the deliberate terminal state
+    // and the P1-3 reason naming who cancelled it.
+    assert.deepEqual(stopped, [{
+      sessionId: 'worker-session-2',
+      options: { finalStatus: 'stopped', reason: 'orchestration task cancelled by Twin' },
+    }]);
     assert.equal(sessions.get('worker-session-2').status, 'stopped');
 
     // A second cancel of the same task stops nothing: the attempt is already

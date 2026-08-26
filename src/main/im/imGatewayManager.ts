@@ -829,7 +829,7 @@ export class IMGatewayManager extends EventEmitter {
       if (!this.coworkRunner || removedSessionIds.length === 0) continue;
       for (const sessionId of removedSessionIds) {
         try {
-          this.coworkRunner.stopSession(sessionId);
+          this.coworkRunner.stopSession(sessionId, { reason: 'IM platform disconnected; session mappings cleared' });
         } catch (error: any) {
           console.warn('[IMGatewayManager] Failed to stop stale IM session', {
             platform,
