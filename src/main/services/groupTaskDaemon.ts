@@ -70,6 +70,7 @@ import {
   GROUP_TASK_CONVERSATION_CHANNEL,
 } from './groupTaskSession';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
+import { SkillTurnTimeoutError } from './orchestratorCoworkBridge';
 import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
 import {
   buildAcceptanceSummary,
@@ -5048,6 +5049,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           sqlite.delete(retryKey); // recovered after earlier failures
         }
       } catch (error) {
+        // A skill-turn watchdog fire is NOT a transient failure: the turn is
+        // still running inside the worker's session. Retrying the message
+        // queues a duplicate turn behind the in-flight one, stalls the tick
+        // for another full timeout budget per attempt, and after
+        // MSG_RETRY_MAX_FAILURES the trigger message was dropped unanswered
+        // (task #41's repeated "Skill turn timed out" pile-up). Advance the
+        // cursor instead: protocol tags/markers above already landed, and
+        // when the in-flight turn completes its result lives in the session
+        // and informs the worker's next dispatch.
+        if (error instanceof SkillTurnTimeoutError) {
+          const timeoutRetryKey = `${MSG_RETRY_PREFIX}${task.id}:${row.id}`;
+          if (sqlite.get<number>(timeoutRetryKey) != null) sqlite.delete(timeoutRetryKey);
+          store.updateLastProcessedMsgId(task.id, row.id);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: message ${row.id} skill turn timed out ` +
+            `(${Math.round(error.timeoutMs / 1000)}s watchdog); the turn keeps running in the ` +
+            'worker session — cursor advanced, no retry queued',
+          );
+          continue;
+        }
         // Round-4 cursor semantics: lastProcessedMsgId is the id of the LAST
         // MESSAGE THE HOST SUCCESSFULLY PROCESSED — it only advances on
         // success. A failing message is retried on later ticks (bounded by a

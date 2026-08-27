@@ -87,6 +87,15 @@ export interface RunExistingSessionSkillTurnParams {
   activeSkillIds?: string[];
   disableRemoteServicesPrompt?: boolean;
   onSkillExecutionStart?: () => Promise<void> | void;
+  /**
+   * Overrides the skill-turn watchdog timeout (ms). Defaults to 300s.
+   * Group-task turns run real pipelines (video/audio generation, batch file
+   * work) that routinely exceed 5 min, so the group-task daemon passes a much
+   * larger budget — the 300s delegation default systematically timed out
+   * mid-work and the daemon's message retries then re-ran the same turn five
+   * times before dropping the trigger message unanswered (task #41).
+   */
+  skillTurnTimeoutMs?: number;
 }
 
 export interface RunExistingSessionSkillTurnResult {
@@ -513,10 +522,17 @@ export function runSkillTurnInExistingSession(
       cancelWithoutSessionError('Private chat skill turn stopped before assistant output so queued A2A guidance can be applied');
     };
 
+    const skillTurnTimeoutMs = Math.max(
+      1_000,
+      Math.trunc(params.skillTurnTimeoutMs ?? SKILL_TURN_TIMEOUT_MS),
+    );
     let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
       timeoutId = null;
-      fail(`Skill turn timed out after ${SKILL_TURN_TIMEOUT_MS / 1000}s`);
-    }, SKILL_TURN_TIMEOUT_MS);
+      // SkillTurnTimeoutError (not a plain Error) so callers can distinguish a
+      // watchdog fire — the session keeps running in the runner — from a real
+      // turn failure worth retrying.
+      fail(new SkillTurnTimeoutError(sessionId, skillTurnTimeoutMs));
+    }, skillTurnTimeoutMs);
 
     runner.on('complete', onComplete);
     runner.on('error', onError);

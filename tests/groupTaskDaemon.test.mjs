@@ -38,6 +38,7 @@ const {
   buildMemberJoinWelcomeText,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
+const { SkillTurnTimeoutError } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
 
 Module._load = originalLoad;
 
@@ -4023,6 +4024,58 @@ test('task #41: an unsolicited [WORKING] ACK arms no delivery deadline and no fa
       0,
       'no fake delivery reminder after the invented ETA',
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task #41: a skill-turn watchdog timeout is not a transient failure — the
+// turn keeps running in the worker session, so advance the cursor instead of
+// piling up retries that re-ran the turn five times and dropped the trigger.
+// ---------------------------------------------------------------------------
+
+test('task #41: a skill-turn watchdog timeout advances the cursor without burning message retries', async () => {
+  const skillTurnAttempts = [];
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      // The watchdog fires while the real turn keeps running in the session.
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        throw new SkillTurnTimeoutError('session-timeout-41', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-skill-timeout-41', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot search for MetaID docs',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(skillTurnAttempts.length, 1, 'skill turn attempted once');
+    // The chair-originated trigger still auto-ACKs before the turn runs.
+    assert.ok(h.sends.some((s) => s.content.startsWith('[WORKING]')), 'auto-ACK posted before the turn');
+    const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-skill-timeout-41'])[0].values[0][0];
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advanced past the timed-out message',
+    );
+    assert.equal(
+      h.store.get(`group_task_msg_retry:${task.id}:${msgId}`),
+      undefined,
+      'watchdog fire is not a transient failure — no retry counter burned',
+    );
+
+    // A later tick must not re-run the same turn (the pre-fix pile-up re-ran
+    // it five times and then dropped the trigger message unanswered).
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'timed-out message is not retried on later ticks');
   } finally {
     h.cleanup();
   }

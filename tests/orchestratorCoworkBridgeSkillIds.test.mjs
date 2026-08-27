@@ -7,6 +7,7 @@ const require = createRequire(import.meta.url);
 const {
   runOrchestratorSkillTurn,
   runSkillTurnInExistingSession,
+  SkillTurnTimeoutError,
 } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
 
 test('runOrchestratorSkillTurn persists active skill ids and disables remote services prompt', async () => {
@@ -328,4 +329,83 @@ test('runSkillTurnInExistingSession waits for slow local skill completion before
   const result = await resultPromise;
   assert.equal(result.replyText, 'PoP 的全称是 Proof of PIN');
   assert.equal(result.assistantMessageId, 'assistant-skill-slow');
+});
+
+test('runSkillTurnInExistingSession rejects with SkillTurnTimeoutError when the watchdog fires', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const runner = new EventEmitter();
+  const session = {
+    id: 'group-task-worker-session',
+    cwd: '/tmp/group-task-workspace',
+    messages: [],
+  };
+  const store = {
+    getAppLanguage() { return 'en'; },
+    getSession(sessionId) {
+      assert.equal(sessionId, session.id);
+      return session;
+    },
+    updateSession() {},
+  };
+
+  // A real long pipeline: the session never completes inside the watchdog
+  // window (it keeps running in the runner after the caller detaches).
+  runner.startSession = async () => {};
+
+  const resultPromise = runSkillTurnInExistingSession(runner, store, {
+    sessionId: session.id,
+    systemPrompt: 'system',
+    userMessage: 'render the video',
+    cwd: session.cwd,
+    activeSkillIds: ['video'],
+    skillTurnTimeoutMs: 1_500,
+  });
+  const rejection = assert.rejects(resultPromise, (error) => {
+    assert.ok(error instanceof SkillTurnTimeoutError, 'typed timeout error, not a plain Error');
+    assert.equal(error.name, 'SkillTurnTimeoutError');
+    assert.equal(error.sessionId, session.id);
+    assert.equal(error.timeoutMs, 1_500, 'caller-provided watchdog budget honored (not the 300s default)');
+    return true;
+  });
+
+  await Promise.resolve();
+  t.mock.timers.tick(1_500);
+  await rejection;
+});
+
+test('runSkillTurnInExistingSession keeps the 300s watchdog default when no override is passed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const runner = new EventEmitter();
+  const session = {
+    id: 'private-chat-default-timeout-session',
+    cwd: '/tmp/private-chat-workspace',
+    messages: [],
+  };
+  const store = {
+    getAppLanguage() { return 'en'; },
+    getSession(sessionId) {
+      assert.equal(sessionId, session.id);
+      return session;
+    },
+    updateSession() {},
+  };
+  runner.startSession = async () => {};
+
+  const resultPromise = runSkillTurnInExistingSession(runner, store, {
+    sessionId: session.id,
+    systemPrompt: 'system',
+    userMessage: 'summarize this pin',
+    cwd: session.cwd,
+  });
+  const rejection = assert.rejects(resultPromise, (error) => {
+    assert.ok(error instanceof SkillTurnTimeoutError);
+    assert.equal(error.timeoutMs, 300_000, 'private-chat callers keep the 300s default');
+    return true;
+  });
+
+  await Promise.resolve();
+  t.mock.timers.tick(300_000);
+  await rejection;
 });
