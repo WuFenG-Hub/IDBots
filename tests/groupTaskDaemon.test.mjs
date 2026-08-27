@@ -3984,3 +3984,46 @@ test('task #41: a chair welcome notice triggers no auto-ACK and arms no delivery
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task #41: an unsolicited [WORKING] (no pending assignment watch) arms no
+// delivery deadline — otherwise every stray ACK manufactures a fake
+// "estimated delivery … but no [DELIVERABLE]" reminder.
+// ---------------------------------------------------------------------------
+
+test('task #41: an unsolicited [WORKING] ACK arms no delivery deadline and no fake reminder fires', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // Worker 2 posts a [WORKING] ACK with an invented ETA although the chair
+    // never assigned anything (the pre-fix auto-ACK-on-welcome pattern).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-stray-ack-41', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：确认在线，预计 5 分钟',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'ACK still marks the worker engaged');
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      undefined,
+      'no delivery deadline armed without a pending assignment watch',
+    );
+
+    // Past the invented ETA: no fake "estimated delivery … but no
+    // [DELIVERABLE] arrived yet" chair reminder may fire.
+    h.sends.length = 0;
+    h.state.nowMs += 10 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => /estimated delivery/.test(s.content)).length,
+      0,
+      'no fake delivery reminder after the invented ETA',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

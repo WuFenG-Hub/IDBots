@@ -4190,7 +4190,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const ack = parseWorkingAck(message.content);
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
+      // The delivery deadline is only meaningful when the ACK answers an
+      // assignment the host actually armed a watch for. An unsolicited
+      // [WORKING] (a stray auto-ACK on a welcome/notice, observer chatter)
+      // must NOT arm one — otherwise every such ACK manufactures a fake
+      // "estimated delivery … but no [DELIVERABLE]" reminder for a member who
+      // was never assigned anything (task #41).
+      const hadPendingWatch = sqlite.get<string>(pendingKey) != null
+        || sqlite.get<string>(remindedKey) != null;
       clearPendingAck();
+      if (!hadPendingWatch) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
+          'without a pending assignment watch; no delivery deadline armed',
+        );
+        return;
+      }
       // P0-4 arming: an explicit ETA arms its own deadline; a numberless ACK
       // (the entropy-P0 template ACK carries no ETA) falls back to the member
       // timeout so the delivery reminder still fires — without this the
