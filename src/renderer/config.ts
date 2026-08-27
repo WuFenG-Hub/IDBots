@@ -514,6 +514,79 @@ export const defaultConfig: AppConfig = {
         { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 }
       ]
     },
+    commandcode: {
+      enabled: false,
+      apiKey: '',
+      // Command Code 网关（https://commandcode.ai/docs/provider）：单一 Bearer key，
+      // Chat Completions / Messages / Models 端点都挂在 /provider/v1 下。我们固定走
+      // OpenAI Chat Completions 格式；模型目录镜像 GET /provider/v1/models 快照
+      // （2026-08-27），上下文窗口取该端点自报值。
+      baseUrl: 'https://api.commandcode.ai/provider/v1',
+      apiFormat: 'openai',
+      models: [
+        { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'claude-fable-5', name: 'Claude Fable 5', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'claude-opus-5', name: 'Claude Opus 5', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', supportsImage: true, contextWindow: 200_000 },
+        { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.5', name: 'GPT-5.5', supportsImage: true, contextWindow: 400_000 },
+        { id: 'gpt-5.4', name: 'GPT-5.4', supportsImage: true, contextWindow: 400_000 },
+        { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', supportsImage: true, contextWindow: 400_000 },
+        { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', supportsImage: true, contextWindow: 400_000 },
+        { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'deepseek/deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision (exp)', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'moonshotai/Kimi-K3', name: 'Kimi K3', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'moonshotai/Kimi-K2.7-Code', name: 'Kimi K2.7 Code', supportsImage: true, contextWindow: 256_000 },
+        { id: 'moonshotai/Kimi-K2.7-Code-Highspeed', name: 'Kimi K2.7 Code HighSpeed', supportsImage: true, contextWindow: 262_000 },
+        { id: 'moonshotai/Kimi-K2.6', name: 'Kimi K2.6', supportsImage: true, contextWindow: 256_000 },
+        { id: 'moonshotai/Kimi-K2.5', name: 'Kimi K2.5', supportsImage: true, contextWindow: 256_000 },
+        { id: 'z-ai/glm-5.3-flash', name: 'GLM-5.3 Flash', supportsImage: false, contextWindow: 1_048_576 },
+        { id: 'zai-org/GLM-5.3', name: 'GLM-5.3', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'zai-org/GLM-5.2', name: 'GLM-5.2', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'zai-org/GLM-5.2-Fast', name: 'GLM-5.2 Fast', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'zai-org/GLM-5.1', name: 'GLM-5.1', supportsImage: false, contextWindow: 200_000 },
+        { id: 'zai-org/GLM-5', name: 'GLM-5', supportsImage: false, contextWindow: 200_000 },
+        { id: 'MiniMaxAI/MiniMax-M3', name: 'MiniMax M3', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'MiniMaxAI/MiniMax-M2.7', name: 'MiniMax M2.7', supportsImage: false, contextWindow: 200_000 },
+        { id: 'minimax/minimax-m3-free', name: 'MiniMax M3 (Free)', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'minimax/minimax-m2.7-free', name: 'MiniMax M2.7 (Free)', supportsImage: false, contextWindow: 197_000 },
+        { id: 'MiniMaxAI/MiniMax-M2.5', name: 'MiniMax M2.5', supportsImage: false, contextWindow: 200_000 },
+        { id: 'xiaomi/mimo-v2.5-pro', name: 'MiMo V2.5 Pro', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'xiaomi/mimo-v2.5', name: 'MiMo V2.5', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'Qwen/Qwen3.8-Max', name: 'Qwen 3.8 Max', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'Qwen/Qwen3.8-27B', name: 'Qwen 3.8 27B', supportsImage: true, contextWindow: 262_144 },
+        { id: 'Qwen/Qwen3.8-Flash', name: 'Qwen 3.8 Flash', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'Qwen/Qwen3.7-Max', name: 'Qwen 3.7 Max', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'Qwen/Qwen3.7-Plus', name: 'Qwen 3.7 Plus', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'Qwen/Qwen3.7-Flash', name: 'Qwen 3.7 Flash', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'Qwen/Qwen3.6-Max-Preview', name: 'Qwen 3.6 Max Preview', supportsImage: false, contextWindow: 200_000 },
+        { id: 'Qwen/Qwen3.6-Plus', name: 'Qwen 3.6 Plus', supportsImage: true, contextWindow: 200_000 },
+        { id: 'stepfun/Step-3.7-Flash', name: 'Step 3.7 Flash', supportsImage: true, contextWindow: 256_000 },
+        { id: 'stepfun/Step-3.5-Flash', name: 'Step 3.5 Flash', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'tencent/hy3-paid', name: 'Tencent Hy3', supportsImage: false, contextWindow: 262_144 },
+        { id: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', supportsImage: true, contextWindow: 1_048_576 },
+        { id: 'google/gemini-3.6-flash', name: 'Gemini 3.6 Flash', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'google/gemini-3.5-flash', name: 'Gemini 3.5 Flash', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'google/gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'google/gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'sakana/fugu-ultra', name: 'Fugu Ultra', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'nvidia/nemotron-3-ultra-550b-a55b', name: 'Nemotron 3 Ultra', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'thinkingmachines/inkling', name: 'Inkling', supportsImage: true, contextWindow: 256_000 },
+        { id: 'thinkingmachines/inkling-small', name: 'Inkling Small', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'poolside/laguna-s-2.1-free', name: 'Laguna S 2.1 (Free)', supportsImage: false, contextWindow: 256_000 },
+        { id: 'meta/muse-spark-1.1', name: 'Muse Spark 1.1', supportsImage: false, contextWindow: 1_048_576 },
+        { id: 'meta/muse-spark-1.2', name: 'Muse Spark 1.2', supportsImage: false, contextWindow: 1_048_576 },
+        { id: 'meta/muse-spark-1.2-contributor', name: 'Muse Spark 1.2 Contributor', supportsImage: false, contextWindow: 1_048_576 },
+        { id: 'xai/grok-4.5', name: 'Grok 4.5', supportsImage: true, contextWindow: 500_000 },
+        { id: 'xai/grok-4.6', name: 'Grok 4.6', supportsImage: true, contextWindow: 500_000 }
+      ]
+    },
     openai: {
       enabled: false,
       apiKey: '',
@@ -658,7 +731,7 @@ export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 
 /** All supported LLM provider keys for the Model settings page. No language filtering. */
 export const ALL_PROVIDER_KEYS = [
-  'metaid-free', 'deepseek', 'opencode', 'openai', 'gemini', 'anthropic', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama',
+  'metaid-free', 'deepseek', 'opencode', 'commandcode', 'openai', 'gemini', 'anthropic', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama',
 ] as const;
 
 /**

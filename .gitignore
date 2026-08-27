@@ -328,3 +328,4 @@ man_base_data_pebble/
 !tests/metawebStudyService.test.mjs
 !tests/procedureRecall.test.mjs
 !tests/skillAssignmentStore.test.mjs
+!tests/commandCodeProvider.test.ts

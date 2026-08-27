@@ -42,6 +42,8 @@ const PROVIDER_DEFAULT_BASE_URLS: Record<string, { anthropic: string; openai: st
   openrouter: { anthropic: 'https://openrouter.ai/api', openai: 'https://openrouter.ai/api/v1' },
   ollama: { anthropic: 'http://localhost:11434', openai: 'http://localhost:11434/v1' },
   opencode: { anthropic: 'https://opencode.ai/zen/go/v1', openai: 'https://opencode.ai/zen/go/v1' },
+  // Command Code serves both schemas under the same /provider/v1 base URL.
+  commandcode: { anthropic: 'https://api.commandcode.ai/provider/v1', openai: 'https://api.commandcode.ai/provider/v1' },
 };
 
 /** Default base URL for a provider and API format (same as Settings). */
