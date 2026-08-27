@@ -3934,3 +3934,53 @@ test('entropy P0 review: numberless template ACK still arms the delivery deadlin
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task #41: a welcome/roll-call notice @mentions every member but is not a
+// work assignment — it must not trigger the worker auto-ACK (whose invented
+// ETA then armed fake delivery deadlines).
+// ---------------------------------------------------------------------------
+
+test('task #41: a chair welcome notice triggers no auto-ACK and arms no delivery deadline', async () => {
+  // The auto-ACK only fires on the skill-turn path (P0-2: it exists because a
+  // skill turn can run for many minutes), so Coder Bot needs a routing hit to
+  // reach maybeSendWorkerAck at all.
+  const h = await createHarness({
+    ackTimeoutMs: 180_000,
+    coderChatSkills: ['web-search'],
+    routing: (input) => input.metabotId === 2
+      ? { prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }
+      : { prompt: null, activeSkillIds: [] },
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    // The host posts the join welcome as the chair; it @mentions every member
+    // but is a [GROUP_TASK_NOTICE:welcome] roll call, not a work assignment.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-welcome-41', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: buildMemberJoinWelcomeText({
+        taskTitle: 'Build MetaApp',
+        joinerName: 'Coder Bot',
+        existingMemberNames: ['Twin Bot', 'Designer Bot'],
+      }, 'zh'),
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    // Both workers still answer the roll call with a normal reply…
+    assert.equal(h.sends.length, 2, 'workers still answer the roll call normally');
+    // …but neither may post the bogus "[WORKING] 已接单" auto-ACK whose invented
+    // ETA armed the fake delivery deadlines seen in task #41.
+    assert.equal(
+      h.sends.filter((s) => s.content.startsWith('[WORKING]')).length,
+      0,
+      'no auto-ACK posted for a host welcome notice',
+    );
+    assert.equal(h.store.get(`group_task_expected_delivery:${task.id}:2`), undefined);
+    assert.equal(h.store.get(`group_task_expected_delivery:${task.id}:3`), undefined);
+  } finally {
+    h.cleanup();
+  }
+});

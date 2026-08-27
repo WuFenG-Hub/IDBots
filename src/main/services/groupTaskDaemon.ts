@@ -62,6 +62,7 @@ import {
   copyWorkingAckExample,
   copyWorkingAckFallback,
   copyCheckpointNeedDecision,
+  hasGroupTaskNotice,
   isRollCallPresenceCheck,
 } from '../libs/groupTaskCopy';
 import {
@@ -1621,6 +1622,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       || STATUS_TAG.test(content)
       || CHECKPOINT_OPEN_TAG.test(content)
       || CHECKPOINT_RESOLVED_TAG.test(content)
+      // Host protocol notices (welcome broadcasts, checkpoint/review notices)
+      // and roll-call presence checks @mention every member but are NOT work
+      // assignments. An auto-ACK here posts a bogus "[WORKING] 已接单" whose
+      // invented ETA then arms a delivery deadline — the false
+      // "estimated delivery by … but no [DELIVERABLE] arrived yet" reminders
+      // (task #41: every welcome ACK armed a 20-26 min fake deadline).
+      || hasGroupTaskNotice(content)
+      || isRollCallPresenceCheck(content)
     ) {
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: auto-ACK suppressed for bot ${bot.id} ` +
