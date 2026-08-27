@@ -51,6 +51,18 @@ export function isQuestionLikeMemoryText(text: string): boolean {
   return false;
 }
 
+/**
+ * Global-audit de-hardgate: the signal regexes above only recognize zh/en
+ * phrasing, so they can never be the sole admission gate for memory — the
+ * turn-level LLM extraction (see coworkMemoryJudge.judgeTurnMemoryExtraction)
+ * carries multilingual coverage. This pure check is only the COST guard for
+ * that extraction: language-neutral, no phrase lists, just substance.
+ */
+export function isSubstantiveMemoryText(userText: string): boolean {
+  const stripped = String(userText ?? '').replace(CODE_BLOCK_RE, ' ').trim();
+  return stripped.length >= 8;
+}
+
 function shouldKeepCandidate(text: string): boolean {
   const trimmed = normalizeText(text);
   if (!trimmed) return false;

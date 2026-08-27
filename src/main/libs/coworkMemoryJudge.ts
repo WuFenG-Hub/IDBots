@@ -299,3 +299,181 @@ export async function judgeMemoryCandidate(input: MemoryJudgeInput): Promise<Mem
   setCachedLlmResult(cacheKey, llmResult);
   return llmResult;
 }
+
+// ---------------------------------------------------------------------------
+// Turn-level multilingual memory extraction (global-audit de-hardgate)
+//
+// The regex extractor in coworkMemoryExtractor only recognizes zh/en signal
+// phrases, so for every other language neither explicit commands ("recuerda
+// que me llamo Carlos") nor implicit personal facts ever reached the judge —
+// memory silently did not exist for non-zh/en users. This pass extracts
+// memory-worthy changes from the WHOLE turn text in any language. It runs at
+// most once per turn, only when the session's LLM judge is enabled and the
+// text is substantive (isSubstantiveMemoryText); regex-extracted candidates
+// keep their existing judged path and are deduped against these.
+// ---------------------------------------------------------------------------
+
+export interface TurnMemoryExtractionChange {
+  action: 'add' | 'delete';
+  text: string;
+  isExplicit: boolean;
+}
+
+export type TurnMemoryExtractionRunner = (input: {
+  userText: string;
+  assistantText: string;
+  guardLevel: CoworkMemoryGuardLevel;
+  implicitEnabled: boolean;
+}) => Promise<TurnMemoryExtractionChange[] | null>;
+
+let turnMemoryExtractionRunner: TurnMemoryExtractionRunner | null = null;
+
+/** Test seam: inject a deterministic extraction runner (null restores the default). */
+export function setTurnMemoryExtractionRunner(runner: TurnMemoryExtractionRunner | null): void {
+  turnMemoryExtractionRunner = runner;
+}
+
+const TURN_EXTRACTION_MAX_USER_CHARS = 1200;
+const TURN_EXTRACTION_MAX_ASSISTANT_CHARS = 400;
+const TURN_EXTRACTION_MAX_TEXT_CHARS = 500;
+const TURN_EXTRACTION_MAX_IMPLICIT_ADDS = 2;
+const TURN_EXTRACTION_MAX_EXPLICIT_ADDS = 2;
+const TURN_EXTRACTION_MAX_DELETES = 2;
+
+type CachedExtraction = { value: TurnMemoryExtractionChange[]; createdAt: number };
+const extractionCache = new Map<string, CachedExtraction>();
+
+/** Pure payload parser, exported for unit tests. Returns null on unusable output. */
+export function parseTurnMemoryExtractionPayload(raw: string): TurnMemoryExtractionChange[] | null {
+  const match = String(raw ?? '').match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[0]) as { changes?: unknown };
+    if (!Array.isArray(parsed.changes)) return null;
+    const changes: TurnMemoryExtractionChange[] = [];
+    let implicitAdds = 0;
+    let explicitAdds = 0;
+    let deletes = 0;
+    for (const entry of parsed.changes) {
+      if (!entry || typeof entry !== 'object') continue;
+      const row = entry as Record<string, unknown>;
+      const action = row.action === 'delete' ? 'delete' : row.action === 'add' ? 'add' : null;
+      const text = truncateUtf16Units(normalizeText(String(row.text ?? '')), TURN_EXTRACTION_MAX_TEXT_CHARS);
+      if (!action || text.length < 2) continue;
+      const isExplicit = row.is_explicit === true || row.isExplicit === true;
+      if (action === 'delete') {
+        if (deletes >= TURN_EXTRACTION_MAX_DELETES) continue;
+        deletes += 1;
+      } else if (isExplicit) {
+        if (explicitAdds >= TURN_EXTRACTION_MAX_EXPLICIT_ADDS) continue;
+        explicitAdds += 1;
+      } else {
+        if (implicitAdds >= TURN_EXTRACTION_MAX_IMPLICIT_ADDS) continue;
+        implicitAdds += 1;
+      }
+      changes.push({ action, text, isExplicit });
+    }
+    return changes;
+  } catch {
+    return null;
+  }
+}
+
+async function runTurnMemoryExtractionDefault(input: {
+  userText: string;
+  assistantText: string;
+  guardLevel: CoworkMemoryGuardLevel;
+  implicitEnabled: boolean;
+}): Promise<TurnMemoryExtractionChange[] | null> {
+  const { config } = resolveCurrentApiConfig();
+  if (!config) return null;
+  const userText = truncateUtf16Units(normalizeText(input.userText), TURN_EXTRACTION_MAX_USER_CHARS);
+  if (!userText) return null;
+  const assistantText = truncateUtf16Units(normalizeText(input.assistantText ?? ''), TURN_EXTRACTION_MAX_ASSISTANT_CHARS);
+
+  const guardClause = input.guardLevel === 'strict'
+    ? 'strict: extract only unmistakable durable facts'
+    : input.guardLevel === 'relaxed'
+      ? 'relaxed: plausible durable facts are fine too'
+      : 'standard: extract clear durable facts';
+  const systemPrompt = [
+    'You extract long-term memories worth keeping from ONE assistant-conversation turn. The user may write in ANY language — extract across languages, never assume Chinese or English.',
+    'Extract durable personal facts, durable preferences, and explicit remember/forget instructions the USER gave (e.g. "remember that ...", "olvida que ...").',
+    'Never extract: questions, transient context (today\'s news, one-off tasks, current debugging), procedural/command output, or anything the assistant merely said about itself unless the user confirmed it as a durable preference.',
+    `Guard level — ${guardClause}.`,
+    input.implicitEnabled
+      ? 'Implicit-memory mode: implicit facts AND explicit instructions both count.'
+      : 'Explicit-only mode: extract ONLY explicit remember/forget instructions from the user.',
+    'Each "text" carries the fact itself in the user\'s own language, with the instruction verb stripped. Do not translate.',
+    'Return strict JSON only: {"changes":[{"action":"add"|"delete","text":"...","is_explicit":true|false}]} — at most 2 implicit adds, 2 explicit adds, 2 deletes; return {"changes":[]} when nothing qualifies.',
+  ].join('\n');
+  const userPrompt = JSON.stringify({
+    user_message: userText,
+    assistant_message: assistantText,
+    guard_level: input.guardLevel,
+    implicit_enabled: input.implicitEnabled,
+  });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS * 2);
+  try {
+    const response = await fetch(buildAnthropicMessagesUrl(config.baseURL), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: config.model,
+        max_tokens: 400,
+        temperature: 0,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const text = extractTextFromAnthropicResponse(payload);
+    return parseTurnMemoryExtractionPayload(text);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function judgeTurnMemoryExtraction(input: {
+  userText: string;
+  assistantText: string;
+  guardLevel: CoworkMemoryGuardLevel;
+  implicitEnabled: boolean;
+}): Promise<TurnMemoryExtractionChange[] | null> {
+  if (turnMemoryExtractionRunner) {
+    try {
+      return await turnMemoryExtractionRunner(input);
+    } catch {
+      return null;
+    }
+  }
+  const cacheKey = `turn-extract|${input.guardLevel}|${input.implicitEnabled ? 1 : 0}|${normalizeText(input.userText)}`;
+  const cached = extractionCache.get(cacheKey);
+  if (cached) {
+    if (Date.now() - cached.createdAt > LLM_CACHE_TTL_MS) {
+      extractionCache.delete(cacheKey);
+    } else {
+      return cached.value;
+    }
+  }
+  const result = await runTurnMemoryExtractionDefault(input);
+  if (result) {
+    extractionCache.set(cacheKey, { value: result, createdAt: Date.now() });
+    while (extractionCache.size > LLM_CACHE_MAX_SIZE) {
+      const oldestKey = extractionCache.keys().next().value;
+      if (!oldestKey || typeof oldestKey !== 'string') break;
+      extractionCache.delete(oldestKey);
+    }
+  }
+  return result;
+}

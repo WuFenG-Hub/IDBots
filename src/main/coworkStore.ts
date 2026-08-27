@@ -7,9 +7,14 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
 import { v4 as uuidv4 } from 'uuid';
 import {
   extractTurnMemoryChanges,
+  isSubstantiveMemoryText,
   type CoworkMemoryGuardLevel,
 } from './libs/coworkMemoryExtractor';
-import { judgeMemoryCandidate } from './libs/coworkMemoryJudge';
+import {
+  judgeMemoryCandidate,
+  judgeTurnMemoryExtraction,
+  type TurnMemoryExtractionChange,
+} from './libs/coworkMemoryJudge';
 import { stripLoneSurrogates, truncateUtf16Units } from './libs/llmSafeText';
 import {
   parseSessionGoal,
@@ -6787,6 +6792,41 @@ export class CoworkStore implements MemoryBackend {
     `, [now, metabotId, scope.kind, scope.key]);
   }
 
+  /**
+   * Shared delete flow for memory changes: best fuzzy match against existing
+   * memories in the write scope (same semantics as the inlined block it
+   * replaced). Returns false for an unusable key or no match.
+   */
+  private deleteBestMatchingUserMemory(text: string, metabotId: number, writeScope: MemoryScope): boolean {
+    const key = normalizeMemoryMatchKey(text);
+    if (!key) return false;
+
+    const candidates = this.listUserMemories({
+      metabotId,
+      scope: writeScope,
+      status: 'all',
+      includeDeleted: false,
+      limit: 100,
+    });
+    let target: CoworkUserMemory | null = null;
+    let bestScore = 0;
+    for (const entry of candidates) {
+      const currentKey = normalizeMemoryMatchKey(entry.text);
+      if (!currentKey) continue;
+      const score = scoreDeleteMatch(currentKey, key);
+      if (score <= bestScore) continue;
+      bestScore = score;
+      target = entry;
+    }
+    if (!target) return false;
+
+    return this.deleteUserMemory({
+      id: target.id,
+      metabotId,
+      scope: writeScope,
+    });
+  }
+
   async applyTurnMemoryUpdates(options: ApplyTurnMemoryUpdatesOptions): Promise<ApplyTurnMemoryUpdatesResult> {
     const result: ApplyTurnMemoryUpdatesResult = {
       totalChanges: 0,
@@ -6813,7 +6853,35 @@ export class CoworkStore implements MemoryBackend {
       guardLevel: options.guardLevel,
       maxImplicitAdds: options.implicitEnabled ? 2 : 0,
     });
-    result.totalChanges = extracted.length;
+
+    // Global-audit de-hardgate: the regex extractor only recognizes zh/en
+    // signal phrases, so non-zh/en users' explicit commands and personal
+    // facts never even reached the judge — memory silently did not exist for
+    // them. One turn-level LLM extraction carries the multilingual coverage
+    // (at most once per turn, only when the session's LLM judge is enabled
+    // and the text is substantive). Regex candidates keep their existing
+    // judged path; entries the extraction duplicates are dropped below.
+    let llmExtraction: TurnMemoryExtractionChange[] = [];
+    if (options.memoryLlmJudgeEnabled && isSubstantiveMemoryText(options.userText)) {
+      try {
+        llmExtraction = await judgeTurnMemoryExtraction({
+          userText: options.userText,
+          assistantText: options.assistantText,
+          guardLevel: options.guardLevel,
+          implicitEnabled: options.implicitEnabled,
+        }) ?? [];
+      } catch {
+        llmExtraction = [];
+      }
+    }
+    const regexExtractionKeys = new Set(
+      extracted.map((change) => `${change.action}|${normalizeMemoryMatchKey(change.text)}`),
+    );
+    const llmOnlyChanges = llmExtraction.filter((change) => {
+      const key = `${change.action}|${normalizeMemoryMatchKey(change.text)}`;
+      return normalizeMemoryMatchKey(change.text).length > 0 && !regexExtractionKeys.has(key);
+    });
+    result.totalChanges = extracted.length + llmOnlyChanges.length;
 
     for (const change of extracted) {
       if (change.action === 'add') {
@@ -6867,42 +6935,48 @@ export class CoworkStore implements MemoryBackend {
         continue;
       }
 
-      const key = normalizeMemoryMatchKey(change.text);
-      if (!key) {
+      if (this.deleteBestMatchingUserMemory(change.text, metabotId, resolvedScopes.writeScope)) {
+        result.deleted += 1;
+      } else {
         result.skipped += 1;
+      }
+    }
+
+    // LLM-extracted entries are already curated by the extraction pass — no
+    // second judge round. Same guard rules apply (explicit-only when implicit
+    // updates are off) and the same best-match delete flow.
+    for (const change of llmOnlyChanges) {
+      if (change.action === 'add') {
+        if (!options.implicitEnabled && !change.isExplicit) {
+          result.skipped += 1;
+          continue;
+        }
+        result.llmReviewed += 1;
+        const write = this.createOrReviveUserMemory({
+          text: change.text,
+          confidence: change.isExplicit ? 0.95 : 0.8,
+          isExplicit: change.isExplicit,
+          scope: resolvedScopes.writeScope,
+          source: {
+            role: 'user',
+            sessionId: options.sessionId,
+            messageId: options.userMessageId,
+            sourceType: change.isExplicit ? 'turn_explicit' : 'turn_llm',
+            sourceId: options.userMessageId,
+          },
+          metabotId,
+        });
+        if (write.created) result.created += 1;
+        else if (write.updated) result.updated += 1;
+        else result.skipped += 1;
         continue;
       }
 
-      const candidates = this.listUserMemories({
-        metabotId,
-        scope: resolvedScopes.writeScope,
-        status: 'all',
-        includeDeleted: false,
-        limit: 100,
-      });
-      let target: CoworkUserMemory | null = null;
-      let bestScore = 0;
-      for (const entry of candidates) {
-        const currentKey = normalizeMemoryMatchKey(entry.text);
-        if (!currentKey) continue;
-        const score = scoreDeleteMatch(currentKey, key);
-        if (score <= bestScore) continue;
-        bestScore = score;
-        target = entry;
-      }
-
-      if (!target) {
+      if (this.deleteBestMatchingUserMemory(change.text, metabotId, resolvedScopes.writeScope)) {
+        result.deleted += 1;
+      } else {
         result.skipped += 1;
-        continue;
       }
-
-      const deleted = this.deleteUserMemory({
-        id: target.id,
-        metabotId,
-        scope: resolvedScopes.writeScope,
-      });
-      if (deleted) result.deleted += 1;
-      else result.skipped += 1;
     }
 
     this.markOrphanImplicitMemoriesStale(metabotId, { scope: resolvedScopes.writeScope });
