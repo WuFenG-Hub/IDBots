@@ -4043,3 +4043,78 @@ test('P1-2: host notices citing protocol tags are never re-interpreted as those 
     h.cleanup();
   }
 });
+
+test('review fix: a new ETA ACK re-arms a fresh delivery-reminder cycle', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    const ack = (pin, eta) => insertGroupMessage(h.db, {
+      pinId: pin, senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[WORKING] doing X，预计${eta}分钟`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    ack('pin-ack-1', 10);
+    await h.loop.runTick();
+    // Past the first ETA with no deliverable -> reminder fires once.
+    h.state.nowMs += 11 * 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.filter((send) => /estimated delivery/.test(send.content)).length, 1);
+    assert.equal(h.store.get('group_task_delivery_reminded:1:2'), '1');
+
+    // The worker ACKs a NEW assignment with a new ETA: the reminded flag from
+    // the previous missed deadline must reset, or the next cycle's reminder
+    // is suppressed forever.
+    ack('pin-ack-2', 5);
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_delivery_reminded:1:2'), undefined, 'reminded flag reset on re-arm');
+
+    h.state.nowMs += 6 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      2,
+      'second deadline miss fires its own reminder',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('review fix: a delivered (even late) deliverable retires the deadline watch', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-ack-late', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] doing X，预计10分钟',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 11 * 60_000;
+    await h.loop.runTick(); // reminder fired
+    assert.equal(h.sends.filter((send) => /estimated delivery/.test(send.content)).length, 1);
+
+    // LATE deliverable lands: both kv keys retire — later ticks see no
+    // outstanding deadline at all.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-deliver-late', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${'ab'.repeat(32)}i0`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_expected_delivery:1:2'), undefined, 'deadline entry retired on delivery');
+    assert.equal(h.store.get('group_task_delivery_reminded:1:2'), undefined, 'reminded flag retired on delivery');
+
+    h.state.nowMs += 30 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      1,
+      'no further deadline reminders after the deliverable arrived',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

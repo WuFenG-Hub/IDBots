@@ -2904,6 +2904,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           uri: candidate.uri,
         });
         recordedDeliverables.push(candidate);
+        // Review fix (delivery-deadline hygiene): the deliverable ARRIVED —
+        // retire this member's deadline watch immediately instead of leaving
+        // the kv armed. A late delivery (past the ETA, after the reminder)
+        // must never look like a still-missing one to later ticks, and the
+        // reminded flag must not suppress the reminder cycle of the member's
+        // NEXT ETA-armed assignment.
+        {
+          const delivererMember = members.find(
+            (candidate2) =>
+              (candidate2.globalmetaid ?? '').trim().toLowerCase()
+                === (message.senderGlobalMetaId ?? '').trim().toLowerCase(),
+          );
+          if (delivererMember?.metabotId != null) {
+            deps.getStore().delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${delivererMember.metabotId}`);
+            deps.getStore().delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${delivererMember.metabotId}`);
+          }
+        }
         // P0-4: persist multi-source on-chain verification for pinid deliverables.
         if (candidate.kind === 'metaapp' || candidate.kind === 'metafile' || candidate.kind === 'pinid') {
           const pinid = pinidFromDeliverable(candidate.uri);
@@ -4198,6 +4215,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const etaMinutes = ack.estimatedMinutes != null && ack.estimatedMinutes > 0
         ? ack.estimatedMinutes
         : memberTimeoutAfterMinutes;
+      // Review fix: arming a fresh deadline starts a fresh reminder cycle —
+      // a leftover delivery-reminded flag from the previous (missed or
+      // delivered) deadline would otherwise suppress the next reminder
+      // forever (the flag used to be set but never reset).
+      sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
       sqlite.set(
         `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
         JSON.stringify({
