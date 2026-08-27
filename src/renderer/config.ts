@@ -517,10 +517,11 @@ export const defaultConfig: AppConfig = {
     commandcode: {
       enabled: false,
       apiKey: '',
-      // Command Code 网关（https://commandcode.ai/docs/provider）：单一 Bearer key，
-      // Chat Completions / Messages / Models 端点都挂在 /provider/v1 下。我们固定走
-      // OpenAI Chat Completions 格式；模型目录镜像 GET /provider/v1/models 快照
-      // （2026-08-27），上下文窗口取该端点自报值。
+      // Command Code gateway (https://commandcode.ai/docs/provider): one Bearer
+      // key, Chat Completions / Messages / Models all mounted under /provider/v1.
+      // We pin the OpenAI Chat Completions format; the model catalog mirrors the
+      // GET /provider/v1/models snapshot (2026-08-27) with endpoint-reported
+      // context windows.
       baseUrl: 'https://api.commandcode.ai/provider/v1',
       apiFormat: 'openai',
       models: [

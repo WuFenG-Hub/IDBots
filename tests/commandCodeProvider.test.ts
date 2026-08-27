@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { ALL_PROVIDER_KEYS, defaultConfig } from '../src/renderer/config.ts';
 import { mergeProvidersConfig } from '../src/renderer/services/config.ts';
+import { buildOpenAICompatibleChatCompletionsUrl } from '../src/renderer/services/llmConnection.ts';
 
 /** Built-in Command Code gateway preset (model settings page). */
 const COMMAND_CODE_BASE_URL = 'https://api.commandcode.ai/provider/v1';
@@ -52,6 +53,15 @@ test('Command Code sits right below OpenCode on the Model settings page', () => 
   const keys = ALL_PROVIDER_KEYS as readonly string[];
   const opencodeIndex = keys.indexOf('opencode');
   assert.equal(keys[opencodeIndex + 1], 'commandcode');
+});
+
+test('commandcode preset base URL joins into the gateway Chat Completions endpoint', () => {
+  // The stored preset must resolve to the live POST target of the pinned
+  // OpenAI-format flow, not just hold the right string in config.
+  assert.equal(
+    buildOpenAICompatibleChatCompletionsUrl(COMMAND_CODE_BASE_URL, 'commandcode'),
+    'https://api.commandcode.ai/provider/v1/chat/completions'
+  );
 });
 
 test('existing users get commandcode merged in without losing stored providers', () => {

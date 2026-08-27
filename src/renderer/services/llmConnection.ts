@@ -61,7 +61,7 @@ export function providerRequiresApiKey(provider: string): boolean {
   return provider !== 'ollama';
 }
 
-function buildOpenAICompatibleChatCompletionsUrl(baseUrl: string, provider: string): string {
+export function buildOpenAICompatibleChatCompletionsUrl(baseUrl: string, provider: string): string {
   const normalized = baseUrl.trim().replace(/\/+$/, '');
   if (!normalized) return '/v1/chat/completions';
   if (normalized.endsWith('/chat/completions')) return normalized;
