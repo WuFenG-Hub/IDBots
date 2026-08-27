@@ -87,7 +87,7 @@ export const GroupTaskTinyAvatar: React.FC<{
 
   if (!browserGlobalMetaId) return body;
 
-  const label = `Open ${displayName || 'Bot'} in Bot Browser`;
+  const label = i18nService.t('groupTasksOpenBotInBrowser').replace('{name}', displayName || 'Bot');
   return (
     <button
       type="button"

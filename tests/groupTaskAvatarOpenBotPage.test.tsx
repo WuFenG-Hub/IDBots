@@ -38,7 +38,7 @@ test('Group task message avatar exposes a Bot Browser target for the chain-signe
   const markup = renderMessageItem({ senderGlobalMetaId: 'idq1alicebot' });
 
   assert.match(markup, /<button[^>]*data-browser-global-metaid="idq1alicebot"/);
-  assert.match(markup, /aria-label="Open Alice Bot in Bot Browser"/);
+  assert.match(markup, /aria-label="[^"]*(?:Open Alice Bot in Bot Browser|打开 Alice Bot)[^"]*"/);
   assert.match(markup, /hello group/);
 });
 
@@ -54,7 +54,7 @@ test('Group task outgoing own-bot message avatar also opens the local Bot page',
   );
 
   assert.match(markup, /<button[^>]*data-browser-global-metaid="idq1ownbot"/);
-  assert.match(markup, /aria-label="Open Own Bot in Bot Browser"/);
+  assert.match(markup, /aria-label="[^"]*(?:Open Own Bot in Bot Browser|打开 Own Bot)[^"]*"/);
 });
 
 test('Group task message without a sender GlobalMetaID keeps a plain non-clickable avatar', () => {
@@ -76,7 +76,7 @@ test('Group task member preview avatars expose Bot Browser targets only for memb
   );
 
   assert.match(markup, /<button[^>]*data-browser-global-metaid="idq1alicebot"/);
-  assert.match(markup, /aria-label="Open Alice in Bot Browser"/);
+  assert.match(markup, /aria-label="[^"]*(?:Open Alice in Bot Browser|打开 Alice)[^"]*"/);
   assert.match(markup, /<button[^>]*data-browser-global-metaid="idp1carabot"/);
   // Bob has no chain identity yet — his tiny avatar stays an inert span.
   const [, bobCell] = markup.split('<span');
