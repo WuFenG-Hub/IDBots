@@ -237,74 +237,110 @@ test('an owner cancel is classified and blocks create even under a waiver', () =
     { allowed: false, decision: 'owner_cancel' },
   );
   // Last decisive reply wins: a confirm after a cancel re-authorizes (the
-  // confirm now arrives via the LLM judge index, the cancel via regex).
+  // confirm now arrives via the LLM intent labels, the cancel via regex).
   assert.deepEqual(
     resolveStaffingOwnerGate({
       triggeringWish: '帮我开个群任务做技能介绍',
       repliesAfterPropose: ['算了', '确认人选'],
-      llmLastConfirmIndex: 1,
+      llmIntents: ['other', 'confirm'],
     }),
     { allowed: true, decision: 'owner_confirmed' },
   );
 });
 
-test('llmLastConfirmIndex: semantic confirm, ordering, and tie-safety', () => {
-  // Any clear approval passes the gate via the judge index.
-  for (const reply of ['确认', '可以', '行', 'OK', '就这样吧']) {
+test('llmIntents: multilingual coverage, ordering, and regex-overlay safety', () => {
+  // Any clear approval passes the gate via the judge label, any language.
+  for (const reply of ['确认', '可以', '行', 'OK', '就这样吧', 'D\'accord', 'Sí, adelante', '確認しました']) {
     assert.deepEqual(
       resolveStaffingOwnerGate({
         triggeringWish: '帮我开个群任务做技能介绍',
         repliesAfterPropose: [reply],
-        llmLastConfirmIndex: 0,
+        llmIntents: ['confirm'],
       }),
       { allowed: true, decision: 'owner_confirmed' },
-      `reply ${reply} should authorize via the LLM confirm index`,
+      `reply ${reply} should authorize via the judge label`,
     );
   }
-  // No confirming reply judged (-1) still awaits the owner.
+  // Multilingual revise / cancel / skip all count now (regex never saw them).
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['Annule tout, on ne le fait pas'],
+      llmIntents: ['cancel'],
+    }),
+    { allowed: false, decision: 'owner_cancel' },
+  );
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['Cambia al diseñador'],
+      llmIntents: ['revise'],
+    }),
+    { allowed: false, decision: 'owner_revise' },
+  );
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['Empieza sin preguntar más'],
+      llmIntents: ['skip'],
+    }),
+    { allowed: true, decision: 'skip_authorized' },
+  );
+  // The LLM wish-skip judgment also authorizes (multilingual wish).
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: 'create a task, empieza sin confirmar',
+      repliesAfterPropose: [],
+      llmWishSkip: true,
+    }),
+    { allowed: true, decision: 'skip_authorized' },
+  );
+  // No decisive label judged (all 'other') still awaits the owner.
   assert.deepEqual(
     resolveStaffingOwnerGate({
       triggeringWish: '帮我开个群任务做技能介绍',
       repliesAfterPropose: ['可以吗？'],
-      llmLastConfirmIndex: -1,
+      llmIntents: ['other'],
     }),
     { allowed: false, decision: 'awaiting_owner' },
   );
-  // A later regex revise beats an earlier LLM confirm.
+  // A later regex revise beats an earlier judge confirm.
   assert.deepEqual(
     resolveStaffingOwnerGate({
       triggeringWish: '帮我开个群任务做技能介绍',
       repliesAfterPropose: ['确认', '换人，用设计师'],
-      llmLastConfirmIndex: 0,
+      llmIntents: ['confirm', 'other'],
     }),
     { allowed: false, decision: 'owner_revise' },
   );
-  // A later LLM confirm beats an earlier regex revise (recovery flow).
+  // A later judge confirm beats an earlier regex revise (recovery flow).
   assert.deepEqual(
     resolveStaffingOwnerGate({
       triggeringWish: '帮我开个群任务做技能介绍',
-      repliesAfterPropose: ['换人，用设计师', '确认'],
-      llmLastConfirmIndex: 1,
+      repliesAfterPropose: ['换人，用设计师', 'D\'accord comme ça'],
+      llmIntents: ['other', 'confirm'],
     }),
     { allowed: true, decision: 'owner_confirmed' },
   );
-  // Same-index tie: the blocking regex reading wins over the LLM confirm.
+  // Same-reply tie: the regex reading overrides the judge label (safety).
   assert.deepEqual(
     resolveStaffingOwnerGate({
       triggeringWish: '帮我开个群任务做技能介绍',
-      repliesAfterPropose: ['换成 B 吧，可以吗'],
-      llmLastConfirmIndex: 0,
+      repliesAfterPropose: ['换成 B 吧'],
+      llmIntents: ['confirm'],
     }),
     { allowed: false, decision: 'owner_revise' },
   );
-  // Out-of-range judge answers read as "no confirm" (untrustworthy index).
+  // A judge that labels nothing decisive cannot flip a waiver on its own —
+  // but persistedSkip still applies (unchanged deterministic path).
   assert.deepEqual(
     resolveStaffingOwnerGate({
       triggeringWish: '帮我开个群任务做技能介绍',
-      repliesAfterPropose: ['确认'],
-      llmLastConfirmIndex: 5,
+      repliesAfterPropose: ['hmm'],
+      llmIntents: ['other'],
+      persistedSkip: true,
     }),
-    { allowed: false, decision: 'awaiting_owner' },
+    { allowed: true, decision: 'skip_authorized' },
   );
 });
 

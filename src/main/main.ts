@@ -163,7 +163,7 @@ import {
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceCoworkStoreGetter,
-  setGroupTaskServiceStaffingOwnerConfirmJudge,
+  setGroupTaskServiceStaffingIntentJudge,
   setGroupTaskServiceTransport,
   setGroupTaskAcceptanceNotifier,
   notifySourceSessionReview,
@@ -183,6 +183,7 @@ import {
   archiveGroupTask,
   unarchiveGroupTask,
 } from './services/groupTaskService';
+import type { OwnerStaffingIntent } from './services/groupTaskStaffing';
 import {
   buildGroupTaskCandidateSearchDeps,
   setGroupTaskCandidateSearchDepsGetter,
@@ -3209,38 +3210,53 @@ const startSqliteDaemons = (): void => {
   // Task #38: owner confirmation is LLM-judged natural language, not a phrase
   // vocabulary. One small one-shot completion per create attempt that reaches
   // the confirm gate; deterministic revise/cancel/skip matching stays regex
-  // (see groupTaskStaffing.classifyOwnerStaffingReply).
-  setGroupTaskServiceStaffingOwnerConfirmJudge(async ({ slateText, replies }) => {
+  // (see the vocabularies comment in groupTaskStaffing).
+  setGroupTaskServiceStaffingIntentJudge(async ({ slateText, triggeringWish, replies }) => {
     const numbered = replies.map((reply, index) => `[${index}] ${reply}`).join('\n');
     const systemPrompt = [
-      'You judge whether a human owner clearly approved a proposed team roster.',
+      'You classify a human owner\'s replies about a proposed team roster.',
       'The assistant showed the owner this roster proposal:',
       '<slate>',
       slateText,
       '</slate>',
-      'The owner then replied, in order:',
+      'The wish that triggered the proposal (may be empty):',
+      triggeringWish || '(none)',
+      'The owner\'s replies after the slate, in order:',
       numbered,
       '',
-      'A reply counts as confirmation only when, in context, the owner clearly approves proceeding with this exact roster.',
-      'Questions ("可以吗?"), conditions, requests to change/swap/drop seats, topic changes, and ambiguous acknowledgments do NOT count.',
-      'Answer with strict JSON only: {"lastConfirmIndex": <integer index of the LAST confirming reply, or -1>}',
+      'Label EACH reply with exactly one intent:',
+      '- confirm: clearly approves proceeding with this exact roster',
+      '- revise: asks to change / swap / remove seats or people',
+      '- cancel: calls the whole task off',
+      '- skip: asks to proceed WITHOUT any further confirmation (e.g. "just start")',
+      '- other: questions, conditions, topic changes, anything ambiguous',
+      'Also answer wishSkip: true only when THE WISH ITSELF asked to start without confirmation.',
+      'Reply in the owner\'s language matters — classify any language, not just Chinese or English.',
+      'Return strict JSON only: {"intents":["<label>",...],"wishSkip":false} with intents aligned to the replies.',
     ].join('\n');
-    const raw = await performChatCompletionForOrchestrator(systemPrompt, 'Judge the owner replies now.', undefined, {
-      maxTokens: 200,
+    const raw = await performChatCompletionForOrchestrator(systemPrompt, 'Classify the owner replies now.', undefined, {
+      maxTokens: 300,
       thinking: 'disabled',
     });
+    const intents: OwnerStaffingIntent[] = replies.map(() => 'other');
+    let wishSkip = false;
     const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) return { lastConfirmIndex: -1 };
-    try {
-    const parsed = JSON.parse(match[0]) as { lastConfirmIndex?: unknown };
-    const index = Number(parsed.lastConfirmIndex);
-    if (!Number.isInteger(index) || index < 0 || index >= replies.length) {
-      return { lastConfirmIndex: -1 };
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[0]) as { intents?: unknown; wishSkip?: unknown };
+        if (Array.isArray(parsed.intents)) {
+          parsed.intents.slice(0, replies.length).forEach((label, index) => {
+            if (label === 'confirm' || label === 'revise' || label === 'cancel' || label === 'skip') {
+              intents[index] = label;
+            }
+          });
+        }
+        wishSkip = parsed.wishSkip === true;
+      } catch {
+        // keep the all-other default
+      }
     }
-    return { lastConfirmIndex: index };
-    } catch {
-      return { lastConfirmIndex: -1 };
-    }
+    return { intents, wishSkip };
   });
   setGroupTaskCandidateSearchDepsGetter(() => buildGroupTaskCandidateSearchDeps({
     metabotStore: getMetabotStore(),

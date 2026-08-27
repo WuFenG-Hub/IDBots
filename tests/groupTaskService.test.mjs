@@ -48,7 +48,7 @@ const {
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceStaffingSessionMessagesLoader,
-  setGroupTaskServiceStaffingOwnerConfirmJudge,
+  setGroupTaskServiceStaffingIntentJudge,
   setGroupTaskAcceptanceNotifier,
   setGroupTaskServiceTransport,
   resetGroupTaskServiceTransport,
@@ -161,7 +161,7 @@ const createHarness = async (overrides = {}) => {
     cleanup: () => {
       setGroupTaskServiceOrchestrationBridgeGetter(null);
       setGroupTaskServiceStaffingSessionMessagesLoader(null);
-      setGroupTaskServiceStaffingOwnerConfirmJudge(null);
+      setGroupTaskServiceStaffingIntentJudge(null);
       resetGroupTaskServiceTransport();
       store.close();
     },
@@ -1293,7 +1293,10 @@ test('Twin create is rejected until the owner confirms the proposed slate', asyn
 
     messages[1] = { type: 'user', content: '确认人选', timestamp: proposed.proposal.createdAt + 20 };
     // Plain confirmation is LLM-judged (task #38): inject the host judge.
-    setGroupTaskServiceStaffingOwnerConfirmJudge(async () => ({ lastConfirmIndex: 0 }));
+    setGroupTaskServiceStaffingIntentJudge(async ({ replies }) => ({
+      intents: replies.map((reply) => (/确认/.test(reply) ? 'confirm' : 'other')),
+      wishSkip: false,
+    }));
     const detail = await createGroupTask({
       title: proposed.proposal.title,
       goal: proposed.proposal.goal,
@@ -1744,7 +1747,10 @@ test('an owner confirmation given before an identical re-propose still authorize
     // Owner confirms with a bare natural reply BEFORE the chair re-proposes.
     messages.push({ type: 'user', content: '确认', timestamp: proposed.proposal.createdAt + 10 });
     // Plain confirmation is LLM-judged (task #38): inject the host judge.
-    setGroupTaskServiceStaffingOwnerConfirmJudge(async () => ({ lastConfirmIndex: 0 }));
+    setGroupTaskServiceStaffingIntentJudge(async ({ replies }) => ({
+      intents: replies.map((reply) => (/确认/.test(reply) ? 'confirm' : 'other')),
+      wishSkip: false,
+    }));
     // The chair re-runs propose with the identical payload (task #38: it lost
     // the proposal id in CLI output parsing). The re-propose must NOT reset
     // the confirmation window past the owner's reply.
@@ -1817,8 +1823,9 @@ test('any clear owner approval passes the confirm gate via the LLM judge (task #
         sourceSessionId: `session-llm-${approval}`,
       });
       messages.push({ type: 'user', content: approval, timestamp: proposed.proposal.createdAt + 10 });
-      setGroupTaskServiceStaffingOwnerConfirmJudge(async ({ replies }) => ({
-        lastConfirmIndex: replies.findIndex((reply) => reply === approval),
+      setGroupTaskServiceStaffingIntentJudge(async ({ replies }) => ({
+        intents: replies.map((reply) => (reply === approval ? 'confirm' : 'other')),
+        wishSkip: false,
       }));
       const detail = await createGroupTask({
         title: proposed.proposal.title,
@@ -1848,7 +1855,7 @@ test('a non-confirming owner reply judged -1 keeps the gate closed', async () =>
       sourceSessionId: 'session-llm-question',
     });
     messages.push({ type: 'user', content: '这样就可以了吗？', timestamp: proposed.proposal.createdAt + 10 });
-    setGroupTaskServiceStaffingOwnerConfirmJudge(async () => ({ lastConfirmIndex: -1 }));
+    setGroupTaskServiceStaffingIntentJudge(async () => ({ intents: ['other'], wishSkip: false }));
     await assert.rejects(
       () => createGroupTask({
         title: proposed.proposal.title,
@@ -1909,7 +1916,7 @@ test('a judge failure rejects create with the judge error surfaced', async () =>
       sourceSessionId: 'session-judge-error',
     });
     messages.push({ type: 'user', content: '确认', timestamp: proposed.proposal.createdAt + 10 });
-    setGroupTaskServiceStaffingOwnerConfirmJudge(async () => {
+    setGroupTaskServiceStaffingIntentJudge(async () => {
       throw new Error('llm unavailable');
     });
     await assert.rejects(
@@ -1923,6 +1930,119 @@ test('a judge failure rejects create with the judge error surfaced', async () =>
       (error) => error instanceof GroupTaskStaffingError
         && error.code === 'OWNER_CONFIRM_REQUIRED'
         && /llm unavailable/.test(error.message),
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a non-Chinese/English cancel blocks create even under an active waiver (global audit)', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      // Multilingual skip wish: the regex never matches this — the judge does.
+      { type: 'user', content: 'crée une tâche de groupe, commence sans confirmation', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-i18n-cancel',
+    });
+    // The owner calls the whole thing off in French AFTER the propose.
+    messages.push({ type: 'user', content: 'Annule tout, on ne le fait pas', timestamp: proposed.proposal.createdAt + 10 });
+    setGroupTaskServiceStaffingIntentJudge(async ({ replies }) => ({
+      intents: replies.map((reply) => (/Annule/i.test(reply) ? 'cancel' : 'other')),
+      wishSkip: true,
+    }));
+    // wishSkip alone would authorize (skip_authorized); the LATER explicit
+    // cancel must win — this is exactly the safety hole a zh/en regex
+    // vocabulary left open for every other language.
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-i18n-cancel',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'OWNER_CANCEL_REQUIRED',
+    );
+    // Same shape, revise instead of cancel: the change request is honored.
+    messages[1] = { type: 'user', content: 'Remplace le designer par Lucas', timestamp: proposed.proposal.createdAt + 10 };
+    setGroupTaskServiceStaffingIntentJudge(async ({ replies }) => ({
+      intents: replies.map((reply) => (/Remplace/i.test(reply) ? 'revise' : 'other')),
+      wishSkip: true,
+    }));
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-i18n-cancel',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'OWNER_REVISE_REQUIRED',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a multilingual skip wish authorizes create without any reply', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: 'crea una tarea de grupo y empieza sin confirmar nada', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-i18n-wish',
+    });
+    setGroupTaskServiceStaffingIntentJudge(async () => ({ intents: [], wishSkip: true }));
+    const detail = await createGroupTask({
+      title: proposed.proposal.title,
+      goal: proposed.proposal.goal,
+      createdBy: 'twinbot',
+      proposalId: proposed.proposal.id,
+      sourceSessionId: 'session-i18n-wish',
+    });
+    assert.equal(detail.staffingProposalId, proposed.proposal.id);
+    assert.equal(h.groupTaskStore.getStaffingProposalById(proposed.proposal.id).ownerDecision, 'skip_authorized');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a mislabeling judge cannot turn a regex revise into a confirm (overlay safety)', async () => {
+  const h = await createHarness();
+  try {
+    const messages = [
+      { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
+    ];
+    setGroupTaskServiceStaffingSessionMessagesLoader(() => messages);
+    const proposed = proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: confirmRequiredPlan(),
+      sourceSessionId: 'session-overlay-safety',
+    });
+    messages.push({ type: 'user', content: '换人，用设计师', timestamp: proposed.proposal.createdAt + 10 });
+    // Judge mislabels the revise as a confirm: the regex overlay must win.
+    setGroupTaskServiceStaffingIntentJudge(async () => ({ intents: ['confirm'], wishSkip: false }));
+    await assert.rejects(
+      () => createGroupTask({
+        title: proposed.proposal.title,
+        goal: proposed.proposal.goal,
+        createdBy: 'twinbot',
+        proposalId: proposed.proposal.id,
+        sourceSessionId: 'session-overlay-safety',
+      }),
+      (error) => error instanceof GroupTaskStaffingError && error.code === 'OWNER_REVISE_REQUIRED',
     );
   } finally {
     h.cleanup();

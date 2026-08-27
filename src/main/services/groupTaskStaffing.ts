@@ -186,16 +186,22 @@ const CANCEL_PATTERNS: RegExp[] = [
 ];
 
 /**
- * Owner CONFIRMATION is no longer matched by a hardcoded phrase vocabulary
- * (task #38: bare 「确认」 was in the list but 「可以」/「就这样吧」 were not, and
- * no finite list covers natural language). The deterministic classifier below
- * only carries the STRUCTURAL intents: keep-roster (an idiom guard so
- * 「好的，不换人」 never mis-fires the /换人/ revise rule), revise, and cancel.
- * Clear natural-language confirmation is judged by the host LLM at create
- * time (see evaluateProposalOwnerGate) and reaches this gate as
- * `llmLastConfirmIndex` — the index of the last reply the judge classified
- * as a clear approval. Blocking regex intents still win ties at the same
- * index (safety: mis-judge toward blocking, never toward auto-starting).
+ * Owner intent labels for the staffing gate. `other` = no decisive intent.
+ */
+export type OwnerStaffingIntent = 'confirm' | 'revise' | 'cancel' | 'skip' | 'other';
+
+/**
+ * Owner intents are no longer matched by hardcoded phrase vocabularies
+ * (global product: zh/en lists like 不用确认/换人/算了/just start silently
+ * miss every other language — a missed CANCEL even let creates proceed
+ * against the owner's wish under an active waiver). Natural-language intent
+ * is judged by the host LLM at create time (see evaluateProposalOwnerGate)
+ * and reaches the gate as `llmIntents` (one label per reply) plus
+ * `llmWishSkip` for the triggering wish. The deterministic classifier below
+ * stays as a precise zh/en + idiom OVERLAY: when it reads a reply
+ * decisively, its label wins for that reply (a mis-judging LLM can never
+ * turn a regex revise/cancel into a confirm); the LLM labels cover
+ * everything else. Last decisive reply wins, as before.
  */
 
 function isSeatRole(value: unknown): value is GroupTaskSeatRole {
@@ -365,43 +371,42 @@ export function resolveStaffingOwnerGate(input: {
   /** Set when the slate qualifies for the all-local small-team auto-start. */
   localSmallSlate?: boolean;
   /**
-   * Index into repliesAfterPropose of the LAST reply the host LLM judged to
-   * be a clear natural-language confirmation of the roster (-1 / null / out
-   * of range = no confirming reply). See classifyOwnerStaffingReply: plain
-   * approvals are never matched by regex, only by this judgment.
+   * Host-LLM intent labels, one per repliesAfterPropose entry in order
+   * (null/missing/'other' = the judge saw no decisive intent in that reply).
+   * See the vocabularies comment above: these labels carry multilingual
+   * coverage; the regex overlay overrides them per reply where it is
+   * decisive.
    */
-  llmLastConfirmIndex?: number | null;
+  llmIntents?: Array<OwnerStaffingIntent> | null;
+  /** Host-LLM judgment that the triggering wish asked to start WITHOUT
+   * confirmation (multilingual coverage for detectSkipConfirmInWish). */
+  llmWishSkip?: boolean | null;
 }): { allowed: boolean; decision: GroupTaskStaffingOwnerDecision } {
-  let lastRegexIntent: { intent: GroupTaskStaffingOwnerDecision; index: number } | null = null;
-  input.repliesAfterPropose.forEach((reply, index) => {
-    const kind = classifyOwnerStaffingReply(reply);
-    if (kind === 'revise') lastRegexIntent = { intent: 'owner_revise', index };
-    else if (kind === 'cancel') lastRegexIntent = { intent: 'owner_cancel', index };
-    else if (kind === 'confirm') lastRegexIntent = { intent: 'owner_confirmed', index };
-    else if (detectSkipConfirmInWish(reply)) lastRegexIntent = { intent: 'skip_authorized', index };
-  });
   const replies = input.repliesAfterPropose;
-  const rawLlmIndex = Number.isInteger(input.llmLastConfirmIndex as number)
-    ? (input.llmLastConfirmIndex as number)
-    : -1;
-  // An out-of-range judge answer is untrustworthy: read as "no confirming
-  // reply" rather than clamped onto some reply the judge never approved.
-  const llmIndex = rawLlmIndex >= 0 && rawLlmIndex < replies.length ? rawLlmIndex : -1;
-  // Last decisive signal wins, same as the single-classifier era. A regex
-  // intent at the same or later index beats the LLM confirm — a reply the
-  // judge read as approval but that also carries a revise/cancel reading
-  // blocks (fail toward asking the owner again, never toward auto-start).
-  let decided: GroupTaskStaffingOwnerDecision | null = null;
-  if (lastRegexIntent && lastRegexIntent.index >= llmIndex) {
-    decided = lastRegexIntent.intent;
-  } else if (llmIndex >= 0) {
-    decided = 'owner_confirmed';
+  const llmIntents = Array.isArray(input.llmIntents) ? input.llmIntents : [];
+  const labelToDecision: Record<Exclude<OwnerStaffingIntent, 'other'>, GroupTaskStaffingOwnerDecision> = {
+    confirm: 'owner_confirmed',
+    revise: 'owner_revise',
+    cancel: 'owner_cancel',
+    skip: 'skip_authorized',
+  };
+  let decided: { intent: GroupTaskStaffingOwnerDecision; index: number } | null = null;
+  replies.forEach((reply, index) => {
+    const kind = classifyOwnerStaffingReply(reply);
+    const label: Exclude<OwnerStaffingIntent, 'other'> | null = kind !== 'unknown'
+      ? kind
+      : detectSkipConfirmInWish(reply)
+        ? 'skip'
+        : (llmIntents[index] && llmIntents[index] !== 'other' ? llmIntents[index] : null);
+    if (label) decided = { intent: labelToDecision[label], index };
+  });
+  if (decided) {
+    if (decided.intent === 'owner_revise') return { allowed: false, decision: 'owner_revise' };
+    if (decided.intent === 'owner_cancel') return { allowed: false, decision: 'owner_cancel' };
+    if (decided.intent === 'owner_confirmed') return { allowed: true, decision: 'owner_confirmed' };
+    if (decided.intent === 'skip_authorized') return { allowed: true, decision: 'skip_authorized' };
   }
-  if (decided === 'owner_revise') return { allowed: false, decision: 'owner_revise' };
-  if (decided === 'owner_cancel') return { allowed: false, decision: 'owner_cancel' };
-  if (decided === 'owner_confirmed') return { allowed: true, decision: 'owner_confirmed' };
-  if (decided === 'skip_authorized') return { allowed: true, decision: 'skip_authorized' };
-  if (detectSkipConfirmInWish(input.triggeringWish) || input.persistedSkip) {
+  if (detectSkipConfirmInWish(input.triggeringWish) || input.llmWishSkip === true || input.persistedSkip) {
     return { allowed: true, decision: 'skip_authorized' };
   }
   if (input.localSmallSlate) return { allowed: true, decision: 'local_auto_start' };

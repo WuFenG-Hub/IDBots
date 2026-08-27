@@ -93,6 +93,7 @@ import {
   validateStaffingPlan,
   type GroupTaskStaffingPlan,
   type GroupTaskStaffingProposal,
+  type OwnerStaffingIntent,
   type GroupTaskStaffingProposalStatus,
   type GroupTaskStaffingSeat,
   type StaffingSessionMessage,
@@ -497,25 +498,27 @@ function loadStaffingSessionMessages(sessionId: string): StaffingSessionMessage[
 }
 
 /**
- * Host LLM judge for natural-language owner confirmation (task #38): given
- * the slate the owner saw and their post-propose replies in order, return
- * the index of the LAST reply that clearly approves proceeding with this
- * exact roster (-1 when none does). Plain approvals ("确认", "可以", "OK",
- * "就这样吧", …) are intentionally NOT matched by regex vocabulary — see
- * classifyOwnerStaffingReply. Wired in main.ts to a one-shot completion;
- * tests inject deterministic fakes.
+ * Host LLM judge for natural-language owner intent (global product, task
+ * #38 + audit follow-up): given the slate the owner saw, the wish that
+ * triggered the proposal, and the post-propose replies in order, label each
+ * reply confirm / revise / cancel / skip / other and say whether the wish
+ * itself asked to start without confirmation. Plain approvals and
+ * non-zh/en intents are intentionally NOT matched by regex vocabularies —
+ * see the vocabularies comment in groupTaskStaffing. Wired in main.ts to a
+ * one-shot completion; tests inject deterministic fakes.
  */
-export type StaffingOwnerConfirmJudge = (input: {
+export type StaffingOwnerIntentJudge = (input: {
   slateText: string;
+  triggeringWish: string;
   replies: string[];
-}) => Promise<{ lastConfirmIndex: number }>;
+}) => Promise<{ intents: OwnerStaffingIntent[]; wishSkip: boolean }>;
 
-let staffingOwnerConfirmJudge: StaffingOwnerConfirmJudge | null = null;
+let staffingOwnerIntentJudge: StaffingOwnerIntentJudge | null = null;
 
-export function setGroupTaskServiceStaffingOwnerConfirmJudge(
-  judge: StaffingOwnerConfirmJudge | null,
+export function setGroupTaskServiceStaffingIntentJudge(
+  judge: StaffingOwnerIntentJudge | null,
 ): void {
-  staffingOwnerConfirmJudge = judge;
+  staffingOwnerIntentJudge = judge;
 }
 
 async function evaluateProposalOwnerGate(
@@ -541,21 +544,22 @@ async function evaluateProposalOwnerGate(
     localSmallSlate: isLocalOnlySmallSlate(proposal.plan),
   };
   const base = resolveStaffingOwnerGate(gateInput);
-  // The deterministic pass decides allow-side signals (skip waiver, local
+  // The deterministic overlay decides allow-side signals (skip waiver, local
   // auto-start, keep-roster confirm) and blocking revise/cancel on its own.
-  // Plain confirmation, however, is LLM-judged: when the regex pass cannot
-  // allow the create and the owner said anything after the propose, consult
-  // the judge — its confirm index still loses to a same-or-later regex
-  // revise/cancel (see resolveStaffingOwnerGate).
-  if (base.allowed || split.repliesAfterPropose.length === 0) {
+  // Everything else — plain confirmations, and revise/cancel/skip expressed
+  // in ANY language — needs the judge; its labels still lose to a
+  // same-reply regex reading (see resolveStaffingOwnerGate). The judge is
+  // consulted whenever the deterministic pass cannot allow the create: even
+  // with zero replies the multilingual wish itself may carry a skip intent.
+  if (base.allowed) {
     return { allowed: base.allowed, decision: base.decision };
   }
-  const judge = staffingOwnerConfirmJudge;
+  const judge = staffingOwnerIntentJudge;
   if (!judge) {
     return {
       allowed: false,
       decision: base.decision,
-      judgeError: 'owner-confirmation intent judge is not available',
+      judgeError: 'owner-intent judge is not available',
     };
   }
   try {
@@ -566,13 +570,15 @@ async function evaluateProposalOwnerGate(
       plan: proposal.plan,
       ownerConfirmRequired: true,
     });
-    const { lastConfirmIndex } = await judge({
+    const judged = await judge({
       slateText,
+      triggeringWish: split.triggeringWish,
       replies: split.repliesAfterPropose,
     });
     const merged = resolveStaffingOwnerGate({
       ...gateInput,
-      llmLastConfirmIndex: lastConfirmIndex,
+      llmIntents: judged.intents,
+      llmWishSkip: judged.wishSkip,
     });
     return { allowed: merged.allowed, decision: merged.decision };
   } catch (error) {
