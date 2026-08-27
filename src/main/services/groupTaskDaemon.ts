@@ -2990,6 +2990,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           uri: candidate.uri,
         });
         recordedDeliverables.push(candidate);
+        // Review fix (delivery-deadline hygiene): the deliverable ARRIVED —
+        // retire this member's deadline watch immediately. Leaving the kv
+        // armed after a late delivery is exactly what fed the reclaim ladder
+        // a healthy, already-delivered worker.
+        {
+          const delivererMember = members.find(
+            (candidateMember) =>
+              (candidateMember.globalmetaid ?? '').trim().toLowerCase()
+                === (message.senderGlobalMetaId ?? '').trim().toLowerCase(),
+          );
+          if (delivererMember?.metabotId != null) {
+            deps.getStore().delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${delivererMember.metabotId}`);
+            deps.getStore().delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${delivererMember.metabotId}`);
+          }
+        }
         // P0-4: persist multi-source on-chain verification for pinid deliverables.
         if (candidate.kind === 'metaapp' || candidate.kind === 'metafile' || candidate.kind === 'pinid') {
           const pinid = pinidFromDeliverable(candidate.uri);
@@ -4450,6 +4465,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const etaMinutes = ack.estimatedMinutes != null && ack.estimatedMinutes > 0
         ? ack.estimatedMinutes
         : memberTimeoutAfterMinutes;
+      // Review fix: arming a fresh deadline starts a fresh reminder cycle —
+      // a leftover delivery-reminded flag from the previous (missed or
+      // delivered) deadline would otherwise skip the next reminder and drop
+      // the member straight onto the reclaim ladder after one grace window.
+      sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
       sqlite.set(
         `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
         JSON.stringify({
@@ -4743,6 +4763,28 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         // — a valid heartbeat lease or fresh session activity means the long
         // task is alive and the ETA was just optimistic.
         if (nowMs < entry.dueAt + memberTimeoutAfterMinutes * 60_000) continue;
+        // Review fix (task #36 follow-up): re-check the ledger BEFORE
+        // reclaiming. The original escalation branch never looked at
+        // deliverables again, so a LATE delivery (past ETA, after the
+        // reminder) plus one quiet timeout window of normal post-delivery
+        // waiting stopped a healthy worker's session, failed its attempt,
+        // and told the chair to re-dispatch work that was already done.
+        const gmidEscalation = (member.globalmetaid ?? '').trim().toLowerCase();
+        const deliveredLate = Boolean(gmidEscalation)
+          && store.listDeliverables(task.id).some(
+            (deliverable) =>
+              (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === gmidEscalation
+              && deliverable.status !== 'rejected',
+          );
+        if (deliveredLate) {
+          sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+          sqlite.delete(remindedKey);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: delivery deadline watch for ${member.name ?? member.metabotId} ` +
+            'retired — the deliverable arrived late but arrived; no reclaim',
+          );
+          continue;
+        }
         const liveness = classifyMemberLiveness({
           lastSpeakMs: null,
           lastSessionActivityMs: getLocalMemberSessionInfo(task.id, member.metabotId)?.lastActivityMs ?? null,

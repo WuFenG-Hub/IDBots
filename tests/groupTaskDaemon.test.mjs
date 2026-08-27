@@ -647,8 +647,92 @@ test('P1-2/P1-3: a genuinely inert worker session is reclaimed once per streak (
   }
 });
 
-test('classifyMemberLiveness: heartbeat lease, speech, and session activity each keep a member alive', () => {
-  const { classifyMemberLiveness } = require('../dist-electron/main/services/groupTaskDaemon.js');
+test('review fix: a late deliverable is never reclaimed by the delivery-timeout escalation', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    // Simulate the pre-fix residue state DIRECTLY so the escalation branch's
+    // own deliverable re-check is what must save the worker: the deadline
+    // blew, the reminder went out, the deliverable then arrived LATE (kv
+    // never retired), and the member has been quietly waiting since.
+    h.store.set('group_task_expected_delivery:1:2', JSON.stringify({ dueAt: startMs - 5 * 60_000 }));
+    h.store.set('group_task_delivery_reminded:1:2', '1');
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    h.db.run(
+      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, status, confirmation, created_at)
+       VALUES (?, 'pin-late-delivery', 'gmid-w2', 'metaapp', ?, 'delivered', 'unconfirmed', ?)`,
+      [task.id, `metaapp://${'ab'.repeat(32)}i0`, startMs - 3 * 60_000],
+    );
+    // No cowork session activity for an hour — inert by every liveness signal.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+    assert.deepEqual(stoppedSessions, [], 'delivered-late worker is not stopped');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), undefined, 'no reclaim recorded');
+    assert.ok(
+      !h.sends.some((send) => /delivery-timeout recovery/.test(send.content)),
+      'no recovery directive for an already-delivered member',
+    );
+    // The stale watch retired instead of lingering armed.
+    assert.equal(h.store.get('group_task_expected_delivery:1:2'), undefined);
+    assert.equal(h.store.get('group_task_delivery_reminded:1:2'), undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('review fix: a new ETA ACK resets the delivery-reminded flag before re-arming', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    const ack = (pin, eta) => insertGroupMessage(h.db, {
+      pinId: pin, senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[WORKING] doing X，预计${eta}分钟`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    ack('ack-eta-1', 2);
+    await h.loop.runTick();
+    h.state.nowMs += 3 * 60_000; // past the 2-min ETA
+    await h.loop.runTick();
+    assert.equal(h.sends.filter((s) => /estimated delivery/.test(s.content)).length, 1, 'first reminder fired');
+    assert.equal(h.store.get('group_task_delivery_reminded:1:2'), '1');
+
+    // New assignment, new ETA: the flag must reset or this cycle skips the
+    // reminder and drops straight onto the reclaim ladder.
+    ack('ack-eta-2', 1);
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_delivery_reminded:1:2'), undefined, 'flag reset on re-arm');
+
+    h.state.nowMs += 90_000; // past the new ETA, before the grace window ends
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => /estimated delivery/.test(s.content)).length,
+      2,
+      'second deadline miss gets its own reminder',
+    );
+    assert.deepEqual(stoppedSessions, [], 'no reclaim during the fresh cycle');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('classifyMemberLiveness: heartbeat lease, speech, and session activity each keep a member alive', () => {  const { classifyMemberLiveness } = require('../dist-electron/main/services/groupTaskDaemon.js');
   const nowMs = 1_700_000_000_000;
   const thresholdMs = 20 * 60_000;
   // everything absent → stale
