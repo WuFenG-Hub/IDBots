@@ -7,6 +7,8 @@ const DEFAULT_ENDPOINTS = [
 const ONLINE_STATUS_PATH = '/group-chat/socket/online-status';
 const ONLINE_USERS_PATH = '/group-chat/socket/online-users';
 const ONLINE_STATUS_BATCH_SIZE = 200;
+const ONLINE_USERS_PAGE_SIZE = 100;
+const ONLINE_USERS_MAX_PAGES = 10;
 const REQUEST_TIMEOUT_MS = 5000;
 
 export interface IdchatOnlineStatusEntry {
@@ -96,6 +98,8 @@ export class IdchatPresenceService {
       list.push(...result.list);
     }
 
+    await this.repairNeverSeenOfflineVerdicts(normalizedIds, list);
+
     return {
       total: list.length,
       onlineCount: list.filter((entry) => entry.isOnline).length,
@@ -148,6 +152,69 @@ export class IdchatPresenceService {
       onlineCount: toFiniteNumber((data as any)?.onlineCount, list.filter((entry) => entry.isOnline).length),
       list,
     };
+  }
+
+  /**
+   * The online-status endpoint can report `isOnline:false` with
+   * `lastSeenAt:0` ("never seen") for identities that ARE online in the
+   * shared online-users registry — observed live: online-status returned
+   * lastSeenAt:0 for bots that online-users listed with a heartbeat seconds
+   * old at the same moment, which made searchRemoteCandidates show a
+   * near-empty online list and hard-blocked legitimate OpenTeam invites
+   * ("invitee ... is offline"). A never-seen verdict is untrustworthy, so
+   * cross-check those ids against the registry before returning. Genuine
+   * disconnects come back with a real lastSeenAt and keep their offline
+   * verdict untouched; an unreachable registry keeps the original verdicts.
+   */
+  private async repairNeverSeenOfflineVerdicts(
+    queriedIds: string[],
+    list: IdchatOnlineStatusEntry[],
+  ): Promise<void> {
+    const byId = new Map(list.map((entry) => [entry.globalMetaId.toLowerCase(), entry]));
+    const suspects = new Set<string>();
+    for (const id of queriedIds) {
+      const entry = byId.get(id.toLowerCase());
+      if (!entry || (!entry.isOnline && !(entry.lastSeenAt > 0))) {
+        suspects.add(id.toLowerCase());
+      }
+    }
+    if (suspects.size === 0) return;
+
+    try {
+      let cursor = 0;
+      for (let page = 0; page < ONLINE_USERS_MAX_PAGES && suspects.size > 0; page += 1) {
+        const result = await this.fetchOnlineUsers({ cursor, size: ONLINE_USERS_PAGE_SIZE });
+        if (result.list.length === 0) break;
+        for (const user of result.list) {
+          const key = user.globalMetaId.toLowerCase();
+          if (!suspects.delete(key)) continue;
+          const existing = byId.get(key);
+          if (existing) {
+            existing.isOnline = true;
+            existing.lastSeenAt = user.lastSeenAt;
+            existing.lastSeenAgoSeconds = user.lastSeenAgoSeconds;
+            existing.deviceCount = user.deviceCount;
+          } else {
+            // The online-status response omitted this id entirely: same
+            // never-seen pattern, so append the registry entry.
+            const repaired: IdchatOnlineStatusEntry = {
+              globalMetaId: user.globalMetaId,
+              isOnline: true,
+              lastSeenAt: user.lastSeenAt,
+              lastSeenAgoSeconds: user.lastSeenAgoSeconds,
+              deviceCount: user.deviceCount,
+            };
+            list.push(repaired);
+            byId.set(key, repaired);
+          }
+        }
+        cursor += result.list.length;
+        if (result.total > 0 && cursor >= result.total) break;
+      }
+    } catch {
+      // Best-effort repair: keep the original verdicts when the registry
+      // cannot be reached (same outcome as before this repair existed).
+    }
   }
 
   private async requestWithFallback<T>(pathWithQuery: string, init?: RequestInit): Promise<T> {
