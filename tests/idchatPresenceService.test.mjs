@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 function loadPresenceService() {
-  return require('../dist-electron/services/idchatPresenceService.js');
+  return require('../dist-electron/main/services/idchatPresenceService.js');
 }
 
 test('idchat presence posts online-status to api.idchat.io and normalizes results', async () => {
