@@ -555,6 +555,7 @@ export function buildBotBrowserScreenshotTool(deps: {
         '`uri` (metaapp://<pinId>, metaid://<globalMetaId>, preview-metaapp://) navigates first, `tabId` switches first; then it waits briefly for paint (`waitMs` 0–10000 overrides).',
         '`clip` ({x,y,width,height}, CSS px) crops the target (content area; whole surface if fullSurface=true).',
         '`format` png default, jpeg smaller; `quality` 0–100 (default 80, png ignores). Absolute `savePath` also saves to disk.',
+        'Captures are auto-downscaled to 2000px per side max so they always fit the on-chain attachment limits; use `clip` for fine detail.',
         'Bot Browser surface must be open and visible, else it errors.',
       ].join(' '),
       {
