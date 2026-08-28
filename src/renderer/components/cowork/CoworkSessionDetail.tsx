@@ -2533,7 +2533,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const actionButtonRef = useRef<HTMLButtonElement>(null);
-  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [isExportingImage, setIsExportingImage] = useState(false);
 
   // Rename states
@@ -2978,12 +2977,10 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     if (position) {
       setMenuPosition(position);
     }
-    setShowConfirmDelete(false);
   };
 
   const closeMenu = () => {
     setMenuPosition(null);
-    setShowConfirmDelete(false);
   };
 
   // Open folder in Finder/Explorer
@@ -3010,7 +3007,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     if (!currentSession) return;
     ignoreNextBlurRef.current = false;
     setIsRenaming(true);
-    setShowConfirmDelete(false);
     setRenameValue(currentSession.title);
     setMenuPosition(null);
   };
@@ -3051,11 +3047,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     closeMenu();
   };
 
-  // Delete handlers
-  const handleDeleteClick = (e: React.MouseEvent) => {
+  // Archive is reversible (Settings → Archived Chats can restore), so a single
+  // archive applies immediately without a confirmation step.
+  const handleDeleteClick = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    setShowConfirmDelete(true);
     setMenuPosition(null);
+    if (!currentSession) return;
+    await coworkService.archiveSession(currentSession.id);
+    if (onNavigateHome) {
+      onNavigateHome();
+    }
   };
 
   const handleShareClick = (e: React.MouseEvent) => {
@@ -3212,20 +3213,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         }
       })();
     });
-  };
-
-  const handleConfirmDelete = async () => {
-    if (!currentSession) return;
-    await coworkService.archiveSession(currentSession.id);
-    setShowConfirmDelete(false);
-    if (onNavigateHome) {
-      onNavigateHome();
-    }
-  };
-
-  const handleCancelDelete = (e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    setShowConfirmDelete(false);
   };
 
   const loadEarlierMessages = useCallback(async () => {
@@ -3746,52 +3733,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             <ArchiveBoxIcon className="h-4 w-4" />
             {i18nService.t('archiveSession')}
           </button>
-        </div>
-      )}
-
-      {/* Archive Confirmation Modal */}
-      {showConfirmDelete && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center modal-backdrop"
-          onClick={handleCancelDelete}
-        >
-          <div
-            className="w-full max-w-sm mx-4 dark:bg-claude-darkSurface bg-claude-surface rounded-2xl shadow-modal overflow-hidden modal-content"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header */}
-            <div className="flex items-center gap-3 px-5 py-4">
-              <div className="p-2 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover">
-                <ArchiveBoxIcon className="h-5 w-5 text-claude-accent dark:text-claude-darkAccent" />
-              </div>
-              <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
-                {i18nService.t('archiveTaskConfirmTitle')}
-              </h2>
-            </div>
-
-            {/* Content */}
-            <div className="px-5 pb-4">
-              <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('archiveTaskConfirmMessage')}
-              </p>
-            </div>
-
-            {/* Footer */}
-            <div className="flex items-center justify-end gap-3 px-5 py-4 border-t dark:border-claude-darkBorder border-claude-border">
-              <button
-                onClick={handleCancelDelete}
-                className="px-4 py-2 text-sm font-medium rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
-              >
-                {i18nService.t('cancel')}
-              </button>
-              <button
-                onClick={handleConfirmDelete}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-claude-accent hover:opacity-90 text-white transition-colors"
-              >
-                {i18nService.t('archiveSession')}
-              </button>
-            </div>
-          </div>
         </div>
       )}
 

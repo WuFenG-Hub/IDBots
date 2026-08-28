@@ -14,6 +14,11 @@ interface CoworkSessionListProps {
   onRenameSession: (sessionId: string, title: string) => void;
   /** Empty-state message; defaults to the generic "no tasks" text. */
   emptyText?: string;
+  /** Batch-selection mode (batch archive): rows render a checkbox and clicking
+   * a row toggles its selection instead of opening the session. */
+  selectionMode?: boolean;
+  selectedSessionIds?: string[];
+  onToggleSessionSelected?: (sessionId: string) => void;
 }
 
 const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
@@ -24,9 +29,13 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
   onTogglePin,
   onRenameSession,
   emptyText,
+  selectionMode = false,
+  selectedSessionIds,
+  onToggleSessionSelected,
 }) => {
   const unreadSessionIds = useSelector((state: RootState) => state.cowork.unreadSessionIds);
   const unreadSessionIdSet = useMemo(() => new Set(unreadSessionIds), [unreadSessionIds]);
+  const selectedSessionIdSet = useMemo(() => new Set(selectedSessionIds ?? []), [selectedSessionIds]);
 
   const sortedSessions = useMemo(() => {
     const sortByRecentActivity = (a: CoworkSessionSummary, b: CoworkSessionSummary) => {
@@ -67,6 +76,11 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
           onDelete={() => onDeleteSession(session.id)}
           onTogglePin={(pinned) => onTogglePin(session.id, pinned)}
           onRename={(title) => onRenameSession(session.id, title)}
+          selectionMode={selectionMode}
+          isSelected={selectedSessionIdSet.has(session.id)}
+          onToggleSelected={
+            onToggleSessionSelected ? () => onToggleSessionSelected(session.id) : undefined
+          }
         />
       ))}
     </div>
