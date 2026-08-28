@@ -225,6 +225,13 @@ const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
 export const GROUP_TASK_DRIVER_KV_PREFIX = 'group_task_driver:';
 /** Default grace: a driver claim this old (or older) is stale — claimable. */
 export const DEFAULT_DRIVER_GRACE_MS = 20_000;
+/**
+ * Tick watchdog (fix/group-member-status): a tick that stays unsettled longer
+ * than this is presumed hung on a never-settling await — the loop logs and
+ * resumes instead of staying silently dead forever. Legit ticks can chain
+ * several 300s worker turns across tasks, so keep this generously high.
+ */
+export const DEFAULT_TICK_WATCHDOG_MS = 30 * 60_000;
 /** Default bounded wait for an upstream deliverable referenced by [DEPENDS_ON]. */
 const DEFAULT_DEPENDENCY_WAIT_MAX_MS = 15 * 60_000;
 
@@ -1140,6 +1147,8 @@ export interface GroupTaskDaemonDeps {
   emitLog?: (message: string) => void;
   now?: () => number;
   intervalMs?: number;
+  /** Tick watchdog window (ms) — see DEFAULT_TICK_WATCHDOG_MS. */
+  tickWatchdogMs?: number;
   workerCooldownMs?: number;
   chairCooldownMs?: number;
   replyBudget?: number;
@@ -1454,6 +1463,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
+  const tickWatchdogMs = Math.max(1_000, Math.trunc(deps.tickWatchdogMs ?? DEFAULT_TICK_WATCHDOG_MS));
   // Entropy P1: per-(task, bot) TTL cache for the group cognition block.
   const cognitionBlockCache = new Map<string, { rosterKey: string; block: string; expiresAt: number }>();
 
@@ -1818,6 +1828,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
+  /** Tick watchdog (fix/group-member-status): see runGuardedTick. */
+  let tickStartedAtMs = 0;
+  let tickEpoch = 0;
 
   const queryNewMessages = (db: Database, groupId: string, afterId: number): GroupChatMessageRow[] =>
     mapMessageRows(db.exec(
@@ -3939,8 +3952,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // [NO_REPLY] escape hatch: the model opted to stay silent. The assistant
     // message is already in the session (context continuity) and cooldown/budget
     // is still recorded by the caller; only the on-chain send is suppressed.
+    // fix/group-member-status: deliberate silence settles the canonical attempt
+    // as a no-reply COMPLETION instead of a failure — a WORKER_NO_REPLY failure
+    // painted the member-rail "出错" badge for the whole error window even
+    // though the bot answered correctly.
     if (NO_REPLY_PATTERN.test(reply)) {
-      failCanonicalAttempt('WORKER_NO_REPLY');
+      if (orchestrationAttemptId && deps.orchestrationBridge) {
+        deps.orchestrationBridge.completeWorkerAttemptNoReply(orchestrationAttemptId);
+      }
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} answered [NO_REPLY]; ` +
         'on-chain send suppressed (debug)',
@@ -4156,13 +4175,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * P1-2/P2-2: a member with fresh cowork-session activity or a valid
    * [WORKING long-task] heartbeat lease is ALIVE (mid long task) — never
    * flagged unreachable.
+   * Recovery (fix/group-member-status): the stamp used to be one-way — a
+   * member marked unreachable left this scan set forever, so a stale stamp
+   * outlived any resumed activity whenever the cursor-based message handler
+   * missed the comeback (e.g. a hung tick). The scan now also covers
+   * 'unreachable' members and restores them to 'working' the moment ANY
+   * liveness signal (fresh speech / session activity / heartbeat lease) reads
+   * alive again.
    */
   const monitorMemberUnreachable = (task: GroupTask, members: GroupTaskMember[]): void => {
     const thresholdMs = memberUnreachableAfterMinutes * 60_000;
     const store = deps.getGroupTaskStore();
     const workers = members.filter(
       (member) => member.role === 'worker'
-        && (member.status === 'assigned' || member.status === 'working'),
+        && (member.status === 'assigned' || member.status === 'working' || member.status === 'unreachable'),
     );
     if (workers.length === 0 || !task.groupId) return;
     const speakMap = store.getMembersLastSpeakAt(
@@ -4187,7 +4213,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         nowMs: now(),
         thresholdMs,
       });
-      if (liveness === 'alive') continue;
+      if (liveness === 'alive') {
+        if (member.status !== 'unreachable') continue;
+        try {
+          store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: member ${member.name ?? member.metabotId} recovered ` +
+            'unreachable -> working (fresh speech/session activity/heartbeat)',
+          );
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: failed to recover member ${member.metabotId} from unreachable: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        continue;
+      }
+      if (member.status === 'unreachable') continue; // already stamped; wait for liveness
       try {
         store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
         emitLog(
@@ -4233,6 +4275,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       task.groupId,
       workers.map((member) => member.globalmetaid),
     );
+    // fix/group-member-status: fresh group speech also feeds the stamp guard
+    // below — a member talking in the group must not wear 'unreachable' just
+    // because its [WORKING] tag (not its voice) went stale.
+    const speakMap = store.getMembersLastSpeakAt(
+      task.groupId,
+      workers.map((member) => member.globalmetaid),
+    );
     const standbyNames = members
       .filter((member) => member.role === 'worker' && member.status === 'standby')
       .map((member) => member.name ?? `bot-${member.metabotId}`);
@@ -4262,14 +4311,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (liveness === 'alive') continue;
 
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
-      // once per (task, member) streak.
-      try {
-        store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
-      } catch (error) {
-        emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: timeout status write for ${name} failed: ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
+      // once per (task, member) streak. Anti-flap (fix/group-member-status):
+      // skip the status write when the member spoke in the group within the
+      // timeout window — fresh speech contradicts 'unreachable', and with the
+      // bidirectional recovery in monitorMemberUnreachable the two watchdogs
+      // would otherwise flap the badge every tick.
+      const speakSec = gmid ? speakMap.get(gmid) ?? null : null;
+      const hasFreshSpeech = speakSec != null
+        && now() - speakSec * 1000 <= memberTimeoutAfterMinutes * 60_000;
+      if (!hasFreshSpeech) {
+        try {
+          store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: timeout status write for ${name} failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
       const hintKey = `${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`;
       if (sqlite.get<string>(hintKey) !== '1') {
@@ -4506,8 +4564,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       store.setMemberStatus(task.id, member.metabotId, 'standby', member.globalmetaid);
       return;
     }
-    // Implicit ACK: any worker speech counts as engaged.
-    if (member.status === 'assigned') {
+    // Implicit ACK: any worker speech counts as engaged. Speech also lifts a
+    // stale 'unreachable' stamp (fix/group-member-status): a member talking in
+    // the group is definitionally reachable, even if the watchdog stamped it
+    // during a silence window.
+    if (member.status === 'assigned' || member.status === 'unreachable') {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
     }
     clearPendingAck();
@@ -5568,14 +5629,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   const runGuardedTick = (): void => {
-    if (ticking) return;
+    // Tick watchdog (fix/group-member-status): a hung await inside runTick
+    // (a promise that never settles — observed in the wild as the loop going
+    // silently idle for hours) used to brick the daemon forever: `ticking`
+    // stayed true and every later interval call early-returned. If the current
+    // tick outlives the watchdog window, log loudly and resume the loop. The
+    // epoch guard keeps the hung tick's late `.finally` from clearing a NEWER
+    // tick's flag; the dangling promise itself is left to rot.
+    if (ticking) {
+      if (now() - tickStartedAtMs > tickWatchdogMs) {
+        emitLog(
+          `[GroupTaskDaemon] Tick watchdog: previous tick #${tickEpoch} exceeded ` +
+          `${Math.round(tickWatchdogMs / 60_000)} min without settling — resetting the loop ` +
+          '(a dangling await may still be in flight)',
+        );
+        ticking = false;
+      } else {
+        return;
+      }
+    }
     ticking = true;
+    tickStartedAtMs = now();
+    tickEpoch += 1;
+    const epoch = tickEpoch;
     void runTick()
       .catch((error) => {
         emitLog(`[GroupTaskDaemon] Tick failed: ${error instanceof Error ? error.message : String(error)}`);
       })
       .finally(() => {
-        ticking = false;
+        if (tickEpoch === epoch) ticking = false;
       });
   };
 

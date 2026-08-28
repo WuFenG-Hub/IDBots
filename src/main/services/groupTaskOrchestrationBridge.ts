@@ -220,6 +220,36 @@ export class GroupTaskOrchestrationBridge {
     return attempt;
   }
 
+  /**
+   * fix/group-member-status: settle an attempt whose worker answered with the
+   * [NO_REPLY] escape hatch. Deliberate silence is a legitimate protocol
+   * answer, not a failure — recording it as 'failed' painted the member-rail
+   * "出错" badge for the whole error window even though the bot was healthy.
+   * Mirrors completeWorkerAttempt minus the on-chain pin (the send was
+   * suppressed), marking the result as a no-reply completion.
+   */
+  completeWorkerAttemptNoReply(attemptId: string): void {
+    const attempt = this.deps.orchestrationStore.getAttempt(attemptId);
+    if (!attempt) return;
+    if (attempt.status === 'queued' || attempt.status === 'running') {
+      this.deps.orchestrationStore.updateAttempt(attempt.id, 'completed', {
+        result: {
+          replyText: '',
+          groupMessagePinId: '',
+          verified: true,
+          deliverables: [],
+          noReply: true,
+        },
+      });
+    }
+    const step = this.deps.orchestrationStore.getStep(attempt.stepId);
+    if (step && (step.status === 'queued' || step.status === 'running')) {
+      this.deps.orchestrationStore.updateStepStatus(step.id, 'waiting_input', {
+        activeAttemptId: attempt.id,
+      });
+    }
+  }
+
   failWorkerAttempt(attemptId: string, error: string): void {
     const attempt = this.deps.orchestrationStore.getAttempt(attemptId);
     if (!attempt) return;
