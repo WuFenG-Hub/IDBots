@@ -14,6 +14,11 @@ interface CoworkSessionItemProps {
   onDelete: () => void;
   onTogglePin: (pinned: boolean) => void;
   onRename: (title: string) => void;
+  /** Batch-selection mode (e.g. batch archive): the row shows a checkbox and
+   * clicking it toggles selection instead of opening the session. */
+  selectionMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelected?: () => void;
 }
 
 const statusLabels: Record<CoworkSessionStatus, string> = {
@@ -205,8 +210,10 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
   onDelete,
   onTogglePin,
   onRename,
+  selectionMode = false,
+  isSelected = false,
+  onToggleSelected,
 }) => {
-  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(session.title);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
@@ -250,7 +257,6 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     if (position) {
       setMenuPosition(position);
     }
-    setShowConfirmDelete(false);
   };
 
   /** Open the session menu at the mouse position (right-click entry point). */
@@ -269,18 +275,17 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     );
     menuPositionFromContextMenuRef.current = true;
     setMenuPosition({ x, y });
-    setShowConfirmDelete(false);
   };
 
   const handleContextMenu = (event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    if (selectionMode) return;
     openMenuAt(event.clientX, event.clientY);
   };
 
   const closeMenu = () => {
     setMenuPosition(null);
-    setShowConfirmDelete(false);
   };
 
   const handleTogglePin = (e: React.MouseEvent) => {
@@ -293,7 +298,6 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     e.stopPropagation();
     ignoreNextBlurRef.current = false;
     setIsRenaming(true);
-    setShowConfirmDelete(false);
     setRenameValue(session.title);
     setMenuPosition(null);
   };
@@ -335,20 +339,12 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     }
   };
 
+  // Archive is reversible (Settings → Archived Chats can restore), so a single
+  // archive applies immediately without a confirmation step.
   const handleDeleteClick = (e: React.MouseEvent) => {
     e.stopPropagation();
-    setShowConfirmDelete(true);
     setMenuPosition(null);
-  };
-
-  const handleConfirmDelete = () => {
     onDelete();
-    setShowConfirmDelete(false);
-  };
-
-  const handleCancelDelete = (e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    setShowConfirmDelete(false);
   };
 
   useEffect(() => {
@@ -384,12 +380,12 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
       menuPositionFromContextMenuRef.current = false;
       return;
     }
-    const menuHeight = showConfirmDelete ? 112 : 160;
+    const menuHeight = 160;
     const position = calculateMenuPosition(menuHeight);
     if (position && (position.x !== menuPosition.x || position.y !== menuPosition.y)) {
       setMenuPosition(position);
     }
-  }, [menuPosition, showConfirmDelete]);
+  }, [menuPosition]);
 
   useEffect(() => {
     if (!isRenaming) return;
@@ -435,6 +431,10 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     <div
       onClick={() => {
         if (isRenaming) return;
+        if (selectionMode) {
+          onToggleSelected?.();
+          return;
+        }
         closeMenu();
         onSelect();
       }}
@@ -442,11 +442,25 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
       className={`group relative px-2.5 py-1.5 rounded-lg cursor-pointer transition-all duration-150 ${
         isActive
           ? 'bg-black/[0.06] dark:bg-white/[0.08]'
-          : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
+          : selectionMode && isSelected
+            ? 'bg-claude-accent/10'
+            : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'
       }`}
     >
       {/* Content area */}
       <div className="flex items-start leading-tight">
+        {selectionMode && (
+          <span className="mr-1.5 flex h-6 flex-shrink-0 items-center">
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={() => onToggleSelected?.()}
+              onClick={(event) => event.stopPropagation()}
+              aria-label={i18nService.t('batchArchiveSelect')}
+              className="h-3.5 w-3.5 cursor-pointer accent-claude-accent"
+            />
+          </span>
+        )}
         <CoworkSessionAvatars session={session} />
         <div className="flex-1 min-w-0">
           <div className={`flex items-center mb-0.5 ${showStatusIndicator || isA2A ? 'gap-2' : 'gap-0'}`}>
@@ -501,31 +515,33 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
       </div>
 
       {/* Actions - absolutely positioned overlay */}
-      <div
-        className={`absolute right-1.5 top-1.5 transition-opacity ${
-          isRenaming
-            ? 'opacity-0 pointer-events-none'
-            : session.pinned
-              ? 'opacity-100'
-              : 'opacity-0 group-hover:opacity-100'
-        }`}
-      >
-        <button
-          ref={actionButtonRef}
-          onClick={openMenu}
-          className="p-1.5 rounded-lg bg-claude-surfaceMuted dark:bg-claude-darkSurfaceMuted dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurface hover:bg-claude-surface transition-colors"
-          aria-label={actionLabel}
+      {!selectionMode && (
+        <div
+          className={`absolute right-1.5 top-1.5 transition-opacity ${
+            isRenaming
+              ? 'opacity-0 pointer-events-none'
+              : session.pinned
+                ? 'opacity-100'
+                : 'opacity-0 group-hover:opacity-100'
+          }`}
         >
-          {session.pinned ? (
-            <span className="relative block h-4 w-4">
-              <PushPinIcon className="h-4 w-4 transition-opacity duration-150 group-hover:opacity-0" />
-              <EllipsisHorizontalIcon className="absolute inset-0 h-4 w-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100" />
-            </span>
-          ) : (
-            <EllipsisHorizontalIcon className="h-4 w-4" />
-          )}
-        </button>
-      </div>
+          <button
+            ref={actionButtonRef}
+            onClick={openMenu}
+            className="p-1.5 rounded-lg bg-claude-surfaceMuted dark:bg-claude-darkSurfaceMuted dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurface hover:bg-claude-surface transition-colors"
+            aria-label={actionLabel}
+          >
+            {session.pinned ? (
+              <span className="relative block h-4 w-4">
+                <PushPinIcon className="h-4 w-4 transition-opacity duration-150 group-hover:opacity-0" />
+                <EllipsisHorizontalIcon className="absolute inset-0 h-4 w-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100" />
+              </span>
+            ) : (
+              <EllipsisHorizontalIcon className="h-4 w-4" />
+            )}
+          </button>
+        </div>
+      )}
 
       {menuPosition && (
         <div
@@ -553,52 +569,6 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
               {item.label}
             </button>
           ))}
-        </div>
-      )}
-
-      {/* Archive Confirmation Modal */}
-      {showConfirmDelete && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={handleCancelDelete}
-        >
-          <div
-            className="w-full max-w-sm mx-4 dark:bg-claude-darkSurface bg-claude-surface rounded-2xl shadow-xl overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header */}
-            <div className="flex items-center gap-3 px-5 py-4">
-              <div className="p-2 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover">
-                <ArchiveBoxIcon className="h-5 w-5 text-claude-accent dark:text-claude-darkAccent" />
-              </div>
-              <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
-                {i18nService.t('archiveTaskConfirmTitle')}
-              </h2>
-            </div>
-
-            {/* Content */}
-            <div className="px-5 pb-4">
-              <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('archiveTaskConfirmMessage')}
-              </p>
-            </div>
-
-            {/* Footer */}
-            <div className="flex items-center justify-end gap-3 px-5 py-4 border-t dark:border-claude-darkBorder border-claude-border">
-              <button
-                onClick={handleCancelDelete}
-                className="px-4 py-2 text-sm font-medium rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
-              >
-                {i18nService.t('cancel')}
-              </button>
-              <button
-                onClick={handleConfirmDelete}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-claude-accent hover:opacity-90 text-white transition-colors"
-              >
-                {i18nService.t('archiveSession')}
-              </button>
-            </div>
-          </div>
         </div>
       )}
     </div>

@@ -8,7 +8,8 @@ import CoworkSessionList from './cowork/CoworkSessionList';
 import CoworkSearchModal from './cowork/CoworkSearchModal';
 import GroupTaskSidebarList from './groupTasks/GroupTaskSidebarList';
 import { selectTask as selectGroupTask } from '../store/slices/groupTasksSlice';
-import { MagnifyingGlassIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon, UserGroupIcon, GlobeAltIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon, UserGroupIcon, GlobeAltIcon, ArchiveBoxIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import Tooltip from './ui/Tooltip';
 import ComposeIcon from './icons/ComposeIcon';
 import SidebarToggleIcon from './icons/SidebarToggleIcon';
 import { P2PStatusBadge } from './p2p/P2PStatusBadge';
@@ -109,6 +110,10 @@ const Sidebar: React.FC<SidebarProps> = ({
   // Which task-record category the home history list shows. Persisted across
   // app restarts; the header + tabs stay fixed while only the list scrolls.
   const [taskRecordTab, setTaskRecordTab] = useState<TaskRecordTab>(loadTaskRecordTab);
+  // Batch-archive selection mode for the local-chats list. The toolbar row
+  // above the list hosts this today and view-grouping controls later.
+  const [isBatchArchiveMode, setIsBatchArchiveMode] = useState(false);
+  const [batchSelectedIds, setBatchSelectedIds] = useState<string[]>([]);
   const activeTaskRecordTab = TASK_RECORD_TABS.find((tab) => tab.id === taskRecordTab) ?? TASK_RECORD_TABS[0];
   const handleSetTaskRecordTab = (tab: TaskRecordTab) => {
     setTaskRecordTab(tab);
@@ -168,6 +173,13 @@ const Sidebar: React.FC<SidebarProps> = ({
     void groupTaskService.loadTasks();
   }, [taskRecordTab]);
 
+  // Leaving the local tab ends any batch-archive selection in progress.
+  useEffect(() => {
+    if (taskRecordTab === 'local') return;
+    setIsBatchArchiveMode(false);
+    setBatchSelectedIds([]);
+  }, [taskRecordTab]);
+
   useEffect(() => {
     if (!isCollapsed) return;
     setIsSearchOpen(false);
@@ -186,6 +198,34 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   const handleDeleteSession = async (sessionId: string) => {
     await coworkService.archiveSession(sessionId);
+  };
+
+  const handleEnterBatchArchiveMode = () => {
+    setBatchSelectedIds([]);
+    setIsBatchArchiveMode(true);
+  };
+
+  const handleExitBatchArchiveMode = () => {
+    setIsBatchArchiveMode(false);
+    setBatchSelectedIds([]);
+  };
+
+  const handleToggleBatchSelected = (sessionId: string) => {
+    setBatchSelectedIds((prev) =>
+      prev.includes(sessionId) ? prev.filter((id) => id !== sessionId) : [...prev, sessionId],
+    );
+  };
+
+  const handleConfirmBatchArchive = async () => {
+    // Only archive ids still present in the local list (a session may have
+    // been archived individually while selection mode was open).
+    const archivableIds = batchSelectedIds.filter((id) =>
+      sessionGroups.local.some((session) => session.id === id),
+    );
+    handleExitBatchArchiveMode();
+    for (const sessionId of archivableIds) {
+      await coworkService.archiveSession(sessionId);
+    }
   };
 
   const handleTogglePin = async (sessionId: string, pinned: boolean) => {
@@ -441,6 +481,46 @@ const Sidebar: React.FC<SidebarProps> = ({
               })}
             </div>
           </div>
+          {/* Toolbar row above the local list: batch archive today, view
+              grouping etc. later. Fixed with the header; only the list scrolls. */}
+          {taskRecordTab === 'local' && sessionGroups.local.length > 0 && (
+            <div className="flex items-center justify-end gap-1.5 px-3 pb-1.5 shrink-0">
+              {isBatchArchiveMode ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void handleConfirmBatchArchive()}
+                    disabled={batchSelectedIds.length === 0}
+                    className="inline-flex h-6 items-center rounded-md bg-claude-accent px-2.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {i18nService.t('batchArchiveConfirm')}
+                    {batchSelectedIds.length > 0 ? ` (${batchSelectedIds.length})` : ''}
+                  </button>
+                  <Tooltip content={i18nService.t('batchArchiveCancel')} position="bottom">
+                    <button
+                      type="button"
+                      onClick={handleExitBatchArchiveMode}
+                      aria-label={i18nService.t('batchArchiveCancel')}
+                      className="rounded p-1 text-claude-textSecondary transition-colors hover:bg-claude-surfaceHover hover:text-claude-text dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover dark:hover:text-claude-darkText"
+                    >
+                      <XMarkIcon className="h-4 w-4" />
+                    </button>
+                  </Tooltip>
+                </>
+              ) : (
+                <Tooltip content={i18nService.t('batchArchive')} position="bottom">
+                  <button
+                    type="button"
+                    onClick={handleEnterBatchArchiveMode}
+                    aria-label={i18nService.t('batchArchive')}
+                    className="rounded p-1 text-claude-textSecondary transition-colors hover:bg-claude-accent/10 hover:text-claude-accent dark:text-claude-darkTextSecondary"
+                  >
+                    <ArchiveBoxIcon className="h-4 w-4" />
+                  </button>
+                </Tooltip>
+              )}
+            </div>
+          )}
           {/* Scrollable list area */}
           <div className="flex-1 min-h-0 overflow-y-auto pb-4">
             {taskRecordTab === 'group' ? (
@@ -462,6 +542,9 @@ const Sidebar: React.FC<SidebarProps> = ({
                 onTogglePin={handleTogglePin}
                 onRenameSession={handleRenameSession}
                 emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
+                selectionMode={isBatchArchiveMode && taskRecordTab === 'local'}
+                selectedSessionIds={batchSelectedIds}
+                onToggleSessionSelected={handleToggleBatchSelected}
               />
             )}
           </div>
