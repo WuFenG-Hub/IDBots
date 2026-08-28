@@ -74,9 +74,16 @@ test('surface wires Bot Browser MetaApp cache IPC into the host adapter', () => 
 test('surface relaxes MetaAPP iframe sandbox after rendering the packaged Browser HTML', () => {
   assert.match(
     source,
-    /import \{ injectBrowserIframeBridge,\s*relaxMetaAppIframeSandbox \} from '\.\/browserIframeBridge';/,
+    /import \{ injectBrowserIframeBridge,\s*patchBrowserNavButtonSync,\s*relaxMetaAppIframeSandbox \} from '\.\/browserIframeBridge';/,
   );
   assert.match(source, /const html = relaxMetaAppIframeSandbox\(\s*await renderBrowserPageHtml\(\s*definition,\s*getBrowserLanguagePreference\(\),\s*\{ theme: themeService\.getEffectiveTheme\(\) \},\s*\),\s*\);/);
+});
+
+test('surface patches the ABC page so back/forward buttons re-sync after in-tab navigation', () => {
+  assert.match(
+    source,
+    /const definition = injectBrowserIframeBridge\(\s*patchBrowserNavButtonSync\(buildBrowserPageDefinition\(\)\),?\s*\);/,
+  );
 });
 
 test('surface uses the ABC theme contract for initial paint and runtime changes', () => {
