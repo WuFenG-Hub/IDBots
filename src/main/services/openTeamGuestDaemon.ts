@@ -47,6 +47,7 @@ import type {
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
+import { isOpenTeamTaskStatusTerminal, parseOpenTeamTaskStatusTag } from '../libs/openTeamTaskStatus';
 import { buildOpenTeamGuestPrompt } from './openTeamGuestPrompt';
 import { ensureOpenTeamGuestSession } from './groupTaskSession';
 import {
@@ -316,6 +317,40 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
+  /** One-time-per-run transcript backfill of the host-task status (below). */
+  let taskStatusBackfillDone = false;
+
+  /**
+   * Host-task status sync: the chair drives the host-side state machine with
+   * `[STATUS:EXECUTING|REVIEW]` group messages and closeGroupTask posts a
+   * deterministic `[STATUS:DONE|CANCELLED]` close-out. The newest chair-sent
+   * tag in the transcript is the membership's task_status. Legacy rows (tag
+   * pre-dates this feature) are re-derived once per daemon start from the
+   * already-indexed transcript — this is what un-sticks the eternal "active"
+   * badge for pre-existing memberships.
+   */
+  const backfillTaskStatusesFromTranscript = (): void => {
+    const membershipStore = deps.getOpenTeamMembershipStore();
+    for (const membership of membershipStore.listMembershipsWithUnknownTaskStatus()) {
+      try {
+        const derived = membershipStore.deriveLatestChairTaskStatus(
+          membership.groupId,
+          membership.inviterGlobalmetaid,
+        );
+        if (derived && membershipStore.updateMembershipTaskStatus(membership.groupId, membership.metabotId, derived)) {
+          emitLog(
+            `[OpenTeamGuestDaemon] Group ${membership.groupId}: host task status backfilled ` +
+            `from the transcript: ${derived}`,
+          );
+        }
+      } catch (error) {
+        emitLog(
+          `[OpenTeamGuestDaemon] Group ${membership.groupId}: task-status backfill failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
 
   const queryNewMessages = (db: Database, groupId: string, afterId: number): GroupChatMessageRow[] =>
     mapMessageRows(db.exec(
@@ -729,31 +764,65 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     // Kick self-check before consuming new messages (P1-2 fallback path).
     if (await runMembershipSelfCheck(membership, bot)) return;
 
+    // Host-task status sync: the chair's `[STATUS:...]` tags ride the ordinary
+    // transcript. Once a close-out tag ([STATUS:DONE|CANCELLED]) has landed the
+    // task is over — the daemon keeps consuming messages (advancing the cursor)
+    // but never speaks in the group again.
+    let taskTerminal = isOpenTeamTaskStatusTerminal(membership.taskStatus);
+    const chairGlobalMetaId = (membership.inviterGlobalmetaid ?? '').trim();
+
     const rows = queryNewMessages(db, membership.groupId, membership.lastProcessedMsgId);
     for (const row of rows) {
       const message = toDaemonMessage(row);
+      // Status tags are parsed BEFORE the mention gating so a close-out tag is
+      // picked up even while a reply cooldown is running. Only the chair (the
+      // membership's recorded inviter — the kick handler's trust anchor) may
+      // set the host-task status; tags quoted by other members never count.
+      if (chairGlobalMetaId && (message.senderGlobalMetaId ?? '').trim() === chairGlobalMetaId) {
+        const statusTag = parseOpenTeamTaskStatusTag(message.content);
+        if (statusTag) {
+          try {
+            if (membershipStore.updateMembershipTaskStatus(membership.groupId, membership.metabotId, statusTag)) {
+              emitLog(
+                `[OpenTeamGuestDaemon] Group ${membership.groupId}: host task status -> ${statusTag} (chair transcript tag)`,
+              );
+            }
+          } catch (error) {
+            emitLog(
+              `[OpenTeamGuestDaemon] Group ${membership.groupId}: task-status update failed: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          if (isOpenTeamTaskStatusTerminal(statusTag)) taskTerminal = true;
+        }
+      }
       let advanceCursor = false;
       try {
-        const decision = decideOpenTeamGuestResponse({
-          message,
-          bot,
-          lastReplyAt: lastReplyAtByMembership.get(membership.id) ?? 0,
-          now: now(),
-          cooldownMs,
-        });
-        if (!decision.respond && decision.reason === 'cooldown') {
-          // Cooldown is transient: keep the cursor BEFORE this message so the
-          // next tick re-evaluates it once the cooldown has elapsed instead of
-          // dropping a legitimate mention forever. Later messages wait to keep
-          // processing order.
-          break;
+        if (taskTerminal) {
+          // Terminal host task: consume the message without any reply path.
+          advanceCursor = true;
+        } else {
+          const decision = decideOpenTeamGuestResponse({
+            message,
+            bot,
+            lastReplyAt: lastReplyAtByMembership.get(membership.id) ?? 0,
+            now: now(),
+            cooldownMs,
+          });
+          if (!decision.respond && decision.reason === 'cooldown') {
+            // Cooldown is transient: keep the cursor BEFORE this message so the
+            // next tick re-evaluates it once the cooldown has elapsed instead of
+            // dropping a legitimate mention forever. Later messages wait to keep
+            // processing order.
+            break;
+          }
+          if (decision.respond) {
+            await generateAndSendGuestReply(membership, bot, message);
+            lastReplyAtByMembership.set(membership.id, now());
+          }
+          consecutiveFailuresByMembership.delete(membership.id);
+          advanceCursor = true;
         }
-        if (decision.respond) {
-          await generateAndSendGuestReply(membership, bot, message);
-          lastReplyAtByMembership.set(membership.id, now());
-        }
-        consecutiveFailuresByMembership.delete(membership.id);
-        advanceCursor = true;
       } catch (error) {
         // A send/generation failure must not silently drop the mention: hold
         // the cursor and retry on the next tick, giving up after a bounded run
@@ -835,6 +904,12 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     runTick,
     start() {
       if (timer) return;
+      if (!taskStatusBackfillDone) {
+        taskStatusBackfillDone = true;
+        // One-time-per-run repair of legacy memberships: re-derive the host
+        // task status from chair `[STATUS:...]` tags already in the transcript.
+        backfillTaskStatusesFromTranscript();
+      }
       runGuardedTick();
       timer = setInterval(runGuardedTick, intervalMs);
       timer.unref?.();

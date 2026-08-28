@@ -2409,11 +2409,13 @@ export async function closeGroupTask(
   if (opts.reason?.trim()) {
     console.log(`[GroupTask] Closing task ${taskId} as ${opts.status}: ${opts.reason.trim()}`);
   }
+  // Read the pre-close status once: the externalDeliveries replay guard and the
+  // close-out announcement both key off it.
+  const beforeStatus = getGroupTaskStore().getTaskById(taskId)?.status ?? null;
   if (opts.externalDeliveries && opts.externalDeliveries.length > 0) {
     // Guard: a repeat close of an already-terminal task is a no-op below —
     // it must not stack a second copy of the external ledger rows.
-    const current = getGroupTaskStore().getTaskById(taskId);
-    if (current && !TERMINAL_STATUSES.has(current.status)) {
+    if (beforeStatus && !TERMINAL_STATUSES.has(beforeStatus)) {
       recordExternalDeliveries(taskId, opts.externalDeliveries);
     }
   }
@@ -2426,6 +2428,32 @@ export async function closeGroupTask(
     }
     return getGroupTaskStore().updateTaskStatus(taskId, opts.status, { actor: opts.actor });
   })();
+  // OpenTeam status sync: a deterministic close-out announcement in the group,
+  // so remote guests parse the chair's [STATUS:DONE|CANCELLED] tag off the
+  // transcript (their membership task_status) and every member sees the ending
+  // in the group itself. Only on a REAL terminal flip (a repeat close of an
+  // already-terminal task no-ops in the bridge and must not re-announce).
+  // Best-effort, mirroring the kick moderation notice: never blocks the close.
+  if (beforeStatus && !TERMINAL_STATUSES.has(beforeStatus) && TERMINAL_STATUSES.has(closed.status)) {
+    try {
+      const chair = getMetabotStore().getMetabotById(closed.chairMetabotId);
+      if (closed.groupId && chair) {
+        await sendGroupChatMessageFn(closed.chairMetabotId, closed.groupId, {
+          content:
+            (closed.status === 'done'
+              ? '[STATUS:DONE] Task closed: accepted by the owner.'
+              : '[STATUS:CANCELLED] Task closed: cancelled by the owner.') +
+            (opts.reason?.trim() ? ` Reason: ${opts.reason.trim()}` : ''),
+          nickName: chair.name?.trim() || `bot-${closed.chairMetabotId}`,
+        });
+      }
+    } catch (error) {
+      console.warn(
+        `[GroupTask] Close-out announcement failed for task ${taskId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   // HITL: a task closing with a checkpoint still open cancels that checkpoint
   // (the wait is over either way). Best-effort: never block the close itself.
   try {

@@ -1024,3 +1024,104 @@ test('self-check: throttled per membership interval', async () => {
     h.store.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Host-task status sync (chair [STATUS:...] transcript tags)
+// ---------------------------------------------------------------------------
+
+const CHAIR_GMID = 'gmid-inviter';
+
+const insertChairStatusMessage = (db, pinChar, content) => {
+  insertGroupMessage(db, {
+    pinId: `${pinChar.repeat(64)}i0`,
+    senderMetaId: 'metaid-chair',
+    senderGlobalMetaId: CHAIR_GMID,
+    senderName: 'Chair Bot',
+    content,
+  });
+};
+
+test('status sync: a chair [STATUS:REVIEW] tag updates the membership; non-chair tags are ignored', async () => {
+  const { store, db, membershipStore, loop, calls } = await createHarness();
+  try {
+    joinAsGuest(membershipStore);
+
+    // A worker-quoted tag must NOT set the host-task status.
+    insertGroupMessage(db, {
+      pinId: `${'a'.repeat(64)}i0`,
+      senderMetaId: 'metaid-other',
+      senderGlobalMetaId: OTHER_GMID,
+      senderName: 'Other Bot',
+      content: 'sure, posting [STATUS:REVIEW] now',
+    });
+    await loop.runTick();
+    assert.equal(membershipStore.getMembership(GROUP_ID, 7).taskStatus, null, 'non-chair tag ignored');
+
+    insertChairStatusMessage(db, 'b', 'All delivered. [STATUS:REVIEW]');
+    await loop.runTick();
+    assert.equal(membershipStore.getMembership(GROUP_ID, 7).taskStatus, 'review', 'chair tag persisted');
+    assert.equal(calls.chat.length, 0, 'status tags never trigger a reply');
+    assert.equal(calls.send.length, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('status sync: a terminal chair tag silences the guest while the cursor keeps advancing', async () => {
+  const { store, db, membershipStore, loop, calls } = await createHarness();
+  try {
+    joinAsGuest(membershipStore);
+
+    // The task closes, then someone still @-mentions the guest afterwards.
+    insertChairStatusMessage(db, 'a', '[STATUS:DONE] Task closed: accepted by the owner.');
+    insertMention(db, 'b');
+    await loop.runTick();
+
+    const membership = membershipStore.getMembership(GROUP_ID, 7);
+    assert.equal(membership.taskStatus, 'done');
+    assert.equal(calls.chat.length, 0, 'no reply generation after the terminal tag');
+    assert.equal(calls.send.length, 0);
+    assert.equal(
+      membership.lastProcessedMsgId,
+      messageIdOf(db, `${'b'.repeat(64)}i0`),
+      'the cursor still consumes the transcript',
+    );
+
+    // Mentions keep being ignored on later ticks too.
+    insertMention(db, 'c');
+    await loop.runTick();
+    assert.equal(calls.chat.length, 0);
+    assert.equal(
+      membershipStore.getMembership(GROUP_ID, 7).lastProcessedMsgId,
+      messageIdOf(db, `${'c'.repeat(64)}i0`),
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test('status sync: daemon start backfills legacy memberships from the transcript', async () => {
+  const { store, db, membershipStore, loop } = await createHarness();
+  try {
+    // Legacy join: the chair's review tag predates the guest cursor (as after
+    // catchUpCursorToLatest), so the live parse path never sees it.
+    insertChairStatusMessage(db, 'a', 'All delivered. [STATUS:REVIEW]');
+    joinAsGuest(membershipStore);
+    membershipStore.catchUpCursorToLatest(GROUP_ID, 7);
+
+    await loop.runTick();
+    assert.equal(membershipStore.getMembership(GROUP_ID, 7).taskStatus, null, 'pre-cursor tag is not live-parsed');
+
+    loop.start();
+    loop.stop();
+    assert.equal(
+      membershipStore.getMembership(GROUP_ID, 7).taskStatus,
+      'review',
+      'start() re-derives the status from the already-indexed transcript',
+    );
+    // Let the tick that start() fired settle before the store closes.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } finally {
+    store.close();
+  }
+});
