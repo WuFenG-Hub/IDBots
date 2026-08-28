@@ -225,6 +225,13 @@ const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
 export const GROUP_TASK_DRIVER_KV_PREFIX = 'group_task_driver:';
 /** Default grace: a driver claim this old (or older) is stale — claimable. */
 export const DEFAULT_DRIVER_GRACE_MS = 20_000;
+/**
+ * Tick watchdog (fix/group-member-status): a tick that stays unsettled longer
+ * than this is presumed hung on a never-settling await — the loop logs and
+ * resumes instead of staying silently dead forever. Legit ticks can chain
+ * several 300s worker turns across tasks, so keep this generously high.
+ */
+export const DEFAULT_TICK_WATCHDOG_MS = 30 * 60_000;
 /** Default bounded wait for an upstream deliverable referenced by [DEPENDS_ON]. */
 const DEFAULT_DEPENDENCY_WAIT_MAX_MS = 15 * 60_000;
 
@@ -1140,6 +1147,8 @@ export interface GroupTaskDaemonDeps {
   emitLog?: (message: string) => void;
   now?: () => number;
   intervalMs?: number;
+  /** Tick watchdog window (ms) — see DEFAULT_TICK_WATCHDOG_MS. */
+  tickWatchdogMs?: number;
   workerCooldownMs?: number;
   chairCooldownMs?: number;
   replyBudget?: number;
@@ -1454,6 +1463,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
+  const tickWatchdogMs = Math.max(1_000, Math.trunc(deps.tickWatchdogMs ?? DEFAULT_TICK_WATCHDOG_MS));
   // Entropy P1: per-(task, bot) TTL cache for the group cognition block.
   const cognitionBlockCache = new Map<string, { rosterKey: string; block: string; expiresAt: number }>();
 
@@ -1818,6 +1828,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
+  /** Tick watchdog (fix/group-member-status): see runGuardedTick. */
+  let tickStartedAtMs = 0;
+  let tickEpoch = 0;
 
   const queryNewMessages = (db: Database, groupId: string, afterId: number): GroupChatMessageRow[] =>
     mapMessageRows(db.exec(
@@ -5610,14 +5623,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   const runGuardedTick = (): void => {
-    if (ticking) return;
+    // Tick watchdog (fix/group-member-status): a hung await inside runTick
+    // (a promise that never settles — observed in the wild as the loop going
+    // silently idle for hours) used to brick the daemon forever: `ticking`
+    // stayed true and every later interval call early-returned. If the current
+    // tick outlives the watchdog window, log loudly and resume the loop. The
+    // epoch guard keeps the hung tick's late `.finally` from clearing a NEWER
+    // tick's flag; the dangling promise itself is left to rot.
+    if (ticking) {
+      if (now() - tickStartedAtMs > tickWatchdogMs) {
+        emitLog(
+          `[GroupTaskDaemon] Tick watchdog: previous tick #${tickEpoch} exceeded ` +
+          `${Math.round(tickWatchdogMs / 60_000)} min without settling — resetting the loop ` +
+          '(a dangling await may still be in flight)',
+        );
+        ticking = false;
+      } else {
+        return;
+      }
+    }
     ticking = true;
+    tickStartedAtMs = now();
+    tickEpoch += 1;
+    const epoch = tickEpoch;
     void runTick()
       .catch((error) => {
         emitLog(`[GroupTaskDaemon] Tick failed: ${error instanceof Error ? error.message : String(error)}`);
       })
       .finally(() => {
-        ticking = false;
+        if (tickEpoch === epoch) ticking = false;
       });
   };
 

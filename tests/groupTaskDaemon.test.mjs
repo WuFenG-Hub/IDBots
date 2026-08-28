@@ -3254,6 +3254,54 @@ test('R6 L2 anti-flap: stale [WORKING] with fresh plain speech does not stamp un
   }
 });
 
+test('tick watchdog: a hung tick no longer bricks the daemon loop', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    deps: { tickWatchdogMs: 500, intervalMs: 20 },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // The first group send never settles — simulating the hung await that
+    // silently killed the loop in production (task #45, 2026-08-28).
+    const realPost = h.deps.postGroupTaskMessage;
+    let postCalls = 0;
+    h.deps.postGroupTaskMessage = async (...args) => {
+      postCalls += 1;
+      if (postCalls === 1) return new Promise(() => {});
+      return realPost(...args);
+    };
+    insertGroupMessage(h.db, {
+      pinId: 'wd-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the thing',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+
+    const drivenAtStart = h.groupTaskStore.getTaskById(task.id).lastDrivenAt ?? 0;
+    h.loop.start();
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    await sleep(100); // tick 1 hangs inside the first send
+    h.state.nowMs += 10_000; // jump past the watchdog window
+    // intervalMs is clamped to >= 1000ms inside the loop — wait out a full
+    // interval so the watchdog fire + the resumed tick both land.
+    await sleep(1_500);
+    h.loop.stop();
+
+    assert.ok(
+      logs.some((line) => line.includes('Tick watchdog')),
+      'watchdog logged the hung tick',
+    );
+    const drivenAtEnd = h.groupTaskStore.getTaskById(task.id).lastDrivenAt ?? 0;
+    assert.ok(
+      drivenAtEnd > drivenAtStart,
+      'the loop resumed driving after the hung tick (lastDrivenAt heartbeat moved)',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // P0-3: [WORKING] ACK + chair reminders
 // ---------------------------------------------------------------------------
