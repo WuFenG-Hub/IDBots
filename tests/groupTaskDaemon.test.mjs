@@ -38,6 +38,7 @@ const {
   buildMemberJoinWelcomeText,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
+const { SkillTurnTimeoutError } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
 
 Module._load = originalLoad;
 
@@ -4405,6 +4406,108 @@ test('review fix: a delivered (even late) deliverable retires the deadline watch
       1,
       'no further deadline reminders after the deliverable arrived',
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task #41: a welcome/roll-call notice @mentions every member but is not a
+// work assignment — it must not trigger the worker auto-ACK (whose invented
+// ETA then armed fake delivery deadlines).
+// ---------------------------------------------------------------------------
+
+test('task #41: a chair welcome notice triggers no auto-ACK and arms no delivery deadline', async () => {
+  // The auto-ACK only fires on the skill-turn path (P0-2: it exists because a
+  // skill turn can run for many minutes), so Coder Bot needs a routing hit to
+  // reach maybeSendWorkerAck at all.
+  const h = await createHarness({
+    ackTimeoutMs: 180_000,
+    coderChatSkills: ['web-search'],
+    routing: (input) => input.metabotId === 2
+      ? { prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }
+      : { prompt: null, activeSkillIds: [] },
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    // The host posts the join welcome as the chair; it @mentions every member
+    // but is a [GROUP_TASK_NOTICE:welcome] roll call, not a work assignment.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-welcome-41', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: buildMemberJoinWelcomeText({
+        taskTitle: 'Build MetaApp',
+        joinerName: 'Coder Bot',
+        existingMemberNames: ['Twin Bot', 'Designer Bot'],
+      }, 'zh'),
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    // Both workers still answer the roll call with a normal reply…
+    assert.equal(h.sends.length, 2, 'workers still answer the roll call normally');
+    // …but neither may post the bogus "[WORKING] 已接单" auto-ACK whose invented
+    // ETA armed the fake delivery deadlines seen in task #41.
+    assert.equal(
+      h.sends.filter((s) => s.content.startsWith('[WORKING]')).length,
+      0,
+      'no auto-ACK posted for a host welcome notice',
+    );
+    assert.equal(h.store.get(`group_task_expected_delivery:${task.id}:2`), undefined);
+    assert.equal(h.store.get(`group_task_expected_delivery:${task.id}:3`), undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task #41: a skill-turn watchdog timeout is not a transient failure — the
+// turn keeps running in the worker session, so advance the cursor instead of
+// piling up retries that re-ran the turn five times and dropped the trigger.
+// ---------------------------------------------------------------------------
+
+test('task #41: a skill-turn watchdog timeout advances the cursor without burning message retries', async () => {
+  const skillTurnAttempts = [];
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      // The watchdog fires while the real turn keeps running in the session.
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        throw new SkillTurnTimeoutError('session-timeout-41', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-skill-timeout-41', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot search for MetaID docs',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(skillTurnAttempts.length, 1, 'skill turn attempted once');
+    // The chair-originated trigger still auto-ACKs before the turn runs.
+    assert.ok(h.sends.some((s) => s.content.startsWith('[WORKING]')), 'auto-ACK posted before the turn');
+    const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-skill-timeout-41'])[0].values[0][0];
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advanced past the timed-out message',
+    );
+    assert.equal(
+      h.store.get(`group_task_msg_retry:${task.id}:${msgId}`),
+      undefined,
+      'watchdog fire is not a transient failure — no retry counter burned',
+    );
+
+    // A later tick must not re-run the same turn (the pre-fix pile-up re-ran
+    // it five times and then dropped the trigger message unanswered).
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'timed-out message is not retried on later ticks');
   } finally {
     h.cleanup();
   }

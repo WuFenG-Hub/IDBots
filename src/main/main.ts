@@ -3619,6 +3619,11 @@ const startSqliteDaemons = (): void => {
         userMessage: params.userMessage,
         cwd,
         activeSkillIds: params.activeSkillIds,
+        // Group-task turns run real pipelines that routinely exceed the 300s
+        // delegation default (task #41: 5-min watchdog fired mid-work, message
+        // retries then re-ran the turn five times and dropped the trigger).
+        // 30 min matches the metaweb-study delegation budget.
+        skillTurnTimeoutMs: 30 * 60 * 1000,
       });
     },
     emitTaskEvent: (payload) => {
@@ -3806,6 +3811,9 @@ const startSqliteDaemons = (): void => {
         userMessage: params.userMessage,
         cwd,
         activeSkillIds: params.activeSkillIds,
+        // Guest work turns run the same long pipelines as local group-task
+        // turns — same 30-min budget as the group-task daemon binding.
+        skillTurnTimeoutMs: 30 * 60 * 1000,
       });
       return { ...result, cwd };
     },
