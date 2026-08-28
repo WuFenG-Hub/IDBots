@@ -41,6 +41,7 @@ export const GROUP_TASK_NOTICE = {
   checkpointOpen: 'checkpoint_open',
   checkpointResolved: 'checkpoint_resolved',
   longTurn: 'long_turn',
+  dispatchHeld: 'dispatch_held',
 } as const;
 
 export type GroupTaskNoticeKind = (typeof GROUP_TASK_NOTICE)[keyof typeof GROUP_TASK_NOTICE];
@@ -254,6 +255,43 @@ export function buildLongTurnStandbyNote(
     ? `@chair ℹ️ ${memberName} is in a long-running turn (recent progress/delivery). New assignments will wait until this turn finishes; no action needed.`
     : `@chair ℹ️ ${memberName} 正在长回合执行中（近期有进展/交付），新派单将在本回合结束后处理，无需干预。`;
   return withGroupTaskNotice(GROUP_TASK_NOTICE.longTurn, body);
+}
+
+/**
+ * Host notice when a worker-addressed dispatch was swallowed by a human-gate
+ * phase (open HITL checkpoint or review): workers stay silent by design, so
+ * without this line the chair believes the dispatch failed or the workers
+ * are broken (task #39: the chair @-dispatched into an open checkpoint and
+ * spent hours assuming the members were unresponsive).
+ */
+export function buildDispatchHeldLine(input: {
+  taskId: number;
+  taskTitle: string;
+  senderName: string;
+  memberNames: string[];
+  gate: 'checkpoint' | 'review';
+  checkpointTopic?: string | null;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const names = input.memberNames.join(language === 'en' ? ', ' : '、');
+  const gateText = input.gate === 'checkpoint'
+    ? (language === 'en'
+      ? `a human checkpoint is open${input.checkpointTopic?.trim() ? ` (${input.checkpointTopic.trim()})` : ''}`
+      : `人工确认点未关闭${input.checkpointTopic?.trim() ? `（${input.checkpointTopic.trim()}）` : ''}`)
+    : (language === 'en' ? 'the task is in the review phase' : '任务处于验收（review）阶段');
+  const resume = input.gate === 'checkpoint'
+    ? (language === 'en'
+      ? 'Once the owner has weighed in, post `[CHECKPOINT_RESOLVED: <decision>]` in the group, then re-send the dispatch — the members will answer it.'
+      : '主人给出意见后，在群里发 `[CHECKPOINT_RESOLVED: <决定>]`，然后重新派发该工作——成员届时会正常响应。')
+    : (language === 'en'
+      ? 'Reopen execution with `[STATUS:EXECUTING]` (or the Tasks panel Back-to-work action), then re-send the dispatch.'
+      : '用 `[STATUS:EXECUTING]`（或 Tasks 面板的返回执行）恢复执行后重新派发。');
+  const body = language === 'en'
+    ? `⏸️ A dispatch from ${input.senderName} to ${names} was HELD: ${gateText}. `
+      + 'Workers stay silent by design in this phase, so the dispatch will NOT be executed as sent. '
+      + resume
+    : `⏸️ ${input.senderName} 刚向 ${names} 派发了工作，但${gateText}：该阶段成员按规则保持沉默，这条派工不会被执行。`
+      + resume;
+  return withGroupTaskNotice(GROUP_TASK_NOTICE.dispatchHeld, body);
 }
 
 export function buildAcceptanceGuidanceText(language: AppLanguage = groupTaskLanguage()): string {

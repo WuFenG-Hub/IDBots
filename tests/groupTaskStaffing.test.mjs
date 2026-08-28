@@ -34,11 +34,17 @@ test('skip-confirm does not match 开发 or interrogatives', () => {
   assert.equal(detectSkipConfirmInWish('just start without confirmation'), true);
 });
 
-test('不换人 is confirm; 换人 is revise', () => {
+test('不换人 is confirm; 换人 is revise; plain confirm words are LLM-judged, not regex', () => {
   assert.equal(classifyOwnerStaffingReply('好的，不换人'), 'confirm');
   assert.equal(classifyOwnerStaffingReply('不用换'), 'confirm');
   assert.equal(classifyOwnerStaffingReply('换人，用设计师'), 'revise');
-  assert.equal(classifyOwnerStaffingReply('确认人选'), 'confirm');
+  // Plain approvals are intentionally NOT classified here (task #38): the
+  // host LLM judges natural-language confirmation and injects it into the
+  // gate as llmLastConfirmIndex. The vocabulary is gone for good.
+  assert.equal(classifyOwnerStaffingReply('确认人选'), 'unknown');
+  assert.equal(classifyOwnerStaffingReply('确认'), 'unknown');
+  assert.equal(classifyOwnerStaffingReply('可以'), 'unknown');
+  assert.equal(classifyOwnerStaffingReply('OK'), 'unknown');
 });
 
 test('bare English instead/drop are not automatic revise', () => {
@@ -110,7 +116,7 @@ test('slate language follows Settings when omitted', () => {
     plan,
     ownerConfirmRequired: true,
   });
-  assert.match(zh, /确认人选/);
+  assert.match(zh, /直接回复确认/);
   const en = buildStaffingSlateText({
     title: 'Skill intro',
     goal: 'Write it',
@@ -209,8 +215,10 @@ test('an owner cancel is classified and blocks create even under a waiver', () =
   for (const cancelReply of ['算了', '别开了', '不开了', '取消吧', '算了，不开了', 'never mind', 'cancel it']) {
     assert.equal(classifyOwnerStaffingReply(cancelReply), 'cancel', cancelReply);
   }
-  // "算了，就这些人吧" is a confirm; "取消确认" is not a whole-decision cancel.
-  assert.equal(classifyOwnerStaffingReply('算了，就这些人吧'), 'confirm');
+  // "算了，就这些人吧" is a natural confirm — LLM-judged now, so the regex
+  // classifier itself reads it as unknown (only the cancel regex must NOT
+  // mis-fire on it); "取消确认" is not a whole-decision cancel either.
+  assert.equal(classifyOwnerStaffingReply('算了，就这些人吧'), 'unknown');
   assert.equal(classifyOwnerStaffingReply('取消确认'), 'unknown');
 
   assert.deepEqual(
@@ -228,13 +236,111 @@ test('an owner cancel is classified and blocks create even under a waiver', () =
     }),
     { allowed: false, decision: 'owner_cancel' },
   );
-  // Last decisive reply wins: a confirm after a cancel re-authorizes.
+  // Last decisive reply wins: a confirm after a cancel re-authorizes (the
+  // confirm now arrives via the LLM intent labels, the cancel via regex).
   assert.deepEqual(
     resolveStaffingOwnerGate({
       triggeringWish: '帮我开个群任务做技能介绍',
       repliesAfterPropose: ['算了', '确认人选'],
+      llmIntents: ['other', 'confirm'],
     }),
     { allowed: true, decision: 'owner_confirmed' },
+  );
+});
+
+test('llmIntents: multilingual coverage, ordering, and regex-overlay safety', () => {
+  // Any clear approval passes the gate via the judge label, any language.
+  for (const reply of ['确认', '可以', '行', 'OK', '就这样吧', 'D\'accord', 'Sí, adelante', '確認しました']) {
+    assert.deepEqual(
+      resolveStaffingOwnerGate({
+        triggeringWish: '帮我开个群任务做技能介绍',
+        repliesAfterPropose: [reply],
+        llmIntents: ['confirm'],
+      }),
+      { allowed: true, decision: 'owner_confirmed' },
+      `reply ${reply} should authorize via the judge label`,
+    );
+  }
+  // Multilingual revise / cancel / skip all count now (regex never saw them).
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['Annule tout, on ne le fait pas'],
+      llmIntents: ['cancel'],
+    }),
+    { allowed: false, decision: 'owner_cancel' },
+  );
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['Cambia al diseñador'],
+      llmIntents: ['revise'],
+    }),
+    { allowed: false, decision: 'owner_revise' },
+  );
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['Empieza sin preguntar más'],
+      llmIntents: ['skip'],
+    }),
+    { allowed: true, decision: 'skip_authorized' },
+  );
+  // The LLM wish-skip judgment also authorizes (multilingual wish).
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: 'create a task, empieza sin confirmar',
+      repliesAfterPropose: [],
+      llmWishSkip: true,
+    }),
+    { allowed: true, decision: 'skip_authorized' },
+  );
+  // No decisive label judged (all 'other') still awaits the owner.
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['可以吗？'],
+      llmIntents: ['other'],
+    }),
+    { allowed: false, decision: 'awaiting_owner' },
+  );
+  // A later regex revise beats an earlier judge confirm.
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['确认', '换人，用设计师'],
+      llmIntents: ['confirm', 'other'],
+    }),
+    { allowed: false, decision: 'owner_revise' },
+  );
+  // A later judge confirm beats an earlier regex revise (recovery flow).
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['换人，用设计师', 'D\'accord comme ça'],
+      llmIntents: ['other', 'confirm'],
+    }),
+    { allowed: true, decision: 'owner_confirmed' },
+  );
+  // Same-reply tie: the regex reading overrides the judge label (safety).
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['换成 B 吧'],
+      llmIntents: ['confirm'],
+    }),
+    { allowed: false, decision: 'owner_revise' },
+  );
+  // A judge that labels nothing decisive cannot flip a waiver on its own —
+  // but persistedSkip still applies (unchanged deterministic path).
+  assert.deepEqual(
+    resolveStaffingOwnerGate({
+      triggeringWish: '帮我开个群任务做技能介绍',
+      repliesAfterPropose: ['hmm'],
+      llmIntents: ['other'],
+      persistedSkip: true,
+    }),
+    { allowed: true, decision: 'skip_authorized' },
   );
 });
 

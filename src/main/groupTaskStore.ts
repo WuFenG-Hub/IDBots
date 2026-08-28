@@ -2329,6 +2329,22 @@ export class GroupTaskStore {
     return this.getStaffingProposalById(id);
   }
 
+  /**
+   * Latest still-open proposal (pending / confirmed / skip_authorized) in a
+   * source session. Feeds propose idempotency: an identical re-propose must
+   * return THIS proposal instead of stacking a new one, so the owner's
+   * in-window confirmation is never orphaned by a window reset.
+   */
+  getLatestOpenStaffingProposalForSession(sourceSessionId: string): GroupTaskStaffingProposal | null {
+    const row = this.getOne<StaffingProposalRow>(
+      `SELECT * FROM group_task_staffing_proposals
+       WHERE source_session_id = ? AND status IN ('pending', 'confirmed', 'skip_authorized')
+       ORDER BY id DESC LIMIT 1`,
+      [sourceSessionId],
+    );
+    return row ? rowToStaffingProposal(row) : null;
+  }
+
   cancelOpenStaffingProposalsForSession(sourceSessionId: string): number {
     this.db.run(
       `UPDATE group_task_staffing_proposals

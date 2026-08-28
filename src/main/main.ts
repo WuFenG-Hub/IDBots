@@ -163,6 +163,7 @@ import {
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceCoworkStoreGetter,
+  setGroupTaskServiceStaffingIntentJudge,
   setGroupTaskServiceTransport,
   setGroupTaskAcceptanceNotifier,
   notifySourceSessionReview,
@@ -182,6 +183,7 @@ import {
   archiveGroupTask,
   unarchiveGroupTask,
 } from './services/groupTaskService';
+import type { OwnerStaffingIntent } from './services/groupTaskStaffing';
 import {
   buildGroupTaskCandidateSearchDeps,
   setGroupTaskCandidateSearchDepsGetter,
@@ -3029,7 +3031,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   coworkTurnSubmissionController = null;
   if (coworkRunner) {
     try {
-      coworkRunner.stopAllSessions();
+      coworkRunner.stopAllSessions('host storage recovery restart');
     } catch (error) {
       console.warn('[SQLiteRecovery] Failed to stop cowork sessions before reset:', error);
     }
@@ -3210,6 +3212,57 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupTaskServiceCoworkStoreGetter(getCoworkStore);
+  // Task #38: owner confirmation is LLM-judged natural language, not a phrase
+  // vocabulary. One small one-shot completion per create attempt that reaches
+  // the confirm gate; deterministic revise/cancel/skip matching stays regex
+  // (see the vocabularies comment in groupTaskStaffing).
+  setGroupTaskServiceStaffingIntentJudge(async ({ slateText, triggeringWish, replies }) => {
+    const numbered = replies.map((reply, index) => `[${index}] ${reply}`).join('\n');
+    const systemPrompt = [
+      'You classify a human owner\'s replies about a proposed team roster.',
+      'The assistant showed the owner this roster proposal:',
+      '<slate>',
+      slateText,
+      '</slate>',
+      'The wish that triggered the proposal (may be empty):',
+      triggeringWish || '(none)',
+      'The owner\'s replies after the slate, in order:',
+      numbered,
+      '',
+      'Label EACH reply with exactly one intent:',
+      '- confirm: clearly approves proceeding with this exact roster',
+      '- revise: asks to change / swap / remove seats or people',
+      '- cancel: calls the whole task off',
+      '- skip: asks to proceed WITHOUT any further confirmation (e.g. "just start")',
+      '- other: questions, conditions, topic changes, anything ambiguous',
+      'Also answer wishSkip: true only when THE WISH ITSELF asked to start without confirmation.',
+      'Reply in the owner\'s language matters — classify any language, not just Chinese or English.',
+      'Return strict JSON only: {"intents":["<label>",...],"wishSkip":false} with intents aligned to the replies.',
+    ].join('\n');
+    const raw = await performChatCompletionForOrchestrator(systemPrompt, 'Classify the owner replies now.', undefined, {
+      maxTokens: 300,
+      thinking: 'disabled',
+    });
+    const intents: OwnerStaffingIntent[] = replies.map(() => 'other');
+    let wishSkip = false;
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[0]) as { intents?: unknown; wishSkip?: unknown };
+        if (Array.isArray(parsed.intents)) {
+          parsed.intents.slice(0, replies.length).forEach((label, index) => {
+            if (label === 'confirm' || label === 'revise' || label === 'cancel' || label === 'skip') {
+              intents[index] = label;
+            }
+          });
+        }
+        wishSkip = parsed.wishSkip === true;
+      } catch {
+        // keep the all-other default
+      }
+    }
+    return { intents, wishSkip };
+  });
   setGroupTaskCandidateSearchDepsGetter(() => buildGroupTaskCandidateSearchDeps({
     metabotStore: getMetabotStore(),
     impressionStore: getMetaIDImpressionStore(),
@@ -8219,7 +8272,7 @@ if (!gotTheLock) {
   ipcMain.handle('cowork:session:stop', async (_event, sessionId: string) => {
     try {
       const runner = getCoworkRunner();
-      runner.stopSession(sessionId);
+      runner.stopSession(sessionId, { reason: 'user requested stop' });
       return { success: true };
     } catch (error) {
       return {
@@ -14253,7 +14306,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       stopCoworkSessions: () => {
         if (coworkRunner) {
           console.log('[Main] Stopping cowork sessions...');
-          coworkRunner.stopAllSessions();
+          coworkRunner.stopAllSessions('app shutdown');
         }
       },
       closeDshRuntime: async () => {

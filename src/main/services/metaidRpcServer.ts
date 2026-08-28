@@ -1938,7 +1938,13 @@ export function startMetaidRpcServer(
       for await (const chunk of req) {
         body += chunk;
       }
-      let parsed: { task_id?: number; status?: string; reason?: string };
+      let parsed: {
+        task_id?: number;
+        status?: string;
+        reason?: string;
+        closure_note?: string;
+        external_deliveries?: Array<{ uri?: string; kind?: string; note?: string }>;
+      };
       try {
         parsed = JSON.parse(body) as typeof parsed;
       } catch {
@@ -1958,6 +1964,19 @@ export function startMetaidRpcServer(
         res.end(JSON.stringify({ success: false, error: "status must be 'done' or 'cancelled'" }));
         return;
       }
+      // P1-4 (task #39): external_deliveries + closure_note let the chair
+      // close a task whose remaining work was finished via Twin direct
+      // delegation with the real artifacts in the ledger.
+      const externalDeliveries = Array.isArray(parsed.external_deliveries)
+        ? parsed.external_deliveries
+          .filter((entry) => entry && typeof entry === 'object' && typeof entry.uri === 'string' && entry.uri.trim())
+          .slice(0, 10)
+          .map((entry) => ({
+            uri: entry.uri,
+            kind: typeof entry.kind === 'string' ? entry.kind : undefined,
+            note: typeof entry.note === 'string' ? entry.note : undefined,
+          }))
+        : undefined;
       try {
         // The RPC close is performed by the Twin (chair) on the owner's
         // behalf — recorded as the chair actor on the status event (P1-5).
@@ -1965,6 +1984,8 @@ export function startMetaidRpcServer(
           status,
           reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
           actor: { kind: 'chair' },
+          externalDeliveries,
+          closureNote: typeof parsed.closure_note === 'string' ? parsed.closure_note : undefined,
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, task }));

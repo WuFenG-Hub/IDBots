@@ -394,7 +394,7 @@ export class Scheduler {
       const sessionId = this.taskSessionIds.get(taskId);
       if (sessionId) {
         try {
-          this.getCoworkRunner().stopSession(sessionId);
+          this.getCoworkRunner().stopSession(sessionId, { reason: 'scheduled task stopped' });
         } catch (err) {
           console.warn(`[Scheduler] Failed to stop cowork session for task ${taskId}:`, err);
         }

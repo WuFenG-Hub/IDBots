@@ -72,7 +72,11 @@ test('worker_session_stop: Twin stops a worker session to the stopped terminal s
   const { stopped, sessions, call } = makeHarness()
   const result = await call('worker_session_stop', { sessionId: 'worker-session' })
   assert.deepEqual(JSON.parse(result.text), { ok: true, sessionId: 'worker-session', status: 'stopped' })
-  assert.deepEqual(stopped, [{ sessionId: 'worker-session', options: { finalStatus: 'stopped' } }])
+  // P1-3: the stop carries the Twin-request reason on the audit trail.
+  assert.deepEqual(stopped, [{
+    sessionId: 'worker-session',
+    options: { finalStatus: 'stopped', reason: 'Twin requested stop via worker_session_stop' },
+  }])
   assert.equal(sessions.get('worker-session').status, 'stopped')
 })
 

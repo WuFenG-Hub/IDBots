@@ -185,20 +185,24 @@ const CANCEL_PATTERNS: RegExp[] = [
   /\b(cancel|abort|never ?mind|forget (it|about it)|call it off|scrap (it|this|the plan))\b/i,
 ];
 
-const CONFIRM_EXACT_PATTERNS: RegExp[] = [
-  /^(确认|就这样|就这样开|可以开|开吧|开始吧|同意|没问题|好的|好|行|嗯)[。.!！]*$/u,
-  /^(ok|okay|yes|yep|go|go ahead|looks good|lgtm|proceed|confirmed?|start)[.!]*$/i,
-];
+/**
+ * Owner intent labels for the staffing gate. `other` = no decisive intent.
+ */
+export type OwnerStaffingIntent = 'confirm' | 'revise' | 'cancel' | 'skip' | 'other';
 
-const CONFIRM_PHRASE_PATTERNS: RegExp[] = [
-  /确认人选/,
-  /按这个(名单|人选|班子)/,
-  /就这些人/,
-  /就这样开/,
-  /可以开(群|了|吧)?/,
-  /confirmed the (roster|slate|team)/i,
-  /looks good,? (start|go|proceed)/i,
-];
+/**
+ * Owner intents are no longer matched by hardcoded phrase vocabularies
+ * (global product: zh/en lists like 不用确认/换人/算了/just start silently
+ * miss every other language — a missed CANCEL even let creates proceed
+ * against the owner's wish under an active waiver). Natural-language intent
+ * is judged by the host LLM at create time (see evaluateProposalOwnerGate)
+ * and reaches the gate as `llmIntents` (one label per reply) plus
+ * `llmWishSkip` for the triggering wish. The deterministic classifier below
+ * stays as a precise zh/en + idiom OVERLAY: when it reads a reply
+ * decisively, its label wins for that reply (a mis-judging LLM can never
+ * turn a regex revise/cancel into a confirm); the LLM labels cover
+ * everything else. Last decisive reply wins, as before.
+ */
 
 function isSeatRole(value: unknown): value is GroupTaskSeatRole {
   return typeof value === 'string' && (GROUP_TASK_SEAT_ROLES as readonly string[]).includes(value);
@@ -326,8 +330,10 @@ export function classifyOwnerStaffingReply(text: string): 'confirm' | 'revise' |
   if (KEEP_ROSTER_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
   if (CANCEL_PATTERNS.some((pattern) => pattern.test(value))) return 'cancel';
   if (REVISE_PATTERNS.some((pattern) => pattern.test(value))) return 'revise';
-  if (CONFIRM_EXACT_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
-  if (CONFIRM_PHRASE_PATTERNS.some((pattern) => pattern.test(value))) return 'confirm';
+  // A plain confirmation ("确认", "可以", "OK", "就这样吧", …) is NOT decided
+  // here — natural-language approval is LLM-judged upstream and injected as
+  // llmLastConfirmIndex. This keeps a deterministic vocabulary out of the
+  // confirm path while revise/cancel stay regex-exact (safety side).
   return 'unknown';
 }
 
@@ -364,20 +370,43 @@ export function resolveStaffingOwnerGate(input: {
   persistedSkip?: boolean;
   /** Set when the slate qualifies for the all-local small-team auto-start. */
   localSmallSlate?: boolean;
+  /**
+   * Host-LLM intent labels, one per repliesAfterPropose entry in order
+   * (null/missing/'other' = the judge saw no decisive intent in that reply).
+   * See the vocabularies comment above: these labels carry multilingual
+   * coverage; the regex overlay overrides them per reply where it is
+   * decisive.
+   */
+  llmIntents?: Array<OwnerStaffingIntent> | null;
+  /** Host-LLM judgment that the triggering wish asked to start WITHOUT
+   * confirmation (multilingual coverage for detectSkipConfirmInWish). */
+  llmWishSkip?: boolean | null;
 }): { allowed: boolean; decision: GroupTaskStaffingOwnerDecision } {
-  let lastIntent: GroupTaskStaffingOwnerDecision | null = null;
-  for (const reply of input.repliesAfterPropose) {
+  const replies = input.repliesAfterPropose;
+  const llmIntents = Array.isArray(input.llmIntents) ? input.llmIntents : [];
+  const labelToDecision: Record<Exclude<OwnerStaffingIntent, 'other'>, GroupTaskStaffingOwnerDecision> = {
+    confirm: 'owner_confirmed',
+    revise: 'owner_revise',
+    cancel: 'owner_cancel',
+    skip: 'skip_authorized',
+  };
+  let decided: { intent: GroupTaskStaffingOwnerDecision; index: number } | null = null;
+  replies.forEach((reply, index) => {
     const kind = classifyOwnerStaffingReply(reply);
-    if (kind === 'revise') lastIntent = 'owner_revise';
-    else if (kind === 'cancel') lastIntent = 'owner_cancel';
-    else if (kind === 'confirm') lastIntent = 'owner_confirmed';
-    else if (detectSkipConfirmInWish(reply)) lastIntent = 'skip_authorized';
+    const label: Exclude<OwnerStaffingIntent, 'other'> | null = kind !== 'unknown'
+      ? kind
+      : detectSkipConfirmInWish(reply)
+        ? 'skip'
+        : (llmIntents[index] && llmIntents[index] !== 'other' ? llmIntents[index] : null);
+    if (label) decided = { intent: labelToDecision[label], index };
+  });
+  if (decided) {
+    if (decided.intent === 'owner_revise') return { allowed: false, decision: 'owner_revise' };
+    if (decided.intent === 'owner_cancel') return { allowed: false, decision: 'owner_cancel' };
+    if (decided.intent === 'owner_confirmed') return { allowed: true, decision: 'owner_confirmed' };
+    if (decided.intent === 'skip_authorized') return { allowed: true, decision: 'skip_authorized' };
   }
-  if (lastIntent === 'owner_revise') return { allowed: false, decision: 'owner_revise' };
-  if (lastIntent === 'owner_cancel') return { allowed: false, decision: 'owner_cancel' };
-  if (lastIntent === 'owner_confirmed') return { allowed: true, decision: 'owner_confirmed' };
-  if (lastIntent === 'skip_authorized') return { allowed: true, decision: 'skip_authorized' };
-  if (detectSkipConfirmInWish(input.triggeringWish) || input.persistedSkip) {
+  if (detectSkipConfirmInWish(input.triggeringWish) || input.llmWishSkip === true || input.persistedSkip) {
     return { allowed: true, decision: 'skip_authorized' };
   }
   if (input.localSmallSlate) return { allowed: true, decision: 'local_auto_start' };
@@ -408,6 +437,28 @@ export function localSeatMetabotIds(plan: GroupTaskStaffingPlan): number[] {
       .filter((seat) => seat.source === 'local' && Number.isInteger(seat.metabotId) && Number(seat.metabotId) > 0)
       .map((seat) => Number(seat.metabotId)),
   )];
+}
+
+/**
+ * Canonical signature of a propose payload (title + goal + acceptance
+ * criteria + NORMALIZED plan). Two proposes with the same signature describe
+ * the exact same slate, so the second one must reuse the first proposal
+ * instead of stacking a new row (propose idempotency; task #38 incident).
+ * Both sides must pass the plan through normalizeStaffingPlan first — the
+ * normalizer emits deterministic key order, making the JSON a stable key.
+ */
+export function staffingProposalPayloadKey(input: {
+  title: string;
+  goal: string;
+  acceptanceCriteria?: string | null;
+  plan: GroupTaskStaffingPlan;
+}): string {
+  return JSON.stringify({
+    title: input.title,
+    goal: input.goal,
+    acceptanceCriteria: input.acceptanceCriteria?.trim() || null,
+    plan: input.plan,
+  });
 }
 
 export function localSeatNames(plan: GroupTaskStaffingPlan): string[] {
@@ -472,8 +523,8 @@ export function buildStaffingSlateText(input: {
   lines.push('');
   if (input.ownerConfirmRequired) {
     lines.push(zh
-      ? '请看是否合理。可以说换人、去掉某岗，或回复「确认人选 / 就这样开」。没确认前我不会建群。'
-      : 'Please confirm this roster, ask to swap/drop a seat, or say "looks good, start". I will not create the group until you confirm.');
+      ? '请看是否合理。可以说换人、去掉某岗，或直接回复确认——任何明确同意的表述都可以（如「确认 / 可以 / 就这样吧 / OK」）。没确认前我不会建群。'
+      : 'Please confirm this roster, ask to swap/drop a seat, or reply with any clear approval ("OK", "looks good", "确认"). I will not create the group until you confirm.');
   } else if (input.skipReason === 'local_small') {
     lines.push(zh
       ? '这份名单全是本机成员且规模不大，无需确认。我将直接开群；若名单不合适，告诉我换人或去掉某个岗位即可。'

@@ -679,7 +679,13 @@ test('review-phase dispatch to workers logs the silence hint and never replies',
     });
     await h.loop.runTick();
 
-    assert.equal(h.sends.length, 0, 'review phase: no worker reply');
+    // P1-2: workers stay silent, and the host now answers the swallowed
+    // dispatch with a visible [GROUP_TASK_NOTICE:dispatch_held] notice
+    // instead of only a host log line.
+    assert.equal(h.sends.filter((send) => send.metabotId === 2).length, 0, 'review phase: no worker reply');
+    assert.equal(h.sends.length, 1, 'one host dispatch-held notice as the chair');
+    assert.match(h.sends[0].content, /\[GROUP_TASK_NOTICE:dispatch_held\]/);
+    assert.match(h.sends[0].content, /Coder Bot/);
     assert.ok(
       h.logs.some((line) => line.includes('review-phase silence') && line.includes('Coder Bot')),
       'daemon logs the silenced dispatch so the chair knows why',

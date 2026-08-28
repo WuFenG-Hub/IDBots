@@ -89,9 +89,11 @@ import {
   remoteSeats,
   resolveStaffingOwnerGate,
   splitSessionMessagesForStaffingGate,
+  staffingProposalPayloadKey,
   validateStaffingPlan,
   type GroupTaskStaffingPlan,
   type GroupTaskStaffingProposal,
+  type OwnerStaffingIntent,
   type GroupTaskStaffingProposalStatus,
   type GroupTaskStaffingSeat,
   type StaffingSessionMessage,
@@ -144,6 +146,15 @@ export interface ProposeGroupTaskStaffingResult {
   ownerConfirmRequired: boolean;
   slateText: string;
   warnings: string[];
+  /**
+   * True when an identical still-open proposal already existed and was
+   * returned as-is instead of inserting a new row: a re-propose must never
+   * reset the owner-confirmation window (task #38: the chair re-ran propose
+   * after the owner had already said 确认, stacking proposal ids 6→7→8 and
+   * orphaning the in-window confirmation behind the new proposals' later
+   * createdAt).
+   */
+  reusedExistingProposal?: boolean;
 }
 
 export interface GroupTaskDetail extends GroupTask {
@@ -486,10 +497,38 @@ function loadStaffingSessionMessages(sessionId: string): StaffingSessionMessage[
   }
 }
 
-function evaluateProposalOwnerGate(
+/**
+ * Host LLM judge for natural-language owner intent (global product, task
+ * #38 + audit follow-up): given the slate the owner saw, the wish that
+ * triggered the proposal, and the post-propose replies in order, label each
+ * reply confirm / revise / cancel / skip / other and say whether the wish
+ * itself asked to start without confirmation. Plain approvals and
+ * non-zh/en intents are intentionally NOT matched by regex vocabularies —
+ * see the vocabularies comment in groupTaskStaffing. Wired in main.ts to a
+ * one-shot completion; tests inject deterministic fakes.
+ */
+export type StaffingOwnerIntentJudge = (input: {
+  slateText: string;
+  triggeringWish: string;
+  replies: string[];
+}) => Promise<{ intents: OwnerStaffingIntent[]; wishSkip: boolean }>;
+
+let staffingOwnerIntentJudge: StaffingOwnerIntentJudge | null = null;
+
+export function setGroupTaskServiceStaffingIntentJudge(
+  judge: StaffingOwnerIntentJudge | null,
+): void {
+  staffingOwnerIntentJudge = judge;
+}
+
+async function evaluateProposalOwnerGate(
   proposal: GroupTaskStaffingProposal,
   sourceSessionId?: string,
-): { allowed: boolean; decision: ReturnType<typeof resolveStaffingOwnerGate>['decision'] } {
+): Promise<{
+  allowed: boolean;
+  decision: ReturnType<typeof resolveStaffingOwnerGate>['decision'];
+  judgeError?: string;
+}> {
   if (proposal.status === 'consumed' || proposal.status === 'cancelled') {
     return { allowed: false, decision: 'awaiting_owner' };
   }
@@ -498,12 +537,57 @@ function evaluateProposalOwnerGate(
     loadStaffingSessionMessages(sessionId),
     proposal.createdAt,
   );
-  return resolveStaffingOwnerGate({
+  const gateInput = {
     triggeringWish: split.triggeringWish,
     repliesAfterPropose: split.repliesAfterPropose,
     persistedSkip: proposal.status === 'skip_authorized' || proposal.skipAuthorized,
     localSmallSlate: isLocalOnlySmallSlate(proposal.plan),
-  });
+  };
+  const base = resolveStaffingOwnerGate(gateInput);
+  // The deterministic overlay decides allow-side signals (skip waiver, local
+  // auto-start, keep-roster confirm) and blocking revise/cancel on its own.
+  // Everything else — plain confirmations, and revise/cancel/skip expressed
+  // in ANY language — needs the judge; its labels still lose to a
+  // same-reply regex reading (see resolveStaffingOwnerGate). The judge is
+  // consulted whenever the deterministic pass cannot allow the create: even
+  // with zero replies the multilingual wish itself may carry a skip intent.
+  if (base.allowed) {
+    return { allowed: base.allowed, decision: base.decision };
+  }
+  const judge = staffingOwnerIntentJudge;
+  if (!judge) {
+    return {
+      allowed: false,
+      decision: base.decision,
+      judgeError: 'owner-intent judge is not available',
+    };
+  }
+  try {
+    const slateText = buildStaffingSlateText({
+      title: proposal.title,
+      goal: proposal.goal,
+      acceptanceCriteria: proposal.acceptanceCriteria,
+      plan: proposal.plan,
+      ownerConfirmRequired: true,
+    });
+    const judged = await judge({
+      slateText,
+      triggeringWish: split.triggeringWish,
+      replies: split.repliesAfterPropose,
+    });
+    const merged = resolveStaffingOwnerGate({
+      ...gateInput,
+      llmIntents: judged.intents,
+      llmWishSkip: judged.wishSkip,
+    });
+    return { allowed: merged.allowed, decision: merged.decision };
+  } catch (error) {
+    return {
+      allowed: false,
+      decision: base.decision,
+      judgeError: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function resolveLocalWorkerIdsFromPlan(plan: GroupTaskStaffingPlan, extraIds: number[]): number[] {
@@ -560,12 +644,49 @@ export function proposeGroupTaskStaffing(
   // 'local_auto_start', keeping the audit trail honest about who waived what.
   const localAutoStart = isLocalOnlySmallSlate(plan);
   const confirmWaived = wishSkip || localAutoStart;
-  const proposal = getGroupTaskStore().createStaffingProposal({
+  // Propose idempotency (task #38): a re-propose with the IDENTICAL payload
+  // must return the existing still-open proposal instead of inserting a new
+  // row. Inserting would cancel the open one and anchor a LATER confirm
+  // window, orphaning a confirmation the owner already gave between the two
+  // proposes (the chair then has to drag a second confirmation out of the
+  // owner). A genuinely changed slate (revise) still creates a fresh
+  // proposal with a fresh window — that reset is the point of a re-propose.
+  const acceptanceCriteria = opts.acceptanceCriteria?.trim() || null;
+  const payloadKey = staffingProposalPayloadKey({ title, goal, acceptanceCriteria, plan });
+  const store = getGroupTaskStore();
+  const existing = store.getLatestOpenStaffingProposalForSession(sourceSessionId);
+  if (
+    existing
+    && !isStaffingProposalExpired(existing.createdAt)
+    && staffingProposalPayloadKey({
+      title: existing.title,
+      goal: existing.goal,
+      acceptanceCriteria: existing.acceptanceCriteria,
+      plan: existing.plan,
+    }) === payloadKey
+  ) {
+    return {
+      proposal: existing,
+      ownerConfirmRequired: !confirmWaived,
+      slateText: buildStaffingSlateText({
+        title,
+        goal,
+        acceptanceCriteria: opts.acceptanceCriteria,
+        plan,
+        ownerConfirmRequired: !confirmWaived,
+        skipReason: wishSkip ? 'wish' : 'local_small',
+        language: opts.language,
+      }),
+      warnings: validation.warnings,
+      reusedExistingProposal: true,
+    };
+  }
+  const proposal = store.createStaffingProposal({
     sourceSessionId,
     twinMetabotId,
     title,
     goal,
-    acceptanceCriteria: opts.acceptanceCriteria?.trim() || null,
+    acceptanceCriteria,
     plan,
     status: wishSkip ? 'skip_authorized' : 'pending',
     createdAt: now,
@@ -707,7 +828,7 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
         `Staffing proposal ${proposalId} expired`,
       );
     }
-    const gate = evaluateProposalOwnerGate(proposal, opts.sourceSessionId);
+    const gate = await evaluateProposalOwnerGate(proposal, opts.sourceSessionId);
     if (!gate.allowed) {
       if (gate.decision === 'owner_revise') {
         throw new GroupTaskStaffingError(
@@ -723,7 +844,9 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
       }
       throw new GroupTaskStaffingError(
         'OWNER_CONFIRM_REQUIRED',
-        'The owner has not confirmed this roster yet. Show the slate and wait, unless they already said to start without confirming.',
+        gate.judgeError
+          ? `The owner's confirmation could not be evaluated (${gate.judgeError}). Show the slate and ask the owner to confirm again.`
+          : 'The owner has not confirmed this roster yet. Any clear approval ("确认", "可以", "OK", "looks good") counts — show the slate and wait, unless they already said to start without confirming.',
       );
     }
     // Resolve names before claiming so a bad local seat does not burn the slate.
@@ -1915,11 +2038,64 @@ export async function recordGroupTaskIntegrityEvent(
  * target session gone) only logs — the task is already closed and never rolls
  * back; NULL sourceSessionId silently skips (degrades to owner-private-only).
  */
+/** P1-4: hard cap on external deliveries per close — the chair summarizes,
+ * not dumps; a runaway list must never flood the ledger. */
+const MAX_EXTERNAL_DELIVERIES_PER_CLOSE = 10;
+
+/**
+ * P1-4 (task #39): record deliverables produced outside the group session
+ * (Twin direct delegation) into the task ledger, attributed to the chair with
+ * an external provenance stamp. Idempotent per close call by construction (a
+ * repeated close of a terminal task never re-reaches this path); malformed
+ * entries are skipped, never thrown — a bad URI must not block the close.
+ */
+function recordExternalDeliveries(
+  taskId: number,
+  entries: Array<{ uri?: string; kind?: string; note?: string }>,
+): void {
+  const store = getGroupTaskStore();
+  const chairGlobalMetaId = store.listMembers(taskId)
+    .find((member) => member.role === 'chair')
+    ?.globalmetaid ?? null;
+  let recorded = 0;
+  for (const entry of entries.slice(0, MAX_EXTERNAL_DELIVERIES_PER_CLOSE)) {
+    const uri = (entry?.uri ?? '').trim();
+    if (!uri) continue;
+    try {
+      const kind = (entry.kind ?? '').trim() || 'twin-delegation';
+      const deliverable = store.addDeliverable({
+        taskId,
+        msgPinId: null,
+        authorGlobalmetaid: chairGlobalMetaId,
+        kind: `external:${kind}`.slice(0, 100),
+        uri: uri.slice(0, 500),
+      });
+      const note = (entry.note ?? '').trim().slice(0, 200);
+      store.updateDeliverableVerification(
+        deliverable.id,
+        note
+          ? `external (chair-attested): ${note}`
+          : 'external (chair-attested): produced outside the group session',
+      );
+      recorded += 1;
+    } catch (error) {
+      console.warn(
+        `[GroupTask] External deliverable record failed for task ${taskId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  console.log(
+    `[GroupTask] Task ${taskId}: recorded ${recorded} external deliverable(s) attributed to the chair`,
+  );
+}
+
 function notifySourceSession(
   task: GroupTask,
   outcome: 'done' | 'cancelled',
   rating?: number | null,
   ratingComment?: string | null,
+  closureNote?: string | null,
 ): void {
   const targetSessionId = (task.sourceSessionId ?? '').trim();
   if (!targetSessionId) return; // panel-created / pre-R2 task — no originating session
@@ -1950,7 +2126,7 @@ function notifySourceSession(
     commentLine,
     deliverableCount,
     summaryVersion: summary?.version ?? null,
-  });
+  }) + (closureNote?.trim() ? `\n${closureNote.trim()}` : '');
 
   try {
     const result = acceptanceNotifier({ taskId: task.id, targetSessionId, message });
@@ -2109,13 +2285,39 @@ function normalizeDeliveredMemberStatuses(taskId: number): void {
 
 export async function closeGroupTask(
   taskId: number,
-  opts: { status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string; actor?: GroupTaskStatusEventActor },
+  opts: {
+    status: 'done' | 'cancelled';
+    reason?: string;
+    rating?: number;
+    ratingComment?: string;
+    actor?: GroupTaskStatusEventActor;
+    /**
+     * P1-4 (task #39): deliverables produced OUTSIDE the group session (the
+     * chair ran the remaining work via Twin direct delegation after the group
+     * stalled). Recorded as ledger rows attributed to the chair with an
+     * external provenance stamp, BEFORE the terminal flip so the acceptance
+     * summary includes them — the Tasks UI then matches what was actually
+     * delivered instead of showing an empty checklist on a done task.
+     */
+    externalDeliveries?: Array<{ uri?: string; kind?: string; note?: string }>;
+    /** P1-4: one-line provenance note for the close-out (e.g. "results came
+     * from Twin direct delegation"); relayed to the source session notice. */
+    closureNote?: string;
+  },
 ): Promise<GroupTaskDetail> {
   if (opts.status !== 'done' && opts.status !== 'cancelled') {
     throw new Error(`closeGroupTask status must be 'done' or 'cancelled'`);
   }
   if (opts.reason?.trim()) {
     console.log(`[GroupTask] Closing task ${taskId} as ${opts.status}: ${opts.reason.trim()}`);
+  }
+  if (opts.externalDeliveries && opts.externalDeliveries.length > 0) {
+    // Guard: a repeat close of an already-terminal task is a no-op below —
+    // it must not stack a second copy of the external ledger rows.
+    const current = getGroupTaskStore().getTaskById(taskId);
+    if (current && !TERMINAL_STATUSES.has(current.status)) {
+      recordExternalDeliveries(taskId, opts.externalDeliveries);
+    }
   }
   const closed = await (() => {
     if (orchestrationBridgeGetter) {
@@ -2147,7 +2349,7 @@ export async function closeGroupTask(
     // R2: relay the acceptance result back to the originating CoWork session
     // (best-effort; never throws into the close flow). Done after the rating is
     // persisted so the notification carries the final rating.
-    notifySourceSession(rated, opts.status, opts.rating, opts.ratingComment);
+    notifySourceSession(rated, opts.status, opts.rating, opts.ratingComment, opts.closureNote);
     return getGroupTask(taskId);
   }
   // OpenTeam M3: the chair sediments one participation impression per REMOTE
@@ -2169,7 +2371,7 @@ export async function closeGroupTask(
   }
   // R2: relay the acceptance result back to the originating CoWork session
   // (covers cancelled and automated/RPC closes without a rating).
-  notifySourceSession(closed, opts.status, opts.rating, opts.ratingComment);
+  notifySourceSession(closed, opts.status, opts.rating, opts.ratingComment, opts.closureNote);
   return getGroupTask(taskId);
 }
 

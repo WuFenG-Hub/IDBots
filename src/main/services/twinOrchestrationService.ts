@@ -184,7 +184,16 @@ export class TwinOrchestrationService {
       if (!workerSessionId) return; // no worker session identity to attribute the message to
       const text = outcome === 'completed'
         ? buildOrchNotifyCompleted(workerName, task.id)
-        : buildOrchNotifyFailed(workerName, task.id, (detail ?? '').trim() || 'WORKER_ATTEMPT_FAILED');
+        : buildOrchNotifyFailed(
+          workerName,
+          task.id,
+          // P1-3 (task #39): a host-initiated session stop is not a worker
+          // fault — say so in the notification so the Twin re-dispatches
+          // instead of blaming (or replacing) the worker.
+          detail != null && detail.trim().startsWith('WORKER_SESSION_STOPPED')
+            ? `${detail.trim()} — host-initiated stop, not a worker fault; once the cause clears, re-dispatching should succeed`
+            : (detail ?? '').trim() || 'WORKER_ATTEMPT_FAILED',
+        );
       const result = this.insertCrossSession({
         sourceSessionId: workerSessionId,
         targetSessionId,
@@ -309,9 +318,15 @@ export class TwinOrchestrationService {
           });
         },
         onLateTermination: (late) => {
-          const error = late.reason === 'error'
-            ? (late.message?.trim() || 'WORKER_ATTEMPT_FAILED')
-            : 'WORKER_SESSION_STOPPED';
+          let error: string;
+          if (late.reason === 'error') {
+            error = late.message?.trim() || 'WORKER_ATTEMPT_FAILED';
+          } else {
+            // P1-3 (task #39): carry the stop reason so the attempt record and
+            // the Twin notification explain WHY the session was stopped.
+            const stopDetail = late.message?.trim() ?? '';
+            error = stopDetail ? `WORKER_SESSION_STOPPED: ${stopDetail}` : 'WORKER_SESSION_STOPPED';
+          }
           this.settleTimedOutAttempt(attemptId, error);
         },
         onRecoveryExpired: () => {
@@ -634,7 +649,10 @@ export class TwinOrchestrationService {
       try {
         const session = this.deps.coworkStore.getSession?.(workerSessionId);
         if (!session || session.status !== 'running') continue;
-        this.deps.coworkRunner.stopSession(workerSessionId, { finalStatus: 'stopped' });
+        this.deps.coworkRunner.stopSession(workerSessionId, {
+          finalStatus: 'stopped',
+          reason: 'orchestration task cancelled by Twin',
+        });
         console.log(
           `[TwinOrchestration] Stopped live worker session ${workerSessionId} of cancelled task ${status.task.id}`,
         );

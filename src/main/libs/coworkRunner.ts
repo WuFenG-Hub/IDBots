@@ -6317,9 +6317,27 @@ export class CoworkRunner extends EventEmitter {
     sessionId: string,
     options: {
       finalStatus?: CoworkSessionStatus;
+      /**
+       * P1-3 (task #39): why the stop happened. Audit-logged and carried on
+       * the 'stopped' event so watchers (orchestrator bridge → attempt
+       * records → Twin notifications) can tell a host-initiated stop apart
+       * from a worker failure and explain it to the chair. Callers that stop
+       * sessions MUST pass one; the empty default only covers legacy paths.
+       */
+      reason?: string;
     } = {}
   ): void {
     const finalStatus = options.finalStatus ?? 'idle';
+    const reason = options.reason?.trim() ?? '';
+    // P1-3 audit trail: stopSession itself used to leave no trace, so a batch
+    // stop of live sessions was unattributable after the fact (task #39:
+    // three Twin-delegated worker sessions died in the same second and the
+    // trigger could only be guessed).
+    coworkLog('INFO', 'stopSession', 'Cowork session stopped', {
+      sessionId,
+      finalStatus,
+      ...(reason ? { reason } : {}),
+    });
     this.stoppedSessions.add(sessionId);
     this.crossSessionContinuationQueues.delete(sessionId);
     const activeSession = this.activeSessions.get(sessionId);
@@ -6353,7 +6371,7 @@ export class CoworkRunner extends EventEmitter {
     this.clearSandboxPermissions(sessionId);
     this.store.updateSession(sessionId, { status: finalStatus });
     if (hadActiveSession) {
-      this.emit('stopped', sessionId);
+      this.emit('stopped', sessionId, reason);
     }
   }
 
@@ -6551,7 +6569,7 @@ export class CoworkRunner extends EventEmitter {
         // stopSession aborts the in-flight turn (DSH native cancel / local
         // abort), auto-denies any pending approval so nothing hangs, and
         // settles the session in the deliberate 'stopped' terminal state.
-        this.stopSession(targetSessionId, { finalStatus: 'stopped' });
+        this.stopSession(targetSessionId, { finalStatus: 'stopped', reason: 'Twin requested stop via worker_session_stop' });
         coworkLog('INFO', 'worker_session_stop', 'Twin stopped worker session', {
           sessionId: targetSessionId,
           metabotId: Number(targetMetabotId),
@@ -11348,7 +11366,7 @@ export class CoworkRunner extends EventEmitter {
     if (!canInterrupt) {
       return false;
     }
-    this.stopSession(sessionId);
+    this.stopSession(sessionId, { reason: 'interrupted before assistant output (queued guidance)' });
     return true;
   }
 
@@ -11360,11 +11378,17 @@ export class CoworkRunner extends EventEmitter {
     return Array.from(this.activeSessions.keys());
   }
 
-  stopAllSessions(): void {
+  /**
+   * P1-3 (task #39): `reason` names the batch cause (host storage recovery
+   * restart, app shutdown) — it lands in the audit log and on each session's
+   * 'stopped' event, so three sessions dying in the same second is later
+   * attributable from cowork.log instead of unexplained.
+   */
+  stopAllSessions(reason?: string): void {
     const sessionIds = this.getActiveSessionIds();
     for (const sessionId of sessionIds) {
       try {
-        this.stopSession(sessionId);
+        this.stopSession(sessionId, reason ? { reason } : undefined);
       } catch (error) {
         console.error(`Failed to stop session ${sessionId}:`, error);
       }
