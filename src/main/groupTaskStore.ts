@@ -1994,6 +1994,7 @@ export class GroupTaskStore {
    * of a message carrying the `[WORKING]` status tag — the durable half of the
    * worker ACK/progress protocol. The service derives the member workStatus
    * from these timestamps (fresh [WORKING] within the working window => working).
+   * P2-2: prefix match — `[WORKING long-task …]` heartbeat forms count too.
    */
   getMembersWorkingAt(
     groupId: string,
@@ -2011,7 +2012,7 @@ export class GroupTaskStore {
       `SELECT sender_global_metaid, MAX(chain_timestamp) AS last_working_at
        FROM group_chat_messages
        WHERE group_id = ? AND sender_global_metaid IN (${placeholders})
-         AND content LIKE '%[WORKING]%' ESCAPE '\\'
+         AND content LIKE '%[WORKING%' ESCAPE '\\'
          AND chain_timestamp IS NOT NULL
        GROUP BY sender_global_metaid`,
       [groupId, ...ids],

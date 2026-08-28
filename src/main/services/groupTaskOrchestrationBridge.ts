@@ -232,6 +232,30 @@ export class GroupTaskOrchestrationBridge {
     }
   }
 
+  /**
+   * P1-2: fail the latest still-active (running/queued) canonical attempt of
+   * one worker of one group task — used by the daemon's stuck-session reclaim
+   * so the orchestration ledger matches the reclaimed reality. Returns true
+   * when an attempt was failed.
+   */
+  failActiveWorkerAttempt(groupTaskId: number, workerMetabotId: number, error: string): boolean {
+    const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
+    if (!groupTask?.orchestrationTaskId) return false;
+    const steps = this.deps.orchestrationStore.listSteps(groupTask.orchestrationTaskId)
+      .filter((step) => step.assigneeMetabotId === workerMetabotId);
+    for (const step of steps.slice().reverse()) {
+      const attempts = this.deps.orchestrationStore.listAttempts(step.id);
+      const active = attempts.slice().reverse().find(
+        (attempt) => attempt.status === 'running' || attempt.status === 'queued',
+      );
+      if (active) {
+        this.failWorkerAttempt(active.id, error);
+        return true;
+      }
+    }
+    return false;
+  }
+
   recordDeliverable(input: {
     groupTaskId: number;
     deliverable: GroupTaskDeliverable;

@@ -16,6 +16,7 @@ import {
   deliverableKindBadge,
   deliverableVerificationBadgeClass,
   deliverableVerificationState,
+  formatGroupTaskRelativeTime,
   formatGroupTaskTime,
   isBotBrowserUri,
   openGroupTaskUri,
@@ -1006,9 +1007,15 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     </button>
                   )}
                 </div>
-                {member.lastSpeakAt != null && (
-                  <div className="text-[10px] leading-tight dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 pl-0.5">
-                    last spoke {formatGroupTaskTime(member.lastSpeakAt)}
+                {(member.lastActivityAt != null || member.lastSpeakAt != null) && (
+                  <div
+                    className="text-[10px] leading-tight dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 pl-0.5"
+                    title={formatGroupTaskTime(member.lastActivityAt ?? member.lastSpeakAt)}
+                  >
+                    {i18nService.t('groupTasksLastActive').replace(
+                      '{time}',
+                      formatGroupTaskRelativeTime(member.lastActivityAt ?? member.lastSpeakAt).compact,
+                    )}
                   </div>
                 )}
                 </>

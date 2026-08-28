@@ -149,8 +149,63 @@ const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
  * P0-2: worker ACK/progress status tag, e.g.
  * `[WORKING] 已接单，正在做X，预计N分钟` — the worker-to-group "I am alive and
  * working" signal. The tag also feeds the member workStatus readout (P1-4).
+ * P2-2: the tag may carry in-tag qualifiers (`[WORKING long-task, ETA 45 min]`)
+ * — a long-task heartbeat; matching is prefix-based so both forms count.
  */
-const WORKING_TAG = /\[WORKING\]/i;
+const WORKING_TAG = /\[WORKING(?:\s[^\]]*)?\]/i;
+/**
+ * P2-2: kv heartbeat lease per (task, member): a `[WORKING ... ETA N min]`
+ * message extends the member's liveness lease to now + N min + grace. While
+ * the lease is valid the host watchdogs must not flag the member unreachable
+ * (a running long task is not silence).
+ */
+export const WORKING_HEARTBEAT_PREFIX = 'group_task_working_heartbeat:';
+/** P2-2: grace period appended to a heartbeat ETA before the lease expires. */
+export const WORKING_HEARTBEAT_GRACE_MS = 5 * 60_000;
+/**
+ * P2-2: heartbeat lease expiry for an ETA in minutes. Pure + exported for
+ * unit tests.
+ */
+export function computeWorkingHeartbeatUntil(
+  estimatedMinutes: number,
+  nowMs: number,
+  graceMs: number = WORKING_HEARTBEAT_GRACE_MS,
+): number {
+  const minutes = Math.max(0, Math.trunc(estimatedMinutes));
+  return nowMs + minutes * 60_000 + Math.max(0, graceMs);
+}
+
+/**
+ * P1-2/P2-1: member liveness classification shared by the silence watchdogs.
+ * The watchdogs used to look at group-chat speech only, so a worker mid
+ * long-task (tool calls streaming into its cowork session, or a valid
+ * [WORKING long-task] heartbeat lease) was mislabeled unreachable. A member
+ * is alive when ANY of: a valid heartbeat lease, group speech within the
+ * threshold, or cowork-session activity within the threshold. Pure +
+ * exported for unit tests.
+ */
+export interface MemberLivenessSignals {
+  lastSpeakMs: number | null;
+  lastSessionActivityMs: number | null;
+  heartbeatUntilMs: number | null;
+  nowMs: number;
+  thresholdMs: number;
+}
+export type MemberLiveness = 'alive' | 'stale';
+export function classifyMemberLiveness(signals: MemberLivenessSignals): MemberLiveness {
+  if (
+    signals.heartbeatUntilMs != null
+    && Number.isFinite(signals.heartbeatUntilMs)
+    && signals.nowMs < signals.heartbeatUntilMs
+  ) {
+    return 'alive';
+  }
+  const fresh = (ts: number | null): boolean =>
+    ts != null && Number.isFinite(ts) && signals.nowMs - ts <= signals.thresholdMs;
+  if (fresh(signals.lastSpeakMs)) return 'alive';
+  if (fresh(signals.lastSessionActivityMs)) return 'alive';
+  return 'stale';
+}
 /** P0-2: kv guard so one dispatch produces at most ONE host ACK. */
 const ACK_KV_PREFIX = 'group_task_ack:';
 /**
@@ -285,6 +340,13 @@ const ACK_SEEN_PREFIX = 'group_task_ack_seen:';
 const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
+/**
+ * P1-2/P1-3: one stuck-session reclaim per (task, member) streak — the host
+ * stops the inert session and hands the chair an actionable directive at most
+ * once per silence streak. Cleared when the member ACKs/speaks again so a
+ * future stuck spell reclaims afresh.
+ */
+const GROUP_TASK_STUCK_RECLAIM_PREFIX = 'group_task_stuck_reclaim:';
 /**
  * R6 L2: one re-assign hint per (task, member) timeout streak — mirrors the
  * ACK_REMINDED kv guard so the chair isn't spammed every tick while a member
@@ -660,6 +722,32 @@ export function checkPlanningCoverage(reply: string, workerNames: string[]): Pla
 }
 
 /**
+ * Map worker names that the chair's dispatch text addresses to their
+ * globalMetaIds, for the mention array on the outgoing group pin. The daemon
+ * wake-up gate (`isMentioned`) honors the mention array, so an auto-generated
+ * dispatch wakes the assigned workers even when the LLM wrote bare names
+ * instead of explicit `@Name` tokens. Pure + exported for unit tests.
+ */
+export function resolveMentionIdsForWorkers(
+  members: Array<{ role: string; name?: string | null; globalmetaid?: string | null }>,
+  mentionedNames: string[],
+): string[] {
+  const wanted = new Set(
+    mentionedNames.map((name) => name.trim().toLowerCase()).filter(Boolean),
+  );
+  if (wanted.size === 0) return [];
+  const ids: string[] = [];
+  for (const member of members) {
+    if (member.role !== 'worker') continue;
+    const name = (member.name ?? '').trim().toLowerCase();
+    const gmid = (member.globalmetaid ?? '').trim();
+    if (!name || !gmid || !wanted.has(name)) continue;
+    if (!ids.includes(gmid)) ids.push(gmid);
+  }
+  return ids;
+}
+
+/**
  * F1 (GT#11): deterministic signature of the ACTIVE member roster as seen by
  * the chair planning turn. Any member add / remove / role change produces a
  * new signature, so the planning-turn settle gate can detect a roster that is
@@ -1019,6 +1107,13 @@ export interface GroupTaskDaemonDeps {
   /** Per-task minimum interval (ms) between presence probes. */
   remotePresenceThrottleMs?: number;
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
+  /**
+   * P1-2: stop a stuck LOCAL worker cowork session (abort the in-flight turn;
+   * the working directory and on-disk artifacts are preserved). Wired to
+   * CoworkRunner.stopSession in production. Unwired = the stuck-session
+   * reclaim only marks state and briefs the chair.
+   */
+  stopWorkerSession?: (sessionId: string) => void;
   /**
    * P4 (v1.2): inject the review-stage owner report (same body the A2A
    * private chat receives) into the task's origin CoWork session under the
@@ -2905,15 +3000,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         });
         recordedDeliverables.push(candidate);
         // Review fix (delivery-deadline hygiene): the deliverable ARRIVED —
-        // retire this member's deadline watch immediately instead of leaving
-        // the kv armed. A late delivery (past the ETA, after the reminder)
-        // must never look like a still-missing one to later ticks, and the
-        // reminded flag must not suppress the reminder cycle of the member's
-        // NEXT ETA-armed assignment.
+        // retire this member's deadline watch immediately. Leaving the kv
+        // armed after a late delivery is exactly what fed the reclaim ladder
+        // a healthy, already-delivered worker.
         {
           const delivererMember = members.find(
-            (candidate2) =>
-              (candidate2.globalmetaid ?? '').trim().toLowerCase()
+            (candidateMember) =>
+              (candidateMember.globalmetaid ?? '').trim().toLowerCase()
                 === (message.senderGlobalMetaId ?? '').trim().toLowerCase(),
           );
           if (delivererMember?.metabotId != null) {
@@ -3627,21 +3720,34 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const workerNames = promptMembers
         .filter((member) => member.role === 'worker')
         .map((member) => member.name);
-      if (workerNames.length > 1) {
-        const coverage = checkPlanningCoverage(reply, workerNames);
-        if (coverage.unmentionedWorkers.length > 0) {
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: planning mentions ` +
-            `${coverage.mentionedWorkers.join(', ') || 'nobody'}; ` +
-            `unmentioned seats stay idle on purpose: ${coverage.unmentionedWorkers.join(', ')}`,
-          );
-        }
+      // Coverage is computed unconditionally: mentionedWorkers also drives the
+      // mention array on the outgoing dispatch so assigned workers are woken
+      // even when the plan text uses bare names instead of `@Name` tokens.
+      const coverage = checkPlanningCoverage(reply, workerNames);
+      if (workerNames.length > 1 && coverage.unmentionedWorkers.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: planning mentions ` +
+          `${coverage.mentionedWorkers.join(', ') || 'nobody'}; ` +
+          `unmentioned seats stay idle on purpose: ${coverage.unmentionedWorkers.join(', ')}`,
+        );
       }
 
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
       coworkStore.addMessage(session.id, { type: 'user', content: directive });
       coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
-      const posted = await postGroupMessage(task.id, bot.id, reply);
+      const dispatchMention = resolveMentionIdsForWorkers(members, coverage.mentionedWorkers);
+      const posted = await postGroupMessage(
+        task.id,
+        bot.id,
+        reply,
+        dispatchMention.length > 0 ? { mention: dispatchMention } : undefined,
+      );
+      if (dispatchMention.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: planning dispatch carries mention array for ` +
+          `${coverage.mentionedWorkers.join(', ')}`,
+        );
+      }
       // P2-7 r2: the daemon's own kickoff must not count as "Twin activity".
       rememberDaemonChairPin(task.id, posted.pinId);
       sqlite.set(plannedKey, '1');
@@ -3934,10 +4040,113 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * P1-2/P2-1: resolve a LOCAL member's cowork session binding (channel
+   * 'metaweb_group_task', conversation 'group-task:<taskId>') and its last
+   * activity time — the "is the worker actually doing something" signal the
+   * speech-only watchdogs used to lack. Best-effort: any store error reads as
+   * "no session info", never breaks the tick.
+   */
+  const getLocalMemberSessionInfo = (
+    taskId: number,
+    metabotId: number,
+  ): { sessionId: string; lastActivityMs: number | null; cwd: string | null } | null => {
+    try {
+      const coworkStore = deps.getCoworkStore();
+      const mapping = coworkStore.getConversationMapping(
+        GROUP_TASK_CONVERSATION_CHANNEL,
+        `group-task:${taskId}`,
+        metabotId,
+      );
+      if (!mapping) return null;
+      const session = coworkStore.getSessionWithoutMessages(mapping.coworkSessionId);
+      if (!session) return null;
+      const updatedAt = Number(session.updatedAt);
+      return {
+        sessionId: session.id,
+        lastActivityMs: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : null,
+        cwd: session.cwd ?? null,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  /** P2-2: valid-until (epoch ms) of the member's [WORKING long-task] lease. */
+  const getMemberHeartbeatUntil = (taskId: number, metabotId: number): number | null => {
+    const raw = deps.getStore().get<string>(`${WORKING_HEARTBEAT_PREFIX}${taskId}:${metabotId}`);
+    const parsed = raw == null ? Number.NaN : Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  /**
+   * P1-2/P1-3: reclaim a genuinely stuck LOCAL worker session, once per
+   * silence streak. Stops the session (working directory and on-disk
+   * artifacts are preserved), fails the canonical orchestration attempt, and
+   * returns an actionable directive for the chair's context channel. Returns
+   * null when the reclaim already fired for this streak.
+   */
+  const reclaimStuckWorkerSession = (
+    task: GroupTask,
+    member: GroupTaskMember,
+    reason: string,
+  ): string | null => {
+    if (member.metabotId == null) return null;
+    const sqlite = deps.getStore();
+    const reclaimKey = `${GROUP_TASK_STUCK_RECLAIM_PREFIX}${task.id}:${member.metabotId}`;
+    if (sqlite.get<string>(reclaimKey) === '1') return null;
+    sqlite.set(reclaimKey, '1');
+    const name = member.name ?? `bot-${member.metabotId}`;
+    const sessionInfo = getLocalMemberSessionInfo(task.id, member.metabotId);
+    let stopped = false;
+    if (sessionInfo && deps.stopWorkerSession) {
+      try {
+        deps.stopWorkerSession(sessionInfo.sessionId);
+        stopped = true;
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: stuck-session stop failed for ${name}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (deps.orchestrationBridge) {
+      try {
+        deps.orchestrationBridge.failActiveWorkerAttempt(
+          task.id,
+          member.metabotId,
+          `STUCK_SESSION_RECLAIMED: ${reason}`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: stuck-session attempt fail failed for ${name}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    emitLog(
+      `[GroupTaskDaemon] Task ${task.id}: reclaimed stuck session for ${name} ` +
+      `(${reason}; session ${sessionInfo?.sessionId ?? 'none'} ${stopped ? 'stopped' : 'not stopped'})`,
+    );
+    return [
+      `Host auto-recovery: ${name} was judged stuck (${reason}).`,
+      sessionInfo
+        ? `Session ${sessionInfo.sessionId} ${stopped ? 'was stopped' : 'could not be stopped'}; ` +
+          `the working directory is preserved at ${sessionInfo.cwd ?? '(unknown)'} — downloaded ` +
+          'artifacts and partial outputs are still on disk.'
+        : 'No local cowork session was found for the member.',
+      `Re-dispatch the subtask with an explicit @${name} (the member wakes on the mention and ` +
+        'continues in the preserved directory), or re-assign to a standby member.',
+    ].join(' ');
+  };
+
+  /**
    * P0-2: auto-mark silent assigned/working members as unreachable after
    * memberUnreachableAfterMinutes without any chain speech. Baseline = last
    * speak time (fallback: member join time); never marks chair members, done
    * members, or members who already show a non-active status.
+   * P1-2/P2-2: a member with fresh cowork-session activity or a valid
+   * [WORKING long-task] heartbeat lease is ALIVE (mid long task) — never
+   * flagged unreachable.
    */
   const monitorMemberUnreachable = (task: GroupTask, members: GroupTaskMember[]): void => {
     const thresholdMs = memberUnreachableAfterMinutes * 60_000;
@@ -3958,7 +4167,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         ? speakSec * 1000
         : parseSqliteUtcMs(member.createdAt);
       if (lastMs == null) continue;
-      if (now() - lastMs <= thresholdMs) continue;
+      const liveness = classifyMemberLiveness({
+        lastSpeakMs: lastMs,
+        lastSessionActivityMs: member.metabotId != null
+          ? getLocalMemberSessionInfo(task.id, member.metabotId)?.lastActivityMs ?? null
+          : null,
+        heartbeatUntilMs: member.metabotId != null
+          ? getMemberHeartbeatUntil(task.id, member.metabotId)
+          : null,
+        nowMs: now(),
+        thresholdMs,
+      });
+      if (liveness === 'alive') continue;
       try {
         store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
         emitLog(
@@ -4010,6 +4230,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const chairMember = members.find((member) => member.role === 'chair');
 
     const timedOut: string[] = [];
+    const reclaimNotes: string[] = [];
     for (const member of workers) {
       const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
       const lastWorkingSec = gmid ? workingMap.get(gmid) ?? null : null;
@@ -4018,6 +4239,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (staleMs <= memberTimeoutAfterMinutes * 60_000) continue;
 
       const name = member.name ?? `bot-${member.metabotId}`;
+
+      // P2-1/P2-2: a valid [WORKING long-task] heartbeat lease or fresh
+      // cowork-session activity means the worker is mid long-task, not stuck
+      // — never flag it unreachable and never reclaim its session.
+      const liveness = classifyMemberLiveness({
+        lastSpeakMs: null, // this monitor's baseline is the [WORKING] signal
+        lastSessionActivityMs: getLocalMemberSessionInfo(task.id, member.metabotId!)?.lastActivityMs ?? null,
+        heartbeatUntilMs: getMemberHeartbeatUntil(task.id, member.metabotId!),
+        nowMs: now(),
+        thresholdMs: memberTimeoutAfterMinutes * 60_000,
+      });
+      if (liveness === 'alive') continue;
 
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
       // once per (task, member) streak.
@@ -4038,6 +4271,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           'injecting chair re-assign hint',
         );
       }
+
+      // P1-2/P1-3: the member is genuinely inert (no speech, no session
+      // activity, no heartbeat) — reclaim the stuck session once per streak
+      // and hand the chair an actionable directive (session id, reason,
+      // preserved working directory, re-dispatch instruction).
+      const reclaimNote = reclaimStuckWorkerSession(
+        task,
+        member,
+        `[WORKING] signal stale ${memberTimeoutAfterMinutes}+ min with zero cowork-session activity`,
+      );
+      if (reclaimNote) reclaimNotes.push(reclaimNote);
 
       // L3: if the member is STILL silent past the escalation window (L2 + lag),
       // brief the owner ONCE per streak via the private report channel — local
@@ -4067,13 +4311,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
       }
     }
-    if (timedOut.length === 0) return '';
+    if (timedOut.length === 0 && reclaimNotes.length === 0) return '';
     const reAssign = standbyNames.length > 0
       ? `Re-assign to a standby member (${standbyNames.join(', ')}) or mark the step suspended.`
       : 'Mark the step suspended and tell the owner it is blocked on an unresponsive member.';
     return [
       '[SYSTEM member-timeout hint — generated by the host, not a group participant]',
-      `These members have gone silent past the ${memberTimeoutAfterMinutes}-min [WORKING] window: ${timedOut.join(', ')}.`,
+      timedOut.length > 0
+        ? `These members have gone silent past the ${memberTimeoutAfterMinutes}-min [WORKING] window: ${timedOut.join(', ')}.`
+        : 'A stuck member session was reclaimed by the host (see below).',
+      ...reclaimNotes,
       `${reAssign} Do NOT auto-fail them.`,
     ].join('\n');
   };
@@ -4208,6 +4455,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
       clearPendingAck();
+      // The member is alive again — clear the stuck-reclaim streak so a future
+      // stuck spell reclaims afresh.
+      sqlite.delete(`${GROUP_TASK_STUCK_RECLAIM_PREFIX}${task.id}:${member.metabotId}`);
+      // P2-2: an ETA-bearing [WORKING] (ACK or long-task heartbeat) extends the
+      // member's liveness lease — the watchdogs honor it before flagging
+      // unreachable/timeout.
+      if (ack.estimatedMinutes != null && ack.estimatedMinutes > 0) {
+        sqlite.set(
+          `${WORKING_HEARTBEAT_PREFIX}${task.id}:${member.metabotId}`,
+          String(computeWorkingHeartbeatUntil(ack.estimatedMinutes, now())),
+        );
+      }
       // P0-4 arming: an explicit ETA arms its own deadline; a numberless ACK
       // (the entropy-P0 template ACK carries no ETA) falls back to the member
       // timeout so the delivery reminder still fires — without this the
@@ -4217,8 +4476,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         : memberTimeoutAfterMinutes;
       // Review fix: arming a fresh deadline starts a fresh reminder cycle —
       // a leftover delivery-reminded flag from the previous (missed or
-      // delivered) deadline would otherwise suppress the next reminder
-      // forever (the flag used to be set but never reset).
+      // delivered) deadline would otherwise skip the next reminder and drop
+      // the member straight onto the reclaim ladder after one grace window.
       sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
       sqlite.set(
         `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
@@ -4294,6 +4553,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // R6 L2: the member recovered — reset the timeout-hint streak so a
           // future silence window triggers a fresh re-assign hint.
           sqlite.delete(`${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`);
+          // P1-2: same for the stuck-reclaim streak.
+          sqlite.delete(`${GROUP_TASK_STUCK_RECLAIM_PREFIX}${task.id}:${member.metabotId}`);
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} spoke after ` +
             `assignment #${entry.messageId} (implicit ACK); no no-ACK reminder`,
@@ -4478,15 +4739,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * P0-4: delivery deadline reminders. When a worker's [WORKING] ACK carried an
    * estimated duration and the deadline passes without ANY deliverable from
    * that member, post ONE reminder addressed to both chair and worker.
+   * P1-3: when the reminder already went out and the deadline stays blown past
+   * one member-timeout grace window, escalate from "remind" to the same
+   * auto-recovery the timeout watchdog uses — but only when the member is
+   * genuinely inert (no heartbeat, no cowork-session activity). Returns a
+   * chair-context block with the reclaim directives (may be empty).
    */
   const monitorDeliveryDeadlines = async (
     task: GroupTask,
     members: GroupTaskMember[],
-  ): Promise<void> => {
-    if (task.status !== 'executing') return;
+  ): Promise<string> => {
+    if (task.status !== 'executing') return '';
     const sqlite = deps.getStore();
     const store = deps.getGroupTaskStore();
     const nowMs = now();
+    const reclaimNotes: string[] = [];
     for (const member of members) {
       if (member.role !== 'worker' || member.metabotId == null) continue;
       const raw = sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
@@ -4499,7 +4766,50 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       if (!entry || typeof entry.dueAt !== 'number' || nowMs < entry.dueAt) continue;
       const remindedKey = `${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
-      if (sqlite.get<string>(remindedKey) === '1') continue;
+      if (sqlite.get<string>(remindedKey) === '1') {
+        // P1-3 escalation: the reminder went out and the deadline is still
+        // blown past one grace window. Reclaim only a genuinely inert member
+        // — a valid heartbeat lease or fresh session activity means the long
+        // task is alive and the ETA was just optimistic.
+        if (nowMs < entry.dueAt + memberTimeoutAfterMinutes * 60_000) continue;
+        // Review fix (task #36 follow-up): re-check the ledger BEFORE
+        // reclaiming. The original escalation branch never looked at
+        // deliverables again, so a LATE delivery (past ETA, after the
+        // reminder) plus one quiet timeout window of normal post-delivery
+        // waiting stopped a healthy worker's session, failed its attempt,
+        // and told the chair to re-dispatch work that was already done.
+        const gmidEscalation = (member.globalmetaid ?? '').trim().toLowerCase();
+        const deliveredLate = Boolean(gmidEscalation)
+          && store.listDeliverables(task.id).some(
+            (deliverable) =>
+              (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === gmidEscalation
+              && deliverable.status !== 'rejected',
+          );
+        if (deliveredLate) {
+          sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+          sqlite.delete(remindedKey);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: delivery deadline watch for ${member.name ?? member.metabotId} ` +
+            'retired — the deliverable arrived late but arrived; no reclaim',
+          );
+          continue;
+        }
+        const liveness = classifyMemberLiveness({
+          lastSpeakMs: null,
+          lastSessionActivityMs: getLocalMemberSessionInfo(task.id, member.metabotId)?.lastActivityMs ?? null,
+          heartbeatUntilMs: getMemberHeartbeatUntil(task.id, member.metabotId),
+          nowMs,
+          thresholdMs: memberTimeoutAfterMinutes * 60_000,
+        });
+        if (liveness === 'alive') continue;
+        const note = reclaimStuckWorkerSession(
+          task,
+          member,
+          `estimated delivery missed past the grace window with no [DELIVERABLE] and zero cowork-session activity`,
+        );
+        if (note) reclaimNotes.push(note);
+        continue;
+      }
       const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
       const hasDeliverable = store.listDeliverables(task.id).some(
         (deliverable) =>
@@ -4530,6 +4840,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
       }
     }
+    if (reclaimNotes.length === 0) return '';
+    return [
+      '[SYSTEM delivery-timeout recovery — generated by the host, not a group participant]',
+      ...reclaimNotes,
+    ].join('\n');
   };
 
   /** Stable per-member welcome key (local members by metabot_id, remote by gmid). */
@@ -4769,7 +5084,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // P0-4: re-verify lagging deliverables + missed delivery deadlines.
     await monitorDeliverableVerification(task);
     if (!checkpointOpenAtTick) {
-      await monitorDeliveryDeadlines(task, members);
+      // P1-3: delivery-timeout reclaim directives ride the same chair-context
+      // channel as the member-timeout hints.
+      const deliveryRecoveryBlock = await monitorDeliveryDeadlines(task, members);
+      if (deliveryRecoveryBlock) {
+        remoteStatusBlock = [remoteStatusBlock, deliveryRecoveryBlock].filter(Boolean).join('\n\n');
+      }
     }
 
     // #13: welcome broadcast + one-round handshake for members joining after

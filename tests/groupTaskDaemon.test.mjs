@@ -178,7 +178,7 @@ const createHarness = async (overrides = {}) => {
       return state.chatReply ?? `reply-for-${llmId}`;
     },
     postGroupTaskMessage: async (taskId, metabotId, content, opts) => {
-      sends.push({ taskId, metabotId, content, replyPin: opts?.replyPin });
+      sends.push({ taskId, metabotId, content, replyPin: opts?.replyPin, mention: opts?.mention });
       if (state.sendFailures?.has(metabotId)) {
         throw new Error(`on-chain send failed for bot ${metabotId}`);
       }
@@ -547,6 +547,218 @@ test('R6: stale [WORKING] local worker → timeout status + L3 owner brief (idem
   } finally {
     h.cleanup();
   }
+});
+
+test('P1-2: fresh cowork-session activity exempts a silent long-task worker from unreachable/timeout', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Stale [WORKING] signal (2 min old, past the 1-min test windows)…
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-live-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const staleId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['working-stale-live-i0'])[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, staleId);
+    // …but the worker's cowork session shows FRESH tool activity (long task
+    // running) — the member must not be flagged or reclaimed.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'active long-task member keeps its working status');
+    assert.equal(stoppedSessions.length, 0, 'no reclaim while the session is active');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P2-2: a valid [WORKING long-task] heartbeat lease exempts a silent worker', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-hb-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const staleId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['working-stale-hb-i0'])[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, staleId);
+    // Heartbeat lease valid for another 30 min (normally written by the
+    // [WORKING long-task, ETA N min] protocol marker handler).
+    h.store.set('group_task_working_heartbeat:1:2', String(startMs + 30 * 60_000));
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'heartbeat-leased member keeps its working status');
+    assert.equal(stoppedSessions.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-2/P1-3: a genuinely inert worker session is reclaimed once per streak (stop + chair directive)', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-dead-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const staleId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['working-stale-dead-i0'])[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, staleId);
+    // Session exists but its last activity is an hour old — the stuck case.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'unreachable', 'inert member is flagged');
+    assert.deepEqual(stoppedSessions, [session.id], 'stuck session stopped (cwd/artifacts preserved by stopSession)');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), '1', 'reclaim recorded');
+
+    // Idempotent: a second tick does not stop again.
+    await h.loop.runTick();
+    assert.equal(stoppedSessions.length, 1, 'reclaim fires once per streak');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('review fix: a late deliverable is never reclaimed by the delivery-timeout escalation', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    // Simulate the pre-fix residue state DIRECTLY so the escalation branch's
+    // own deliverable re-check is what must save the worker: the deadline
+    // blew, the reminder went out, the deliverable then arrived LATE (kv
+    // never retired), and the member has been quietly waiting since.
+    h.store.set('group_task_expected_delivery:1:2', JSON.stringify({ dueAt: startMs - 5 * 60_000 }));
+    h.store.set('group_task_delivery_reminded:1:2', '1');
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    h.db.run(
+      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, status, confirmation, created_at)
+       VALUES (?, 'pin-late-delivery', 'gmid-w2', 'metaapp', ?, 'delivered', 'unconfirmed', ?)`,
+      [task.id, `metaapp://${'ab'.repeat(32)}i0`, startMs - 3 * 60_000],
+    );
+    // No cowork session activity for an hour — inert by every liveness signal.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+    assert.deepEqual(stoppedSessions, [], 'delivered-late worker is not stopped');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), undefined, 'no reclaim recorded');
+    assert.ok(
+      !h.sends.some((send) => /delivery-timeout recovery/.test(send.content)),
+      'no recovery directive for an already-delivered member',
+    );
+    // The stale watch retired instead of lingering armed.
+    assert.equal(h.store.get('group_task_expected_delivery:1:2'), undefined);
+    assert.equal(h.store.get('group_task_delivery_reminded:1:2'), undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('review fix: a new ETA ACK resets the delivery-reminded flag before re-arming', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    const ack = (pin, eta) => insertGroupMessage(h.db, {
+      pinId: pin, senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[WORKING] doing X，预计${eta}分钟`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    ack('ack-eta-1', 2);
+    await h.loop.runTick();
+    h.state.nowMs += 3 * 60_000; // past the 2-min ETA
+    await h.loop.runTick();
+    assert.equal(h.sends.filter((s) => /estimated delivery/.test(s.content)).length, 1, 'first reminder fired');
+    assert.equal(h.store.get('group_task_delivery_reminded:1:2'), '1');
+
+    // New assignment, new ETA: the flag must reset or this cycle skips the
+    // reminder and drops straight onto the reclaim ladder.
+    ack('ack-eta-2', 1);
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_delivery_reminded:1:2'), undefined, 'flag reset on re-arm');
+
+    h.state.nowMs += 90_000; // past the new ETA, before the grace window ends
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => /estimated delivery/.test(s.content)).length,
+      2,
+      'second deadline miss gets its own reminder',
+    );
+    assert.deepEqual(stoppedSessions, [], 'no reclaim during the fresh cycle');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('classifyMemberLiveness: heartbeat lease, speech, and session activity each keep a member alive', () => {  const { classifyMemberLiveness } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const nowMs = 1_700_000_000_000;
+  const thresholdMs = 20 * 60_000;
+  // everything absent → stale
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: null, lastSessionActivityMs: null, heartbeatUntilMs: null, nowMs, thresholdMs,
+  }), 'stale');
+  // valid heartbeat lease → alive even with nothing else
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: null, lastSessionActivityMs: null, heartbeatUntilMs: nowMs + 10 * 60_000, nowMs, thresholdMs,
+  }), 'alive');
+  // expired lease → stale
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: null, lastSessionActivityMs: null, heartbeatUntilMs: nowMs - 1, nowMs, thresholdMs,
+  }), 'stale');
+  // fresh speech → alive
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: nowMs - 5 * 60_000, lastSessionActivityMs: null, heartbeatUntilMs: null, nowMs, thresholdMs,
+  }), 'alive');
+  // fresh session activity (the long-task case) → alive
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: nowMs - 60 * 60_000, lastSessionActivityMs: nowMs - 60_000, heartbeatUntilMs: null, nowMs, thresholdMs,
+  }), 'alive');
+  // old everything → stale
+  assert.equal(classifyMemberLiveness({
+    lastSpeakMs: nowMs - 60 * 60_000, lastSessionActivityMs: nowMs - 60 * 60_000, heartbeatUntilMs: null, nowMs, thresholdMs,
+  }), 'stale');
 });
 
 test('cursor advances on no-reply messages; a failing message holds the batch (fail-stop) until it recovers', async () => {
@@ -1355,6 +1567,61 @@ test('chair planning turn: fires once for a new planning task (kv, directive, ro
   } finally {
     h.cleanup();
   }
+});
+
+test('chair planning turn: dispatch post carries a mention array for the assigned workers (P1-1)', async () => {
+  const h = await createHarness({
+    // Bare name, no '@' token — the wake-up must come from the mention array.
+    chatReply: 'Plan: Coder Bot researches first, then hands off. [STATUS:EXECUTING]',
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.deepEqual(
+      h.sends[0].mention,
+      ['gmid-w2'],
+      'assigned worker globalMetaId rides the mention array even without an @ token',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('chair planning turn: plan addressing nobody carries no mention array', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: I draft the outline myself first. [STATUS:EXECUTING]',
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.sends[0].mention, undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('resolveMentionIdsForWorkers: maps mentioned worker names to globalMetaIds', () => {
+  const { resolveMentionIdsForWorkers } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  assert.deepEqual(
+    resolveMentionIdsForWorkers(GATE_MEMBERS, ['Coder Bot', 'Designer Bot']),
+    ['gmid-w2', 'gmid-w3'],
+  );
+  // chair names never resolve, unknown names are skipped, case-insensitive
+  assert.deepEqual(
+    resolveMentionIdsForWorkers(GATE_MEMBERS, ['Twin Bot', 'coder bot', 'Nobody']),
+    ['gmid-w2'],
+  );
+  // members without a globalMetaId cannot be mentioned
+  assert.deepEqual(
+    resolveMentionIdsForWorkers(
+      [{ metabotId: 9, globalmetaid: null, role: 'worker', name: 'Ghost Bot' }],
+      ['Ghost Bot'],
+    ),
+    [],
+  );
+  assert.deepEqual(resolveMentionIdsForWorkers(GATE_MEMBERS, []), []);
 });
 
 test('chair planning turn: not attempted for executing tasks', async () => {
@@ -2903,6 +3170,30 @@ test('P0-3: chair assignment records pending ACK; worker [WORKING] ACK clears it
     const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
     assert.equal(member.status, 'working');
     assert.ok(h.store.get('group_task_expected_delivery:1:2'), 'expected delivery deadline recorded');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P2-2: a [WORKING long-task] heartbeat arms the liveness lease and counts as working', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-heartbeat-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING long-task, ETA 45 min] VoxCPM synthesis in background',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working');
+    const lease = Number(h.store.get('group_task_working_heartbeat:1:2'));
+    assert.ok(Number.isFinite(lease), 'heartbeat lease recorded');
+    assert.equal(lease, startMs + 45 * 60_000 + 5 * 60_000, 'ETA + 5-min grace');
+    // the heartbeat also arms the delivery deadline (same as any ETA ACK)
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'));
   } finally {
     h.cleanup();
   }

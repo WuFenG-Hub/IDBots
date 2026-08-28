@@ -219,6 +219,9 @@ test('createGroupTask happy path: twin chair, joins per member, kickoff, rows pe
     // member to respond; the chair assigns work with @ in later messages).
     assert.match(kickoff.opts.content, /Members: Coder Bot, Designer Bot/);
     assert.doesNotMatch(kickoff.opts.content, /@Coder Bot|@Designer Bot/);
+    // P1-1: no assignment list on create → no mention array either; members
+    // are woken by the chair planning turn's dispatch mention instead.
+    assert.equal(kickoff.opts.mention, undefined);
     assert.equal(kickoff.opts.nickName, 'Twin Bot');
 
     // listed too
@@ -229,6 +232,27 @@ test('createGroupTask happy path: twin chair, joins per member, kickoff, rows pe
     // P2-6: show surfaces the group transcript (mock transport writes no rows,
     // so only the array shape is asserted here).
     assert.ok(Array.isArray(shown.messages), 'getGroupTask returns the message flow');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('createGroupTask with activeMemberNames: kickoff carries a mention array for the assigned workers (P1-1)', async () => {
+  const h = await createHarness();
+  try {
+    await createGroupTask({
+      title: 'Build MetaApp',
+      goal: 'Build with an explicit first assignee',
+      memberMetabotIds: [2, 3],
+      activeMemberNames: ['Coder Bot'],
+      createdBy: 'user',
+    });
+    const kickoff = h.calls.send[0];
+    // The roster text stays @-free (P0-3)…
+    assert.doesNotMatch(kickoff.opts.content, /@Coder Bot|@Designer Bot/);
+    // …but the assigned worker's globalMetaId rides the mention array so the
+    // daemon wake-up gate fires without a manual @ from the chair.
+    assert.deepEqual(kickoff.opts.mention, ['gmid-coder']);
   } finally {
     h.cleanup();
   }
