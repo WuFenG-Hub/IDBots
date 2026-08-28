@@ -1123,6 +1123,8 @@ export class SqliteStore {
     this.migrateOpenTeamMembershipsActivatedColumn();
     // Migration: add left_at/left_cause/left_reason to openteam_memberships (guest "removed" notice).
     this.migrateOpenTeamMembershipsLeftColumns();
+    // Migration: add task_status/task_status_updated_at to openteam_memberships (host task status sync).
+    this.migrateOpenTeamMembershipsTaskStatusColumns();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_invites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2582,6 +2584,35 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateOpenTeamMembershipsLeftColumns:', error);
+    }
+  }
+
+  /**
+   * Migration: task_status / task_status_updated_at on openteam_memberships
+   * (guest-side host-task status sync). The guest learns the host task's status
+   * from the chair's `[STATUS:...]` group messages and persists the latest here
+   * so the collab view can show 待验收/已完成/已取消 instead of an eternal
+   * "active". PRAGMA-guarded and idempotent; existing rows stay NULL (unknown)
+   * until the guest daemon's one-time transcript backfill re-derives them.
+   */
+  private migrateOpenTeamMembershipsTaskStatusColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_memberships)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('task_status')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN task_status TEXT');
+        changed = true;
+      }
+      if (!columns.includes('task_status_updated_at')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN task_status_updated_at TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamMembershipsTaskStatusColumns:', error);
     }
   }
 

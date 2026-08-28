@@ -2272,3 +2272,54 @@ test('done tasks show delivered members as done, not unreachable/standby', async
     h.cleanup();
   }
 });
+
+test('closeGroupTask: the chair posts exactly one [STATUS:DONE]/[STATUS:CANCELLED] close-out announcement', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({ title: 'T', goal: 'G', createdBy: 'user' });
+    const done = await closeGroupTask(detail.id, { status: 'done', reason: 'goal met' });
+    assert.equal(done.status, 'done');
+
+    const announcements = h.calls.send.filter((call) => /^\[STATUS:/.test(call.opts.content));
+    assert.equal(announcements.length, 1, 'exactly one close-out announcement');
+    assert.equal(announcements[0].metabotId, 1, 'posted as the chair');
+    assert.equal(announcements[0].groupId, GROUP_ID);
+    assert.equal(
+      announcements[0].opts.content,
+      '[STATUS:DONE] Task closed: accepted by the owner. Reason: goal met',
+    );
+
+    // A repeat (no-op) close of the terminal task must NOT re-announce.
+    await closeGroupTask(detail.id, { status: 'done' });
+    assert.equal(
+      h.calls.send.filter((call) => /^\[STATUS:/.test(call.opts.content)).length,
+      1,
+      'repeat close stays silent',
+    );
+
+    const second = await createGroupTask({ title: 'T2', goal: 'G2', createdBy: 'user' });
+    await closeGroupTask(second.id, { status: 'cancelled', reason: 'obsolete' });
+    const cancelAnnouncement = h.calls.send.find((call) => call.opts.content.startsWith('[STATUS:CANCELLED]'));
+    assert.ok(cancelAnnouncement, 'cancellation is announced too');
+    assert.equal(
+      cancelAnnouncement.opts.content,
+      '[STATUS:CANCELLED] Task closed: cancelled by the owner. Reason: obsolete',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('closeGroupTask: a failing close-out announcement never fails the close', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({ title: 'T', goal: 'G', createdBy: 'user' });
+    setGroupTaskServiceTransport({
+      sendGroupChatMessage: async () => { throw new Error('chain offline'); },
+    });
+    const closed = await closeGroupTask(detail.id, { status: 'done' });
+    assert.equal(closed.status, 'done');
+  } finally {
+    h.cleanup();
+  }
+});

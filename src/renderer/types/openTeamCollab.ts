@@ -9,6 +9,9 @@ export type OpenTeamCollabStatus = 'active' | 'left';
 /** How a guest membership ended (mirrors OpenTeamMembershipLeftCause in main). */
 export type OpenTeamCollabLeftCause = 'kick' | 'self_check' | 'opt_out';
 
+/** Host task status learned from the chair's [STATUS:...] group messages (main-side mirror). */
+export type OpenTeamCollabTaskStatus = 'executing' | 'review' | 'done' | 'cancelled';
+
 export interface OpenTeamCollabSummary {
   id: number;
   groupId: string;
@@ -30,6 +33,14 @@ export interface OpenTeamCollabSummary {
   leftAt: string | null;
   leftCause: OpenTeamCollabLeftCause | null;
   leftReason: string | null;
+  /**
+   * Latest host task status parsed from the chair's [STATUS:...] group messages;
+   * null = unknown (legacy rows, or the chair never posted a tag). Drives the
+   * badge: a task the host closed shows 已完成/已取消 here instead of an
+   * eternal 进行中.
+   */
+  taskStatus: OpenTeamCollabTaskStatus | null;
+  taskStatusUpdatedAt: string | null;
 }
 
 /** P0-1: one received [OPENTEAM_INVITE] on this machine, whatever its outcome. */

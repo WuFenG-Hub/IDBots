@@ -496,3 +496,119 @@ test('hasMembershipForGroup: any local membership row counts (active or left), u
     store.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Host-task status sync (chair [STATUS:...] transcript tags)
+// ---------------------------------------------------------------------------
+
+test('memberships: task_status columns exist; updateMembershipTaskStatus persists and dedupes', async () => {
+  const tempDir = makeTempDir();
+  const { store, openTeamStore, db } = await openStores(tempDir);
+  try {
+    const cols = getColumns(db, 'openteam_memberships');
+    for (const col of ['task_status', 'task_status_updated_at']) {
+      assert.ok(cols.includes(col), `openteam_memberships.${col} should exist`);
+    }
+
+    const created = openTeamStore.upsertActiveMembership({ groupId: 'group-ts', metabotId: 7 });
+    assert.equal(created.taskStatus, null, 'fresh membership has no host-task status');
+    assert.equal(created.taskStatusUpdatedAt, null);
+
+    assert.equal(openTeamStore.updateMembershipTaskStatus('group-ts', 7, 'review'), true);
+    const updated = openTeamStore.getMembership('group-ts', 7);
+    assert.equal(updated.taskStatus, 'review');
+    assert.ok(updated.taskStatusUpdatedAt, 'status change is stamped');
+
+    // Same-value rewrite is a no-op (the stamp must not churn).
+    assert.equal(openTeamStore.updateMembershipTaskStatus('group-ts', 7, 'review'), false);
+    // Unknown membership is a no-op false.
+    assert.equal(openTeamStore.updateMembershipTaskStatus('group-ext-9', 7, 'done'), false);
+
+    assert.equal(openTeamStore.updateMembershipTaskStatus('group-ts', 7, 'done'), true);
+    assert.equal(openTeamStore.getMembership('group-ts', 7).taskStatus, 'done');
+
+    // listCollabSummaries surfaces the fields to the renderer.
+    const summary = openTeamStore.listCollabSummaries().find((row) => row.groupId === 'group-ts');
+    assert.equal(summary.taskStatus, 'done');
+    assert.ok(summary.taskStatusUpdatedAt);
+
+    // A reviving re-invite resets the stale terminal status (fresh participation).
+    const revived = openTeamStore.upsertActiveMembership({ groupId: 'group-ts', metabotId: 7, invitePinId: 'pin-new' });
+    assert.equal(revived.taskStatus, null);
+    assert.equal(revived.taskStatusUpdatedAt, null);
+  } finally {
+    store.close();
+  }
+});
+
+test('memberships: deriveLatestChairTaskStatus reads the newest chair tag only', async () => {
+  const tempDir = makeTempDir();
+  const { store, openTeamStore, db } = await openStores(tempDir);
+  try {
+    openTeamStore.upsertActiveMembership({
+      groupId: 'group-derive', metabotId: 7, inviterGlobalmetaid: 'gmid-Chair',
+    });
+
+    insertGroupMessage(db, {
+      pinId: 'd1', groupId: 'group-derive', senderName: 'Chair', content: 'Plan posted. [STATUS:EXECUTING]', chainTimestamp: 1785000001000,
+    });
+    // A worker quoting the tag must NOT count.
+    insertGroupMessage(db, {
+      pinId: 'd2', groupId: 'group-derive', senderName: 'Worker', content: 'ack your [STATUS:REVIEW] instruction', chainTimestamp: 1785000002000,
+    });
+    insertGroupMessage(db, {
+      pinId: 'd3', groupId: 'group-derive', senderName: 'Chair', content: 'All delivered. [STATUS:REVIEW]', chainTimestamp: 1785000003000,
+    });
+
+    assert.equal(
+      openTeamStore.deriveLatestChairTaskStatus('group-derive', 'gmid-Chair'),
+      'review',
+      'newest chair tag wins; worker-quoted tags are ignored',
+    );
+
+    // Later terminal tag supersedes.
+    insertGroupMessage(db, {
+      pinId: 'd4', groupId: 'group-derive', senderName: 'Chair', content: '[STATUS:DONE] Task closed: accepted by the owner.', chainTimestamp: 1785000004000,
+    });
+    assert.equal(openTeamStore.deriveLatestChairTaskStatus('group-derive', 'gmid-Chair'), 'done');
+
+    // No chair tag anywhere / unknown chair -> null.
+    insertGroupMessage(db, {
+      pinId: 'd5', groupId: 'group-quiet', senderName: 'Worker', content: '[STATUS:REVIEW] pretending', chainTimestamp: 1785000005000,
+    });
+    assert.equal(openTeamStore.deriveLatestChairTaskStatus('group-quiet', 'gmid-Chair'), null);
+    assert.equal(openTeamStore.deriveLatestChairTaskStatus('group-derive', null), null);
+    assert.equal(openTeamStore.deriveLatestChairTaskStatus('group-derive', ''), null);
+  } finally {
+    store.close();
+  }
+});
+
+test('memberships: listActiveGroupIds excludes terminal host tasks; unknown-status listing', async () => {
+  const tempDir = makeTempDir();
+  const { store, openTeamStore } = await openStores(tempDir);
+  try {
+    openTeamStore.upsertActiveMembership({ groupId: 'group-running', metabotId: 7 });
+    openTeamStore.upsertActiveMembership({ groupId: 'group-review', metabotId: 7 });
+    openTeamStore.upsertActiveMembership({ groupId: 'group-done', metabotId: 7 });
+    openTeamStore.upsertActiveMembership({ groupId: 'group-cancelled', metabotId: 8 });
+
+    openTeamStore.updateMembershipTaskStatus('group-review', 7, 'review');
+    openTeamStore.updateMembershipTaskStatus('group-done', 7, 'done');
+    openTeamStore.updateMembershipTaskStatus('group-cancelled', 8, 'cancelled');
+
+    assert.deepEqual(
+      openTeamStore.listActiveGroupIds().sort(),
+      ['group-review', 'group-running'],
+      'terminal-task groups leave the backfill set; review/unknown keep polling',
+    );
+
+    assert.deepEqual(
+      openTeamStore.listMembershipsWithUnknownTaskStatus().map((m) => m.groupId),
+      ['group-running'],
+      'only never-derived memberships are backfill candidates',
+    );
+  } finally {
+    store.close();
+  }
+});

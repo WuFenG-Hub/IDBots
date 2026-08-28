@@ -18,11 +18,41 @@ export function openTeamCollabTitle(collab: Pick<OpenTeamCollabSummary, 'taskTit
   return i18nService.t('openTeamCollabUntitled').replace('{id}', shortGlobalMetaId(collab.groupId) || collab.groupId);
 }
 
-/** Tailwind classes for the Active/Left status badge. */
-export function openTeamCollabStatusBadgeClass(status: string): string {
-  return status === 'active'
-    ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
-    : 'bg-gray-200 text-gray-600 dark:bg-gray-700/50 dark:text-gray-300';
+/**
+ * Badge for one collab: a left membership shows "Left" (gray); otherwise the
+ * HOST task status drives the badge — 待验收 amber, 已完成 blue, 已取消 gray,
+ * unknown/executing keeps the plain green "进行中". This is what un-sticks the
+ * eternal "active" badge once the chair's [STATUS:...] tags are parsed.
+ */
+export function openTeamCollabStatusBadgeClass(
+  collab: Pick<OpenTeamCollabSummary, 'status' | 'taskStatus'>,
+): string {
+  if (collab.status === 'left') {
+    return 'bg-gray-200 text-gray-600 dark:bg-gray-700/50 dark:text-gray-300';
+  }
+  switch (collab.taskStatus) {
+    case 'review':
+      return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
+    case 'done':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
+    case 'cancelled':
+      return 'bg-gray-200 text-gray-600 dark:bg-gray-700/50 dark:text-gray-300';
+    default:
+      return 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300';
+  }
+}
+
+/** i18n label paired with openTeamCollabStatusBadgeClass. */
+export function openTeamCollabStatusLabel(
+  collab: Pick<OpenTeamCollabSummary, 'status' | 'taskStatus'>,
+): string {
+  if (collab.status === 'left') return i18nService.t('openTeamCollabStatusLeft');
+  switch (collab.taskStatus) {
+    case 'review': return i18nService.t('openTeamCollabTaskStatusReview');
+    case 'done': return i18nService.t('openTeamCollabTaskStatusDone');
+    case 'cancelled': return i18nService.t('openTeamCollabTaskStatusCancelled');
+    default: return i18nService.t('openTeamCollabStatusActive');
+  }
 }
 
 /**
@@ -130,8 +160,8 @@ export const OpenTeamCollabCard: React.FC<{ collab: OpenTeamCollabSummary; onCli
             <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">
               {openTeamCollabTitle(collab)}
             </span>
-            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${openTeamCollabStatusBadgeClass(collab.status)}`}>
-              {i18nService.t(collab.status === 'active' ? 'openTeamCollabStatusActive' : 'openTeamCollabStatusLeft')}
+            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${openTeamCollabStatusBadgeClass(collab)}`}>
+              {openTeamCollabStatusLabel(collab)}
             </span>
           </div>
           <div className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">

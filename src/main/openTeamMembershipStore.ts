@@ -5,6 +5,8 @@
  */
 
 import type { SqliteDatabase as Database } from './sqliteTypes';
+import type { OpenTeamTaskStatus } from './libs/openTeamTaskStatus';
+import { parseOpenTeamTaskStatusTag } from './libs/openTeamTaskStatus';
 
 export type OpenTeamMembershipStatus = 'active' | 'left';
 export type OpenTeamInviteStatus = 'pending' | 'accepted' | 'declined' | 'expired';
@@ -43,6 +45,15 @@ export interface OpenTeamMembership {
   leftCause: OpenTeamMembershipLeftCause | null;
   /** Kick reason carried by the [OPENTEAM_KICK] envelope; null otherwise. */
   leftReason: string | null;
+  /**
+   * Latest host-task status learned from the chair's `[STATUS:...]` group
+   * messages (executing/review/done/cancelled); null = unknown (legacy rows, or
+   * the chair never posted a tag). Drives the collab badge and the terminal
+   * backfill/reply cutoffs.
+   */
+  taskStatus: OpenTeamTaskStatus | null;
+  /** When taskStatus was last (re-)derived (sqlite datetime 'now', UTC). */
+  taskStatusUpdatedAt: string | null;
 }
 
 /** How a guest membership ended (drives the guest-side "removed" notice). */
@@ -152,6 +163,8 @@ interface OpenTeamMembershipRow {
   left_at: string | null;
   left_cause: string | null;
   left_reason: string | null;
+  task_status: string | null;
+  task_status_updated_at: string | null;
 }
 
 interface OpenTeamInviteRow {
@@ -171,6 +184,7 @@ interface OpenTeamInviteRow {
 }
 
 function rowToOpenTeamMembership(row: OpenTeamMembershipRow): OpenTeamMembership {
+  const taskStatus = row.task_status;
   return {
     id: row.id,
     groupId: row.group_id,
@@ -189,6 +203,11 @@ function rowToOpenTeamMembership(row: OpenTeamMembershipRow): OpenTeamMembership
       ? row.left_cause
       : null,
     leftReason: row.left_reason ?? null,
+    taskStatus: taskStatus === 'executing' || taskStatus === 'review'
+      || taskStatus === 'done' || taskStatus === 'cancelled'
+      ? taskStatus
+      : null,
+    taskStatusUpdatedAt: row.task_status_updated_at ?? null,
   };
 }
 
@@ -346,7 +365,9 @@ export class OpenTeamMembershipStore {
            activated_at = datetime('now'),
            left_at = NULL,
            left_cause = NULL,
-           left_reason = NULL
+           left_reason = NULL,
+           task_status = NULL,
+           task_status_updated_at = NULL
          WHERE group_id = ? AND metabot_id = ?`,
         [
           input.globalmetaid ?? null,
@@ -427,11 +448,18 @@ export class OpenTeamMembershipStore {
     });
   }
 
-  /** group_id of every active membership (group-chat backfill targets). */
+  /**
+   * group_id of every active membership (group-chat backfill targets).
+   * Memberships whose host task reached a terminal status (done/cancelled) are
+   * excluded: the group is dead for this bot and the 15s backfill would poll it
+   * forever. review/executing/unknown keep polling — the chair's close-out
+   * `[STATUS:DONE|CANCELLED]` announcement still has to arrive.
+   */
   listActiveGroupIds(): string[] {
     const rows = this.getAll<{ group_id: string }>(
       `SELECT DISTINCT group_id FROM openteam_memberships
-       WHERE status = 'active' AND TRIM(group_id) != ''`,
+       WHERE status = 'active' AND TRIM(group_id) != ''
+         AND (task_status IS NULL OR task_status NOT IN ('done','cancelled'))`,
     );
     return rows.map((row) => row.group_id);
   }
@@ -514,6 +542,68 @@ export class OpenTeamMembershipStore {
       [groupId, groupId, metabotId],
     );
     this.saveDb();
+  }
+
+  // --- host-task status sync (chair `[STATUS:...]` transcript tags) ---
+
+  /**
+   * Persist the latest host-task status learned from a chair `[STATUS:...]`
+   * group message. A same-value rewrite is skipped so the updated_at stamp
+   * stays meaningful; everything else restamps.
+   */
+  updateMembershipTaskStatus(
+    groupId: string,
+    metabotId: number,
+    status: OpenTeamTaskStatus,
+  ): boolean {
+    const existing = this.getMembership(groupId, metabotId);
+    if (!existing || existing.taskStatus === status) return false;
+    this.db.run(
+      `UPDATE openteam_memberships
+       SET task_status = ?, task_status_updated_at = datetime('now')
+       WHERE group_id = ? AND metabot_id = ?`,
+      [status, groupId, metabotId],
+    );
+    this.saveDb();
+    return true;
+  }
+
+  /**
+   * Re-derive the host-task status from the local transcript: the newest
+   * `[STATUS:...]` group message sent BY THE CHAIR (the membership's recorded
+   * inviter — same trust anchor as the kick handler). Tags quoted by other
+   * members never count. Returns null when the chair never posted a tag.
+   */
+  deriveLatestChairTaskStatus(
+    groupId: string,
+    chairGlobalMetaId: string | null | undefined,
+  ): OpenTeamTaskStatus | null {
+    const chair = (chairGlobalMetaId ?? '').trim();
+    if (!chair) return null;
+    const rows = this.getAll<{ content: string | null }>(
+      `SELECT content FROM group_chat_messages
+       WHERE group_id = ? AND sender_global_metaid = ?
+         AND content LIKE '%[STATUS:%'
+       ORDER BY id DESC`,
+      [groupId, chair],
+    );
+    for (const row of rows) {
+      const parsed = parseOpenTeamTaskStatusTag(row.content);
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  /**
+   * Memberships whose host-task status was never derived (task_status IS NULL)
+   * — the retroactive transcript backfill runs over these once per daemon
+   * start so legacy rows stop showing an eternal "active".
+   */
+  listMembershipsWithUnknownTaskStatus(): OpenTeamMembership[] {
+    const rows = this.getAll<OpenTeamMembershipRow>(
+      `SELECT * FROM openteam_memberships WHERE task_status IS NULL ORDER BY id ASC`,
+    );
+    return rows.map(rowToOpenTeamMembership);
   }
 
   // --- openteam_invites ---

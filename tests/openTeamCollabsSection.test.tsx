@@ -6,6 +6,7 @@ import {
   OpenTeamCollabCard,
   OpenTeamGuestInviteCard,
   openTeamCollabStatusBadgeClass,
+  openTeamCollabStatusLabel,
   openTeamCollabTitle,
   shortGlobalMetaId,
 } from '../src/renderer/components/groupTasks/OpenTeamCollabsSection';
@@ -26,6 +27,11 @@ const baseCollab: OpenTeamCollabSummary = {
   createdAt: null,
   messageCount: 12,
   lastMessageAt: null,
+  leftAt: null,
+  leftCause: null,
+  leftReason: null,
+  taskStatus: null,
+  taskStatusUpdatedAt: null,
 };
 
 test('shortGlobalMetaId: trims, shortens, tolerates empty input', () => {
@@ -45,8 +51,50 @@ test('openTeamCollabTitle: task title wins, short group id fallback', () => {
 });
 
 test('openTeamCollabStatusBadgeClass: active is green, left is gray', () => {
-  assert.ok(openTeamCollabStatusBadgeClass('active').includes('green'));
-  assert.ok(openTeamCollabStatusBadgeClass('left').includes('gray'));
+  assert.ok(openTeamCollabStatusBadgeClass({ status: 'active', taskStatus: null }).includes('green'));
+  assert.ok(openTeamCollabStatusBadgeClass({ status: 'left', taskStatus: null }).includes('gray'));
+});
+
+test('collab badge: the host task status drives active memberships', () => {
+  // 待验收 amber, 已完成 blue, 已取消 gray, unknown/executing keeps 进行中 green.
+  assert.ok(openTeamCollabStatusBadgeClass({ status: 'active', taskStatus: 'review' }).includes('amber'));
+  assert.ok(openTeamCollabStatusBadgeClass({ status: 'active', taskStatus: 'done' }).includes('blue'));
+  assert.ok(openTeamCollabStatusBadgeClass({ status: 'active', taskStatus: 'cancelled' }).includes('gray'));
+  assert.ok(openTeamCollabStatusBadgeClass({ status: 'active', taskStatus: 'executing' }).includes('green'));
+
+  assert.equal(
+    openTeamCollabStatusLabel({ status: 'active', taskStatus: 'review' }),
+    i18nService.t('openTeamCollabTaskStatusReview'),
+  );
+  assert.equal(
+    openTeamCollabStatusLabel({ status: 'active', taskStatus: 'done' }),
+    i18nService.t('openTeamCollabTaskStatusDone'),
+  );
+  assert.equal(
+    openTeamCollabStatusLabel({ status: 'active', taskStatus: 'cancelled' }),
+    i18nService.t('openTeamCollabTaskStatusCancelled'),
+  );
+  assert.equal(
+    openTeamCollabStatusLabel({ status: 'active', taskStatus: 'executing' }),
+    i18nService.t('openTeamCollabStatusActive'),
+  );
+  assert.equal(
+    openTeamCollabStatusLabel({ status: 'active', taskStatus: null }),
+    i18nService.t('openTeamCollabStatusActive'),
+  );
+  // A left membership always shows Left, even if a status tag landed first.
+  assert.equal(
+    openTeamCollabStatusLabel({ status: 'left', taskStatus: 'done' }),
+    i18nService.t('openTeamCollabStatusLeft'),
+  );
+});
+
+test('OpenTeamCollabCard: renders the host task status label on the badge', () => {
+  const markup = renderToStaticMarkup(
+    <OpenTeamCollabCard collab={{ ...baseCollab, taskStatus: 'review' }} onClick={() => {}} />,
+  );
+  assert.ok(markup.includes(i18nService.t('openTeamCollabTaskStatusReview')), 'review label rendered');
+  assert.ok(!markup.includes(i18nService.t('openTeamCollabStatusActive')), 'plain active label replaced');
 });
 
 test('OpenTeamCollabCard: renders title, status, bot, inviter and message count', () => {
