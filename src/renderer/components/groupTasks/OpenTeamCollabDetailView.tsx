@@ -11,6 +11,7 @@ import {
 } from './groupTaskUtils';
 import {
   openTeamCollabStatusBadgeClass,
+  openTeamCollabStatusLabel,
   openTeamCollabTitle,
   shortGlobalMetaId,
 } from './OpenTeamCollabsSection';
@@ -131,8 +132,8 @@ const OpenTeamCollabDetailView: React.FC<OpenTeamCollabDetailViewProps> = ({
           <h1 className="text-lg font-semibold dark:text-claude-darkText text-claude-text truncate">
             {title}
           </h1>
-          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${openTeamCollabStatusBadgeClass(collab.status)}`}>
-            {i18nService.t(collab.status === 'active' ? 'openTeamCollabStatusActive' : 'openTeamCollabStatusLeft')}
+          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${openTeamCollabStatusBadgeClass(collab)}`}>
+            {openTeamCollabStatusLabel(collab)}
           </span>
         </div>
         <WindowTitleBar inline />
