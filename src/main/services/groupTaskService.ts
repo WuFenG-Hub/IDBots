@@ -899,6 +899,8 @@ export interface GroupTaskMemberPreview {
   avatar: string | null;
   role: GroupTaskMember['role'];
   metabotId: number | null;
+  /** Chain GlobalMetaID of the member, so avatars can open the Bot page. */
+  globalMetaId: string | null;
 }
 
 function buildMetabotAvatarMap(metabotIds: Array<number | null | undefined>): Map<number, string | null> {
@@ -925,6 +927,7 @@ function toTaskSummary(
     avatar: member.metabotId != null ? (avatarById.get(member.metabotId) ?? null) : null,
     role: member.role,
     metabotId: member.metabotId,
+    globalMetaId: member.globalmetaid,
   }));
   return {
     ...task,

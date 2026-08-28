@@ -2,12 +2,24 @@ import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { i18nService } from '../../services/i18n';
 import { isRenderableAvatarSource } from '../../utils/avatarSource';
+import { buildBotPageBrowserUri } from '../../features/botBrowser/botBrowserIntent';
 import type { GroupTaskMemberPreview, GroupTaskSummary } from '../../types/groupTask';
 import {
   formatGroupTaskRelativeTime,
   groupTaskStatusBadgeClass,
   groupTaskStatusLabelKey,
 } from './groupTaskUtils';
+
+/**
+ * Open a member/sender Bot page in the Bot Browser via the app-wide URI
+ * channel (the same DOM event the markdown link renderer uses). Keeps avatar
+ * components free of per-view callback threading.
+ */
+export const openBotPageInBotBrowser = (globalMetaId: string | null | undefined): void => {
+  const uri = buildBotPageBrowserUri(globalMetaId ?? '');
+  if (!uri || typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent('botBrowser:openUri', { detail: { uri } }));
+};
 
 const avatarInitial = (name?: string | null): string => {
   const trimmed = name?.trim() ?? '';
@@ -27,6 +39,7 @@ export const groupTaskMemberPreviews = (task: GroupTaskSummary): GroupTaskMember
     avatar: null,
     role: name === task.chairName ? 'chair' : 'worker',
     metabotId: null,
+    globalMetaId: null,
   }));
 };
 
@@ -44,22 +57,25 @@ export const GroupTaskTinyAvatar: React.FC<{
   src?: string | null;
   name?: string | null;
   size?: 'list' | 'hover';
-}> = ({ src, name, size = 'list' }) => {
+  /** When set, clicking opens this member's Bot page in the Bot Browser. */
+  browserGlobalMetaId?: string | null;
+}> = ({ src, name, size = 'list', browserGlobalMetaId }) => {
   const [imageFailed, setImageFailed] = useState(false);
   useEffect(() => {
     setImageFailed(false);
   }, [src]);
   const showImage = isRenderableAvatarSource(src) && !imageFailed;
   const box = size === 'hover' ? 'h-5 w-5 text-[10px]' : 'h-4 w-4 text-[9px]';
-  return (
+  const displayName = name?.trim() || '';
+  const body = (
     <span
       className={`flex ${box} flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-claude-surfaceHover font-semibold text-claude-textSecondary dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary`}
-      title={name?.trim() || undefined}
+      title={browserGlobalMetaId ? undefined : (displayName || undefined)}
     >
       {showImage ? (
         <img
           src={src ?? undefined}
-          alt={name?.trim() || ''}
+          alt={displayName}
           className="h-full w-full object-cover"
           onError={() => setImageFailed(true)}
         />
@@ -67,6 +83,28 @@ export const GroupTaskTinyAvatar: React.FC<{
         avatarInitial(name)
       )}
     </span>
+  );
+
+  if (!browserGlobalMetaId) return body;
+
+  const label = i18nService.t('groupTasksOpenBotInBrowser').replace('{name}', displayName || 'Bot');
+  return (
+    <button
+      type="button"
+      data-browser-global-metaid={browserGlobalMetaId}
+      aria-label={label}
+      title={label}
+      onClick={(event) => {
+        // Avatars sit inside clickable task cards/sidebar rows; opening the
+        // Bot page must not also open the task.
+        event.stopPropagation();
+        event.preventDefault();
+        openBotPageInBotBrowser(browserGlobalMetaId);
+      }}
+      className={`flex-shrink-0 rounded-full transition-shadow hover:ring-2 hover:ring-claude-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60 ${box}`}
+    >
+      {body}
+    </button>
   );
 };
 
@@ -81,6 +119,7 @@ export const GroupTaskMemberAvatarRow: React.FC<{ members: GroupTaskMemberPrevie
           key={`${member.metabotId ?? member.name}-${index}`}
           src={member.avatar}
           name={member.name}
+          browserGlobalMetaId={member.globalMetaId}
         />
       ))}
     </span>
@@ -150,7 +189,7 @@ export const GroupTaskHoverCard: React.FC<{
                 key={`${member.metabotId ?? member.name}-${index}`}
                 className="flex items-center gap-2 min-w-0"
               >
-                <GroupTaskTinyAvatar src={member.avatar} name={member.name} size="hover" />
+                <GroupTaskTinyAvatar src={member.avatar} name={member.name} size="hover" browserGlobalMetaId={member.globalMetaId} />
                 <span className="min-w-0 flex-1 truncate text-xs dark:text-claude-darkText text-claude-text">
                   {member.name || '?'}
                 </span>

@@ -15,6 +15,7 @@ import {
 } from '../chat/messengerBubble';
 import type { GroupChatTranscriptMessage } from '../../types/groupTask';
 import { formatGroupTaskMessengerTime } from './groupTaskUtils';
+import { openBotPageInBotBrowser } from './GroupTaskListMeta';
 
 const DEFAULT_AVATAR = getDefaultMetabotAvatarUrl();
 const TXID_RE = /^[0-9a-f]{64}$/i;
@@ -177,6 +178,8 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   const senderName = senderDisplayName?.trim() || message.senderName?.trim() || 'Unknown';
   const timestamp = formatGroupTaskMessengerTime(message.chainTimestamp);
   const avatarSrc = useSenderAvatar(message);
+  const senderGlobalMetaId = message.senderGlobalMetaId?.trim() || null;
+  const senderBrowserLabel = i18nService.t('groupTasksOpenBotInBrowser').replace('{name}', senderName);
   const txId = resolveTxId(message);
   const txidPreview = txId ? formatTxidPreview(txId) : '';
   const rawContent = message.content ?? '';
@@ -202,13 +205,36 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
         highlight ? 'rounded-lg bg-claude-accent/5 ring-2 ring-claude-accent/60' : ''
       }`}
     >
-      <img
-        src={avatarSrc}
-        alt={senderName}
-        style={{ width: 32, height: 32 }}
-        className="rounded-full object-cover flex-shrink-0"
-        onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_AVATAR; }}
-      />
+      {senderGlobalMetaId ? (
+        <button
+          type="button"
+          data-browser-global-metaid={senderGlobalMetaId}
+          aria-label={senderBrowserLabel}
+          title={senderBrowserLabel}
+          onClick={(event) => {
+            event.stopPropagation();
+            event.preventDefault();
+            openBotPageInBotBrowser(senderGlobalMetaId);
+          }}
+          className="rounded-full flex-shrink-0 overflow-hidden transition-shadow hover:ring-2 hover:ring-claude-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
+        >
+          <img
+            src={avatarSrc}
+            alt={senderName}
+            style={{ width: 32, height: 32 }}
+            className="rounded-full object-cover"
+            onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_AVATAR; }}
+          />
+        </button>
+      ) : (
+        <img
+          src={avatarSrc}
+          alt={senderName}
+          style={{ width: 32, height: 32 }}
+          className="rounded-full object-cover flex-shrink-0"
+          onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_AVATAR; }}
+        />
+      )}
 
       <div className={messengerColumnClassName(isOutgoing)}>
         <div className={`mb-0.5 flex max-w-full flex-wrap items-center gap-1 px-1 ${isOutgoing ? 'flex-row-reverse' : 'flex-row'}`}>

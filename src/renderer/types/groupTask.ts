@@ -249,6 +249,8 @@ export interface GroupTaskMemberPreview {
   avatar: string | null;
   role: GroupTaskMemberRole;
   metabotId: number | null;
+  /** Chain GlobalMetaID of the member, so avatars can open the Bot page. */
+  globalMetaId: string | null;
 }
 
 export interface GroupChatTranscriptMessage {
