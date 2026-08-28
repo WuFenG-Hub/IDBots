@@ -3952,8 +3952,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // [NO_REPLY] escape hatch: the model opted to stay silent. The assistant
     // message is already in the session (context continuity) and cooldown/budget
     // is still recorded by the caller; only the on-chain send is suppressed.
+    // fix/group-member-status: deliberate silence settles the canonical attempt
+    // as a no-reply COMPLETION instead of a failure — a WORKER_NO_REPLY failure
+    // painted the member-rail "出错" badge for the whole error window even
+    // though the bot answered correctly.
     if (NO_REPLY_PATTERN.test(reply)) {
-      failCanonicalAttempt('WORKER_NO_REPLY');
+      if (orchestrationAttemptId && deps.orchestrationBridge) {
+        deps.orchestrationBridge.completeWorkerAttemptNoReply(orchestrationAttemptId);
+      }
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} answered [NO_REPLY]; ` +
         'on-chain send suppressed (debug)',

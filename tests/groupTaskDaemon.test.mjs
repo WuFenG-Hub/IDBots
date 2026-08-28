@@ -1473,6 +1473,39 @@ test('[NO_REPLY] plain path: suppressed on-chain, session kept, cooldown recorde
   }
 });
 
+test('[NO_REPLY] settles the canonical attempt as a no-reply completion, not a failure', async () => {
+  const h = await createHarness({ chatReply: '[NO_REPLY]' });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'nr-attempt-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot thanks!',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.sends.length, 0, 'still suppressed on-chain');
+    // fix/group-member-status: deliberate silence must NOT leave a failed
+    // attempt residual — that failure used to paint the member-rail "出错"
+    // badge for the whole error window on a healthy bot.
+    const attemptView = h.deps.orchestrationBridge.getWorkerAttemptStatus(task.id, 2);
+    assert.equal(attemptView.status, null, 'no failed/running attempt residual after [NO_REPLY]');
+    const orchestrationTaskId = h.groupTaskStore.getTaskById(task.id).orchestrationTaskId;
+    const attempts = h.orchestrationStore.listSteps(orchestrationTaskId)
+      .flatMap((step) => h.orchestrationStore.listAttempts(step.id));
+    assert.ok(attempts.length > 0, 'a canonical attempt was recorded for the turn');
+    assert.ok(
+      attempts.every((attempt) => attempt.status === 'completed'),
+      'no-reply attempts complete instead of failing',
+    );
+    assert.ok(
+      attempts.every((attempt) => attempt.result?.noReply === true),
+      'the completion is marked as a deliberate no-reply',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('[NO_REPLY] matching: trailing text and case variants suppressed; normal replies unaffected', async () => {
   const h = await createHarness();
   try {

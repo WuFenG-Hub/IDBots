@@ -1225,7 +1225,8 @@ function toEpochMs(value: number | null | undefined): number | null {
  *      working/assigned member => working (a long task in flight, e.g. tool
  *      calls streaming into the session, is not silence);
  *  3. a recent FAILED attempt (error window) with a NEWER success record
- *     (lastSpeakAt / lastWorkingAt strictly AFTER attemptAtMs) => idle
+ *     (lastSpeakAt / lastWorkingAt / cowork-session activity strictly AFTER
+ *     attemptAtMs) => idle
  *     (a fresh `[WORKING]` already returned at 2);
  *  4. a recent FAILED attempt without newer records, only when the member is
  *     NOT currently `working` => error. A `working` member's failed attempt is
@@ -1292,13 +1293,17 @@ export function computeGroupTaskMemberWorkStatus(input: {
     && nowMs - attemptAtMs <= errorWindowMs
   ) {
     // Error-degrade: a failed attempt is only a stale residual marker when no
-    // NEWER success record exists. Any speech/working record strictly AFTER
-    // the failed attempt (attemptAtMs = the attempt's finishedAt) downgrades
-    // the panel off 'error'. A record at exactly attemptAtMs is NOT treated as
-    // post-failure recovery evidence — it coincides with the failure itself.
+    // NEWER success record exists. Any speech/working/cowork-session record
+    // strictly AFTER the failed attempt (attemptAtMs = the attempt's
+    // finishedAt) downgrades the panel off 'error' — session activity counts
+    // too (fix/group-member-status): a local bot that kept working its tools
+    // after a failed group-reply attempt is recovering, not crashed. A record
+    // at exactly attemptAtMs is NOT treated as post-failure recovery evidence
+    // — it coincides with the failure itself.
     const hasNewerSuccessRecord =
       (lastSpeakAtMs != null && lastSpeakAtMs > attemptAtMs)
-      || (lastWorkingAtMs != null && lastWorkingAtMs > attemptAtMs);
+      || (lastWorkingAtMs != null && lastWorkingAtMs > attemptAtMs)
+      || (lastSessionActivityMs != null && lastSessionActivityMs > attemptAtMs);
     if (hasNewerSuccessRecord) return 'idle';
     // A member the state machine still calls `working` is mid-retry, not
     // crashed. Fall through so R6 timeout / the working self-report can win

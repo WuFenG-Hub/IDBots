@@ -1137,6 +1137,25 @@ test('P1-4: computeGroupTaskMemberWorkStatus error-degrade priority', () => {
     'error',
     'assigned member (not yet working) still reads error on a failed attempt',
   );
+
+  // fix/group-member-status: cowork-session activity strictly AFTER the failed
+  // attempt is also a newer success record — a local bot that kept working its
+  // tools after a failed group-reply attempt is recovering, not crashed.
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 10 * MIN, lastSessionActivityAt: NOW - 8 * MIN }),
+    'idle',
+    'session activity strictly after the failed attempt downgrades off error',
+  );
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 10 * MIN, lastSessionActivityAt: NOW - 10 * MIN }),
+    'error',
+    'session activity exactly at the failed attempt does not degrade error',
+  );
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 10 * MIN, lastSessionActivityAt: NOW - 30 * MIN }),
+    'error',
+    'session activity predating the failed attempt is not recovery evidence',
+  );
 });
 
 // --- Local-only UI state: display name, pin, archive/unarchive ---
