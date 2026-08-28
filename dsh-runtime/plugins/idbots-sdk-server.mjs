@@ -552,7 +552,22 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       entry.reject(new Error(typeof error === 'string' && error ? error : 'host tool failed'))
       return { answered: true, id }
     }
-    entry.resolve(await this.idbotsMaterializeToolValue(entry.agent, text, images))
+    // The tool call MUST settle here: the entry is already deleted, so an
+    // escaped materialize throw (e.g. the attachment store rejecting an
+    // oversize screenshot) leaves the pending promise unsettled forever — not
+    // even a turn abort can reach it — and the session wedges for good.
+    // Degrade to a text note instead.
+    let value
+    try {
+      value = await this.idbotsMaterializeToolValue(entry.agent, text, images)
+    } catch (materializeError) {
+      const reason = materializeError instanceof Error ? materializeError.message : String(materializeError)
+      const imageCount = Array.isArray(images) ? images.length : 0
+      value = {
+        text: `${typeof text === 'string' ? text : JSON.stringify(text ?? null)}\n[idbots: ${imageCount} image${imageCount === 1 ? '' : 's'} from this tool result omitted — ${reason}]`,
+      }
+    }
+    entry.resolve(value)
     return { answered: true, id }
   }
 
@@ -560,7 +575,10 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
    * Turn a host respond into the tool's canonical value: commit image
    * payloads through the attachments store when the route can carry them,
    * degrade to a text note when it cannot. Never emits an image the active
-   * route rejects — the tool result is durable history.
+   * route rejects — the tool result is durable history. A single rejected
+   * image (oversize, over the byte cap, malformed) degrades to a note naming
+   * the reason instead of throwing, so one bad capture can never wedge the
+   * tool call; the model sees the note and can retry with a smaller capture.
    */
   async idbotsMaterializeToolValue(agent, text, images) {
     const value = { text: typeof text === 'string' ? text : JSON.stringify(text ?? null) }
@@ -574,15 +592,22 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       }
     }
     const saved = []
+    const rejected = []
     for (const image of images) {
       if (typeof image?.data !== 'string' || image.data.length === 0) continue
-      saved.push(await attachments.saveImage({
-        data: Uint8Array.from(Buffer.from(image.data, 'base64')),
-        mediaType: image.mediaType,
-        ...typeof image.name === 'string' && image.name.length > 0 ? { name: image.name } : {},
-      }))
+      try {
+        saved.push(await attachments.saveImage({
+          data: Uint8Array.from(Buffer.from(image.data, 'base64')),
+          mediaType: image.mediaType,
+          ...typeof image.name === 'string' && image.name.length > 0 ? { name: image.name } : {},
+        }))
+      } catch (saveError) {
+        rejected.push(saveError instanceof Error ? saveError.message : String(saveError))
+      }
     }
-    return saved.length > 0 ? { ...value, images: saved } : value
+    if (rejected.length === 0) return saved.length > 0 ? { ...value, images: saved } : value
+    const noted = `${value.text}\n[idbots: ${rejected.length} image${rejected.length === 1 ? '' : 's'} from this tool result omitted — ${rejected[0]}]`
+    return saved.length > 0 ? { ...value, text: noted, images: saved } : { ...value, text: noted }
   }
 
   // ---- user-questions bridge ---------------------------------------------------

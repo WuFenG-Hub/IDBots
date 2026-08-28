@@ -2,7 +2,9 @@
 // model; execution round-trips to the wire host (idbots/tool/request →
 // idbots/tool/respond), a host error becomes an error tool result the model
 // sees, and image payloads on a respond reach the model as image blocks via
-// the attachment store — or degrade to a text note on a text-only route.
+// the attachment store — or degrade to a text note on a text-only route, or
+// when the attachment store rejects the image (oversize) — and the turn must
+// still settle in every case.
 //
 // Run: node test/host-tool-bridge.test.mjs   (from dsh-runtime/)
 
@@ -21,6 +23,21 @@ const runtimeDir = path.resolve(here, '..')
 // 1x1 transparent PNG.
 const PNG_1x1_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+
+// Minimal PNG stream carrying arbitrary IHDR dimensions (the attachment
+// store's inspector reads the header only, so no IDAT is needed to exercise
+// its size validation).
+const makePngWithSize = (width, height) => {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const ihdr = Buffer.alloc(25) // length(4) + 'IHDR'(4) + 13 data + crc(4, unchecked)
+  ihdr.writeUInt32BE(13, 0)
+  ihdr.write('IHDR', 4, 'ascii')
+  ihdr.writeUInt32BE(width, 8)
+  ihdr.writeUInt32BE(height, 12)
+  const iend = Buffer.alloc(12)
+  iend.write('IEND', 4, 'ascii')
+  return Buffer.concat([sig, ihdr, iend]).toString('base64')
+}
 
 const results = []
 const record = (name, pass, detail = '') => {
@@ -139,6 +156,39 @@ const main = async () => {
   record('image bytes are content-addressed in the attachment store', stored)
   const imageFollowUp = seen.filter((r) => JSON.stringify(r.body?.messages ?? []).includes('data:image/png;base64,')).at(-1)
   record('follow-up provider request carries the image_url data URL', Boolean(imageFollowUp))
+
+  // Turn 3b: REGRESSION — an image the attachment store rejects (here: 2100px
+  // on a side, over the 2000px limit) must degrade to an omission note and the
+  // turn MUST still end. Before the fix, the store's AttachmentError escaped
+  // idbotsToolRespond after the pending entry was already deleted, so the
+  // model's tool call never settled and the session wedged permanently (a
+  // terminate + resume re-ran the same screenshot call and wedged again).
+  const turn3b = waitForEvent((e) => e.type === 'turn/end' && e.data?.turn === 4)
+  await client.prompt(sessionId, [{ type: 'text', text: 'CALL_HOST_TOOL_IMAGE please' }])
+  const priorRequestIds = new Set([request.params.id, request2.params.id, request3.params.id])
+  const request3b = await waitFor((n) => n.method === 'idbots/tool/request' && !priorRequestIds.has(n.params.id))
+  const oversizePng = makePngWithSize(2100, 100)
+  await client.request('idbots/tool/respond', {
+    id: request3b.params.id,
+    ok: true,
+    text: 'HOST-SHOT: captured oversize',
+    images: [{ data: oversizePng, mediaType: 'image/png', name: 'oversize' }],
+  })
+  await turn3b // wedged bridge: this await times out and fails the test
+  const oversizeResult = events.find((e) => e.type === 'tool/result' && JSON.stringify(e).includes('HOST-SHOT: captured oversize'))
+  const oversizeJson = oversizeResult ? JSON.stringify(oversizeResult) : ''
+  record('rejected image settles the tool call as an omission note (turn ends)',
+    Boolean(oversizeResult)
+      && oversizeJson.includes('omitted')
+      && oversizeJson.includes('exceeds the per-side limit')
+      && !oversizeJson.includes('"type":"image"'), oversizeJson.slice(0, 120))
+  // The follow-up provider request still carries turn 3's committed 1x1 image
+  // in history, so assert on the REJECTED image's own bytes, not data URLs in
+  // general: the note rides the tool message, the rejected bytes never do.
+  const oversizeFollowUp = seen.filter((r) => JSON.stringify(r.body?.messages ?? []).includes('HOST-SHOT: captured oversize')).at(-1)
+  const oversizeFollowUpJson = oversizeFollowUp ? JSON.stringify(oversizeFollowUp.body?.messages ?? []) : ''
+  record('follow-up provider request carries the note, not the rejected image bytes',
+    oversizeFollowUpJson.includes('omitted') && !oversizeFollowUpJson.includes(oversizePng))
 
   // Turn 4: same image respond on a TEXT-ONLY route — the result must degrade
   // to the omission note with no image block (an image on this route would

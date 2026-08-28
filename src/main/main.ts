@@ -307,6 +307,11 @@ import {
   type BotBrowserCaptureBridge,
   type BotBrowserCaptureResponse,
 } from './services/botBrowserCaptureBridge';
+import {
+  BOT_BROWSER_CAPTURE_MAX_BYTES,
+  computeCaptureFitSize,
+  readPngSize,
+} from './services/botBrowserCaptureFit';
 import { sendBotBrowserOpenUri } from './services/botBrowserOpenUriService';
 import {
   forkMetaAppToWorkspace,
@@ -7439,26 +7444,53 @@ if (!gotTheLock) {
       if (!captureRect) {
         return { success: false, error: 'Capture rect is required' };
       }
-      const image = await event.sender.capturePage(captureRect);
-      const format: 'png' | 'jpeg' = options?.format === 'jpeg' ? 'jpeg' : 'png';
+      const captured = await event.sender.capturePage(captureRect);
+      const sourcePng = captured.toPNG();
+      // capturePage returns PHYSICAL pixels (2x the CSS rect on Retina), while
+      // the DSH attachment store measures the encoded bytes and rejects images
+      // over 2000px per side / 20 MiB — fit every capture to those bounds here
+      // so the tool result is always committable (see botBrowserCaptureFit).
+      let pixelSize = readPngSize(sourcePng) ?? { width: captureRect.width, height: captureRect.height };
+      let image = captured;
+      const fit = computeCaptureFitSize(pixelSize.width, pixelSize.height);
+      if (fit) {
+        // Decode from the encoded PNG so resize works in unambiguous 1x pixel
+        // space (the capturePage image itself carries the display scaleFactor).
+        const decoded = nativeImage.createFromBuffer(sourcePng);
+        if (decoded.isEmpty()) {
+          return { success: false, error: 'Captured image could not be decoded for downscaling' };
+        }
+        image = decoded.resize({ width: fit.width, height: fit.height, quality: 'good' });
+        pixelSize = fit;
+      }
+      const quality = typeof options?.quality === 'number'
+        && options.quality >= 0 && options.quality <= 100
+        ? Math.round(options.quality)
+        : 80;
+      let format: 'png' | 'jpeg' = options?.format === 'jpeg' ? 'jpeg' : 'png';
       let buffer: Buffer;
-      let mimeType: string;
       if (format === 'jpeg') {
-        const quality = typeof options?.quality === 'number'
-          && options.quality >= 0 && options.quality <= 100
-          ? Math.round(options.quality)
-          : 80;
         buffer = image.toJPEG(quality);
-        mimeType = 'image/jpeg';
       } else {
-        buffer = image.toPNG();
-        mimeType = 'image/png';
+        buffer = fit ? image.toPNG() : sourcePng;
+      }
+      if (buffer.length > BOT_BROWSER_CAPTURE_MAX_BYTES && format === 'png') {
+        // Photo-dense pages can stay over the store's byte cap even after the
+        // side fit; JPEG is dramatically smaller for those.
+        format = 'jpeg';
+        buffer = image.toJPEG(quality);
+      }
+      if (buffer.length > BOT_BROWSER_CAPTURE_MAX_BYTES) {
+        return {
+          success: false,
+          error: `Captured image is still ${buffer.length} bytes after downscaling; the limit is ${BOT_BROWSER_CAPTURE_MAX_BYTES}. Retry with a smaller clip region.`,
+        };
       }
       return {
         success: true,
-        mimeType,
-        width: captureRect.width,
-        height: captureRect.height,
+        mimeType: format === 'jpeg' ? 'image/jpeg' : 'image/png',
+        width: pixelSize.width,
+        height: pixelSize.height,
         data: buffer.toString('base64'),
       };
     } catch (error) {
