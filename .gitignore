@@ -267,6 +267,7 @@ man_base_data_pebble/
 !tests/metaAppManagerBundledSync.test.mjs
 !tests/markdownContentBotBrowserUri.test.tsx
 !tests/browserIframeBridgeScript.test.ts
+!tests/browserNavButtonSyncPatch.test.ts
 !tests/sqliteStoreFreshMigrations.test.mjs
 !tests/userIdentityStore.test.mjs
 !tests/userIdentityService.test.mjs
