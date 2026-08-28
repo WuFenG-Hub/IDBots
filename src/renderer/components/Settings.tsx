@@ -11,7 +11,7 @@ import ErrorMessage from './ErrorMessage';
 import FreeQuotaCard from './FreeQuotaCard';
 import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
-import { CustomProviderIcon, OpenCodeIcon } from './icons/providers';
+import { CustomProviderIcon, CommandCodeIcon, OpenCodeIcon } from './icons/providers';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels, setSelectedModel } from '../store/slices/modelSlice';
 import { RootState } from '../store';
@@ -58,6 +58,7 @@ const providerKeys = [
   'metaid-free',
   'deepseek',
   'opencode',
+  'commandcode',
   'openai',
   'gemini',
   'anthropic',
@@ -206,6 +207,10 @@ const providerMeta: Record<ProviderType, { label: string; icon: React.ReactNode 
     label: 'OpenCode',
     icon: <OpenCodeIcon />,
   },
+  commandcode: {
+    label: 'Command Code',
+    icon: <CommandCodeIcon />,
+  },
 };
 
 const providerSwitchableDefaultBaseUrls: Partial<Record<ProviderType, { anthropic: string; openai: string }>> = {
@@ -257,10 +262,12 @@ const isBuiltInFreeProvider = (provider: string): boolean => provider === LLM_FR
  * unless relay-provisioned (IDBots-Free).
  */
 const isManagedProvider = (provider: string): boolean => (
-  isBuiltInFreeProvider(provider) || provider === 'deepseek'
+  isBuiltInFreeProvider(provider) || provider === 'deepseek' || provider === 'commandcode'
 );
 /** DeepSeek official key-console URL, opened in the external browser from the key hint. */
 const DEEPSEEK_PLATFORM_URL = 'https://platform.deepseek.com/';
+/** Command Code Studio key-management page, opened in the external browser from the key hint. */
+const COMMAND_CODE_KEYS_URL = 'https://commandcode.ai/settings/api-keys';
 const normalizeBaseUrl = (baseUrl: string): string => baseUrl.trim().replace(/\/+$/, '').toLowerCase();
 const normalizeApiFormat = (value: unknown): 'anthropic' | 'openai' | 'responses' => {
   if (value === 'responses') {
@@ -2743,6 +2750,25 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                         className="text-claude-accent hover:underline"
                       >
                         {DEEPSEEK_PLATFORM_URL}
+                      </a>
+                    </p>
+                  )}
+                  {activeProvider === 'commandcode' && (
+                    <p className="mt-1 text-[11px] leading-relaxed dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {i18nService.t('commandcodeApiKeyHint')}{' '}
+                      <a
+                        href={COMMAND_CODE_KEYS_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void window.electron.shell.openExternal(COMMAND_CODE_KEYS_URL).catch(() => {
+                            window.open(COMMAND_CODE_KEYS_URL, '_blank', 'noopener');
+                          });
+                        }}
+                        className="text-claude-accent hover:underline"
+                      >
+                        {COMMAND_CODE_KEYS_URL}
                       </a>
                     </p>
                   )}

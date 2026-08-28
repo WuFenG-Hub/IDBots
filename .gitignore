@@ -331,3 +331,4 @@ man_base_data_pebble/
 !tests/procedureRecall.test.mjs
 !tests/skillAssignmentStore.test.mjs
 !tests/coworkMemoryTurnExtraction.test.mjs
+!tests/commandCodeProvider.test.ts

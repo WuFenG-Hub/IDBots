@@ -38,6 +38,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   gemini: 'Gemini',
   anthropic: 'Anthropic',
   deepseek: 'DeepSeek',
+  commandcode: 'Command Code',
   moonshot: 'Moonshot',
   zhipu: 'Zhipu',
   minimax: 'MiniMax',
