@@ -3141,6 +3141,119 @@ test('P0-2: silent assigned/working members are auto-marked unreachable after th
   }
 });
 
+test('P0-2 recovery: an unreachable member with fresh liveness signals is restored to working', async () => {
+  const h = await createHarness({ memberUnreachableAfterMinutes: 5 });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // Both workers carry a stale unreachable stamp from a prior silence spell.
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'unreachable', 'gmid-w2');
+    h.groupTaskStore.setMemberStatus(task.id, 3, 'unreachable', 'gmid-w3');
+
+    // Worker 2 spoke 30s ago — but the message is ALREADY past the cursor
+    // (e.g. it arrived while a hung tick froze message processing), so only
+    // the bidirectional monitor can recover the member.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-rec-fresh-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '我还在，刚发完交付',
+      chainTimestamp: Math.floor((startMs + 5 * 60_000 - 30_000) / 1000),
+    });
+    const cursorId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, cursorId);
+
+    // Advance past the unreachable threshold: worker 3 (never spoke, no
+    // session) is now genuinely stale; worker 2's speech is still fresh.
+    h.state.nowMs = startMs + 5 * 60_000;
+    await h.loop.runTick();
+    let members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(
+      members.find((m) => m.metabotId === 2).status, 'working',
+      'fresh speech behind the cursor still recovers the stale unreachable stamp',
+    );
+    assert.equal(
+      members.find((m) => m.metabotId === 3).status, 'unreachable',
+      'a member with no liveness signal keeps the stamp',
+    );
+
+    // Worker 3's cowork session shows fresh tool activity (long task in
+    // flight, no group speech) — session liveness recovers it too.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    ensureGroupTaskSession(h.coworkStore, task, 3, 'Designer Bot');
+    await h.loop.runTick();
+    members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(
+      members.find((m) => m.metabotId === 3).status, 'working',
+      'fresh cowork-session activity recovers the unreachable stamp',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('unreachable recovery: plain (non-[WORKING]) worker speech lifts the stamp via implicit ACK', async () => {
+  const h = await createHarness({ memberUnreachableAfterMinutes: 5 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'unreachable', 'gmid-w2');
+
+    // A 10-minute-old plain message that the cursor never processed (the loop
+    // was hung when it arrived). Too stale for the monitor's liveness window,
+    // so only the message handler's implicit ACK can lift the stamp.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-rec-plain-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '进度同步：素材都齐了',
+      chainTimestamp: Math.floor((startMs - 10 * 60_000) / 1000),
+    });
+
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'any processed worker speech lifts a stale unreachable stamp');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R6 L2 anti-flap: stale [WORKING] with fresh plain speech does not stamp unreachable', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 60 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // [WORKING] 2 min stale (past the 1-min timeout window), but the member
+    // spoke in the group 20s ago. Both messages already processed.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-flap-working-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单',
+      chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-flap-speech-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '补充：配图 prompt 也发了',
+      chainTimestamp: Math.floor((startMs - 20_000) / 1000),
+    });
+    const cursorId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, cursorId);
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'fresh speech contradicts the timeout stamp — no flap');
+    assert.equal(
+      h.store.get('group_task_timeout_hint:1:2'), '1',
+      'the chair re-assign hint still fires (status write alone is skipped)',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // P0-3: [WORKING] ACK + chair reminders
 // ---------------------------------------------------------------------------

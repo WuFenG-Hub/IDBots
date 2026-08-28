@@ -4156,13 +4156,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * P1-2/P2-2: a member with fresh cowork-session activity or a valid
    * [WORKING long-task] heartbeat lease is ALIVE (mid long task) — never
    * flagged unreachable.
+   * Recovery (fix/group-member-status): the stamp used to be one-way — a
+   * member marked unreachable left this scan set forever, so a stale stamp
+   * outlived any resumed activity whenever the cursor-based message handler
+   * missed the comeback (e.g. a hung tick). The scan now also covers
+   * 'unreachable' members and restores them to 'working' the moment ANY
+   * liveness signal (fresh speech / session activity / heartbeat lease) reads
+   * alive again.
    */
   const monitorMemberUnreachable = (task: GroupTask, members: GroupTaskMember[]): void => {
     const thresholdMs = memberUnreachableAfterMinutes * 60_000;
     const store = deps.getGroupTaskStore();
     const workers = members.filter(
       (member) => member.role === 'worker'
-        && (member.status === 'assigned' || member.status === 'working'),
+        && (member.status === 'assigned' || member.status === 'working' || member.status === 'unreachable'),
     );
     if (workers.length === 0 || !task.groupId) return;
     const speakMap = store.getMembersLastSpeakAt(
@@ -4187,7 +4194,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         nowMs: now(),
         thresholdMs,
       });
-      if (liveness === 'alive') continue;
+      if (liveness === 'alive') {
+        if (member.status !== 'unreachable') continue;
+        try {
+          store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: member ${member.name ?? member.metabotId} recovered ` +
+            'unreachable -> working (fresh speech/session activity/heartbeat)',
+          );
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: failed to recover member ${member.metabotId} from unreachable: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        continue;
+      }
+      if (member.status === 'unreachable') continue; // already stamped; wait for liveness
       try {
         store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
         emitLog(
@@ -4233,6 +4256,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       task.groupId,
       workers.map((member) => member.globalmetaid),
     );
+    // fix/group-member-status: fresh group speech also feeds the stamp guard
+    // below — a member talking in the group must not wear 'unreachable' just
+    // because its [WORKING] tag (not its voice) went stale.
+    const speakMap = store.getMembersLastSpeakAt(
+      task.groupId,
+      workers.map((member) => member.globalmetaid),
+    );
     const standbyNames = members
       .filter((member) => member.role === 'worker' && member.status === 'standby')
       .map((member) => member.name ?? `bot-${member.metabotId}`);
@@ -4262,14 +4292,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (liveness === 'alive') continue;
 
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
-      // once per (task, member) streak.
-      try {
-        store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
-      } catch (error) {
-        emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: timeout status write for ${name} failed: ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
+      // once per (task, member) streak. Anti-flap (fix/group-member-status):
+      // skip the status write when the member spoke in the group within the
+      // timeout window — fresh speech contradicts 'unreachable', and with the
+      // bidirectional recovery in monitorMemberUnreachable the two watchdogs
+      // would otherwise flap the badge every tick.
+      const speakSec = gmid ? speakMap.get(gmid) ?? null : null;
+      const hasFreshSpeech = speakSec != null
+        && now() - speakSec * 1000 <= memberTimeoutAfterMinutes * 60_000;
+      if (!hasFreshSpeech) {
+        try {
+          store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: timeout status write for ${name} failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
       const hintKey = `${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`;
       if (sqlite.get<string>(hintKey) !== '1') {
@@ -4506,8 +4545,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       store.setMemberStatus(task.id, member.metabotId, 'standby', member.globalmetaid);
       return;
     }
-    // Implicit ACK: any worker speech counts as engaged.
-    if (member.status === 'assigned') {
+    // Implicit ACK: any worker speech counts as engaged. Speech also lifts a
+    // stale 'unreachable' stamp (fix/group-member-status): a member talking in
+    // the group is definitionally reachable, even if the watchdog stamped it
+    // during a silence window.
+    if (member.status === 'assigned' || member.status === 'unreachable') {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
     }
     clearPendingAck();
