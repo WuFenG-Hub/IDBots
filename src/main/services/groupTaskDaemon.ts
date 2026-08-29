@@ -4791,6 +4791,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           continue;
         }
       }
+      // G-02 (task #48): liveness is state-driven — a member with a valid
+      // (non-rejected, delivered/accepted/frozen) deliverable already answered
+      // the assignment with work product, no matter how long ago. An ACK-timeout
+      // alarm against them is noise and invites a bogus re-dispatch, so retire
+      // the watch silently (log only; no group message, no chair reminder).
+      const hasValidDeliverable = memberGmid
+        && store.listDeliverables(task.id).some((deliverable) =>
+          (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === memberGmid.toLowerCase()
+          && deliverable.status !== 'rejected');
+      if (hasValidDeliverable) {
+        sqlite.delete(pendingKey);
+        const remindedRaw = sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+        if (remindedRaw != null) {
+          sqlite.delete(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+        }
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} has a valid deliverable ` +
+          `(assignment #${entry.messageId}); ACK watch retired silently — delivered members never alarm`,
+        );
+        continue;
+      }
       // P5 (v1.2): ENGAGED worker — recent speech (even before the assignment:
       // mid long skill turn) or a deliverable recorded within the window. The
       // missed-ACK warning is suppressed; instead ONE neutral long-turn note
