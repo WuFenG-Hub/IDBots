@@ -3552,6 +3552,60 @@ test('tick watchdog: a hung tick no longer bricks the daemon loop', async () => 
   }
 });
 
+test('tick watchdog: a long but healthy tick is never reset — no double dispatch', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    workerCooldownMs: 0,
+    chairCooldownMs: 0,
+    deps: { tickWatchdogMs: 1_500, intervalMs: 20 },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // Every group send takes ~0.9s of real time and advances the daemon clock
+    // by 1.2s — so a multi-message tick outlasts the 1.5s watchdog window in
+    // TOTAL duration while never going 1.5s without observable progress. A
+    // duration-based watchdog (the reviewed defect) would reset the loop
+    // mid-tick and re-dispatch the still-pending messages.
+    const realPost = h.deps.postGroupTaskMessage;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    h.deps.postGroupTaskMessage = async (...args) => {
+      await sleep(900);
+      h.state.nowMs += 1_200;
+      return realPost(...args);
+    };
+    for (let i = 1; i <= 3; i += 1) {
+      insertGroupMessage(h.db, {
+        pinId: `wd-long-assign-${i}-i0`, senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+        senderName: 'Twin Bot', content: `@Coder Bot work package ${i}`,
+        chainTimestamp: Math.floor(h.state.nowMs / 1000),
+      });
+    }
+
+    h.loop.start();
+    // intervalMs is clamped to >= 1000ms inside the loop, so interval ticks
+    // fire DURING the slow first tick — exactly the overlap the review flagged.
+    // Wait out the whole multi-send tick plus one more interval.
+    await sleep(9_000);
+    h.loop.stop();
+
+    assert.equal(
+      logs.filter((line) => line.includes('Tick watchdog')).length,
+      0,
+      'a tick with steady progress is never reset, however long it runs',
+    );
+    const workerSends = h.sends.filter((send) => send.metabotId === 2);
+    assert.equal(
+      workerSends.length,
+      3,
+      'each assignment was processed exactly once — no watchdog-induced double dispatch',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // P0-3: [WORKING] ACK + chair reminders
 // ---------------------------------------------------------------------------

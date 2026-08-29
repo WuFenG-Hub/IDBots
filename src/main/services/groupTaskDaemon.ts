@@ -243,12 +243,17 @@ export const GROUP_TASK_DRIVER_KV_PREFIX = 'group_task_driver:';
 /** Default grace: a driver claim this old (or older) is stale — claimable. */
 export const DEFAULT_DRIVER_GRACE_MS = 20_000;
 /**
- * Tick watchdog (fix/group-member-status): a tick that stays unsettled longer
- * than this is presumed hung on a never-settling await — the loop logs and
- * resumes instead of staying silently dead forever. Legit ticks can chain
- * several 300s worker turns across tasks, so keep this generously high.
+/**
+ * Tick watchdog (fix/group-member-status): a tick that makes NO observable
+ * progress (group send / cursor advance) for longer than this is presumed hung
+ * on a never-settling await — the loop logs and resumes instead of staying
+ * silently dead forever. Progress-based, not duration-based: a healthy tick
+ * may legitimately chain several worker turns and run long. The window must
+ * exceed the longest single indivisible await inside a tick — one worker skill
+ * turn, budgeted at skillTurnTimeoutMs (30 min in main.ts) — because an
+ * in-flight turn produces no progress signals; 45 min gives a 15-min margin.
  */
-export const DEFAULT_TICK_WATCHDOG_MS = 30 * 60_000;
+export const DEFAULT_TICK_WATCHDOG_MS = 45 * 60_000;
 /** Default bounded wait for an upstream deliverable referenced by [DEPENDS_ON]. */
 const DEFAULT_DEPENDENCY_WAIT_MAX_MS = 15 * 60_000;
 
@@ -1609,6 +1614,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     try {
       const result = await deps.postGroupTaskMessage(taskId, metabotId, content, opts);
       refreshDriverClaim(taskId);
+      noteTickProgress(); // a completed send proves the in-flight tick is alive
       return result;
     } catch (sendError) {
       // R7: the sender's reply was already written to its own task session
@@ -1845,9 +1851,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
-  /** Tick watchdog (fix/group-member-status): see runGuardedTick. */
-  let tickStartedAtMs = 0;
+  /**
+   * Tick watchdog (fix/group-member-status): see runGuardedTick. Tracks the
+   * last OBSERVABLE progress of the in-flight tick (a group send completed or
+   * the message cursor advanced), not the tick's start — a healthy long tick
+   * keeps refreshing it, only a truly hung one lets it go stale.
+   */
+  let tickLastProgressAtMs = 0;
   let tickEpoch = 0;
+  const noteTickProgress = (): void => {
+    tickLastProgressAtMs = now();
+  };
 
   const queryNewMessages = (db: Database, groupId: string, afterId: number): GroupChatMessageRow[] =>
     mapMessageRows(db.exec(
@@ -5603,6 +5617,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
         // Round-4: cursor advances only on SUCCESSFUL processing.
         store.updateLastProcessedMsgId(task.id, message.id);
+        noteTickProgress(); // a processed message proves the in-flight tick is alive
         const retryKey = `${MSG_RETRY_PREFIX}${task.id}:${message.id}`;
         if (sqlite.get<number>(retryKey) != null) {
           sqlite.delete(retryKey); // recovered after earlier failures
@@ -5621,6 +5636,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const timeoutRetryKey = `${MSG_RETRY_PREFIX}${task.id}:${row.id}`;
           if (sqlite.get<number>(timeoutRetryKey) != null) sqlite.delete(timeoutRetryKey);
           store.updateLastProcessedMsgId(task.id, row.id);
+          noteTickProgress();
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: message ${row.id} skill turn timed out ` +
             `(${Math.round(error.timeoutMs / 1000)}s watchdog); the turn keeps running in the ` +
@@ -5669,6 +5685,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
           }
           store.updateLastProcessedMsgId(task.id, row.id);
+          noteTickProgress();
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: message ${row.id} dropped after ` +
             `${failures} consecutive failures (cursor advanced past it)`,
@@ -5758,15 +5775,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // Tick watchdog (fix/group-member-status): a hung await inside runTick
     // (a promise that never settles — observed in the wild as the loop going
     // silently idle for hours) used to brick the daemon forever: `ticking`
-    // stayed true and every later interval call early-returned. If the current
-    // tick outlives the watchdog window, log loudly and resume the loop. The
+    // stayed true and every later interval call early-returned. The check is
+    // INACTIVITY-based: if the in-flight tick has shown no observable progress
+    // (group send / cursor advance) for the whole watchdog window, log loudly
+    // and resume the loop. A healthy long tick keeps refreshing its progress
+    // heartbeat, so legitimate multi-turn batches never trip it (review
+    // feedback: a duration-based 30-min window could fire under a legit pair
+    // of 30-min skill turns and double-dispatch the pending messages). The
     // epoch guard keeps the hung tick's late `.finally` from clearing a NEWER
     // tick's flag; the dangling promise itself is left to rot.
     if (ticking) {
-      if (now() - tickStartedAtMs > tickWatchdogMs) {
+      if (now() - tickLastProgressAtMs > tickWatchdogMs) {
         emitLog(
-          `[GroupTaskDaemon] Tick watchdog: previous tick #${tickEpoch} exceeded ` +
-          `${Math.round(tickWatchdogMs / 60_000)} min without settling — resetting the loop ` +
+          `[GroupTaskDaemon] Tick watchdog: tick #${tickEpoch} made no progress for ` +
+          `${Math.round(tickWatchdogMs / 60_000)} min — resetting the loop ` +
           '(a dangling await may still be in flight)',
         );
         ticking = false;
@@ -5775,7 +5797,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
     ticking = true;
-    tickStartedAtMs = now();
+    tickLastProgressAtMs = now();
     tickEpoch += 1;
     const epoch = tickEpoch;
     void runTick()
