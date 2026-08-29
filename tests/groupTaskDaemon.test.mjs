@@ -4845,3 +4845,95 @@ test('task #41: a skill-turn watchdog timeout advances the cursor without burnin
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task #41 residue: an ETA-bearing [WORKING] threaded under a host notice or
+// roll call (replyPin → [GROUP_TASK_NOTICE:*] / 请确认在线) is a presence
+// confirmation, not a delivery commitment — it must not arm a delivery
+// deadline. An ETA [WORKING] threaded under a real assignment (or not
+// threaded at all, P2-2 long-task heartbeat) still arms one.
+// ---------------------------------------------------------------------------
+
+test('task #41 residue: an ETA [WORKING] replying to a welcome notice arms no delivery deadline', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-welcome-r3', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: buildMemberJoinWelcomeText({
+        taskTitle: 'Build MetaApp', joinerName: 'Coder Bot',
+        existingMemberNames: ['Twin Bot'],
+      }, 'zh'),
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    h.sends.length = 0;
+
+    // The worker's presence reply threads under the welcome pin (the daemon
+    // threads every reply under its trigger) and happens to carry the
+    // [WORKING] tag plus an ETA — an organic echo of the roll call.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-ack-notice-r3', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已就位，预计 2 分钟后开始',
+      replyPin: 'pin-welcome-r3',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'ACK still marks the worker engaged');
+    assert.ok(
+      h.store.get(`group_task_working_heartbeat:${task.id}:2`),
+      'liveness lease still extended (the worker is alive)',
+    );
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      undefined,
+      'no delivery deadline armed off a notice-threaded ACK',
+    );
+
+    // Past the invented ETA: no fake "estimated delivery …" reminder fires.
+    h.state.nowMs += 5 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => /estimated delivery/.test(s.content)).length,
+      0,
+      'no fake delivery reminder after the roll-call ETA',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #41 residue: an ETA [WORKING] replying to a real chair assignment still arms the deadline', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-r3', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get(`group_task_ack_pending:${task.id}:2`), 'assignment watch armed');
+
+    // Same ETA ACK shape as the notice case, but threaded under the real
+    // dispatch: the deadline must arm (P2-2 semantics untouched).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-ack-assign-r3', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：build metaapp，预计 5 分钟',
+      replyPin: 'pin-assign-r3',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      'deadline armed for an assignment-threaded ACK',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
