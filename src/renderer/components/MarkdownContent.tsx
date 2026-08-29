@@ -464,7 +464,8 @@ const findFallbackPathFromContext = (
 
 const createMarkdownComponents = (
   resolveLocalFilePath?: (href: string, text: string) => string | null,
-  onOpenBotBrowserUri?: (uri: string) => void
+  onOpenBotBrowserUri?: (uri: string) => void,
+  onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void
 ) => ({
   p: ({ node, className, children, ...props }: any) => (
     <p className="my-1 first:mt-0 last:mb-0 leading-6 dark:text-claude-darkText text-claude-text" {...props}>
@@ -596,6 +597,11 @@ const createMarkdownComponents = (
 
       const handleClick = async (e: React.MouseEvent) => {
         e.preventDefault();
+        // Surfaces may intercept local file opens (e.g. the cowork markdown
+        // viewer sidebar); a true return means the click was handled.
+        if (onOpenLocalFile?.(filePath, e) === true) {
+          return;
+        }
         const anchor = e.currentTarget as HTMLAnchorElement;
         try {
           const result = await window.electron.shell.openPath(filePath);
@@ -685,6 +691,8 @@ interface MarkdownContentProps {
   /** When set, metaid:// metaapp:// map:// metafile:// preview-metaapp:// links call this instead of navigating. */
   onOpenBotBrowserUri?: (uri: string) => void;
   resolveLocalFilePath?: (href: string, text: string) => string | null;
+  /** Intercept local file link clicks; return true to suppress the default shell.openPath. */
+  onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
 }
 
 const MarkdownContent: React.FC<MarkdownContentProps> = ({
@@ -693,10 +701,11 @@ const MarkdownContent: React.FC<MarkdownContentProps> = ({
   compact = false,
   onOpenBotBrowserUri,
   resolveLocalFilePath,
+  onOpenLocalFile,
 }) => {
   const components = useMemo(
-    () => createMarkdownComponents(resolveLocalFilePath, onOpenBotBrowserUri),
-    [resolveLocalFilePath, onOpenBotBrowserUri]
+    () => createMarkdownComponents(resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile),
+    [resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile]
   );
   const normalizedContent = useMemo(
     () => encodeFileUrlsInMarkdown(linkifyAgentInternetUris(content)),
