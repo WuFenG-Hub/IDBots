@@ -316,6 +316,11 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
   goal: (text: string) => string;
   criteria: (text: string) => string;
   criteriaEmpty: string;
+  criteriaCheckTitle: string;
+  criteriaPass: (text: string) => string;
+  criteriaFail: (text: string) => string;
+  criteriaUnclear: (text: string) => string;
+  observationsTitle: string;
   emptyChecklist: string;
   checklistTitle: string;
   omittedProcess: (count: number) => string;
@@ -331,6 +336,11 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
       goal: (text) => `Goal: ${text}`,
       criteria: (text) => `Acceptance criteria: ${text}`,
       criteriaEmpty: '(not specified)',
+      criteriaCheckTitle: 'Criteria check (as declared at creation):',
+      criteriaPass: (text) => `- ✓ PASS — ${text}`,
+      criteriaFail: (text) => `- ✗ FAIL — ${text}`,
+      criteriaUnclear: (text) => `- ? UNVERIFIED — ${text}`,
+      observationsTitle: 'Observations (outside the declared criteria — NOT blocking):',
       emptyChecklist: 'Deliverables: no verified artifacts.',
       checklistTitle: 'Deliverables:',
       omittedProcess: (count) => `(${count} process note(s) omitted; see the in-group report)`,
@@ -346,6 +356,11 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
     goal: (text) => `目标：${text}`,
     criteria: (text) => `验收标准：${text}`,
     criteriaEmpty: '（未填写）',
+    criteriaCheckTitle: '验收标准对照（以创建时声明为准）：',
+    criteriaPass: (text) => `- ✓ 通过 — ${text}`,
+    criteriaFail: (text) => `- ✗ 未通过 — ${text}`,
+    criteriaUnclear: (text) => `- ? 无法核实 — ${text}`,
+    observationsTitle: '观察项（标准之外，不阻断验收）：',
     emptyChecklist: '成果清单：无已核验交付物。',
     checklistTitle: '成果清单：',
     omittedProcess: (count) => `（另有 ${count} 项过程记录，见群内报告）`,

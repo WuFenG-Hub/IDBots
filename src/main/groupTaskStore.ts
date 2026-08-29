@@ -168,6 +168,12 @@ export interface GroupTask {
    * tasks and pre-R2 rows (relay degrades to owner-private-only).
    */
   sourceSessionId: string | null;
+  /**
+   * G-04: epoch ms while dispatch is paused by a supervisor `pause` signal;
+   * NULL = running. While set the daemon holds the planning turn and chair
+   * dispatch replies; resume requires explicit owner confirmation.
+   */
+  dispatchPausedAt: number | null;
 }
 
 export interface GroupTaskMember {
@@ -242,6 +248,32 @@ export interface GroupChatTranscriptMessage {
   senderSuspect: boolean;
 }
 
+/**
+ * G-04: one supervisor intervention signal (nudge / flag / pause / resume),
+ * recorded from the Twin supervisor channel (metabot-group-task skill RPC).
+ * Structured data, NOT a chair speech: visible in-group via a host notice,
+ * auditable on the ledger, and snapshotted into the acceptance summary at
+ * review entry. `processedAt` marks when the daemon drove the chair's
+ * response turn (nudge/flag) or applied the host gate (pause/resume).
+ */
+export type GroupTaskSupervisorSignalKind = 'nudge' | 'flag' | 'pause' | 'resume';
+
+export interface GroupTaskSupervisorSignal {
+  id: number;
+  taskId: number;
+  kind: GroupTaskSupervisorSignalKind;
+  /** The supervisor's instruction/finding text (required, capped by the RPC). */
+  note: string;
+  /** Roster member (name or gmid) a nudge points at; null for task-wide signals. */
+  target: string | null;
+  createdBy: string;
+  /** Pin of the host notice that made the signal visible in-group. */
+  noticePinId: string | null;
+  processedAt: number | null;
+  chairResponsePinId: string | null;
+  createdAt: string | null;
+}
+
 /** One deliverable row inside an acceptance summary (immutable snapshot). */
 export interface GroupTaskAcceptanceSummaryDeliverable {
   kind: string | null;
@@ -262,6 +294,21 @@ export interface GroupTaskAcceptanceSummaryMember {
   role: GroupTaskMemberRole;
   /** Self-reported status snapshot; host-derived workStatus is a P1/R6 concern. */
   workStatus: string;
+}
+
+/**
+ * G-05: one create-time acceptance criterion judged by the chair at review.
+ * 'pass'/'fail' answer the criterion as WRITTEN at create time; 'unclear' is
+ * the honest middle state when the criterion genuinely cannot be verified
+ * from the recorded evidence (rendered distinctly, never silently folded
+ * into pass).
+ */
+export type GroupTaskAcceptanceCriteriaVerdictValue = 'pass' | 'fail' | 'unclear';
+
+export interface GroupTaskAcceptanceCriteriaVerdict {
+  verdict: GroupTaskAcceptanceCriteriaVerdictValue;
+  /** The criterion as restated for judgment (derived from create-time criteria). */
+  text: string;
 }
 
 /**
@@ -286,6 +333,23 @@ export interface GroupTaskAcceptanceSummary {
    * owner-facing block is then omitted entirely, never padded).
    */
   planChanges: string[];
+  /**
+   * G-05: per-criterion verdicts against the CREATE-TIME acceptance criteria,
+   * extracted from the chair's owner report at review entry. Empty until
+   * captured (the card then shows only the raw criteria preview as before).
+   */
+  criteriaVerdicts: GroupTaskAcceptanceCriteriaVerdict[];
+  /**
+   * G-05: findings OUTSIDE the declared criteria (e.g. "archive not
+   * on-chain" when the criteria never asked for on-chain archival). Rendered as
+   * non-blocking observations — they never count against a criterion verdict.
+   */
+  observations: string[];
+  /**
+   * G-04: supervisor intervention lines (nudge/flag/pause/resume) snapshotted
+   * at review entry so the review record carries the full supervision trail.
+   */
+  supervisorSignals: string[];
   /** Deterministic acceptance guidance (3 actions). */
   guidance: string;
   /**
@@ -402,6 +466,7 @@ interface GroupTaskRow {
   pinned: number | null;
   archived_at: number | null;
   source_session_id: string | null;
+  dispatch_paused_at: number | null;
 }
 
 interface GroupTaskMemberRow {
@@ -490,6 +555,9 @@ interface GroupTaskAcceptanceSummaryRow {
   members_json: string;
   guidance: string;
   plan_changes_json?: string | null;
+  criteria_verdicts_json?: string | null;
+  observations_json?: string | null;
+  supervisor_signals_json?: string | null;
   conclusion: string | null;
   outcome: string | null;
   rating: number | null;
@@ -498,6 +566,38 @@ interface GroupTaskAcceptanceSummaryRow {
   generated_at: string | null;
   published_group_pin_id: string | null;
   notified_session: string | null;
+}
+
+interface GroupTaskSupervisorSignalRow {
+  id: number;
+  task_id: number;
+  kind: string;
+  note: string;
+  target: string | null;
+  created_by: string;
+  notice_pin_id: string | null;
+  processed_at: number | null;
+  chair_response_pin_id: string | null;
+  created_at: string | null;
+}
+
+function isSupervisorSignalKind(value: string): value is GroupTaskSupervisorSignalKind {
+  return value === 'nudge' || value === 'flag' || value === 'pause' || value === 'resume';
+}
+
+function rowToGroupTaskSupervisorSignal(row: GroupTaskSupervisorSignalRow): GroupTaskSupervisorSignal {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    kind: isSupervisorSignalKind(row.kind) ? row.kind : 'flag',
+    note: row.note,
+    target: row.target ?? null,
+    createdBy: row.created_by ?? 'supervisor',
+    noticePinId: row.notice_pin_id ?? null,
+    processedAt: row.processed_at ?? null,
+    chairResponsePinId: row.chair_response_pin_id ?? null,
+    createdAt: row.created_at ?? null,
+  };
 }
 
 /** Improvement #4 (v1.3): one recorded chair plan-change resolution. */
@@ -658,6 +758,40 @@ function rowToGroupTaskAcceptanceSummary(
   } catch {
     // Malformed snapshot JSON degrades to "no plan change disclosed".
   }
+  // G-05: per-criterion verdicts + non-blocking observations (degrade to empty).
+  let criteriaVerdicts: GroupTaskAcceptanceCriteriaVerdict[] = [];
+  try {
+    const parsed = row.criteria_verdicts_json ? JSON.parse(row.criteria_verdicts_json) as unknown : null;
+    if (Array.isArray(parsed)) {
+      criteriaVerdicts = parsed.filter((entry): entry is GroupTaskAcceptanceCriteriaVerdict =>
+        Boolean(entry)
+        && typeof entry === 'object'
+        && typeof (entry as GroupTaskAcceptanceCriteriaVerdict).text === 'string'
+        && (entry as GroupTaskAcceptanceCriteriaVerdict).text.trim().length > 0
+        && ['pass', 'fail', 'unclear'].includes(String((entry as GroupTaskAcceptanceCriteriaVerdict).verdict)));
+    }
+  } catch {
+    // Malformed verdict JSON degrades to "not captured".
+  }
+  let observations: string[] = [];
+  try {
+    const parsed = row.observations_json ? JSON.parse(row.observations_json) as unknown : null;
+    if (Array.isArray(parsed)) {
+      observations = parsed.filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
+    }
+  } catch {
+    // Malformed observations JSON degrades to empty.
+  }
+  // G-04: supervisor-signal snapshot lines (degrade to empty).
+  let supervisorSignals: string[] = [];
+  try {
+    const parsed = row.supervisor_signals_json ? JSON.parse(row.supervisor_signals_json) as unknown : null;
+    if (Array.isArray(parsed)) {
+      supervisorSignals = parsed.filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
+    }
+  } catch {
+    // Malformed snapshot JSON degrades to empty.
+  }
   return {
     id: row.id,
     taskId: row.task_id,
@@ -667,6 +801,9 @@ function rowToGroupTaskAcceptanceSummary(
     deliverables,
     members,
     planChanges,
+    criteriaVerdicts,
+    observations,
+    supervisorSignals,
     guidance: row.guidance,
     conclusion: row.conclusion ?? null,
     outcome: isGroupTaskStatusValue(row.outcome) ? row.outcome : null,
@@ -703,6 +840,7 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     pinned: Boolean(row.pinned),
     archivedAt: row.archived_at ?? null,
     sourceSessionId: row.source_session_id ?? null,
+    dispatchPausedAt: row.dispatch_paused_at ?? null,
   };
 }
 
@@ -1286,6 +1424,133 @@ export class GroupTaskStore {
        WHERE id = (SELECT id FROM group_task_acceptance_summaries
                    WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
       [trimmed || null, taskId],
+    );
+    this.saveDb();
+  }
+
+  /**
+   * G-05: stamp the per-criterion verdicts (against the create-time acceptance
+   * criteria) and the non-blocking observations extracted from the chair's
+   * owner report onto the LATEST summary version, mirroring the conclusion
+   * stamp. Empty inputs normalize to NULL (not captured).
+   */
+  updateAcceptanceSummaryCriteriaVerdicts(
+    taskId: number,
+    verdicts: GroupTaskAcceptanceCriteriaVerdict[],
+    observations: string[],
+  ): void {
+    const cleanVerdicts = verdicts.filter((entry) => entry.text.trim().length > 0);
+    const cleanObservations = observations.filter((line) => line.trim().length > 0);
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries
+       SET criteria_verdicts_json = ?, observations_json = ?
+       WHERE id = (SELECT id FROM group_task_acceptance_summaries
+                   WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
+      [
+        cleanVerdicts.length > 0 ? JSON.stringify(cleanVerdicts) : null,
+        cleanObservations.length > 0 ? JSON.stringify(cleanObservations) : null,
+        taskId,
+      ],
+    );
+    this.saveDb();
+  }
+
+  // --- G-04: supervisor intervention ledger + dispatch pause gate ---
+
+  /** G-04: set/clear the dispatch pause gate (epoch ms; null resumes). */
+  setTaskDispatchPausedAt(taskId: number, pausedAt: number | null): void {
+    this.db.run(
+      'UPDATE group_tasks SET dispatch_paused_at = ?, updated_at = datetime(\'now\') WHERE id = ?',
+      [pausedAt, taskId],
+    );
+    this.saveDb();
+  }
+
+  /** G-04: record one supervisor signal; returns the persisted row. */
+  addSupervisorSignal(input: {
+    taskId: number;
+    kind: GroupTaskSupervisorSignalKind;
+    note: string;
+    target?: string | null;
+    createdBy?: string;
+    noticePinId?: string | null;
+  }): GroupTaskSupervisorSignal {
+    const note = input.note.trim();
+    if (!note) throw new Error('supervisor signal note must not be empty');
+    this.db.run(
+      `INSERT INTO group_task_supervisor_signals
+        (task_id, kind, note, target, created_by, notice_pin_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        input.taskId,
+        input.kind,
+        note,
+        input.target?.trim() || null,
+        input.createdBy?.trim() || 'supervisor',
+        input.noticePinId ?? null,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<GroupTaskSupervisorSignalRow>(
+      'SELECT * FROM group_task_supervisor_signals WHERE id = ?',
+      [id],
+    );
+    if (!row) throw new Error(`addSupervisorSignal failed: signal ${id} not found after insert`);
+    return rowToGroupTaskSupervisorSignal(row);
+  }
+
+  /** G-04: all supervisor signals of a task, oldest first (audit trail). */
+  listSupervisorSignals(taskId: number): GroupTaskSupervisorSignal[] {
+    const rows = this.getAll<GroupTaskSupervisorSignalRow>(
+      'SELECT * FROM group_task_supervisor_signals WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskSupervisorSignal);
+  }
+
+  /** G-04: signals the daemon has not yet driven a chair response for. */
+  listPendingSupervisorSignals(taskId: number): GroupTaskSupervisorSignal[] {
+    const rows = this.getAll<GroupTaskSupervisorSignalRow>(
+      'SELECT * FROM group_task_supervisor_signals WHERE task_id = ? AND processed_at IS NULL ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskSupervisorSignal);
+  }
+
+  /** G-04: mark signals processed with the chair response pin (null = host-applied). */
+  markSupervisorSignalsProcessed(ids: number[], chairResponsePinId: string | null): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(', ');
+    this.db.run(
+      `UPDATE group_task_supervisor_signals
+       SET processed_at = ?, chair_response_pin_id = ?
+       WHERE id IN (${placeholders})`,
+      [Date.now(), chairResponsePinId, ...ids],
+    );
+    this.saveDb();
+  }
+
+  /**
+   * G-04: one-line renders of every supervisor signal, for the acceptance
+   * summary snapshot at review entry (the review record).
+   */
+  listSupervisorSignalLines(taskId: number): string[] {
+    return this.listSupervisorSignals(taskId).map((signal) => {
+      const target = signal.target?.trim();
+      const prefix = target ? `[${signal.kind.toUpperCase()} → ${target}]` : `[${signal.kind.toUpperCase()}]`;
+      return `${prefix} ${signal.note}`;
+    });
+  }
+
+  /** G-04: snapshot supervisor signal lines onto the LATEST acceptance summary. */
+  updateAcceptanceSummarySupervisorSignals(taskId: number, lines: string[]): void {
+    const clean = lines.filter((line) => line.trim().length > 0);
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries SET supervisor_signals_json = ?
+       WHERE id = (SELECT id FROM group_task_acceptance_summaries
+                   WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
+      [clean.length > 0 ? JSON.stringify(clean) : null, taskId],
     );
     this.saveDb();
   }

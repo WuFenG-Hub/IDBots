@@ -30,6 +30,7 @@ import type {
   GroupTaskAcceptanceSummary,
   GroupTaskAcceptanceSummaryDeliverable,
   GroupTaskAcceptanceSummaryMember,
+  GroupTaskAcceptanceCriteriaVerdict,
 } from '../groupTaskStore';
 
 /** Human-readable verification label mirroring the renderer badge text. */
@@ -232,12 +233,65 @@ export function extractChairConclusion(report: string): string | null {
     : cleaned;
 }
 
+// ---------------------------------------------------------------------------
+// G-05: create-time-aligned acceptance verdicts.
+//
+// The owner-report directive requires the chair to answer EACH create-time
+// acceptance criterion on its own ASCII-protocol line and to park anything the
+// criteria never asked for under [OBSERVATION]. The host parses only those
+// labels (never natural-language intent) and stamps the result onto the
+// acceptance-summary record, so the group summary, the Tasks acceptance card
+// and the origin-session notice all render the same per-circuit verdict, with
+// extra findings visibly NON-blocking.
+// ---------------------------------------------------------------------------
+
+/** Cap for one parsed criterion/observation line. */
+export const CRITERIA_VERDICT_LINE_MAX_CHARS = 200;
+
+const CRITERION_VERDICT_LINE_RE = /^[ \t]*(?:[-*][ \t]+)?\[CRITERION:[ \t]*(PASS|FAIL|UNCLEAR)\][ \t]*[-—–:]?[ \t]*(.+)$/gim;
+const OBSERVATION_LINE_RE = /^[ \t]*(?:[-*][ \t]+)?\[OBSERVATION\][ \t]*[-—–:]?[ \t]*(.+)$/gim;
+
+function capVerdictLine(text: string): string {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= CRITERIA_VERDICT_LINE_MAX_CHARS) return cleaned;
+  return `${cleaned.slice(0, CRITERIA_VERDICT_LINE_MAX_CHARS).trimEnd()}…`;
+}
+
+/**
+ * G-05: parse the per-criterion verdict block and the non-blocking
+ * observations out of the chair's owner report. ASCII protocol tags only;
+ * everything else in the narrative is prose and ignored. Order preserved.
+ */
+export function extractCriteriaVerdicts(report: string): {
+  verdicts: GroupTaskAcceptanceCriteriaVerdict[];
+  observations: string[];
+} {
+  const text = String(report ?? '');
+  const verdicts: GroupTaskAcceptanceCriteriaVerdict[] = [];
+  for (const match of text.matchAll(CRITERION_VERDICT_LINE_RE)) {
+    const verdict = match[1]?.toLowerCase();
+    const line = capVerdictLine(match[2] ?? '');
+    if ((verdict === 'pass' || verdict === 'fail' || verdict === 'unclear') && line) {
+      verdicts.push({ verdict, text: line });
+    }
+  }
+  const observations: string[] = [];
+  for (const match of text.matchAll(OBSERVATION_LINE_RE)) {
+    const line = capVerdictLine(match[1] ?? '');
+    if (line) observations.push(line);
+  }
+  return { verdicts, observations };
+}
+
 /** Render the immutable summary record back into the deterministic group message. */
 export function buildAcceptanceSummaryMessageText(
   summary: Pick<
     GroupTaskAcceptanceSummary,
     'goal' | 'acceptanceCriteria' | 'deliverables' | 'members' | 'guidance'
-  > & { planChanges?: string[] } & Partial<Pick<GroupTaskAcceptanceSummary, 'conclusion'>>,
+  > & { planChanges?: string[] } & Partial<Pick<GroupTaskAcceptanceSummary, 'conclusion'>> & {
+    criteriaVerdicts?: GroupTaskAcceptanceCriteriaVerdict[];
+    observations?: string[];
+  },
   taskTitle: string,
   language: AppLanguage = groupTaskLanguage(),
 ): string {
@@ -255,6 +309,18 @@ export function buildAcceptanceSummaryMessageText(
       ? acceptancePreview(summary.acceptanceCriteria ?? '')
       : copy.criteriaEmpty,
   ));
+  // G-05: per-criterion verdicts against the CREATE-TIME criteria — the
+  // owner sees exactly which declared item passed/failed/needs verification.
+  const verdicts = summary.criteriaVerdicts ?? [];
+  if (verdicts.length > 0) {
+    lines.push('');
+    lines.push(copy.criteriaCheckTitle);
+    for (const entry of verdicts) {
+      if (entry.verdict === 'pass') lines.push(copy.criteriaPass(entry.text));
+      else if (entry.verdict === 'fail') lines.push(copy.criteriaFail(entry.text));
+      else lines.push(copy.criteriaUnclear(entry.text));
+    }
+  }
   lines.push('');
   const checklist = selectAcceptanceChecklist(summary.deliverables);
   if (checklist.items.length === 0) {
@@ -295,6 +361,20 @@ export function buildAcceptanceSummaryMessageText(
     }
     if (planChanges.length > PLAN_CHANGE_MAX_RENDER_LINES) {
       lines.push(copy.omittedPlanChanges(planChanges.length - PLAN_CHANGE_MAX_RENDER_LINES));
+    }
+  }
+  // G-05: findings OUTSIDE the declared criteria render as explicitly
+  // non-blocking observations — never as acceptance gaps (task #48: "archive
+  // not on-chain" listed as a gap although the criteria never asked for it).
+  const observations = (summary.observations ?? []).map((line) => line.trim()).filter(Boolean);
+  if (observations.length > 0) {
+    lines.push('');
+    lines.push(copy.observationsTitle);
+    for (const observation of observations.slice(0, PLAN_CHANGE_MAX_RENDER_LINES)) {
+      lines.push(`- ${acceptancePreview(observation, PLAN_CHANGE_LINE_MAX_CHARS)}`);
+    }
+    if (observations.length > PLAN_CHANGE_MAX_RENDER_LINES) {
+      lines.push(copy.omittedPlanChanges(observations.length - PLAN_CHANGE_MAX_RENDER_LINES));
     }
   }
   lines.push('');

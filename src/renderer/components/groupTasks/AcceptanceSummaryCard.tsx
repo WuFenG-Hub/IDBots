@@ -131,6 +131,42 @@ const AcceptanceSummaryCard: React.FC<{
             />
           </div>
 
+          {/* G-05: per-criterion verdicts against the create-time criteria. */}
+          {(summary.criteriaVerdicts ?? []).length > 0 && (
+            <div>
+              <div className="text-[11px] font-medium uppercase tracking-wide dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 mb-1">
+                {i18nService.t('groupTasksAcceptanceCriteriaCheck')}
+              </div>
+              <ul className="space-y-1">
+                {(summary.criteriaVerdicts ?? []).map((entry, index) => (
+                  <li
+                    key={index}
+                    className="flex items-start gap-1.5 text-xs leading-relaxed dark:text-claude-darkTextSecondary text-claude-textSecondary"
+                  >
+                    <span
+                      className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${
+                        entry.verdict === 'pass'
+                          ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                          : entry.verdict === 'fail'
+                            ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+                            : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      {i18nService.t(
+                        entry.verdict === 'pass'
+                          ? 'groupTasksAcceptanceCriteriaPass'
+                          : entry.verdict === 'fail'
+                            ? 'groupTasksAcceptanceCriteriaFail'
+                            : 'groupTasksAcceptanceCriteriaUnclear',
+                      )}
+                    </span>
+                    <span className="min-w-0 break-words">{entry.text}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <div>
             <div className="text-[11px] font-medium uppercase tracking-wide dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 mb-1">
               {i18nService.t('groupTasksAcceptanceDeliverables')}
@@ -167,6 +203,25 @@ const AcceptanceSummaryCard: React.FC<{
                     className="text-xs leading-relaxed dark:text-claude-darkTextSecondary text-claude-textSecondary"
                   >
                     {change}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* G-05: findings outside the declared criteria — non-blocking. */}
+          {(summary.observations ?? []).length > 0 && (
+            <div>
+              <div className="text-[11px] font-medium uppercase tracking-wide dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 mb-1">
+                {i18nService.t('groupTasksAcceptanceObservations')}
+              </div>
+              <ul className="space-y-1">
+                {(summary.observations ?? []).map((observation, index) => (
+                  <li
+                    key={index}
+                    className="text-xs italic leading-relaxed dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80"
+                  >
+                    {observation}
                   </li>
                 ))}
               </ul>
