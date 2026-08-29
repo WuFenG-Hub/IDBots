@@ -519,12 +519,16 @@ test('R6: stale [WORKING] local worker → timeout status + L3 owner brief (idem
   });
   try {
     const task = h.createTask([2]);
-    // Worker 2 self-reports [WORKING] with a chain timestamp ~16.7 min in the
-    // past (seconds), so both the L2 timeout window and the L3 escalation window
-    // have already elapsed at the default nowMs (1_000_000_000_000).
+    // Worker 2 self-reports [WORKING] with a chain timestamp 35 min in the past
+    // (seconds), so the L2 timeout window, the L3 escalation window AND the
+    // default 30-min unreachable window have all elapsed at the default nowMs
+    // (1_000_000_000_000). The stamp must out-age the unreachable window: the
+    // anti-flap gate double-checks the member's liveness against the recovery
+    // predicate before writing, and a [WORKING] message also counts as the
+    // member's last group speech (review follow-up, fix/group-member-status).
     insertGroupMessage(h.db, {
       pinId: 'working-stale-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: 999_999_000,
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: 999_997_900,
     });
     h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
     // Advance the daemon cursor past the [WORKING] message so the tick doesn't
@@ -3420,6 +3424,80 @@ test('R6 L2 anti-flap: stale [WORKING] with fresh plain speech does not stamp un
     assert.equal(
       h.store.get('group_task_timeout_hint:1:2'), '1',
       'the chair re-assign hint still fires (status write alone is skipped)',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('review follow-up: liveness in the timeout/unreachable gap never flaps the member status', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    workerCooldownMs: 0,
+    chairCooldownMs: 0,
+    deps: { memberTimeoutAfterMinutes: 20, memberUnreachableAfterMinutes: 30 },
+  });
+  try {
+    const task = h.createTask([2, 3, 4]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // All three workers' [WORKING] signals are past the 20-min timeout window,
+    // so monitorLocalWorkerTimeout evaluates a status write for each of them.
+    // (A [WORKING] message also counts as the member's last group speech.)
+    insertGroupMessage(h.db, {
+      pinId: 'gap-w2-working-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单',
+      chainTimestamp: Math.floor((startMs - 25 * 60_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'gap-w3-working-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单',
+      chainTimestamp: Math.floor((startMs - 40 * 60_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'gap-w4-working-i0', senderMetaId: 'metaid-4', senderGlobalMetaId: 'gmid-w4',
+      senderName: 'Reviewer Bot', content: '[WORKING] 已接单',
+      chainTimestamp: Math.floor((startMs - 40 * 60_000) / 1000),
+    });
+    const cursorId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, cursorId);
+    for (const metabotId of [2, 3, 4]) {
+      h.groupTaskStore.setMemberStatus(task.id, metabotId, 'working', `gmid-w${metabotId}`);
+    }
+
+    // Worker 3 additionally has cowork-session activity 25 min old — inside the
+    // 20–30 min gap between the timeout window and the unreachable window.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 3, 'Designer Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 25 * 60_000, session.id]);
+
+    // w2: last speech 25 min old (in the gap) — the stamp must be skipped.
+    // w3: speech 40 min old but session activity 25 min old (in the gap) — the
+    //     stamp must be skipped too (monitorMemberUnreachable would recover it
+    //     right back, which used to flap the badge every tick).
+    // w4: every signal 40 min stale — legitimately unreachable, and STAYS so.
+    for (let tick = 1; tick <= 3; tick += 1) {
+      await h.loop.runTick();
+      const members = h.groupTaskStore.listMembers(task.id);
+      assert.equal(
+        members.find((m) => m.metabotId === 2).status, 'working',
+        `tick ${tick}: speech inside the unreachable window blocks the timeout stamp`,
+      );
+      assert.equal(
+        members.find((m) => m.metabotId === 3).status, 'working',
+        `tick ${tick}: session activity inside the unreachable window blocks the timeout stamp`,
+      );
+      assert.equal(
+        members.find((m) => m.metabotId === 4).status, 'unreachable',
+        `tick ${tick}: a genuinely inert member is (and stays) stamped`,
+      );
+    }
+    assert.equal(
+      logs.filter((line) => line.includes('unreachable -> working')).length,
+      0,
+      'no unreachable↔working flap churn across ticks',
     );
   } finally {
     h.cleanup();

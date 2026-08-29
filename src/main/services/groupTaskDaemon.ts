@@ -4355,25 +4355,36 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // P2-1/P2-2: a valid [WORKING long-task] heartbeat lease or fresh
       // cowork-session activity means the worker is mid long-task, not stuck
       // — never flag it unreachable and never reclaim its session.
+      const lastSessionActivityMs = getLocalMemberSessionInfo(task.id, member.metabotId!)?.lastActivityMs ?? null;
+      const heartbeatUntilMs = getMemberHeartbeatUntil(task.id, member.metabotId!);
       const liveness = classifyMemberLiveness({
         lastSpeakMs: null, // this monitor's baseline is the [WORKING] signal
-        lastSessionActivityMs: getLocalMemberSessionInfo(task.id, member.metabotId!)?.lastActivityMs ?? null,
-        heartbeatUntilMs: getMemberHeartbeatUntil(task.id, member.metabotId!),
+        lastSessionActivityMs,
+        heartbeatUntilMs,
         nowMs: now(),
         thresholdMs: memberTimeoutAfterMinutes * 60_000,
       });
       if (liveness === 'alive') continue;
 
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
-      // once per (task, member) streak. Anti-flap (fix/group-member-status):
-      // skip the status write when the member spoke in the group within the
-      // timeout window — fresh speech contradicts 'unreachable', and with the
-      // bidirectional recovery in monitorMemberUnreachable the two watchdogs
-      // would otherwise flap the badge every tick.
+      // once per (task, member) streak. Anti-flap (fix/group-member-status,
+      // review follow-up): write 'unreachable' only in states where
+      // monitorMemberUnreachable would not immediately recover the member —
+      // i.e. its EXACT recovery predicate (group speech / cowork-session
+      // activity / heartbeat lease within the UNREACHABLE window) must also
+      // report stale. Judging freshness with the smaller
+      // memberTimeoutAfterMinutes window made a member whose speech or session
+      // activity sat in the 20–30 min gap flap unreachable→working→unreachable
+      // on successive ticks for as long as the gap lasted.
       const speakSec = gmid ? speakMap.get(gmid) ?? null : null;
-      const hasFreshSpeech = speakSec != null
-        && now() - speakSec * 1000 <= memberTimeoutAfterMinutes * 60_000;
-      if (!hasFreshSpeech) {
+      const recoveryLiveness = classifyMemberLiveness({
+        lastSpeakMs: speakSec != null ? speakSec * 1000 : parseSqliteUtcMs(member.createdAt),
+        lastSessionActivityMs,
+        heartbeatUntilMs,
+        nowMs: now(),
+        thresholdMs: memberUnreachableAfterMinutes * 60_000,
+      });
+      if (recoveryLiveness !== 'alive') {
         try {
           store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
         } catch (error) {
