@@ -4228,7 +4228,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * members, or members who already show a non-active status.
    * P1-2/P2-2: a member with fresh cowork-session activity or a valid
    * [WORKING long-task] heartbeat lease is ALIVE (mid long task) — never
-   * flagged unreachable.
+   * flagged unreachable. A member with a non-rejected deliverable on the
+   * ledger is DONE waiting, not unreachable, and is skipped entirely.
    * Recovery (fix/group-member-status): the stamp used to be one-way — a
    * member marked unreachable left this scan set forever, so a stale stamp
    * outlived any resumed activity whenever the cursor-based message handler
@@ -4249,8 +4250,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       task.groupId,
       workers.map((member) => member.globalmetaid),
     );
+    // Review fix (delivered-then-idle): a worker with a non-rejected
+    // deliverable on the ledger is DONE waiting, not unreachable — same
+    // guard as monitorLocalWorkerTimeout so the badge never stamps a
+    // delivered member who simply went quiet after handing in its work.
+    const deliveredGmids = new Set(
+      store.listDeliverables(task.id)
+        .filter((deliverable) => deliverable.status !== 'rejected')
+        .map((deliverable) => (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase())
+        .filter((authorGmid) => authorGmid.length > 0),
+    );
     for (const member of workers) {
       const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      if (gmid && deliveredGmids.has(gmid)) continue;
       const speakSec = gmid ? speakMap.get(gmid) ?? null : null;
       const lastMs = speakSec != null
         ? speakSec * 1000
@@ -4308,7 +4320,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * streak — the chair gets a concrete "re-assign to a standby member or mark
    * suspended" suggestion, not just another alert. Best-effort: never blocks
    * the tick; the store status change is the authoritative signal, the chair
-   * hint is advisory.
+   * hint is advisory. A member with a non-rejected deliverable on the ledger
+   * is skipped entirely — delivered-then-idle is done, not stuck.
    */
   const monitorLocalWorkerTimeout = async (
     task: GroupTask,
@@ -4336,6 +4349,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       task.groupId,
       workers.map((member) => member.globalmetaid),
     );
+    // Review fix (delivered-then-idle): a worker with a non-rejected
+    // deliverable on the ledger who then went quiet is DONE waiting, not
+    // stuck — flagging it unreachable, stopping its session, and handing the
+    // chair a re-dispatch directive duplicates finished work. Mirrors the
+    // deliveredLate guard in monitorDeliveryDeadlines; delivery does not
+    // move the member store status, so the ledger is the source of truth.
+    const deliveredGmids = new Set(
+      store.listDeliverables(task.id)
+        .filter((deliverable) => deliverable.status !== 'rejected')
+        .map((deliverable) => (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase())
+        .filter((authorGmid) => authorGmid.length > 0),
+    );
     const standbyNames = members
       .filter((member) => member.role === 'worker' && member.status === 'standby')
       .map((member) => member.name ?? `bot-${member.metabotId}`);
@@ -4345,6 +4370,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const reclaimNotes: string[] = [];
     for (const member of workers) {
       const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      if (gmid && deliveredGmids.has(gmid)) continue;
       const lastWorkingSec = gmid ? workingMap.get(gmid) ?? null : null;
       if (lastWorkingSec == null) continue;
       const staleMs = now() - lastWorkingSec * 1000;
