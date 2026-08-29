@@ -989,6 +989,7 @@ contextBridge.exposeInMainWorld('electron', {
     revealMnemonic: () => ipcRenderer.invoke('userIdentity:revealMnemonic'),
     retrySubsidy: () => ipcRenderer.invoke('userIdentity:retrySubsidy'),
     retryChainSync: () => ipcRenderer.invoke('userIdentity:retryChainSync'),
+    syncToMobile: () => ipcRenderer.invoke('userIdentity:syncToMobile'),
   },
   metaWebListener: {
     getListenerConfig: () => ipcRenderer.invoke('idbots:getListenerConfig'),
