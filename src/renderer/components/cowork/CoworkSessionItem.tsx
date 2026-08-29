@@ -100,11 +100,13 @@ const avatarInitial = (name?: string | null): string => {
 };
 
 /** Small circular avatar with an initial-letter fallback. */
-const SessionAvatarCircle: React.FC<{
+export const SessionAvatarCircle: React.FC<{
   src?: string | null;
   name?: string | null;
   className?: string;
-}> = ({ src, name, className = '' }) => {
+  /** Size utilities; defaults to the session-row 24px circle. */
+  sizeClass?: string;
+}> = ({ src, name, className = '', sizeClass = 'h-6 w-6' }) => {
   const initiallyRenderable = isRenderableSessionAvatarSource(src);
   // Track image-load failures so a broken/404 avatar URL falls back to the
   // initial letter instead of showing a broken-image icon. Reset if the src
@@ -116,7 +118,7 @@ const SessionAvatarCircle: React.FC<{
   const showImage = initiallyRenderable && !imageFailed;
   return (
     <span
-      className={`flex h-6 w-6 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-claude-surfaceHover text-[11px] font-semibold text-claude-textSecondary dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary ${className}`}
+      className={`flex ${sizeClass} flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-claude-surfaceHover text-[11px] font-semibold text-claude-textSecondary dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary ${className}`}
       title={name?.trim() || undefined}
     >
       {showImage ? (

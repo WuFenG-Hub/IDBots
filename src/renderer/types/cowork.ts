@@ -721,6 +721,8 @@ export interface CoworkSessionSummary {
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
   /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
   projectId?: string | null;
+  /** Working directory the session runs in; used by the sidebar's by-project grouping. */
+  cwd?: string | null;
 }
 
 // The New Task composer's working-directory choice. `project` and `folder` both

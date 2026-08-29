@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../store';
 import { coworkService } from '../services/cowork';
@@ -6,11 +6,13 @@ import { groupTaskService } from '../services/groupTaskService';
 import { i18nService } from '../services/i18n';
 import CoworkSessionList from './cowork/CoworkSessionList';
 import CoworkSearchModal from './cowork/CoworkSearchModal';
+import SessionViewOptionsMenu from './cowork/SessionViewOptionsMenu';
 import GroupTaskSidebarList from './groupTasks/GroupTaskSidebarList';
 import { selectTask as selectGroupTask } from '../store/slices/groupTasksSlice';
 import { MagnifyingGlassIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon, UserGroupIcon, GlobeAltIcon, ArchiveBoxIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import Tooltip from './ui/Tooltip';
 import ComposeIcon from './icons/ComposeIcon';
+import FilterLinesIcon from './icons/FilterLinesIcon';
 import SidebarToggleIcon from './icons/SidebarToggleIcon';
 import { P2PStatusBadge } from './p2p/P2PStatusBadge';
 import BackgroundTasksBadge from './cowork/BackgroundTasksBadge';
@@ -20,6 +22,10 @@ import BotBrowserCoworkPanel from '../features/botBrowser/BotBrowserCoworkPanel'
 import { defaultSidebarWidth } from '../utils/sidebarWidth';
 import type { BotBrowserSurfaceMode, BotInternetPane } from '../features/botBrowser/types';
 import type { CoworkSessionSummary } from '../types/cowork';
+import type {
+  SessionSortMode,
+  SessionViewMode,
+} from '../utils/sessionViewGrouping';
 import type { SettingsOpenOptions } from './Settings';
 
 interface SidebarProps {
@@ -73,6 +79,30 @@ const loadTaskRecordTab = (): TaskRecordTab => {
   return 'local';
 };
 
+/** localStorage keys for the local-chats list view ("filter & sort") choices. */
+const SESSION_VIEW_MODE_STORAGE_KEY = 'sessionViewMode';
+const SESSION_SORT_MODE_STORAGE_KEY = 'sessionSortMode';
+
+const loadSessionViewMode = (): SessionViewMode => {
+  try {
+    const stored = window.localStorage.getItem(SESSION_VIEW_MODE_STORAGE_KEY);
+    if (stored === 'project') return 'project';
+  } catch {
+    // localStorage unavailable; fall through to the default view.
+  }
+  return 'timeline';
+};
+
+const loadSessionSortMode = (): SessionSortMode => {
+  try {
+    const stored = window.localStorage.getItem(SESSION_SORT_MODE_STORAGE_KEY);
+    if (stored === 'createdAt') return 'createdAt';
+  } catch {
+    // localStorage unavailable; fall through to the default sort.
+  }
+  return 'updatedAt';
+};
+
 const Sidebar: React.FC<SidebarProps> = ({
   onShowSettings,
   activeView,
@@ -111,9 +141,31 @@ const Sidebar: React.FC<SidebarProps> = ({
   // app restarts; the header + tabs stay fixed while only the list scrolls.
   const [taskRecordTab, setTaskRecordTab] = useState<TaskRecordTab>(loadTaskRecordTab);
   // Batch-archive selection mode for the local-chats list. The toolbar row
-  // above the list hosts this today and view-grouping controls later.
+  // above the list hosts this and the view "filter & sort" controls.
   const [isBatchArchiveMode, setIsBatchArchiveMode] = useState(false);
   const [batchSelectedIds, setBatchSelectedIds] = useState<string[]>([]);
+  // View + sort choices for the local-chats list, persisted across app
+  // restarts; the menu itself is a transient popover anchored to the toolbar.
+  const [sessionViewMode, setSessionViewMode] = useState<SessionViewMode>(loadSessionViewMode);
+  const [sessionSortMode, setSessionSortMode] = useState<SessionSortMode>(loadSessionSortMode);
+  const [isViewMenuOpen, setIsViewMenuOpen] = useState(false);
+  const viewMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const handleSetSessionViewMode = (mode: SessionViewMode) => {
+    setSessionViewMode(mode);
+    try {
+      window.localStorage.setItem(SESSION_VIEW_MODE_STORAGE_KEY, mode);
+    } catch {
+      // localStorage unavailable; the view still switches for this session.
+    }
+  };
+  const handleSetSessionSortMode = (mode: SessionSortMode) => {
+    setSessionSortMode(mode);
+    try {
+      window.localStorage.setItem(SESSION_SORT_MODE_STORAGE_KEY, mode);
+    } catch {
+      // localStorage unavailable; the sort still switches for this session.
+    }
+  };
   const activeTaskRecordTab = TASK_RECORD_TABS.find((tab) => tab.id === taskRecordTab) ?? TASK_RECORD_TABS[0];
   const handleSetTaskRecordTab = (tab: TaskRecordTab) => {
     setTaskRecordTab(tab);
@@ -178,7 +230,15 @@ const Sidebar: React.FC<SidebarProps> = ({
     if (taskRecordTab === 'local') return;
     setIsBatchArchiveMode(false);
     setBatchSelectedIds([]);
+    setIsViewMenuOpen(false);
   }, [taskRecordTab]);
+
+  // The toolbar row (and its filter & sort menu) only exists while the local
+  // list is non-empty.
+  useEffect(() => {
+    if (sessionGroups.local.length > 0) return;
+    setIsViewMenuOpen(false);
+  }, [sessionGroups.local.length]);
 
   useEffect(() => {
     if (!isCollapsed) return;
@@ -481,46 +541,76 @@ const Sidebar: React.FC<SidebarProps> = ({
               })}
             </div>
           </div>
-          {/* Toolbar row above the local list: batch archive today, view
-              grouping etc. later. Fixed with the header; only the list scrolls. */}
+          {/* Toolbar row above the local list: current view label on the
+              left, filter & sort + batch archive on the right. Fixed with the
+              header; only the list scrolls. */}
           {taskRecordTab === 'local' && sessionGroups.local.length > 0 && (
-            <div className="flex items-center justify-end gap-1.5 px-3 pb-1.5 shrink-0">
-              {isBatchArchiveMode ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => void handleConfirmBatchArchive()}
-                    disabled={batchSelectedIds.length === 0}
-                    className="inline-flex h-6 items-center rounded-md bg-claude-accent px-2.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {i18nService.t('batchArchiveConfirm')}
-                    {batchSelectedIds.length > 0 ? ` (${batchSelectedIds.length})` : ''}
-                  </button>
-                  <Tooltip content={i18nService.t('batchArchiveCancel')} position="bottom">
+            <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5 shrink-0">
+              <span className="min-w-0 truncate text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t(sessionViewMode === 'project' ? 'sessionViewByProject' : 'sessionViewTimeline')}
+              </span>
+              <div className="flex items-center gap-1.5">
+                {isBatchArchiveMode ? (
+                  <>
                     <button
                       type="button"
-                      onClick={handleExitBatchArchiveMode}
-                      aria-label={i18nService.t('batchArchiveCancel')}
-                      className="rounded p-1 text-claude-textSecondary transition-colors hover:bg-claude-surfaceHover hover:text-claude-text dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover dark:hover:text-claude-darkText"
+                      onClick={() => void handleConfirmBatchArchive()}
+                      disabled={batchSelectedIds.length === 0}
+                      className="inline-flex h-6 items-center rounded-md bg-claude-accent px-2.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      <XMarkIcon className="h-4 w-4" />
+                      {i18nService.t('batchArchiveConfirm')}
+                      {batchSelectedIds.length > 0 ? ` (${batchSelectedIds.length})` : ''}
                     </button>
-                  </Tooltip>
-                </>
-              ) : (
-                <Tooltip content={i18nService.t('batchArchive')} position="bottom">
-                  <button
-                    type="button"
-                    onClick={handleEnterBatchArchiveMode}
-                    aria-label={i18nService.t('batchArchive')}
-                    className="rounded p-1 text-claude-textSecondary transition-colors hover:bg-claude-accent/10 hover:text-claude-accent dark:text-claude-darkTextSecondary"
-                  >
-                    <ArchiveBoxIcon className="h-4 w-4" />
-                  </button>
-                </Tooltip>
-              )}
+                    <Tooltip content={i18nService.t('batchArchiveCancel')} position="bottom">
+                      <button
+                        type="button"
+                        onClick={handleExitBatchArchiveMode}
+                        aria-label={i18nService.t('batchArchiveCancel')}
+                        className="rounded p-1 text-claude-textSecondary transition-colors hover:bg-claude-surfaceHover hover:text-claude-text dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover dark:hover:text-claude-darkText"
+                      >
+                        <XMarkIcon className="h-4 w-4" />
+                      </button>
+                    </Tooltip>
+                  </>
+                ) : (
+                  <>
+                    <Tooltip content={i18nService.t('sessionViewFilterSort')} position="bottom">
+                      <button
+                        ref={viewMenuButtonRef}
+                        type="button"
+                        onClick={() => setIsViewMenuOpen((open) => !open)}
+                        aria-label={i18nService.t('sessionViewFilterSort')}
+                        aria-haspopup="menu"
+                        aria-expanded={isViewMenuOpen}
+                        className="rounded p-1 text-claude-textSecondary transition-colors hover:bg-claude-accent/10 hover:text-claude-accent dark:text-claude-darkTextSecondary"
+                      >
+                        <FilterLinesIcon className="h-4 w-4" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip content={i18nService.t('batchArchive')} position="bottom">
+                      <button
+                        type="button"
+                        onClick={handleEnterBatchArchiveMode}
+                        aria-label={i18nService.t('batchArchive')}
+                        className="rounded p-1 text-claude-textSecondary transition-colors hover:bg-claude-accent/10 hover:text-claude-accent dark:text-claude-darkTextSecondary"
+                      >
+                        <ArchiveBoxIcon className="h-4 w-4" />
+                      </button>
+                    </Tooltip>
+                  </>
+                )}
+              </div>
             </div>
           )}
+          <SessionViewOptionsMenu
+            anchorRef={viewMenuButtonRef}
+            open={isViewMenuOpen && taskRecordTab === 'local' && !isBatchArchiveMode}
+            onClose={() => setIsViewMenuOpen(false)}
+            viewMode={sessionViewMode}
+            sortMode={sessionSortMode}
+            onViewModeChange={handleSetSessionViewMode}
+            onSortModeChange={handleSetSessionSortMode}
+          />
           {/* Scrollable list area */}
           <div className="flex-1 min-h-0 overflow-y-auto pb-4">
             {taskRecordTab === 'group' ? (
@@ -545,6 +635,8 @@ const Sidebar: React.FC<SidebarProps> = ({
                 selectionMode={isBatchArchiveMode && taskRecordTab === 'local'}
                 selectedSessionIds={batchSelectedIds}
                 onToggleSessionSelected={handleToggleBatchSelected}
+                viewMode={taskRecordTab === 'local' ? sessionViewMode : undefined}
+                sortMode={taskRecordTab === 'local' ? sessionSortMode : undefined}
               />
             )}
           </div>

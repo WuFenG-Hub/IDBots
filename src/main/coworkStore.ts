@@ -760,6 +760,8 @@ export interface CoworkSessionSummary {
   hiddenFromSessionList?: boolean;
   /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
   projectId?: string | null;
+  /** Working directory the session runs in; used by the sidebar's by-project grouping. */
+  cwd?: string | null;
 }
 
 export type CoworkUserMemoryStatus = 'created' | 'stale' | 'deleted';
@@ -3400,6 +3402,7 @@ export class CoworkStore implements MemoryBackend {
       model_provider?: string | null;
       effort?: string | null;
       project_id?: string | null;
+      cwd?: string | null;
       created_at: number;
       updated_at: number;
       activity_at?: number | null;
@@ -3426,6 +3429,7 @@ export class CoworkStore implements MemoryBackend {
         s.model_provider,
         s.effort,
         s.project_id,
+        s.cwd,
         s.created_at,
         s.updated_at,
         -- Sort by the LAST USER MESSAGE time (fixed once a turn is sent), not
@@ -3474,6 +3478,7 @@ export class CoworkStore implements MemoryBackend {
       modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
       projectId: row.project_id ?? null,
+      cwd: row.cwd ?? null,
     }));
   }
 
