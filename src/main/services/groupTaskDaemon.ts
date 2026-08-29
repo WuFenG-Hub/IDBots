@@ -102,6 +102,23 @@ const CONVERSATION_CHANNEL = GROUP_TASK_CONVERSATION_CHANNEL;
 const DELIVERABLE_TAG = /\[DELIVERABLE\]/i;
 const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
 /**
+ * GT#47 R1: global variant that collects EVERY [STATUS:*] tag in one message.
+ * A chair plan message routinely quotes *descriptive* tags in its body (the
+ * goal/acceptance-criteria text says things like "通过后发 [STATUS:REVIEW]")
+ * before the instruction tag the protocol template requires at the message
+ * end. The old single-match parse let the descriptive tag win, the resulting
+ * illegal planning→review directive was swallowed, and the task stayed pinned
+ * in planning forever (task #47). Directive semantics: the LAST tag in the
+ * message is the chair's instruction.
+ */
+const STATUS_TAG_ALL = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
+
+function extractStatusDirectives(content: string): Array<'executing' | 'review'> {
+  return [...content.matchAll(STATUS_TAG_ALL)].map(
+    (match) => match[1].toLowerCase() as 'executing' | 'review',
+  );
+}
+/**
  * HITL checkpoint tags (chair-only, same trust rule as STATUS tags):
  * `[CHECKPOINT: <topic>]` pauses the task for the owner's decision;
  * `[CHECKPOINT_RESOLVED: <decision>]` resumes work. While a checkpoint is
@@ -3214,13 +3231,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
-    const statusMatch = STATUS_TAG.exec(content);
-    if (statusMatch) {
+    const statusDirectives = extractStatusDirectives(content);
+    if (statusDirectives.length > 0) {
       const chairMember = members.find((member) => member.role === 'chair');
       const chairGlobalMetaId = (chairMember?.globalmetaid ?? '').trim();
       const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
       if (chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId) {
-        const nextStatus = statusMatch[1].toLowerCase() as 'executing' | 'review';
+        // GT#47 R1: the LAST tag is the instruction (protocol template places
+        // it at the message end); every earlier tag is descriptive text quoted
+        // from the goal/acceptance criteria. Multiple tags in one message get
+        // an audit log line so the parse is never a silent judgment call.
+        const nextStatus = statusDirectives[statusDirectives.length - 1];
+        if (statusDirectives.length > 1) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: chair message carries ${statusDirectives.length} [STATUS:*] tags ` +
+            `(${statusDirectives.map((tag) => tag.toUpperCase()).join(' -> ')}) — ` +
+            `applying the last one ([STATUS:${nextStatus.toUpperCase()}]) as the instruction, earlier tags treated as descriptive text`,
+          );
+        }
         try {
           const beforeStatus = store.getTaskById(task.id)?.status;
           // Improvement #2 (v1.3): review re-entry debounce — a [STATUS:REVIEW]
@@ -3259,7 +3287,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 fromStatus: beforeStatus,
                 toStatus: updated.status,
                 actor: chairName || `metabot:${chairMember?.metabotId ?? 'chair'}`,
-                reason: `[STATUS:${statusMatch[1].toUpperCase()}] tag`,
+                reason: `[STATUS:${nextStatus.toUpperCase()}] tag`,
               });
             } catch (error) {
               emitLog(
@@ -3430,7 +3458,33 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               `[GroupTaskDaemon] Task ${task.id}: ${error.message} — stale in-flight verdict ignored; task stays executing`,
             );
           } else if (error instanceof Error && error.message.startsWith('Illegal group task status transition')) {
-            // Illegal transition (e.g. backwards or from terminal): silently ignored.
+            // GT#47 R2: an illegal transition is a chair directive the host
+            // REJECTED, not a protocol verdict to swallow whole. Task #47
+            // showed what silence costs: zero transitions, zero status
+            // events, zero logs — "stuck but everything looks fine". Leave a
+            // durable audit row (reason marks it rejected, so the UI history
+            // never reads as an applied move) and a log line. The message
+            // itself was processed successfully, so the GT#26 bounded-retry /
+            // tag-only reprocess paths do not apply here.
+            const rejectedFrom = store.getTaskById(task.id)?.status ?? null;
+            const chairActor = chairMember?.name?.trim() || `metabot:${chairMember?.metabotId ?? 'chair'}`;
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: [STATUS:${nextStatus.toUpperCase()}] directive rejected — illegal transition ${rejectedFrom ?? '?'} -> ${nextStatus}`,
+            );
+            try {
+              store.addTaskTransition({
+                taskId: task.id,
+                fromStatus: rejectedFrom,
+                toStatus: nextStatus,
+                actor: chairActor,
+                reason: `illegal_transition: [STATUS:${nextStatus.toUpperCase()}] rejected (${rejectedFrom ?? '?'} -> ${nextStatus} is not legal)`,
+              });
+            } catch (auditError) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: illegal-transition audit row write failed: ` +
+                `${auditError instanceof Error ? auditError.message : String(auditError)}`,
+              );
+            }
           } else {
             // GT#26: not a protocol verdict — the durable write itself failed
             // (e.g. a busy DB during the DSH stall storm). Swallowing it here
@@ -3440,7 +3494,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             // bounded MSG_RETRY path, and the drop-time tag-only reprocess is
             // the final chance for the transition to land.
             emitLog(
-              `[GroupTaskDaemon] Task ${task.id}: [STATUS:${statusMatch[1].toUpperCase()}] tag application failed — ` +
+              `[GroupTaskDaemon] Task ${task.id}: [STATUS:${nextStatus.toUpperCase()}] tag application failed — ` +
               `retrying: ${error instanceof Error ? error.message : String(error)}`,
             );
             throw error;
@@ -4407,6 +4461,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     message: GroupTaskDaemonMessage,
     members: GroupTaskMember[],
     botsById: Map<number, GroupTaskDaemonBotFull>,
+    opts?: { humanGateActive?: boolean },
   ): void => {
     const sqlite = deps.getStore();
     const store = deps.getGroupTaskStore();
@@ -4421,6 +4476,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (member.role !== 'worker' || member.metabotId == null) continue;
         const bot = botsById.get(member.metabotId);
         if (!bot || !isMentioned(message, bot)) continue;
+        // GT#47 R3: during review / an open checkpoint the mention is part of
+        // a review-closing or checkpoint message, not a work assignment —
+        // arming the 3-min no-ACK watch here is exactly what fired the false
+        // "eleven did not ACK" alarm in task #47. The responder path posts the
+        // dispatch-held notice that tells the chair why the mention went cold.
+        if (opts?.humanGateActive) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: mention of ${member.name ?? member.metabotId} ` +
+            `(message #${message.id}) during a human-gate phase — no ACK watch armed`,
+          );
+          continue;
+        }
         // P5 (v1.1) false-positive modeling — being mentioned by the chair is
         // not always an assignment, and an unACKed "assignment" is not always
         // a missed one. Three legal states never arm the 3-min no-ACK watch:
@@ -4534,30 +4601,41 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           String(computeWorkingHeartbeatUntil(ack.estimatedMinutes, now())),
         );
       }
-      // P0-4 arming: an explicit ETA arms its own deadline; a numberless ACK
-      // (the entropy-P0 template ACK carries no ETA) falls back to the member
-      // timeout so the delivery reminder still fires — without this the
-      // reminder silently never triggers for template ACKs.
-      const etaMinutes = ack.estimatedMinutes != null && ack.estimatedMinutes > 0
-        ? ack.estimatedMinutes
-        : memberTimeoutAfterMinutes;
-      // Review fix: arming a fresh deadline starts a fresh reminder cycle —
-      // a leftover delivery-reminded flag from the previous (missed or
-      // delivered) deadline would otherwise skip the next reminder and drop
-      // the member straight onto the reclaim ladder after one grace window.
-      sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
-      sqlite.set(
-        `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
-        JSON.stringify({
-          dueAt: now() + etaMinutes * 60_000,
-          ackedAt: now(),
-          taskDescription: ack.taskDescription,
-        }),
-      );
-      emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING]` +
-        `(est. ${etaMinutes} min)`,
-      );
+      // GT#47 R3: during review / an open checkpoint a [WORKING] is liveness
+      // only, not a work commitment — arming a delivery deadline off a chair
+      // message that must stay unanswered is what mis-armed task #47's
+      // expected_delivery records deep into what should have been acceptance.
+      if (!opts?.humanGateActive) {
+        // P0-4 arming: an explicit ETA arms its own deadline; a numberless ACK
+        // (the entropy-P0 template ACK carries no ETA) falls back to the member
+        // timeout so the delivery reminder still fires — without this the
+        // reminder silently never triggers for template ACKs.
+        const etaMinutes = ack.estimatedMinutes != null && ack.estimatedMinutes > 0
+          ? ack.estimatedMinutes
+          : memberTimeoutAfterMinutes;
+        // Review fix: arming a fresh deadline starts a fresh reminder cycle —
+        // a leftover delivery-reminded flag from the previous (missed or
+        // delivered) deadline would otherwise skip the next reminder and drop
+        // the member straight onto the reclaim ladder after one grace window.
+        sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+        sqlite.set(
+          `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+          JSON.stringify({
+            dueAt: now() + etaMinutes * 60_000,
+            ackedAt: now(),
+            taskDescription: ack.taskDescription,
+          }),
+        );
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING]` +
+          `(est. ${etaMinutes} min)`,
+        );
+      } else {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
+          'during a human-gate phase — liveness only, no delivery deadline armed',
+        );
+      }
       return;
     }
     if (hasStandbyMarker(message.content)) {
@@ -5298,14 +5376,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
         recordGroupTaskMessageForLocalMembers(task, message, members, botsById);
         const verificationNotes = await processMessageTags(task, message, members, botsById, promptMembers);
-        // P0-3: [WORKING] ACK / [STANDBY] markers + assignment ACK tracking.
-        handleMemberProtocolMarkers(task, message, members, botsById);
         // A [STATUS:...] tag on THIS message may have flipped the task status
         // (e.g. chair posted [STATUS:REVIEW]); gate with the fresh status, not
         // the tick-start snapshot. A [CHECKPOINT...] tag may likewise have
         // opened/resolved a HITL checkpoint — gate with the fresh state too.
         const freshStatus = store.getTaskById(task.id)?.status ?? task.status;
         const hasOpenCheckpoint = store.getOpenCheckpoint(task.id) != null;
+        // GT#47 R3: during a human-gate phase (review / open checkpoint) a
+        // chair @mention is NOT an assignment and a worker [WORKING] is NOT a
+        // work commitment — the protocol-marker watches below must respect the
+        // same silence gate the responder path uses, or a final-check message
+        // mis-arms ACK/deadline watches (task #47: expected_delivery armed and
+        // a no-ACK alarm fired off the chair's review-closing messages).
+        const humanGateActive = freshStatus === 'review' || hasOpenCheckpoint;
+        // P0-3: [WORKING] ACK / [STANDBY] markers + assignment ACK tracking.
+        handleMemberProtocolMarkers(task, message, members, botsById, { humanGateActive });
         const gatingTask: GroupTaskDaemonTask = { ...task, status: freshStatus, hasOpenCheckpoint };
         const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById, {
           entropyFloorGate: entropyP0.floorGate,

@@ -1022,6 +1022,145 @@ test('status tags: chair-only, transitions, same-status silent, review->executin
 });
 
 // ---------------------------------------------------------------------------
+// GT#47: chair plan message with a DESCRIPTIVE [STATUS:REVIEW] quoted in the
+// body + the real instruction tag at the end (the task #47 post-mortem repro)
+// ---------------------------------------------------------------------------
+
+test('GT#47 R1: descriptive [STATUS:REVIEW] in the plan body must not beat the trailing [STATUS:EXECUTING]', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2], { activate: false }); // stays 'planning'
+    insertGroupMessage(h.db, {
+      pinId: 'plan-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '目标: 完成 anydoc 技能。验收标准: 全部交付物上链, owner 核验通过后发 [STATUS:REVIEW]。\n'
+        + '分工: @Coder Bot 负责封装与终检。\n[STATUS:EXECUTING]',
+      chainTimestamp: 100,
+    });
+    await h.loop.runTick();
+
+    // The task must leave planning via the trailing EXECUTING instruction —
+    // the pre-fix parser grabbed the descriptive REVIEW, the illegal
+    // planning->review directive was swallowed, and the task stayed pinned.
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
+    assert.ok(
+      logs.some((line) => line.includes('carries 2 [STATUS:*] tags')),
+      'multi-tag message leaves an audit log line',
+    );
+    const transitions = h.groupTaskStore.listTaskTransitions(task.id);
+    assert.ok(
+      transitions.some((t) => t.toStatus === 'executing' && /\[STATUS:EXECUTING\] tag/.test(t.reason ?? '')),
+      'transition audit row credits the EXECUTING tag',
+    );
+    assert.ok(
+      !transitions.some((t) => (t.reason ?? '').startsWith('illegal_transition')),
+      'no rejected-directive audit row for the plan message',
+    );
+
+    // Follow-through (the real msg 2113 shape): a final-check message whose
+    // trailing tag is the real [STATUS:REVIEW] now lands review cleanly.
+    insertGroupMessage(h.db, {
+      pinId: 'final-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '终检: 选题/文案/配图/上链全部完成, 等待 owner 验收。\n[STATUS:REVIEW]',
+      chainTimestamp: 101,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#47 R2: an illegal chair [STATUS] directive leaves a rejected-transition audit row instead of silence', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2], { activate: false }); // stays 'planning'
+    insertGroupMessage(h.db, {
+      pinId: 'early-review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '提前进入验收 [STATUS:REVIEW]', chainTimestamp: 100,
+    });
+    await h.loop.runTick();
+
+    // planning -> review is illegal: the task stays put, but the rejection is
+    // now observable (audit row + log), not swallowed whole.
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning');
+    const rejected = h.groupTaskStore
+      .listTaskTransitions(task.id)
+      .find((t) => (t.reason ?? '').startsWith('illegal_transition'));
+    assert.ok(rejected, 'rejected-directive audit row written');
+    assert.equal(rejected.fromStatus, 'planning');
+    assert.equal(rejected.toStatus, 'review');
+    assert.ok(logs.some((line) => line.includes('directive rejected')), 'rejection logged');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#47 R3: during review, chair mentions arm no ACK watch and worker [WORKING] arms no delivery deadline', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]); // executing
+    insertGroupMessage(h.db, {
+      pinId: 'rev-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal met', chainTimestamp: 100,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+
+    // Chair final-check message @mentions the worker during review (the msg
+    // that mis-armed the no-ACK alarm for eleven in task #47)...
+    insertGroupMessage(h.db, {
+      pinId: 'final-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '终检通过: @Coder Bot 的交付已核验, 等待 owner 验收。', chainTimestamp: 101,
+    });
+    // ...and the worker ACKs that review-phase message (the msg that mis-armed
+    // the expected_delivery deadline for Builder in task #47).
+    insertGroupMessage(h.db, {
+      pinId: 'ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到, 静默待命', chainTimestamp: 102,
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.store.get(`group_task_ack_pending:${task.id}:2`),
+      undefined,
+      'review-phase mention arms no ACK watch',
+    );
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      undefined,
+      'review-phase [WORKING] arms no delivery deadline',
+    );
+    assert.ok(
+      logs.some((line) => line.includes('no delivery deadline armed')),
+      'the gated ACK is logged as liveness-only',
+    );
+
+    // Control: back in executing (rework hatch) the same [WORKING] arms the
+    // deadline again — the gate is phase-scoped, not a blanket disarm.
+    insertGroupMessage(h.db, {
+      pinId: 'rework-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] rework needed after all', chainTimestamp: 103,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'ack2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 重新开工', chainTimestamp: 104,
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`) != null,
+      'executing-phase [WORKING] still arms the delivery deadline',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // #13 join-welcome handshake + #14 closing ceremony
 // ---------------------------------------------------------------------------
 
