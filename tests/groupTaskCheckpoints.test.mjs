@@ -505,7 +505,7 @@ test('loop: review entry supersedes an open checkpoint', async () => {
 
     insertGroupMessage(h.db, {
       pinId: 'cp-review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal looks met',
+      senderName: 'Twin Bot', content: 'goal looks met\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
 

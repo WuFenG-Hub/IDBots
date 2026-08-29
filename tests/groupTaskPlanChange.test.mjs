@@ -315,7 +315,7 @@ test('daemon: review entry surfaces the 方案变更 block in the group summary 
     await h.loop.runTick();
     insertGroupMessage(h.db, {
       pinId: 'rv-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+      senderName: 'Twin Bot', content: '目标达成\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
 
@@ -343,7 +343,7 @@ test('daemon: a task with no plan change shows no block in any surface', async (
     const task = h.createTask();
     insertGroupMessage(h.db, {
       pinId: 'rv-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+      senderName: 'Twin Bot', content: '目标达成\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
 

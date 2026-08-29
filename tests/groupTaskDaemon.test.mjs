@@ -1046,19 +1046,19 @@ test('status tags: chair-only, transitions, same-status silent, review->executin
     });
     insertGroupMessage(h.db, {
       pinId: 's2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] work is underway',
+      senderName: 'Twin Bot', content: 'work is underway\n[STATUS:EXECUTING]',
     });
     insertGroupMessage(h.db, {
       pinId: 's3-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] still underway',
+      senderName: 'Twin Bot', content: 'still underway\n[STATUS:EXECUTING]',
     });
     insertGroupMessage(h.db, {
       pinId: 's4-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal looks met',
+      senderName: 'Twin Bot', content: 'goal looks met\n[STATUS:REVIEW]',
     });
     insertGroupMessage(h.db, {
       pinId: 's5-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] rework needed after all',
+      senderName: 'Twin Bot', content: 'rework needed after all\n[STATUS:EXECUTING]',
     });
     await h.loop.runTick();
 
@@ -1166,7 +1166,7 @@ test('GT#47 R3: during review, chair mentions arm no ACK watch and worker [WORKI
     const task = h.createTask([2]); // executing
     insertGroupMessage(h.db, {
       pinId: 'rev-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal met', chainTimestamp: 100,
+      senderName: 'Twin Bot', content: 'goal met\n[STATUS:REVIEW]', chainTimestamp: 100,
     });
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
@@ -1204,7 +1204,7 @@ test('GT#47 R3: during review, chair mentions arm no ACK watch and worker [WORKI
     // deadline again — the gate is phase-scoped, not a blanket disarm.
     insertGroupMessage(h.db, {
       pinId: 'rework-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] rework needed after all', chainTimestamp: 103,
+      senderName: 'Twin Bot', content: 'rework needed after all\n[STATUS:EXECUTING]', chainTimestamp: 103,
     });
     insertGroupMessage(h.db, {
       pinId: 'ack2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
@@ -1330,7 +1330,7 @@ test('#14 closing ceremony: review entry posts a system closing line as chair (n
     });
     insertGroupMessage(h.db, {
       pinId: 'review-tag-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal looks met',
+      senderName: 'Twin Bot', content: 'goal looks met\n[STATUS:REVIEW]',
       chainTimestamp: 101,
     });
     await h.loop.runTick();
@@ -1365,7 +1365,7 @@ test('Improvement #1: review entry captures the chair 【结论】 into the reco
     const task = h.createTask([2]); // executing
     insertGroupMessage(h.db, {
       pinId: 'review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal met', chainTimestamp: 101,
+      senderName: 'Twin Bot', content: 'goal met\n[STATUS:REVIEW]', chainTimestamp: 101,
     });
     await h.loop.runTick();
 
@@ -1390,7 +1390,7 @@ test('Improvement #1: a failed owner report degrades to a conclusion-less ceremo
     const task = h.createTask([2]); // executing
     insertGroupMessage(h.db, {
       pinId: 'review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal met', chainTimestamp: 101,
+      senderName: 'Twin Bot', content: 'goal met\n[STATUS:REVIEW]', chainTimestamp: 101,
     });
     await h.loop.runTick();
 
@@ -1416,7 +1416,7 @@ test('#14 closing re-assert: a worker straggler landing after review entry is fo
     });
     insertGroupMessage(h.db, {
       pinId: 'review-tag-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal met', chainTimestamp: 101,
+      senderName: 'Twin Bot', content: 'goal met\n[STATUS:REVIEW]', chainTimestamp: 101,
     });
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
@@ -1609,7 +1609,7 @@ test('mid-batch [STATUS:REVIEW] flip gates subsequent messages with the new stat
     });
     insertGroupMessage(h.db, {
       pinId: 'flip-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] everything is in',
+      senderName: 'Twin Bot', content: 'everything is in\n[STATUS:REVIEW]',
     });
     insertGroupMessage(h.db, {
       pinId: 'post-flip-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
@@ -2384,7 +2384,7 @@ test('owner report: review transition sends exactly one private report to the bo
     });
     insertGroupMessage(h.db, {
       pinId: 'rev-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] all done',
+      senderName: 'Twin Bot', content: 'all done\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
 
@@ -2441,17 +2441,17 @@ test('owner report: rework hatch clears the guard and the next review reports ag
       senderName: 'Twin Bot', content,
     });
 
-    chairMsg('rw1-i0', '[STATUS:REVIEW] done');
+    chairMsg('rw1-i0', 'done\n[STATUS:REVIEW]');
     await h.loop.runTick();
     assert.equal(h.ownerReportCalls.length, 1);
 
     // Improvement #2 (v1.3): the re-review must land past the review re-entry
     // debounce window — a [STATUS:REVIEW] within 30s of the rework hatch is a
     // stale in-flight verdict and is deliberately skipped.
-    chairMsg('rw2-i0', '[STATUS:EXECUTING] rework needed');
+    chairMsg('rw2-i0', 'rework needed\n[STATUS:EXECUTING]');
     await h.loop.runTick();
     h.state.nowMs += 31_000;
-    chairMsg('rw3-i0', '[STATUS:REVIEW] done for real');
+    chairMsg('rw3-i0', 'done for real\n[STATUS:REVIEW]');
     await h.loop.runTick();
     assert.equal(h.ownerReportCalls.length, 2, 're-review after rework reports again');
     assert.equal(h.store.get(`group_task_owner_reported:${task.id}`), '1');
@@ -2472,7 +2472,7 @@ test('owner report: A2A display failure is reported without retrying the on-chai
     const task = h.createTask([2]);
     insertGroupMessage(h.db, {
       pinId: 'rdf1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] done',
+      senderName: 'Twin Bot', content: 'done\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
 
@@ -2504,7 +2504,7 @@ test('owner report: send failure is logged and does not block the tick', async (
     const task = h.createTask([2]);
     insertGroupMessage(h.db, {
       pinId: 'rf1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] done',
+      senderName: 'Twin Bot', content: 'done\n[STATUS:REVIEW]',
     });
     insertGroupMessage(h.db, {
       pinId: 'rf2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-boss',
@@ -4175,7 +4175,7 @@ test('F6: chair [STATUS:REVIEW] during the Twin-activity suppression window is s
     // The chair flips the task to REVIEW while the window is still active.
     insertGroupMessage(h.db, {
       pinId: 'f6-review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 全部交付已核验', chainTimestamp: 1_000_000_010,
+      senderName: 'Twin Bot', content: '全部交付已核验\n[STATUS:REVIEW]', chainTimestamp: 1_000_000_010,
     });
     await h.loop.runTick();
 
@@ -5121,6 +5121,263 @@ test('task #41 residue: an ETA [WORKING] replying to a real chair assignment sti
       h.store.get(`group_task_expected_delivery:${task.id}:2`),
       'deadline armed for an assignment-threaded ACK',
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// G-01..G-04 enhancement suite (2026-08-30 requirements doc)
+// ---------------------------------------------------------------------------
+
+test('G-03: a chair body tag with no trailing instruction never transitions and is observable', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (line) => logs.push(line) });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'g3-body-tag-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '计划如上。验收标准提到 owner 核验通过后发 [STATUS:REVIEW]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'a descriptive body tag must not move the state machine',
+    );
+    assert.ok(
+      logs.some((line) => line.includes('descriptive tags ignored, no transition applied')),
+      'the ignored parse leaves an observable log line',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('G-03: a tag followed by trailing prose is body text, not an instruction', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'g3-mid-tag-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '终检完成 [STATUS:REVIEW] 请 owner 验收',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'only the message-END field carries the instruction tag',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('G-03: the planning dispatch self-heals a missing trailing tag with the deterministic footer', async () => {
+  const h = await createHarness({ chatReply: '分工:Coder Bot 负责实现。' });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'the planning dispatch was posted');
+    assert.match(h.sends[0].content, /\[STATUS:EXECUTING\]$/);
+    assert.match(h.sends[0].content, /分工:Coder Bot 负责实现。/);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('G-02: a valid deliverable retires the pending ACK watch silently (no alarm, no standby note)', async () => {
+  const h = await createHarness({ ackTimeoutMs: 1 });
+  try {
+    const task = h.createTask([2]);
+    const assignedAt = h.state.nowMs - 120_000;
+    // Chair @-dispatch arms the ACK watch.
+    insertGroupMessage(h.db, {
+      pinId: 'g2-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 请实现 X 并交付',
+      chainTimestamp: Math.floor(assignedAt / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.store.get(`group_task_ack_pending:${task.id}:2`),
+      'ACK watch armed by the chair dispatch',
+    );
+    // The worker delivered long ago (outside every recency window) — valid,
+    // non-rejected: state-driven liveness says done, not missing.
+    h.db.run(
+      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, status, confirmation, created_at)
+       VALUES (?, 'g2-dlv-pin', 'gmid-w2', 'metaapp', ?, 'delivered', 'unconfirmed', datetime('now', '-1 hour'))`,
+      [task.id, `metaapp://${'ab'.repeat(32)}i0`],
+    );
+    h.state.nowMs += 60_000; // push past the (1 ms) ACK timeout
+    const sendsBefore = h.sends.length;
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_ack_pending:${task.id}:2`),
+      undefined,
+      'the watch is retired for a delivered member',
+    );
+    const newSends = h.sends.slice(sendsBefore);
+    assert.ok(
+      newSends.every((send) => !/has not sent a \[WORKING\] ACK/i.test(send.content)),
+      'no missing-ACK alarm for the delivered member',
+    );
+    assert.ok(
+      newSends.every((send) => !/long-running turn/i.test(send.content)),
+      'no long-turn standby note either — delivered is done waiting',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('G-01: created and first-dispatch milestones report to the origin session exactly once', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message }) => {
+        milestones.push({ taskId, kind, message });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2], { activate: false });
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-g01', task.id]);
+    const fresh = h.groupTaskStore.getTaskById(task.id);
+    // Chair plan with the trailing instruction tag: transition + dispatch report.
+    insertGroupMessage(h.db, {
+      pinId: 'g1-plan-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '分工如下。\n[STATUS:EXECUTING]',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    await h.loop.runTick();
+    const kinds = milestones.map((entry) => entry.kind);
+    assert.equal(kinds.filter((kind) => kind === 'created').length, 1, 'created reports once');
+    assert.equal(kinds.filter((kind) => kind === 'dispatch').length, 1, 'first dispatch reports once');
+    const dispatch = milestones.find((entry) => entry.kind === 'dispatch');
+    assert.match(dispatch.message, /\[GROUP_TASK_DISPATCH\]/);
+    assert.ok(dispatch.message.includes('executing'), 'dispatch notice carries the status');
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('G-01: an illegal transition reports an anomaly to the origin session (never silent)', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning: -> review is illegal
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-g01b', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'g1-illegal-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '提前收工。\n[STATUS:REVIEW]',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning', 'illegal move rejected');
+    const anomaly = milestones.find((entry) => entry.kind === 'anomaly');
+    assert.ok(anomaly, 'anomaly milestone fired');
+    assert.match(anomaly.message, /\[GROUP_TASK_ALERT\]/);
+    assert.equal(anomaly.subject, 'illegal_transition:review');
+    const audit = h.groupTaskStore.listTaskTransitions(task.id)
+      .find((row) => (row.reason ?? '').startsWith('illegal_transition:'));
+    assert.ok(audit, 'durable audit row records the rejection');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('G-01: the no-progress stall anomaly fires once per episode', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      noProgressStallMs: 300_000,
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-g01c', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'g1-stale-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 400, // > 5 min stale
+    });
+    await h.loop.runTick();
+    const stalls = milestones.filter((entry) => entry.subject === 'stall');
+    assert.equal(stalls.length, 1, 'stall anomaly reported once');
+    assert.match(stalls[0].message, /\[GROUP_TASK_ALERT\]/);
+    await h.loop.runTick();
+    assert.equal(
+      milestones.filter((entry) => entry.subject === 'stall').length,
+      1,
+      'no repeat spam while the episode persists',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('gating (G-04): while dispatch is paused the chair answers only the owner; workers unchanged', () => {
+  const pausedTask = { id: 1, status: 'executing', dispatchPaused: true };
+  const ownerMessage = gateMessage({ senderGlobalMetaId: BOSS_GMID, senderMetaId: 'metaid-human', senderName: 'Owner', content: 'what is the status?' });
+  const workerMention = gateMessage({ content: '@Coder Bot please continue your step' });
+  const chairMention = gateMessage({ content: '@Twin Bot question for you' });
+
+  const toOwner = decideGroupTaskResponders(ownerMessage, pausedTask, GATE_MEMBERS, GATE_BOTS);
+  assert.deepEqual(toOwner, [{ metabotId: 1, reason: 'chair_owner_message' }]);
+
+  const toWorkerMention = decideGroupTaskResponders(workerMention, pausedTask, GATE_MEMBERS, GATE_BOTS);
+  assert.deepEqual(toWorkerMention, [{ metabotId: 2, reason: 'worker_mentioned' }], 'in-flight worker mentions still answer');
+
+  const toChairMention = decideGroupTaskResponders(chairMention, pausedTask, GATE_MEMBERS, GATE_BOTS);
+  assert.deepEqual(toChairMention, [], 'no chair dispatch replies while paused');
+});
+
+test('G-04: a supervisor pause holds the planning turn; nudge drives a chair response turn after resume', async () => {
+  const h = await createHarness({ chatReply: '已复查:交付物完整,见核验记录。' });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    h.groupTaskStore.setTaskDispatchPausedAt(task.id, h.state.nowMs);
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'planning turn held while paused');
+    assert.equal(h.sends.length, 0, 'no group posts while paused');
+
+    // Resume + a pending nudge: the chair must answer in-group.
+    h.groupTaskStore.setTaskDispatchPausedAt(task.id, null);
+    h.groupTaskStore.addSupervisorSignal({
+      taskId: task.id,
+      kind: 'nudge',
+      note: 'double-check the archive step dedupe',
+      target: 'Coder Bot',
+    });
+    await h.loop.runTick();
+    const supervisorTurn = h.chatCalls.find((call) => call.userMessage.includes('[NUDGE → Coder Bot]'));
+    assert.ok(supervisorTurn, 'the chair turn received the supervisor directive');
+    assert.ok(
+      h.sends.some((send) => send.content.includes('已复查')),
+      'the chair response was posted to the group',
+    );
+    const pending = h.groupTaskStore.listPendingSupervisorSignals(task.id);
+    assert.equal(pending.length, 0, 'the nudge is marked processed with the response pin');
   } finally {
     h.cleanup();
   }

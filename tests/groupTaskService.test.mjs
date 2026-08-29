@@ -2342,3 +2342,79 @@ test('closeGroupTask: a failing close-out announcement never fails the close', a
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// G-04: supervisor intervention channel
+// ---------------------------------------------------------------------------
+
+test('superviseGroupTask: nudge records the signal and posts a supervisor notice; pause/resume gate dispatch with owner confirm', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await groupTaskService.createGroupTask({
+      title: 'Supervised build',
+      goal: 'Build it',
+      acceptanceCriteria: 'shipped',
+      memberMetabotIds: [2],
+      createdBy: 'user',
+    });
+    const sendsBefore = h.calls.send.length;
+
+    // nudge → visible notice + pending signal row
+    const nudge = await groupTaskService.superviseGroupTask({
+      taskId: detail.id,
+      action: 'nudge',
+      note: 'double-check the archive dedupe',
+      target: 'Coder Bot',
+    });
+    assert.equal(nudge.signal.kind, 'nudge');
+    assert.equal(nudge.signal.processedAt, null, 'nudge waits for the chair response turn');
+    const notice = h.calls.send[sendsBefore];
+    assert.equal(notice.metabotId, 1, 'notice posted under the chair transport identity');
+    assert.match(notice.opts.content, /\[GROUP_TASK_NOTICE:supervisor\]/);
+    assert.match(notice.opts.content, /监督提示 → Coder Bot/);
+
+    // pause → local gate + pre-processed row
+    const paused = await groupTaskService.superviseGroupTask({
+      taskId: detail.id,
+      action: 'pause',
+      note: 'owner wants to check the draft first',
+    });
+    assert.equal(typeof paused.dispatchPausedAt, 'number');
+    assert.ok(paused.signal.processedAt, 'pause is host-applied (already processed)');
+    assert.notEqual(
+      h.groupTaskStore.getTaskById(detail.id).dispatchPausedAt,
+      null,
+      'the pause gate is persisted',
+    );
+
+    // resume without owner confirmation is refused
+    await assert.rejects(
+      () => groupTaskService.superviseGroupTask({
+        taskId: detail.id,
+        action: 'resume',
+        note: 'resume please',
+      }),
+      /requires explicit owner confirmation/,
+    );
+    assert.notEqual(h.groupTaskStore.getTaskById(detail.id).dispatchPausedAt, null, 'still paused');
+
+    // owner-confirmed resume lifts the gate and records the trail
+    const resumed = await groupTaskService.superviseGroupTask({
+      taskId: detail.id,
+      action: 'resume',
+      note: 'owner confirmed in chat',
+      confirmOwner: true,
+    });
+    assert.equal(resumed.dispatchPausedAt, null);
+    assert.equal(h.groupTaskStore.getTaskById(detail.id).dispatchPausedAt, null);
+
+    // the whole trail is exposed on the detail (review record source)
+    const shown = await groupTaskService.getGroupTask(detail.id);
+    assert.deepEqual(
+      shown.supervisorSignals.map((signal) => signal.kind),
+      ['nudge', 'pause', 'resume'],
+    );
+  } finally {
+    h.cleanup();
+  }
+});

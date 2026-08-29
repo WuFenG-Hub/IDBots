@@ -2716,9 +2716,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * is never posted to the group; failures only log, never block the tick.
    */
   /**
-   * G-01: best-effort milestone notice into the origin CoWork session. The
-   * service side owns the once-per-node kv guard; here we only transport and
-   * log. A missing dep or a failed delivery never blocks the tick.
+   * G-01: best-effort milestone notice into the origin CoWork session.
+   * Guarded once per (kind, task, subject) HERE on the daemon side using the
+   * SAME kv key the service-side notifySourceSessionMilestone uses
+   * (`group_task_milestone_notified:<kind>:<taskId>[:subject]`) — the daemon
+   * never re-fires a node in one pass, the service re-checks under its own
+   * seam, and the rework hatch clears the shared key to re-arm dispatch. A
+   * missing dep or a failed delivery never blocks the tick.
    */
   const notifySourceSessionMilestone = (
     task: GroupTask,
@@ -2728,6 +2732,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   ): void => {
     if (!task.sourceSessionId?.trim()) return; // panel-created / pre-R2 task
     if (!deps.sendMilestoneToSourceSession) return; // seam not wired (tests)
+    const sqlite = deps.getStore();
+    const subjectKey = subject?.trim() ? `:${subject.trim()}` : '';
+    const guardKey = `group_task_milestone_notified:${kind}:${task.id}${subjectKey}`;
+    if (sqlite.get<string>(guardKey) === '1') return;
     try {
       const sent = deps.sendMilestoneToSourceSession({
         taskId: task.id,
@@ -2736,9 +2744,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         subject: subject ?? null,
       });
       if (sent) {
+        sqlite.set(guardKey, '1');
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${kind} milestone reported to origin session ` +
-          `${task.sourceSessionId}${subject?.trim() ? ` (subject: ${subject.trim()})` : ''}`,
+          `${task.sourceSessionId}${subjectKey}`,
         );
       }
     } catch (error) {

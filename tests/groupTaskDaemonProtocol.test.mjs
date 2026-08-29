@@ -341,7 +341,7 @@ test('P4 (v1.2): review entry delivers the owner report body to the origin sessi
     const task = h.createTask([2]);
     insertGroupMessage(h.db, {
       pinId: 'r1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+      senderName: 'Twin Bot', content: '目标达成\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
@@ -355,7 +355,7 @@ test('P4 (v1.2): review entry delivers the owner report body to the origin sessi
     // Rework hatch: review -> executing clears the guards...
     insertGroupMessage(h.db, {
       pinId: 'rework-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] 返工：PNG 基线重建',
+      senderName: 'Twin Bot', content: '返工：PNG 基线重建\n[STATUS:EXECUTING]',
     });
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
@@ -369,7 +369,7 @@ test('P4 (v1.2): review entry delivers the owner report body to the origin sessi
     h.state.nowMs += 31_000;
     insertGroupMessage(h.db, {
       pinId: 'r2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 返工完成，再次验收',
+      senderName: 'Twin Bot', content: '返工完成，再次验收\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
     assert.equal(h.sourceReviewReports.length, 2, 'second review re-reports to the source session');
@@ -391,7 +391,7 @@ test('Improvement #2: a chair [STATUS:REVIEW] verdict landing within the rework 
 
     insertGroupMessage(h.db, {
       pinId: 'rv1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+      senderName: 'Twin Bot', content: '目标达成\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
@@ -402,7 +402,7 @@ test('Improvement #2: a chair [STATUS:REVIEW] verdict landing within the rework 
     h.state.nowMs += 27_000;
     insertGroupMessage(h.db, {
       pinId: 'rework2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] 返工：重启 Builder 的子任务',
+      senderName: 'Twin Bot', content: '返工：重启 Builder 的子任务\n[STATUS:EXECUTING]',
     });
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
@@ -414,7 +414,7 @@ test('Improvement #2: a chair [STATUS:REVIEW] verdict landing within the rework 
     h.state.nowMs += 3_000;
     insertGroupMessage(h.db, {
       pinId: 'stale-rv-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: 'S4 核验通过 [STATUS:REVIEW]',
+      senderName: 'Twin Bot', content: 'S4 核验通过\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
     assert.equal(
@@ -431,7 +431,7 @@ test('Improvement #2: a chair [STATUS:REVIEW] verdict landing within the rework 
     h.state.nowMs += 31_000;
     insertGroupMessage(h.db, {
       pinId: 'rv2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 返工完成，再次验收',
+      senderName: 'Twin Bot', content: '返工完成，再次验收\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
@@ -464,7 +464,7 @@ test('Improvement #5: pending-only deliverables yield a facts-only directive tha
     });
     insertGroupMessage(h.db, {
       pinId: 'i5-rv-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+      senderName: 'Twin Bot', content: '目标达成\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
     const directive = h.chatCalls.find((call) => call.userMessage.includes('owner-report directive'))?.userMessage;
@@ -508,7 +508,7 @@ test('Improvement #2: a rework landing while the owner report is composed aborts
     };
     insertGroupMessage(h.db, {
       pinId: 'rv-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+      senderName: 'Twin Bot', content: '目标达成\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
 
@@ -554,7 +554,7 @@ test('Improvement #5: all deliverables on-chain confirmed keep the accept/rework
     );
     insertGroupMessage(h.db, {
       pinId: 'i5-rv2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 全部上链，请验收',
+      senderName: 'Twin Bot', content: '全部上链，请验收\n[STATUS:REVIEW]',
     });
     await h.loop.runTick();
     const directive = h.chatCalls.find((call) => call.userMessage.includes('owner-report directive'))?.userMessage;

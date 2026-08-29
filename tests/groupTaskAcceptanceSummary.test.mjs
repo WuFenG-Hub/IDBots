@@ -10,6 +10,7 @@ const {
   buildAcceptanceGuidance,
   deliverableVerificationLabel,
   extractChairConclusion,
+  extractCriteriaVerdicts,
   selectAcceptanceChecklist,
   textDeliverablePreview,
   CHAIR_CONCLUSION_MAX_CHARS,
@@ -321,4 +322,65 @@ test('text-only task prints the report body, never 见消息原文/unverified', 
   assert.ok(result.messageText.includes('[text] 验收观察：动画可播放 — chair'));
   assert.ok(!result.messageText.includes('（见消息原文）'));
   assert.ok(!result.messageText.includes('(unverified)'));
+});
+
+// ---------------------------------------------------------------------------
+// G-05: create-time-aligned criteria verdicts
+// ---------------------------------------------------------------------------
+
+test('G-05: extractCriteriaVerdicts parses protocol lines, ignores prose, keeps order', () => {
+  const report = [
+    '【结论】两项标准均满足,建议验收通过。',
+    'Narration about the run. The criteria were checked one by one.',
+    '[CRITERION:PASS] 归档一条（先查重） — 已归档 pin xxx 且查重通过',
+    '- [CRITERION:FAIL] 预览可用 — 预览链接 404',
+    '* [CRITERION:UNCLEAR] 推广文案已起草 — 无法核实草稿位置',
+    '[OBSERVATION] 归档文件未上链（标准未要求,不影响验收）',
+    'Some closing prose mentioning [CRITERION:PASS] mid-sentence but not at line start should not double count.',
+  ].join('\n');
+  const { verdicts, observations } = extractCriteriaVerdicts(report);
+  assert.equal(verdicts.length, 3);
+  assert.deepEqual(
+    verdicts.map((entry) => entry.verdict),
+    ['pass', 'fail', 'unclear'],
+  );
+  assert.match(verdicts[0].text, /^归档一条/);
+  assert.match(verdicts[1].text, /^预览可用/);
+  assert.equal(observations.length, 1);
+  assert.match(observations[0], /归档文件未上链/);
+});
+
+test('G-05: the summary message renders the criteria check and marks observations non-blocking', () => {
+  const text = buildAcceptanceSummaryMessageText({
+    goal: 'archive one item',
+    acceptanceCriteria: '归档一条（先查重）',
+    deliverables: [],
+    members: [],
+    guidance: 'You can:',
+    conclusion: '两项标准均满足',
+    criteriaVerdicts: [
+      { verdict: 'pass', text: '归档一条（先查重） — 已归档' },
+      { verdict: 'fail', text: '预览可用 — 404' },
+    ],
+    observations: ['归档文件未上链（标准未要求）'],
+  }, '归档任务');
+  assert.match(text, /验收标准对照/);
+  assert.match(text, /✓ 通过 — 归档一条（先查重） — 已归档/);
+  assert.match(text, /✗ 未通过 — 预览可用 — 404/);
+  assert.match(text, /观察项（标准之外，不阻断验收）/);
+  assert.match(text, /归档文件未上链/);
+});
+
+test('G-04: the summary message renders the supervisor intervention trail', () => {
+  const text = buildAcceptanceSummaryMessageText({
+    goal: 'g',
+    acceptanceCriteria: null,
+    deliverables: [],
+    members: [],
+    guidance: 'You can:',
+    supervisorSignals: ['[NUDGE → Coder Bot] double-check dedupe', '[PAUSE] owner asked to hold dispatch'],
+  }, 'supervised task');
+  assert.match(text, /监督者干预记录/);
+  assert.match(text, /\[NUDGE → Coder Bot\] double-check dedupe/);
+  assert.match(text, /\[PAUSE\] owner asked to hold dispatch/);
 });
