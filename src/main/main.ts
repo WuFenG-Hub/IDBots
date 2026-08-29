@@ -3626,6 +3626,16 @@ const startSqliteDaemons = (): void => {
         skillTurnTimeoutMs: 30 * 60 * 1000,
       });
     },
+    // Tick watchdog (review follow-up, fix/group-member-status): the daemon's
+    // watchdog is INACTIVITY-based — it resets the loop only when a tick shows
+    // no observable progress (send settled / cursor advanced) for the whole
+    // window. The window must comfortably exceed the longest single indivisible
+    // await inside a tick — one skill turn, budgeted at 30 min above — because
+    // an in-flight turn produces no progress signals; 45 min leaves a 15-min
+    // margin. A healthy tick processing a backlog may run far longer and must
+    // never trip it (a duration-based 30-min window could fire under two legit
+    // 20-min turns and double-dispatch the pending messages).
+    tickWatchdogMs: 45 * 60 * 1000,
     emitTaskEvent: (payload) => {
       broadcastGroupTaskEvent(payload);
     },
