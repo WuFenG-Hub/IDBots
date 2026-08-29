@@ -112,11 +112,26 @@ const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
  * message is the chair's instruction.
  */
 const STATUS_TAG_ALL = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
+/**
+ * G-03 (task #47 structural fix): the instruction tag is ONLY the one at the
+ * message END (the protocol template instructs the chair to end the message
+ * with it, and every host-composed directive does). A tag anywhere in the body
+ * is descriptive prose quoted from the goal/acceptance criteria — it is never
+ * parsed as an instruction, regardless of position or count. Detection stays
+ * regex-only over an ASCII protocol label; no natural-language intent is
+ * inferred here.
+ */
+const STATUS_TAG_TRAILING = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\][ \t]*$/i;
 
+/**
+ * Extract the chair's status instruction from a message body.
+ * Returns [] unless a valid tag sits at the (whitespace-trimmed) message end —
+ * tags embedded in the body are deliberately ignored (see STATUS_TAG_TRAILING).
+ */
 function extractStatusDirectives(content: string): Array<'executing' | 'review'> {
-  return [...content.matchAll(STATUS_TAG_ALL)].map(
-    (match) => match[1].toLowerCase() as 'executing' | 'review',
-  );
+  const match = STATUS_TAG_TRAILING.exec(String(content ?? '').trim());
+  if (!match) return [];
+  return [match[1].toLowerCase() as 'executing' | 'review'];
 }
 /**
  * HITL checkpoint tags (chair-only, same trust rule as STATUS tags):
@@ -3251,16 +3266,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const chairGlobalMetaId = (chairMember?.globalmetaid ?? '').trim();
       const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
       if (chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId) {
-        // GT#47 R1: the LAST tag is the instruction (protocol template places
-        // it at the message end); every earlier tag is descriptive text quoted
-        // from the goal/acceptance criteria. Multiple tags in one message get
-        // an audit log line so the parse is never a silent judgment call.
+        // G-03: the instruction tag is the one at the message end (protocol
+        // template). Any other tag in the body is descriptive text quoted from
+        // the goal/acceptance criteria — logged so the parse is never a silent
+        // judgment call, but never applied.
         const nextStatus = statusDirectives[statusDirectives.length - 1];
-        if (statusDirectives.length > 1) {
+        const bodyTagCount = [...content.matchAll(STATUS_TAG_ALL)].length;
+        if (bodyTagCount > 1) {
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: chair message carries ${statusDirectives.length} [STATUS:*] tags ` +
-            `(${statusDirectives.map((tag) => tag.toUpperCase()).join(' -> ')}) — ` +
-            `applying the last one ([STATUS:${nextStatus.toUpperCase()}]) as the instruction, earlier tags treated as descriptive text`,
+            `[GroupTaskDaemon] Task ${task.id}: chair message carries ${bodyTagCount} [STATUS:*] tags — ` +
+            `applying the trailing one ([STATUS:${nextStatus.toUpperCase()}]) as the instruction, ` +
+            `earlier tags treated as descriptive text`,
           );
         }
         try {
@@ -3513,6 +3529,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
             throw error;
           }
+        }
+      }
+    } else {
+      // G-03 observability: a chair message whose BODY cites [STATUS:*] tags
+      // without a trailing instruction tag must not transition silently —
+      // leave a log line so a stuck task is always diagnosable (task #47's
+      // "zero transitions, zero logs" failure mode).
+      const bodyTags = [...content.matchAll(STATUS_TAG_ALL)].map((match) => match[1].toUpperCase());
+      if (bodyTags.length > 0) {
+        const chairMemberForTags = members.find((member) => member.role === 'chair');
+        const chairGmidForTags = (chairMemberForTags?.globalmetaid ?? '').trim();
+        const senderGmidForTags = (message.senderGlobalMetaId ?? '').trim();
+        if (chairGmidForTags && senderGmidForTags && senderGmidForTags === chairGmidForTags) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: chair message cites ${bodyTags.length} [STATUS:*] tag(s) ` +
+            `(${bodyTags.join(' -> ')}) in the body with no trailing instruction tag — ` +
+            'descriptive tags ignored, no transition applied',
+          );
         }
       }
     }
@@ -3807,13 +3841,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
         throw new Error('planning turn produced no usable plan');
       }
+      // G-03 hardening: the planning dispatch is a HOST-owned protocol message
+      // (the directive requires ending it with [STATUS:EXECUTING]) and the
+      // state machine now parses instruction tags ONLY at the message end. If
+      // the LLM omitted the trailing tag — or buried it mid-body where the
+      // parser deliberately ignores it — append the deterministic protocol
+      // footer so a posted plan can never leave the task pinned in planning
+      // (task #47's failure mode, now impossible from this path).
+      let postedReply = reply;
+      if (extractStatusDirectives(reply).length === 0) {
+        const bodyTags = [...reply.matchAll(STATUS_TAG_ALL)].length;
+        postedReply = `${reply.replace(/[ \t]+$/, '')}\n[STATUS:EXECUTING]`;
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: planning reply carried no trailing [STATUS:*] tag` +
+          `${bodyTags > 0 ? ` (${bodyTags} body tag(s) ignored by the strict parser)` : ''} — ` +
+          'appended the deterministic [STATUS:EXECUTING] footer',
+        );
+      }
       const workerNames = promptMembers
         .filter((member) => member.role === 'worker')
         .map((member) => member.name);
       // Coverage is computed unconditionally: mentionedWorkers also drives the
       // mention array on the outgoing dispatch so assigned workers are woken
       // even when the plan text uses bare names instead of `@Name` tokens.
-      const coverage = checkPlanningCoverage(reply, workerNames);
+      const coverage = checkPlanningCoverage(postedReply, workerNames);
       if (workerNames.length > 1 && coverage.unmentionedWorkers.length > 0) {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: planning mentions ` +
