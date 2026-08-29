@@ -8788,11 +8788,35 @@ export class CoworkRunner extends EventEmitter {
     }
     const resolvedCwd = path.resolve(cwd);
 
-    if (!fs.existsSync(resolvedCwd)) {
-      this.handleError(sessionId, `Working directory does not exist: ${resolvedCwd}`);
-      this.clearPendingPermissions(sessionId);
-      this.removeActiveSession(sessionId, activeSession);
-      return;
+    if (!this.isDirectory(resolvedCwd)) {
+      // Self-heal: a persisted session cwd can vanish between turns (workspace
+      // cleanup, external delete, disk migration). Recreating it keeps the
+      // conversation alive — the files that lived there are gone either way.
+      // Only when recreation itself fails (permissions, a file on the path)
+      // do we strand the session with an error, as before.
+      try {
+        fs.mkdirSync(resolvedCwd, { recursive: true });
+      } catch (error) {
+        this.handleError(
+          sessionId,
+          `Working directory does not exist and could not be recreated: ${resolvedCwd} (${
+            error instanceof Error ? error.message : String(error)
+          })`
+        );
+        this.clearPendingPermissions(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
+        return;
+      }
+      coworkLog('WARN', 'runClaudeCode', 'Session working directory was missing; recreated it', {
+        sessionId,
+        cwd: resolvedCwd,
+      });
+      const notice = tApp(
+        `此会话的工作目录已不存在，已自动重建（原目录内文件不再恢复）：${resolvedCwd}`,
+        `This session's working directory no longer existed and was recreated (files that lived there are not restored): ${resolvedCwd}`
+      );
+      const stored = this.store.addMessage(sessionId, { type: 'system', content: notice });
+      this.emit('message', sessionId, stored);
     }
 
     // Sandbox VM + Claude Agent SDK are retired. Leftover sandbox sessions
