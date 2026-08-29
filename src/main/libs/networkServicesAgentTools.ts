@@ -227,7 +227,7 @@ export function buildNetworkServicesAgentTools(deps: {
 
   const listOnlineServices = tool(
     'list_online_services',
-    'List MetaWeb services whose providers are currently online (Gig Square yellow pages). Use when the user asks for online Bot services, who can do a task right now, or to browse the live service directory. Pass query with short task keywords to rank matches. When NOT to use: finding a person/bot by name or personality (search_metaids), listing currently-online people without a service intent, or publishing a local skill as a service. Returns a markdown table of up to `limit` rows (1-100, default 20) with provider metaid:// links, price, last-seen, and routing pin ids. Page with cursor.',
+    'List MetaWeb services whose providers are currently online (Gig Square yellow pages). Use when the user asks for online Bot services, who can do a task right now, or to browse the live service directory. Pass query with short task keywords to rank matches. When NOT to use: finding a person/bot by name or personality (search_metaids), listing currently-online people without a service intent (list_online_bots), or publishing a local skill as a service. Returns a markdown table of up to `limit` rows (1-100, default 20) with provider metaid:// links, price, last-seen, and routing pin ids. Page with cursor.',
     {
       query: z.string().optional(),
       limit: z.number().optional(),

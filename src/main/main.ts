@@ -5256,6 +5256,37 @@ const getCoworkRunner = () => {
           return { services };
         },
       },
+      onlineBots: {
+        listOnlineBots: async ({ cursor, limit }) => {
+          // Live registry read (no snapshot reuse): presence here answers
+          // "who is online RIGHT NOW", so a fresh page beats a cached one.
+          const page = await getIdchatPresenceService().fetchOnlineUsers({
+            cursor,
+            size: limit,
+            withUserInfo: true,
+          });
+          const ownGlobalMetaIds = new Set(
+            getMetabotStore().listMetabots()
+              .map((metabot) => metabot.globalmetaid?.trim())
+              .filter((id): id is string => Boolean(id))
+          );
+          return {
+            total: page.total,
+            onlineWindowSeconds: page.onlineWindowSeconds,
+            list: page.list.map((entry) => {
+              const info = (entry.userInfo ?? {}) as Record<string, unknown>;
+              return {
+                globalMetaId: entry.globalMetaId,
+                name: typeof info.name === 'string' ? info.name.trim() : '',
+                bio: typeof info.bio === 'string' ? info.bio : '',
+                lastSeenAgoSeconds: entry.lastSeenAgoSeconds,
+                deviceCount: entry.deviceCount,
+                isOwn: ownGlobalMetaIds.has(entry.globalMetaId),
+              };
+            }),
+          };
+        },
+      },
       projects: {
         list: () => getProjectStore().listProjects(),
       },
@@ -5602,9 +5633,10 @@ const getCoworkRunner = () => {
             '- When the user wants to find/discover an app (not open a known one), call search_metaapps first (query/tag/publisher/sinceDays), open the best match with bot_browser_open_uri, and offer 2-3 alternatives by name. For remix children of an app, use search_metaapps with mode="forks".',
             '- Opening apps in the Bot Browser ALWAYS goes through search_metaapps and metaapp:// URIs. NEVER use open_metaapp or resolve_metaapp_url here: the local MetaApp launcher is retired in this surface.',
             'How to FIND people and bots for the user:',
+            '- When the user asks who is online right now / who is currently present (bots or users, e.g. to chat, invite, or collaborate), call list_online_bots (page with cursor when they want more). Present the table with identities kept as metaid:// links; do NOT invent people who are not in it. Open a Bot page with bot_browser_open_uri only when the user wants to view it.',
             '- When the user asks for currently-online Bot services, who can do a task right now, or the live service directory, call list_online_services first (query with short task keywords). Present the table with provider names kept as metaid:// links. Open a provider Bot page with bot_browser_open_uri only when the user wants to view it.',
             '- When the user wants to find a person or bot on-chain (view someone\'s bot page, look up who someone is, find users/bots by personality or skill, find someone to chat with), call search_metaids first (query/skill/chainName/chatOnly/sinceDays), open the best match\'s bot page with bot_browser_open_uri on metaid://<globalMetaId>, and offer 2-3 alternatives by name. Use metaid_profile for a specific identity\'s full profile.',
-            '- When you mention a specific app or bot in your reply, write it as a markdown link: [title](metaapp://<pinId>) or [name](metaid://<globalMetaId>) — these render as clickable links that open in the Bot Browser. NEVER shorten, truncate, or ellipsis a globalMetaId or pinId; always output them in full inside the link. Prefer the publisher\'s display name (and avatar when available) for authors, but the full globalMetaId must always be the link target. When search_metaapps, search_metaids, or list_online_services returns table/bullet lines, reuse them VERBATIM — never restate an app, an author, or a person as plain text.',
+            '- When you mention a specific app or bot in your reply, write it as a markdown link: [title](metaapp://<pinId>) or [name](metaid://<globalMetaId>) — these render as clickable links that open in the Bot Browser. NEVER shorten, truncate, or ellipsis a globalMetaId or pinId; always output them in full inside the link. Prefer the publisher\'s display name (and avatar when available) for authors, but the full globalMetaId must always be the link target. When search_metaapps, search_metaids, list_online_bots, or list_online_services returns table/bullet lines, reuse them VERBATIM — never restate an app, an author, or a person as plain text.',
             '- NEVER use Playwright, screenshots, or any external browser automation: the Bot Browser is not a Playwright browser and needs none.',
             active?.uri
               ? `<active_tab ${activeTabAttrs}>${escapeXml(active.uri)}</active_tab>`

@@ -129,6 +129,10 @@ import {
   type NetworkServicesControl,
 } from './networkServicesAgentTools';
 import {
+  buildOnlineBotsAgentTools,
+  type OnlineBotsControl,
+} from './onlineBotsAgentTools';
+import {
   buildProjectsAgentTools,
   buildProjectsPromptSection,
   type ProjectsControl,
@@ -339,6 +343,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   'search_metaids',
   'metaid_profile',
   'list_online_services',
+  'list_online_bots',
   'metabot_getinfo',
   'metabot_list',
 ]);
@@ -1627,6 +1632,15 @@ export interface CoworkRunnerOptions {
    */
   networkServices?: NetworkServicesControl;
   /**
+   * When set, every cowork session gets list_online_bots backed by the shared
+   * idchat presence registry (IdchatPresenceService.fetchOnlineUsers) — who is
+   * online right now, bots and users. Distinct from networkServices (orderable
+   * services): presence means reachable now, not offering a service. Browser
+   * sessions may open a Bot page via bot_browser_open_uri; other sessions only
+   * present clickable metaid:// links.
+   */
+  onlineBots?: OnlineBotsControl;
+  /**
    * When set, every cowork session gets the project_query tool backed by the
    * local Projects store (Settings > Projects), and a `## Local Projects`
    * section is injected into the composed system prompt. Disabled projects are
@@ -1814,6 +1828,7 @@ export class CoworkRunner extends EventEmitter {
   private episodeTimelineProvider?: CoworkEpisodeTimeline;
   private metaIdSearch?: MetaIdSearchControl;
   private networkServices?: NetworkServicesControl;
+  private onlineBots?: OnlineBotsControl;
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
   private metawebLearning?: MetawebLearningControl;
@@ -1922,6 +1937,7 @@ export class CoworkRunner extends EventEmitter {
     this.episodeTimelineProvider = options?.episodeTimelineProvider;
     this.metaIdSearch = options?.metaIdSearch;
     this.networkServices = options?.networkServices;
+    this.onlineBots = options?.onlineBots;
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
     this.metawebLearning = options?.metawebLearning;
@@ -8562,6 +8578,19 @@ export class CoworkRunner extends EventEmitter {
         ...buildNetworkServicesAgentTools({
           tool,
           networkServices: this.networkServices,
+          openBestMatchInBrowser: isBrowserSession,
+        })
+      );
+    }
+    // Live presence registry: who is online right now (bots and users).
+    // Distinct from search_metaids (on-chain identity search) and from
+    // list_online_services (orderable services). Browser sessions may open a
+    // Bot page; other sessions only present metaid:// links.
+    if (this.onlineBots) {
+      memoryTools.push(
+        ...buildOnlineBotsAgentTools({
+          tool,
+          onlineBots: this.onlineBots,
           openBestMatchInBrowser: isBrowserSession,
         })
       );
