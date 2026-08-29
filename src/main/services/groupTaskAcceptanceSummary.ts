@@ -291,6 +291,7 @@ export function buildAcceptanceSummaryMessageText(
   > & { planChanges?: string[] } & Partial<Pick<GroupTaskAcceptanceSummary, 'conclusion'>> & {
     criteriaVerdicts?: GroupTaskAcceptanceCriteriaVerdict[];
     observations?: string[];
+    supervisorSignals?: string[];
   },
   taskTitle: string,
   language: AppLanguage = groupTaskLanguage(),
@@ -375,6 +376,19 @@ export function buildAcceptanceSummaryMessageText(
     }
     if (observations.length > PLAN_CHANGE_MAX_RENDER_LINES) {
       lines.push(copy.omittedPlanChanges(observations.length - PLAN_CHANGE_MAX_RENDER_LINES));
+    }
+  }
+  // G-04: the supervision trail rides the review record — every nudge/flag/
+  // pause/resume line snapshotted at review entry.
+  const supervisorSignals = (summary.supervisorSignals ?? []).map((line) => line.trim()).filter(Boolean);
+  if (supervisorSignals.length > 0) {
+    lines.push('');
+    lines.push(copy.supervisorSignalsTitle);
+    for (const signal of supervisorSignals.slice(0, PLAN_CHANGE_MAX_RENDER_LINES)) {
+      lines.push(`- ${acceptancePreview(signal, PLAN_CHANGE_LINE_MAX_CHARS)}`);
+    }
+    if (supervisorSignals.length > PLAN_CHANGE_MAX_RENDER_LINES) {
+      lines.push(copy.omittedPlanChanges(supervisorSignals.length - PLAN_CHANGE_MAX_RENDER_LINES));
     }
   }
   lines.push('');

@@ -170,6 +170,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [closeError, setCloseError] = useState<string | null>(null);
   const [reopening, setReopening] = useState(false);
   const [reopenError, setReopenError] = useState<string | null>(null);
+  // G-04: supervisor-pause resume (owner click = the confirmation).
+  const [resumingPaused, setResumingPaused] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   // OpenTeam M3: member removal (kick) — target member + in-flight state.
   const [kickTarget, setKickTarget] = useState<GroupTaskDetail['members'][number] | null>(null);
   const [kicking, setKicking] = useState(false);
@@ -497,6 +500,22 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   };
 
+  // G-04: owner-side resume of a supervisor dispatch pause. The button click
+  // IS the owner confirmation the resume gate requires.
+  const handleResumePaused = async () => {
+    if (resumingPaused || !detail) return;
+    setResumingPaused(true);
+    setResumeError(null);
+    try {
+      const updated = await groupTaskService.resumePausedTask(taskId);
+      setDetail(updated);
+    } catch (err) {
+      setResumeError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setResumingPaused(false);
+    }
+  };
+
   const handleConfirmKick = async () => {
     if (!kickTarget || !detail) return;
     setKicking(true);
@@ -739,6 +758,26 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             {detail.status === 'review' && (
               <div className="mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
                 {i18nService.t('groupTasksReviewSilenceHint')}
+              </div>
+            )}
+            {detail.dispatchPausedAt != null && !isTerminal && (
+              <div className="mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span>⏸️ {i18nService.t('groupTasksPausedBanner')}</span>
+                  <button
+                    type="button"
+                    onClick={() => void handleResumePaused()}
+                    disabled={resumingPaused}
+                    className="ml-auto shrink-0 rounded-lg border border-amber-400/60 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors disabled:opacity-50"
+                  >
+                    {resumingPaused
+                      ? i18nService.t('groupTasksResuming')
+                      : i18nService.t('groupTasksResumeDispatch')}
+                  </button>
+                </div>
+                {resumeError && (
+                  <div className="mt-1 text-red-600 dark:text-red-400">{resumeError}</div>
+                )}
               </div>
             )}
             {openCheckpoint && (

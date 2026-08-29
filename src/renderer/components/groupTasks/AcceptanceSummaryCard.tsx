@@ -228,6 +228,25 @@ const AcceptanceSummaryCard: React.FC<{
             </div>
           )}
 
+          {/* G-04: the supervision trail rides the review record. */}
+          {(summary.supervisorSignals ?? []).length > 0 && (
+            <div>
+              <div className="text-[11px] font-medium uppercase tracking-wide dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 mb-1">
+                {i18nService.t('groupTasksSupervisorSignals')}
+              </div>
+              <ul className="space-y-1">
+                {(summary.supervisorSignals ?? []).map((signal, index) => (
+                  <li
+                    key={index}
+                    className="text-xs leading-relaxed dark:text-claude-darkTextSecondary text-claude-textSecondary"
+                  >
+                    {signal}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {(summary.members ?? []).length > 0 && (
             <div className="text-[11px] dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80">
               <span className="font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">

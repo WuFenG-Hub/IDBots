@@ -42,6 +42,7 @@ import {
   getGroupTaskMemberStatus,
   setGroupTaskMemberStatus,
   reworkGroupTask,
+  superviseGroupTask,
   exportGroupTask,
 } from './groupTaskService';
 import { gateChairDrivingSend, gateExternalChairSend, DEFAULT_DRIVER_GRACE_MS } from './groupTaskDaemon';
@@ -113,6 +114,7 @@ const GROUP_TASK_MEMBER_STATUS_PATH = '/api/idbots/group-task/member-status';
 const GROUP_TASK_DELIVERABLE_DELETE_PATH = '/api/idbots/group-task/deliverable-delete';
 const GROUP_TASK_SET_MEMBER_STATUS_PATH = '/api/idbots/group-task/set-member-status';
 const GROUP_TASK_REWORK_PATH = '/api/idbots/group-task/rework';
+const GROUP_TASK_SUPERVISE_PATH = '/api/idbots/group-task/supervise';
 const GROUP_TASK_EXPORT_PATH = '/api/idbots/group-task/export';
 const GROUP_TASK_SEARCH_REMOTE_PATH = '/api/idbots/group-task/search-remote-candidates';
 const GROUP_TASK_SEARCH_CANDIDATES_PATH = '/api/idbots/group-task/search-candidates';
@@ -2145,6 +2147,67 @@ export function startMetaidRpcServer(
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_SUPERVISE_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: {
+        task_id?: number;
+        signal?: string;
+        note?: string;
+        target?: string;
+        confirm_owner?: boolean;
+        created_by?: string;
+      };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const taskId = Number(parsed.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
+        return;
+      }
+      // The supervise verb rides `signal` — the outer `action: "supervise"` is
+      // the skill's routing key and stays in the forwarded body untouched.
+      const signal = String(parsed.signal ?? '').trim();
+      const note = typeof parsed.note === 'string' ? parsed.note : '';
+      if (!note.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'note is required (what to check / flag / why pause or resume)' }));
+        return;
+      }
+      try {
+        const result = await superviseGroupTask({
+          taskId,
+          action: signal as 'nudge' | 'flag' | 'pause' | 'resume',
+          note,
+          target: typeof parsed.target === 'string' ? parsed.target : null,
+          confirmOwner: parsed.confirm_owner === true,
+          createdBy: typeof parsed.created_by === 'string' ? parsed.created_by : undefined,
+        });
+        res.writeHead(200);
+        res.end(JSON.stringify({
+          success: true,
+          signal: result.signal,
+          dispatch_paused_at: result.dispatchPausedAt,
+        }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        // Validation/semantic refusals (resume without owner confirm, unknown
+        // task, already paused) are 4xx — the caller can distinguish them from
+        // transport failures.
+        res.writeHead(/required|not found|already|not paused|must be one of/.test(message) ? 400 : 500);
         res.end(JSON.stringify({ success: false, error: message }));
       }
       return;

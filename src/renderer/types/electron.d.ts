@@ -1376,6 +1376,7 @@ interface IElectronAPI {
     close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string }) => Promise<any>;
     reopen: (input: { taskId: number; reason?: string }) => Promise<any>;
     rework: (input: { taskId: number; reason?: string }) => Promise<any>;
+    resume: (input: { taskId: number }) => Promise<any>;
     listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) => Promise<any>;
     sendUserMessage: (input: { taskId: number; content: string }) => Promise<any>;
     kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) => Promise<any>;

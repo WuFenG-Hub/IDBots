@@ -585,6 +585,14 @@ export interface GroupTaskDaemonTask {
    * the owner only). Populated by the daemon loop per message.
    */
   hasOpenCheckpoint?: boolean;
+  /**
+   * G-04: true while a supervisor pause holds dispatch (dispatch_paused_at
+   * set). The chair stops auto-replying except to the owner — no new
+   * assignments leave the group until an owner-confirmed resume. Workers keep
+   * answering already-posted mentions (in-flight work), which cannot create
+   * new dispatches because only the chair dispatches.
+   */
+  dispatchPaused?: boolean;
 }
 
 export interface GroupTaskDaemonMember {
@@ -719,6 +727,15 @@ export function decideGroupTaskResponders(
     const isOwnerMessage = Boolean(
       senderGlobalMetaId && bossGlobalMetaId && senderGlobalMetaId === bossGlobalMetaId,
     );
+    // G-04: supervisor pause holds dispatch — the chair auto-replies only to
+    // the owner (resume dialogue) while paused; floor-control, mentions, and
+    // deliverable turns resume after the owner-confirmed resume.
+    if (task.dispatchPaused === true) {
+      if (isOwnerMessage) {
+        decisions.push({ metabotId: member.metabotId, reason: 'chair_owner_message' });
+      }
+      continue;
+    }
     if (isHumanGatePhase) {
       // Human-gate phases: the chair responds only to the owner (acceptance /
       // checkpoint dialogue).
@@ -2601,6 +2618,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         ...planChangeLines,
       ]
       : [];
+    // G-04: the owner report narrates the supervision trail too — every
+    // nudge/flag/pause/resume the Twin channel injected during the run.
+    const supervisorLines = (() => {
+      try {
+        return store.listSupervisorSignalLines(task.id);
+      } catch {
+        return [];
+      }
+    })();
+    const supervisorBlock = supervisorLines.length > 0
+      ? [
+        '',
+        'Supervisor interventions recorded during the run (Twin supervisor channel; restate each as ONE line, do not expand):',
+        ...supervisorLines.map((line) => `- ${line}`),
+      ]
+      : [];
     const allOnChainConfirmed =
       deliverables.length > 0 && deliverables.every((deliverable) => deliverable.confirmation === 'confirmed');
     const verdictInstruction = allOnChainConfirmed
@@ -2649,12 +2682,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           '- Include the plan-change lines below in one short "plan changed" passage so the owner understands why the artifact looks the way it does. If the list below is empty, do NOT mention plan changes at all.',
         ]
         : []),
+      ...(supervisorBlock.length > 0
+        ? [
+          '- Include the supervisor-intervention lines below in one short passage (what the supervisor asked/flagged and how it was handled). If the list below is empty, do NOT mention supervisor interventions at all.',
+        ]
+        : []),
       '',
       `Goal: ${summary?.goal ?? task.goal}`,
       `Acceptance criteria: ${(summary?.acceptanceCriteria ?? task.acceptanceCriteria)?.trim() || '(none specified)'}`,
       'Deliverables recorded (from the host acceptance summary):',
       ...(deliverableLines.length > 0 ? deliverableLines : ['(none recorded)']),
       ...planChangeBlock,
+      ...supervisorBlock,
     ].join('\n');
   };
 
@@ -3587,6 +3626,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                     guidance: summaryInput.guidance,
                     planChanges: summaryInput.planChanges,
                   });
+                  // G-04: snapshot the supervision trail onto the same record
+                  // so the review record carries every nudge/flag/pause/resume.
+                  try {
+                    store.updateAcceptanceSummarySupervisorSignals(
+                      task.id,
+                      store.listSupervisorSignalLines(task.id),
+                    );
+                  } catch (signalError) {
+                    emitLog(
+                      `[GroupTaskDaemon] Task ${task.id}: supervisor-signal snapshot record failed: ` +
+                      `${signalError instanceof Error ? signalError.message : String(signalError)}`,
+                    );
+                  }
                   // Improvement #1 (single-card acceptance): the owner report runs
                   // BEFORE the group summary is posted. It captures the chair's
                   // one-line 【结论】 verdict onto the just-saved record (version
@@ -4082,6 +4134,96 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    }
+  };
+
+  /**
+   * G-04: drive the chair's response to pending supervisor signals (nudge /
+   * flag). One chair turn per pending batch: the directive restates every
+   * unprocessed signal, the chair answers in the group (its judgment stays
+   * authoritative — supervision inputs, not overrides), and the rows are
+   * stamped with the response pin. Pause/resume rows arrive already processed
+   * (host-applied gates). While a human gate is active (review / open
+   * checkpoint) the turn is deferred; terminal tasks just close the rows.
+   */
+  const processSupervisorSignals = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+    promptMembers: DaemonPromptMember[],
+  ): Promise<void> => {
+    const store = deps.getGroupTaskStore();
+    const pending = store.listPendingSupervisorSignals(task.id)
+      .filter((signal) => signal.kind === 'nudge' || signal.kind === 'flag');
+    if (pending.length === 0) return;
+    if (task.status === 'done' || task.status === 'cancelled') {
+      store.markSupervisorSignalsProcessed(pending.map((signal) => signal.id), null);
+      return;
+    }
+    if (task.status === 'review' || store.getOpenCheckpoint(task.id) != null) {
+      return; // human gate active — defer the chair turn until it clears
+    }
+
+    const chairMember = members.find((member) => member.role === 'chair');
+    const bot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
+    if (!chairMember || !bot) {
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: supervisor signal turn skipped (no chair bot found)`);
+      return;
+    }
+
+    const signalLines = pending.map((signal) => {
+      const target = signal.target?.trim();
+      return `- [${signal.kind.toUpperCase()}${target ? ` → ${target}` : ''}] ${signal.note}`;
+    });
+    const directive = [
+      '[SYSTEM supervisor directive — generated by the host, not by a group participant]',
+      'The owner\'s supervisor channel (the Twin acting as the owner\'s representative) recorded the following signal(s) for this task:',
+      ...signalLines,
+      '',
+      'Reply ONCE in the group addressing every signal above:',
+      '- For each NUDGE: state what you checked and what you found (facts first).',
+      '- For each FLAG: state your judgment — agree or disagree, with the reason.',
+      'These are supervision inputs, NOT orders that override your chair authority: your coordination and verdicts remain the authoritative ones.',
+      'Do NOT emit any [STATUS:*] tag in this reply — this is a supervision answer, not a lifecycle move.',
+    ].join('\n');
+
+    try {
+      const coworkStore = deps.getCoworkStore();
+      const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
+      const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
+      const brain = metabotBrainOptions(bot);
+      const reply = (await deps.performChat(
+        systemPromptParts.systemPrompt,
+        [systemPromptParts.volatileContext, directive].filter(Boolean).join('\n\n'),
+        brain.llmId ?? undefined,
+        {
+          llmProvider: brain.llmProvider,
+          fallbackLlmId: brain.fallbackLlmId,
+          fallbackLlmProvider: brain.fallbackLlmProvider,
+          effort: brain.effort,
+          fallbackEffort: brain.fallbackEffort,
+          thinking: 'enabled',
+        },
+      )).trim();
+      if (!reply || NO_REPLY_PATTERN.test(reply)) {
+        throw new Error('supervisor signal turn produced no usable reply');
+      }
+      const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
+      coworkStore.addMessage(session.id, { type: 'user', content: directive });
+      coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
+      const posted = await postGroupMessage(task.id, bot.id, reply);
+      // P2-7 r2: the daemon's own reply must not count as "Twin activity".
+      rememberDaemonChairPin(task.id, posted.pinId);
+      store.markSupervisorSignalsProcessed(pending.map((signal) => signal.id), posted.pinId);
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: chair answered ${pending.length} supervisor signal(s) ` +
+        `(pin ${posted.pinId})`,
+      );
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: supervisor signal turn failed (signals stay pending): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   };
 
@@ -5613,6 +5755,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // the owner's decision — skip member nudging (unreachable marking, ACK and
     // delivery-deadline reminders) that would punish the enforced silence.
     const checkpointOpenAtTick = store.getOpenCheckpoint(task.id) != null;
+    // G-04: a supervisor pause holds dispatch — same monitor silence as a
+    // checkpoint (owner-initiated pause must not punish members for it).
+    const dispatchPausedAtTick = task.dispatchPausedAt != null;
 
     // G-01: one creation report per task — title, current status and roster to
     // the origin session. Fires on the first tick that sees the task (any
@@ -5629,15 +5774,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       );
     }
 
+    // G-04: drive the chair's response to pending supervisor signals (nudge /
+    // flag). One turn per batch; pause/resume rows arrive already processed
+    // (host-applied gates).
+    if (!dispatchPausedAtTick) {
+      await processSupervisorSignals(task, members, botsById, promptMembers);
+    }
+
     // G-01: no-progress stall — an executing task with no new group message and
     // no new deliverable for the window looks stuck; tell the origin session
     // once per re-arm window instead of sitting silent.
-    if (task.status === 'executing' && !checkpointOpenAtTick && task.groupId) {
+    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick && task.groupId) {
       monitorNoProgressStall(task);
     }
 
     // P0-2: auto-mark silent assigned/working members unreachable (badge for chair).
-    if (task.status === 'executing' && !checkpointOpenAtTick) {
+    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick) {
       monitorMemberUnreachable(task, members);
     }
 
@@ -5645,7 +5797,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // stale, mark them timeout + inject a chair re-assign hint (L2), then brief
     // the owner if still silent past the escalation window (L3). The hint block
     // rides the existing remoteStatusBlock chair-context channel.
-    if (task.status === 'executing' && !checkpointOpenAtTick) {
+    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick) {
       const timeoutBlock = await monitorLocalWorkerTimeout(task, members, ownerGlobalMetaId);
       if (timeoutBlock) {
         remoteStatusBlock = [remoteStatusBlock, timeoutBlock].filter(Boolean).join('\n\n');
@@ -5653,12 +5805,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
 
     // P0-3: once-per-assignment chair reminder for missing [WORKING] ACKs.
-    if (!checkpointOpenAtTick) {
+    if (!checkpointOpenAtTick && !dispatchPausedAtTick) {
       await monitorAcksAndReminders(task, members);
     }
     // P0-4: re-verify lagging deliverables + missed delivery deadlines.
     await monitorDeliverableVerification(task);
-    if (!checkpointOpenAtTick) {
+    if (!checkpointOpenAtTick && !dispatchPausedAtTick) {
       // P1-3: delivery-timeout reclaim directives ride the same chair-context
       // channel as the member-timeout hints.
       const deliveryRecoveryBlock = await monitorDeliveryDeadlines(task, members);
@@ -5680,7 +5832,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
-    if (task.status === 'planning') {
+    // G-04: a supervisor pause holds the initial dispatch too.
+    if (task.status === 'planning' && !dispatchPausedAtTick) {
       await maybeRunChairPlanningTurn(task, members, botsById, promptMembers, remoteStatusBlock);
     }
 
@@ -5818,7 +5971,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const humanGateActive = freshStatus === 'review' || hasOpenCheckpoint;
         // P0-3: [WORKING] ACK / [STANDBY] markers + assignment ACK tracking.
         handleMemberProtocolMarkers(task, message, members, botsById, { humanGateActive });
-        const gatingTask: GroupTaskDaemonTask = { ...task, status: freshStatus, hasOpenCheckpoint };
+        const gatingTask: GroupTaskDaemonTask = {
+          ...task,
+          status: freshStatus,
+          hasOpenCheckpoint,
+          dispatchPaused: dispatchPausedAtTick || store.getTaskById(task.id)?.dispatchPausedAt != null,
+        };
         const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById, {
           entropyFloorGate: entropyP0.floorGate,
         });

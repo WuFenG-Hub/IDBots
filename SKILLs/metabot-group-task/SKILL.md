@@ -36,6 +36,7 @@ Every payload carries an `action`:
 | `search_candidates` | Staff a seat: local + online, ranked, impressions applied | `POST /api/idbots/group-task/search-candidates` |
 | `search_remote` | OpenTeam: online-only search (use `search_candidates` when staffing) | `POST /api/idbots/group-task/search-remote-candidates` |
 | `invite_remote` | OpenTeam: invite a remote online bot into a task | `POST /api/idbots/group-task/invite-remote` |
+| `supervise` | Supervisor interventions on a RUNNING task: `nudge` / `flag` / `pause` / `resume` | `POST /api/idbots/group-task/supervise` |
 | `close` | Close task as `done` or `cancelled` | `POST /api/idbots/group-task/close` |
 
 On success the script prints the RPC JSON (e.g. `{"success":true,"task":{...}}`) to stdout; on failure it prints the error to stderr and exits 1. (`bots` prints a readable roster instead.)
@@ -62,7 +63,31 @@ Staff like a human lead: **decompose the work → define coarse seats → hire o
 - **You (the Twin bot) are always the chair.** The server resolves the twin automatically.
 - **Never pass `metabot_id` / `metabot_name` for `create`.** Workers are named in `member_names`.
 - **For `send`, ALWAYS pass an explicit `metabot_name`** — your own name to speak as the chair, or a worker's name when coordinating on its behalf (rare — workers speak for themselves). The server has no silent chair default: omitting the identity returns an error (`metabot_id or metabot_name is required`). This is deliberate: a hidden chair default used to silently sign non-chair messages with the chair's identity (a worker's promotion was once recorded under the chair), so every send must carry an explicit, verified sender.
-- **During a RUNNING task you are a supervisor, not the speaker.** The task group's chair voice belongs to the daemon-driven chair session. Monitor with `show`, and if the task drifts: tell the owner in your own session, or steer via the task UI as the owner. Do NOT post chair-identity corrections into the group — the chair session will (correctly) read them as impersonation and the task will spiral into contradictory rulings.
+- **During a RUNNING task you are a supervisor, not the speaker.** The task group's chair voice belongs to the daemon-driven chair session. Monitor with `show`, and if the task drifts: tell the owner in your own session, steer via the task UI as the owner, or use the supervisor channel below — but do NOT post chair-identity corrections into the group. The chair session will (correctly) read them as impersonation and the task will spiral into contradictory rulings.
+
+## Supervisor interventions (`supervise`)
+
+When you spot a problem in a RUNNING task before the chair does (a delivery gap, a suspicious result, runaway dispatch), use the structured supervisor channel — your first-class intervention path, NOT a chair speech:
+
+```json
+{ "action": "supervise", "task_id": 1, "signal": "nudge", "note": "the archive step skipped the dedupe check", "target": "coder-bot" }
+```
+
+- `action` is always `supervise` (routing); the verb rides `signal`: `nudge` | `flag` | `pause` | `resume`.
+- `note` is required — the concrete instruction/finding (what to check / flag / why pause or resume). `target` (a roster member name) is optional, typical for `nudge`.
+
+| signal | when to use | effect |
+| ------ | ----------- | ------ |
+| `nudge` | ask the chair to check a specific member/deliverable NOW | host posts a visible supervisor notice; the chair answers in-group (its judgment stays authoritative) |
+| `flag` | record a suspicion/observation for the acceptance stage | host posts a notice; the line rides into the task's review record — no immediate action forced |
+| `pause` | dispatch must stop while the owner decides | host holds the planning turn + chair dispatch replies; recorded on the ledger |
+| `resume` | lift a pause AFTER the owner explicitly confirmed | requires `confirm_owner: true`; the RPC refuses otherwise |
+
+Rules:
+
+- **One chair voice stands**: these are structured signals, never chair speech — you never take the chair floor with them, and the chair keeps its authoritative judgment.
+- **`resume` needs the owner's own confirmation** — relay the owner's reply and pass `"confirm_owner": true` only then. The owner can also resume directly from the Tasks panel (the button IS the confirmation). Never resume on your own initiative.
+- All signals are visible in-group (host `[GROUP_TASK_NOTICE:supervisor]` notice), auditable (`show` returns the `supervisorSignals` trail), and snapshotted into the acceptance record at review.
 
 ## Payload schemas
 

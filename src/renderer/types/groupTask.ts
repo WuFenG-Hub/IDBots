@@ -35,6 +35,8 @@ export interface GroupTask {
   pinned: boolean;
   /** Local-only archive marker (epoch ms; null = active). */
   archivedAt: number | null;
+  /** G-04: epoch ms while a supervisor pause holds dispatch; null = running. */
+  dispatchPausedAt?: number | null;
 }
 
 export interface GroupTaskMember {
@@ -184,6 +186,8 @@ export interface GroupTaskAcceptanceSummary {
    * observations, never acceptance gaps.
    */
   observations?: string[];
+  /** G-04: supervisor intervention lines snapshotted at review entry. */
+  supervisorSignals?: string[];
   guidance: string;
   /**
    * Improvement #1 (single-card acceptance): the chair's one-line conclusion —
@@ -260,6 +264,22 @@ export interface GroupTaskDetail extends GroupTask {
    * unavailable; the banner then falls back to the checkpoint topic).
    */
   openCheckpointSummary?: string | null;
+  /** G-04: supervisor intervention trail (nudge/flag/pause/resume), oldest first. */
+  supervisorSignals?: GroupTaskSupervisorSignal[];
+}
+
+/** G-04: one supervisor intervention signal (structured, not chair speech). */
+export interface GroupTaskSupervisorSignal {
+  id: number;
+  taskId: number;
+  kind: 'nudge' | 'flag' | 'pause' | 'resume';
+  note: string;
+  target: string | null;
+  createdBy: string;
+  noticePinId: string | null;
+  processedAt: number | null;
+  chairResponsePinId: string | null;
+  createdAt: string | null;
 }
 
 export interface GroupTaskSummary extends GroupTask {

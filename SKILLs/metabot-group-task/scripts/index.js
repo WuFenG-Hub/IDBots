@@ -8,7 +8,7 @@
  *   node index.js --payload @/path/to/payload.json
  *   echo '<JSON string>' | node index.js
  *
- * Payload: { action: 'create'|'propose'|'list'|'show'|'member_status'|'send'|'invite'|'kick'|'close'|'search_candidates'|'search_remote'|'invite_remote', ... }
+ * Payload: { action: 'create'|'propose'|'list'|'show'|'member_status'|'send'|'invite'|'kick'|'close'|'supervise'|'search_candidates'|'search_remote'|'invite_remote', ... }
  * RPC base: process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200'
  */
 'use strict';
@@ -46,6 +46,7 @@ const ACTION_PATHS = {
   invite: '/api/idbots/group-task/invite',
   kick: '/api/idbots/group-task/kick-member',
   close: '/api/idbots/group-task/close',
+  supervise: '/api/idbots/group-task/supervise',
   'deliverable-delete': '/api/idbots/group-task/deliverable-delete',
   search_remote: '/api/idbots/group-task/search-remote-candidates',
   search_candidates: '/api/idbots/group-task/search-candidates',
