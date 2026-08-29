@@ -4456,6 +4456,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * - any other worker speech clears the pending ACK (implicit ACK) and marks
    *   the member working (silence is never assumed).
    */
+  /**
+   * Task #41 residue: true when pinId resolves to a stored group message that
+   * is a host protocol notice or a roll-call presence check. Empty or
+   * unresolvable pins return false, leaving the default arming semantics
+   * (P2-2: any ETA-bearing [WORKING] arms its own deadline) unchanged.
+   */
+  const isNoticeOrRollCallPin = (pinId: string | null | undefined): boolean => {
+    const pin = (pinId ?? '').trim();
+    if (!pin) return false;
+    try {
+      const result = deps.getStore().getDatabase().exec(
+        'SELECT content FROM group_chat_messages WHERE pin_id = ? LIMIT 1',
+        [pin],
+      );
+      const content = String(result[0]?.values?.[0]?.[0] ?? '');
+      return hasGroupTaskNotice(content) || isRollCallPresenceCheck(content);
+    } catch {
+      return false;
+    }
+  };
+
   const handleMemberProtocolMarkers = (
     task: GroupTask,
     message: GroupTaskDaemonMessage,
@@ -4605,7 +4626,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // only, not a work commitment — arming a delivery deadline off a chair
       // message that must stay unanswered is what mis-armed task #47's
       // expected_delivery records deep into what should have been acceptance.
-      if (!opts?.humanGateActive) {
+      // Task #41 residue: same for a [WORKING] threaded under a host notice or
+      // roll call (replyPin → a [GROUP_TASK_NOTICE:*] / 请确认在线 message) —
+      // it is a presence confirmation, not a delivery commitment. Host
+      // auto-ACKs and organic worker replies both thread replyPin under their
+      // trigger message, so the notice echo is recognizable by its target.
+      const acksHostNotice = isNoticeOrRollCallPin(message.replyPin);
+      if (!opts?.humanGateActive && !acksHostNotice) {
         // P0-4 arming: an explicit ETA arms its own deadline; a numberless ACK
         // (the entropy-P0 template ACK carries no ETA) falls back to the member
         // timeout so the delivery reminder still fires — without this the
@@ -4633,7 +4660,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       } else {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
-          'during a human-gate phase — liveness only, no delivery deadline armed',
+          (opts?.humanGateActive
+            ? 'during a human-gate phase'
+            : 'in reply to a host notice/roll call') +
+          ' — liveness only, no delivery deadline armed',
         );
       }
       return;
