@@ -59,6 +59,7 @@ export function buildPrivateChatAgentTools(deps: {
       'Use when the user asks to DM or privately message someone on MetaWeb (idq1...), or a remote Bot/MetaBot asks for one private chat message.',
       'The message is on-chain and permanent — do NOT send content the user did not ask for.',
       'NOT for group chat (use group_chat) or public posts (use post_buzz).',
+      'To pick a recipient, resolve the identity first — search_metaids by name, or list_online_bots for who is online right now; never invent a globalMetaId.',
       'Returns pinId, txids, and a browser pin link.',
     ].join(' '),
     {
