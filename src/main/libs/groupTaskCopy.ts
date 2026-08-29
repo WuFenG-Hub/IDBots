@@ -477,6 +477,108 @@ export function wrapCrossSessionMessage(
     : `来自${sourceSessionId} 的信息：${message}`;
 }
 
+// ---------------------------------------------------------------------------
+// G-01: origin-session milestone notices. Each carries an ASCII protocol
+// prefix (renderer/test detectable), the task identifier, the current status,
+// and the next step or pending decision — and fires exactly once per node.
+// ---------------------------------------------------------------------------
+
+/** Shared pointer line: where the owner opens the task from a milestone notice. */
+function taskPanelPointerLine(language: AppLanguage): string {
+  return language === 'en'
+    ? 'Open the Tasks panel to follow this task in detail.'
+    : '可在 Tasks 面板查看并跟进该任务详情。';
+}
+
+export function buildSourceSessionCreatedNotice(input: {
+  title: string;
+  status: string;
+  memberNames: string[];
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const members = input.memberNames.join(language === 'en' ? ', ' : '、');
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_CREATED] Group task "${input.title}" is live (status: ${input.status}).`,
+      `Members: ${members || '(none)'}`,
+      `Next: the chair decomposes the goal and dispatches work; I will report the first dispatch here.`,
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_CREATED] 群任务「${input.title}」已创建成功（状态：${input.status}）。`,
+    `成员：${members || '（无）'}`,
+    '下一步：chair 将拆解目标并派工；首轮派工完成后我会在此汇报。',
+    taskPanelPointerLine(language),
+  ].join('\n');
+}
+
+/** Cap for the dispatch plan text echoed into the origin session. */
+export const SOURCE_SESSION_DISPATCH_MAX_CHARS = 1200;
+
+export function buildSourceSessionDispatchNotice(input: {
+  title: string;
+  status: string;
+  planText: string;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const plan = input.planText.trim();
+  const capped = plan.length > SOURCE_SESSION_DISPATCH_MAX_CHARS
+    ? `${plan.slice(0, SOURCE_SESSION_DISPATCH_MAX_CHARS).trimEnd()}…`
+    : plan;
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_DISPATCH] Group task "${input.title}" is now ${input.status}: the chair posted the first dispatch.`,
+      'Dispatch (seat assignments and work stages):',
+      capped,
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_DISPATCH] 群任务「${input.title}」已进入 ${input.status}：chair 已完成首轮派工。`,
+    '派工内容（各座位分工与工序）：',
+    capped,
+    taskPanelPointerLine(language),
+  ].join('\n');
+}
+
+export function buildSourceSessionCheckpointNotice(input: {
+  title: string;
+  topic: string | null;
+  summary: string;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const topic = (input.topic ?? '').trim();
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_CHECKPOINT] Group task "${input.title}" reached a decision point${topic ? ` (${topic})` : ''} and is paused waiting for your call.`,
+      input.summary.trim() || 'The chair has sent you the details privately; reply there or in the task group.',
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_CHECKPOINT] 群任务「${input.title}」到达需要你决策的节点${topic ? `（${topic}）` : ''}，任务已暂停等待你的决定。`,
+    input.summary.trim() || 'chair 已将详情私发给你；可直接回复，或在任务群内留言。',
+    taskPanelPointerLine(language),
+  ].join('\n');
+}
+
+export function buildSourceSessionAnomalyNotice(input: {
+  title: string;
+  status: string;
+  summary: string;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_ALERT] Group task "${input.title}" (status: ${input.status}) hit an anomaly:`,
+      input.summary.trim(),
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_ALERT] 群任务「${input.title}」（状态：${input.status}）出现异常：`,
+    input.summary.trim(),
+    taskPanelPointerLine(language),
+  ].join('\n');
+}
+
 export function copyRespondingPlaceholder(language: AppLanguage = groupTaskLanguage()): string {
   return pickCopy('响应中…', 'Responding…', language);
 }

@@ -54,6 +54,10 @@ import {
   buildLongTurnStandbyNote,
   buildMemberJoinWelcomeText,
   buildReviewClosingLine,
+  buildSourceSessionAnomalyNotice,
+  buildSourceSessionCheckpointNotice,
+  buildSourceSessionCreatedNotice,
+  buildSourceSessionDispatchNotice,
   copyCorrectionApplied,
   copyLocalDeliverableNoPin,
   copyLocalDeliverableOnChain,
@@ -436,6 +440,12 @@ export function clearGroupTaskReviewDeliveryGuards(kv: GroupTaskDriverKv, taskId
   kv.delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${taskId}`);
   kv.delete(`${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${taskId}`);
   kv.delete(`${GROUP_TASK_REVIEW_REASSERT_KV_PREFIX}${taskId}`);
+  // G-01: a rework hatch starts a NEW dispatch round — re-arm the
+  // origin-session dispatch report so the owner hears about the re-assignments.
+  kv.delete(`group_task_milestone_notified:dispatch:${taskId}`);
+  // G-01: a rework IS progress — re-arm the stall anomaly for the new round.
+  kv.delete(`${NO_PROGRESS_STALL_STAMP_PREFIX}${taskId}`);
+  kv.delete(`group_task_milestone_notified:anomaly:${taskId}:stall`);
 }
 
 /**
@@ -507,6 +517,15 @@ const DEFAULT_REMOTE_UNREACHABLE_AFTER_MS = 10 * 60_000;
  * per this interval (in-memory throttle; failed probes also throttle).
  */
 const DEFAULT_REMOTE_PRESENCE_THROTTLE_MS = 60_000;
+/**
+ * G-01: no-progress stall window (ms). An executing task whose latest group
+ * message AND latest deliverable are both older than this window reports one
+ * anomaly notice to the origin session; the guard re-arms when progress
+ * resumes or the task reworks.
+ */
+const DEFAULT_NO_PROGRESS_STALL_MS = 60 * 60_000;
+/** G-01: kv stamp for the no-progress anomaly (set on report, cleared on progress). */
+const NO_PROGRESS_STALL_STAMP_PREFIX = 'group_task_no_progress_stall:';
 /**
  * P2-7 (round 2): window (ms) in which ANY chair-bot message posted by the
  * Twin side suppresses daemon-driven chair AUTO replies (deliverable /
@@ -1171,6 +1190,20 @@ export interface GroupTaskDaemonDeps {
     report: string;
     conclusion: string | null;
   }) => void;
+  /**
+   * G-01: deliver a milestone notice (created / first dispatch / HITL
+   * checkpoint / anomaly) into the task's origin CoWork session. Best-effort;
+   * kv-guarded per node on the service side, so a delivery failure simply
+   * retries on the next trigger.
+   */
+  sendMilestoneToSourceSession?: (input: {
+    taskId: number;
+    kind: 'created' | 'dispatch' | 'checkpoint' | 'anomaly';
+    message: string;
+    subject?: string | null;
+  }) => boolean;
+  /** G-01: no-progress stall window before the anomaly notice (default 60 min). */
+  noProgressStallMs?: number;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
   getMetaIDGroupCognitionPromptBlock?: (input: {
@@ -1497,6 +1530,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const remotePresenceThrottleMs = Math.max(
     1_000,
     Math.trunc(deps.remotePresenceThrottleMs ?? DEFAULT_REMOTE_PRESENCE_THROTTLE_MS),
+  );
+  /**
+   * G-01: no-progress stall window — an executing task with no new group
+   * message AND no new deliverable for this long reads as "流程长时间无进展"
+   * and reports one anomaly notice to the origin session (re-armed when
+   * progress resumes or the task reworks).
+   */
+  const noProgressStallMs = Math.max(
+    5 * 60_000,
+    Math.trunc(deps.noProgressStallMs ?? DEFAULT_NO_PROGRESS_STALL_MS),
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
@@ -2154,6 +2197,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: owner notified that remote teammate ${info.name} is unreachable`,
           );
+          // G-01: the origin session hears the same anomaly (member unreachable
+          // after retry window) — never silent.
+          notifySourceSessionMilestone(
+            task,
+            'anomaly',
+            buildSourceSessionAnomalyNotice({
+              title: task.title,
+              status: task.status,
+              summary:
+                `Remote teammate "${info.name}" appears unreachable ` +
+                `(${formatRemoteUnreachableFacts(info)}). The chair will re-assign their part if the silence continues.`,
+            }),
+            `remote_unreachable:${info.globalMetaId.toLowerCase()}`,
+          );
         } catch (error) {
           // Not marked as notified — the next probe retries (throttled).
           emitLog(
@@ -2603,6 +2660,40 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * cleared when the task re-enters executing via the rework hatch). The report
    * is never posted to the group; failures only log, never block the tick.
    */
+  /**
+   * G-01: best-effort milestone notice into the origin CoWork session. The
+   * service side owns the once-per-node kv guard; here we only transport and
+   * log. A missing dep or a failed delivery never blocks the tick.
+   */
+  const notifySourceSessionMilestone = (
+    task: GroupTask,
+    kind: 'created' | 'dispatch' | 'checkpoint' | 'anomaly',
+    message: string,
+    subject?: string | null,
+  ): void => {
+    if (!task.sourceSessionId?.trim()) return; // panel-created / pre-R2 task
+    if (!deps.sendMilestoneToSourceSession) return; // seam not wired (tests)
+    try {
+      const sent = deps.sendMilestoneToSourceSession({
+        taskId: task.id,
+        kind,
+        message,
+        subject: subject ?? null,
+      });
+      if (sent) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${kind} milestone reported to origin session ` +
+          `${task.sourceSessionId}${subject?.trim() ? ` (subject: ${subject.trim()})` : ''}`,
+        );
+      }
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: ${kind} milestone report failed (tick continues): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
   const maybeSendOwnerReport = async (
     task: GroupTask,
     members: GroupTaskMember[],
@@ -2850,6 +2941,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         kind: 'checkpoint',
         checkpointId: checkpoint.id,
       });
+      // G-01: the origin session hears about the HITL checkpoint too (the
+      // A2A private chat is not the only place the owner lives). Best-effort;
+      // the report text is reused verbatim as the decision summary.
+      notifySourceSessionMilestone(
+        task,
+        'checkpoint',
+        buildSourceSessionCheckpointNotice({
+          title: task.title,
+          topic: checkpoint.topic,
+          summary: report,
+        }),
+        `checkpoint:${checkpoint.id}`,
+      );
       sqlite.set(guardKey, '1');
       deps.emitTaskEvent?.({
         type: 'groupTask:ownerReportDelivery',
@@ -3339,6 +3443,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               status: updated.status,
               at: now(),
             });
+            if (updated.status === 'executing' && beforeStatus === 'planning') {
+              // G-01: planning → executing means the chair's plan message (the
+              // one carrying this trailing tag) is the first dispatch — report
+              // its seat assignments to the origin session, once per round.
+              notifySourceSessionMilestone(
+                task,
+                'dispatch',
+                buildSourceSessionDispatchNotice({
+                  title: task.title,
+                  status: updated.status,
+                  planText: message.content,
+                }),
+              );
+            }
             if (updated.status === 'executing' && beforeStatus === 'review') {
               // Rework hatch: every review-delivery guard resets (shared with
               // the RPC/UI rework paths via clearGroupTaskReviewDeliveryGuards)
@@ -3515,6 +3633,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 `${auditError instanceof Error ? auditError.message : String(auditError)}`,
               );
             }
+            // G-01: an illegal transition is exactly the "state-machine
+            // anomaly" the origin session must hear about — never silent.
+            notifySourceSessionMilestone(
+              task,
+              'anomaly',
+              buildSourceSessionAnomalyNotice({
+                title: task.title,
+                status: rejectedFrom ?? 'unknown',
+                summary: `The chair's [STATUS:${nextStatus.toUpperCase()}] directive was rejected ` +
+                  `(${rejectedFrom ?? '?'} -> ${nextStatus} is not a legal transition) and was NOT applied. ` +
+                  'The task stays in its current state; check the task history for the rejected directive.',
+              }),
+              `illegal_transition:${nextStatus}`,
+            );
           } else {
             // GT#26: not a protocol verdict — the durable write itself failed
             // (e.g. a busy DB during the DSH stall storm). Swallowing it here
@@ -3875,12 +4007,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
       coworkStore.addMessage(session.id, { type: 'user', content: directive });
-      coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
+      coworkStore.addMessage(session.id, { type: 'assistant', content: postedReply });
       const dispatchMention = resolveMentionIdsForWorkers(members, coverage.mentionedWorkers);
       const posted = await postGroupMessage(
         task.id,
         bot.id,
-        reply,
+        postedReply,
         dispatchMention.length > 0 ? { mention: dispatchMention } : undefined,
       );
       if (dispatchMention.length > 0) {
@@ -4273,6 +4405,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     emitLog(
       `[GroupTaskDaemon] Task ${task.id}: reclaimed stuck session for ${name} ` +
       `(${reason}; session ${sessionInfo?.sessionId ?? 'none'} ${stopped ? 'stopped' : 'not stopped'})`,
+    );
+    // G-01: a reclaimed member session is the "member lost after retries"
+    // anomaly the origin session must hear about — never silent.
+    notifySourceSessionMilestone(
+      task,
+      'anomaly',
+      buildSourceSessionAnomalyNotice({
+        title: task.title,
+        status: task.status,
+        summary:
+          `Member "${name}" was judged stuck (${reason}); their session was reclaimed ` +
+          `${stopped ? 'and stopped' : '(stop unavailable)'}. The chair will re-dispatch or re-assign the subtask; ` +
+          'any partial work on disk is preserved.',
+      }),
+      `worker_reclaimed:${member.metabotId}`,
     );
     return [
       `Host auto-recovery: ${name} was judged stuck (${reason}).`,
@@ -4782,6 +4929,68 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
     }
     clearPendingAck();
+  };
+
+  /**
+   * G-01: no-progress stall monitor — one anomaly notice to the origin session
+   * when an executing task shows zero observable progress (no group message,
+   * no deliverable) for the window. The stamp resets when progress resumes so
+   * each stall episode reports at most once; the paired milestone guard lives
+   * in the SAME kv store the service reads (production wires both to the app
+   * sqlite kv), so clearing it here re-arms the service-side once-guard.
+   */
+  const monitorNoProgressStall = (task: GroupTask): void => {
+    const sqlite = deps.getStore();
+    const stampKey = `${NO_PROGRESS_STALL_STAMP_PREFIX}${task.id}`;
+    let lastMessageMs: number | null = null;
+    try {
+      const result = sqlite.getDatabase().exec(
+        'SELECT MAX(chain_timestamp) FROM group_chat_messages WHERE group_id = ?',
+        [task.groupId],
+      );
+      const sec = Number(result[0]?.values?.[0]?.[0]);
+      if (Number.isFinite(sec) && sec > 0) lastMessageMs = sec * 1000;
+    } catch {
+      return; // transient read failure — retry next tick
+    }
+    let lastDeliverableMs: number | null = null;
+    try {
+      for (const deliverable of deps.getGroupTaskStore().listDeliverables(task.id)) {
+        const ms = parseSqliteUtcMs(deliverable.createdAt ?? null);
+        if (ms != null && (lastDeliverableMs == null || ms > lastDeliverableMs)) lastDeliverableMs = ms;
+      }
+    } catch {
+      // best-effort ledger read
+    }
+    const progressPoints = [lastMessageMs, lastDeliverableMs].filter((ms): ms is number => ms != null);
+    if (progressPoints.length === 0) return; // nothing observable yet — never alarm
+    const lastProgressMs = Math.max(...progressPoints);
+    const idleMs = now() - lastProgressMs;
+    if (idleMs < noProgressStallMs) {
+      if (sqlite.get<string>(stampKey) != null) {
+        sqlite.delete(stampKey);
+        sqlite.delete(`group_task_milestone_notified:anomaly:${task.id}:stall`);
+      }
+      return;
+    }
+    if (sqlite.get<string>(stampKey) === '1') return; // already reported this episode
+    sqlite.set(stampKey, '1');
+    emitLog(
+      `[GroupTaskDaemon] Task ${task.id}: no progress for ${Math.round(idleMs / 60_000)} min ` +
+      '(no new group message, no new deliverable) — reporting stall anomaly to the origin session',
+    );
+    notifySourceSessionMilestone(
+      task,
+      'anomaly',
+      buildSourceSessionAnomalyNotice({
+        title: task.title,
+        status: task.status,
+        summary:
+          `No progress for ${Math.round(idleMs / 60_000)} minutes (no new group messages, no new deliverables). ` +
+          'Check the task detail view — the chair may be waiting on a stuck member or a silent failure.',
+      }),
+      'stall',
+    );
   };
 
   /**
@@ -5361,6 +5570,28 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // the owner's decision — skip member nudging (unreachable marking, ACK and
     // delivery-deadline reminders) that would punish the enforced silence.
     const checkpointOpenAtTick = store.getOpenCheckpoint(task.id) != null;
+
+    // G-01: one creation report per task — title, current status and roster to
+    // the origin session. Fires on the first tick that sees the task (any
+    // status), so even a task that raced past planning still reports once.
+    if (task.sourceSessionId?.trim()) {
+      notifySourceSessionMilestone(
+        task,
+        'created',
+        buildSourceSessionCreatedNotice({
+          title: task.title,
+          status: task.status,
+          memberNames: promptMembers.map((member) => member.name).filter(Boolean),
+        }),
+      );
+    }
+
+    // G-01: no-progress stall — an executing task with no new group message and
+    // no new deliverable for the window looks stuck; tell the origin session
+    // once per re-arm window instead of sitting silent.
+    if (task.status === 'executing' && !checkpointOpenAtTick && task.groupId) {
+      monitorNoProgressStall(task);
+    }
 
     // P0-2: auto-mark silent assigned/working members unreachable (badge for chair).
     if (task.status === 'executing' && !checkpointOpenAtTick) {

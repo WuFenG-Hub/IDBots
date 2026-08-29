@@ -358,8 +358,82 @@ export function setGroupTaskAcceptanceNotifier(notifier: GroupTaskAcceptanceNoti
   acceptanceNotifier = notifier;
 }
 
+/**
+ * G-01 milestone relay seam — same transport shape as the acceptance notifier
+ * (main.ts wires both to insertCrossSessionMessageAndQueue), kept separately
+ * so review/close delivery and progress reporting can never break each other.
+ */
+export type GroupTaskSourceSessionMilestoneKind =
+  | 'created'
+  | 'dispatch'
+  | 'checkpoint'
+  | 'anomaly';
+
+let sourceSessionNotifier: GroupTaskAcceptanceNotifier | null = null;
+
+export function setGroupTaskSourceSessionNotifier(
+  notifier: GroupTaskAcceptanceNotifier | null,
+): void {
+  sourceSessionNotifier = notifier;
+}
+
 /** R2 kv guard: one acceptance notification per task per terminal outcome. */
 const GROUP_TASK_ACCEPTANCE_NOTIFIED_KV_PREFIX = 'group_task_acceptance_notified:';
+
+/**
+ * G-01: deliver one milestone notice into the task's origin CoWork session.
+ * kv-guarded per (kind, task, subject) so each node reports exactly once;
+ * the daemon's rework hatch clears the dispatch guard so a re-dispatch round
+ * re-reports. Best-effort: failures only log.
+ */
+export function notifySourceSessionMilestone(
+  task: GroupTask,
+  kind: GroupTaskSourceSessionMilestoneKind,
+  message: string,
+  subject?: string | null,
+): boolean {
+  const targetSessionId = (task.sourceSessionId ?? '').trim();
+  if (!targetSessionId) return false; // panel-created / pre-R2 task
+  if (!sourceSessionNotifier) return false; // seam not wired (tests / pre-init)
+  const body = message.trim();
+  if (!body) return false;
+  const kv = getKvStore();
+  const subjectKey = subject?.trim() ? `:${subject.trim()}` : '';
+  const guardKey = `group_task_milestone_notified:${kind}:${task.id}${subjectKey}`;
+  if (kv.get<string>(guardKey) === '1') return false;
+  try {
+    const result = sourceSessionNotifier({ taskId: task.id, targetSessionId, message: body });
+    if (!result.ok) {
+      console.warn(
+        `[GroupTask] Milestone (${kind}) to session ${targetSessionId} not delivered for task ${task.id}` +
+        (result.warning ? ` (${result.warning})` : ''),
+      );
+      return false;
+    }
+    kv.set(guardKey, '1');
+    return true;
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Milestone (${kind}) delivery failed for task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+}
+
+/** G-01: clear a milestone guard (rework re-arms the dispatch report). */
+export function clearSourceSessionMilestoneGuard(
+  taskId: number,
+  kind: GroupTaskSourceSessionMilestoneKind,
+  subject?: string | null,
+): void {
+  const subjectKey = subject?.trim() ? `:${subject.trim()}` : '';
+  try {
+    getKvStore().delete(`group_task_milestone_notified:${kind}:${taskId}${subjectKey}`);
+  } catch {
+    // kv unavailable — the guard simply stays armed (report skipped once more)
+  }
+}
 
 function getKvStore(): GroupTaskServiceKvStore {
   if (!kvStoreGetter) {

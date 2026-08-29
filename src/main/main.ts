@@ -166,7 +166,9 @@ import {
   setGroupTaskServiceStaffingIntentJudge,
   setGroupTaskServiceTransport,
   setGroupTaskAcceptanceNotifier,
+  setGroupTaskSourceSessionNotifier,
   notifySourceSessionReview,
+  notifySourceSessionMilestone,
   postGroupTaskMessage,
   createGroupTask,
   listGroupTaskSummaries,
@@ -3300,6 +3302,22 @@ const startSqliteDaemons = (): void => {
       return { ok: false, warning: error instanceof Error ? error.message : String(error) };
     }
   });
+  // G-01: milestone notices (created / first dispatch / checkpoint / anomaly)
+  // ride the SAME cross-session queue as the acceptance relay — a separate seam
+  // so review/close delivery and progress reporting stay independently wired.
+  setGroupTaskSourceSessionNotifier(({ taskId, targetSessionId, message }) => {
+    try {
+      getCoworkRunner().reviveErroredSessionForContinuation(targetSessionId);
+      const result = getCoworkRunner().insertCrossSessionMessageAndQueue({
+        sourceSessionId: `group-task:${taskId}`,
+        targetSessionId,
+        message,
+      });
+      return { ok: Boolean(result.insert?.ok), warning: result.warning };
+    } catch (error) {
+      return { ok: false, warning: error instanceof Error ? error.message : String(error) };
+    }
+  });
   // OpenTeam M3: collaboration-impression sedimentation (chair -> remote teammate).
   setOpenTeamImpressionServiceDepsGetter(() => ({
     groupTaskStore: getGroupTaskStore(),
@@ -3705,6 +3723,14 @@ const startSqliteDaemons = (): void => {
     sendReviewReportToSourceSession: ({ taskId, report, conclusion }) => {
       const task = getGroupTaskStore().getTaskById(taskId);
       if (task) notifySourceSessionReview(task, { report, conclusion });
+    },
+    // G-01: milestone notices (created / first dispatch / HITL checkpoint /
+    // anomaly) reach the origin CoWork session through the same cross-session
+    // queue; the service side owns the once-per-node guards.
+    sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+      const task = getGroupTaskStore().getTaskById(taskId);
+      if (!task) return false;
+      return notifySourceSessionMilestone(task, kind, message, subject ?? null);
     },
     // Ledger fix (#14→#16): local file deliverables are uploaded on-chain as
     // metafiles paid by the AUTHOR bot's wallet — same metaFileUploadService
