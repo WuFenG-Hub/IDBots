@@ -14159,12 +14159,17 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     win.setMinimumSize(800, 600);
 
     // 设置窗口加载超时
+    // A dev cold start can legitimately take a while: with a cold vite cache
+    // the first page load blocks on dependency pre-bundling (~2000 optimized
+    // deps in this repo), which can exceed 30s. A too-short timeout makes the
+    // reload logic abort a healthy in-flight load and cascade into retries.
+    const LOAD_TIMEOUT_MS = isDev ? 90000 : 30000;
     const loadTimeout = setTimeout(() => {
       if (win.webContents.isLoadingMainFrame()) {
         console.log('Window load timed out, attempting to reload...');
         scheduleReload('load-timeout', win.webContents);
       }
-    }, 30000);
+    }, LOAD_TIMEOUT_MS);
 
     // 清除超时
     win.webContents.once('did-finish-load', () => {
@@ -14233,11 +14238,26 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     if (isDev) {
       // 开发环境
       const maxRetries = 3;
+      // ERR_ABORTED retries get their own, generous budget: an aborted load is
+      // almost always one of our own reload/timeout timers cancelling an
+      // in-flight navigation, not a dead dev server, so it must not consume
+      // the failure budget that ends on the static error page.
+      const maxAbortedRetries = 10;
       let retryCount = 0;
+      let abortedRetryCount = 0;
 
       const tryLoadURL = () => {
-        win.loadURL(DEV_SERVER_URL).catch((err) => {
+        win.loadURL(DEV_SERVER_URL).catch((err: unknown) => {
           console.error('Failed to load URL:', err);
+          const aborted =
+            (err as { code?: unknown } | null | undefined)?.code === 'ERR_ABORTED' ||
+            (err as { errno?: unknown } | null | undefined)?.errno === -3;
+          if (aborted && abortedRetryCount < maxAbortedRetries) {
+            abortedRetryCount += 1;
+            console.log(`Load URL aborted (${abortedRetryCount}/${maxAbortedRetries}); retrying without consuming failure budget...`);
+            setTimeout(tryLoadURL, 3000);
+            return;
+          }
           retryCount++;
 
           if (retryCount < maxRetries) {
@@ -14246,7 +14266,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
           } else {
             console.error('Failed to load URL after maximum retries');
             if (!win.isDestroyed()) {
-              win.loadFile(path.join(__dirname, '../resources/error.html'));
+              // Pass the dev server URL so the error page's Retry button can
+              // navigate back to it instead of reloading this static file.
+              win.loadFile(path.join(__dirname, '../resources/error.html'), {
+                query: { devServerUrl: DEV_SERVER_URL },
+              });
             }
           }
         });
@@ -14262,8 +14286,14 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
 
     // 添加错误处理
-    win.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedURL, isMainFrame) => {
       console.error('Page failed to load:', errorCode, errorDescription);
+      // ERR_ABORTED (-3) means the navigation was cancelled — typically by our
+      // own reload timers racing a slow dev-server load — and subframe failures
+      // say nothing about the main page; neither justifies a window reload.
+      if (errorCode === -3 || !isMainFrame) {
+        return;
+      }
       // 如果加载失败，尝试重新加载
       if (isDev) {
         setTimeout(() => {

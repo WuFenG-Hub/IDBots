@@ -50,7 +50,16 @@
     <div class="error-container">
         <h1>Connection Error</h1>
         <p>Unable to connect to the development server. Please make sure the server is running and try again.</p>
-        <button onclick="window.location.reload()">Retry</button>
+        <button onclick="retryConnection()">Retry</button>
     </div>
+    <script>
+        // When the main process loads this page as the dev-server fallback it
+        // appends ?devServerUrl=... so Retry can navigate back to the dev
+        // server; reloading this static file would just show the error again.
+        function retryConnection() {
+            var target = new URLSearchParams(window.location.search).get('devServerUrl');
+            window.location.href = target || window.location.href;
+        }
+    </script>
 </body>
 </html> 
