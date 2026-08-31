@@ -224,10 +224,13 @@ export function generateRuntimeConfig(input) {
     // dsh-authorization (new 0.1.1 package) is intentionally NOT mounted:
     // IDBots owns API keys in settings and injects them via apiKeyEnv.
     // pi-ai registers OAuth flows only when ctx.authorization exists.
-    { id: 'session-projections', name: plugin('idbots-session-projections.mjs') },
+    // Official projection registry plugin (0.1.2+: the package ships its own
+    // cordis apply; the former idbots-session-projections.mjs shim is retired).
+    { id: 'session-projection', name: '@deepseek-ai/dsh-session-projection' },
     // Projection registry: token-meter (next entry) registers its tokenUsage /
     // contextPressure / contextBreakdown units onto it; idbots-sdk-server's
-    // idbots/usage RPC reads them for the host's usage panel.
+    // idbots/usage RPC reads them for the host's usage panel. agent-loop also
+    // hard-requires ctx.sessionProjections (turnBoundary fold) since 0.1.2.
     { id: 'token-meter', name: '@deepseek-ai/dsh-token-meter' },
     {
       id: 'compaction-basic',

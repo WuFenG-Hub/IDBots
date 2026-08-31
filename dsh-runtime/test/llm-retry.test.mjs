@@ -9,7 +9,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { HarnessClient } from '@deepseek-ai/dsh-sdk-client'
+import { runtimeClient } from './helpers/runtime-client.mjs'
 import { generateRuntimeConfig } from '../lib/generate-runtime-config.mjs'
 import { startMockServer } from './fixtures/mock-openai.mjs'
 
@@ -31,8 +31,7 @@ const main = async () => {
   const configPath = path.join(os.tmpdir(), `dsh-retry-${Date.now()}.json`)
   fs.writeFileSync(configPath, JSON.stringify(config))
 
-  const client = new HarnessClient({
-    command: process.execPath,
+  const client = runtimeClient({
     args: [path.join(runtimeDir, 'bin.mjs'), configPath],
     env: { ...process.env, RETRY_KEY: 'sk-retry', SPIKE_QUIET: '1' },
   })

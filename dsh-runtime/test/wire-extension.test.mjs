@@ -11,7 +11,8 @@
 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { HarnessClient, JsonRpcResponseError } from '@deepseek-ai/dsh-sdk-client'
+import { JsonRpcResponseError } from '@deepseek-ai/dsh-sdk-client'
+import { runtimeClient } from './helpers/runtime-client.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const runtimeDir = path.resolve(here, '..')
@@ -23,8 +24,7 @@ const record = (name, pass, detail = '') => {
 }
 
 const main = async () => {
-  const client = new HarnessClient({
-    command: process.execPath,
+  const client = runtimeClient({
     args: [path.join(runtimeDir, 'bin.mjs'), path.join(runtimeDir, 'cordis.test.yml')],
     env: { ...process.env, SPIKE_QUIET: '1' },
   })

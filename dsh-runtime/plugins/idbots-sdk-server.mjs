@@ -146,13 +146,16 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }, { global: true })
 
     ctx.on('approval/request', (req, next) => this.idbotsBridgeApproval(req, next), { global: true })
-    // inject (not effect): the service may mount after this plugin; the
-    // fiber activates whenever `userQuestions` becomes available.
-    ctx.inject(['userQuestions'], () => this.idbotsRegisterAskProvider())
+    // user-questions (0.1.2): the answerer seam is the scoped cordis
+    // waterfall 'user-questions/request' — claim by answering, delegate via
+    // next(). The former service.registerProvider({ask}) API is gone; the
+    // service itself rejects owned-child callers (DELEGATED_CALLER) before
+    // dispatch, so a global listener still only ever sees root-agent asks.
+    ctx.on('user-questions/request', (req, next) => this.idbotsBridgeAsk(req, next), { global: true })
     // Same reactive pattern for the projection registry: reading
     // ctx.sessionProjections without declaring inject throws in cordis, and a
     // hard inject would keep this plugin from ever mounting in compositions
-    // without idbots-session-projections. The fiber delivers the registry
+    // without the session-projection plugin. The fiber delivers the registry
     // when present; idbots/usage answers available:false otherwise.
     this.idbotsProjections = null
     ctx.inject(['sessionProjections'], (projectionCtx) => {
@@ -619,31 +622,25 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   // it through the same AskUserQuestion modal the Claude path uses. The turn
   // signal settles unanswered asks (the tool contract requires settling).
 
-  idbotsRegisterAskProvider() {
-    const service = this.ctx.get('userQuestions')
-    if (service === undefined) return () => undefined
-    return service.registerProvider({
-      ask: async (request) => {
-        const id = `ask-${Date.now().toString(36)}-${++this.idbotsAskSeq}`
-        const questions = Array.isArray(request?.questions) ? request.questions : []
-        const pending = new Promise((resolve, reject) => {
-          this.idbotsAsks.set(id, { resolve, reject })
-        })
-        this.idbotsTransport.notify('idbots/ask/request', {
-          id,
-          sessionId: String(request?.agent?.id ?? ''),
-          questions,
-        })
-        request?.signal?.addEventListener('abort', () => {
-          const entry = this.idbotsAsks.get(id)
-          if (entry === undefined) return
-          this.idbotsAsks.delete(id)
-          entry.reject(new Error('ask_user_question was aborted before the user answered'))
-          this.idbotsTransport.notify('idbots/ask/cancelled', { id })
-        }, { once: true })
-        return pending
-      },
+  idbotsBridgeAsk(request, next) {
+    const id = `ask-${Date.now().toString(36)}-${++this.idbotsAskSeq}`
+    const questions = Array.isArray(request?.questions) ? request.questions : []
+    const pending = new Promise((resolve, reject) => {
+      this.idbotsAsks.set(id, { resolve, reject })
     })
+    this.idbotsTransport.notify('idbots/ask/request', {
+      id,
+      sessionId: String(request?.agent?.id ?? ''),
+      questions,
+    })
+    request?.signal?.addEventListener('abort', () => {
+      const entry = this.idbotsAsks.get(id)
+      if (entry === undefined) return
+      this.idbotsAsks.delete(id)
+      entry.reject(new Error('ask_user_question was aborted before the user answered'))
+      this.idbotsTransport.notify('idbots/ask/cancelled', { id })
+    }, { once: true })
+    return pending
   }
 
   async idbotsAskRespond({ id, answers, error }) {

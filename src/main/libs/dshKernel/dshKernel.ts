@@ -130,10 +130,17 @@ export class DshKernel {
 
     const clientUrl = pathToFileURL(join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-sdk-client', 'lib', 'index.js')).href
     const { HarnessClient } = await dynamicImport(clientUrl)
-    const client = new HarnessClient({
+    // dsh-sdk-client 0.1.2 dropped `command`/`args` from HarnessClient options
+    // (one-arg construction now resolves and spawns the same-version `dsh`
+    // CLI). We launch our own bin; that rides the second constructor argument
+    // (RuntimeProcessOptions) — the channel upstream's fake-runtime tests use
+    // via createProcessHarnessClient, untyped in the public d.ts.
+    const client = new HarnessClient({}, {
       command: this.opts.nodePath ?? resolveElectronExecutablePath(),
       args: [binPath, configPath],
-      env: mergeDshRuntimeProcessEnv({ configEnv: config.env }),
+      environment: () => mergeDshRuntimeProcessEnv({ configEnv: config.env }),
+      description: 'idbots-dsh-runtime',
+      initializeTimeoutMs: 20_000,
     })
     client.start()
     const first = config.providers[0]

@@ -26,6 +26,12 @@
 - id: agent-loop
   name: '@deepseek-ai/dsh-agent-loop'
 
+# Projection registry plugin (0.1.2+: official package apply). agent-loop
+# (turnBoundary fold) and token-meter (usage units) hard-require the
+# ctx.sessionProjections service.
+- id: session-projection
+  name: '@deepseek-ai/dsh-session-projection'
+
 - id: token-meter
   name: '@deepseek-ai/dsh-token-meter'
 
