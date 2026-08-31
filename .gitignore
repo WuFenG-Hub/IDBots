@@ -44,6 +44,7 @@ docs/*
 !docs/analysis/
 !docs/analysis/**
 tests/*
+!tests/devWindowLoadRetry.test.mjs
 !tests/runtimeDependencyContract.test.mjs
 !tests/dshRuntimeDepsCheck.test.mjs
 !tests/dshKernelEventMapper.test.mjs
