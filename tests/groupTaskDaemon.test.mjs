@@ -652,6 +652,62 @@ test('P1-2/P1-3: a genuinely inert worker session is reclaimed once per streak (
   }
 });
 
+test('review fix: a delivered-then-idle worker is never flagged or reclaimed by the local-worker timeout', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Both workers: stale [WORKING] signal (2 min old, past the 1-min test
+    // windows) and a cowork session inert for an hour — inert by every
+    // liveness signal.
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-done2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-done3-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    h.groupTaskStore.setMemberStatus(task.id, 3, 'working', 'gmid-w3');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session: session2 } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    const { session: session3 } = ensureGroupTaskSession(h.coworkStore, task, 3, 'Designer Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id IN (?, ?)', [startMs - 60 * 60_000, session2.id, session3.id]);
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    // Member 2 delivered (non-rejected) before going idle — done, not stuck.
+    // Member 3's only deliverable was REJECTED — the guard must not cover it.
+    h.db.run(
+      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, status, confirmation, created_at)
+       VALUES (?, 'pin-done-delivery', 'gmid-w2', 'metaapp', ?, 'delivered', 'unconfirmed', ?)`,
+      [task.id, `metaapp://${'cd'.repeat(32)}i0`, startMs - 3 * 60_000],
+    );
+    h.db.run(
+      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, status, confirmation, created_at)
+       VALUES (?, 'pin-rejected-delivery', 'gmid-w3', 'metaapp', ?, 'rejected', 'unconfirmed', ?)`,
+      [task.id, `metaapp://${'ef'.repeat(32)}i0`, startMs - 3 * 60_000],
+    );
+
+    await h.loop.runTick();
+    const member2 = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    const member3 = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 3);
+    assert.equal(member2.status, 'working', 'delivered member keeps its working status');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), undefined, 'no reclaim recorded for the delivered member');
+    assert.equal(member3.status, 'unreachable', 'rejected-only member is still flagged');
+    assert.deepEqual(stoppedSessions, [session3.id], 'only the genuinely stuck session is stopped');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:3'), '1', 'reclaim recorded for the rejected-only member');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('review fix: a late deliverable is never reclaimed by the delivery-timeout escalation', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
