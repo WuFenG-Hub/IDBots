@@ -69,6 +69,7 @@ tests/*
 !tests/httpListenWithRetry.test.mjs
 !tests/coworkDshRestartDefer.test.mjs
 !tests/coworkCwdSelfHeal.test.mjs
+!tests/sessionViewGrouping.test.ts
 !tests/coworkDshRuntimeDrain.test.mjs
 !tests/coworkDshPerRouteCredential.test.mjs
 !tests/dshHostToolRegistry.test.mjs
