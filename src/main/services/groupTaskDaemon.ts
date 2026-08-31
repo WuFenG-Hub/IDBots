@@ -54,6 +54,10 @@ import {
   buildLongTurnStandbyNote,
   buildMemberJoinWelcomeText,
   buildReviewClosingLine,
+  buildSourceSessionAnomalyNotice,
+  buildSourceSessionCheckpointNotice,
+  buildSourceSessionCreatedNotice,
+  buildSourceSessionDispatchNotice,
   copyCorrectionApplied,
   copyLocalDeliverableNoPin,
   copyLocalDeliverableOnChain,
@@ -77,6 +81,7 @@ import {
   buildAcceptanceSummary,
   buildAcceptanceSummaryMessageText,
   extractChairConclusion,
+  extractCriteriaVerdicts,
 } from './groupTaskAcceptanceSummary';
 import {
   buildExperiencePromptBlocksXml,
@@ -112,11 +117,26 @@ const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
  * message is the chair's instruction.
  */
 const STATUS_TAG_ALL = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
+/**
+ * G-03 (task #47 structural fix): the instruction tag is ONLY the one at the
+ * message END (the protocol template instructs the chair to end the message
+ * with it, and every host-composed directive does). A tag anywhere in the body
+ * is descriptive prose quoted from the goal/acceptance criteria — it is never
+ * parsed as an instruction, regardless of position or count. Detection stays
+ * regex-only over an ASCII protocol label; no natural-language intent is
+ * inferred here.
+ */
+const STATUS_TAG_TRAILING = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\][ \t]*$/i;
 
+/**
+ * Extract the chair's status instruction from a message body.
+ * Returns [] unless a valid tag sits at the (whitespace-trimmed) message end —
+ * tags embedded in the body are deliberately ignored (see STATUS_TAG_TRAILING).
+ */
 function extractStatusDirectives(content: string): Array<'executing' | 'review'> {
-  return [...content.matchAll(STATUS_TAG_ALL)].map(
-    (match) => match[1].toLowerCase() as 'executing' | 'review',
-  );
+  const match = STATUS_TAG_TRAILING.exec(String(content ?? '').trim());
+  if (!match) return [];
+  return [match[1].toLowerCase() as 'executing' | 'review'];
 }
 /**
  * HITL checkpoint tags (chair-only, same trust rule as STATUS tags):
@@ -421,6 +441,12 @@ export function clearGroupTaskReviewDeliveryGuards(kv: GroupTaskDriverKv, taskId
   kv.delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${taskId}`);
   kv.delete(`${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${taskId}`);
   kv.delete(`${GROUP_TASK_REVIEW_REASSERT_KV_PREFIX}${taskId}`);
+  // G-01: a rework hatch starts a NEW dispatch round — re-arm the
+  // origin-session dispatch report so the owner hears about the re-assignments.
+  kv.delete(`group_task_milestone_notified:dispatch:${taskId}`);
+  // G-01: a rework IS progress — re-arm the stall anomaly for the new round.
+  kv.delete(`${NO_PROGRESS_STALL_STAMP_PREFIX}${taskId}`);
+  kv.delete(`group_task_milestone_notified:anomaly:${taskId}:stall`);
 }
 
 /**
@@ -493,6 +519,15 @@ const DEFAULT_REMOTE_UNREACHABLE_AFTER_MS = 10 * 60_000;
  */
 const DEFAULT_REMOTE_PRESENCE_THROTTLE_MS = 60_000;
 /**
+ * G-01: no-progress stall window (ms). An executing task whose latest group
+ * message AND latest deliverable are both older than this window reports one
+ * anomaly notice to the origin session; the guard re-arms when progress
+ * resumes or the task reworks.
+ */
+const DEFAULT_NO_PROGRESS_STALL_MS = 60 * 60_000;
+/** G-01: kv stamp for the no-progress anomaly (set on report, cleared on progress). */
+const NO_PROGRESS_STALL_STAMP_PREFIX = 'group_task_no_progress_stall:';
+/**
  * P2-7 (round 2): window (ms) in which ANY chair-bot message posted by the
  * Twin side suppresses daemon-driven chair AUTO replies (deliverable /
  * floor-control / owner-message). Covers scenarios the exact reply-pin match
@@ -550,6 +585,14 @@ export interface GroupTaskDaemonTask {
    * the owner only). Populated by the daemon loop per message.
    */
   hasOpenCheckpoint?: boolean;
+  /**
+   * G-04: true while a supervisor pause holds dispatch (dispatch_paused_at
+   * set). The chair stops auto-replying except to the owner — no new
+   * assignments leave the group until an owner-confirmed resume. Workers keep
+   * answering already-posted mentions (in-flight work), which cannot create
+   * new dispatches because only the chair dispatches.
+   */
+  dispatchPaused?: boolean;
 }
 
 export interface GroupTaskDaemonMember {
@@ -684,6 +727,15 @@ export function decideGroupTaskResponders(
     const isOwnerMessage = Boolean(
       senderGlobalMetaId && bossGlobalMetaId && senderGlobalMetaId === bossGlobalMetaId,
     );
+    // G-04: supervisor pause holds dispatch — the chair auto-replies only to
+    // the owner (resume dialogue) while paused; floor-control, mentions, and
+    // deliverable turns resume after the owner-confirmed resume.
+    if (task.dispatchPaused === true) {
+      if (isOwnerMessage) {
+        decisions.push({ metabotId: member.metabotId, reason: 'chair_owner_message' });
+      }
+      continue;
+    }
     if (isHumanGatePhase) {
       // Human-gate phases: the chair responds only to the owner (acceptance /
       // checkpoint dialogue).
@@ -1156,6 +1208,20 @@ export interface GroupTaskDaemonDeps {
     report: string;
     conclusion: string | null;
   }) => void;
+  /**
+   * G-01: deliver a milestone notice (created / first dispatch / HITL
+   * checkpoint / anomaly) into the task's origin CoWork session. Best-effort;
+   * kv-guarded per node on the service side, so a delivery failure simply
+   * retries on the next trigger.
+   */
+  sendMilestoneToSourceSession?: (input: {
+    taskId: number;
+    kind: 'created' | 'dispatch' | 'checkpoint' | 'anomaly';
+    message: string;
+    subject?: string | null;
+  }) => boolean;
+  /** G-01: no-progress stall window before the anomaly notice (default 60 min). */
+  noProgressStallMs?: number;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
   getMetaIDGroupCognitionPromptBlock?: (input: {
@@ -1482,6 +1548,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const remotePresenceThrottleMs = Math.max(
     1_000,
     Math.trunc(deps.remotePresenceThrottleMs ?? DEFAULT_REMOTE_PRESENCE_THROTTLE_MS),
+  );
+  /**
+   * G-01: no-progress stall window — an executing task with no new group
+   * message AND no new deliverable for this long reads as "流程长时间无进展"
+   * and reports one anomaly notice to the origin session (re-armed when
+   * progress resumes or the task reworks).
+   */
+  const noProgressStallMs = Math.max(
+    5 * 60_000,
+    Math.trunc(deps.noProgressStallMs ?? DEFAULT_NO_PROGRESS_STALL_MS),
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
@@ -2139,6 +2215,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: owner notified that remote teammate ${info.name} is unreachable`,
           );
+          // G-01: the origin session hears the same anomaly (member unreachable
+          // after retry window) — never silent.
+          notifySourceSessionMilestone(
+            task,
+            'anomaly',
+            buildSourceSessionAnomalyNotice({
+              title: task.title,
+              status: task.status,
+              summary:
+                `Remote teammate "${info.name}" appears unreachable ` +
+                `(${formatRemoteUnreachableFacts(info)}). The chair will re-assign their part if the silence continues.`,
+            }),
+            `remote_unreachable:${info.globalMetaId.toLowerCase()}`,
+          );
         } catch (error) {
           // Not marked as notified — the next probe retries (throttled).
           emitLog(
@@ -2528,6 +2618,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         ...planChangeLines,
       ]
       : [];
+    // G-04: the owner report narrates the supervision trail too — every
+    // nudge/flag/pause/resume the Twin channel injected during the run.
+    const supervisorLines = (() => {
+      try {
+        return store.listSupervisorSignalLines(task.id);
+      } catch {
+        return [];
+      }
+    })();
+    const supervisorBlock = supervisorLines.length > 0
+      ? [
+        '',
+        'Supervisor interventions recorded during the run (Twin supervisor channel; restate each as ONE line, do not expand):',
+        ...supervisorLines.map((line) => `- ${line}`),
+      ]
+      : [];
     const allOnChainConfirmed =
       deliverables.length > 0 && deliverables.every((deliverable) => deliverable.confirmation === 'confirmed');
     const verdictInstruction = allOnChainConfirmed
@@ -2540,6 +2646,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           '- Do NOT recommend accepting or reworking, and do NOT invent a verdict: not every deliverable is on-chain confirmed, and this ledger alone cannot tell whether the artifacts actually exist. Never treat "pending", "unconfirmed", or "(no uri)" as grounds for requesting rework.',
           '- Explicitly defer the decision: state that the chair\'s first-hand verification verdict in the group is authoritative, and that the owner decides in the Tasks UI. Never end with an open-ended "what would you like to do next?".',
         ];
+    // G-05: the report must answer the CREATE-TIME acceptance criteria
+    // one-by-one on ASCII protocol lines the host parses, and park everything
+    // the criteria never asked for under [OBSERVATION] — extra findings are
+    // explicitly NON-blocking (task #48: "archive not on-chain" was listed as
+    // a gap although the criteria only said "archive one item, dedupe first").
+    const hasCriteria = Boolean((summary?.acceptanceCriteria ?? task.acceptanceCriteria ?? '').trim());
+    const criteriaCheckInstruction = hasCriteria
+      ? [
+          '- CRITERIA CHECK (machine-parsed — exact line format required): after the conclusion line, output ONE line per acceptance criterion declared at creation, in order, each formatted exactly as:',
+          '  `[CRITERION:PASS] <criterion> — <one-line evidence>` / `[CRITERION:FAIL] <criterion> — <what is missing>` / `[CRITERION:UNCLEAR] <criterion> — <why it cannot be verified>`.',
+          '  Judge each criterion strictly AS WRITTEN at create time. On-chain confirmation state is EVIDENCE, not itself a criterion — never fail a criterion for "not on-chain" unless the criterion explicitly demands on-chain publication.',
+          '- Findings OUTSIDE the declared criteria (quality opinions, extras you wish had been required, on-chain-state notes) go on separate `[OBSERVATION] <one line>` lines — they are informational for the owner and must NEVER count against a criterion verdict or the accept/rework recommendation.',
+        ]
+      : [];
     return [
       '[SYSTEM owner-report directive — generated by the host, not by a group participant]',
       `The group task "${task.title}" just moved to REVIEW. The host has generated a deterministic acceptance summary for the group (goal, deliverable list, verification, guidance) — it is reproduced verbatim below as the single source of truth. Compose a concise PRIVATE report to the owner that NARRATES it:`,
@@ -2551,6 +2671,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       `- FORMAT REQUIREMENT: ${copyConclusionTagInstruction()} The host extracts that line verbatim as the single conclusion string reused by the Tasks acceptance-card headline, the group summary, and the origin-session notice. When the verdict rules below allow a recommendation, make it the verdict (accept & close, or rework and of what); under the facts-only rules make it a one-line factual deferral. Never a question.`,
       '- Restate the goal briefly.',
       '- Say what each member did (by name) and whether the deliverables are on-chain confirmed.',
+      ...criteriaCheckInstruction,
       // Reputation temperature arbitration: the roster cognition block carries
       // a recency-weighted cooperation score per member; disputes resolve
       // toward the higher temperature instead of burning communication rounds.
@@ -2561,12 +2682,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           '- Include the plan-change lines below in one short "plan changed" passage so the owner understands why the artifact looks the way it does. If the list below is empty, do NOT mention plan changes at all.',
         ]
         : []),
+      ...(supervisorBlock.length > 0
+        ? [
+          '- Include the supervisor-intervention lines below in one short passage (what the supervisor asked/flagged and how it was handled). If the list below is empty, do NOT mention supervisor interventions at all.',
+        ]
+        : []),
       '',
       `Goal: ${summary?.goal ?? task.goal}`,
       `Acceptance criteria: ${(summary?.acceptanceCriteria ?? task.acceptanceCriteria)?.trim() || '(none specified)'}`,
       'Deliverables recorded (from the host acceptance summary):',
       ...(deliverableLines.length > 0 ? deliverableLines : ['(none recorded)']),
       ...planChangeBlock,
+      ...supervisorBlock,
     ].join('\n');
   };
 
@@ -2588,6 +2715,49 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * cleared when the task re-enters executing via the rework hatch). The report
    * is never posted to the group; failures only log, never block the tick.
    */
+  /**
+   * G-01: best-effort milestone notice into the origin CoWork session.
+   * Guarded once per (kind, task, subject) HERE on the daemon side using the
+   * SAME kv key the service-side notifySourceSessionMilestone uses
+   * (`group_task_milestone_notified:<kind>:<taskId>[:subject]`) — the daemon
+   * never re-fires a node in one pass, the service re-checks under its own
+   * seam, and the rework hatch clears the shared key to re-arm dispatch. A
+   * missing dep or a failed delivery never blocks the tick.
+   */
+  const notifySourceSessionMilestone = (
+    task: GroupTask,
+    kind: 'created' | 'dispatch' | 'checkpoint' | 'anomaly',
+    message: string,
+    subject?: string | null,
+  ): void => {
+    if (!task.sourceSessionId?.trim()) return; // panel-created / pre-R2 task
+    if (!deps.sendMilestoneToSourceSession) return; // seam not wired (tests)
+    const sqlite = deps.getStore();
+    const subjectKey = subject?.trim() ? `:${subject.trim()}` : '';
+    const guardKey = `group_task_milestone_notified:${kind}:${task.id}${subjectKey}`;
+    if (sqlite.get<string>(guardKey) === '1') return;
+    try {
+      const sent = deps.sendMilestoneToSourceSession({
+        taskId: task.id,
+        kind,
+        message,
+        subject: subject ?? null,
+      });
+      if (sent) {
+        sqlite.set(guardKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${kind} milestone reported to origin session ` +
+          `${task.sourceSessionId}${subjectKey}`,
+        );
+      }
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: ${kind} milestone report failed (tick continues): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
   const maybeSendOwnerReport = async (
     task: GroupTask,
     members: GroupTaskMember[],
@@ -2684,6 +2854,33 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             `${conclusionError instanceof Error ? conclusionError.message : String(conclusionError)}`,
           );
         }
+      }
+      // G-05: stamp the per-criterion verdicts + non-blocking observations
+      // onto the same record BEFORE any downstream surface renders — the group
+      // summary message (re-rendered below), the Tasks acceptance card, and
+      // the origin-session notice then all show the SAME criteria check.
+      // Best-effort: a store failure never blocks the report delivery.
+      const criteriaCheck = extractCriteriaVerdicts(report);
+      if (criteriaCheck.verdicts.length > 0 || criteriaCheck.observations.length > 0) {
+        try {
+          store.updateAcceptanceSummaryCriteriaVerdicts(
+            task.id,
+            criteriaCheck.verdicts,
+            criteriaCheck.observations,
+          );
+        } catch (criteriaError) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: acceptance criteria-verdict record failed: ` +
+            `${criteriaError instanceof Error ? criteriaError.message : String(criteriaError)}`,
+          );
+        }
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: criteria check captured — ` +
+          `${criteriaCheck.verdicts.filter((entry) => entry.verdict === 'pass').length} pass, ` +
+          `${criteriaCheck.verdicts.filter((entry) => entry.verdict === 'fail').length} fail, ` +
+          `${criteriaCheck.verdicts.filter((entry) => entry.verdict === 'unclear').length} unclear, ` +
+          `${criteriaCheck.observations.length} observation(s)`,
+        );
       }
       // P4 (v1.2): the origin CoWork session receives the SAME report body the
       // A2A private chat gets — the owner's repeated ask ("我在 co-work 对话中
@@ -2835,6 +3032,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         kind: 'checkpoint',
         checkpointId: checkpoint.id,
       });
+      // G-01: the origin session hears about the HITL checkpoint too (the
+      // A2A private chat is not the only place the owner lives). Best-effort;
+      // the report text is reused verbatim as the decision summary.
+      notifySourceSessionMilestone(
+        task,
+        'checkpoint',
+        buildSourceSessionCheckpointNotice({
+          title: task.title,
+          topic: checkpoint.topic,
+          summary: report,
+        }),
+        `checkpoint:${checkpoint.id}`,
+      );
       sqlite.set(guardKey, '1');
       deps.emitTaskEvent?.({
         type: 'groupTask:ownerReportDelivery',
@@ -3251,16 +3461,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const chairGlobalMetaId = (chairMember?.globalmetaid ?? '').trim();
       const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
       if (chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId) {
-        // GT#47 R1: the LAST tag is the instruction (protocol template places
-        // it at the message end); every earlier tag is descriptive text quoted
-        // from the goal/acceptance criteria. Multiple tags in one message get
-        // an audit log line so the parse is never a silent judgment call.
+        // G-03: the instruction tag is the one at the message end (protocol
+        // template). Any other tag in the body is descriptive text quoted from
+        // the goal/acceptance criteria — logged so the parse is never a silent
+        // judgment call, but never applied.
         const nextStatus = statusDirectives[statusDirectives.length - 1];
-        if (statusDirectives.length > 1) {
+        const bodyTagCount = [...content.matchAll(STATUS_TAG_ALL)].length;
+        if (bodyTagCount > 1) {
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: chair message carries ${statusDirectives.length} [STATUS:*] tags ` +
-            `(${statusDirectives.map((tag) => tag.toUpperCase()).join(' -> ')}) — ` +
-            `applying the last one ([STATUS:${nextStatus.toUpperCase()}]) as the instruction, earlier tags treated as descriptive text`,
+            `[GroupTaskDaemon] Task ${task.id}: chair message carries ${bodyTagCount} [STATUS:*] tags — ` +
+            `applying the trailing one ([STATUS:${nextStatus.toUpperCase()}]) as the instruction, ` +
+            `earlier tags treated as descriptive text`,
           );
         }
         try {
@@ -3323,6 +3534,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               status: updated.status,
               at: now(),
             });
+            if (updated.status === 'executing' && beforeStatus === 'planning') {
+              // G-01: planning → executing means the chair's plan message (the
+              // one carrying this trailing tag) is the first dispatch — report
+              // its seat assignments to the origin session, once per round.
+              notifySourceSessionMilestone(
+                task,
+                'dispatch',
+                buildSourceSessionDispatchNotice({
+                  title: task.title,
+                  status: updated.status,
+                  planText: message.content,
+                }),
+              );
+            }
             if (updated.status === 'executing' && beforeStatus === 'review') {
               // Rework hatch: every review-delivery guard resets (shared with
               // the RPC/UI rework paths via clearGroupTaskReviewDeliveryGuards)
@@ -3410,6 +3635,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                     guidance: summaryInput.guidance,
                     planChanges: summaryInput.planChanges,
                   });
+                  // G-04: snapshot the supervision trail onto the same record
+                  // so the review record carries every nudge/flag/pause/resume.
+                  try {
+                    store.updateAcceptanceSummarySupervisorSignals(
+                      task.id,
+                      store.listSupervisorSignalLines(task.id),
+                    );
+                  } catch (signalError) {
+                    emitLog(
+                      `[GroupTaskDaemon] Task ${task.id}: supervisor-signal snapshot record failed: ` +
+                      `${signalError instanceof Error ? signalError.message : String(signalError)}`,
+                    );
+                  }
                   // Improvement #1 (single-card acceptance): the owner report runs
                   // BEFORE the group summary is posted. It captures the chair's
                   // one-line 【结论】 verdict onto the just-saved record (version
@@ -3499,6 +3737,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 `${auditError instanceof Error ? auditError.message : String(auditError)}`,
               );
             }
+            // G-01: an illegal transition is exactly the "state-machine
+            // anomaly" the origin session must hear about — never silent.
+            notifySourceSessionMilestone(
+              task,
+              'anomaly',
+              buildSourceSessionAnomalyNotice({
+                title: task.title,
+                status: rejectedFrom ?? 'unknown',
+                summary: `The chair's [STATUS:${nextStatus.toUpperCase()}] directive was rejected ` +
+                  `(${rejectedFrom ?? '?'} -> ${nextStatus} is not a legal transition) and was NOT applied. ` +
+                  'The task stays in its current state; check the task history for the rejected directive.',
+              }),
+              `illegal_transition:${nextStatus}`,
+            );
           } else {
             // GT#26: not a protocol verdict — the durable write itself failed
             // (e.g. a busy DB during the DSH stall storm). Swallowing it here
@@ -3513,6 +3765,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
             throw error;
           }
+        }
+      }
+    } else {
+      // G-03 observability: a chair message whose BODY cites [STATUS:*] tags
+      // without a trailing instruction tag must not transition silently —
+      // leave a log line so a stuck task is always diagnosable (task #47's
+      // "zero transitions, zero logs" failure mode).
+      const bodyTags = [...content.matchAll(STATUS_TAG_ALL)].map((match) => match[1].toUpperCase());
+      if (bodyTags.length > 0) {
+        const chairMemberForTags = members.find((member) => member.role === 'chair');
+        const chairGmidForTags = (chairMemberForTags?.globalmetaid ?? '').trim();
+        const senderGmidForTags = (message.senderGlobalMetaId ?? '').trim();
+        if (chairGmidForTags && senderGmidForTags && senderGmidForTags === chairGmidForTags) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: chair message cites ${bodyTags.length} [STATUS:*] tag(s) ` +
+            `(${bodyTags.join(' -> ')}) in the body with no trailing instruction tag — ` +
+            'descriptive tags ignored, no transition applied',
+          );
         }
       }
     }
@@ -3807,13 +4077,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
         throw new Error('planning turn produced no usable plan');
       }
+      // G-03 hardening: the planning dispatch is a HOST-owned protocol message
+      // (the directive requires ending it with [STATUS:EXECUTING]) and the
+      // state machine now parses instruction tags ONLY at the message end. If
+      // the LLM omitted the trailing tag — or buried it mid-body where the
+      // parser deliberately ignores it — append the deterministic protocol
+      // footer so a posted plan can never leave the task pinned in planning
+      // (task #47's failure mode, now impossible from this path).
+      let postedReply = reply;
+      if (extractStatusDirectives(reply).length === 0) {
+        const bodyTags = [...reply.matchAll(STATUS_TAG_ALL)].length;
+        postedReply = `${reply.replace(/[ \t]+$/, '')}\n[STATUS:EXECUTING]`;
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: planning reply carried no trailing [STATUS:*] tag` +
+          `${bodyTags > 0 ? ` (${bodyTags} body tag(s) ignored by the strict parser)` : ''} — ` +
+          'appended the deterministic [STATUS:EXECUTING] footer',
+        );
+      }
       const workerNames = promptMembers
         .filter((member) => member.role === 'worker')
         .map((member) => member.name);
       // Coverage is computed unconditionally: mentionedWorkers also drives the
       // mention array on the outgoing dispatch so assigned workers are woken
       // even when the plan text uses bare names instead of `@Name` tokens.
-      const coverage = checkPlanningCoverage(reply, workerNames);
+      const coverage = checkPlanningCoverage(postedReply, workerNames);
       if (workerNames.length > 1 && coverage.unmentionedWorkers.length > 0) {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: planning mentions ` +
@@ -3824,12 +4111,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
       coworkStore.addMessage(session.id, { type: 'user', content: directive });
-      coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
+      coworkStore.addMessage(session.id, { type: 'assistant', content: postedReply });
       const dispatchMention = resolveMentionIdsForWorkers(members, coverage.mentionedWorkers);
       const posted = await postGroupMessage(
         task.id,
         bot.id,
-        reply,
+        postedReply,
         dispatchMention.length > 0 ? { mention: dispatchMention } : undefined,
       );
       if (dispatchMention.length > 0) {
@@ -3856,6 +4143,96 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    }
+  };
+
+  /**
+   * G-04: drive the chair's response to pending supervisor signals (nudge /
+   * flag). One chair turn per pending batch: the directive restates every
+   * unprocessed signal, the chair answers in the group (its judgment stays
+   * authoritative — supervision inputs, not overrides), and the rows are
+   * stamped with the response pin. Pause/resume rows arrive already processed
+   * (host-applied gates). While a human gate is active (review / open
+   * checkpoint) the turn is deferred; terminal tasks just close the rows.
+   */
+  const processSupervisorSignals = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+    promptMembers: DaemonPromptMember[],
+  ): Promise<void> => {
+    const store = deps.getGroupTaskStore();
+    const pending = store.listPendingSupervisorSignals(task.id)
+      .filter((signal) => signal.kind === 'nudge' || signal.kind === 'flag');
+    if (pending.length === 0) return;
+    if (task.status === 'done' || task.status === 'cancelled') {
+      store.markSupervisorSignalsProcessed(pending.map((signal) => signal.id), null);
+      return;
+    }
+    if (task.status === 'review' || store.getOpenCheckpoint(task.id) != null) {
+      return; // human gate active — defer the chair turn until it clears
+    }
+
+    const chairMember = members.find((member) => member.role === 'chair');
+    const bot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
+    if (!chairMember || !bot) {
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: supervisor signal turn skipped (no chair bot found)`);
+      return;
+    }
+
+    const signalLines = pending.map((signal) => {
+      const target = signal.target?.trim();
+      return `- [${signal.kind.toUpperCase()}${target ? ` → ${target}` : ''}] ${signal.note}`;
+    });
+    const directive = [
+      '[SYSTEM supervisor directive — generated by the host, not by a group participant]',
+      'The owner\'s supervisor channel (the Twin acting as the owner\'s representative) recorded the following signal(s) for this task:',
+      ...signalLines,
+      '',
+      'Reply ONCE in the group addressing every signal above:',
+      '- For each NUDGE: state what you checked and what you found (facts first).',
+      '- For each FLAG: state your judgment — agree or disagree, with the reason.',
+      'These are supervision inputs, NOT orders that override your chair authority: your coordination and verdicts remain the authoritative ones.',
+      'Do NOT emit any [STATUS:*] tag in this reply — this is a supervision answer, not a lifecycle move.',
+    ].join('\n');
+
+    try {
+      const coworkStore = deps.getCoworkStore();
+      const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
+      const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
+      const brain = metabotBrainOptions(bot);
+      const reply = (await deps.performChat(
+        systemPromptParts.systemPrompt,
+        [systemPromptParts.volatileContext, directive].filter(Boolean).join('\n\n'),
+        brain.llmId ?? undefined,
+        {
+          llmProvider: brain.llmProvider,
+          fallbackLlmId: brain.fallbackLlmId,
+          fallbackLlmProvider: brain.fallbackLlmProvider,
+          effort: brain.effort,
+          fallbackEffort: brain.fallbackEffort,
+          thinking: 'enabled',
+        },
+      )).trim();
+      if (!reply || NO_REPLY_PATTERN.test(reply)) {
+        throw new Error('supervisor signal turn produced no usable reply');
+      }
+      const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
+      coworkStore.addMessage(session.id, { type: 'user', content: directive });
+      coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
+      const posted = await postGroupMessage(task.id, bot.id, reply);
+      // P2-7 r2: the daemon's own reply must not count as "Twin activity".
+      rememberDaemonChairPin(task.id, posted.pinId);
+      store.markSupervisorSignalsProcessed(pending.map((signal) => signal.id), posted.pinId);
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: chair answered ${pending.length} supervisor signal(s) ` +
+        `(pin ${posted.pinId})`,
+      );
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: supervisor signal turn failed (signals stay pending): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   };
 
@@ -4222,6 +4599,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     emitLog(
       `[GroupTaskDaemon] Task ${task.id}: reclaimed stuck session for ${name} ` +
       `(${reason}; session ${sessionInfo?.sessionId ?? 'none'} ${stopped ? 'stopped' : 'not stopped'})`,
+    );
+    // G-01: a reclaimed member session is the "member lost after retries"
+    // anomaly the origin session must hear about — never silent.
+    notifySourceSessionMilestone(
+      task,
+      'anomaly',
+      buildSourceSessionAnomalyNotice({
+        title: task.title,
+        status: task.status,
+        summary:
+          `Member "${name}" was judged stuck (${reason}); their session was reclaimed ` +
+          `${stopped ? 'and stopped' : '(stop unavailable)'}. The chair will re-dispatch or re-assign the subtask; ` +
+          'any partial work on disk is preserved.',
+      }),
+      `worker_reclaimed:${member.metabotId}`,
     );
     return [
       `Host auto-recovery: ${name} was judged stuck (${reason}).`,
@@ -4734,6 +5126,68 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * G-01: no-progress stall monitor — one anomaly notice to the origin session
+   * when an executing task shows zero observable progress (no group message,
+   * no deliverable) for the window. The stamp resets when progress resumes so
+   * each stall episode reports at most once; the paired milestone guard lives
+   * in the SAME kv store the service reads (production wires both to the app
+   * sqlite kv), so clearing it here re-arms the service-side once-guard.
+   */
+  const monitorNoProgressStall = (task: GroupTask): void => {
+    const sqlite = deps.getStore();
+    const stampKey = `${NO_PROGRESS_STALL_STAMP_PREFIX}${task.id}`;
+    let lastMessageMs: number | null = null;
+    try {
+      const result = sqlite.getDatabase().exec(
+        'SELECT MAX(chain_timestamp) FROM group_chat_messages WHERE group_id = ?',
+        [task.groupId],
+      );
+      const sec = Number(result[0]?.values?.[0]?.[0]);
+      if (Number.isFinite(sec) && sec > 0) lastMessageMs = sec * 1000;
+    } catch {
+      return; // transient read failure — retry next tick
+    }
+    let lastDeliverableMs: number | null = null;
+    try {
+      for (const deliverable of deps.getGroupTaskStore().listDeliverables(task.id)) {
+        const ms = parseSqliteUtcMs(deliverable.createdAt ?? null);
+        if (ms != null && (lastDeliverableMs == null || ms > lastDeliverableMs)) lastDeliverableMs = ms;
+      }
+    } catch {
+      // best-effort ledger read
+    }
+    const progressPoints = [lastMessageMs, lastDeliverableMs].filter((ms): ms is number => ms != null);
+    if (progressPoints.length === 0) return; // nothing observable yet — never alarm
+    const lastProgressMs = Math.max(...progressPoints);
+    const idleMs = now() - lastProgressMs;
+    if (idleMs < noProgressStallMs) {
+      if (sqlite.get<string>(stampKey) != null) {
+        sqlite.delete(stampKey);
+        sqlite.delete(`group_task_milestone_notified:anomaly:${task.id}:stall`);
+      }
+      return;
+    }
+    if (sqlite.get<string>(stampKey) === '1') return; // already reported this episode
+    sqlite.set(stampKey, '1');
+    emitLog(
+      `[GroupTaskDaemon] Task ${task.id}: no progress for ${Math.round(idleMs / 60_000)} min ` +
+      '(no new group message, no new deliverable) — reporting stall anomaly to the origin session',
+    );
+    notifySourceSessionMilestone(
+      task,
+      'anomaly',
+      buildSourceSessionAnomalyNotice({
+        title: task.title,
+        status: task.status,
+        summary:
+          `No progress for ${Math.round(idleMs / 60_000)} minutes (no new group messages, no new deliverables). ` +
+          'Check the task detail view — the chair may be waiting on a stuck member or a silent failure.',
+      }),
+      'stall',
+    );
+  };
+
+  /**
    * P0-3: chair reminder when an assignment got no [WORKING] ACK within
    * ackTimeoutMs (default 3 min). Fires ONCE per pending assignment; never
    * auto-fails the worker.
@@ -4790,6 +5244,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           );
           continue;
         }
+      }
+      // G-02 (task #48): liveness is state-driven — a member with a valid
+      // (non-rejected, delivered/accepted/frozen) deliverable already answered
+      // the assignment with work product, no matter how long ago. An ACK-timeout
+      // alarm against them is noise and invites a bogus re-dispatch, so retire
+      // the watch silently (log only; no group message, no chair reminder).
+      const hasValidDeliverable = memberGmid
+        && store.listDeliverables(task.id).some((deliverable) =>
+          (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === memberGmid.toLowerCase()
+          && deliverable.status !== 'rejected');
+      if (hasValidDeliverable) {
+        sqlite.delete(pendingKey);
+        const remindedRaw = sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+        if (remindedRaw != null) {
+          sqlite.delete(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+        }
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} has a valid deliverable ` +
+          `(assignment #${entry.messageId}); ACK watch retired silently — delivered members never alarm`,
+        );
+        continue;
       }
       // P5 (v1.2): ENGAGED worker — recent speech (even before the assignment:
       // mid long skill turn) or a deliverable recorded within the window. The
@@ -5289,9 +5764,41 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // the owner's decision — skip member nudging (unreachable marking, ACK and
     // delivery-deadline reminders) that would punish the enforced silence.
     const checkpointOpenAtTick = store.getOpenCheckpoint(task.id) != null;
+    // G-04: a supervisor pause holds dispatch — same monitor silence as a
+    // checkpoint (owner-initiated pause must not punish members for it).
+    const dispatchPausedAtTick = task.dispatchPausedAt != null;
+
+    // G-01: one creation report per task — title, current status and roster to
+    // the origin session. Fires on the first tick that sees the task (any
+    // status), so even a task that raced past planning still reports once.
+    if (task.sourceSessionId?.trim()) {
+      notifySourceSessionMilestone(
+        task,
+        'created',
+        buildSourceSessionCreatedNotice({
+          title: task.title,
+          status: task.status,
+          memberNames: promptMembers.map((member) => member.name).filter(Boolean),
+        }),
+      );
+    }
+
+    // G-04: drive the chair's response to pending supervisor signals (nudge /
+    // flag). One turn per batch; pause/resume rows arrive already processed
+    // (host-applied gates).
+    if (!dispatchPausedAtTick) {
+      await processSupervisorSignals(task, members, botsById, promptMembers);
+    }
+
+    // G-01: no-progress stall — an executing task with no new group message and
+    // no new deliverable for the window looks stuck; tell the origin session
+    // once per re-arm window instead of sitting silent.
+    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick && task.groupId) {
+      monitorNoProgressStall(task);
+    }
 
     // P0-2: auto-mark silent assigned/working members unreachable (badge for chair).
-    if (task.status === 'executing' && !checkpointOpenAtTick) {
+    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick) {
       monitorMemberUnreachable(task, members);
     }
 
@@ -5299,7 +5806,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // stale, mark them timeout + inject a chair re-assign hint (L2), then brief
     // the owner if still silent past the escalation window (L3). The hint block
     // rides the existing remoteStatusBlock chair-context channel.
-    if (task.status === 'executing' && !checkpointOpenAtTick) {
+    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick) {
       const timeoutBlock = await monitorLocalWorkerTimeout(task, members, ownerGlobalMetaId);
       if (timeoutBlock) {
         remoteStatusBlock = [remoteStatusBlock, timeoutBlock].filter(Boolean).join('\n\n');
@@ -5307,12 +5814,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
 
     // P0-3: once-per-assignment chair reminder for missing [WORKING] ACKs.
-    if (!checkpointOpenAtTick) {
+    if (!checkpointOpenAtTick && !dispatchPausedAtTick) {
       await monitorAcksAndReminders(task, members);
     }
     // P0-4: re-verify lagging deliverables + missed delivery deadlines.
     await monitorDeliverableVerification(task);
-    if (!checkpointOpenAtTick) {
+    if (!checkpointOpenAtTick && !dispatchPausedAtTick) {
       // P1-3: delivery-timeout reclaim directives ride the same chair-context
       // channel as the member-timeout hints.
       const deliveryRecoveryBlock = await monitorDeliveryDeadlines(task, members);
@@ -5334,7 +5841,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
-    if (task.status === 'planning') {
+    // G-04: a supervisor pause holds the initial dispatch too.
+    if (task.status === 'planning' && !dispatchPausedAtTick) {
       await maybeRunChairPlanningTurn(task, members, botsById, promptMembers, remoteStatusBlock);
     }
 
@@ -5472,7 +5980,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const humanGateActive = freshStatus === 'review' || hasOpenCheckpoint;
         // P0-3: [WORKING] ACK / [STANDBY] markers + assignment ACK tracking.
         handleMemberProtocolMarkers(task, message, members, botsById, { humanGateActive });
-        const gatingTask: GroupTaskDaemonTask = { ...task, status: freshStatus, hasOpenCheckpoint };
+        const gatingTask: GroupTaskDaemonTask = {
+          ...task,
+          status: freshStatus,
+          hasOpenCheckpoint,
+          dispatchPaused: dispatchPausedAtTick || store.getTaskById(task.id)?.dispatchPausedAt != null,
+        };
         const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById, {
           entropyFloorGate: entropyP0.floorGate,
         });

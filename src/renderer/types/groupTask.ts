@@ -35,6 +35,8 @@ export interface GroupTask {
   pinned: boolean;
   /** Local-only archive marker (epoch ms; null = active). */
   archivedAt: number | null;
+  /** G-04: epoch ms while a supervisor pause holds dispatch; null = running. */
+  dispatchPausedAt?: number | null;
 }
 
 export interface GroupTaskMember {
@@ -145,6 +147,15 @@ export interface GroupTaskAcceptanceSummaryMember {
   workStatus: string;
 }
 
+/** G-05: per-criterion verdict against the create-time acceptance criteria. */
+export type GroupTaskAcceptanceCriteriaVerdictValue = 'pass' | 'fail' | 'unclear';
+
+export interface GroupTaskAcceptanceCriteriaVerdict {
+  verdict: GroupTaskAcceptanceCriteriaVerdictValue;
+  /** The criterion as restated for judgment (derived from create-time criteria). */
+  text: string;
+}
+
 /**
  * R1: host-generated, deterministic acceptance summary ("把菜端上桌"). Single
  * source of truth for the group's last review message, the owner private
@@ -164,6 +175,19 @@ export interface GroupTaskAcceptanceSummary {
    * in-group [PLAN_CHANGE] resolutions. Empty/undefined = no change (block omitted).
    */
   planChanges?: string[];
+  /**
+   * G-05: per-criterion verdicts against the CREATE-TIME acceptance criteria,
+   * extracted from the chair's owner report at review entry. Empty/undefined
+   * until captured (the card then shows only the raw criteria preview).
+   */
+  criteriaVerdicts?: GroupTaskAcceptanceCriteriaVerdict[];
+  /**
+   * G-05: findings OUTSIDE the declared criteria — explicitly non-blocking
+   * observations, never acceptance gaps.
+   */
+  observations?: string[];
+  /** G-04: supervisor intervention lines snapshotted at review entry. */
+  supervisorSignals?: string[];
   guidance: string;
   /**
    * Improvement #1 (single-card acceptance): the chair's one-line conclusion —
@@ -240,6 +264,22 @@ export interface GroupTaskDetail extends GroupTask {
    * unavailable; the banner then falls back to the checkpoint topic).
    */
   openCheckpointSummary?: string | null;
+  /** G-04: supervisor intervention trail (nudge/flag/pause/resume), oldest first. */
+  supervisorSignals?: GroupTaskSupervisorSignal[];
+}
+
+/** G-04: one supervisor intervention signal (structured, not chair speech). */
+export interface GroupTaskSupervisorSignal {
+  id: number;
+  taskId: number;
+  kind: 'nudge' | 'flag' | 'pause' | 'resume';
+  note: string;
+  target: string | null;
+  createdBy: string;
+  noticePinId: string | null;
+  processedAt: number | null;
+  chairResponsePinId: string | null;
+  createdAt: string | null;
 }
 
 export interface GroupTaskSummary extends GroupTask {

@@ -13,6 +13,7 @@ import {
   buildSourceSessionAcceptanceNotice,
   buildSourceSessionReviewFallback,
   buildSourceSessionReviewNotice,
+  buildSupervisorSignalNotice,
   copyAcceptanceCommentLine,
   copyAcceptanceRatingLine,
   copyDefaultObserverExpectation,
@@ -20,6 +21,7 @@ import {
   copyObserverSectionHeader,
   copyReviewReportTruncated,
   copyReviewVersionTag,
+  SUPERVISOR_NOTE_MAX_CHARS,
 } from '../libs/groupTaskCopy';
 import {
   GroupTaskStore,
@@ -35,6 +37,8 @@ import {
   type GroupTaskCheckpoint,
   type GroupChatTranscriptMessage,
   type GroupTaskAcceptanceSummary,
+  type GroupTaskSupervisorSignal,
+  type GroupTaskSupervisorSignalKind,
 } from '../groupTaskStore';
 import {
   createGroupChat,
@@ -195,6 +199,8 @@ export interface GroupTaskDetail extends GroupTask {
    * nothing but the tag). Document links inside it survive untouched.
    */
   openCheckpointSummary: string | null;
+  /** G-04: supervisor intervention trail (nudge/flag/pause/resume), oldest first. */
+  supervisorSignals: GroupTaskSupervisorSignal[];
 }
 
 export interface CreateGroupTaskResult extends GroupTaskDetail {
@@ -358,8 +364,82 @@ export function setGroupTaskAcceptanceNotifier(notifier: GroupTaskAcceptanceNoti
   acceptanceNotifier = notifier;
 }
 
+/**
+ * G-01 milestone relay seam — same transport shape as the acceptance notifier
+ * (main.ts wires both to insertCrossSessionMessageAndQueue), kept separately
+ * so review/close delivery and progress reporting can never break each other.
+ */
+export type GroupTaskSourceSessionMilestoneKind =
+  | 'created'
+  | 'dispatch'
+  | 'checkpoint'
+  | 'anomaly';
+
+let sourceSessionNotifier: GroupTaskAcceptanceNotifier | null = null;
+
+export function setGroupTaskSourceSessionNotifier(
+  notifier: GroupTaskAcceptanceNotifier | null,
+): void {
+  sourceSessionNotifier = notifier;
+}
+
 /** R2 kv guard: one acceptance notification per task per terminal outcome. */
 const GROUP_TASK_ACCEPTANCE_NOTIFIED_KV_PREFIX = 'group_task_acceptance_notified:';
+
+/**
+ * G-01: deliver one milestone notice into the task's origin CoWork session.
+ * kv-guarded per (kind, task, subject) so each node reports exactly once;
+ * the daemon's rework hatch clears the dispatch guard so a re-dispatch round
+ * re-reports. Best-effort: failures only log.
+ */
+export function notifySourceSessionMilestone(
+  task: GroupTask,
+  kind: GroupTaskSourceSessionMilestoneKind,
+  message: string,
+  subject?: string | null,
+): boolean {
+  const targetSessionId = (task.sourceSessionId ?? '').trim();
+  if (!targetSessionId) return false; // panel-created / pre-R2 task
+  if (!sourceSessionNotifier) return false; // seam not wired (tests / pre-init)
+  const body = message.trim();
+  if (!body) return false;
+  const kv = getKvStore();
+  const subjectKey = subject?.trim() ? `:${subject.trim()}` : '';
+  const guardKey = `group_task_milestone_notified:${kind}:${task.id}${subjectKey}`;
+  if (kv.get<string>(guardKey) === '1') return false;
+  try {
+    const result = sourceSessionNotifier({ taskId: task.id, targetSessionId, message: body });
+    if (!result.ok) {
+      console.warn(
+        `[GroupTask] Milestone (${kind}) to session ${targetSessionId} not delivered for task ${task.id}` +
+        (result.warning ? ` (${result.warning})` : ''),
+      );
+      return false;
+    }
+    kv.set(guardKey, '1');
+    return true;
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Milestone (${kind}) delivery failed for task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+}
+
+/** G-01: clear a milestone guard (rework re-arms the dispatch report). */
+export function clearSourceSessionMilestoneGuard(
+  taskId: number,
+  kind: GroupTaskSourceSessionMilestoneKind,
+  subject?: string | null,
+): void {
+  const subjectKey = subject?.trim() ? `:${subject.trim()}` : '';
+  try {
+    getKvStore().delete(`group_task_milestone_notified:${kind}:${taskId}${subjectKey}`);
+  } catch {
+    // kv unavailable — the guard simply stays armed (report skipped once more)
+  }
+}
 
 function getKvStore(): GroupTaskServiceKvStore {
   if (!kvStoreGetter) {
@@ -1514,6 +1594,8 @@ export async function getGroupTask(
     // [CHECKPOINT] message that opened the open checkpoint (by pin id), so the
     // detail banner can show it without the owner paging the transcript.
     openCheckpointSummary: resolveOpenCheckpointSummary(store, task, checkpoints),
+    // G-04: supervisor intervention trail (nudge/flag/pause/resume).
+    supervisorSignals: store.listSupervisorSignals(id),
   };
 }
 
@@ -1599,6 +1681,116 @@ export async function postGroupTaskMessageAsOwner(
     mention: opts?.mention,
   });
   return { ...sent, deliverableValidation };
+}
+
+// ---------------------------------------------------------------------------
+// G-04: supervisor intervention channel (nudge / flag / pause / resume).
+//
+// The Twin (owner representative) supervises a RUNNING task through the
+// metabot-group-task skill: structured signals recorded on the supervisor
+// ledger, made visible in-group via a host notice (NOT a chair speech — the
+// [GROUP_TASK_NOTICE:supervisor] envelope keeps them out of the tag parser),
+// and snapshotted into the review record at acceptance. `pause` holds the
+// daemon's dispatch path until an owner-confirmed `resume`.
+// ---------------------------------------------------------------------------
+
+export interface SuperviseGroupTaskInput {
+  taskId: number;
+  action: GroupTaskSupervisorSignalKind;
+  /** The instruction/finding text (required). */
+  note: string;
+  /** Roster member (name) a nudge points at; optional. */
+  target?: string | null;
+  /** resume only: explicit owner confirmation relayed by the Twin. */
+  confirmOwner?: boolean;
+  /** Attribution recorded on the signal row. */
+  createdBy?: string;
+}
+
+export async function superviseGroupTask(
+  input: SuperviseGroupTaskInput,
+): Promise<{ signal: GroupTaskSupervisorSignal; dispatchPausedAt: number | null }> {
+  const taskId = Number(input.taskId);
+  if (!Number.isInteger(taskId) || taskId <= 0) throw new Error('task_id is required');
+  const action = input.action;
+  if (action !== 'nudge' && action !== 'flag' && action !== 'pause' && action !== 'resume') {
+    throw new Error('action must be one of: nudge, flag, pause, resume');
+  }
+  const note = String(input.note ?? '').trim().slice(0, SUPERVISOR_NOTE_MAX_CHARS);
+  if (!note) throw new Error('note is required (what to check / flag / why pause or resume)');
+  const target = input.target?.trim() || null;
+
+  const store = getGroupTaskStore();
+  const task = store.getTaskById(taskId);
+  if (!task) throw new Error(`group task ${taskId} not found`);
+  if (task.status === 'done' || task.status === 'cancelled') {
+    throw new Error(`group task ${taskId} is already closed (${task.status})`);
+  }
+  if ((action === 'nudge' || action === 'flag') && task.status === 'review') {
+    // Signals still make sense in review for the record, but a nudge cannot
+    // drive a chair turn while the human gate is active — allowed, recorded,
+    // surfaced at acceptance.
+  }
+  if (action === 'resume') {
+    if (task.dispatchPausedAt == null) {
+      throw new Error(`group task ${taskId} is not paused`);
+    }
+    if (input.confirmOwner !== true) {
+      throw new Error(
+        'resuming a supervisor pause requires explicit owner confirmation — relay the owner\'s reply and pass confirm_owner=true',
+      );
+    }
+  }
+  if (action === 'pause' && task.dispatchPausedAt != null) {
+    throw new Error(`group task ${taskId} is already paused`);
+  }
+
+  // Host-applied gates first (pause/resume take effect even if the notice
+  // post fails on-chain — the gate is local state, the notice is visibility).
+  if (action === 'pause') store.setTaskDispatchPausedAt(taskId, Date.now());
+  if (action === 'resume') store.setTaskDispatchPausedAt(taskId, null);
+
+  let noticePinId: string | null = null;
+  try {
+    const notice = buildSupervisorSignalNotice({
+      taskId,
+      taskTitle: task.title,
+      kind: action,
+      note,
+      target,
+    });
+    const sent = await postGroupTaskMessage(taskId, task.chairMetabotId, notice);
+    noticePinId = sent.pinId ?? null;
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Supervisor ${action} notice post failed for task ${taskId} (signal still recorded): ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const signal = store.addSupervisorSignal({
+    taskId,
+    kind: action,
+    note,
+    target,
+    createdBy: input.createdBy?.trim() || 'twin-supervisor',
+    noticePinId,
+  });
+  // pause/resume are host-enforced: no chair response turn to wait for.
+  if (action === 'pause' || action === 'resume') {
+    store.markSupervisorSignalsProcessed([signal.id], noticePinId);
+  }
+  const fresh = store.getTaskById(taskId);
+  console.log(
+    `[GroupTask] Supervisor ${action} recorded for task ${taskId}` +
+    `${target ? ` (target: ${target})` : ''}${noticePinId ? ` (notice pin ${noticePinId})` : ''}`,
+  );
+  return {
+    signal: action === 'pause' || action === 'resume'
+      ? store.listSupervisorSignals(taskId).find((row) => row.id === signal.id) ?? signal
+      : signal,
+    dispatchPausedAt: fresh?.dispatchPausedAt ?? null,
+  };
 }
 
 /** Add a local bot to an existing task: on-chain join first, then the member row. */

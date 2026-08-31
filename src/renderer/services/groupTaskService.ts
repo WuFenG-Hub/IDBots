@@ -141,6 +141,20 @@ class GroupTaskService {
     return task;
   }
 
+  /** G-04: owner-side resume of a supervisor dispatch pause. */
+  async resumePausedTask(taskId: number): Promise<GroupTaskDetail> {
+    const api = window.electron?.groupTask;
+    if (!api) throw new Error('Group task API unavailable');
+
+    const result = await api.resume({ taskId });
+    if (!result.success || !result.task) {
+      throw new Error(result.error ?? 'Failed to resume group task');
+    }
+    const task = result.task as GroupTaskDetail;
+    store.dispatch(upsertTask(this.toSummary(task)));
+    return task;
+  }
+
   async closeTask(input: { taskId: number; status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string }): Promise<GroupTaskDetail> {
     const api = window.electron?.groupTask;
     if (!api) throw new Error('Group task API unavailable');

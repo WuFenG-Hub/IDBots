@@ -566,6 +566,14 @@ test('memberships: deriveLatestChairTaskStatus reads the newest chair tag only',
       'newest chair tag wins; worker-quoted tags are ignored',
     );
 
+    // G-03: a chair message quoting a DESCRIPTIVE tag in the body before the
+    // trailing instruction must derive the INSTRUCTION (last match), never the
+    // quoted one (the host-side task #47 failure family).
+    insertGroupMessage(db, {
+      pinId: 'd3b', groupId: 'group-derive', senderName: 'Chair', content: '标准提到通过后发 [STATUS:REVIEW]，但当前仍在执行。\n[STATUS:EXECUTING]', chainTimestamp: 1785000003500,
+    });
+    assert.equal(openTeamStore.deriveLatestChairTaskStatus('group-derive', 'gmid-Chair'), 'executing');
+
     // Later terminal tag supersedes.
     insertGroupMessage(db, {
       pinId: 'd4', groupId: 'group-derive', senderName: 'Chair', content: '[STATUS:DONE] Task closed: accepted by the owner.', chainTimestamp: 1785000004000,

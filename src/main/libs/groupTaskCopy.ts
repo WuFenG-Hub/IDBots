@@ -42,6 +42,7 @@ export const GROUP_TASK_NOTICE = {
   checkpointResolved: 'checkpoint_resolved',
   longTurn: 'long_turn',
   dispatchHeld: 'dispatch_held',
+  supervisor: 'supervisor',
 } as const;
 
 export type GroupTaskNoticeKind = (typeof GROUP_TASK_NOTICE)[keyof typeof GROUP_TASK_NOTICE];
@@ -257,6 +258,55 @@ export function buildLongTurnStandbyNote(
   return withGroupTaskNotice(GROUP_TASK_NOTICE.longTurn, body);
 }
 
+// ---------------------------------------------------------------------------
+// G-04: supervisor intervention notices. Host-authored [GROUP_TASK_NOTICE:
+// supervisor] lines — structured Twin/owner-representative signals, NOT chair
+// speech: the envelope keeps them out of the tag parser and the group reads
+// them as supervision, never as the chair's own voice.
+// ---------------------------------------------------------------------------
+
+/** Cap for a supervisor signal note (group notice + ledger). */
+export const SUPERVISOR_NOTE_MAX_CHARS = 500;
+
+export function buildSupervisorSignalNotice(input: {
+  taskId: number;
+  taskTitle: string;
+  kind: 'nudge' | 'flag' | 'pause' | 'resume';
+  note: string;
+  target?: string | null;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const note = input.note.trim();
+  const target = input.target?.trim() ?? '';
+  const kindLine = (text: string) => `@chair 🔎 ${text}`;
+  const bodies: Record<typeof input.kind, string> = {
+    nudge: language === 'en'
+      ? kindLine(
+        `SUPERVISOR NUDGE${target ? ` → ${target}` : ''}: the supervisor asks you to check this now — ${note}. ` +
+          'Verify and answer in the group; your judgment stays authoritative.',
+      )
+      : kindLine(
+        `监督提示${target ? ` → ${target}` : ''}：监督者请你立即检查——${note}。` +
+          '请核验后在群内答复；判定权仍归 chair。',
+      ),
+    flag: language === 'en'
+      ? kindLine(
+        `SUPERVISOR FLAG${target ? ` → ${target}` : ''} (recorded into the review record): ${note}. ` +
+          'No immediate action required — address it if you agree, and it will surface again at acceptance.',
+      )
+      : kindLine(
+        `监督者疑点标注${target ? ` → ${target}` : ''}（将进入验收记录）：${note}。` +
+          '无需立即处理——若你认同可跟进；该项会在验收时再次呈现。',
+      ),
+    pause: language === 'en'
+      ? `⏸️ SUPERVISOR PAUSE: dispatch is paused by the supervisor — ${note}. The chair will not assign new work until the owner confirms resume.`
+      : `⏸️ 监督者暂停：派工已由监督者暂停——${note}。在 owner 确认恢复前，chair 不会派发新工作。`,
+    resume: language === 'en'
+      ? `▶️ SUPERVISOR RESUME (owner-confirmed): dispatch resumes — ${note || 'no additional note'}. The chair may continue assigning work.`
+      : `▶️ 监督者恢复（owner 已确认）：派工恢复——${note || '无补充说明'}。chair 可继续派发工作。`,
+  };
+  return withGroupTaskNotice(GROUP_TASK_NOTICE.supervisor, bodies[input.kind]);
+}
+
 /**
  * Host notice when a worker-addressed dispatch was swallowed by a human-gate
  * phase (open HITL checkpoint or review): workers stay silent by design, so
@@ -316,6 +366,12 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
   goal: (text: string) => string;
   criteria: (text: string) => string;
   criteriaEmpty: string;
+      criteriaCheckTitle: string;
+      criteriaPass: (text: string) => string;
+      criteriaFail: (text: string) => string;
+      criteriaUnclear: (text: string) => string;
+      observationsTitle: string;
+      supervisorSignalsTitle: string;
   emptyChecklist: string;
   checklistTitle: string;
   omittedProcess: (count: number) => string;
@@ -331,6 +387,12 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
       goal: (text) => `Goal: ${text}`,
       criteria: (text) => `Acceptance criteria: ${text}`,
       criteriaEmpty: '(not specified)',
+      criteriaCheckTitle: 'Criteria check (as declared at creation):',
+      criteriaPass: (text) => `- ✓ PASS — ${text}`,
+      criteriaFail: (text) => `- ✗ FAIL — ${text}`,
+      criteriaUnclear: (text) => `- ? UNVERIFIED — ${text}`,
+      observationsTitle: 'Observations (outside the declared criteria — NOT blocking):',
+      supervisorSignalsTitle: 'Supervisor interventions:',
       emptyChecklist: 'Deliverables: no verified artifacts.',
       checklistTitle: 'Deliverables:',
       omittedProcess: (count) => `(${count} process note(s) omitted; see the in-group report)`,
@@ -346,6 +408,12 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
     goal: (text) => `目标：${text}`,
     criteria: (text) => `验收标准：${text}`,
     criteriaEmpty: '（未填写）',
+    criteriaCheckTitle: '验收标准对照（以创建时声明为准）：',
+    criteriaPass: (text) => `- ✓ 通过 — ${text}`,
+    criteriaFail: (text) => `- ✗ 未通过 — ${text}`,
+    criteriaUnclear: (text) => `- ? 无法核实 — ${text}`,
+    observationsTitle: '观察项（标准之外，不阻断验收）：',
+    supervisorSignalsTitle: '监督者干预记录：',
     emptyChecklist: '成果清单：无已核验交付物。',
     checklistTitle: '成果清单：',
     omittedProcess: (count) => `（另有 ${count} 项过程记录，见群内报告）`,
@@ -475,6 +543,108 @@ export function wrapCrossSessionMessage(
   return language === 'en'
     ? `From ${sourceSessionId}: ${message}`
     : `来自${sourceSessionId} 的信息：${message}`;
+}
+
+// ---------------------------------------------------------------------------
+// G-01: origin-session milestone notices. Each carries an ASCII protocol
+// prefix (renderer/test detectable), the task identifier, the current status,
+// and the next step or pending decision — and fires exactly once per node.
+// ---------------------------------------------------------------------------
+
+/** Shared pointer line: where the owner opens the task from a milestone notice. */
+function taskPanelPointerLine(language: AppLanguage): string {
+  return language === 'en'
+    ? 'Open the Tasks panel to follow this task in detail.'
+    : '可在 Tasks 面板查看并跟进该任务详情。';
+}
+
+export function buildSourceSessionCreatedNotice(input: {
+  title: string;
+  status: string;
+  memberNames: string[];
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const members = input.memberNames.join(language === 'en' ? ', ' : '、');
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_CREATED] Group task "${input.title}" is live (status: ${input.status}).`,
+      `Members: ${members || '(none)'}`,
+      `Next: the chair decomposes the goal and dispatches work; I will report the first dispatch here.`,
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_CREATED] 群任务「${input.title}」已创建成功（状态：${input.status}）。`,
+    `成员：${members || '（无）'}`,
+    '下一步：chair 将拆解目标并派工；首轮派工完成后我会在此汇报。',
+    taskPanelPointerLine(language),
+  ].join('\n');
+}
+
+/** Cap for the dispatch plan text echoed into the origin session. */
+export const SOURCE_SESSION_DISPATCH_MAX_CHARS = 1200;
+
+export function buildSourceSessionDispatchNotice(input: {
+  title: string;
+  status: string;
+  planText: string;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const plan = input.planText.trim();
+  const capped = plan.length > SOURCE_SESSION_DISPATCH_MAX_CHARS
+    ? `${plan.slice(0, SOURCE_SESSION_DISPATCH_MAX_CHARS).trimEnd()}…`
+    : plan;
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_DISPATCH] Group task "${input.title}" is now ${input.status}: the chair posted the first dispatch.`,
+      'Dispatch (seat assignments and work stages):',
+      capped,
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_DISPATCH] 群任务「${input.title}」已进入 ${input.status}：chair 已完成首轮派工。`,
+    '派工内容（各座位分工与工序）：',
+    capped,
+    taskPanelPointerLine(language),
+  ].join('\n');
+}
+
+export function buildSourceSessionCheckpointNotice(input: {
+  title: string;
+  topic: string | null;
+  summary: string;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const topic = (input.topic ?? '').trim();
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_CHECKPOINT] Group task "${input.title}" reached a decision point${topic ? ` (${topic})` : ''} and is paused waiting for your call.`,
+      input.summary.trim() || 'The chair has sent you the details privately; reply there or in the task group.',
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_CHECKPOINT] 群任务「${input.title}」到达需要你决策的节点${topic ? `（${topic}）` : ''}，任务已暂停等待你的决定。`,
+    input.summary.trim() || 'chair 已将详情私发给你；可直接回复，或在任务群内留言。',
+    taskPanelPointerLine(language),
+  ].join('\n');
+}
+
+export function buildSourceSessionAnomalyNotice(input: {
+  title: string;
+  status: string;
+  summary: string;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_ALERT] Group task "${input.title}" (status: ${input.status}) hit an anomaly:`,
+      input.summary.trim(),
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_ALERT] 群任务「${input.title}」（状态：${input.status}）出现异常：`,
+    input.summary.trim(),
+    taskPanelPointerLine(language),
+  ].join('\n');
 }
 
 export function copyRespondingPlaceholder(language: AppLanguage = groupTaskLanguage()): string {

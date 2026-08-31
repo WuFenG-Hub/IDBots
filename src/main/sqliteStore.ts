@@ -896,13 +896,39 @@ export class SqliteStore {
         archived_at INTEGER,
         source_session_id TEXT,
         comm_total_bytes INTEGER,
-        comm_message_count INTEGER
+        comm_message_count INTEGER,
+        dispatch_paused_at INTEGER
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
     this.migrateGroupTasksLastDrivenAt();
     this.migrateGroupTasksRatingColumns();
     this.migrateGroupTasksCommStats();
+    // G-04: supervisor pause gate — epoch ms while dispatch is paused, NULL = running.
+    this.migrateGroupTasksDispatchPausedAt();
+
+    // G-04: supervisor intervention ledger (nudge / flag / pause / resume) —
+    // structured signals recorded from the Twin supervisor channel, visible
+    // in-group via host notices, auditable, and snapshotted into the review
+    // record. CREATE TABLE IF NOT EXISTS is the idempotent first-run migration.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_supervisor_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('nudge','flag','pause','resume')),
+        note TEXT NOT NULL,
+        target TEXT,
+        created_by TEXT NOT NULL DEFAULT 'supervisor',
+        notice_pin_id TEXT,
+        processed_at INTEGER,
+        chair_response_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_supervisor_signals_task
+        ON group_task_supervisor_signals(task_id, id);
+    `);
     this.migrateGroupTasksLocalState();
     this.migrateGroupTasksSourceSessionId();
     this.db.run(`
@@ -1059,6 +1085,10 @@ export class SqliteStore {
         deliverables_json TEXT NOT NULL,
         members_json TEXT NOT NULL,
         guidance TEXT NOT NULL,
+        plan_changes_json TEXT,
+        criteria_verdicts_json TEXT,
+        observations_json TEXT,
+        supervisor_signals_json TEXT,
         conclusion TEXT,
         outcome TEXT,
         rating INTEGER,
@@ -1076,6 +1106,9 @@ export class SqliteStore {
     // Improvement #4 (v1.3): older user databases lack the plan-changes snapshot
     // column — add it idempotently (NULL = no plan change disclosed).
     this.migrateGroupTaskAcceptanceSummariesPlanChanges();
+    // G-05: criteria-verdict / observation columns for create-time-aligned
+    // acceptance — idempotent PRAGMA-guarded, NULL = not captured.
+    this.migrateGroupTaskAcceptanceSummariesCriteriaVerdicts();
 
     // Improvement #4 (v1.3): plan-change resolutions the chair posts in-group
     // with a [PLAN_CHANGE: ...] tag (original plan -> blocker -> fallback).
@@ -2399,6 +2432,38 @@ export class SqliteStore {
   }
 
   /**
+   * Migration (G-05): per-criterion verdicts + non-blocking observations on
+   * acceptance summaries. Idempotent PRAGMA-guarded; existing rows stay NULL
+   * (verdicts not captured — the card falls back to the raw criteria preview).
+   */
+  private migrateGroupTaskAcceptanceSummariesCriteriaVerdicts(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_acceptance_summaries)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('criteria_verdicts_json')) {
+        this.db.run(
+          'ALTER TABLE group_task_acceptance_summaries ADD COLUMN criteria_verdicts_json TEXT;',
+        );
+        this.save();
+      }
+      if (!columns.includes('observations_json')) {
+        this.db.run(
+          'ALTER TABLE group_task_acceptance_summaries ADD COLUMN observations_json TEXT;',
+        );
+        this.save();
+      }
+      if (!columns.includes('supervisor_signals_json')) {
+        this.db.run(
+          'ALTER TABLE group_task_acceptance_summaries ADD COLUMN supervisor_signals_json TEXT;',
+        );
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskAcceptanceSummariesCriteriaVerdicts:', error);
+    }
+  }
+
+  /**
    * Migration (P3, v1.1): widen the deliverable status CHECK to include
    * 'delivered' — a deliverable whose pin verified on-chain must not keep
    * reading 'pending' (task #22: uri populated + verified, enum stuck at
@@ -2651,6 +2716,24 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupTasksLastDrivenAt:', e);
+    }
+  }
+
+  /**
+   * Migration (G-04): supervisor pause gate on group_tasks — epoch ms while
+   * dispatch is paused by a supervisor `pause` signal, NULL = running. While
+   * set, the daemon holds the planning turn and chair dispatch replies and
+   * resume requires explicit owner confirmation.
+   */
+  private migrateGroupTasksDispatchPausedAt(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('dispatch_paused_at')) return;
+      this.db.run('ALTER TABLE group_tasks ADD COLUMN dispatch_paused_at INTEGER');
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupTasksDispatchPausedAt:', e);
     }
   }
 

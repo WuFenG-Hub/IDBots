@@ -831,6 +831,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('groupTask:reopen', input),
     rework: (input: { taskId: number; reason?: string }) =>
       ipcRenderer.invoke('groupTask:rework', input),
+    resume: (input: { taskId: number }) =>
+      ipcRenderer.invoke('groupTask:resume', input),
     listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) =>
       ipcRenderer.invoke('groupTask:listMessages', input),
     sendUserMessage: (input: { taskId: number; content: string }) =>

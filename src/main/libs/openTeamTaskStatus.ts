@@ -13,13 +13,23 @@
 
 export type OpenTeamTaskStatus = 'executing' | 'review' | 'done' | 'cancelled';
 
-export const OPENTEAM_TASK_STATUS_TAG_RE = /\[STATUS:\s*(EXECUTING|REVIEW|DONE|CANCELLED)\s*\]/i;
+export const OPENTEAM_TASK_STATUS_TAG_RE = /\[STATUS:\s*(EXECUTING|REVIEW|DONE|CANCELLED)\s*\]/gi;
 
-/** Extract the status tag from a group message body; null when absent. Total: never throws. */
+/**
+ * Extract the status tag from a group message body; null when absent. Total. never throws.
+ *
+ * G-03: LAST match wins. Chair instruction tags sit at the message end (the
+ * host protocol template requires it) while earlier tags in the body are
+ * descriptive text quoted from the goal/acceptance criteria — a first-match
+ * parse would let a quoted "[STATUS:REVIEW]" flip the guest mirror while the
+ * host machine correctly applied the trailing instruction. Deterministic
+ * host-authored close-out announcements carry exactly one tag, so last-match
+ * reads them unchanged.
+ */
 export function parseOpenTeamTaskStatusTag(content: string | null | undefined): OpenTeamTaskStatus | null {
-  const match = OPENTEAM_TASK_STATUS_TAG_RE.exec(String(content ?? ''));
-  if (!match) return null;
-  return match[1].toLowerCase() as OpenTeamTaskStatus;
+  const matches = [...String(content ?? '').matchAll(OPENTEAM_TASK_STATUS_TAG_RE)];
+  if (matches.length === 0) return null;
+  return matches[matches.length - 1][1].toLowerCase() as OpenTeamTaskStatus;
 }
 
 /** Terminal host-task statuses: the guest stops replying and the group leaves the backfill set. */
