@@ -340,3 +340,7 @@ man_base_data_pebble/
 !tests/skillAssignmentStore.test.mjs
 !tests/coworkMemoryTurnExtraction.test.mjs
 !tests/commandCodeProvider.test.ts
+
+# Local extracted skill packages and tool output artifacts (runtime-generated)
+/.idbots-extract/
+/output/
