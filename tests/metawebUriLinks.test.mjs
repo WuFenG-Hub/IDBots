@@ -59,6 +59,9 @@ test('METAWEB_CITATION_RULE forbids Web2 viewer URLs', () => {
   assert.match(METAWEB_CITATION_RULE, /metaapp:\/\//);
   assert.match(METAWEB_CITATION_RULE, /metafile:\/\//);
   assert.match(METAWEB_CITATION_RULE, /NEVER construct Web2 viewer URLs/i);
+  // The scheme contract: metafile:// is binary-only; text pins cite pin://.
+  assert.match(METAWEB_CITATION_RULE, /ONLY for pins on \/file whose payload is a binary file/);
+  assert.match(METAWEB_CITATION_RULE, /never cite a text pin as metafile:\/\//);
 });
 
 // ---------------------------------------------------------------------------

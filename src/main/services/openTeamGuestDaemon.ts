@@ -52,9 +52,11 @@ import { buildOpenTeamGuestPrompt } from './openTeamGuestPrompt';
 import { ensureOpenTeamGuestSession } from './groupTaskSession';
 import {
   buildGuestMetafileDeliverableLine,
+  buildGuestNoteDeliverableLine,
   collectGuestDeliverableFiles,
   DEFAULT_MAX_DELIVERABLE_FILES,
 } from './openTeamGuestDeliverables';
+import { isTextDocumentDeliverable } from './deliverableTextNote';
 
 /** Escape hatch: a reply starting with the [NO_REPLY] tag is suppressed (not sent on-chain). */
 const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
@@ -192,6 +194,19 @@ export type OpenTeamGuestUploadFileFn = (input: {
   contentType?: string;
 }) => Promise<Record<string, unknown>>;
 
+/**
+ * Narrow simplenote publish seam (wired to
+ * deliverableTextNote.publishTextFileAsNote in main.ts). MetaWeb URI
+ * convention: readable text deliverables (Markdown / plain text) go on-chain
+ * as simplenote notes cited pin:// — metafile:// is reserved for binary
+ * payloads. The GUEST bot's own wallet pays the note pin.
+ */
+export type OpenTeamGuestPublishTextFn = (input: {
+  metabotId: number;
+  filePath: string;
+  contentType?: string;
+}) => Promise<{ pinId?: string } | null | undefined>;
+
 export interface OpenTeamGuestDaemonSqliteLike {
   getDatabase(): Database;
 }
@@ -210,6 +225,13 @@ export interface OpenTeamGuestDaemonDeps {
   runSkillTurn?: OpenTeamGuestRunSkillTurnFn;
   /** M3 file delivery; unwired = skill turns run but files are not uploaded/delivered. */
   uploadDeliverableFile?: OpenTeamGuestUploadFileFn;
+  /**
+   * M3 text-document delivery: readable text files (Markdown / plain text)
+   * are published as simplenote notes (pin://) instead of /file metafiles.
+   * Unwired (or returning null) = text documents fall back to the metafile
+   * upload path.
+   */
+  publishTextDeliverable?: OpenTeamGuestPublishTextFn;
   /**
    * P1-2 self-check fallback: group member-list read (wired to
    * groupChatTransport.fetchGroupMembers in main.ts). Unwired = the periodic
@@ -459,11 +481,14 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
   };
 
   /**
-   * M3 file delivery: upload the skill turn's file artifact(s) on-chain as
-   * metafiles and append one `[DELIVERABLE] metafile: <uri>` line per file.
-   * Upload problems never suppress or rewrite the text reply — failed files
-   * are called out in a plain (untagged) sentence so no fake deliverable rows
-   * can be ingested on the inviter side.
+   * M3 file delivery: publish the skill turn's file artifact(s) on-chain and
+   * append one `[DELIVERABLE]` line per file. Protocol follows content kind
+   * (MetaWeb URI convention): readable text documents become simplenote notes
+   * (`note: pin://<pinId>`), binary files become metafiles
+   * (`metafile: metafile://<pinId><ext>`). Upload problems never suppress or
+   * rewrite the text reply — failed files are called out in a plain
+   * (untagged) sentence so no fake deliverable rows can be ingested on the
+   * inviter side.
    */
   const appendFileDeliverables = async (input: {
     bot: Metabot;
@@ -489,31 +514,52 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     const failedNames: string[] = [];
     for (const file of files) {
       try {
-        const upload = await deps.uploadDeliverableFile!({
-          metabotId: input.bot.id,
-          filePath: file.filePath,
-          contentType: file.contentType,
-        });
-        const pinId = typeof upload?.pinId === 'string' ? upload.pinId.trim() : '';
-        const line = pinId
-          ? buildGuestMetafileDeliverableLine({
-            pinId,
-            fileName: file.fileName,
+        // MetaWeb URI convention: readable text documents (Markdown / plain
+        // text) are published as simplenote notes and delivered as pin://;
+        // metafile:// is reserved for binary payloads. A note publish yielding
+        // no pinId (oversized/unreadable doc) falls through to the metafile
+        // upload so the file still gets delivered on-chain.
+        const preferTextNote = deps.publishTextDeliverable != null
+          && isTextDocumentDeliverable(file.filePath, file.contentType);
+        let line: string | null = null;
+        if (preferTextNote) {
+          const published = await deps.publishTextDeliverable!({
+            metabotId: input.bot.id,
+            filePath: file.filePath,
             contentType: file.contentType,
-          })
-          : null;
+          });
+          const notePinId = typeof published?.pinId === 'string' ? published.pinId.trim() : '';
+          line = notePinId
+            ? buildGuestNoteDeliverableLine({ pinId: notePinId, fileName: file.fileName })
+            : null;
+        }
+        if (!line && deps.uploadDeliverableFile) {
+          const upload = await deps.uploadDeliverableFile({
+            metabotId: input.bot.id,
+            filePath: file.filePath,
+            contentType: file.contentType,
+          });
+          const pinId = typeof upload?.pinId === 'string' ? upload.pinId.trim() : '';
+          line = pinId
+            ? buildGuestMetafileDeliverableLine({
+              pinId,
+              fileName: file.fileName,
+              contentType: file.contentType,
+            })
+            : null;
+        }
         if (line) {
           deliverableLines.push(line);
         } else {
           failedNames.push(file.fileName);
           emitLog(
-            `[OpenTeamGuestDaemon] Bot ${input.bot.id}: metafile upload for ${file.fileName} returned no pinId`,
+            `[OpenTeamGuestDaemon] Bot ${input.bot.id}: on-chain publish for ${file.fileName} produced no deliverable line`,
           );
         }
       } catch (error) {
         failedNames.push(file.fileName);
         emitLog(
-          `[OpenTeamGuestDaemon] Bot ${input.bot.id}: metafile upload for ${file.fileName} failed: ` +
+          `[OpenTeamGuestDaemon] Bot ${input.bot.id}: on-chain publish for ${file.fileName} failed: ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -523,7 +569,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
       input.reply,
       ...deliverableLines,
       ...(failedNames.length > 0
-        ? [`(On-chain upload failed for: ${failedNames.join(', ')} — generated locally but not delivered as a metafile; ask me to retry if needed.)`]
+        ? [`(On-chain publish failed for: ${failedNames.join(', ')} — generated locally but not delivered on-chain; ask me to retry if needed.)`]
         : []),
     ].join('\n');
   };
@@ -651,7 +697,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
       return;
     }
 
-    if (skillTurn && deps.uploadDeliverableFile) {
+    if (skillTurn && (deps.uploadDeliverableFile || deps.publishTextDeliverable)) {
       reply = await appendFileDeliverables({
         bot,
         reply,

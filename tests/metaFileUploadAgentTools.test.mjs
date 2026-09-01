@@ -154,6 +154,19 @@ test('formatUploadResult marks the sponsor path and reports verification outcome
   assert.match(unverified, /verification: not indexed yet/);
 });
 
+test('formatUploadResult nudges text documents toward post_simplenote + pin://', () => {
+  const textUpload = formatUploadResult({
+    ...SAMPLE_RESULT,
+    metafileUri: 'metafile://pin1i0.md',
+    fileName: 'report.md',
+    contentType: 'text/markdown',
+  });
+  assert.match(textUpload, /prefer post_simplenote next time/);
+  assert.match(textUpload, /pin:\/\/<pinId>/);
+  // Binary uploads carry no such nudge.
+  assert.doesNotMatch(formatUploadResult(SAMPLE_RESULT), /prefer post_simplenote/);
+});
+
 test('upload_file surfaces the feeAssist reason when a hard sponsor failure aborts the upload', async () => {
   const hardFail = new Error('sponsor commit rejected');
   hardFail.code = 'mvc_fee_assist_commit_failed';

@@ -99,6 +99,7 @@ import {
 } from './groupTaskDeliverableParser';
 import { buildMetafileUri } from './serviceDeliveryArtifacts.js';
 import metaFileUploadShared from './metaFileUploadShared.js';
+import { isTextDocumentDeliverable } from './deliverableTextNote';
 
 const { inferContentTypeFromFilePath } = metaFileUploadShared;
 
@@ -1309,6 +1310,20 @@ export interface GroupTaskDaemonDeps {
     filePath: string;
     contentType?: string;
   }) => Promise<Record<string, unknown>>;
+  /**
+   * MetaWeb URI convention: a local deliverable that is a readable text
+   * document (Markdown / plain text) is published as a simplenote pin
+   * (/protocols/simplenote) instead of a /file metafile, so the ledger
+   * records pin://<pinId> — metafile:// is reserved for binary payloads.
+   * Wired to deliverableTextNote.publishTextFileAsNote in main.ts.
+   * Unwired (or returning null) = text documents fall back to the metafile
+   * upload path above.
+   */
+  publishTextDeliverable?: (input: {
+    metabotId: number;
+    filePath: string;
+    contentType?: string;
+  }) => Promise<{ pinId?: string } | null | undefined>;
 }
 
 export interface GroupTaskDaemonLoop {
@@ -3318,9 +3333,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         // Ledger fix (#14→#16): a text deliverable whose segment names a LOCAL
         // file is upgraded to on-chain evidence — the host uploads the file as
         // a metafile (paid by the author bot) and rewrites the row in place.
+        // MetaWeb URI convention: a readable text document (Markdown / plain
+        // text) is instead published as a simplenote note and recorded as
+        // pin://<pinId> — metafile:// is reserved for binary payloads.
         // Upload failure degrades to the plain text record + a visible note;
         // it never drops the deliverable row.
-        if (candidate.kind === 'text' && deps.uploadDeliverableFile) {
+        if (candidate.kind === 'text' && (deps.uploadDeliverableFile || deps.publishTextDeliverable)) {
           const segment = candidateSegments[candidateIndex] ?? '';
           const filePath = extractLocalFilePaths(segment)[0];
           // Only files that actually exist are upload candidates — a path
@@ -3332,28 +3350,60 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             )?.metabotId ?? null;
             try {
               const contentType = inferContentTypeFromFilePath(filePath);
-              const upload = await deps.uploadDeliverableFile({
-                metabotId: authorBotId ?? 0,
-                filePath,
-                contentType,
-              });
-              const pinId = typeof upload?.pinId === 'string' ? upload.pinId.trim() : '';
-              if (pinId) {
-                const uri = buildMetafileUri(pinId, {
-                  fileName: path.basename(filePath),
+              // MetaWeb URI convention: readable text documents publish as
+              // simplenote notes (pin://); metafile:// is reserved for binary
+              // payloads. A note publish yielding no pinId (oversized or
+              // unreadable document) falls through to the metafile upload so
+              // the file still becomes on-chain evidence.
+              const preferTextNote = deps.publishTextDeliverable != null
+                && isTextDocumentDeliverable(filePath, contentType);
+              let notePinId = '';
+              if (preferTextNote) {
+                const published = await deps.publishTextDeliverable!({
+                  metabotId: authorBotId ?? 0,
+                  filePath,
                   contentType,
                 });
-                store.updateDeliverableUri(deliverable.id, uri, 'metafile');
-                // Reuse the pinid verification path so the upgraded row gets
-                // the same on-chain confirmation semantics as a native one.
-                const report = await verifyPinSources(pinId);
+                notePinId = typeof published?.pinId === 'string' ? published.pinId.trim() : '';
+              }
+              if (notePinId) {
+                const uri = `pin://${notePinId}`;
+                store.updateDeliverableUri(deliverable.id, uri, 'pinid');
+                // Same on-chain confirmation semantics as a native pinid
+                // deliverable.
+                const report = await verifyPinSources(notePinId);
                 store.updateDeliverableVerification(deliverable.id, JSON.stringify(report));
                 store.updateDeliverableConfirmation(
                   deliverable.id,
                   report.verified ? 'confirmed' : 'unconfirmed',
                 );
                 verificationNotes.push(copyLocalDeliverableOnChain(uri));
-              } else {
+              } else if (deps.uploadDeliverableFile) {
+                const upload = await deps.uploadDeliverableFile({
+                  metabotId: authorBotId ?? 0,
+                  filePath,
+                  contentType,
+                });
+                const pinId = typeof upload?.pinId === 'string' ? upload.pinId.trim() : '';
+                if (pinId) {
+                  const uri = buildMetafileUri(pinId, {
+                    fileName: path.basename(filePath),
+                    contentType,
+                  });
+                  store.updateDeliverableUri(deliverable.id, uri, 'metafile');
+                  // Reuse the pinid verification path so the upgraded row gets
+                  // the same on-chain confirmation semantics as a native one.
+                  const report = await verifyPinSources(pinId);
+                  store.updateDeliverableVerification(deliverable.id, JSON.stringify(report));
+                  store.updateDeliverableConfirmation(
+                    deliverable.id,
+                    report.verified ? 'confirmed' : 'unconfirmed',
+                  );
+                  verificationNotes.push(copyLocalDeliverableOnChain(uri));
+                } else {
+                  verificationNotes.push(copyLocalDeliverableNoPin(filePath));
+                }
+              } else if (preferTextNote) {
                 verificationNotes.push(copyLocalDeliverableNoPin(filePath));
               }
             } catch (error) {

@@ -2664,6 +2664,144 @@ test('P1-4 r2: [DELIVERABLE] parsing is line-scoped — body dir paths and trunc
 });
 
 // ---------------------------------------------------------------------------
+// Local-file deliverable upgrade: text documents publish as simplenote notes
+// (pin://), binaries stay metafile (MetaWeb URI convention)
+// ---------------------------------------------------------------------------
+
+test('local deliverable upgrade: .md publishes as a simplenote note (pin://), .png stays metafile', async () => {
+  const NOTE_PINID = `${'ab'.repeat(32)}i0`;
+  const FILE_PINID = `${'cd'.repeat(32)}i0`;
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-deliverable-'));
+  const publishCalls = [];
+  const uploadCalls = [];
+  const h = await createHarness({
+    deps: {
+      publishTextDeliverable: async (input) => {
+        publishCalls.push(input);
+        return { pinId: NOTE_PINID };
+      },
+      uploadDeliverableFile: async (input) => {
+        uploadCalls.push(input);
+        return { pinId: FILE_PINID };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    const mdPath = path.join(artifactDir, 'report.md');
+    const pngPath = path.join(artifactDir, 'chart.png');
+    fs.writeFileSync(mdPath, '# Report\n\nDone.');
+    fs.writeFileSync(pngPath, 'png-bytes');
+
+    insertGroupMessage(h.db, {
+      pinId: 'note-dlv-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] 报告：${mdPath}`,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'file-dlv-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] 图表：${pngPath}`,
+    });
+    await h.loop.runTick();
+
+    assert.equal(publishCalls.length, 1, 'text document goes through the simplenote seam');
+    assert.equal(publishCalls[0].filePath, mdPath);
+    assert.equal(uploadCalls.length, 1, 'binary file stays on the metafile seam');
+    assert.equal(uploadCalls[0].filePath, pngPath);
+
+    const rows = h.groupTaskStore.listDeliverables(task.id);
+    const byPin = (pinId) => rows.find((r) => r.msgPinId === pinId);
+    assert.deepEqual(
+      { kind: byPin('note-dlv-i0').kind, uri: byPin('note-dlv-i0').uri },
+      { kind: 'pinid', uri: `pin://${NOTE_PINID}` },
+      'Markdown deliverable is recorded as pin://, never metafile://',
+    );
+    assert.deepEqual(
+      { kind: byPin('file-dlv-i0').kind, uri: byPin('file-dlv-i0').uri },
+      { kind: 'metafile', uri: `metafile://${FILE_PINID}.png` },
+      'binary deliverable keeps the metafile:// URI',
+    );
+  } finally {
+    h.cleanup();
+    fs.rmSync(artifactDir, { recursive: true, force: true });
+  }
+});
+
+test('local deliverable upgrade: without the note seam a .md still falls back to metafile', async () => {
+  const FILE_PINID = `${'cd'.repeat(32)}i0`;
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-deliverable-'));
+  const uploadCalls = [];
+  const h = await createHarness({
+    deps: {
+      uploadDeliverableFile: async (input) => {
+        uploadCalls.push(input);
+        return { pinId: FILE_PINID };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    const mdPath = path.join(artifactDir, 'report.md');
+    fs.writeFileSync(mdPath, '# Report\n\nDone.');
+    insertGroupMessage(h.db, {
+      pinId: 'note-fallback-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] 报告：${mdPath}`,
+    });
+    await h.loop.runTick();
+
+    assert.equal(uploadCalls.length, 1);
+    const row = h.groupTaskStore.listDeliverables(task.id).find((r) => r.msgPinId === 'note-fallback-i0');
+    assert.deepEqual(
+      { kind: row.kind, uri: row.uri },
+      { kind: 'metafile', uri: `metafile://${FILE_PINID}.md` },
+      'unwired publishTextDeliverable keeps the legacy metafile behavior',
+    );
+  } finally {
+    h.cleanup();
+    fs.rmSync(artifactDir, { recursive: true, force: true });
+  }
+});
+
+test('local deliverable upgrade: a note publish without pinId falls back to metafile', async () => {
+  const FILE_PINID = `${'cd'.repeat(32)}i0`;
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-deliverable-'));
+  const publishCalls = [];
+  const uploadCalls = [];
+  const h = await createHarness({
+    deps: {
+      publishTextDeliverable: async (input) => {
+        publishCalls.push(input);
+        return null; // oversized/unreadable document — no note pin
+      },
+      uploadDeliverableFile: async (input) => {
+        uploadCalls.push(input);
+        return { pinId: FILE_PINID };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    const mdPath = path.join(artifactDir, 'big-report.md');
+    fs.writeFileSync(mdPath, '# Big report');
+    insertGroupMessage(h.db, {
+      pinId: 'note-null-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] 报告：${mdPath}`,
+    });
+    await h.loop.runTick();
+
+    assert.equal(publishCalls.length, 1);
+    assert.equal(uploadCalls.length, 1, 'null note result falls back to the metafile upload');
+    const row = h.groupTaskStore.listDeliverables(task.id).find((r) => r.msgPinId === 'note-null-i0');
+    assert.deepEqual(
+      { kind: row.kind, uri: row.uri },
+      { kind: 'metafile', uri: `metafile://${FILE_PINID}.md` },
+    );
+  } finally {
+    h.cleanup();
+    fs.rmSync(artifactDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Round-2 iteration: P1-5 planning-directive distribution + opt-out (obs. 1/5)
 // ---------------------------------------------------------------------------
 
