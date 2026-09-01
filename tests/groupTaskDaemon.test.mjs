@@ -255,7 +255,17 @@ const createHarness = async (overrides = {}) => {
     // join-welcome tests); spreads last so tests can override anything above.
     ...(overrides.deps ? overrides.deps : {}),
   };
-  const loop = createGroupTaskDaemonLoop(deps);
+  // fix/group-task-flow: responder turns run as detached async jobs now.
+  // Preserve the historical test contract ("when runTick() resolves, every
+  // triggered turn has completed") by draining pending turn jobs after the tick.
+  const drainLoop = (target) => ({
+    ...target,
+    runTick: async () => {
+      await target.runTick();
+      await target.whenIdle();
+    },
+  });
+  const loop = drainLoop(createGroupTaskDaemonLoop(deps));
 
   const createTask = (workerIds = [2, 3], opts = {}) => {
     const task = groupTaskStore.createTask({
@@ -275,6 +285,8 @@ const createHarness = async (overrides = {}) => {
   return {
     store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore, loop, deps,
     chatCalls, sends, routingCalls, skillTurnCalls, events, ownerReportCalls, state, createTask,
+    /** Rebuild a loop over the same stores with extra deps — drained like the harness loop. */
+    makeLoop: (extraDeps = {}) => drainLoop(createGroupTaskDaemonLoop({ ...deps, ...extraDeps })),
     cleanup: () => store.close(),
   };
 };
@@ -822,8 +834,8 @@ test('classifyMemberLiveness: heartbeat lease, speech, and session activity each
   }), 'stale');
 });
 
-test('cursor advances on no-reply messages; a failing message holds the batch (fail-stop) until it recovers', async () => {
-  // Cooldowns off: this test isolates the fail-stop/retry ordering semantics.
+test('cursor advances on no-reply messages; a failing turn retries via the durable queue in FIFO order', async () => {
+  // Cooldowns off: this test isolates the retry/ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
   try {
     const task = h.createTask([2]);
@@ -838,9 +850,11 @@ test('cursor advances on no-reply messages; a failing message holds the batch (f
     const selfId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['self-i0'])[0].values[0][0];
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId);
 
-    // First message blows up the LLM (one-shot error), second would succeed:
-    // fail-stop — the later message waits BEHIND the failed one so its success
-    // can never advance the cursor past the pending retry.
+    // fix/group-task-flow semantics: turns are detached jobs. The first
+    // message's turn fails (one-shot error) and re-enters the durable defer
+    // queue; the second message's trigger queues behind the busy session. The
+    // cursor advances once both triggers are dispatched/queued — reply-level
+    // retries never regress the cursor.
     h.state.chatError = 'llm exploded';
     insertGroupMessage(h.db, {
       pinId: 'boom-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
@@ -852,21 +866,25 @@ test('cursor advances on no-reply messages; a failing message holds the batch (f
     });
     await h.loop.runTick();
 
-    assert.equal(h.chatCalls.length, 1, 'only the first message attempted; the batch stops at the failure');
-    assert.equal(h.sends.length, 0, 'nothing sent while the first message fails');
+    assert.equal(h.chatCalls.length, 1, 'only the first message attempted; the second queues behind the busy session');
+    assert.equal(h.sends.length, 0, 'nothing sent while the first turn fails');
+    const okId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['ok-i0'])[0].values[0][0];
     assert.equal(
-      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId,
-      'cursor held before the failing message (no leapfrog by the later clean message)',
+      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId,
+      'cursor advanced once both triggers were dispatched/queued (turn retry rides the durable queue)',
     );
 
-    // Next tick: the failed message recovers (one-shot error spent) and both
-    // flow in order.
+    // Next tick: the failed turn is retried first (FIFO per bot) and succeeds —
+    // the one-shot error is spent. The queued second message waits its turn.
     await h.loop.runTick();
-    assert.equal(h.chatCalls.length, 3, 'failed message retried, then the queued one');
-    assert.equal(h.sends.length, 2);
+    assert.equal(h.chatCalls.length, 2, 'failed turn retried from the durable queue');
     assert.match(h.chatCalls[1].userMessage, />>> Human: @Coder Bot first attempt <<</, 'retry keeps message order');
+    assert.equal(h.sends.length, 1);
+
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 3, 'queued second message drains after the retry');
     assert.match(h.chatCalls[2].userMessage, />>> Human: @Coder Bot second attempt <<</);
-    const okId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['ok-i0'])[0].values[0][0];
+    assert.equal(h.sends.length, 2);
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId);
   } finally {
     h.cleanup();
@@ -985,6 +1003,8 @@ test('send failure is logged and swallowed; cursor still advances', async () => 
       senderName: 'Human', content: '@Coder Bot say hi',
     });
     await failingLoop.runTick();
+    // fix/group-task-flow: the send runs inside the detached turn job — drain it.
+    await failingLoop.whenIdle();
     assert.equal(attempt, 1, 'send was attempted');
     assert.equal(originalSend.length, 0, 'no successful sends recorded');
     const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['fail-send-i0'])[0].values[0][0];
@@ -3012,11 +3032,11 @@ test('round-4: HTTP probe notes on https deliverable links ride the chair verifi
   }
 });
 
-test('round-4 cursor semantics: failing message is retried, cursor advances only on success', async () => {
+test('round-4 cursor semantics: a failed reply turn retries via the durable queue; the cursor never regresses', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
-    // one-shot LLM failure: tick 1 fails, tick 2 succeeds
+    // one-shot LLM failure: tick 1's turn fails, tick 2's durable-queue retry succeeds
     h.state.chatError = 'transient boom';
     insertGroupMessage(h.db, {
       pinId: 'retry-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
@@ -3025,21 +3045,23 @@ test('round-4 cursor semantics: failing message is retried, cursor advances only
     const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['retry-i0'])[0].values[0][0];
 
     await h.loop.runTick();
-    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
-      'cursor does NOT advance on a failed message (retry semantics)');
+    // fix/group-task-flow: the cursor advances once the trigger is DISPATCHED;
+    // the failed reply turn retries via the durable defer queue instead of
+    // holding the cursor (and the whole batch behind it) hostage.
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advanced at dispatch (reply retry rides the durable queue)');
     assert.equal(h.chatCalls.length, 1, 'first attempt failed');
+    assert.equal(h.sends.length, 0);
 
     await h.loop.runTick();
-    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
-      'cursor advances once the message is processed successfully');
-    assert.equal(h.chatCalls.length, 2, 'message was retried');
-    assert.equal(h.sends.length, 1);
+    assert.equal(h.chatCalls.length, 2, 'message retried from the durable queue on the next tick');
+    assert.equal(h.sends.length, 1, 'retry posted the reply');
   } finally {
     h.cleanup();
   }
 });
 
-test('round-4 cursor semantics: permanently failing message is dropped after the bounded retries', async () => {
+test('round-4 cursor semantics: a permanently failing turn is dropped after the bounded retries', async () => {
   const h = await createHarness({ chatErrorAlways: 'always boom' });
   try {
     const task = h.createTask([2]);
@@ -3049,15 +3071,15 @@ test('round-4 cursor semantics: permanently failing message is dropped after the
     });
     const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['stuck-i0'])[0].values[0][0];
 
-    for (let tick = 1; tick <= 4; tick += 1) {
+    // fix/group-task-flow: one attempt per tick — tick 1 dispatches from the
+    // message loop, ticks 2-5 drain the durable-queue requeue. The 5th failure
+    // spends the budget and the entry is dropped.
+    for (let tick = 1; tick <= 5; tick += 1) {
       await h.loop.runTick();
-      assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
-        `tick ${tick}: cursor held until the retry budget is spent`);
+      assert.equal(h.sends.length, 0, `tick ${tick}: nothing ever posts`);
+      assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+        `tick ${tick}: cursor stayed advanced (dispatch-time semantics)`);
     }
-    // the 5th failure spends the budget: the message is dropped, cursor advances
-    await h.loop.runTick();
-    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
-      'cursor advanced past the permanently failing message after the bounded retries');
     assert.equal(h.chatCalls.length, 5, 'exactly MSG_RETRY_MAX_FAILURES attempts');
 
     // the 6th tick has nothing left to process
@@ -3560,7 +3582,7 @@ test('review follow-up: liveness in the timeout/unreachable gap never flaps the 
   }
 });
 
-test('tick watchdog: a hung tick no longer bricks the daemon loop', async () => {
+test('tick watchdog: a hung TURN no longer hangs the daemon loop', async () => {
   const logs = [];
   const h = await createHarness({
     emitLog: (message) => logs.push(message),
@@ -3571,6 +3593,8 @@ test('tick watchdog: a hung tick no longer bricks the daemon loop', async () => 
     h.state.nowMs = Date.now();
     // The first group send never settles — simulating the hung await that
     // silently killed the loop in production (task #45, 2026-08-28).
+    // fix/group-task-flow: sends run inside detached turn jobs now, so the hung
+    // send hangs ONE job while the tick loop keeps driving every other task.
     const realPost = h.deps.postGroupTaskMessage;
     let postCalls = 0;
     h.deps.postGroupTaskMessage = async (...args) => {
@@ -3587,21 +3611,22 @@ test('tick watchdog: a hung tick no longer bricks the daemon loop', async () => 
     const drivenAtStart = h.groupTaskStore.getTaskById(task.id).lastDrivenAt ?? 0;
     h.loop.start();
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    await sleep(100); // tick 1 hangs inside the first send
+    await sleep(100); // tick 1 dispatches the turn whose send hangs forever
     h.state.nowMs += 10_000; // jump past the watchdog window
     // intervalMs is clamped to >= 1000ms inside the loop — wait out a full
-    // interval so the watchdog fire + the resumed tick both land.
+    // interval so later ticks land.
     await sleep(1_500);
     h.loop.stop();
 
-    assert.ok(
-      logs.some((line) => line.includes('Tick watchdog')),
-      'watchdog logged the hung tick',
+    assert.equal(
+      logs.filter((line) => line.includes('Tick watchdog')).length,
+      0,
+      'no watchdog fire: the tick itself never hung (the hung send lives in a detached job)',
     );
     const drivenAtEnd = h.groupTaskStore.getTaskById(task.id).lastDrivenAt ?? 0;
     assert.ok(
       drivenAtEnd > drivenAtStart,
-      'the loop resumed driving after the hung tick (lastDrivenAt heartbeat moved)',
+      'the loop keeps driving while a turn job is hung (lastDrivenAt heartbeat moved)',
     );
   } finally {
     h.cleanup();
@@ -4323,8 +4348,7 @@ test('P1-3: the planning directive embeds the OpenTeam block when invites are pe
   try {
     const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
     // Wire the optional store getter (same shape main.ts passes).
-    h.loop = createGroupTaskDaemonLoop({
-      ...h.deps,
+    h.loop = h.makeLoop({
       getOpenTeamMembershipStore: () => membershipStore,
     });
     const task = h.createTask([2], { activate: false }); // planning

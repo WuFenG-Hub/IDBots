@@ -161,7 +161,18 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.uploadDeliverableFile != null ? { uploadDeliverableFile: overrides.uploadDeliverableFile } : {}),
   };
 
-  const loop = createGroupTaskDaemonLoop(loopDeps);
+  const rawLoop = createGroupTaskDaemonLoop(loopDeps);
+  // fix/group-task-flow: responder turns run as detached async jobs now.
+  // Preserve the historical test contract ("when runTick() resolves, every
+  // triggered turn has completed") by draining pending turn jobs after the tick.
+  const drainLoop = (target) => ({
+    ...target,
+    runTick: async () => {
+      await target.runTick();
+      await target.whenIdle();
+    },
+  });
+  const loop = drainLoop(rawLoop);
 
   const createTask = (workerIds = [2, 3], opts = {}) => {
     const task = groupTaskStore.createTask({
@@ -182,7 +193,7 @@ const createHarness = async (overrides = {}) => {
     store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore,
     loop, chatCalls, sends, routingCalls, skillTurnCalls, logs, ownerReports, sourceReviewReports, state, createTask,
     /** A SECOND daemon loop over the SAME stores/kv (multi-instance mutex). */
-    makeSecondLoop: () => createGroupTaskDaemonLoop(loopDeps),
+    makeSecondLoop: () => drainLoop(createGroupTaskDaemonLoop(loopDeps)),
     cleanup: () => store.close(),
   };
 };

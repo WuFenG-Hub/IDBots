@@ -1313,6 +1313,8 @@ export interface GroupTaskDaemonDeps {
 
 export interface GroupTaskDaemonLoop {
   runTick(): Promise<void>;
+  /** Resolves when every turn job dispatched so far has settled (tests / shutdown). */
+  whenIdle(): Promise<void>;
   start(): void;
   stop(): void;
   isRunning(): boolean;
@@ -1905,6 +1907,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * cap or a cooldown is NOT dropped. The (task, bot, message) is queued here and
    * retried at the start of a later tick, so the skipped worker still gets its
    * chance (the message cursor has already advanced past it by then).
+   *
+   * fix/group-task-flow: the queue is DURABLE (kv per task). The async turn
+   * dispatch below defers to it whenever a bot is busy, so an app restart must
+   * not strand those triggers the way the old in-memory array did.
    */
   interface DeferredReplyEntry {
     taskId: number;
@@ -1912,18 +1918,62 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     messageId: number;
     reason: GroupTaskResponderDecision['reason'];
     verificationNotes: string[];
+    /** Bounded async-turn retry counter (see MSG_RETRY_MAX_FAILURES). */
+    failures?: number;
   }
-  let deferredReplies: DeferredReplyEntry[] = [];
-  const deferReply = (entry: DeferredReplyEntry): void => {
-    const index = deferredReplies.findIndex(
-      (existing) => existing.taskId === entry.taskId && existing.metabotId === entry.metabotId,
-    );
-    if (index >= 0) {
-      deferredReplies[index] = entry; // keep only the newest pending message
-    } else {
-      deferredReplies.push(entry);
+  const DEFERRED_QUEUE_KV_PREFIX = 'group_task_deferred:';
+  const loadDeferredQueue = (taskId: number): DeferredReplyEntry[] => {
+    const raw = deps.getStore().get<string>(`${DEFERRED_QUEUE_KV_PREFIX}${taskId}`);
+    if (raw == null) return [];
+    try {
+      const parsed = JSON.parse(String(raw)) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((entry): entry is DeferredReplyEntry =>
+        Boolean(entry)
+        && typeof (entry as DeferredReplyEntry).taskId === 'number'
+        && typeof (entry as DeferredReplyEntry).metabotId === 'number'
+        && typeof (entry as DeferredReplyEntry).messageId === 'number');
+    } catch {
+      return [];
     }
   };
+  const saveDeferredQueue = (taskId: number, entries: DeferredReplyEntry[]): void => {
+    const sqlite = deps.getStore();
+    const key = `${DEFERRED_QUEUE_KV_PREFIX}${taskId}`;
+    if (entries.length === 0) {
+      sqlite.delete(key);
+    } else {
+      sqlite.set(key, JSON.stringify(entries));
+    }
+  };
+  const deferReply = (entry: DeferredReplyEntry): void => {
+    const entries = loadDeferredQueue(entry.taskId);
+    // Entries are per (task, bot, message) and drain FIFO by message id: every
+    // distinct trigger gets its own turn (coalescing same-bot messages to the
+    // newest would silently drop real assignments). Re-deferring the SAME
+    // trigger replaces it in place, preserving position and failure count.
+    const index = entries.findIndex(
+      (existing) => existing.metabotId === entry.metabotId && existing.messageId === entry.messageId,
+    );
+    if (index >= 0) {
+      entries[index] = entry;
+    } else {
+      entries.push(entry);
+    }
+    entries.sort((a, b) => a.messageId - b.messageId);
+    saveDeferredQueue(entry.taskId, entries);
+  };
+
+  /**
+   * fix/group-task-flow: async turn execution state. Turns run as detached
+   * jobs (see dispatchReplyTurn) so one multi-minute turn never freezes the
+   * tick for every other task/monitor. turnInFlight enforces the
+   * one-turn-per-(task,bot)-session invariant; pendingTurnJobs lets tests and
+   * shutdown observe completion via whenIdle().
+   */
+  const turnInFlight = new Map<string, { startedAt: number }>();
+  const pendingTurnJobs = new Set<Promise<void>>();
+  const latchWatchers = new Set<ReturnType<typeof setInterval>>();
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
@@ -4451,6 +4501,181 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * fix/group-task-flow: upper bound for the post-timeout in-flight latch. A
+   * skill-turn watchdog fire means the turn keeps running inside the session;
+   * the guard stays latched until the session leaves 'running' (or this cap).
+   */
+  const TURN_LATCH_MAX_MS = 45 * 60_000;
+  const latchInFlightUntilSessionIdle = (key: string, sessionId: string | null, taskId: number, botId: number): void => {
+    if (!sessionId) {
+      turnInFlight.delete(key);
+      return;
+    }
+    const startedAt = now();
+    const watcher = setInterval(() => {
+      let status: string | null = null;
+      try {
+        status = deps.getCoworkStore().getSession(sessionId)?.status ?? null;
+      } catch {
+        status = null;
+      }
+      if (status === 'running' && now() - startedAt < TURN_LATCH_MAX_MS) return;
+      clearInterval(watcher);
+      latchWatchers.delete(watcher);
+      turnInFlight.delete(key);
+      emitLog(
+        `[GroupTaskDaemon] Task ${taskId}: in-flight latch for bot ${botId} released ` +
+        `(session status ${status ?? 'unknown'}${status === 'running' ? ', latch cap reached' : ''})`,
+      );
+    }, 15_000);
+    watcher.unref?.();
+    latchWatchers.add(watcher);
+  };
+
+  /**
+   * fix/group-task-flow: dispatch one responder's turn as a DETACHED async job.
+   * The old inline `await generateAndSendReply(...)` let a single 10-40 min
+   * turn freeze the whole daemon tick — every other task's messages and every
+   * watchdog stalled behind it (task #51: a 41-min chair turn batched late
+   * false-positive warnings and left the pipeline looking dead). Now the tick
+   * only dispatches; the job posts the reply when the turn completes.
+   *
+   * Invariants preserved:
+   * - one turn per (task, bot) session: callers check turnInFlight first and
+   *   defer into the durable queue when busy;
+   * - cooldown/reply budget are charged at dispatch (committed work), so a
+   *   failing turn cannot retry for free;
+   * - failures requeue into the durable defer queue with the same bounded
+   *   retry budget the synchronous path had (MSG_RETRY_MAX_FAILURES);
+   * - a skill-turn watchdog fire is not retried (the turn keeps running in the
+   *   session) and keeps the guard latched until the session goes idle.
+   */
+  const dispatchReplyTurn = (args: {
+    task: GroupTask;
+    member: GroupTaskMember;
+    bot: GroupTaskDaemonBotFull;
+    message: GroupTaskDaemonMessage;
+    reason: GroupTaskResponderDecision['reason'];
+    promptMembers: DaemonPromptMember[];
+    chairGlobalMetaId: string;
+    ownerGlobalMetaId: string;
+    verificationNotes: string[];
+    remoteStatusBlock: string;
+    /** The durable-queue entry being drained, when this dispatch is a retry. */
+    entry: DeferredReplyEntry | null;
+  }): void => {
+    const { task, member, bot, message } = args;
+    const key = keyOf(task.id, bot.id);
+    const sessionId = ensureTaskSession(deps.getCoworkStore(), task, bot.id, bot.name).id;
+    turnInFlight.set(key, { startedAt: now() });
+    // The reply budget is charged at dispatch (committed work — a retry storm
+    // must not be free); the cooldown timestamp only moves on SUCCESS (a failed
+    // turn posted nothing, so its durable-queue retry must not sit out a
+    // cooldown it never earned).
+    replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
+    emitLog(
+      `[GroupTaskDaemon] Task ${task.id}: dispatched async ${member.role} turn for bot ${bot.id} ` +
+      `(message #${message.id}, reason ${args.reason}${args.entry ? ', from deferred queue' : ''})`,
+    );
+    const job: Promise<void> = (async () => {
+      let keepLatched = false;
+      try {
+        await generateAndSendReply(
+          task,
+          member,
+          bot,
+          message,
+          args.promptMembers,
+          args.chairGlobalMetaId,
+          args.ownerGlobalMetaId,
+          args.verificationNotes,
+          args.remoteStatusBlock,
+        );
+        lastReplyAtByKey.set(key, now());
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${member.role} turn for bot ${bot.id} completed ` +
+          `(message #${message.id})`,
+        );
+      } catch (error) {
+        if (error instanceof SkillTurnTimeoutError) {
+          keepLatched = true;
+          latchInFlightUntilSessionIdle(key, sessionId, task.id, bot.id);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn hit the skill-turn watchdog ` +
+            `(message #${message.id}); the turn keeps running in the session — no retry queued, ` +
+            'guard latched until the session goes idle',
+          );
+        } else {
+          const failures = (args.entry?.failures ?? 0) + 1;
+          if (failures >= MSG_RETRY_MAX_FAILURES) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} ` +
+              `dropped after ${failures} failures: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          } else {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} ` +
+              `failed (attempt ${failures}/${MSG_RETRY_MAX_FAILURES}); requeued: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+            deferReply({
+              taskId: task.id,
+              metabotId: bot.id,
+              messageId: message.id,
+              reason: args.reason,
+              verificationNotes: args.verificationNotes,
+              failures,
+            });
+          }
+        }
+      } finally {
+        if (!keepLatched) turnInFlight.delete(key);
+        pendingTurnJobs.delete(job);
+        noteTickProgress();
+      }
+    })();
+    pendingTurnJobs.add(job);
+  };
+
+  /**
+   * fix/group-task-flow: run a task-level chair turn (planning / supervisor
+   * signals) as a detached job under the same per-(task,bot) in-flight guard —
+   * a busy chair session defers the work to a later tick instead of blocking
+   * this one. The wrapped function keeps its own retry/pending semantics.
+   */
+  const runTurnAsync = (guardKey: string, label: string, fn: () => Promise<void>): boolean => {
+    if (turnInFlight.has(guardKey)) {
+      emitLog(`[GroupTaskDaemon] ${label}: skipped — a turn is already in flight for ${guardKey}`);
+      return false;
+    }
+    turnInFlight.set(guardKey, { startedAt: now() });
+    const job: Promise<void> = (async () => {
+      try {
+        await fn();
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] ${label} failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        turnInFlight.delete(guardKey);
+        pendingTurnJobs.delete(job);
+        noteTickProgress();
+      }
+    })();
+    pendingTurnJobs.add(job);
+    return true;
+  };
+
+  /** Resolves once every turn job dispatched so far has settled. */
+  const whenIdle = async (): Promise<void> => {
+    while (pendingTurnJobs.size > 0) {
+      await Promise.allSettled([...pendingTurnJobs]);
+    }
+  };
+
+  /**
    * Round-4 attribution enrichment. The chain-signature GlobalMetaID is the
    * ONLY identity source for group-task attribution:
    * - a row whose sender_global_metaid is empty is resolved from its legacy
@@ -5786,8 +6011,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // G-04: drive the chair's response to pending supervisor signals (nudge /
     // flag). One turn per batch; pause/resume rows arrive already processed
     // (host-applied gates).
+    // fix/group-task-flow: detached — the turn must not block the tick; a busy
+    // chair session defers the batch to a later tick (signals stay pending).
     if (!dispatchPausedAtTick) {
-      await processSupervisorSignals(task, members, botsById, promptMembers);
+      const hasPendingSignals = store
+        .listPendingSupervisorSignals(task.id)
+        .some((signal) => signal.kind === 'nudge' || signal.kind === 'flag');
+      if (hasPendingSignals && chairMemberId != null) {
+        runTurnAsync(keyOf(task.id, chairMemberId), `Task ${task.id} supervisor-signal turn`, () =>
+          processSupervisorSignals(task, members, botsById, promptMembers));
+      }
     }
 
     // G-01: no-progress stall — an executing task with no new group message and
@@ -5842,18 +6075,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
     // G-04: a supervisor pause holds the initial dispatch too.
-    if (task.status === 'planning' && !dispatchPausedAtTick) {
-      await maybeRunChairPlanningTurn(task, members, botsById, promptMembers, remoteStatusBlock);
+    // fix/group-task-flow: detached — planning must not block the tick. The
+    // planned-key/attempts counters inside keep their semantics; a busy chair
+    // session simply retries on a later tick.
+    if (task.status === 'planning' && !dispatchPausedAtTick && chairMemberId != null) {
+      runTurnAsync(keyOf(task.id, chairMemberId), `Task ${task.id} chair planning turn`, () =>
+        maybeRunChairPlanningTurn(task, members, botsById, promptMembers, remoteStatusBlock));
     }
 
     // P0-3c: compensate replies deferred by a cap/cooldown in an earlier tick.
     // Deferred entries get priority over brand-new messages so a skipped worker
     // still gets its chance (the message cursor already advanced past it).
+    // fix/group-task-flow: the queue is durable (kv); entries dispatch as async
+    // jobs and re-enter the queue when the bot session is still busy.
     const memberGmids = memberGlobalMetaIdSet(members);
     const ownerGmidKey = ownerGlobalMetaId.toLowerCase();
-    const deferredForTask = deferredReplies.filter((entry) => entry.taskId === task.id);
+    const deferredForTask = loadDeferredQueue(task.id);
     if (deferredForTask.length > 0) {
-      deferredReplies = deferredReplies.filter((entry) => entry.taskId !== task.id);
+      saveDeferredQueue(task.id, []); // popped; entries re-defer below as needed
       for (const entry of deferredForTask) {
         const member = members.find((candidate) => candidate.metabotId === entry.metabotId);
         const bot = botsById.get(entry.metabotId);
@@ -5911,26 +6150,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             `${Math.round(dependencyWaitMaxMs / 60_000)} min; proceeding with the deferred dispatch`,
           );
         }
-        try {
-          await generateAndSendReply(
-            task,
-            member,
-            bot,
-            deferredMessage,
-            promptMembers,
-            chairGlobalMetaId,
-            ownerGlobalMetaId,
-            entry.verificationNotes,
-            remoteStatusBlock,
-          );
-          lastReplyAtByKey.set(key, now());
-          replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
-        } catch (error) {
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: deferred reply failed for bot ${entry.metabotId}: ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-          );
+        // fix/group-task-flow: a busy session keeps the entry queued — the
+        // in-flight turn finishes first, then this drains on a later tick.
+        if (turnInFlight.has(key)) {
+          deferReply(entry);
+          continue;
         }
+        dispatchReplyTurn({
+          task,
+          member,
+          bot,
+          message: deferredMessage,
+          reason: entry.reason,
+          promptMembers,
+          chairGlobalMetaId,
+          ownerGlobalMetaId,
+          verificationNotes: entry.verificationNotes,
+          remoteStatusBlock,
+          entry,
+        });
       }
     }
 
@@ -6135,19 +6373,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
           // Verification facts travel with the deliverable that triggered the chair.
           const notesForDecision = decision.reason === 'chair_deliverable' ? verificationNotes : [];
-          await generateAndSendReply(
+          // fix/group-task-flow: a busy session queues the trigger durably
+          // instead of blocking the tick behind the in-flight turn.
+          if (turnInFlight.has(key)) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: bot ${decision.metabotId} has a turn in flight; ` +
+              `queued message #${message.id} for a later tick`,
+            );
+            deferReply({
+              taskId: task.id,
+              metabotId: decision.metabotId,
+              messageId: message.id,
+              reason: decision.reason,
+              verificationNotes: notesForDecision,
+            });
+            continue;
+          }
+          dispatchReplyTurn({
             task,
             member,
             bot,
             message,
+            reason: decision.reason,
             promptMembers,
             chairGlobalMetaId,
             ownerGlobalMetaId,
-            notesForDecision,
+            verificationNotes: notesForDecision,
             remoteStatusBlock,
-          );
-          lastReplyAtByKey.set(key, now());
-          replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
+            entry: null,
+          });
           if (!isChair) {
             workerRepliesThisTick += 1;
           } else if (decision.reason !== 'chair_mentioned') {
@@ -6162,27 +6416,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           sqlite.delete(retryKey); // recovered after earlier failures
         }
       } catch (error) {
-        // A skill-turn watchdog fire is NOT a transient failure: the turn is
-        // still running inside the worker's session. Retrying the message
-        // queues a duplicate turn behind the in-flight one, stalls the tick
-        // for another full timeout budget per attempt, and after
-        // MSG_RETRY_MAX_FAILURES the trigger message was dropped unanswered
-        // (task #41's repeated "Skill turn timed out" pile-up). Advance the
-        // cursor instead: protocol tags/markers above already landed, and
-        // when the in-flight turn completes its result lives in the session
-        // and informs the worker's next dispatch.
-        if (error instanceof SkillTurnTimeoutError) {
-          const timeoutRetryKey = `${MSG_RETRY_PREFIX}${task.id}:${row.id}`;
-          if (sqlite.get<number>(timeoutRetryKey) != null) sqlite.delete(timeoutRetryKey);
-          store.updateLastProcessedMsgId(task.id, row.id);
-          noteTickProgress();
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: message ${row.id} skill turn timed out ` +
-            `(${Math.round(error.timeoutMs / 1000)}s watchdog); the turn keeps running in the ` +
-            'worker session — cursor advanced, no retry queued',
-          );
-          continue;
-        }
+        // fix/group-task-flow: responder turns are detached jobs now, so this
+        // catch only covers SYNCHRONOUS processing failures (attribution,
+        // protocol tags). Skill-turn watchdog handling lives in
+        // dispatchReplyTurn (no retry; guard latched until the session idles).
         // Round-4 cursor semantics: lastProcessedMsgId is the id of the LAST
         // MESSAGE THE HOST SUCCESSFULLY PROCESSED — it only advances on
         // success. A failing message is retried on later ticks (bounded by a
@@ -6298,6 +6535,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         remoteUnreachableNotified.delete(key);
       }
     }
+    // fix/group-task-flow: tasks that left the active set drop their durable
+    // defer queue too — a done/cancelled task must never resurrect queued replies.
+    for (const task of store.listTasks()) {
+      if (!activeTaskIds.has(task.id)) saveDeferredQueue(task.id, []);
+    }
     for (const task of activeTasks) {
       try {
         await processTask(task);
@@ -6350,6 +6592,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   return {
     runTick,
+    whenIdle,
     start() {
       if (timer) return;
       runGuardedTick();
@@ -6357,9 +6600,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       timer.unref?.();
     },
     stop() {
-      if (!timer) return;
-      clearInterval(timer);
-      timer = null;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      // fix/group-task-flow: release the post-timeout session latch watchers
+      // with the loop so a stopped daemon never holds timers alive.
+      for (const watcher of latchWatchers) clearInterval(watcher);
+      latchWatchers.clear();
     },
     isRunning() {
       return timer !== null;
