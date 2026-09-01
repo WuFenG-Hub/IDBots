@@ -550,6 +550,12 @@ const DEFAULT_ACK_TIMEOUT_MS = 3 * 60_000;
 const DEFAULT_ACK_ENGAGED_RECENT_MS = 10 * 60_000;
 /** P0-4: minutes between retries of an unverified deliverable (indexer lag). */
 const DEFAULT_VERIFICATION_RETRY_MS = 10 * 60_000;
+/**
+ * fix/group-task-flow: hard cap for a plain-LLM group-task turn (no tool
+ * loop). A wedged provider request aborts into the retry path instead of
+ * hanging the turn forever.
+ */
+const DEFAULT_PLAIN_TURN_TIMEOUT_MS = 10 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Pure gating (exported for tests)
@@ -1034,6 +1040,8 @@ export type GroupTaskDaemonPerformChatFn = (
     effort?: 'off' | 'low' | 'high' | 'max' | null;
     fallbackEffort?: 'off' | 'low' | 'high' | 'max' | null;
     thinking?: 'enabled' | 'disabled';
+    /** fix/group-task-flow: abort the request when a plain-LLM turn wedges. */
+    signal?: AbortSignal;
   },
 ) => Promise<string>;
 
@@ -1297,6 +1305,11 @@ export interface GroupTaskDaemonDeps {
   ackEngagedRecentMs?: number;
   /** P0-4: ms between retries of an unverified deliverable (default 10 min). */
   verificationRetryMs?: number;
+  /**
+   * fix/group-task-flow: hard timeout (ms) for plain-LLM group-task turns
+   * (default 10 min). The abort rejects into the bounded retry path.
+   */
+  plainTurnTimeoutMs?: number;
   /**
    * Ledger fix (#14→#16): upload a LOCAL file deliverable on-chain as a
    * metafile paid by the author bot's wallet, so a worker's local file path
@@ -1602,6 +1615,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     deps.getStore().getSaveFunction(),
   );
 
+  /**
+   * fix/group-task-flow: plain-LLM turns (chair planning, replies without a
+   * skill route, owner reports) used to run with NO timeout — a wedged HTTP
+   * request held the turn (and, before async dispatch, the whole tick)
+   * hostage for as long as the provider stayed silent (task #51's 41-min
+   * gap). Every daemon plain-LLM call now carries an AbortSignal; the abort
+   * rejects into the normal retry path. Skill turns keep their own watchdog.
+   */
+  const plainTurnTimeoutMs = Math.max(
+    5_000,
+    Math.trunc(deps.plainTurnTimeoutMs ?? DEFAULT_PLAIN_TURN_TIMEOUT_MS),
+  );
+  const performChatWithTimeout: GroupTaskDaemonPerformChatFn = (systemPrompt, userMessage, llmId, options) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort(
+        new Error(`plain LLM turn timed out after ${Math.round(plainTurnTimeoutMs / 60_000)} min`),
+      );
+    }, plainTurnTimeoutMs);
+    timer.unref?.();
+    const merged = { ...(options ?? {}), signal: controller.signal };
+    return deps.performChat(systemPrompt, userMessage, llmId, merged)
+      .finally(() => clearTimeout(timer));
+  };
+
   // Loop prevention state (in-memory, per loop instance; no new DB columns).
   const lastReplyAtByKey = new Map<string, number>();
   const replyCountByKey = new Map<string, number>();
@@ -1872,7 +1910,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       ackText = copyWorkingAckFallback(objective);
     } else {
       try {
-        ackText = (await deps.performChat(baseSystemPrompt, directive, llmId, {
+        ackText = (await performChatWithTimeout(baseSystemPrompt, directive, llmId, {
           fallbackLlmId,
           thinking: 'disabled',
         })).trim();
@@ -2864,7 +2902,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const brain = metabotBrainOptions(bot);
       const llmId = brain.llmId ?? undefined;
       const fallbackLlmId = brain.fallbackLlmId;
-      const report = (await deps.performChat(systemPrompt, directive, llmId, {
+      const report = (await performChatWithTimeout(systemPrompt, directive, llmId, {
         llmProvider: brain.llmProvider,
         fallbackLlmId,
         fallbackLlmProvider: brain.fallbackLlmProvider,
@@ -3063,7 +3101,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const brain = metabotBrainOptions(bot);
       const llmId = brain.llmId ?? undefined;
       const fallbackLlmId = brain.fallbackLlmId;
-      const report = (await deps.performChat(systemPrompt, directive, llmId, {
+      const report = (await performChatWithTimeout(systemPrompt, directive, llmId, {
         llmProvider: brain.llmProvider,
         fallbackLlmId,
         fallbackLlmProvider: brain.fallbackLlmProvider,
@@ -4116,7 +4154,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const llmId = brain.llmId ?? undefined;
       const fallbackLlmId = brain.fallbackLlmId;
       // Plain LLM path: the chair is planning here, not executing skills.
-      const reply = (await deps.performChat(systemPrompt, directive, llmId, {
+      const reply = (await performChatWithTimeout(systemPrompt, directive, llmId, {
         llmProvider: brain.llmProvider,
         fallbackLlmId,
         fallbackLlmProvider: brain.fallbackLlmProvider,
@@ -4251,7 +4289,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
       const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
       const brain = metabotBrainOptions(bot);
-      const reply = (await deps.performChat(
+      const reply = (await performChatWithTimeout(
         systemPromptParts.systemPrompt,
         [systemPromptParts.volatileContext, directive].filter(Boolean).join('\n\n'),
         brain.llmId ?? undefined,
@@ -4411,7 +4449,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // The runner appends the assistant message to the session itself.
     } else {
       try {
-        reply = (await deps.performChat(baseSystemPrompt, userMessage, llmId, {
+        reply = (await performChatWithTimeout(baseSystemPrompt, userMessage, llmId, {
           llmProvider: brain.llmProvider,
           fallbackLlmId,
           fallbackLlmProvider: brain.fallbackLlmProvider,
