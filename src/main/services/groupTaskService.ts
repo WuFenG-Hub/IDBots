@@ -1476,6 +1476,17 @@ export async function getGroupTask(
   // Projection-only, so historical closed tasks (#33/#34) repair themselves
   // without a data migration; closeGroupTask additionally persists 'done'.
   //
+  // Task #52 extension: the same settle applies while the task SITS IN REVIEW —
+  // entering acceptance means the work phase is over for the whole crew, yet
+  // the members' state machine keeps its last stamps ('working') and the
+  // liveness-derived workStatus reads 'working'/'timeout' off stale [WORKING]
+  // signals. The member rail then showed every finished member as
+  // Working/Timeout next to the "awaiting acceptance" task state. During
+  // review: delivered members read 'done'; the rest read 'idle' (workStatus)
+  // with a stale 'working' state-machine stamp projected to 'standby'.
+  // Read-path only — a rework hatch (review→executing) drops the projection
+  // and the stored stamps resume; no reset needed.
+  //
   // Semantics (2026-08-25 review):
   // - Cancelled tasks deliberately do NOT settle — a cancelled crew member
   //   keeps whatever stamp the abort left.
@@ -1489,6 +1500,7 @@ export async function getGroupTask(
   //   daemon skips terminal tasks, and worker-session context injection only
   //   carries name/role — no other reader needs the projection.
   const taskDone = task.status === 'done';
+  const taskAccepting = task.status === 'review';
   const deliveredAuthorIds = new Set(
     deliverables
       .filter((row) => row.status === 'delivered' || row.status === 'accepted')
@@ -1535,7 +1547,7 @@ export async function getGroupTask(
       }
     })();
     const invite = inviteByGmid.get(gmid);
-    const memberDelivered = taskDone && gmid !== '' && deliveredAuthorIds.has(gmid);
+    const memberDelivered = (taskDone || taskAccepting) && gmid !== '' && deliveredAuthorIds.has(gmid);
     // P2-1: newest real activity across every signal, epoch ms.
     const activityCandidates = [
       lastSpeakAt != null ? lastSpeakAt * 1000 : null,
@@ -1543,16 +1555,28 @@ export async function getGroupTask(
       lastSessionActivityAt,
     ].filter((value): value is number => value != null);
     const lastActivityAt = activityCandidates.length > 0 ? Math.max(...activityCandidates) : null;
+    // Task #52: during review a stale 'working' state-machine stamp projects to
+    // 'standby' (on the bench while the owner accepts); other stamps stand.
+    const projectedStatus = memberDelivered && member.status !== 'done'
+      ? 'done' as const
+      : taskAccepting && member.status === 'working'
+        ? 'standby' as const
+        : member.status;
     return {
       ...member,
       avatar: member.metabotId != null ? (avatarById.get(member.metabotId) ?? null) : null,
       lastSpeakAt,
       lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
       lastActivityAt,
-      status: memberDelivered && member.status !== 'done' ? 'done' : member.status,
+      status: projectedStatus,
       workStatus: memberDelivered
         ? 'done'
-        : computeGroupTaskMemberWorkStatus({
+        : taskAccepting
+          // Task #52: review = work phase over — nobody is mid-work; the
+          // liveness-derived working/timeout readouts describe a state that
+          // no longer exists.
+          ? 'idle' as const
+          : computeGroupTaskMemberWorkStatus({
             metabotId: member.metabotId,
             lastSpeakAt,
             lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,

@@ -1158,6 +1158,61 @@ test('P1-4: computeGroupTaskMemberWorkStatus error-degrade priority', () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// Task #52: the member rail while the task SITS IN REVIEW. Entering acceptance
+// ends the work phase for the whole crew, so the liveness-derived
+// working/timeout readouts (stale [WORKING] signals) describe a state that no
+// longer exists. getGroupTask projects: delivered members -> done; the rest ->
+// idle, with a stale 'working' state-machine stamp projected to 'standby'.
+// ---------------------------------------------------------------------------
+
+test('task #52: review-phase member readout settles to done/idle instead of working/timeout', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.groupTaskStore.createTask({
+      groupId: GROUP_ID, title: 'mono-color skill', goal: 'Ship the skill intro MetaApp',
+      acceptanceCriteria: 'Deliverables on chain', chairMetabotId: 1, createdBy: 'user', createPinId: 'pin-c',
+    });
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 1, globalmetaid: 'gmid-twin', role: 'chair', joinedPinId: 'pin-c' });
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 2, globalmetaid: 'gmid-coder', role: 'worker', joinedPinId: 'pin-c' });
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 3, globalmetaid: 'gmid-designer', role: 'worker', joinedPinId: 'pin-c' });
+    // The stuck shape from #52: task in review (verdict landed) but every
+    // member still carries the 'working' stamp with stale signals.
+    h.groupTaskStore.updateTaskStatus(task.id, 'executing');
+    h.groupTaskStore.updateTaskStatus(task.id, 'review');
+    h.groupTaskStore.setMemberStatus(task.id, 1, 'working', 'gmid-twin');
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-coder');
+    h.groupTaskStore.setMemberStatus(task.id, 3, 'working', 'gmid-designer');
+    // Coder delivered; designer and the chair have no ledger rows.
+    const deliverable = h.groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'pin-deliv', authorGlobalmetaid: 'gmid-coder', kind: 'pinid', uri: 'pin-deliv',
+    });
+    h.groupTaskStore.updateDeliverableStatus(deliverable.id, 'delivered');
+
+    const shown = await getGroupTask(task.id);
+    const chair = shown.members.find((m) => m.metabotId === 1);
+    const coder = shown.members.find((m) => m.metabotId === 2);
+    const designer = shown.members.find((m) => m.metabotId === 3);
+
+    assert.equal(coder.status, 'done', 'delivered member settles to done (state machine)');
+    assert.equal(coder.workStatus, 'done', 'delivered member reads Delivered');
+    assert.equal(chair.status, 'standby', "chair's stale working stamp projects to standby during review");
+    assert.equal(chair.workStatus, 'idle', 'chair reads Idle while awaiting acceptance');
+    assert.equal(designer.status, 'standby', "worker's stale working stamp projects to standby during review");
+    assert.equal(designer.workStatus, 'idle', 'non-delivered worker reads Idle, never working/timeout');
+
+    // Read-path only: the stored stamps survive untouched, so a rework hatch
+    // (review -> executing) drops the projection and executing semantics resume.
+    h.groupTaskStore.updateTaskStatus(task.id, 'executing');
+    const reopened = await getGroupTask(task.id);
+    const reopenedDesigner = reopened.members.find((m) => m.metabotId === 3);
+    assert.equal(reopenedDesigner.status, 'working', 'stored working stamp resumes after rework');
+    assert.notEqual(reopenedDesigner.workStatus, 'idle');
+  } finally {
+    h.cleanup();
+  }
+});
+
 // --- Local-only UI state: display name, pin, archive/unarchive ---
 
 const insertTaskRow = (h, overrides = {}) => h.groupTaskStore.createTask({
