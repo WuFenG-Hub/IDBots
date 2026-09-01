@@ -75,3 +75,28 @@ export const isA2ASystemErrorMessage = (message: A2AFilterableMessage): boolean 
   const content = typeof message.content === 'string' ? message.content : '';
   return /^\s*Error:/i.test(content) || metadata.isError === true;
 };
+
+/**
+ * Human-readable cause behind an A2A session's error status: the newest
+ * system error message in the transcript, preferring metadata.error over the
+ * "Error: …" content. System bubbles are hidden in the A2A view, so the error
+ * banner is the only place this text can surface. Returns null when the loaded
+ * message window contains no error message.
+ */
+export const lastA2AErrorDetail = (
+  messages: Array<A2AFilterableMessage>,
+  maxChars: number = 240,
+): string | null => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || !isA2ASystemErrorMessage(message)) continue;
+    const metadata = readMetadata(message);
+    const metadataError = typeof metadata.error === 'string' ? metadata.error.trim() : '';
+    const content = typeof message.content === 'string' ? message.content.trim() : '';
+    const detail = metadataError
+      || content.replace(/^\s*Error:\s*/i, '').trim();
+    if (!detail) continue;
+    return detail.length > maxChars ? `${detail.slice(0, maxChars - 1)}…` : detail;
+  }
+  return null;
+};

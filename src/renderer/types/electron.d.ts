@@ -23,6 +23,7 @@ import type {
   CoworkKnowledgeEntry,
   CoworkMessageFeedbackRecord,
   CoworkPermissionMode,
+  CoworkSessionStatus,
   CoworkWorkspaceSelection,
 } from './cowork';
 import type {
@@ -1052,6 +1053,7 @@ interface IElectronAPI {
     addAutoApproveTool: (sessionId: string, toolName: string) => Promise<{ success: boolean; error?: string }>;
     removeAutoApproveTool: (sessionId: string, toolName: string) => Promise<{ success: boolean; error?: string }>;
     endA2APrivateChat: (sessionId: string) => Promise<{ success: boolean; noticeSent?: boolean; error?: string }>;
+    clearSessionError: (sessionId: string) => Promise<{ success: boolean; status?: CoworkSessionStatus; error?: string }>;
     ensureA2ASession: (input: CoworkEnsureA2ASessionInput) => Promise<CoworkEnsureA2ASessionResult>;
     queueA2AGuidance: (input: CoworkA2AGuidanceRequest) => Promise<CoworkA2AGuidanceResult>;
     resendA2ADeliveryArtifact: (input: string | { sessionId: string; orderTxid?: string | null }) => Promise<{ success: boolean; deliveryPinId?: string | null; error?: string }>;

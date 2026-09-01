@@ -8872,6 +8872,39 @@ if (!gotTheLock) {
     });
   });
 
+  // A2A error-banner dismiss. A long-lived private conversation can rest on a
+  // stale 'error' written by one failed local turn while the transcript moved
+  // on; this is the same guarded heal the daemon applies on new A2A activity,
+  // exposed so the renderer banner can be cleared explicitly. Only an errored
+  // A2A session moves to 'completed' — running/idle/stopped keep their meaning.
+  ipcMain.handle('cowork:session:clearError', async (_event, sessionId: string) => {
+    try {
+      const coworkStoreInst = getCoworkStore();
+      const session = coworkStoreInst.getSessionWithoutMessages(sessionId);
+      if (!session) {
+        return { success: false, error: 'Session not found' };
+      }
+      if (session.sessionType !== 'a2a') {
+        return { success: false, error: 'Not an A2A session' };
+      }
+      if (session.status !== 'error') {
+        return { success: true, status: session.status };
+      }
+      coworkStoreInst.updateSession(sessionId, { status: 'completed' });
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) {
+          try { win.webContents.send('cowork:stream:complete', { sessionId }); } catch { /* ignore */ }
+        }
+      });
+      return { success: true, status: 'completed' };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to clear session error',
+      };
+    }
+  });
+
   ipcMain.handle('cowork:session:endA2APrivateChat', async (_event, sessionId: string) => {
     try {
       const coworkStoreInst = getCoworkStore();

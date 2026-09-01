@@ -31,6 +31,7 @@ import {
 } from '../store/slices/browserCoworkSlice';
 import type {
   CoworkSession,
+  CoworkSessionStatus,
   CoworkConfigUpdate,
   CoworkApiConfig,
   CoworkSandboxStatus,
@@ -603,6 +604,37 @@ class CoworkService {
 
     console.error('Failed to end A2A private chat:', result.error);
     return { success: false, error: result.error || 'Failed to end A2A private chat' };
+  }
+
+  /**
+   * Dismiss the A2A error banner: the main process heals a stale 'error'
+   * status to 'completed' (guarded, A2A-only). Local session state follows the
+   * backend-reported status so the banner hides immediately.
+   */
+  async clearSessionError(sessionId: string): Promise<{ success: boolean; status?: CoworkSessionStatus; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.clearSessionError) {
+      return { success: false, error: 'Clear session error API not available' };
+    }
+
+    const result = await cowork.clearSessionError(sessionId);
+    if (!result.success) {
+      console.error('Failed to clear session error:', result.error);
+      return { success: false, error: result.error || 'Failed to clear session error' };
+    }
+
+    const status = result.status ?? 'completed';
+    store.dispatch(updateSessionStatus({ sessionId, status }));
+    store.dispatch(updateBrowserSessionStatus({ sessionId, status }));
+    if (store.getState().cowork.currentSessionId === sessionId) {
+      try {
+        const refreshed = await window.electron?.cowork?.getSession(sessionId);
+        if (refreshed?.success && refreshed.session) {
+          store.dispatch(setCurrentSession(refreshed.session));
+        }
+      } catch { /* ignore */ }
+    }
+    return { success: true, status };
   }
 
   async queueA2AGuidance(input: CoworkA2AGuidanceRequest): Promise<CoworkA2AGuidanceResult> {

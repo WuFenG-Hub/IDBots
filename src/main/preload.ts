@@ -406,6 +406,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:removeAutoApproveTool', { sessionId, toolName }),
     endA2APrivateChat: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:endA2APrivateChat', sessionId),
+    clearSessionError: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:clearError', sessionId),
     ensureA2ASession: (input: {
       actorId?: string | null;
       localMetabotId?: number | null;

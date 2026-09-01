@@ -1781,8 +1781,35 @@ async function resolvePrivateConversationSession(
   return { sessionId: session.id, externalConversationId, episodeStarted: true };
 }
 
+/**
+ * A2A session status is turn-scoped: a failed local turn writes 'error' (via
+ * handleError / runSkillTurnInExistingSession), but the plain-chat reply path
+ * and the outgoing-sync path never write a status back. One transient failure
+ * therefore stranded long-lived conversations on a permanent error banner even
+ * while the transcript kept moving. New transcript activity proves the
+ * conversation lives on, so a session still resting on 'error' heals to
+ * 'completed' — the resting state of healthy A2A sessions. Deliberately
+ * narrow: only 'error' is touched (running/idle/stopped keep their meaning),
+ * and a retrying skill turn that fails again simply re-writes 'error'.
+ */
+function healStaleA2AErrorStatus(params: {
+  coworkStore: Pick<CoworkStore, 'getSessionWithoutMessages' | 'updateSession'>;
+  sessionId: string;
+  emitToRenderer?: RendererEmitter;
+}): boolean {
+  const session = params.coworkStore.getSessionWithoutMessages(params.sessionId);
+  if (!session || session.sessionType !== 'a2a' || session.status !== 'error') {
+    return false;
+  }
+  params.coworkStore.updateSession(params.sessionId, { status: 'completed' });
+  // Same rest signal the order-observer close-out uses, so the renderer's
+  // complete listener syncs the healed status into its session state.
+  params.emitToRenderer?.('cowork:stream:complete', { sessionId: params.sessionId });
+  return true;
+}
+
 export function appendPrivateChatA2AMessage(params: {
-  coworkStore: Pick<CoworkStore, 'addMessage'>;
+  coworkStore: Pick<CoworkStore, 'addMessage' | 'getSessionWithoutMessages' | 'updateSession'>;
   sessionId: string;
   externalConversationId: string;
   type: 'user' | 'assistant';
@@ -1819,6 +1846,12 @@ export function appendPrivateChatA2AMessage(params: {
       message,
     });
   }
+
+  healStaleA2AErrorStatus({
+    coworkStore: params.coworkStore,
+    sessionId: params.sessionId,
+    emitToRenderer: params.emitToRenderer,
+  });
 
   return message;
 }

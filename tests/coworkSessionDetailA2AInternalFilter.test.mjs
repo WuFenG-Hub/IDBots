@@ -17,7 +17,7 @@ const sourcePath = path.join(
 test('CoworkSessionDetail hides non-order internal states in A2A sessions', () => {
   const source = fs.readFileSync(sourcePath, 'utf8');
 
-  assert.match(source, /import \{ shouldHideA2AInternalMessage \} from '\.\/a2aInternalMessageFilter'/);
+  assert.match(source, /import \{ shouldHideA2AInternalMessage, lastA2AErrorDetail \} from '\.\/a2aInternalMessageFilter'/);
   assert.match(
     source,
     /visibleA2AMessages[\s\S]*?!shouldHideControlMessage\(message\) && !shouldHideA2AInternalMessage\(message\)/,
