@@ -35,6 +35,8 @@
 //     enabled?: boolean,                //   default true; allowlist = every configured
 //   },                                  //   provider/model route (the provider table is
 //                                        //   the authorization surface)
+//   persistenceCompression?: 'zstd'|'none', // session artifact encoding (default
+//                                        //   zstd; the host migrates existing roots first)
 //   workspaceInstructions?: {          // AGENTS.md/CLAUDE.md discovery controls
 //     maxBytes?: number,               //   rendered baseline byte budget (default 65536)
 //     dshHome?: string,                //   user-global AGENTS.md home (default $DSH_HOME/~/.dsh)
@@ -262,7 +264,13 @@ export function generateRuntimeConfig(input) {
     {
       id: 'persistence',
       name: '@deepseek-ai/dsh-session-persistence-jsonl',
-      config: { root: input.sessionRoot, compression: 'none' },
+      // 0.1.2 physical encoding: zstd (Node builtin zlib — no native addon)
+      // shrinks session artifacts several-fold. The backend refuses a root
+      // that mixes encodings, so dshKernel.ensureRuntime migrates existing
+      // plaintext artifacts (lib/migrate-session-root-zstd.mjs) before
+      // spawning a zstd composition. Tests that parse the artifact as text
+      // opt back in with persistenceCompression: 'none'.
+      config: { root: input.sessionRoot, compression: input.persistenceCompression ?? 'zstd' },
     },
     { id: 'checkpoint-policy', name: '@deepseek-ai/dsh-session-checkpoint-policy' },
     { id: 'user-approval', name: '@deepseek-ai/dsh-user-approval' },

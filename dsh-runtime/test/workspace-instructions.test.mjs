@@ -107,6 +107,9 @@ const main = async () => {
       models: [{ id: 'mock-1', contextWindow: 32768 }],
     }],
     sections: [],
+    // This suite parses the session artifact as plaintext (header scan) —
+    // keep the plaintext encoding instead of the zstd default.
+    persistenceCompression: 'none',
     workspace: { cwd: workspaceA },
     workspaceInstructions: { dshHome },
   })

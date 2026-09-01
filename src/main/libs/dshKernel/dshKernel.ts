@@ -124,6 +124,17 @@ export class DshKernel {
     const generatorUrl = pathToFileURL(join(runtimeDir, 'lib', 'generate-runtime-config.mjs')).href
     const { generateRuntimeConfig } = await dynamicImport(generatorUrl)
     mkdirSync(config.sessionRoot, { recursive: true })
+    // 0.1.2 persistence encoding: the jsonl backend refuses a root that mixes
+    // physical encodings, so existing plaintext session.jsonl artifacts are
+    // migrated onto zstd (atomic per artifact, crash-recoverable) before the
+    // runtime boots a zstd composition. A migration failure propagates — the
+    // rollback keeps the root uniformly plaintext, but booting 'none' after
+    // an fs-level failure would be a silent lie about durability instead.
+    const migrationUrl = pathToFileURL(join(runtimeDir, 'lib', 'migrate-session-root-zstd.mjs')).href
+    const { migrateSessionRootToZstd } = await dynamicImport(migrationUrl)
+    await migrateSessionRootToZstd(config.sessionRoot, {
+      log: (level, event, data) => this.opts.log?.(level, `dshKernel.${event}`, data),
+    })
     const configPath = join(config.sessionRoot, dshRuntimeConfigFileName(config.runtimeId))
     writeFileSync(configPath, JSON.stringify(generateRuntimeConfig(config), null, 2))
     this.runtimeConfig = config
