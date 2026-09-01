@@ -50,6 +50,7 @@ import {
   ArchiveBoxIcon,
   ExclamationTriangleIcon,
   ChevronRightIcon,
+  ChevronDownIcon,
   StopCircleIcon,
   XMarkIcon,
   PaperAirplaneIcon,
@@ -3394,6 +3395,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
   }, [loadEarlierMessages]);
 
+  // DSH WebUI "back to bottom" button: instant jump, then resume follow mode.
+  const handleScrollToBottomClick = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    pinningScrollRef.current = true;
+    pinScrollToBottom(container);
+    pinningScrollRef.current = false;
+    setShouldAutoScroll(true);
+  }, []);
+
   const autoScrollFollowSignal = buildAutoScrollFollowSignal(currentSession?.messages, isStreaming);
 
   const resolveLocalFilePath = useCallback((href: string, text: string) => {
@@ -3939,6 +3950,24 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           renderConversationTurns()
         )}
         <div ref={messagesEndRef} className="h-20" />
+        {/* DSH WebUI-style "back to bottom" button: sticky zero-height slot keeps
+            the 34px floating button pinned 16px above the scrollport's bottom edge,
+            right-aligned with the chat content column. */}
+        {!shouldAutoScroll && (
+          <div className="sticky bottom-4 z-10 h-0 flex pointer-events-none">
+            <div className="w-full max-w-[clamp(680px,64%,920px)] mx-auto flex justify-end">
+              <button
+                type="button"
+                onClick={handleScrollToBottomClick}
+                title={i18nService.t('coworkScrollToBottom')}
+                aria-label={i18nService.t('coworkScrollToBottom')}
+                className="pointer-events-auto -mt-[34px] flex h-[34px] w-[34px] items-center justify-center rounded-full border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-elevated dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+              >
+                <ChevronDownIcon className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {shouldRenderRefundStatusCard && currentSession.serviceOrderSummary && (
