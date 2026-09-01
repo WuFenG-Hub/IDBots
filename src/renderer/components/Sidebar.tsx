@@ -8,7 +8,13 @@ import CoworkSessionList from './cowork/CoworkSessionList';
 import CoworkSearchModal from './cowork/CoworkSearchModal';
 import SessionViewOptionsMenu from './cowork/SessionViewOptionsMenu';
 import GroupTaskSidebarList from './groupTasks/GroupTaskSidebarList';
-import { selectTask as selectGroupTask } from '../store/slices/groupTasksSlice';
+import {
+  OPEN_TEAM_COLLAB_POLL_INTERVAL_MS,
+  OpenTeamCollabSidebarRow,
+} from './groupTasks/OpenTeamCollabsSection';
+import { openTeamCollabService } from '../services/openTeamCollabService';
+import { selectCollab, selectTask as selectGroupTask } from '../store/slices/groupTasksSlice';
+import type { OpenTeamCollabSummary } from '../types/openTeamCollab';
 import { MagnifyingGlassIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon, UserGroupIcon, GlobeAltIcon, ArchiveBoxIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import Tooltip from './ui/Tooltip';
 import ComposeIcon from './icons/ComposeIcon';
@@ -135,6 +141,10 @@ const Sidebar: React.FC<SidebarProps> = ({
   const groupTasks = useSelector((state: RootState) => state.groupTasks.tasks);
   const selectedGroupTaskId = useSelector((state: RootState) => state.groupTasks.selectedTaskId);
   const scheduledTasks = useSelector((state: RootState) => state.scheduledTask.tasks);
+  // Joined OpenTeam collabs for the records "Group Tasks" tab (remote-hosted
+  // tasks this machine's bots participate in; loaded/polled only while that
+  // tab is visible).
+  const [openTeamCollabs, setOpenTeamCollabs] = useState<OpenTeamCollabSummary[]>([]);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const dispatch = useDispatch();
   // Which task-record category the home history list shows. Persisted across
@@ -194,9 +204,9 @@ const Sidebar: React.FC<SidebarProps> = ({
     return {
       local: { count: sessionGroups.local.length, unread: unreadOf(sessionGroups.local) },
       a2a: { count: sessionGroups.a2a.length, unread: unreadOf(sessionGroups.a2a) },
-      group: { count: groupTasks.length, unread: unreadOf(sessionGroups.group) },
+      group: { count: groupTasks.length + openTeamCollabs.length, unread: unreadOf(sessionGroups.group) },
     };
-  }, [sessionGroups, unreadSessionIds, groupTasks]);
+  }, [sessionGroups, unreadSessionIds, groupTasks, openTeamCollabs]);
   const isMac = window.electron.platform === 'darwin';
   const hasRunningScheduledTask = scheduledTasks.some(
     (task) => task.enabled && task.state.runningAtMs !== null && task.state.lastStatus === 'running'
@@ -223,6 +233,29 @@ const Sidebar: React.FC<SidebarProps> = ({
   useEffect(() => {
     if (taskRecordTab !== 'group') return;
     void groupTaskService.loadTasks();
+  }, [taskRecordTab]);
+
+  // Collab rows ride the same tab gate: load on entering the tab, then poll so
+  // new remote collaborations surface without leaving the sidebar.
+  useEffect(() => {
+    if (taskRecordTab !== 'group') return;
+    let cancelled = false;
+    const load = () => {
+      openTeamCollabService
+        .list()
+        .then((list) => {
+          if (!cancelled) setOpenTeamCollabs(list);
+        })
+        .catch(() => {
+          // Traceability rows must never break the records list.
+        });
+    };
+    load();
+    const timer = setInterval(load, OPEN_TEAM_COLLAB_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [taskRecordTab]);
 
   // Leaving the local tab ends any batch-archive selection in progress.
@@ -302,6 +335,12 @@ const Sidebar: React.FC<SidebarProps> = ({
     dispatch(selectGroupTask(taskId));
   };
 
+  /** Open a joined OpenTeam collab from the sidebar records list. */
+  const handleSelectOpenTeamCollab = (collabId: number) => {
+    onShowGroupTasks();
+    dispatch(selectCollab(collabId));
+  };
+
   const handleToggleGroupTaskPin = async (taskId: number, pinned: boolean) => {
     await groupTaskService.setTaskPinned(taskId, pinned);
   };
@@ -321,6 +360,9 @@ const Sidebar: React.FC<SidebarProps> = ({
       return;
     }
     if (itemId === 'groupTasks') {
+      // The nav entry is a fixed home-page entry point: never re-open whatever
+      // task/collab was drilled into last time.
+      dispatch(selectGroupTask(null));
       onShowGroupTasks();
       return;
     }
@@ -614,15 +656,41 @@ const Sidebar: React.FC<SidebarProps> = ({
           {/* Scrollable list area */}
           <div className="flex-1 min-h-0 overflow-y-auto pb-4">
             {taskRecordTab === 'group' ? (
-              <GroupTaskSidebarList
-                tasks={groupTasks}
-                selectedTaskId={selectedGroupTaskId}
-                onSelectTask={handleSelectGroupTask}
-                onTogglePin={handleToggleGroupTaskPin}
-                onRename={handleRenameGroupTask}
-                onArchive={handleArchiveGroupTask}
-                emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
-              />
+              groupTasks.length === 0 && openTeamCollabs.length === 0 ? (
+                <div className="text-center py-8">
+                  <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t(activeTaskRecordTab.emptyKey)}
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {groupTasks.length > 0 && (
+                    <GroupTaskSidebarList
+                      tasks={groupTasks}
+                      selectedTaskId={selectedGroupTaskId}
+                      onSelectTask={handleSelectGroupTask}
+                      onTogglePin={handleToggleGroupTaskPin}
+                      onRename={handleRenameGroupTask}
+                      onArchive={handleArchiveGroupTask}
+                      emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
+                    />
+                  )}
+                  {openTeamCollabs.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="px-2.5 pb-0.5 pt-1 text-[11px] font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('groupTasksModeOpenTeam')}
+                      </div>
+                      {openTeamCollabs.map((collab) => (
+                        <OpenTeamCollabSidebarRow
+                          key={collab.id}
+                          collab={collab}
+                          onSelect={() => handleSelectOpenTeamCollab(collab.id)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
             ) : (
               <CoworkSessionList
                 sessions={tabbedSessions}

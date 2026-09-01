@@ -137,6 +137,32 @@ export function filterGroupTasksByTab(tasks, tab) {
   return list.filter((task) => isActiveGroupTaskStatus(task.status));
 }
 
+/**
+ * A task seat is remote when it maps to no local metabots row (metabotId ==
+ * null) but carries a chain GlobalMetaID — i.e. an external bot invited via
+ * OpenTeam. Mirrors the detail view's remote-member rule.
+ */
+export function isRemoteGroupTaskSeat(member) {
+  return member?.metabotId == null && Boolean(String(member?.globalMetaId ?? '').trim());
+}
+
+/**
+ * Split locally-stored group tasks for the home-page mode toggle:
+ * - local: every participant is one of this machine's metabots.
+ * - openTeam: at least one seat is a remote bot (OpenTeam invitee) — the task
+ *   belongs under "发起的 Open Team" regardless of its status.
+ */
+export function splitGroupTasksByOpenTeam(tasks) {
+  const list = Array.isArray(tasks) ? tasks : [];
+  const local = [];
+  const openTeam = [];
+  for (const task of list) {
+    const members = Array.isArray(task?.members) ? task.members : [];
+    (members.some(isRemoteGroupTaskSeat) ? openTeam : local).push(task);
+  }
+  return { local, openTeam };
+}
+
 /** Tailwind classes for the colored status badge. */
 export function groupTaskStatusBadgeClass(status) {
   switch (status) {
