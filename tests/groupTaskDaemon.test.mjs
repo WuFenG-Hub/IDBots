@@ -1220,15 +1220,17 @@ test('GT#47 R3: during review, chair mentions arm no ACK watch and worker [WORKI
       'the gated ACK is logged as liveness-only',
     );
 
-    // Control: back in executing (rework hatch) the same [WORKING] arms the
-    // deadline again — the gate is phase-scoped, not a blanket disarm.
+    // Control: back in executing (rework hatch) an ETA-bearing [WORKING] arms
+    // the deadline again — the gate is phase-scoped, not a blanket disarm.
+    // (Task #51: only an explicit numeric ETA arms a deadline now, so the
+    // control ACK must carry one.)
     insertGroupMessage(h.db, {
       pinId: 'rework-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Twin Bot', content: 'rework needed after all\n[STATUS:EXECUTING]', chainTimestamp: 103,
     });
     insertGroupMessage(h.db, {
       pinId: 'ack2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[WORKING] 重新开工', chainTimestamp: 104,
+      senderName: 'Coder Bot', content: '[WORKING] 重新开工，预计 10 分钟', chainTimestamp: 104,
     });
     await h.loop.runTick();
     assert.ok(
@@ -3364,13 +3366,25 @@ test('P0-2: silent assigned/working members are auto-marked unreachable after th
     const startMs = Date.now();
     h.state.nowMs = startMs;
 
-    // Worker 2 spoke 1 minute ago (within threshold); worker 3 never spoke.
+    // Worker 2 claimed work with a [WORKING] 1 minute ago (within threshold);
+    // worker 3 got a chair assignment (a pending ACK watch) and never spoke.
+    // Both carry an outstanding obligation, so silence past the threshold is
+    // flag-worthy — a member with NO obligation is legitimately idle and is
+    // never stamped (see the obligation-gate test).
     insertGroupMessage(h.db, {
       pinId: 'pin-old-1',
       senderMetaId: 'metaid-2',
       senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot',
-      content: 'hello',
+      content: '[WORKING] hello',
+      chainTimestamp: Math.floor((startMs - 60_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-old-3',
+      senderMetaId: 'metaid-1',
+      senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Designer Bot please handle the icon set',
       chainTimestamp: Math.floor((startMs - 60_000) / 1000),
     });
 
@@ -3405,6 +3419,13 @@ test('P0-2 recovery: an unreachable member with fresh liveness signals is restor
     // Both workers carry a stale unreachable stamp from a prior silence spell.
     h.groupTaskStore.setMemberStatus(task.id, 2, 'unreachable', 'gmid-w2');
     h.groupTaskStore.setMemberStatus(task.id, 3, 'unreachable', 'gmid-w3');
+    // Worker 3's stamp is backed by an outstanding obligation (an assignment
+    // whose ACK watch is still pending) — without one the stamp is bogus and
+    // the obligation gate lifts it immediately instead of keeping it.
+    h.store.set(
+      `group_task_ack_pending:${task.id}:3`,
+      JSON.stringify({ assignedAt: startMs, messageId: 1, assignedChainSec: Math.floor(startMs / 1000) }),
+    );
 
     // Worker 2 spoke 30s ago — but the message is ALREADY past the cursor
     // (e.g. it arrived while a hung tick froze message processing), so only
@@ -4739,7 +4760,7 @@ test('entropy P1 review: chair without a globalMetaID falls back to the full-ros
   }
 });
 
-test('entropy P0 review: numberless template ACK still arms the delivery deadline with the timeout default', async () => {
+test('entropy P0 review: a numberless template ACK is liveness only — no invented delivery deadline', async () => {
   const h = await createHarness({ ackTimeoutMs: 180_000 });
   try {
     const task = h.createTask([2]);
@@ -4757,18 +4778,154 @@ test('entropy P0 review: numberless template ACK still arms the delivery deadlin
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
-    const raw = h.store.get('group_task_expected_delivery:1:2');
-    assert.ok(raw, 'deadline armed even without a numeric ETA');
-    const entry = JSON.parse(raw);
-    assert.ok(entry.dueAt > h.state.nowMs, 'armed with a positive default window');
+    // Task #51: a numberless ACK is pure liveness. The old fallback armed a
+    // memberTimeoutAfterMinutes deadline out of thin air and then fired fake
+    // "estimated delivery" reminders at workers simply mid-turn.
+    assert.equal(
+      h.store.get('group_task_expected_delivery:1:2'),
+      undefined,
+      'no delivery deadline armed without an explicit ETA',
+    );
 
-    // Past the default member timeout (20 min) with no deliverable -> the
-    // P0-4 chair reminder must fire (it never did before this fix).
+    // Past the old invented window (20 min) with no deliverable: still no
+    // fake reminder. A genuinely dead worker is caught by the stale-[WORKING]
+    // / unreachable watchdogs (real inactivity), not by an invented deadline.
     h.state.nowMs += 21 * 60_000;
     await h.loop.runTick();
-    assert.ok(
-      h.sends.some((send) => /estimated delivery/.test(send.content)),
-      'chair delivery reminder fired for the template-ACK deadline',
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      0,
+      'no fake delivery reminder off a numberless ACK',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #51: implicit ACK by message-id order — a watch armed after the reply synced never alarms', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // The worker's reply synced BEFORE the chair's assignment row (chain
+    // relay/indexer skew), so the cursor processed it with no watch to clear;
+    // the assignment then armed a watch whose daemon-local assignedAt
+    // postdates the reply — the pre-fix false alarm. On-chain the reply
+    // genuinely ANSWERS the assignment (its chain second is strictly later);
+    // only the sync order was inverted.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-skew-reply', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '收到，我来看一下',
+      chainTimestamp: Math.floor(startMs / 1000) + 1,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-skew-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const assignId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-skew-assign'])[0].values[0][0];
+    const replyId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-skew-reply'])[0].values[0][0];
+    assert.ok(replyId < assignId, 'reply synced first (lower id)');
+    assert.ok(h.store.get(`group_task_ack_pending:${task.id}:2`), 'watch armed by the late-synced assignment');
+    h.sends.length = 0;
+
+    // Past the ACK timeout: the reply's chain second is strictly later than
+    // the assignment's, so chain order proves engagement — daemon-local
+    // processing time is irrelevant.
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => /has not sent a \[WORKING\] ACK/.test(s.content)).length,
+      0,
+      'no no-ACK reminder for a worker who already replied',
+    );
+    assert.equal(h.store.get(`group_task_ack_seen:${task.id}:${assignId}`), '1', 'ack-seen recorded');
+    assert.equal(h.store.get(`group_task_ack_pending:${task.id}:2`), undefined, 'watch cleared');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #51: implicit ACK by message-id — a higher-id reply behind a manually stale watch clears it', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    insertGroupMessage(h.db, {
+      pinId: 'pin-idc-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const assignId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-idc-assign'])[0].values[0][0];
+
+    // The reply carries an EARLIER chain second (clock skew between relays)
+    // but a HIGHER row id; simulate the watch surviving its processing (e.g.
+    // the reply arrived flagged suspect, or the handler missed the member
+    // match) by re-arming the watch manually afterwards.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-idc-reply', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'on it',
+      chainTimestamp: Math.floor(startMs / 1000) - 5,
+    });
+    const replyId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-idc-reply'])[0].values[0][0];
+    assert.ok(replyId > assignId, 'reply has the higher row id');
+    const cursorId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, cursorId);
+    h.store.set(
+      `group_task_ack_pending:${task.id}:2`,
+      JSON.stringify({ assignedAt: startMs, messageId: assignId, assignedChainSec: Math.floor(startMs / 1000) }),
+    );
+    h.sends.length = 0;
+
+    // Chain-second comparison says "earlier" (skewed), but the message-id
+    // comparison proves the reply postdates the assignment — implicit ACK.
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => /has not sent a \[WORKING\] ACK/.test(s.content)).length,
+      0,
+      'message-id order rescues a chain-clock-skewed reply',
+    );
+    assert.equal(h.store.get(`group_task_ack_seen:${task.id}:${assignId}`), '1');
+    assert.equal(h.store.get(`group_task_ack_pending:${task.id}:2`), undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #51 obligation gate: idle members are never stamped unreachable; a bogus stamp is lifted', async () => {
+  const h = await createHarness({ memberUnreachableAfterMinutes: 5 });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // Worker 2 carries a bogus legacy stamp (older builds stamped
+    // delivered-then-idle members — cf. Lucy in task #51) and has NO
+    // outstanding obligation: the monitor lifts it immediately, without
+    // waiting for fresh liveness.
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'unreachable', 'gmid-w2');
+    // Worker 3 is plainly idle: assigned to the task but never given work,
+    // never spoke — silence is the normal state, not a failure.
+
+    h.state.nowMs = startMs + 30 * 60_000;
+    await h.loop.runTick();
+    const members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(
+      members.find((m) => m.metabotId === 2).status,
+      'working',
+      'bogus stamp lifted immediately (no obligation, no liveness needed)',
+    );
+    assert.equal(
+      members.find((m) => m.metabotId === 3).status,
+      'assigned',
+      'an idle member with no obligation is never stamped unreachable',
     );
   } finally {
     h.cleanup();

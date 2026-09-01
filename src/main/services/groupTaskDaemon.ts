@@ -4929,9 +4929,45 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         .map((deliverable) => (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase())
         .filter((authorGmid) => authorGmid.length > 0),
     );
+    // Task #51 obligation gate: an 'unreachable' stamp is only meaningful for
+    // a member with something OUTSTANDING. Three obligation sources:
+    //   1. a pending [WORKING] ACK watch (fresh assignment, not yet answered);
+    //   2. an armed ETA delivery deadline;
+    //   3. a [WORKING] claim on record (the member publicly took work — going
+    //      silent afterwards with a dead session is flag-worthy; this is also
+    //      what keeps this monitor consistent with monitorLocalWorkerTimeout,
+    //      whose own stamp condition implies a [WORKING] claim).
+    // A member with none of these (never assigned anything open, or already
+    // delivered and idle) is legitimately silent — never stamp it, and lift
+    // a stale stamp immediately instead of waiting for fresh liveness (older
+    // builds stamped exactly these members; cf. Lucy in task #51).
+    const workingMap = store.getMembersWorkingAt(
+      task.groupId,
+      workers.map((member) => member.globalmetaid),
+    );
     for (const member of workers) {
       const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
-      if (gmid && deliveredGmids.has(gmid)) continue;
+      const hasObligation = (member.metabotId != null && (
+        deps.getStore().get<string>(`${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`) != null
+        || deps.getStore().get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`) != null
+      )) || (gmid ? workingMap.get(gmid) != null : false);
+      if ((gmid && deliveredGmids.has(gmid)) || !hasObligation) {
+        if (member.status === 'unreachable' && member.metabotId != null) {
+          try {
+            store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: member ${member.name ?? member.metabotId} recovered ` +
+              'unreachable -> working (no outstanding obligation — the stamp was bogus)',
+            );
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: failed to lift bogus unreachable stamp for ${member.metabotId}: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        continue;
+      }
       const speakSec = gmid ? speakMap.get(gmid) ?? null : null;
       const lastMs = speakSec != null
         ? speakSec * 1000
@@ -5124,8 +5160,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           ownerGlobalMetaId,
           text:
             `[GroupTask] Task "${task.title}": local member "${name}" has been silent for ` +
-            `${Math.round(staleMs / 60_000)}+ min (past the [WORKING] window). The chair has a ` +
-            're-assign hint in context; please decide whether to wait, reassign, or close the task.',
+            `${Math.round(staleMs / 60_000)}+ min (past the [WORKING] window). The chair will get a ` +
+            're-assign hint on its next turn; you can also decide now whether to wait, reassign, or close the task.',
         });
         sqlite.set(ownerKey, '1');
         emitLog(
@@ -5278,7 +5314,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             }
             continue;
           }
-          sqlite.set(pendingKey, JSON.stringify({ assignedAt: now(), messageId: message.id }));
+          // Task #51 false-alarm fix: persist the assignment's CHAIN second
+          // alongside the daemon-local arming time. The implicit-ACK check in
+          // monitorAcksAndReminders judges "spoke after the assignment" by
+          // chain order (message id / chain second), never by `assignedAt` —
+          // a tick blocked by a slow turn used to arm watches whose
+          // `assignedAt` postdated the worker's actual reply and then
+          // false-alarm a member who had demonstrably engaged.
+          sqlite.set(
+            pendingKey,
+            JSON.stringify({
+              assignedAt: now(),
+              messageId: message.id,
+              assignedChainSec: message.chainTimestamp ?? null,
+            }),
+          );
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: assignment to ${member.name ?? member.metabotId} (message #${message.id}); waiting for [WORKING] ACK`,
           );
@@ -5339,30 +5389,38 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // trigger message, so the notice echo is recognizable by its target.
       const acksHostNotice = isNoticeOrRollCallPin(message.replyPin);
       if (!opts?.humanGateActive && !acksHostNotice) {
-        // P0-4 arming: an explicit ETA arms its own deadline; a numberless ACK
-        // (the entropy-P0 template ACK carries no ETA) falls back to the member
-        // timeout so the delivery reminder still fires — without this the
-        // reminder silently never triggers for template ACKs.
-        const etaMinutes = ack.estimatedMinutes != null && ack.estimatedMinutes > 0
-          ? ack.estimatedMinutes
-          : memberTimeoutAfterMinutes;
-        // Review fix: arming a fresh deadline starts a fresh reminder cycle —
-        // a leftover delivery-reminded flag from the previous (missed or
-        // delivered) deadline would otherwise skip the next reminder and drop
-        // the member straight onto the reclaim ladder after one grace window.
-        sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
-        sqlite.set(
-          `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
-          JSON.stringify({
-            dueAt: now() + etaMinutes * 60_000,
-            ackedAt: now(),
-            taskDescription: ack.taskDescription,
-          }),
-        );
-        emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING]` +
-          `(est. ${etaMinutes} min)`,
-        );
+        // P0-4 arming: ONLY an explicit numeric ETA arms a delivery deadline.
+        // A numberless ACK (the entropy-P0 template ACK carries no ETA) is
+        // pure liveness — the old fallback invented a memberTimeoutAfterMinutes
+        // deadline out of thin air and then fired fake "estimated delivery"
+        // reminders at workers who were simply mid-turn (the task #51 false
+        // alarms). A worker that goes genuinely silent after a numberless ACK
+        // is still covered by the unreachable / stale-[WORKING] watchdogs,
+        // which key off real inactivity instead of an invented deadline.
+        if (ack.estimatedMinutes != null && ack.estimatedMinutes > 0) {
+          // Review fix: arming a fresh deadline starts a fresh reminder cycle —
+          // a leftover delivery-reminded flag from the previous (missed or
+          // delivered) deadline would otherwise skip the next reminder and drop
+          // the member straight onto the reclaim ladder after one grace window.
+          sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+          sqlite.set(
+            `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+            JSON.stringify({
+              dueAt: now() + ack.estimatedMinutes * 60_000,
+              ackedAt: now(),
+              taskDescription: ack.taskDescription,
+            }),
+          );
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING]` +
+            `(est. ${ack.estimatedMinutes} min)`,
+          );
+        } else {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
+            'without an ETA — liveness only, no delivery deadline armed',
+          );
+        }
       } else {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
@@ -5471,7 +5529,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
       const raw = sqlite.get<string>(pendingKey);
       if (!raw) continue;
-      let entry: { assignedAt: number; messageId: number };
+      let entry: { assignedAt: number; messageId: number; assignedChainSec?: number | null };
       try {
         entry = JSON.parse(raw);
       } catch {
@@ -5485,12 +5543,42 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // ack-seen for the assignment message, and never misreport it as
       // "not ACKed" (the 8/10 #11 incident: worker [WORKING]-ed at 18:36 but
       // the chair still got a no-ACK alert at 18:43).
+      //
+      // Task #51: "spoke after the assignment" is judged by CHAIN order, not
+      // daemon-local processing time — a tick blocked by a slow turn used to
+      // compare the worker's chain-time speech against a processing-time
+      // `assignedAt` and false-alarm. Two independent signals, either
+      // suffices:
+      //   1. the member's latest group message id exceeds the assignment
+      //      message id (insertion-order proof), or
+      //   2. the member's last-speech chain second is >= the assignment's
+      //      chain second (same-second ties count as engaged — P1-4).
+      // Pending entries armed before assignedChainSec existed fall back to
+      // the legacy processing-time comparison.
       const store = deps.getGroupTaskStore();
       const memberGmid = (member.globalmetaid ?? '').trim();
       if (memberGmid && task.groupId) {
         const speakMap = store.getMembersLastSpeakAt(task.groupId, [memberGmid]);
         const lastSpeakSec = speakMap.get(memberGmid.toLowerCase());
-        if (lastSpeakSec != null && Number.isFinite(lastSpeakSec) && lastSpeakSec * 1000 >= entry.assignedAt) {
+        let latestMsgId: number | null = null;
+        try {
+          const result = sqlite.getDatabase().exec(
+            'SELECT MAX(id) FROM group_chat_messages WHERE group_id = ? AND sender_global_metaid = ?',
+            [task.groupId, memberGmid.toLowerCase()],
+          );
+          const value = Number(result[0]?.values?.[0]?.[0]);
+          if (Number.isFinite(value) && value > 0) latestMsgId = value;
+        } catch {
+          latestMsgId = null; // transient read failure — fall through to the time-based check
+        }
+        const spokeAfterAssignment =
+          (latestMsgId != null && latestMsgId > entry.messageId)
+          || (lastSpeakSec != null && Number.isFinite(lastSpeakSec) && (
+            typeof entry.assignedChainSec === 'number'
+              ? lastSpeakSec >= entry.assignedChainSec
+              : lastSpeakSec * 1000 >= entry.assignedAt
+          ));
+        if (spokeAfterAssignment) {
           sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${entry.messageId}`, '1');
           sqlite.delete(pendingKey);
           if (sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`) != null) {
