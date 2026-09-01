@@ -115,7 +115,10 @@ const createHarness = async () => {
     presenceError: null,
   };
 
-  const loop = createGroupTaskDaemonLoop({
+  // fix/group-task-flow follow-up: responder turns run as detached async jobs
+  // now. Drain them after each tick so they cannot outlive store.close() in
+  // cleanup (same wrapper as groupTaskDaemon.test.mjs).
+  const rawLoop = createGroupTaskDaemonLoop({
     getStore: () => store,
     getGroupTaskStore: () => groupTaskStore,
     getMetabotStore: () => metabotStore,
@@ -142,6 +145,13 @@ const createHarness = async () => {
     workerCooldownMs: 0,
     chairCooldownMs: 0,
   });
+  const loop = {
+    ...rawLoop,
+    runTick: async () => {
+      await rawLoop.runTick();
+      await rawLoop.whenIdle();
+    },
+  };
 
   /** Task in 'executing' with the local chair plus one remote worker. */
   const createTask = ({ withLocalWorker = false } = {}) => {
