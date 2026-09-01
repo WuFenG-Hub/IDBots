@@ -225,7 +225,7 @@ export function isTextDeliverable(candidate: ParsedDeliverable): boolean {
 // second slash of `scheme://…` (`/` or `:` before), URL path segments
 // (`https://host/path` — `.` before), and relative tokens (`foo/bar` —
 // word char before).
-const LOCAL_PATH_TOKEN_RE = /(?<![:/.\w])(~\/|\/(?!\/))[^\s"'`<>[\]{}|*（）]+/g;
+const LOCAL_PATH_TOKEN_RE = /(?<![:/.\w])(~\/|\/(?!\/)|[A-Za-z]:\\)[^\s"'`<>[\]{}|*（）]+/g;
 /** Paths that are NOT local files: on-chain schemes and protocol routes. */
 const NON_LOCAL_PATH_PREFIXES = [
   'metaapp:', 'metafile:', 'metaid:', 'http:', 'https:', 'pin:', 'map:',
@@ -233,7 +233,7 @@ const NON_LOCAL_PATH_PREFIXES = [
   '/protocols/', '/api/', '/browser/', '/buzz/', '/metaapp/', '/metaid/',
 ];
 /** File tokens without a directory separator are not paths. */
-const HAS_SEPARATOR_RE = /\//;
+const HAS_SEPARATOR_RE = /[\\/]/;
 
 /** True when the token is a plausible LOCAL file path (absolute or ~/). */
 function looksLikeLocalPath(token: string): boolean {
@@ -242,7 +242,7 @@ function looksLikeLocalPath(token: string): boolean {
   if (token.endsWith('/') || token.endsWith('\\')) return false;
   // `foo/bar` relative tokens resolve nowhere without a base — only absolute
   // or home-relative paths are actionable for the uploader.
-  return token.startsWith('/') || token.startsWith('~/');
+  return token.startsWith('/') || token.startsWith('~/') || /^[A-Za-z]:\\/.test(token);
 }
 
 /**
