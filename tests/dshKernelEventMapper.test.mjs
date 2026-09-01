@@ -352,14 +352,13 @@ test('unassembled commentary (block-end only) opens a thinking message', () => {
     },
   })
   // No text slot was streamed, so commentary materializes as a thinking
-  // message. The slot stays streaming across the tool round (update, not
-  // finalize) so the ThinkingBlock does not collapse before the next step.
+  // message. Per-round Think rows: the round's commentary finalizes SETTLED at
+  // assistant/message so the next round opens its own row below the tool rows.
   const opened = done.find((a) => a.kind === 'message')
   assert.equal(opened.slot, 'thinking')
   assert.equal(opened.message.metadata.isThinking, true)
-  const updated = done.find((a) => a.kind === 'messageUpdate' && a.slot === 'thinking')
-  assert.equal(updated.content, 'Thinking out loud without any streamed deltas.')
-  assert.equal(done.some((a) => a.kind === 'messageFinalize' && a.slot === 'thinking'), false)
+  const settled = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.equal(settled.content, 'Thinking out loud without any streamed deltas.')
 })
 
 test('mixed commentary and final text split across slots in order', () => {
@@ -432,13 +431,13 @@ test('native DeepSeek tool-step text folds into thinking and does not open a vis
     },
   })
   assert.equal(done.some((a) => a.slot === 'text'), false, 'commentary must not become a visible bubble')
-  assert.equal(done.some((a) => a.kind === 'messageFinalize' && a.slot === 'thinking'), false, 'thinking stays streaming across the tool round')
-  const updated = done.find((a) => a.kind === 'messageUpdate' && a.slot === 'thinking')
-  assert.match(updated.content, /need a tool/)
-  assert.match(updated.content, /本地没装 tsx/)
+  // Per-round Think row: this step's reasoning + commentary finalizes settled.
+  const settled = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.match(settled.content, /need a tool/)
+  assert.match(settled.content, /本地没装 tsx/)
 })
 
-test('native DeepSeek keeps one thinking slot across tool rounds and only finalizes on the reply', () => {
+test('native DeepSeek finalizes one Think row per tool round (interleaved timeline)', () => {
   const mapper = new DshEventMapper()
   mapper.consume({
     type: 'assistant/chunk',
@@ -457,19 +456,24 @@ test('native DeepSeek keeps one thinking slot across tool rounds and only finali
       },
     },
   })
-  assert.equal(step1.filter((a) => a.kind === 'message' && a.slot === 'thinking').length, 0)
+  // Round 1 settles its own Think row with this step's reasoning + commentary.
+  const row1 = step1.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.match(row1.content, /first plan/)
+  assert.match(row1.content, /先看仓库结构/)
 
+  // Round 2 reasoning opens a FRESH Think row (new message, no round-1 prefix)
+  // after the tool rows, restoring the think → tools → think interleaving.
   const step2open = mapper.consume({
     type: 'assistant/chunk',
     data: { chunk: { type: 'reasoning-delta', index: 0, text: ' next' } },
   })
-  assert.equal(step2open.some((a) => a.kind === 'message'), false, 'must reuse the live thinking slot')
-  assert.equal(step2open[0].kind, 'messageUpdate')
-  assert.match(step2open[0].content, /first plan/)
-  assert.match(step2open[0].content, /先看仓库结构/)
-  assert.match(step2open[0].content, / next/)
+  const opened2 = step2open.find((a) => a.kind === 'message' && a.slot === 'thinking')
+  assert.notEqual(opened2, undefined, 'round 2 must open a fresh thinking message')
+  const update2 = step2open.find((a) => a.kind === 'messageUpdate')
+  assert.equal(update2.content, ' next')
+  assert.equal(update2.content.includes('first plan'), false, 'fresh row carries no earlier rounds')
 
-  mapper.consume({
+  const step2 = mapper.consume({
     type: 'assistant/message',
     data: {
       message: {
@@ -482,6 +486,8 @@ test('native DeepSeek keeps one thinking slot across tool rounds and only finali
       },
     },
   })
+  const row2 = step2.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.equal(row2.content, 'next\n\n继续读安装器。')
 
   const reply = mapper.consume({
     type: 'assistant/message',
@@ -495,13 +501,10 @@ test('native DeepSeek keeps one thinking slot across tool rounds and only finali
       },
     },
   })
-  const thinkingDone = reply.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  // The reply step's reasoning gets its own settled Think row, then the reply.
+  const row3 = reply.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.equal(row3.content, 'ready to answer')
   const textDone = reply.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(reply.some((a) => a.kind === 'message' && a.slot === 'thinking'), false, 'reply must not open a second thinking bubble')
-  assert.match(thinkingDone.content, /first plan/)
-  assert.match(thinkingDone.content, /先看仓库结构/)
-  assert.match(thinkingDone.content, /继续读安装器/)
-  assert.match(thinkingDone.content, /ready to answer/)
   assert.equal(textDone.content, '## 本轮测试汇总')
   assert.equal(textDone.metadata, undefined)
 })
@@ -616,7 +619,8 @@ test('off-mode commentary converts at block-start tool-call and streams as think
   assert.equal(more[0].slot, 'text')
   assert.equal(more[0].content, '现在查一下')
 
-  // Round finalize: assembled text is authoritative; display stays streaming.
+  // Round finalize: assembled text is authoritative; the round's Think row
+  // settles (no isStreaming) so the next round opens its own row.
   const round1 = mapper.consume({
     type: 'assistant/message',
     data: {
@@ -634,18 +638,29 @@ test('off-mode commentary converts at block-start tool-call and streams as think
   assert.equal(ride1.slot, 'text')
   assert.equal(ride1.content, '现在查一下')
   assert.equal(ride1.metadata.isThinking, true)
-  assert.equal(ride1.metadata.isStreaming, true, 'thinking display stays open across the tool round')
+  assert.equal(ride1.metadata.isStreaming, undefined, 'round 1 settles its own Think row')
   assert.equal(round1.some((a) => a.kind === 'message' && a.slot === 'thinking'), false, 'no second Think bubble')
 
   mapper.consume({ type: 'tool/call', data: { callId: 'c1', name: 'search_metaweb', arguments: '{}' } })
 
-  // Round 2 text is held while streaming (thinking already held — same
-  // contract as the reasoning path) and appended at finalize.
-  const held = mapper.consume({
+  // Round 2 commentary opens a FRESH optimistic bubble (the ride settled, so
+  // nothing is held)…
+  const opened2 = mapper.consume({
     type: 'assistant/chunk',
     data: { turn: 1, step: 2, chunk: { type: 'text-delta', index: 0, text: '继续读' } },
   })
-  assert.deepEqual(held, [])
+  assert.deepEqual(kinds(opened2), ['message', 'messageUpdate'])
+  assert.equal(opened2[0].slot, 'text')
+  // …and its own tool-call block-start converts it into round 2's Think row.
+  const converted2 = mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 1, step: 2, chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
+  })
+  assert.deepEqual(kinds(converted2), ['messageFinalize'])
+  assert.equal(converted2[0].slot, 'text')
+  assert.equal(converted2[0].content, '继续读')
+  assert.equal(converted2[0].metadata.isThinking, true)
+
   const round2 = mapper.consume({
     type: 'assistant/message',
     data: {
@@ -660,10 +675,10 @@ test('off-mode commentary converts at block-start tool-call and streams as think
     },
   })
   const ride2 = round2.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(ride2.content, '现在查一下\n\n继续读。')
-  assert.equal(ride2.metadata.isStreaming, true)
+  assert.equal(ride2.content, '继续读。')
+  assert.equal(ride2.metadata.isStreaming, undefined, 'round 2 settles its own Think row')
 
-  // The pure reply settles the thinking display with the commentary only…
+  // The pure reply lands as its own visible bubble…
   const reply = mapper.consume({
     type: 'assistant/message',
     data: {
@@ -672,13 +687,9 @@ test('off-mode commentary converts at block-start tool-call and streams as think
     },
   })
   const settles = reply.filter((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(settles.length, 2, 'ride message settles, then the reply bubble finalizes')
-  assert.equal(settles[0].content, '现在查一下\n\n继续读。')
-  assert.equal(settles[0].metadata.isThinking, true)
-  assert.equal(settles[0].metadata.isStreaming, undefined, 'pulse off once the reply lands')
-  assert.equal(settles[0].content.includes('汇总'), false, 'the reply never enters the thinking display')
-  assert.equal(settles[1].content, '## 汇总')
-  assert.equal(settles[1].metadata, undefined, 'the reply is plain visible text')
+  assert.equal(settles.length, 1, 'only the reply bubble finalizes')
+  assert.equal(settles[0].content, '## 汇总')
+  assert.equal(settles[0].metadata, undefined, 'the reply is plain visible text')
 
   const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
   const turnEnd = ended.find((a) => a.kind === 'turnEnd')
