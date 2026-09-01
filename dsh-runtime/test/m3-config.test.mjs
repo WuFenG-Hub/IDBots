@@ -243,6 +243,25 @@ const main = async () => {
   record('E2E: follow-up request carries the web_search result to the model',
     webToolContent.includes('Sources:') && webToolContent.includes('nodejs.org'))
 
+  // Web-search failure diagnostics (0.1.2): when the aux endpoint fails, the
+  // tool result error must carry the actual endpoint and recovery guidance
+  // (searchEndpointError) so the model — and through it the user — can see
+  // WHERE the search call went, not just that it failed.
+  const turn4 = waitForEvent((e) => e.type === 'turn/end')
+  await client.prompt(sessionId, [{ type: 'text', text: 'CALL_WEB_SEARCH_FAIL please' }])
+  await turn4
+  const failCalls = events.filter((e) => e.type === 'tool/call' && e.data?.name === 'web_search')
+  const failCall = failCalls.at(-1)
+  // The mock reuses `call_web_search_1` across turns — match by seq order.
+  const failResult = failCall ? events.find((e) => e.type === 'tool/result'
+    && e.data?.message?.content?.[0]?.toolCallId === failCall.data.callId && e.seq > failCall.seq) : undefined
+  const failText = JSON.stringify(failResult ?? {})
+  record('E2E: web_search failure reports the endpoint and guidance',
+    failText.includes('/anthropic/v1/messages')
+      && failText.toLowerCase().includes('endpoint')
+      && (failText.includes('overloaded') || failText.includes('503')),
+    failText.slice(0, 120))
+
   subscription.close()
   await client.close()
   server.close()
