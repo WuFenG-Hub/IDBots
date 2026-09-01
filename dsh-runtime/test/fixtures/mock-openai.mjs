@@ -105,6 +105,9 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('RUN_LONG_BASH') ? 'bash'
         : lastUserText.includes('RUN_BASH_WRITE') ? 'bash'
         : lastUserText.includes('RUN_BASH') ? 'bash'
+        : lastUserText.includes('DELEGATE_BAD_MODEL') ? 'subagent'
+        : lastUserText.includes('DELEGATE_MODEL') ? 'subagent'
+        : lastUserText.includes('LIST_MODELS') ? 'list_subagent_models'
         : lastUserText.includes('DELEGATE') ? 'subagent'
         : null
       // HANG_TEST: open the SSE stream, emit one delta, and never finish —
@@ -125,7 +128,12 @@ export function startMockServer(port = 48787) {
             : writeMatch
               ? { command: `echo ${writeMatch[1]} > marker.txt`, description: 'write workspace marker' }
               : { command: 'echo BASH_WORKS && date', description: 'echo test' })
-          : toolCallFor === 'subagent' ? { prompt: 'say SUBAGENT_DONE', description: 'delegation test' } : { note: 'please dump the big blob' })
+          : toolCallFor === 'subagent' ? (lastUserText.includes('DELEGATE_BAD_MODEL')
+            ? { prompt: 'say SUBAGENT_DONE', description: 'unauthorized route', provider: 'mockgw', model: 'mock-9' }
+            : lastUserText.includes('DELEGATE_MODEL')
+              ? { prompt: 'say SUBAGENT_DONE', description: 'model-selected delegation', provider: 'mockgw', model: 'mock-2' }
+              : { prompt: 'say SUBAGENT_DONE', description: 'delegation test' })
+          : toolCallFor === 'list_subagent_models' ? {} : { note: 'please dump the big blob' })
         frame({
           ...base,
           choices: [{

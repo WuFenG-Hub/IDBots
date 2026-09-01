@@ -55,6 +55,7 @@
 import { isAbsolute, resolve } from 'node:path'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '@deepseek-ai/dsh-sdk-jsonrpc-server'
+import * as dshToolSubagent from '@deepseek-ai/dsh-tool-subagent'
 
 const RESPOND_OUTCOMES = new Set(['allowed-once', 'rejected'])
 
@@ -87,9 +88,27 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsChildEvents = new Map()
     // child agent id → parent dsh session id (for live row notifications).
     this.idbotsChildParents = new Map()
+    // 0.1.2 child-delegation model selection: true only when the composition
+    // mounted the Host-scope subagentModelSelection setting (non-empty
+    // allowlist derived from the app provider table).
+    this.idbotsSubagentModelSelection = options?.subagentModelSelection === true
 
     ctx.on('agent/created', ({ agent }) => {
       this.idbotsAgents.set(String(agent.id), agent)
+      // Delegation tool (0.1.2): modelSelectionSettings requires an Agent or
+      // preset scope, so the tool mounts INSIDE each agent's context — never
+      // at composition level. Children inherit the allowlist recorded at the
+      // parent's first live seq; mounting for children too keeps nested
+      // delegation (maxDepth-gated) identical to the former top-level mount.
+      // ctx.plugin returns a cordis Fiber (thenable, no .catch) — wrap it.
+      Promise.resolve(agent.ctx.plugin(dshToolSubagent, {
+        provider: 'spawn',
+        toolName: 'subagent',
+        enableRunInBackground: false,
+        modelSelectionSettings: this.idbotsSubagentModelSelection,
+      })).catch((error) => {
+        this.ctx.logger.warn(`idbots-sdk-server: agent-scoped tool-subagent mount failed for ${String(agent.id)}: ${String(error?.message ?? error)}`)
+      })
       // Subagent lineage lives FLATTENED on the session header (not under a
       // meta subobject): header.origin === 'subagent' + header.parentSession.
       const header = agent?.session?.header
@@ -817,6 +836,7 @@ export function apply(ctx, config = {}) {
   const transport = new JsonRpcLineTransport(input, output)
   const server = new IdbotsSdkServer(ctx, transport, {
     maxTokensAsSuccess: config.maxTokensAsSuccess !== false,
+    subagentModelSelection: config.subagentModelSelection === true,
   })
   server.idbotsRegisterHostTools(config.tools)
   server.idbotsRegisterPolicyGate(config.policyTools)
