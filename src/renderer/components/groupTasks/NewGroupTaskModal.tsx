@@ -197,6 +197,16 @@ const NewGroupTaskModal: React.FC<NewGroupTaskModalProps> = ({ onClose, onCreate
               </p>
             </blockquote>
 
+            {/* When-to-use note: deliberately quiet (small, faded) — it only
+                tells the user what kind of work deserves a group task. */}
+            <div className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70 leading-relaxed">
+              <p className="font-medium mb-1">{i18nService.t('groupTasksWhenToUseTitle')}</p>
+              <ol className="list-decimal pl-4 space-y-1">
+                <li>{i18nService.t('groupTasksWhenToUseHint1')}</li>
+                <li>{i18nService.t('groupTasksWhenToUseHint2')}</li>
+              </ol>
+            </div>
+
             <div className="pt-2 space-y-3">
               <button
                 type="button"
