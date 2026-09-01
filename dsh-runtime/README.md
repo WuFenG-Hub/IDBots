@@ -3,8 +3,8 @@
 IDBots' DSH agent runtime: a standalone process spawned and supervised by the
 Electron main process, speaking newline-delimited JSON-RPC on stdio through
 `@deepseek-ai/dsh-sdk-client`. Consumes DeepSeek Harness strictly as pinned npm
-packages (`0.1.0-rc.6` line, npm `next` tag — the `latest` dist-tags are stale,
-see `spikes/dsh-phase0/PHASE0_REPORT.md` F1). No forks.
+packages (`0.1.2-alpha.2` line, npm `alpha` tag — `latest`/`next` dist-tags lag
+behind, see `spikes/dsh-phase0/PHASE0_REPORT.md` F1). No forks.
 
 ## Layout
 

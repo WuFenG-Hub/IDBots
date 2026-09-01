@@ -8,9 +8,9 @@ Companion memory: `dsh-phase1-m1-progress` (project memory, auto-recalled)
 IDBots runs a **dual-kernel architecture**: cowork sessions run either on the
 Claude Agent SDK (original path, untouched) or on **DSH (DeepSeek Harness)**
 via `dsh-runtime/` — a self-composed Cordis plugin runtime consumed strictly
-as pinned npm packages (`@deepseek-ai/*@0.1.0-rc.7`, zero forks; upgraded
-from rc.6 on 2026-08-19 — rc.7 replays v1 assistant state as provider-neutral
-history instead of failing). Phase 1
+as pinned npm packages (`@deepseek-ai/*@0.1.2-alpha.2`, zero forks; upgraded
+from 0.1.1-rc.2 on 2026-08-31 — alpha line keeps the 0.1.1 replay semantics and
+adds the Remote surface + waterfall seams; old rc-line history still replays). Phase 1
 (26 commits on `feat/dsh-phase1`, merged as `946361a7`) plus a soak-fix
 series on main is complete and live-verified: kernel swap, full tool surface,
 skills (bash-executed), permission chain, compaction, retry, session-scoped
@@ -166,8 +166,15 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 - **Mapper never echoes user/message** (submission path records user bubbles).
 - **DSH session teardown**: `removeActiveSession` after completion (else next
   input classifies as a dangling steer); re-register at turn start.
-- **npm**: pin `next` tag / exact `0.1.0-rc.7` — `latest` dist-tags are stale
-  and ERESOLVE-conflict.
+- **npm**: pin the `alpha` tag / exact `0.1.2-alpha.2` — `latest`/`next`
+  dist-tags lag behind and ERESOLVE-conflict.
+- **Session artifact encoding (0.1.2)**: default `zstd` (Node builtin zlib,
+  no native addon; Electron 41 = Node 24 has it). The jsonl backend refuses
+  roots that mix encodings, so `ensureRuntime` migrates existing plaintext
+  artifacts first (`dsh-runtime/lib/migrate-session-root-zstd.mjs`:
+  concatenated-frame layout — frame 1 is exactly the header line — atomic
+  rename + crash-recovery for both-exist pairs + rollback). Tests that parse
+  the artifact as text pass `persistenceCompression: 'none'`.
 
 ## 5. Testing infrastructure & gotchas
 

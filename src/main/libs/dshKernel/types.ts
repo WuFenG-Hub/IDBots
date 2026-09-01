@@ -186,6 +186,19 @@ export interface DshRuntimeConfigInput {
   extraEntries?: Array<Record<string, unknown>>
   /** Extra env for the runtime process (credential vars, never keys in config). */
   env?: Record<string, string>
+  /**
+   * Child-delegation model choice (DSH 0.1.2): default enabled — the
+   * allowlist is derived from `providers` by the generator (the provider
+   * table is the authorization surface). Set `enabled: false` to opt out.
+   */
+  subagentModelSelection?: { enabled?: boolean }
+  /**
+   * Session artifact physical encoding (DSH 0.1.2). Default `zstd` (Node
+   * builtin zlib); `ensureRuntime` migrates existing plaintext artifacts
+   * before booting a zstd composition. `'none'` stays plaintext (tests that
+   * parse the artifact as text).
+   */
+  persistenceCompression?: 'zstd' | 'none'
   /** Distinguishes this process's composition file when several kernels share
    *  one sessionRoot (one runtime per provider). Not a composition field. */
   runtimeId?: string

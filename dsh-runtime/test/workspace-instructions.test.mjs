@@ -25,7 +25,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { HarnessClient } from '@deepseek-ai/dsh-sdk-client'
+import { runtimeClient } from './helpers/runtime-client.mjs'
 import { generateRuntimeConfig } from '../lib/generate-runtime-config.mjs'
 import { startMockServer } from './fixtures/mock-openai.mjs'
 
@@ -107,14 +107,16 @@ const main = async () => {
       models: [{ id: 'mock-1', contextWindow: 32768 }],
     }],
     sections: [],
+    // This suite parses the session artifact as plaintext (header scan) —
+    // keep the plaintext encoding instead of the zstd default.
+    persistenceCompression: 'none',
     workspace: { cwd: workspaceA },
     workspaceInstructions: { dshHome },
   })
   const configPath = path.join(os.tmpdir(), `dsh-wsinst-${Date.now()}.json`)
   fs.writeFileSync(configPath, JSON.stringify(config))
 
-  const client = new HarnessClient({
-    command: process.execPath,
+  const client = runtimeClient({
     args: [path.join(runtimeDir, 'bin.mjs'), configPath],
     env: { ...process.env, WSINST_KEY: 'sk-wsinst', SPIKE_QUIET: '1' },
     requestTimeoutMs: 30000,

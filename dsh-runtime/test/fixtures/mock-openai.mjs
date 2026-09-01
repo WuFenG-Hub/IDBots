@@ -33,6 +33,14 @@ export function startMockServer(port = 48787) {
       // blocks (plain JSON — the provider does not stream). Served on the same
       // port so one mock gateway covers the main loop AND the search seam.
       if (req.method === 'POST' && req.url.endsWith('/messages')) {
+        // Failure branch: a search whose query carries the fail marker gets a
+        // 503 — exercises the kernel's endpoint-diagnostics error path
+        // (searchEndpointError names the endpoint and recovery guidance).
+        if (JSON.stringify(parsed ?? {}).includes('fail please')) {
+          res.writeHead(503, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'mock search backend overloaded' } }))
+          return
+        }
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({
           id: 'msg-mock-search', type: 'message', role: 'assistant', model: parsed.model ?? 'mock-1',
@@ -99,12 +107,16 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_HOST_TOOL_IMAGE') ? 'host_echo_tool'
         : lastUserText.includes('CALL_HOST_TOOL') ? 'host_echo_tool'
         : lastUserText.includes('CALL_MCP_TOOL') ? 'mcp__echo__echo'
+        : lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'web_search'
         : lastUserText.includes('CALL_ASK_TOOL') ? 'ask_user_question'
         : lastUserText.includes('CALL_WEB_SEARCH') ? 'web_search'
         : lastUserText.includes('CALL_READ') ? 'read'
         : lastUserText.includes('RUN_LONG_BASH') ? 'bash'
         : lastUserText.includes('RUN_BASH_WRITE') ? 'bash'
         : lastUserText.includes('RUN_BASH') ? 'bash'
+        : lastUserText.includes('DELEGATE_BAD_MODEL') ? 'subagent'
+        : lastUserText.includes('DELEGATE_MODEL') ? 'subagent'
+        : lastUserText.includes('LIST_MODELS') ? 'list_subagent_models'
         : lastUserText.includes('DELEGATE') ? 'subagent'
         : null
       // HANG_TEST: open the SSE stream, emit one delta, and never finish —
@@ -119,13 +131,18 @@ export function startMockServer(port = 48787) {
         const writeMatch = /RUN_BASH_WRITE:([A-Za-z0-9_-]+)/.exec(lastUserText)
         const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
           : toolCallFor === 'ask_user_question' ? { questions: [{ id: 'q1', question: 'Pick a color', header: 'auto-confirm', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
-          : toolCallFor === 'web_search' ? { queries: ['latest stable Node.js version'] }
+          : toolCallFor === 'web_search' ? { queries: [lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'fail please' : 'latest stable Node.js version'] }
           : toolCallFor === 'read' ? { file_path: 'readable.txt' } : toolCallFor === 'bash' ? (lastUserText.includes('RUN_LONG_BASH')
             ? { command: 'sleep 5 && echo LONG_BASH_DONE', description: 'long-running foreground command for the stall-watchdog test' }
             : writeMatch
               ? { command: `echo ${writeMatch[1]} > marker.txt`, description: 'write workspace marker' }
               : { command: 'echo BASH_WORKS && date', description: 'echo test' })
-          : toolCallFor === 'subagent' ? { prompt: 'say SUBAGENT_DONE', description: 'delegation test' } : { note: 'please dump the big blob' })
+          : toolCallFor === 'subagent' ? (lastUserText.includes('DELEGATE_BAD_MODEL')
+            ? { prompt: 'say SUBAGENT_DONE', description: 'unauthorized route', provider: 'mockgw', model: 'mock-9' }
+            : lastUserText.includes('DELEGATE_MODEL')
+              ? { prompt: 'say SUBAGENT_DONE', description: 'model-selected delegation', provider: 'mockgw', model: 'mock-2' }
+              : { prompt: 'say SUBAGENT_DONE', description: 'delegation test' })
+          : toolCallFor === 'list_subagent_models' ? {} : { note: 'please dump the big blob' })
         frame({
           ...base,
           choices: [{

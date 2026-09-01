@@ -3,6 +3,11 @@
 // result — and the panel surface (idbots/subagents/list + /messages) reads
 // the lineage and transcript afterwards.
 //
+// 0.1.2 model selection: the delegation tool also accepts provider/model
+// within the allowlist derived from the provider table (mockgw/mock-2),
+// list_subagent_models advertises the routes, and an out-of-allowlist route
+// fails closed.
+//
 // Run: node test/subagent.test.mjs   (from dsh-runtime/)
 
 import assert from 'node:assert/strict'
@@ -10,7 +15,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { HarnessClient } from '@deepseek-ai/dsh-sdk-client'
+import { runtimeClient } from './helpers/runtime-client.mjs'
 import { generateRuntimeConfig } from '../lib/generate-runtime-config.mjs'
 import { startMockServer } from './fixtures/mock-openai.mjs'
 
@@ -20,19 +25,23 @@ const runtimeDir = path.resolve(here, '..')
 const main = async () => {
   const { server, seen } = await startMockServer(48800)
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-subagent-'))
-  const config = generateRuntimeConfig({
+  const configJson = JSON.stringify(generateRuntimeConfig({
     sessionRoot,
     providers: [{
       key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48800/v1', apiKeyEnv: 'SUBAGENT_KEY',
-      models: [{ id: 'mock-1', contextWindow: 32768 }],
+      models: [
+        { id: 'mock-1', contextWindow: 32768 },
+        { id: 'mock-2', contextWindow: 32768 },
+      ],
     }],
     sections: [],
-  })
+  }))
+  assert.ok(configJson.includes('subagent-model-selection-settings'), 'generator mounts the model-selection settings entry')
+  assert.ok(!configJson.includes('"tool-subagent"'), 'generator no longer mounts tool-subagent at composition level')
   const configPath = path.join(os.tmpdir(), `dsh-subagent-${Date.now()}.json`)
-  fs.writeFileSync(configPath, JSON.stringify(config))
+  fs.writeFileSync(configPath, configJson)
 
-  const client = new HarnessClient({
-    command: process.execPath,
+  const client = runtimeClient({
     args: [path.join(runtimeDir, 'bin.mjs'), configPath],
     env: { ...process.env, SUBAGENT_KEY: 'sk-subagent', SPIKE_QUIET: '1' },
   })
@@ -85,12 +94,6 @@ const main = async () => {
   console.log('[messages]', JSON.stringify(messages.messages.map((m) => ({ type: m.type, content: m.content.slice(0, 40) }))))
   assert.ok(messages.messages.some((m) => m.type === 'user' && m.content.includes('SUBAGENT_DONE') || m.content.includes('say')), 'child prompt visible in transcript')
   assert.ok(messages.messages.some((m) => m.type === 'assistant'), 'child reply visible in transcript')
-
-  subscription.close()
-  await client.close()
-  server.close()
-  fs.rmSync(sessionRoot, { recursive: true, force: true })
-  fs.rmSync(configPath, { force: true })
   console.log('PASS  subagent delegation + panel surface (list/messages)')
 
   const started = lifecycle.find((n) => n.method === 'idbots/subagent/started' && n.params.sessionId === sessionId)
@@ -101,6 +104,43 @@ const main = async () => {
   const finished = lifecycle.find((n) => n.method === 'idbots/subagent/finished' && n.params.agentId === started.params.agentId)
   assert.ok(finished, 'subagent finished notification for the same agent id')
   console.log('PASS  subagent lifecycle notifications (started/progress/finished)')
+
+  // ---- 0.1.2 model selection -------------------------------------------
+  const turnCount = { n: 1 }
+  const runTurn = async (text) => {
+    const nth = ++turnCount.n
+    const end = waitFor((n) => n.method === 'session.event' && n.params.sessionId === sessionId
+      && n.params.event.type === 'turn/end' && n.params.event.data?.turn === nth, 40000, `turn ${nth} end`)
+    await client.prompt(sessionId, [{ type: 'text', text }])
+    await end
+  }
+
+  // list_subagent_models advertises the allowlist (provider-table derived).
+  const toolResults = () => events // strings of tool/result events
+  await runTurn('LIST_MODELS show me the routes')
+  assert.ok(toolResults().some((r) => r.includes('list_subagent_models') || (r.includes('mockgw') && r.includes('mock-2'))),
+    'list_subagent_models result advertises mockgw/mock-2')
+  console.log('PASS  list_subagent_models advertises allowlisted routes')
+
+  // Model-selected delegation: the child turn runs on mock-2 (not the parent's mock-1).
+  const childSeenBefore = seen.length
+  await runTurn('DELEGATE_MODEL to the cheaper model please')
+  const childRequest = seen.slice(childSeenBefore).find((r) => r.body?.model === 'mock-2'
+    && JSON.stringify(r.body?.messages ?? []).includes('say SUBAGENT_DONE'))
+  assert.ok(childRequest, 'model-selected child request ran on mockgw/mock-2')
+  assert.ok(events.some((r) => r.includes('SUBAGENT_DONE')), 'model-selected child result reached the parent')
+  console.log('PASS  delegation with provider/model runs the child on the selected route')
+
+  // Fail-closed: a route outside the allowlist is rejected with an error tool result.
+  await runTurn('DELEGATE_BAD_MODEL try the forbidden route')
+  assert.ok(events.some((r) => r.includes('not allowed')), 'out-of-allowlist route fails closed')
+  console.log('PASS  out-of-allowlist route fails closed')
+
+  subscription.close()
+  await client.close()
+  server.close()
+  fs.rmSync(sessionRoot, { recursive: true, force: true })
+  fs.rmSync(configPath, { force: true })
   process.exit(0)
 }
 

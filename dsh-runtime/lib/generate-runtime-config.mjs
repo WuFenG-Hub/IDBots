@@ -31,6 +31,12 @@
 //     model: string,                     //   model for the auxiliary search call
 //   },                                   //   mounted once the host has seen a DeepSeek provider
 //   workspace?: { cwd: string },       // mounts DSH-native bash/fs tools at cwd
+//   subagentModelSelection?: {          // child-delegation model choice (0.1.2):
+//     enabled?: boolean,                //   default true; allowlist = every configured
+//   },                                  //   provider/model route (the provider table is
+//                                        //   the authorization surface)
+//   persistenceCompression?: 'zstd'|'none', // session artifact encoding (default
+//                                        //   zstd; the host migrates existing roots first)
 //   workspaceInstructions?: {          // AGENTS.md/CLAUDE.md discovery controls
 //     maxBytes?: number,               //   rendered baseline byte budget (default 65536)
 //     dshHome?: string,                //   user-global AGENTS.md home (default $DSH_HOME/~/.dsh)
@@ -206,6 +212,24 @@ export function generateRuntimeConfig(input) {
     }
   }
 
+  // Subagent model-selection authorization (0.1.2): children may pick any
+  // route the app already configured. Route ids must mirror the llm registry
+  // exactly — pi-ai keys are sanitized, the native adapter owns the single
+  // fixed `deepseek-official` route. Duplicates would trip the settings
+  // service's own validation, so dedupe by provider+model.
+  const selectionEnabled = input.subagentModelSelection?.enabled !== false
+  const allowedModelMap = new Map()
+  for (const provider of providers) {
+    const routeKey = provider.native ? 'deepseek-official' : sanitizeRouteKey(provider.key)
+    for (const model of provider.models) {
+      allowedModelMap.set(`${routeKey}\0${model.id}`, { provider: routeKey, model: model.id })
+    }
+  }
+  const subagentModelSelection = {
+    enabled: selectionEnabled,
+    allowedModels: [...allowedModelMap.values()],
+  }
+
   return [
     { id: 'sessions', name: '@deepseek-ai/dsh-session' },
     { id: 'tools', name: '@deepseek-ai/dsh-tools' },
@@ -224,10 +248,13 @@ export function generateRuntimeConfig(input) {
     // dsh-authorization (new 0.1.1 package) is intentionally NOT mounted:
     // IDBots owns API keys in settings and injects them via apiKeyEnv.
     // pi-ai registers OAuth flows only when ctx.authorization exists.
-    { id: 'session-projections', name: plugin('idbots-session-projections.mjs') },
+    // Official projection registry plugin (0.1.2+: the package ships its own
+    // cordis apply; the former idbots-session-projections.mjs shim is retired).
+    { id: 'session-projection', name: '@deepseek-ai/dsh-session-projection' },
     // Projection registry: token-meter (next entry) registers its tokenUsage /
     // contextPressure / contextBreakdown units onto it; idbots-sdk-server's
-    // idbots/usage RPC reads them for the host's usage panel.
+    // idbots/usage RPC reads them for the host's usage panel. agent-loop also
+    // hard-requires ctx.sessionProjections (turnBoundary fold) since 0.1.2.
     { id: 'token-meter', name: '@deepseek-ai/dsh-token-meter' },
     {
       id: 'compaction-basic',
@@ -237,7 +264,13 @@ export function generateRuntimeConfig(input) {
     {
       id: 'persistence',
       name: '@deepseek-ai/dsh-session-persistence-jsonl',
-      config: { root: input.sessionRoot, compression: 'none' },
+      // 0.1.2 physical encoding: zstd (Node builtin zlib — no native addon)
+      // shrinks session artifacts several-fold. The backend refuses a root
+      // that mixes encodings, so dshKernel.ensureRuntime migrates existing
+      // plaintext artifacts (lib/migrate-session-root-zstd.mjs) before
+      // spawning a zstd composition. Tests that parse the artifact as text
+      // opt back in with persistenceCompression: 'none'.
+      config: { root: input.sessionRoot, compression: input.persistenceCompression ?? 'zstd' },
     },
     { id: 'checkpoint-policy', name: '@deepseek-ai/dsh-session-checkpoint-policy' },
     { id: 'user-approval', name: '@deepseek-ai/dsh-user-approval' },
@@ -283,7 +316,18 @@ export function generateRuntimeConfig(input) {
     // Model-facing subagent delegation (in-process spawn provider, foreground).
     { id: 'subagent', name: '@deepseek-ai/dsh-subagent' },
     { id: 'subagent-spawn-in-process', name: '@deepseek-ai/dsh-subagent-spawn-in-process', config: { providerName: 'spawn' } },
-    { id: 'tool-subagent', name: '@deepseek-ai/dsh-tool-subagent', config: { provider: 'spawn', toolName: 'subagent', enableRunInBackground: false } },
+    // Host-scope model-selection preference (0.1.2): the allowlist children
+    // may pick from when delegating. Authorized routes = every provider/model
+    // the app already configured — the provider table IS the authorization
+    // surface. The delegation tool itself is mounted per Agent scope by
+    // idbots-sdk-server (modelSelectionSettings requires an Agent/preset
+    // scope; a top-level mount throws), reading this setting at each fresh
+    // root session and recording it into the session for children to inherit.
+    ...(subagentModelSelection.enabled && subagentModelSelection.allowedModels.length > 0 ? [{
+      id: 'subagent-model-selection-settings',
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings',
+      config: { enabled: true, allowedModels: subagentModelSelection.allowedModels },
+    }] : []),
     {
       id: 'idbots-prompt-sections',
       name: plugin('idbots-prompt-sections.mjs'),
@@ -303,7 +347,12 @@ export function generateRuntimeConfig(input) {
     {
       id: 'idbots-sdk-server',
       name: plugin('idbots-sdk-server.mjs'),
-      ...(input.hostTools ? { config: { tools: input.hostTools } } : {}),
+      config: {
+        ...(input.hostTools ? { tools: input.hostTools } : {}),
+        // Per-agent tool-subagent mounts read this: true only when the
+        // settings entry above is mounted (enabled + non-empty allowlist).
+        subagentModelSelection: subagentModelSelection.enabled && subagentModelSelection.allowedModels.length > 0,
+      },
     },
     ...(input.workspace ? [
       { id: 'shell-env', name: '@deepseek-ai/dsh-shell-env' },

@@ -81,6 +81,24 @@ class FakeAdapter extends LlmAdapter {
     yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
 
+  // Exact-model metadata (0.1.2 initialize path): declare the effort ladder
+  // so initialize({reasoningEffort}) validation passes for the fake route.
+  async resolveModel(provider, model) {
+    return {
+      provider,
+      id: model,
+      name: model,
+      context: { contextWindow: 32768 },
+      reasoning: {
+        defaultEffort: 'low',
+        efforts: [
+          { id: 'off', name: 'Off' }, { id: 'low', name: 'Low' },
+          { id: 'high', name: 'High' }, { id: 'max', name: 'Max' },
+        ],
+      },
+    }
+  }
+
   async *stream(options) {
     const key = String(options.sessionId ?? 'anonymous')
     const n = (this.requests.get(key) ?? 0) + 1
