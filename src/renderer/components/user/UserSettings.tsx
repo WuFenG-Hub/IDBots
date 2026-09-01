@@ -164,6 +164,8 @@ const UserSettings: React.FC = () => {
 
   // Profile
   const [retryingSync, setRetryingSync] = useState(false);
+  const [mobileSyncing, setMobileSyncing] = useState(false);
+  const [mobileSyncResult, setMobileSyncResult] = useState<Awaited<ReturnType<typeof window.electron.userIdentity.syncToMobile>> | null>(null);
   const [subsidyRetrying, setSubsidyRetrying] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [nameSaving, setNameSaving] = useState(false);
@@ -422,8 +424,25 @@ const UserSettings: React.FC = () => {
     }
   };
 
-  const openLogoutModal = () => {
-    setLogoutError('');
+  const handleSyncToMobile = async () => {
+    if (mobileSyncing) return;
+    setMobileSyncing(true);
+    try {
+      const result = await window.electron.userIdentity.syncToMobile();
+      setMobileSyncResult(result);
+      if (result.success) {
+        showToast(i18nService.t('userSettingsMobileSyncSuccess'));
+      } else {
+        showToast(`${i18nService.t('userSettingsMobileSyncFailed')}: ${result.error ?? ''}`);
+      }
+    } catch (error: any) {
+      showToast(`${i18nService.t('userSettingsMobileSyncFailed')}: ${error?.message || ''}`);
+    } finally {
+      setMobileSyncing(false);
+    }
+  };
+
+  const openLogoutModal = () => {    setLogoutError('');
     setRevealError('');
     setRevealedMnemonic('');
     setLogoutModalOpen(true);
@@ -932,6 +951,40 @@ const UserSettings: React.FC = () => {
             {i18nService.t('userSettingsDepositHint')}
           </div>
         )}
+
+        {/* Mobile companion sync: publish the bot manifest as /info/bots */}
+        <div className="flex items-start justify-between gap-3 rounded-xl border dark:border-claude-darkBorder border-claude-border px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+              {i18nService.t('userSettingsMobileSyncTitle')}
+            </p>
+            <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('userSettingsMobileSyncDescription')}
+            </p>
+            {mobileSyncResult && (
+              <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
+                {mobileSyncResult.success
+                  ? i18nService.t('userSettingsMobileSyncStats')
+                      .replace('{bound}', String(mobileSyncResult.boundCount))
+                      .replace('{total}', String(mobileSyncResult.botCount))
+                      .replace('{newly}', String(mobileSyncResult.newlyBound))
+                      + (mobileSyncResult.skippedUnbound.length > 0
+                        ? ` · ${i18nService.t('userSettingsMobileSyncSkipped')}: ${mobileSyncResult.skippedUnbound.join(', ')}`
+                        : '')
+                  : (mobileSyncResult.error ?? '')}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => { void handleSyncToMobile(); }}
+            disabled={mobileSyncing}
+            className="btn-idchat-primary-filled shrink-0 px-3 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <ArrowPathIcon className={`h-3.5 w-3.5 mr-1.5 inline ${mobileSyncing ? 'animate-spin' : ''}`} />
+            {mobileSyncing ? i18nService.t('userSettingsMobileSyncing') : i18nService.t('userSettingsMobileSyncButton')}
+          </button>
+        </div>
 
         {/* Logout confirmation modal */}
         {logoutModalOpen && (

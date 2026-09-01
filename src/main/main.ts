@@ -81,6 +81,7 @@ import {
   updateUserIdentityName,
 } from './services/userIdentityService';
 import { signOwnerBinding } from './services/ownerBindingService';
+import { syncUserBotsToMobile } from './services/userBotsPinService';
 import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, type MetaidAddressInfo } from './services/metabotRestoreService';
 import { fetchDeepSeekBalance } from './services/deepseekBalanceService';
 import { requestMvcGasSubsidy } from './services/mvcSubsidyService';
@@ -11564,6 +11565,27 @@ if (!gotTheLock) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[UserIdentity] userIdentity:retryChainSync failed:', errMsg);
       return { success: false, error: errMsg };
+    }
+  });
+
+  // One-click bot manifest sync for the mobile companion: completes missing
+  // owner bindings, then publishes the /info/bots discovery pin.
+  ipcMain.handle('userIdentity:syncToMobile', async () => {
+    try {
+      const result = await syncUserBotsToMobile(getUserIdentityStore(), getMetabotStore());
+      console.log('[UserIdentity] userIdentity:syncToMobile result', {
+        success: result.success,
+        botCount: result.botCount,
+        boundCount: result.boundCount,
+        newlyBound: result.newlyBound,
+        skippedUnbound: result.skippedUnbound.length,
+        pinId: result.pinId,
+      });
+      return result;
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:syncToMobile failed:', errMsg);
+      return { success: false, botCount: 0, boundCount: 0, newlyBound: 0, skippedUnbound: [], txids: [], error: errMsg };
     }
   });
 
