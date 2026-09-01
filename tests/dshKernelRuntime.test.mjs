@@ -166,3 +166,88 @@ test('DshKernel E2E', { skip: runtimeReady ? false : 'dsh-runtime/node_modules n
     fs.rmSync(sessionRoot, { recursive: true, force: true })
   }
 })
+
+// Multi-slot parallel warmup over a shared plaintext root: provider slots
+// share one sessionRoot and kernelEnsureChain serializes only per slot, so on
+// the first launch after the zstd upgrade two slots may call ensureRuntime
+// concurrently over a root full of legacy plaintext artifacts. The migration
+// must collapse onto one pass (module-level in-flight dedup) — an interleaved
+// double pass raced rename/unlink, the losing unlink rolled the root back
+// into a mixed encoding, and the 0.1.2 persistence backend then rejected the
+// root (encodingMismatch) until an app restart.
+test('DshKernel parallel ensureRuntime over a shared plaintext root', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async () => {
+  const { DshKernel } = require('../dist-electron/main/libs/dshKernel/dshKernel.js')
+  const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
+  const { server } = await startMockServer(48791)
+
+  const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-kernel-parallel-'))
+  // Seed the root the way an upgraded user's looks: several legacy plaintext
+  // sessions spread over project dirs (enough to give a racing pass room).
+  const LEGACY = 6
+  for (let i = 0; i < LEGACY; i += 1) {
+    const dir = path.join(sessionRoot, `--proj-${i % 2}--`, `legacy-${i}`)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'session.jsonl'),
+      `{"type":"session","version":0,"id":"legacy-${i}","createdAt":1786794975563,"delegationDepth":0}\n`
+      + `{"type":"user/message","seq":0,"time":1786794975600,"data":{"content":[{"type":"text","text":"hello ${i}"}]}}\n`)
+  }
+
+  const makeKernel = (sink) => new DshKernel({
+    runtimeDir,
+    handlers: {
+      onMessage: (sessionId, message) => { sink.push({ sessionId, ...message }); return `m-${sink.length}` },
+      onMessageUpdate: () => undefined,
+      onMessageFinalize: () => undefined,
+      onTurnEnd: (sessionId, reason) => sink.push({ type: 'turn-end', sessionId, reason }),
+      onUsage: () => undefined,
+      onApprovalRequest: () => undefined,
+      onApprovalCancelled: () => undefined,
+      onError: () => undefined,
+    },
+  })
+  const config = {
+    sessionRoot,
+    providers: [{
+      key: 'mockgw',
+      apiFormat: 'openai',
+      baseUrl: 'http://127.0.0.1:48791/v1',
+      apiKeyEnv: 'DSH_KERNEL_PARALLEL_KEY',
+      models: [{ id: 'mock-1', contextWindow: 32768 }],
+    }],
+    sections: [],
+    env: { DSH_KERNEL_PARALLEL_KEY: 'sk-parallel', SPIKE_QUIET: '1' },
+  }
+
+  const sinkA = []
+  const sinkB = []
+  const kernelA = makeKernel(sinkA)
+  const kernelB = makeKernel(sinkB)
+  try {
+    await Promise.all([
+      kernelA.ensureRuntime(config),
+      kernelB.ensureRuntime(config),
+    ])
+
+    // The root must now be uniformly zstd — a mixed root would fail the very
+    // next persistence init with encodingMismatch.
+    for (let i = 0; i < LEGACY; i += 1) {
+      const dir = path.join(sessionRoot, `--proj-${i % 2}--`, `legacy-${i}`)
+      assert.ok(!fs.existsSync(path.join(dir, 'session.jsonl')), `legacy-${i} plaintext migrated`)
+      assert.ok(fs.existsSync(path.join(dir, 'session.jsonl.zstd')), `legacy-${i} zstd artifact present`)
+    }
+
+    // Both slots boot and complete turns over the migrated root.
+    await Promise.all([
+      kernelA.ensureSession({ sessionId: 'parallel-a', provider: 'mockgw', model: 'mock-1' }),
+      kernelB.ensureSession({ sessionId: 'parallel-b', provider: 'mockgw', model: 'mock-1' }),
+    ])
+    await kernelA.prompt('parallel-a', 'HELLO_MOCK')
+    await kernelB.prompt('parallel-b', 'HELLO_MOCK')
+    await waitFor(() => sinkA.some((m) => m.type === 'turn-end' && m.reason.kind === 'completed'), 25000, 'kernel A turn')
+    await waitFor(() => sinkB.some((m) => m.type === 'turn-end' && m.reason.kind === 'completed'), 25000, 'kernel B turn')
+  } finally {
+    await Promise.allSettled([kernelA.close(), kernelB.close()])
+    server.close()
+    fs.rmSync(sessionRoot, { recursive: true, force: true })
+  }
+})
