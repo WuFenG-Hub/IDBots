@@ -50,6 +50,7 @@ import {
   ArchiveBoxIcon,
   ExclamationTriangleIcon,
   ChevronRightIcon,
+  ChevronDownIcon,
   StopCircleIcon,
   XMarkIcon,
   PaperAirplaneIcon,
@@ -345,7 +346,7 @@ const RefundStatusCard: React.FC<{
   return (
     <div className="px-4 pb-3 shrink-0">
       <div
-        className={`max-w-3xl mx-auto rounded-2xl border px-4 py-3 ${
+        className={`max-w-[clamp(680px,64%,920px)] mx-auto rounded-2xl border px-4 py-3 ${
           isSuccess
             ? 'border-emerald-500/30 bg-emerald-500/10'
             : 'border-orange-500/30 bg-orange-500/10'
@@ -1585,11 +1586,11 @@ const UserMessageItem: React.FC<{
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
       >
-        <div className="max-w-3xl mx-auto">
+        <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
           <div className="pl-4 sm:pl-8 md:pl-12">
             <div className="flex items-start gap-3 flex-row-reverse">
               <div className="w-full min-w-0 flex flex-col items-end">
-                <div className="w-fit max-w-[42rem]">
+                <div className="w-fit max-w-[min(646px,82%)]">
                   {gigSquareCard}
                 </div>
               </div>
@@ -1606,11 +1607,11 @@ const UserMessageItem: React.FC<{
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
         <div className="pl-4 sm:pl-8 md:pl-12">
           <div className="flex items-start gap-3 flex-row-reverse">
             <div className="w-full min-w-0 flex flex-col items-end">
-              <div className="w-fit max-w-[42rem] rounded-2xl px-4 py-2.5 dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text shadow-subtle">
+              <div className="w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text shadow-subtle">
                 <MarkdownContent
                   content={message.content}
                   className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
@@ -2036,7 +2037,7 @@ const StreamingActivityBar: React.FC<{ messages: CoworkMessage[]; fallbackText?:
 
   return (
     <div className="shrink-0 animate-fade-in px-4">
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
         <div className="streaming-bar" />
         <div className="py-1">
           <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -2312,7 +2313,7 @@ const AssistantTurnBlock: React.FC<{
 
   return (
     <div className="px-4 py-2">
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
         <div className="flex items-start gap-3">
           <div className="flex-1 min-w-0 px-4 py-3 space-y-3">
             {showWorkedHeader ? (
@@ -3394,6 +3395,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
   }, [loadEarlierMessages]);
 
+  // DSH WebUI "back to bottom" button: instant jump, then resume follow mode.
+  const handleScrollToBottomClick = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    pinningScrollRef.current = true;
+    pinScrollToBottom(container);
+    pinningScrollRef.current = false;
+    setShouldAutoScroll(true);
+  }, []);
+
   const autoScrollFollowSignal = buildAutoScrollFollowSignal(currentSession?.messages, isStreaming);
 
   const resolveLocalFilePath = useCallback((href: string, text: string) => {
@@ -3627,7 +3638,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           )}
           {showWelcomeHandoff && hasRenderableAssistantContent(turn) && (
             <div className="px-4 pb-2">
-              <div className="max-w-3xl mx-auto">
+              <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
                 <div className="flex items-start gap-2.5 rounded-xl border border-claude-accent/20 bg-claude-accent/5 px-3.5 py-2.5">
                   <SparklesIcon className="h-4 w-4 mt-0.5 shrink-0 text-claude-accent" />
                   <p className="text-xs leading-5 dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -3939,6 +3950,24 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           renderConversationTurns()
         )}
         <div ref={messagesEndRef} className="h-20" />
+        {/* DSH WebUI-style "back to bottom" button: sticky zero-height slot keeps
+            the 34px floating button pinned 16px above the scrollport's bottom edge,
+            right-aligned with the chat content column. */}
+        {!shouldAutoScroll && (
+          <div className="sticky bottom-4 z-10 h-0 flex pointer-events-none">
+            <div className="w-full max-w-[clamp(680px,64%,920px)] mx-auto flex justify-end">
+              <button
+                type="button"
+                onClick={handleScrollToBottomClick}
+                title={i18nService.t('coworkScrollToBottom')}
+                aria-label={i18nService.t('coworkScrollToBottom')}
+                className="pointer-events-auto -mt-[34px] flex h-[34px] w-[34px] items-center justify-center rounded-full border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-elevated dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+              >
+                <ChevronDownIcon className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {shouldRenderRefundStatusCard && currentSession.serviceOrderSummary && (
@@ -3961,7 +3990,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
       {freeQuotaExhausted && (
         <div className="px-4 pb-2 shrink-0">
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
             <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
               <ExclamationTriangleIcon className="h-4 w-4 text-red-500 shrink-0" />
               <span className="text-xs text-red-700 dark:text-red-300">
@@ -3983,7 +4012,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
       {isA2ASession && currentSession.status === 'error' && !freeQuotaExhausted && (
         <div className="px-4 pb-2 shrink-0">
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
             <div className="flex items-start justify-between gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
               <div className="flex items-start gap-2 min-w-0">
                 <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 text-red-500 shrink-0" />
@@ -4018,7 +4047,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       {/* Input Area */}
       {isA2ASession ? (
         <div className="px-4 py-3 shrink-0 border-t dark:border-claude-darkBorder border-claude-border">
-          <div className="mx-auto flex max-w-3xl flex-col items-stretch gap-2">
+          <div className="mx-auto flex max-w-[clamp(680px,64%,920px)] flex-col items-stretch gap-2">
             {isPrivateA2ASession && (
               <A2AGuidanceControls
                 key={currentSession.id}
@@ -4034,7 +4063,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         </div>
       ) : (
         <div className="p-4 shrink-0">
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
             <div className="flex items-center justify-end gap-2 mb-2">
               {currentSession.contextUsage && (
                 <ManualCompactButton
@@ -4065,7 +4094,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             </div>
           </div>
           {delegationBlocking && (
-            <div className="max-w-3xl mx-auto mb-2">
+            <div className="max-w-[clamp(680px,64%,920px)] mx-auto mb-2">
               <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
                 <svg className="animate-spin h-4 w-4 text-amber-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -4078,7 +4107,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             </div>
           )}
           {showWelcomeRetirement && (
-            <div className="max-w-3xl mx-auto mb-2">
+            <div className="max-w-[clamp(680px,64%,920px)] mx-auto mb-2">
               <div className="flex flex-col gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
                 <div className="flex items-start gap-2.5">
                   <CheckIcon className="h-4 w-4 mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
@@ -4105,7 +4134,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               </div>
             </div>
           )}
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
             <CoworkPromptInput
               key={currentSession.id}
               scopeKey={currentSession.id}
@@ -4117,6 +4146,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               disabled={delegationBlocking}
               onManageSkills={onManageSkills}
               size="large"
+              singleLine
               showModelSelector={true}
               modelEffortValue={sessionModelEffortValue}
               onModelEffortChange={handleSessionModelEffortChange}

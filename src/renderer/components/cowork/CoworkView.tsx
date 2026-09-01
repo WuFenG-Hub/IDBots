@@ -728,7 +728,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
       {/* Main Content */}
       <div className="flex-1 overflow-y-auto min-h-0">
-        <div className="max-w-3xl mx-auto px-4 pt-10 pb-6 min-h-full flex flex-col">
+        <div className="max-w-[clamp(680px,64%,920px)] mx-auto px-4 pt-10 pb-6 min-h-full flex flex-col">
           <div className="flex-1 flex flex-col items-center justify-center text-center space-y-6">
             {/* Welcome Section - centered */}
             <div className="text-center space-y-5">
@@ -781,7 +781,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
       {/* Prompt Input Area - Bottom aligned */}
       <div className="p-4 shrink-0">
-        <div className="max-w-3xl mx-auto">
+        <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
           <CoworkPromptInput
             ref={promptInputRef}
             onSubmit={handleStartSession}
