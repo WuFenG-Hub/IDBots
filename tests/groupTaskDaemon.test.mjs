@@ -255,7 +255,17 @@ const createHarness = async (overrides = {}) => {
     // join-welcome tests); spreads last so tests can override anything above.
     ...(overrides.deps ? overrides.deps : {}),
   };
-  const loop = createGroupTaskDaemonLoop(deps);
+  // fix/group-task-flow: responder turns run as detached async jobs now.
+  // Preserve the historical test contract ("when runTick() resolves, every
+  // triggered turn has completed") by draining pending turn jobs after the tick.
+  const drainLoop = (target) => ({
+    ...target,
+    runTick: async () => {
+      await target.runTick();
+      await target.whenIdle();
+    },
+  });
+  const loop = drainLoop(createGroupTaskDaemonLoop(deps));
 
   const createTask = (workerIds = [2, 3], opts = {}) => {
     const task = groupTaskStore.createTask({
@@ -275,6 +285,8 @@ const createHarness = async (overrides = {}) => {
   return {
     store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore, loop, deps,
     chatCalls, sends, routingCalls, skillTurnCalls, events, ownerReportCalls, state, createTask,
+    /** Rebuild a loop over the same stores with extra deps — drained like the harness loop. */
+    makeLoop: (extraDeps = {}) => drainLoop(createGroupTaskDaemonLoop({ ...deps, ...extraDeps })),
     cleanup: () => store.close(),
   };
 };
@@ -822,8 +834,8 @@ test('classifyMemberLiveness: heartbeat lease, speech, and session activity each
   }), 'stale');
 });
 
-test('cursor advances on no-reply messages; a failing message holds the batch (fail-stop) until it recovers', async () => {
-  // Cooldowns off: this test isolates the fail-stop/retry ordering semantics.
+test('cursor advances on no-reply messages; a failing turn retries via the durable queue in FIFO order', async () => {
+  // Cooldowns off: this test isolates the retry/ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
   try {
     const task = h.createTask([2]);
@@ -838,9 +850,11 @@ test('cursor advances on no-reply messages; a failing message holds the batch (f
     const selfId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['self-i0'])[0].values[0][0];
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId);
 
-    // First message blows up the LLM (one-shot error), second would succeed:
-    // fail-stop — the later message waits BEHIND the failed one so its success
-    // can never advance the cursor past the pending retry.
+    // fix/group-task-flow semantics: turns are detached jobs. The first
+    // message's turn fails (one-shot error) and re-enters the durable defer
+    // queue; the second message's trigger queues behind the busy session. The
+    // cursor advances once both triggers are dispatched/queued — reply-level
+    // retries never regress the cursor.
     h.state.chatError = 'llm exploded';
     insertGroupMessage(h.db, {
       pinId: 'boom-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
@@ -852,21 +866,25 @@ test('cursor advances on no-reply messages; a failing message holds the batch (f
     });
     await h.loop.runTick();
 
-    assert.equal(h.chatCalls.length, 1, 'only the first message attempted; the batch stops at the failure');
-    assert.equal(h.sends.length, 0, 'nothing sent while the first message fails');
+    assert.equal(h.chatCalls.length, 1, 'only the first message attempted; the second queues behind the busy session');
+    assert.equal(h.sends.length, 0, 'nothing sent while the first turn fails');
+    const okId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['ok-i0'])[0].values[0][0];
     assert.equal(
-      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId,
-      'cursor held before the failing message (no leapfrog by the later clean message)',
+      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId,
+      'cursor advanced once both triggers were dispatched/queued (turn retry rides the durable queue)',
     );
 
-    // Next tick: the failed message recovers (one-shot error spent) and both
-    // flow in order.
+    // Next tick: the failed turn is retried first (FIFO per bot) and succeeds —
+    // the one-shot error is spent. The queued second message waits its turn.
     await h.loop.runTick();
-    assert.equal(h.chatCalls.length, 3, 'failed message retried, then the queued one');
-    assert.equal(h.sends.length, 2);
+    assert.equal(h.chatCalls.length, 2, 'failed turn retried from the durable queue');
     assert.match(h.chatCalls[1].userMessage, />>> Human: @Coder Bot first attempt <<</, 'retry keeps message order');
+    assert.equal(h.sends.length, 1);
+
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 3, 'queued second message drains after the retry');
     assert.match(h.chatCalls[2].userMessage, />>> Human: @Coder Bot second attempt <<</);
-    const okId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['ok-i0'])[0].values[0][0];
+    assert.equal(h.sends.length, 2);
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId);
   } finally {
     h.cleanup();
@@ -985,6 +1003,8 @@ test('send failure is logged and swallowed; cursor still advances', async () => 
       senderName: 'Human', content: '@Coder Bot say hi',
     });
     await failingLoop.runTick();
+    // fix/group-task-flow: the send runs inside the detached turn job — drain it.
+    await failingLoop.whenIdle();
     assert.equal(attempt, 1, 'send was attempted');
     assert.equal(originalSend.length, 0, 'no successful sends recorded');
     const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['fail-send-i0'])[0].values[0][0];
@@ -1200,15 +1220,17 @@ test('GT#47 R3: during review, chair mentions arm no ACK watch and worker [WORKI
       'the gated ACK is logged as liveness-only',
     );
 
-    // Control: back in executing (rework hatch) the same [WORKING] arms the
-    // deadline again — the gate is phase-scoped, not a blanket disarm.
+    // Control: back in executing (rework hatch) an ETA-bearing [WORKING] arms
+    // the deadline again — the gate is phase-scoped, not a blanket disarm.
+    // (Task #51: only an explicit numeric ETA arms a deadline now, so the
+    // control ACK must carry one.)
     insertGroupMessage(h.db, {
       pinId: 'rework-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Twin Bot', content: 'rework needed after all\n[STATUS:EXECUTING]', chainTimestamp: 103,
     });
     insertGroupMessage(h.db, {
       pinId: 'ack2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[WORKING] 重新开工', chainTimestamp: 104,
+      senderName: 'Coder Bot', content: '[WORKING] 重新开工，预计 10 分钟', chainTimestamp: 104,
     });
     await h.loop.runTick();
     assert.ok(
@@ -3150,11 +3172,11 @@ test('round-4: HTTP probe notes on https deliverable links ride the chair verifi
   }
 });
 
-test('round-4 cursor semantics: failing message is retried, cursor advances only on success', async () => {
+test('round-4 cursor semantics: a failed reply turn retries via the durable queue; the cursor never regresses', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
-    // one-shot LLM failure: tick 1 fails, tick 2 succeeds
+    // one-shot LLM failure: tick 1's turn fails, tick 2's durable-queue retry succeeds
     h.state.chatError = 'transient boom';
     insertGroupMessage(h.db, {
       pinId: 'retry-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
@@ -3163,21 +3185,23 @@ test('round-4 cursor semantics: failing message is retried, cursor advances only
     const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['retry-i0'])[0].values[0][0];
 
     await h.loop.runTick();
-    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
-      'cursor does NOT advance on a failed message (retry semantics)');
+    // fix/group-task-flow: the cursor advances once the trigger is DISPATCHED;
+    // the failed reply turn retries via the durable defer queue instead of
+    // holding the cursor (and the whole batch behind it) hostage.
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advanced at dispatch (reply retry rides the durable queue)');
     assert.equal(h.chatCalls.length, 1, 'first attempt failed');
+    assert.equal(h.sends.length, 0);
 
     await h.loop.runTick();
-    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
-      'cursor advances once the message is processed successfully');
-    assert.equal(h.chatCalls.length, 2, 'message was retried');
-    assert.equal(h.sends.length, 1);
+    assert.equal(h.chatCalls.length, 2, 'message retried from the durable queue on the next tick');
+    assert.equal(h.sends.length, 1, 'retry posted the reply');
   } finally {
     h.cleanup();
   }
 });
 
-test('round-4 cursor semantics: permanently failing message is dropped after the bounded retries', async () => {
+test('round-4 cursor semantics: a permanently failing turn is dropped after the bounded retries', async () => {
   const h = await createHarness({ chatErrorAlways: 'always boom' });
   try {
     const task = h.createTask([2]);
@@ -3187,15 +3211,15 @@ test('round-4 cursor semantics: permanently failing message is dropped after the
     });
     const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['stuck-i0'])[0].values[0][0];
 
-    for (let tick = 1; tick <= 4; tick += 1) {
+    // fix/group-task-flow: one attempt per tick — tick 1 dispatches from the
+    // message loop, ticks 2-5 drain the durable-queue requeue. The 5th failure
+    // spends the budget and the entry is dropped.
+    for (let tick = 1; tick <= 5; tick += 1) {
       await h.loop.runTick();
-      assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
-        `tick ${tick}: cursor held until the retry budget is spent`);
+      assert.equal(h.sends.length, 0, `tick ${tick}: nothing ever posts`);
+      assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+        `tick ${tick}: cursor stayed advanced (dispatch-time semantics)`);
     }
-    // the 5th failure spends the budget: the message is dropped, cursor advances
-    await h.loop.runTick();
-    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
-      'cursor advanced past the permanently failing message after the bounded retries');
     assert.equal(h.chatCalls.length, 5, 'exactly MSG_RETRY_MAX_FAILURES attempts');
 
     // the 6th tick has nothing left to process
@@ -3480,13 +3504,25 @@ test('P0-2: silent assigned/working members are auto-marked unreachable after th
     const startMs = Date.now();
     h.state.nowMs = startMs;
 
-    // Worker 2 spoke 1 minute ago (within threshold); worker 3 never spoke.
+    // Worker 2 claimed work with a [WORKING] 1 minute ago (within threshold);
+    // worker 3 got a chair assignment (a pending ACK watch) and never spoke.
+    // Both carry an outstanding obligation, so silence past the threshold is
+    // flag-worthy — a member with NO obligation is legitimately idle and is
+    // never stamped (see the obligation-gate test).
     insertGroupMessage(h.db, {
       pinId: 'pin-old-1',
       senderMetaId: 'metaid-2',
       senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot',
-      content: 'hello',
+      content: '[WORKING] hello',
+      chainTimestamp: Math.floor((startMs - 60_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-old-3',
+      senderMetaId: 'metaid-1',
+      senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Designer Bot please handle the icon set',
       chainTimestamp: Math.floor((startMs - 60_000) / 1000),
     });
 
@@ -3521,6 +3557,13 @@ test('P0-2 recovery: an unreachable member with fresh liveness signals is restor
     // Both workers carry a stale unreachable stamp from a prior silence spell.
     h.groupTaskStore.setMemberStatus(task.id, 2, 'unreachable', 'gmid-w2');
     h.groupTaskStore.setMemberStatus(task.id, 3, 'unreachable', 'gmid-w3');
+    // Worker 3's stamp is backed by an outstanding obligation (an assignment
+    // whose ACK watch is still pending) — without one the stamp is bogus and
+    // the obligation gate lifts it immediately instead of keeping it.
+    h.store.set(
+      `group_task_ack_pending:${task.id}:3`,
+      JSON.stringify({ assignedAt: startMs, messageId: 1, assignedChainSec: Math.floor(startMs / 1000) }),
+    );
 
     // Worker 2 spoke 30s ago — but the message is ALREADY past the cursor
     // (e.g. it arrived while a hung tick froze message processing), so only
@@ -3698,7 +3741,7 @@ test('review follow-up: liveness in the timeout/unreachable gap never flaps the 
   }
 });
 
-test('tick watchdog: a hung tick no longer bricks the daemon loop', async () => {
+test('tick watchdog: a hung TURN no longer hangs the daemon loop', async () => {
   const logs = [];
   const h = await createHarness({
     emitLog: (message) => logs.push(message),
@@ -3709,6 +3752,8 @@ test('tick watchdog: a hung tick no longer bricks the daemon loop', async () => 
     h.state.nowMs = Date.now();
     // The first group send never settles — simulating the hung await that
     // silently killed the loop in production (task #45, 2026-08-28).
+    // fix/group-task-flow: sends run inside detached turn jobs now, so the hung
+    // send hangs ONE job while the tick loop keeps driving every other task.
     const realPost = h.deps.postGroupTaskMessage;
     let postCalls = 0;
     h.deps.postGroupTaskMessage = async (...args) => {
@@ -3725,21 +3770,22 @@ test('tick watchdog: a hung tick no longer bricks the daemon loop', async () => 
     const drivenAtStart = h.groupTaskStore.getTaskById(task.id).lastDrivenAt ?? 0;
     h.loop.start();
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    await sleep(100); // tick 1 hangs inside the first send
+    await sleep(100); // tick 1 dispatches the turn whose send hangs forever
     h.state.nowMs += 10_000; // jump past the watchdog window
     // intervalMs is clamped to >= 1000ms inside the loop — wait out a full
-    // interval so the watchdog fire + the resumed tick both land.
+    // interval so later ticks land.
     await sleep(1_500);
     h.loop.stop();
 
-    assert.ok(
-      logs.some((line) => line.includes('Tick watchdog')),
-      'watchdog logged the hung tick',
+    assert.equal(
+      logs.filter((line) => line.includes('Tick watchdog')).length,
+      0,
+      'no watchdog fire: the tick itself never hung (the hung send lives in a detached job)',
     );
     const drivenAtEnd = h.groupTaskStore.getTaskById(task.id).lastDrivenAt ?? 0;
     assert.ok(
       drivenAtEnd > drivenAtStart,
-      'the loop resumed driving after the hung tick (lastDrivenAt heartbeat moved)',
+      'the loop keeps driving while a turn job is hung (lastDrivenAt heartbeat moved)',
     );
   } finally {
     h.cleanup();
@@ -4461,8 +4507,7 @@ test('P1-3: the planning directive embeds the OpenTeam block when invites are pe
   try {
     const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
     // Wire the optional store getter (same shape main.ts passes).
-    h.loop = createGroupTaskDaemonLoop({
-      ...h.deps,
+    h.loop = h.makeLoop({
       getOpenTeamMembershipStore: () => membershipStore,
     });
     const task = h.createTask([2], { activate: false }); // planning
@@ -4853,7 +4898,7 @@ test('entropy P1 review: chair without a globalMetaID falls back to the full-ros
   }
 });
 
-test('entropy P0 review: numberless template ACK still arms the delivery deadline with the timeout default', async () => {
+test('entropy P0 review: a numberless template ACK is liveness only — no invented delivery deadline', async () => {
   const h = await createHarness({ ackTimeoutMs: 180_000 });
   try {
     const task = h.createTask([2]);
@@ -4871,18 +4916,154 @@ test('entropy P0 review: numberless template ACK still arms the delivery deadlin
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
-    const raw = h.store.get('group_task_expected_delivery:1:2');
-    assert.ok(raw, 'deadline armed even without a numeric ETA');
-    const entry = JSON.parse(raw);
-    assert.ok(entry.dueAt > h.state.nowMs, 'armed with a positive default window');
+    // Task #51: a numberless ACK is pure liveness. The old fallback armed a
+    // memberTimeoutAfterMinutes deadline out of thin air and then fired fake
+    // "estimated delivery" reminders at workers simply mid-turn.
+    assert.equal(
+      h.store.get('group_task_expected_delivery:1:2'),
+      undefined,
+      'no delivery deadline armed without an explicit ETA',
+    );
 
-    // Past the default member timeout (20 min) with no deliverable -> the
-    // P0-4 chair reminder must fire (it never did before this fix).
+    // Past the old invented window (20 min) with no deliverable: still no
+    // fake reminder. A genuinely dead worker is caught by the stale-[WORKING]
+    // / unreachable watchdogs (real inactivity), not by an invented deadline.
     h.state.nowMs += 21 * 60_000;
     await h.loop.runTick();
-    assert.ok(
-      h.sends.some((send) => /estimated delivery/.test(send.content)),
-      'chair delivery reminder fired for the template-ACK deadline',
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      0,
+      'no fake delivery reminder off a numberless ACK',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #51: implicit ACK by message-id order — a watch armed after the reply synced never alarms', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // The worker's reply synced BEFORE the chair's assignment row (chain
+    // relay/indexer skew), so the cursor processed it with no watch to clear;
+    // the assignment then armed a watch whose daemon-local assignedAt
+    // postdates the reply — the pre-fix false alarm. On-chain the reply
+    // genuinely ANSWERS the assignment (its chain second is strictly later);
+    // only the sync order was inverted.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-skew-reply', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '收到，我来看一下',
+      chainTimestamp: Math.floor(startMs / 1000) + 1,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-skew-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const assignId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-skew-assign'])[0].values[0][0];
+    const replyId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-skew-reply'])[0].values[0][0];
+    assert.ok(replyId < assignId, 'reply synced first (lower id)');
+    assert.ok(h.store.get(`group_task_ack_pending:${task.id}:2`), 'watch armed by the late-synced assignment');
+    h.sends.length = 0;
+
+    // Past the ACK timeout: the reply's chain second is strictly later than
+    // the assignment's, so chain order proves engagement — daemon-local
+    // processing time is irrelevant.
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => /has not sent a \[WORKING\] ACK/.test(s.content)).length,
+      0,
+      'no no-ACK reminder for a worker who already replied',
+    );
+    assert.equal(h.store.get(`group_task_ack_seen:${task.id}:${assignId}`), '1', 'ack-seen recorded');
+    assert.equal(h.store.get(`group_task_ack_pending:${task.id}:2`), undefined, 'watch cleared');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #51: implicit ACK by message-id — a higher-id reply behind a manually stale watch clears it', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    insertGroupMessage(h.db, {
+      pinId: 'pin-idc-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const assignId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-idc-assign'])[0].values[0][0];
+
+    // The reply carries an EARLIER chain second (clock skew between relays)
+    // but a HIGHER row id; simulate the watch surviving its processing (e.g.
+    // the reply arrived flagged suspect, or the handler missed the member
+    // match) by re-arming the watch manually afterwards.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-idc-reply', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'on it',
+      chainTimestamp: Math.floor(startMs / 1000) - 5,
+    });
+    const replyId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-idc-reply'])[0].values[0][0];
+    assert.ok(replyId > assignId, 'reply has the higher row id');
+    const cursorId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, cursorId);
+    h.store.set(
+      `group_task_ack_pending:${task.id}:2`,
+      JSON.stringify({ assignedAt: startMs, messageId: assignId, assignedChainSec: Math.floor(startMs / 1000) }),
+    );
+    h.sends.length = 0;
+
+    // Chain-second comparison says "earlier" (skewed), but the message-id
+    // comparison proves the reply postdates the assignment — implicit ACK.
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => /has not sent a \[WORKING\] ACK/.test(s.content)).length,
+      0,
+      'message-id order rescues a chain-clock-skewed reply',
+    );
+    assert.equal(h.store.get(`group_task_ack_seen:${task.id}:${assignId}`), '1');
+    assert.equal(h.store.get(`group_task_ack_pending:${task.id}:2`), undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #51 obligation gate: idle members are never stamped unreachable; a bogus stamp is lifted', async () => {
+  const h = await createHarness({ memberUnreachableAfterMinutes: 5 });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // Worker 2 carries a bogus legacy stamp (older builds stamped
+    // delivered-then-idle members — cf. Lucy in task #51) and has NO
+    // outstanding obligation: the monitor lifts it immediately, without
+    // waiting for fresh liveness.
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'unreachable', 'gmid-w2');
+    // Worker 3 is plainly idle: assigned to the task but never given work,
+    // never spoke — silence is the normal state, not a failure.
+
+    h.state.nowMs = startMs + 30 * 60_000;
+    await h.loop.runTick();
+    const members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(
+      members.find((m) => m.metabotId === 2).status,
+      'working',
+      'bogus stamp lifted immediately (no obligation, no liveness needed)',
+    );
+    assert.equal(
+      members.find((m) => m.metabotId === 3).status,
+      'assigned',
+      'an idle member with no obligation is never stamped unreachable',
     );
   } finally {
     h.cleanup();
@@ -5516,6 +5697,159 @@ test('G-04: a supervisor pause holds the planning turn; nudge drives a chair res
     );
     const pending = h.groupTaskStore.listPendingSupervisorSignals(task.id);
     assert.equal(pending.length, 0, 'the nudge is marked processed with the response pin');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// fix/group-task-flow Phase 3: long-turn liveness — a still-running turn
+// posts a host placeholder + bounded heartbeats instead of sitting silent,
+// and renews the worker's [WORKING long-task] lease while it runs.
+// ---------------------------------------------------------------------------
+
+test('long-turn liveness: a still-running turn posts a placeholder + heartbeats; settle clears the timers', async () => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let releaseTurn;
+  const gate = new Promise((resolve) => { releaseTurn = resolve; });
+  const h = await createHarness({
+    deps: {
+      longTurnPlaceholderMs: 100,
+      longTurnHeartbeatMs: 150,
+      longTurnHeartbeatMax: 3,
+      performChat: async () => {
+        await gate;
+        return '[WORKING] done';
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-lt-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    // Raw loop: the drained wrapper would hang on the gated turn forever.
+    const rawLoop = createGroupTaskDaemonLoop(h.deps);
+    await rawLoop.runTick();
+
+    // Placeholder at ~100ms, heartbeat #1 at ~250ms — the turn is still gated.
+    await sleep(320);
+    const placeholderSends = () => h.sends.filter((send) =>
+      send.metabotId === 2 && send.content.startsWith('[WORKING] 仍在执行中'));
+    const heartbeatSends = () => h.sends.filter((send) =>
+      send.metabotId === 2 && send.content.startsWith('[WORKING] 长步骤仍在后台执行'));
+    assert.equal(placeholderSends().length, 1, 'one placeholder line while the turn runs');
+    assert.equal(heartbeatSends().length, 1, 'first heartbeat while the turn runs');
+    const lease = Number(h.store.get(`group_task_working_heartbeat:${task.id}:2`));
+    assert.ok(lease > h.state.nowMs, 'each worker post renews the [WORKING long-task] lease');
+
+    // Settle the turn: the remaining beats (~400ms / ~550ms) must never fire.
+    releaseTurn();
+    await rawLoop.whenIdle();
+    await sleep(420);
+    assert.equal(placeholderSends().length, 1, 'no second placeholder after settle');
+    assert.equal(heartbeatSends().length, 1, 'remaining heartbeats cleared at settle');
+  } finally {
+    releaseTurn();
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// fix/group-task-flow Phase 5: chair-drive guarantees — a chair trigger that
+// produced a decision but no answer (per-tick cap, suppression, budget) is
+// re-driven once; an idle task with nothing running nudges the chair.
+// ---------------------------------------------------------------------------
+
+test('task #51 chair-drive safety net: a chair trigger dropped by the per-tick cap is re-driven once', async () => {
+  const h = await createHarness({ deps: { chairResponseRedriveMs: 60_000 } });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Two chair-triggering worker questions in one tick: the first dispatches,
+    // the per-tick chair auto-reply cap silently drops the second.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-net-q1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '素材库的地址是哪一个？',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-net-q2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '图标风格定哪一种？',
+      chainTimestamp: Math.floor(startMs / 1000) + 1,
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'per-tick chair cap: only the first trigger dispatched');
+    const q2Id = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-net-q2'])[0].values[0][0];
+    const pending = JSON.parse(h.store.get(`group_task_chair_response_pending:${task.id}`) ?? 'null');
+    assert.equal(pending?.messageId, q2Id, 'the capped trigger stays pending (the answered one does not clear it)');
+
+    // Past the redrive window with the chair still silent: the net re-drives
+    // the dropped trigger through the durable defer queue (same-tick drain).
+    h.state.nowMs = startMs + 120_000;
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 2, 'the dropped trigger is re-driven once');
+    assert.equal(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      undefined,
+      'obligation cleared after the answer',
+    );
+
+    // No third drive — the net fires once per trigger.
+    h.state.nowMs = startMs + 240_000;
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 2, 'no further re-drive');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #51 no-progress nudge: idle minutes with nothing running drives the chair to report status', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-nudge-hello', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] hello',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.sends.length = 0;
+    h.chatCalls.length = 0;
+
+    // 21 idle minutes, no turn in flight → one supervisor nudge is recorded
+    // this tick and drives the chair status turn on the next.
+    h.state.nowMs = startMs + 21 * 60_000;
+    await h.loop.runTick();
+    const signals = h.groupTaskStore.listPendingSupervisorSignals(task.id);
+    assert.equal(signals.length, 1, 'one nudge recorded for the idle episode');
+    assert.equal(signals[0].kind, 'nudge');
+
+    await h.loop.runTick();
+    assert.ok(
+      h.chatCalls.some((call) => call.userMessage.includes('NUDGE')),
+      'the nudge drives a chair turn',
+    );
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'the nudge is marked processed',
+    );
+
+    // Same idle episode: no second nudge (the guard holds until progress).
+    h.state.nowMs = startMs + 30 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'no second nudge within the same idle episode',
+    );
   } finally {
     h.cleanup();
   }

@@ -196,6 +196,7 @@ import {
   stopGroupTaskDaemon,
   type GroupTaskDaemonSendOwnerReportFn,
 } from './services/groupTaskDaemon';
+import { groupTaskLog } from './libs/groupTaskLogger';
 import {
   startOpenTeamGuestDaemon,
   stopOpenTeamGuestDaemon,
@@ -3796,7 +3797,12 @@ const startSqliteDaemons = (): void => {
           }),
         }
       : {}),
-    emitLog: (msg) => console.log(msg),
+    // Persist daemon logs to userData/logs/grouptask.log (with console passthrough)
+    // so stalled group tasks remain diagnosable after the fact.
+    emitLog: (msg) => {
+      console.log(msg);
+      groupTaskLog(msg);
+    },
   });
 
   // OpenTeam (M1): guest-side wiring. The guest service answers OpenTeam
