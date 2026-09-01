@@ -75,6 +75,9 @@ function createCoworkStoreHarness() {
   return {
     stored,
     coworkStore: {
+      // appendPrivateChatA2AMessage consults session state for the stale-error
+      // heal; a null session makes the heal a no-op in this harness.
+      getSessionWithoutMessages: () => null,
       addMessage(sessionId, message) {
         const created = {
           id: `msg-${stored.length + 1}`,

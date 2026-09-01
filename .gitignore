@@ -123,6 +123,7 @@ tests/*
 !tests/botBrowserHostService.test.mjs
 !tests/privateChatOrderCoworkTimeout.test.mjs
 !tests/a2aGuidanceRestart.test.ts
+!tests/a2aStaleErrorHeal.test.mjs
 !tests/orchestratorSessionTitle.test.ts
 !tests/orderPromptBuilder.test.ts
 !tests/privateChatOrderCoworkDeliveryArtifacts.test.mjs

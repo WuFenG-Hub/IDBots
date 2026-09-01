@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   isA2AOrderRelatedMessage,
   shouldHideA2AInternalMessage,
+  lastA2AErrorDetail,
 } from '../src/renderer/components/cowork/a2aInternalMessageFilter';
 import type { CoworkMessage } from '../src/renderer/types/cowork';
 
@@ -136,4 +137,42 @@ test('ordinary conversation bubbles and local notices stay visible', () => {
   assert.equal(shouldHideA2AInternalMessage(endNotice), false);
   assert.equal(shouldHideA2AInternalMessage(failedDelivery), false);
   assert.equal(shouldHideA2AInternalMessage(plainAssistant), false);
+});
+
+test('lastA2AErrorDetail prefers the newest error and strips the Error: prefix', () => {
+  const messages = [
+    asMessage({
+      type: 'system',
+      content: 'Error: Working directory does not exist: /tmp/gone',
+      metadata: { error: 'Working directory does not exist: /tmp/gone' },
+    }),
+    asMessage({ type: 'assistant', content: 'later reply' }),
+    asMessage({
+      type: 'system',
+      content: 'Error: Cannot find module /tmp/x.js',
+      metadata: { error: 'Cannot find module /tmp/x.js' },
+    }),
+    asMessage({ type: 'assistant', content: 'newest reply' }),
+  ];
+
+  assert.equal(lastA2AErrorDetail(messages), 'Cannot find module /tmp/x.js');
+});
+
+test('lastA2AErrorDetail falls back to content and truncates long details', () => {
+  const fromContentOnly = [
+    asMessage({ type: 'assistant', content: 'reply' }),
+    asMessage({ type: 'system', content: 'Error: boom from content' }),
+  ];
+  assert.equal(lastA2AErrorDetail(fromContentOnly), 'boom from content');
+
+  const longDetail = 'x'.repeat(400);
+  const truncated = lastA2AErrorDetail([
+    asMessage({ type: 'system', content: 'irrelevant', metadata: { error: longDetail } }),
+  ]);
+  assert.ok(truncated);
+  assert.equal(truncated.length, 240);
+  assert.ok(truncated.endsWith('…'));
+
+  assert.equal(lastA2AErrorDetail([asMessage({ type: 'assistant', content: 'no errors' })]), null);
+  assert.equal(lastA2AErrorDetail([]), null);
 });

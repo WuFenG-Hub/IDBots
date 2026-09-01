@@ -22,7 +22,7 @@ import ManualCompactButton from './ManualCompactButton';
 import A2AMessageItem from './A2AMessageItem';
 import MessageFeedbackControls from './MessageFeedbackControls';
 import { ThinkingBlock, splitThinkTaggedContent } from './ThinkingBlock';
-import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
+import { shouldHideA2AInternalMessage, lastA2AErrorDetail } from './a2aInternalMessageFilter';
 import {
   getTodoListSummaryText,
   isTaskCreateToolName,
@@ -2411,6 +2411,22 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
     return false;
   }, [currentSession?.messages]);
+  // Cause text for the A2A error banner: the newest system error message.
+  // System bubbles are hidden in the A2A view, so without this the banner
+  // says "something failed" without ever showing what.
+  const a2aSessionErrorDetail = useMemo(() => (
+    isA2ASession ? lastA2AErrorDetail(currentSession?.messages ?? []) : null
+  ), [isA2ASession, currentSession?.messages]);
+  const [isClearingA2AError, setIsClearingA2AError] = useState(false);
+  const handleDismissA2AErrorBanner = useCallback(async () => {
+    if (!currentSession || isClearingA2AError) return;
+    setIsClearingA2AError(true);
+    try {
+      await coworkService.clearSessionError(currentSession.id);
+    } finally {
+      setIsClearingA2AError(false);
+    }
+  }, [currentSession, isClearingA2AError]);
   // Latest SDK prompt suggestion for the follow-up chips. The SDK emits at most
   // one per turn (after the result message); we surface the most recent one.
   const latestPromptSuggestion = useMemo(() => {
@@ -3968,11 +3984,32 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       {isA2ASession && currentSession.status === 'error' && !freeQuotaExhausted && (
         <div className="px-4 pb-2 shrink-0">
           <div className="max-w-3xl mx-auto">
-            <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
-              <ExclamationTriangleIcon className="h-4 w-4 text-red-500 shrink-0" />
-              <span className="text-xs text-red-700 dark:text-red-300">
-                {i18nService.t('coworkA2ASessionErrorBanner')}
-              </span>
+            <div className="flex items-start justify-between gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+              <div className="flex items-start gap-2 min-w-0">
+                <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 text-red-500 shrink-0" />
+                <div className="min-w-0">
+                  <span className="text-xs text-red-700 dark:text-red-300">
+                    {i18nService.t('coworkA2ASessionErrorBanner')}
+                  </span>
+                  {a2aSessionErrorDetail && (
+                    <p className="mt-0.5 text-xs leading-4 text-red-600/90 dark:text-red-300/80 break-all">
+                      {a2aSessionErrorDetail}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleDismissA2AErrorBanner();
+                }}
+                disabled={isClearingA2AError}
+                title={i18nService.t('coworkA2ASessionErrorDismiss')}
+                aria-label={i18nService.t('coworkA2ASessionErrorDismiss')}
+                className="shrink-0 p-1 rounded-md text-red-400 hover:text-red-600 dark:hover:text-red-200 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <XMarkIcon className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
         </div>
