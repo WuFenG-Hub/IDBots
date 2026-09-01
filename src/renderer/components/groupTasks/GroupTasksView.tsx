@@ -330,18 +330,19 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
         <WindowTitleBar inline />
       </div>
 
-      {/* Mode toggle (local vs OpenTeam) + New Group Task button on the same row */}
+      {/* Mode toggle (local vs OpenTeam) + New Group Task button on the same row.
+          Segmented-control style mirrors the Settings Skills/MCP toggle. */}
       <div className="flex items-center justify-between border-b dark:border-claude-darkBorder border-claude-border px-4 py-1.5 shrink-0">
-        <div className="flex items-center gap-0.5 rounded-lg dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted p-0.5">
+        <div className="inline-flex items-center rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface p-1">
           {MODE_TABS.map((tab) => (
             <button
               key={tab.id}
               type="button"
               aria-pressed={mode === tab.id}
               onClick={() => setMode(tab.id)}
-              className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+              className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
                 mode === tab.id
-                  ? 'dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text shadow-sm'
+                  ? 'bg-claude-accent text-white shadow-sm'
                   : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
               }`}
             >
