@@ -5563,3 +5563,59 @@ test('G-04: a supervisor pause holds the planning turn; nudge drives a chair res
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// fix/group-task-flow Phase 3: long-turn liveness — a still-running turn
+// posts a host placeholder + bounded heartbeats instead of sitting silent,
+// and renews the worker's [WORKING long-task] lease while it runs.
+// ---------------------------------------------------------------------------
+
+test('long-turn liveness: a still-running turn posts a placeholder + heartbeats; settle clears the timers', async () => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let releaseTurn;
+  const gate = new Promise((resolve) => { releaseTurn = resolve; });
+  const h = await createHarness({
+    deps: {
+      longTurnPlaceholderMs: 100,
+      longTurnHeartbeatMs: 150,
+      longTurnHeartbeatMax: 3,
+      performChat: async () => {
+        await gate;
+        return '[WORKING] done';
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-lt-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    // Raw loop: the drained wrapper would hang on the gated turn forever.
+    const rawLoop = createGroupTaskDaemonLoop(h.deps);
+    await rawLoop.runTick();
+
+    // Placeholder at ~100ms, heartbeat #1 at ~250ms — the turn is still gated.
+    await sleep(320);
+    const placeholderSends = () => h.sends.filter((send) =>
+      send.metabotId === 2 && send.content.startsWith('[WORKING] 仍在执行中'));
+    const heartbeatSends = () => h.sends.filter((send) =>
+      send.metabotId === 2 && send.content.startsWith('[WORKING] 长步骤仍在后台执行'));
+    assert.equal(placeholderSends().length, 1, 'one placeholder line while the turn runs');
+    assert.equal(heartbeatSends().length, 1, 'first heartbeat while the turn runs');
+    const lease = Number(h.store.get(`group_task_working_heartbeat:${task.id}:2`));
+    assert.ok(lease > h.state.nowMs, 'each worker post renews the [WORKING long-task] lease');
+
+    // Settle the turn: the remaining beats (~400ms / ~550ms) must never fire.
+    releaseTurn();
+    await rawLoop.whenIdle();
+    await sleep(420);
+    assert.equal(placeholderSends().length, 1, 'no second placeholder after settle');
+    assert.equal(heartbeatSends().length, 1, 'remaining heartbeats cleared at settle');
+  } finally {
+    releaseTurn();
+    h.cleanup();
+  }
+});

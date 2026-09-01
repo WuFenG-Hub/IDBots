@@ -157,6 +157,30 @@ export function copyWorkingAckExample(language: AppLanguage = groupTaskLanguage(
     : '[WORKING] 已接单，正在做X，预计N分钟';
 }
 
+/**
+ * fix/group-task-flow (task #51 feedback): host-posted liveness lines for a
+ * turn that is still running. Posted AS the working bot so the group sees
+ * progress instead of silence. Deliberately numberless (never parsed as an
+ * ETA, arms no delivery deadline) and question-free, URI-free and short —
+ * isCeremonyAckLine must keep classifying them as ceremony so they never
+ * drive a chair turn by themselves.
+ */
+export function copyLongTurnInProgress(
+  language: AppLanguage = groupTaskLanguage(),
+): string {
+  return language === 'en'
+    ? '[WORKING] Still on it — this step is taking a while; progress is normal and I will report as soon as it lands.'
+    : '[WORKING] 仍在执行中——本步骤耗时较长，进展正常，完成后会立即汇报。';
+}
+
+export function copyLongTurnHeartbeat(
+  language: AppLanguage = groupTaskLanguage(),
+): string {
+  return language === 'en'
+    ? '[WORKING] Long step still running in the background; everything is fine — will report the moment it completes.'
+    : '[WORKING] 长步骤仍在后台执行，一切正常，完成后第一时间汇报进展。';
+}
+
 export function copyStandbyExample(language: AppLanguage = groupTaskLanguage()): string {
   return language === 'en'
     ? '[STANDBY] observing / on standby / can exit'

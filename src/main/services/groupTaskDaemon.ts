@@ -67,6 +67,8 @@ import {
   copyWorkingAckExample,
   copyWorkingAckFallback,
   copyCheckpointNeedDecision,
+  copyLongTurnHeartbeat,
+  copyLongTurnInProgress,
   hasGroupTaskNotice,
   isRollCallPresenceCheck,
 } from '../libs/groupTaskCopy';
@@ -556,6 +558,20 @@ const DEFAULT_VERIFICATION_RETRY_MS = 10 * 60_000;
  * hanging the turn forever.
  */
 const DEFAULT_PLAIN_TURN_TIMEOUT_MS = 10 * 60_000;
+/**
+ * fix/group-task-flow (task #51 feedback): host-side liveness reporting for
+ * long turns. A dispatched turn that is still running after
+ * DEFAULT_LONG_TURN_PLACEHOLDER_MS posts a numberless [WORKING] placeholder
+ * as the bot (the group sees progress instead of silence), then at most
+ * DEFAULT_LONG_TURN_HEARTBEAT_MAX heartbeat lines every
+ * DEFAULT_LONG_TURN_HEARTBEAT_MS. Each worker post also renews the
+ * [WORKING long-task] heartbeat lease so the watchdogs keep treating the
+ * member as alive for the turn's duration. Real timers (not the daemon
+ * clock): the fake test clock must not fire them.
+ */
+const DEFAULT_LONG_TURN_PLACEHOLDER_MS = 90_000;
+const DEFAULT_LONG_TURN_HEARTBEAT_MS = 10 * 60_000;
+const DEFAULT_LONG_TURN_HEARTBEAT_MAX = 3;
 
 // ---------------------------------------------------------------------------
 // Pure gating (exported for tests)
@@ -1311,6 +1327,15 @@ export interface GroupTaskDaemonDeps {
    */
   plainTurnTimeoutMs?: number;
   /**
+   * fix/group-task-flow: long-turn liveness reporting cadence — placeholder
+   * delay (ms, default 90s), heartbeat interval (ms, default 10 min) and max
+   * heartbeat count per turn (default 3). Tests shrink these to observe the
+   * posts without waiting.
+   */
+  longTurnPlaceholderMs?: number;
+  longTurnHeartbeatMs?: number;
+  longTurnHeartbeatMax?: number;
+  /**
    * Ledger fix (#14→#16): upload a LOCAL file deliverable on-chain as a
    * metafile paid by the author bot's wallet, so a worker's local file path
    * becomes verifiable chain evidence. Same seam the OpenTeam guest daemon
@@ -1626,6 +1651,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const plainTurnTimeoutMs = Math.max(
     5_000,
     Math.trunc(deps.plainTurnTimeoutMs ?? DEFAULT_PLAIN_TURN_TIMEOUT_MS),
+  );
+  const longTurnPlaceholderMs = Math.max(
+    50,
+    Math.trunc(deps.longTurnPlaceholderMs ?? DEFAULT_LONG_TURN_PLACEHOLDER_MS),
+  );
+  const longTurnHeartbeatMs = Math.max(
+    50,
+    Math.trunc(deps.longTurnHeartbeatMs ?? DEFAULT_LONG_TURN_HEARTBEAT_MS),
+  );
+  const longTurnHeartbeatMax = Math.max(
+    0,
+    Math.trunc(deps.longTurnHeartbeatMax ?? DEFAULT_LONG_TURN_HEARTBEAT_MAX),
   );
   const performChatWithTimeout: GroupTaskDaemonPerformChatFn = (systemPrompt, userMessage, llmId, options) => {
     const controller = new AbortController();
@@ -4588,6 +4625,67 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * - a skill-turn watchdog fire is not retried (the turn keeps running in the
    *   session) and keeps the guard latched until the session goes idle.
    */
+  /**
+   * fix/group-task-flow (task #51 feedback): arm the long-turn liveness
+   * timers for one detached turn job; the returned timers must be cleared in
+   * the job's finally. Posts numberless ceremony-shaped [WORKING] lines as
+   * the working bot (chair posts are remembered so they never retrigger the
+   * daemon; worker posts renew the [WORKING long-task] heartbeat lease the
+   * watchdogs honor). Real timers on purpose: the test clock must not fire
+   * them.
+   */
+  const armLongTurnLiveness = (args: {
+    taskId: number;
+    metabotId: number;
+    isChair: boolean;
+    job: Promise<void>;
+  }): Array<ReturnType<typeof setTimeout>> => {
+    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    // unref: a never-settling turn (the skill-turn watchdog latch path) must
+    // not keep the process event loop alive through these timers.
+    const armTimer = (fn: () => void, delayMs: number): ReturnType<typeof setTimeout> => {
+      const timer = setTimeout(fn, delayMs);
+      timer.unref?.();
+      return timer;
+    };
+    const postLine = (text: string): void => {
+      void (async () => {
+        // Re-check inside the async hop: the job may have settled (its
+        // finally clears these timers) after this timer already fired.
+        if (!pendingTurnJobs.has(args.job)) return;
+        try {
+          const posted = await postGroupMessage(args.taskId, args.metabotId, text);
+          if (args.isChair) {
+            rememberDaemonChairPin(args.taskId, posted.pinId);
+          } else {
+            deps.getStore().set(
+              `${WORKING_HEARTBEAT_PREFIX}${args.taskId}:${args.metabotId}`,
+              String(computeWorkingHeartbeatUntil(10, now())),
+            );
+          }
+          emitLog(
+            `[GroupTaskDaemon] Task ${args.taskId}: posted a long-turn liveness line for bot ${args.metabotId}`,
+          );
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${args.taskId}: long-turn liveness post failed for bot ${args.metabotId}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      })();
+    };
+    timers.push(armTimer(() => postLine(copyLongTurnInProgress()), longTurnPlaceholderMs));
+    for (let beat = 1; beat <= longTurnHeartbeatMax; beat += 1) {
+      timers.push(
+        armTimer(
+          () => postLine(copyLongTurnHeartbeat()),
+          longTurnPlaceholderMs + beat * longTurnHeartbeatMs,
+        ),
+      );
+    }
+    return timers;
+  };
+
   const dispatchReplyTurn = (args: {
     task: GroupTask;
     member: GroupTaskMember;
@@ -4615,6 +4713,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       `[GroupTaskDaemon] Task ${task.id}: dispatched async ${member.role} turn for bot ${bot.id} ` +
       `(message #${message.id}, reason ${args.reason}${args.entry ? ', from deferred queue' : ''})`,
     );
+    // fix/group-task-flow (task #51 feedback): long turns report liveness
+    // instead of going silent — see armLongTurnLiveness.
+    const livenessTimers: Array<ReturnType<typeof setTimeout>> = [];
     const job: Promise<void> = (async () => {
       let keepLatched = false;
       try {
@@ -4668,12 +4769,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           }
         }
       } finally {
+        for (const timer of livenessTimers) clearTimeout(timer);
+        livenessTimers.length = 0;
         if (!keepLatched) turnInFlight.delete(key);
         pendingTurnJobs.delete(job);
         noteTickProgress();
       }
     })();
     pendingTurnJobs.add(job);
+    livenessTimers.push(
+      ...armLongTurnLiveness({ taskId: task.id, metabotId: bot.id, isChair: member.role === 'chair', job }),
+    );
   };
 
   /**
@@ -4682,12 +4788,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * a busy chair session defers the work to a later tick instead of blocking
    * this one. The wrapped function keeps its own retry/pending semantics.
    */
-  const runTurnAsync = (guardKey: string, label: string, fn: () => Promise<void>): boolean => {
+  const runTurnAsync = (
+    guardKey: string,
+    label: string,
+    fn: () => Promise<void>,
+    liveness?: { taskId: number; metabotId: number; isChair: boolean },
+  ): boolean => {
     if (turnInFlight.has(guardKey)) {
       emitLog(`[GroupTaskDaemon] ${label}: skipped — a turn is already in flight for ${guardKey}`);
       return false;
     }
     turnInFlight.set(guardKey, { startedAt: now() });
+    const livenessTimers: Array<ReturnType<typeof setTimeout>> = [];
     const job: Promise<void> = (async () => {
       try {
         await fn();
@@ -4697,12 +4809,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `${error instanceof Error ? error.message : String(error)}`,
         );
       } finally {
+        for (const timer of livenessTimers) clearTimeout(timer);
+        livenessTimers.length = 0;
         turnInFlight.delete(guardKey);
         pendingTurnJobs.delete(job);
         noteTickProgress();
       }
     })();
     pendingTurnJobs.add(job);
+    // A task-level chair turn (planning / supervisor) reports liveness too —
+    // the task #51 planning turn sat silent for 41 min and read as a stuck
+    // chair to everyone watching the group.
+    if (liveness) livenessTimers.push(...armLongTurnLiveness({ ...liveness, job }));
     return true;
   };
 
@@ -6144,8 +6262,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         .listPendingSupervisorSignals(task.id)
         .some((signal) => signal.kind === 'nudge' || signal.kind === 'flag');
       if (hasPendingSignals && chairMemberId != null) {
-        runTurnAsync(keyOf(task.id, chairMemberId), `Task ${task.id} supervisor-signal turn`, () =>
-          processSupervisorSignals(task, members, botsById, promptMembers));
+        runTurnAsync(
+          keyOf(task.id, chairMemberId),
+          `Task ${task.id} supervisor-signal turn`,
+          () => processSupervisorSignals(task, members, botsById, promptMembers),
+          { taskId: task.id, metabotId: chairMemberId, isChair: true },
+        );
       }
     }
 
@@ -6205,8 +6327,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // planned-key/attempts counters inside keep their semantics; a busy chair
     // session simply retries on a later tick.
     if (task.status === 'planning' && !dispatchPausedAtTick && chairMemberId != null) {
-      runTurnAsync(keyOf(task.id, chairMemberId), `Task ${task.id} chair planning turn`, () =>
-        maybeRunChairPlanningTurn(task, members, botsById, promptMembers, remoteStatusBlock));
+      runTurnAsync(
+        keyOf(task.id, chairMemberId),
+        `Task ${task.id} chair planning turn`,
+        () => maybeRunChairPlanningTurn(task, members, botsById, promptMembers, remoteStatusBlock),
+        { taskId: task.id, metabotId: chairMemberId, isChair: true },
+      );
     }
 
     // P0-3c: compensate replies deferred by a cap/cooldown in an earlier tick.
