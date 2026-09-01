@@ -15,6 +15,15 @@
 // plaintext and a `compression: 'none'` boot remains possible; a rollback
 // failure is rethrown — booting either encoding over a half-migrated root
 // would trip the backend's encoding guard, so failing loudly is the safe end.
+//
+// Concurrency: several DshKernel instances (one per provider slot) share one
+// sessionRoot and may call ensureRuntime in parallel — their kernelEnsureChain
+// serializes only per slot. Two interleaved passes would race rename/unlink,
+// and the losing unlink (ENOENT) would trigger a rollback that leaves the
+// root mixed. An in-process, per-root in-flight promise (below) collapses
+// concurrent callers onto ONE pass; the final-unlink ENOENT is additionally
+// tolerated (an external writer finished the artifact — ours holds identical
+// bytes) so residual concurrency converges instead of rolling back.
 
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
@@ -124,11 +133,27 @@ async function restorePlaintext(zstdPath, plainPath) {
 
 /**
  * Migrate one session root onto the zstd physical encoding.
+ * Concurrent calls for the SAME root (provider slots sharing a sessionRoot
+ * booting in parallel) collapse onto one in-flight pass — every caller awaits
+ * the same result. Sequential calls scan fresh, so cross-restart crash
+ * recovery still runs.
  * @param root - persistence root (`<root>/<project>/<session>/session.jsonl*`)
  * @param opts.log - optional structured logger (level, event, data).
  * @returns `{ migrated, recovered }` artifact counts.
  */
-export async function migrateSessionRootToZstd(root, opts = {}) {
+const inFlightMigrations = new Map()
+
+export function migrateSessionRootToZstd(root, opts = {}) {
+  const key = path.resolve(String(root))
+  const existing = inFlightMigrations.get(key)
+  if (existing !== undefined) return existing
+  const run = migrateSessionRootToZstdUnlocked(root, opts)
+    .finally(() => { inFlightMigrations.delete(key) })
+  inFlightMigrations.set(key, run)
+  return run
+}
+
+async function migrateSessionRootToZstdUnlocked(root, opts = {}) {
   const log = opts.log ?? (() => {})
   let migrated = 0
   let recovered = 0
@@ -193,7 +218,20 @@ export async function migrateSessionRootToZstd(root, opts = {}) {
         }
         await fsp.rename(tmp, zstdPath)
         renamed.push({ dir })
-        await fsp.unlink(plainPath)
+        try {
+          await fsp.unlink(plainPath)
+        } catch (error) {
+          // The plaintext vanished between stat and unlink — an external
+          // writer completed this artifact (identical bytes; rename is an
+          // atomic overwrite). Converge on the migrated state instead of
+          // rolling the root back into a mixed encoding, and drop it from
+          // the rollback set: the artifact is no longer ours to restore.
+          if (error?.code !== 'ENOENT') throw error
+          const at = renamed.findIndex((entry) => entry.dir === dir)
+          if (at !== -1) renamed.splice(at, 1)
+          recovered += 1
+          continue
+        }
         migrated += 1
       } catch (error) {
         await fsp.rm(tmp, { force: true }).catch(() => {})

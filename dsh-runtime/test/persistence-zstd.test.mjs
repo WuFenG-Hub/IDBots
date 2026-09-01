@@ -82,6 +82,35 @@ const EVENTS = (n) => Array.from({ length: n }, (_, i) =>
   console.log('PASS  migration unit: atomic rewrite, roundtrip, idempotence, crash recovery')
 }
 
+// ---- 1b. concurrent callers collapse onto one pass ---------------------------
+// Provider slots share one sessionRoot and may warm up in parallel; without
+// the in-flight dedup their passes interleave (rename/unlink race → the losing
+// unlink ENOENT triggered a rollback that left the root mixed, and the 0.1.2
+// backend then rejected the root outright). With dedup, concurrent callers
+// await the SAME pass and report identical counts.
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zstd-concurrent-'))
+  const SESSIONS = 8
+  for (let i = 0; i < SESSIONS; i += 1) {
+    const dir = path.join(root, `proj-${i % 2}`, `sess-${i}`)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'session.jsonl'), `${HEADER(`sess-${i}`)}\n${EVENTS(20)}\n`)
+  }
+  const [a, b] = await Promise.all([
+    migrateSessionRootToZstd(root),
+    migrateSessionRootToZstd(root),
+  ])
+  assert.deepEqual([a.migrated, a.recovered], [SESSIONS, 0], 'pass A migrated every artifact')
+  assert.deepEqual(a, b, 'concurrent caller observed the identical pass result')
+  for (let i = 0; i < SESSIONS; i += 1) {
+    const dir = path.join(root, `proj-${i % 2}`, `sess-${i}`)
+    assert.ok(!fs.existsSync(path.join(dir, 'session.jsonl')), `sess-${i} plaintext gone`)
+    assert.ok(fs.existsSync(path.join(dir, 'session.jsonl.zstd')), `sess-${i} zstd present`)
+  }
+  fs.rmSync(root, { recursive: true, force: true })
+  console.log('PASS  migration unit: concurrent callers collapse onto one pass (no mixed root)')
+}
+
 // ---- 2+3. live runtime on a migrated root -----------------------------------
 const main = async () => {
   const { server, seen } = await startMockServer(48802)
