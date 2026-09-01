@@ -85,6 +85,19 @@ const deepSeekChatBaseURL = (baseUrl) => {
 const NATIVE_DEEPSEEK_IMAGE_PIXEL_BUDGET = 640_000
 const NATIVE_DEEPSEEK_IMAGE_MAX_BYTES = 1_048_576
 
+/** Outage-tuned LLM retry policy shared by every route. The upstream defaults
+ *  (5 retries, 500ms→10s backoff ≈ 46s total) and the earlier pi-ai override
+ *  (2 retries ≈ 10s) both lose whole turns to ordinary machine-level network
+ *  blips — a Wi-Fi roam/DNS flap routinely takes 30–90s to settle, and each
+ *  dead fetch costs ~5s of DNS/connect timeout on top. 8 retries with a 1s→30s
+ *  ladder stretches the step-level retry window to ~3 minutes, long enough to
+ *  ride out a blip without the turn (and the task behind it) dying. */
+const TRANSIENT_OUTAGE_RETRY_POLICY = Object.freeze({
+  mode: 'normal',
+  maxRetries: 8,
+  backoff: Object.freeze({ initialDelayMs: 1_000, maxDelayMs: 30_000 }),
+})
+
 const modelDeclaresImageInput = (model) =>
   Array.isArray(model.input) && model.input.includes('image')
 
@@ -99,6 +112,9 @@ const nativeDeepSeekEntry = (provider) => ({
     baseURL: deepSeekChatBaseURL(provider.baseUrl),
     thinking: 'enabled',
     reasoningEffort: 'high',
+    // Without this the adapter default (5 retries, 500ms→10s) applies — too
+    // thin for machine-level network blips (see TRANSIENT_OUTAGE_RETRY_POLICY).
+    retryPolicy: TRANSIENT_OUTAGE_RETRY_POLICY,
     defaultContextWindow: provider.models[0].contextWindow,
     models: provider.models.map((model) => ({
       id: model.id,
@@ -198,7 +214,7 @@ export function generateRuntimeConfig(input) {
       displayName: provider.key,
       apiKeyEnv: provider.apiKeyEnv,
       api: protocol,
-      retryPolicy: { mode: 'normal', maxRetries: 2 },
+      retryPolicy: TRANSIENT_OUTAGE_RETRY_POLICY,
       baseURL: provider.baseUrl,
       models: provider.models.map((model) => ({
         id: model.id,
