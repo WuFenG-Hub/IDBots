@@ -38,7 +38,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult } from './coworkAssistantReply';
+import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -7580,6 +7580,24 @@ export class CoworkRunner extends EventEmitter {
         outcome = await runGuardedTurn(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT);
       }
 
+      // Transient environmental failure (TRANSPORT/TIMEOUT/RATE_LIMIT/SERVER/
+      // EMPTY_RESPONSE): the runtime's step-level retry ladder has already
+      // stretched to ~3 minutes; if the turn STILL died, the machine sat
+      // through a real network outage (e.g. a Wi-Fi roam taking 30–90s to
+      // settle). Resume the same DSH session once — full history is preserved
+      // and no tool side effects replay — instead of failing the whole task.
+      // A second consecutive transient failure falls through to the error
+      // settlement below; non-transient codes never enter this path.
+      if (outcome.kind === 'error' && !activeSession.abortController.signal.aborted && isTransientDshTurnError(outcome)) {
+        coworkLog(
+          'WARN',
+          'runDshSessionLocal',
+          'Transient DSH turn failure — auto-resuming turn once after provider/network blip',
+          { sessionId, code: outcome.error?.code, message: outcome.error?.message }
+        );
+        outcome = await runGuardedTurn(TRANSIENT_TURN_RESUME_PROMPT);
+      }
+
       if (activeSession.abortController.signal.aborted) {
         this.addSystemMessage(sessionId, `Turn aborted: ${outcome.reason ?? 'cancelled'}.`);
         finish('idle');
@@ -7591,10 +7609,10 @@ export class CoworkRunner extends EventEmitter {
         return;
       }
       if (outcome.kind === 'error') {
-        // turn/end error reasons carry the details in `failure` (status,
-        // message, code) — surface everything we have.
-        const failureDetail = (outcome as any)?.failure?.message
-          ?? (outcome as any)?.failure?.code
+        // turn/end error outcomes carry the provider failure detail in
+        // `error` ({ message, code }) — surface everything we have.
+        const failureDetail = outcome.error?.message
+          ?? outcome.error?.code
           ?? outcome.reason
           ?? JSON.stringify(outcome).slice(0, 300);
         coworkLog('ERROR', 'runDshSessionLocal', 'DSH turn failed', { outcome });
