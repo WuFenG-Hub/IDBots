@@ -209,3 +209,40 @@ test('selectAcceptanceChecklist: digital URIs first; process-text placeholders o
 
   assert.deepEqual(selectAcceptanceChecklist(null), { items: [], omittedProcessCount: 0 });
 });
+
+test('isRemoteGroupTaskSeat: metabotId null + globalMetaId present means a remote OpenTeam seat', async () => {
+  const { isRemoteGroupTaskSeat } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  assert.equal(isRemoteGroupTaskSeat({ metabotId: null, globalMetaId: 'idq12se8j7n6g35g' }), true);
+  assert.equal(isRemoteGroupTaskSeat({ metabotId: 15, globalMetaId: 'idq1d5m392ahkhp7' }), false);
+  // A null-metabotId seat without a chain id is junk, not a remote bot.
+  assert.equal(isRemoteGroupTaskSeat({ metabotId: null, globalMetaId: null }), false);
+  assert.equal(isRemoteGroupTaskSeat({ metabotId: null, globalMetaId: '  ' }), false);
+  assert.equal(isRemoteGroupTaskSeat(null), false);
+  assert.equal(isRemoteGroupTaskSeat(undefined), false);
+});
+
+test('splitGroupTasksByOpenTeam: all-local vs any-remote seats (user example: task with mixed seats is OpenTeam)', async () => {
+  const { splitGroupTasksByOpenTeam } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  const localSeat = (metabotId, globalMetaId) => ({ metabotId, globalMetaId });
+  const localTask = { id: 1, status: 'executing', members: [localSeat(1, 'idq1aaa'), localSeat(2, 'idq1bbb')] };
+  // Mirrors live task #44 (group 960c427f…): chair+one worker local, two workers remote.
+  const mixedSeatTask = {
+    id: 44,
+    status: 'done',
+    members: [
+      localSeat(null, 'idq12se8j7n6g35g'),
+      localSeat(null, 'idq1xpueudwykqxg'),
+      localSeat(1, 'idq14hmv23j5fnlx'),
+      localSeat(15, 'idq1d5m392ahkhp7'),
+    ],
+  };
+  const noMembersTask = { id: 7, status: 'planning', members: [] };
+  const split = splitGroupTasksByOpenTeam([localTask, mixedSeatTask, noMembersTask]);
+  assert.deepEqual(split.local.map((t) => t.id), [1, 7]);
+  assert.deepEqual(split.openTeam.map((t) => t.id), [44]);
+  // The OpenTeam bucket ignores status — a done mixed-seats task still lands there.
+  assert.equal(split.openTeam[0].status, 'done');
+  // Tolerated input shapes.
+  assert.deepEqual(splitGroupTasksByOpenTeam(null), { local: [], openTeam: [] });
+  assert.deepEqual(splitGroupTasksByOpenTeam([undefined, {}]), { local: [undefined, {}], openTeam: [] });
+});

@@ -4,6 +4,8 @@ import type { GroupTaskSummary } from '../../types/groupTask';
 interface GroupTasksState {
   tasks: GroupTaskSummary[];
   selectedTaskId: number | null;
+  /** Selected OpenTeam membership (invitee side); mutually exclusive with selectedTaskId. */
+  selectedCollabId: number | null;
   loading: boolean;
   error: string | null;
 }
@@ -11,6 +13,7 @@ interface GroupTasksState {
 const initialState: GroupTasksState = {
   tasks: [],
   selectedTaskId: null,
+  selectedCollabId: null,
   loading: false,
   error: null,
 };
@@ -72,6 +75,14 @@ const groupTasksSlice = createSlice({
     },
     selectTask(state, action: PayloadAction<number | null>) {
       state.selectedTaskId = action.payload;
+      // Task detail and OpenTeam collab detail are two exclusive drill-downs
+      // of the same view; any task selection (or the null reset used by the
+      // nav entry) leaves the collab selection.
+      state.selectedCollabId = null;
+    },
+    selectCollab(state, action: PayloadAction<number | null>) {
+      state.selectedCollabId = action.payload;
+      state.selectedTaskId = null;
     },
   },
 });
@@ -86,6 +97,7 @@ export const {
   updateTaskDisplayName,
   removeTask,
   selectTask,
+  selectCollab,
 } = groupTasksSlice.actions;
 
 export default groupTasksSlice.reducer;

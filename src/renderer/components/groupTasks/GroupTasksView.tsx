@@ -1,20 +1,25 @@
 import React, { useEffect, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../../store';
-import { selectTask } from '../../store/slices/groupTasksSlice';
+import { selectCollab, selectTask } from '../../store/slices/groupTasksSlice';
 import { groupTaskService } from '../../services/groupTaskService';
 import { i18nService } from '../../services/i18n';
 import type { GroupTaskListTab, GroupTaskSummary } from '../../types/groupTask';
-import type { OpenTeamCollabSummary } from '../../types/openTeamCollab';
 import GroupTaskDetailView from './GroupTaskDetailView';
-import OpenTeamCollabsSection from './OpenTeamCollabsSection';
 import OpenTeamCollabDetailView from './OpenTeamCollabDetailView';
+import {
+  OpenTeamCollabCard,
+  OpenTeamGuestInviteCard,
+  openTeamCollabTitle,
+  useOpenTeamCollabs,
+} from './OpenTeamCollabsSection';
 import {
   filterGroupTasksByTab,
   formatGroupTaskRelativeTime,
   groupTaskStatusBadgeClass,
   groupTaskStatusLabelKey,
   shortGroupId,
+  splitGroupTasksByOpenTeam,
 } from './groupTaskUtils';
 import GroupTaskItemMenu, { PushPinIcon } from './GroupTaskItemMenu';
 import {
@@ -41,6 +46,21 @@ const FILTER_TABS: Array<{ id: GroupTaskListTab; labelKey: string }> = [
   { id: 'done', labelKey: 'groupTasksFilterDone' },
   { id: 'cancelled', labelKey: 'groupTasksFilterCancelled' },
   { id: 'all', labelKey: 'groupTasksFilterAll' },
+];
+
+/** Home-page mode: tasks whose every seat is a local bot vs OpenTeam tasks. */
+type GroupTaskHomeMode = 'local' | 'openTeam';
+/** OpenTeam sub-tab: initiated here (remote invitees) vs joined remotely. */
+type OpenTeamListTab = 'initiated' | 'joined';
+
+const MODE_TABS: Array<{ id: GroupTaskHomeMode; labelKey: string }> = [
+  { id: 'local', labelKey: 'groupTasksModeLocal' },
+  { id: 'openTeam', labelKey: 'groupTasksModeOpenTeam' },
+];
+
+const OPEN_TEAM_TABS: Array<{ id: OpenTeamListTab; labelKey: string }> = [
+  { id: 'initiated', labelKey: 'groupTasksOpenTeamInitiated' },
+  { id: 'joined', labelKey: 'groupTasksOpenTeamJoined' },
 ];
 
 export { groupTaskStatusLabelKey } from './groupTaskUtils';
@@ -192,14 +212,42 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
   const tasks = useSelector((state: RootState) => state.groupTasks.tasks);
   const loading = useSelector((state: RootState) => state.groupTasks.loading);
   const selectedTaskId = useSelector((state: RootState) => state.groupTasks.selectedTaskId);
+  const selectedCollabId = useSelector((state: RootState) => state.groupTasks.selectedCollabId);
+  const [mode, setMode] = useState<GroupTaskHomeMode>('local');
   const [activeTab, setActiveTab] = useState<GroupTaskListTab>('active');
-  const [selectedCollab, setSelectedCollab] = useState<OpenTeamCollabSummary | null>(null);
+  const [openTeamTab, setOpenTeamTab] = useState<OpenTeamListTab>('initiated');
+  const {
+    items: collabs,
+    guestInvites,
+    loaded: collabsLoaded,
+    removedNotices,
+    dismissRemovedNotice,
+  } = useOpenTeamCollabs();
+  const selectedCollab = selectedCollabId != null
+    ? collabs.find((collab) => collab.id === selectedCollabId) ?? null
+    : null;
 
   useEffect(() => {
     void groupTaskService.loadTasks();
   }, []);
 
-  const filteredTasks = filterGroupTasksByTab(tasks, activeTab);
+  // Local seats only vs OpenTeam (at least one remote invitee seat).
+  const { local: localTasks, openTeam: initiatedTasks } = splitGroupTasksByOpenTeam(tasks);
+  const filteredTasks = mode === 'local' ? filterGroupTasksByTab(localTasks, activeTab) : initiatedTasks;
+
+  // Sidebar deep link: collab selected before its list arrives — hold on a
+  // loading screen instead of flashing the home list.
+  if (selectedCollabId != null && !selectedCollab && !collabsLoaded) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('loading')}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (selectedCollab) {
     return (
@@ -210,7 +258,7 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
         onToggleSidebar={onToggleSidebar}
         onNewChat={onNewChat}
         updateBadge={updateBadge}
-        onBack={() => setSelectedCollab(null)}
+        onBack={() => dispatch(selectCollab(null))}
       />
     );
   }
@@ -228,6 +276,28 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
       />
     );
   }
+
+  const subTabs = mode === 'local' ? FILTER_TABS : OPEN_TEAM_TABS;
+  const activeSubTab = mode === 'local' ? activeTab : openTeamTab;
+  const setActiveSubTab = (id: string) => {
+    if (mode === 'local') {
+      setActiveTab(id as GroupTaskListTab);
+    } else {
+      setOpenTeamTab(id as OpenTeamListTab);
+    }
+  };
+
+  const renderTaskEmptyState = (iconClass: string, titleKey: string, hintKey: string) => (
+    <div className="flex flex-col items-center justify-center py-16 px-6">
+      <UserGroupIcon className={iconClass} />
+      <p className="text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+        {i18nService.t(titleKey)}
+      </p>
+      <p className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70 text-center">
+        {i18nService.t(hintKey)}
+      </p>
+    </div>
+  );
 
   return (
     <div className="flex flex-col h-full">
@@ -260,24 +330,22 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
         <WindowTitleBar inline />
       </div>
 
-      {/* Filter tabs + New Group Task button */}
-      <div className="flex items-center justify-between border-b dark:border-claude-darkBorder border-claude-border px-4 shrink-0">
-        <div className="flex">
-          {FILTER_TABS.map((tab) => (
+      {/* Mode toggle (local vs OpenTeam) + New Group Task button on the same row */}
+      <div className="flex items-center justify-between border-b dark:border-claude-darkBorder border-claude-border px-4 py-1.5 shrink-0">
+        <div className="flex items-center gap-0.5 rounded-lg dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted p-0.5">
+          {MODE_TABS.map((tab) => (
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
-                activeTab === tab.id
-                  ? 'dark:text-claude-darkText text-claude-text'
+              aria-pressed={mode === tab.id}
+              onClick={() => setMode(tab.id)}
+              className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                mode === tab.id
+                  ? 'dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text shadow-sm'
                   : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
               }`}
             >
               {i18nService.t(tab.labelKey)}
-              {activeTab === tab.id && (
-                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
-              )}
             </button>
           ))}
         </div>
@@ -292,24 +360,104 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
         )}
       </div>
 
+      {/* Sub tabs: status tabs under Local; initiated/joined under OpenTeam */}
+      <div className="flex items-center border-b dark:border-claude-darkBorder border-claude-border px-4 shrink-0">
+        {subTabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveSubTab(tab.id)}
+            className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
+              activeSubTab === tab.id
+                ? 'dark:text-claude-darkText text-claude-text'
+                : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
+            }`}
+          >
+            {i18nService.t(tab.labelKey)}
+            {activeSubTab === tab.id && (
+              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
+            )}
+          </button>
+        ))}
+      </div>
+
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        {loading && tasks.length === 0 ? (
+        {mode === 'openTeam' && openTeamTab === 'joined' ? (
+          <>
+            {/* R4: one-time dismissible notice when a poll observes an active -> left flip. */}
+            {removedNotices.map((notice) => {
+              const reasonText = notice.leftReason?.trim()
+                ? ` — ${i18nService.t('openTeamCollabLeftReason')}: ${notice.leftReason.trim()}`
+                : '';
+              return (
+                <div
+                  key={notice.id}
+                  className="mx-4 mt-3 flex items-start gap-2 rounded-lg border dark:border-amber-500/40 border-amber-300/70 dark:bg-amber-900/20 bg-amber-50 px-3 py-2"
+                >
+                  <span className="flex-1 min-w-0 text-xs dark:text-amber-200 text-amber-800">
+                    {i18nService.t('openTeamCollabRemovedNotice')
+                      .replace('{bot}', notice.botName?.trim() || `bot-${notice.metabotId}`)
+                      .replace('{title}', openTeamCollabTitle(notice))
+                      .replace('{reason}', reasonText)}
+                  </span>
+                  <button
+                    type="button"
+                    className="shrink-0 text-xs dark:text-amber-300/80 text-amber-700 hover:underline"
+                    aria-label={i18nService.t('close')}
+                    onClick={() => dismissRemovedNotice(notice.id)}
+                  >
+                    {i18nService.t('close')}
+                  </button>
+                </div>
+              );
+            })}
+            {collabs.length > 0 ? (
+              collabs.map((collab) => (
+                <OpenTeamCollabCard
+                  key={collab.id}
+                  collab={collab}
+                  onClick={() => dispatch(selectCollab(collab.id))}
+                />
+              ))
+            ) : guestInvites.length === 0 ? (
+              renderTaskEmptyState(
+                'h-12 w-12 dark:text-claude-darkTextSecondary/40 text-claude-textSecondary/40 mb-4',
+                'groupTasksOpenTeamJoinedEmpty',
+                'groupTasksOpenTeamJoinedEmptyHint',
+              )
+            ) : null}
+            {guestInvites.length > 0 && (
+              <>
+                <div className="px-4 pt-4 pb-2">
+                  <h2 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('openTeamGuestInvitesSectionTitle')}
+                  </h2>
+                </div>
+                {guestInvites.map((invite) => (
+                  <OpenTeamGuestInviteCard key={invite.id} invite={invite} />
+                ))}
+              </>
+            )}
+          </>
+        ) : loading && tasks.length === 0 ? (
           <div className="flex items-center justify-center py-16">
             <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
               {i18nService.t('loading')}
             </div>
           </div>
         ) : filteredTasks.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 px-6">
-            <UserGroupIcon className="h-12 w-12 dark:text-claude-darkTextSecondary/40 text-claude-textSecondary/40 mb-4" />
-            <p className="text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
-              {i18nService.t('groupTasksEmptyState')}
-            </p>
-            <p className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70 text-center">
-              {i18nService.t('groupTasksEmptyHint')}
-            </p>
-          </div>
+          mode === 'local'
+            ? renderTaskEmptyState(
+              'h-12 w-12 dark:text-claude-darkTextSecondary/40 text-claude-textSecondary/40 mb-4',
+              'groupTasksEmptyState',
+              'groupTasksEmptyHint',
+            )
+            : renderTaskEmptyState(
+              'h-12 w-12 dark:text-claude-darkTextSecondary/40 text-claude-textSecondary/40 mb-4',
+              'groupTasksOpenTeamInitiatedEmpty',
+              'groupTasksOpenTeamInitiatedEmptyHint',
+            )
         ) : (
           filteredTasks.map((task) => (
             <GroupTaskListItem
@@ -322,8 +470,6 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
             />
           ))
         )}
-        {/* OpenTeam invitee-side traceability: external group tasks our bots joined */}
-        <OpenTeamCollabsSection onOpenCollab={setSelectedCollab} />
       </div>
     </div>
   );

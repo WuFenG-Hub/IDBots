@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import { openTeamCollabService } from '../../services/openTeamCollabService';
 import type { OpenTeamCollabSummary, OpenTeamGuestInvite, OpenTeamGuestInviteStatus } from '../../types/openTeamCollab';
 import { formatGroupTaskTime } from './groupTaskUtils';
+import { GroupTaskTypeBadge } from './GroupTaskSidebarList';
 
 /** Short display form of a GlobalMetaID / group id (same style as the task detail rail). */
 export function shortGlobalMetaId(value: string | null | undefined): string {
@@ -188,27 +189,31 @@ export const OpenTeamCollabCard: React.FC<{ collab: OpenTeamCollabSummary; onCli
   );
 };
 
-interface OpenTeamCollabsSectionProps {
-  onOpenCollab: (collab: OpenTeamCollabSummary) => void;
-}
-
 /** Poll cadence for the collab list (new invites/kicks surface without a reload). */
 export const OPEN_TEAM_COLLAB_POLL_INTERVAL_MS = 15_000;
 
 /**
- * "External collaborations (OpenTeam)" block under the Group Tasks list: every
- * external group task this machine's bots auto-joined (or left). Hidden when
- * there is nothing to show — the block is pure traceability, not an entry point.
- * Loaded on mount and re-polled every OPEN_TEAM_COLLAB_POLL_INTERVAL_MS so new
- * collaborations and kick/leave transitions surface without revisiting the view;
- * the interval is cleared on unmount.
+ * Collab + received-invite data for every OpenTeam surface (group-task home
+ * "Open Team" tabs, sidebar records list). Loads on mount and re-polls every
+ * OPEN_TEAM_COLLAB_POLL_INTERVAL_MS so new collaborations and kick/leave
+ * transitions surface without revisiting the view; the interval is cleared on
+ * unmount. `loaded` distinguishes "empty so far" from "not fetched yet" so a
+ * deep link into a collab can show a loading state instead of flashing home.
+ *
+ * R4: also watches for active -> left flips (kick / self-check) and surfaces
+ * them as one-time dismissible removed notices — the user must SEE the
+ * removal, not just find a grayed badge on the next visit.
  */
-const OpenTeamCollabsSection: React.FC<OpenTeamCollabsSectionProps> = ({ onOpenCollab }) => {
+export function useOpenTeamCollabs(): {
+  items: OpenTeamCollabSummary[];
+  guestInvites: OpenTeamGuestInvite[];
+  loaded: boolean;
+  removedNotices: OpenTeamCollabSummary[];
+  dismissRemovedNotice: (id: number) => void;
+} {
   const [items, setItems] = useState<OpenTeamCollabSummary[]>([]);
   const [guestInvites, setGuestInvites] = useState<OpenTeamGuestInvite[]>([]);
-  // R4: one-time dismissible notice when a poll observes an active -> left
-  // flip (kick / self-check) — the user must SEE the removal, not just find a
-  // grayed badge on the next visit.
+  const [loaded, setLoaded] = useState(false);
   const [removedNotices, setRemovedNotices] = useState<OpenTeamCollabSummary[]>([]);
   const prevStatusRef = useRef<Map<number, OpenTeamCollabSummary['status']>>(new Map());
   const dismissedNoticeIdsRef = useRef<Set<number>>(new Set());
@@ -230,6 +235,7 @@ const OpenTeamCollabsSection: React.FC<OpenTeamCollabsSectionProps> = ({ onOpenC
           }
           prevStatusRef.current = new Map(list.map((collab) => [collab.id, collab.status]));
           setItems(list);
+          setLoaded(true);
         })
         .catch(() => {
           // Traceability data must never break the Group Tasks view.
@@ -253,71 +259,55 @@ const OpenTeamCollabsSection: React.FC<OpenTeamCollabsSectionProps> = ({ onOpenC
     };
   }, []);
 
-  const dismissRemovedNotice = (id: number) => {
+  const dismissRemovedNotice = useCallback((id: number) => {
     dismissedNoticeIdsRef.current.add(id);
     setRemovedNotices((current) => current.filter((notice) => notice.id !== id));
-  };
+  }, []);
 
-  if (items.length === 0 && guestInvites.length === 0) return null;
+  return { items, guestInvites, loaded, removedNotices, dismissRemovedNotice };
+}
 
+/**
+ * Compact sidebar row for one joined collab (Bot Home task records, "Group
+ * Tasks" tab). Same rhythm as GroupTaskSidebarRow: title + type/status badges
+ * on the first line, bot/meta line below.
+ */
+export const OpenTeamCollabSidebarRow: React.FC<{
+  collab: OpenTeamCollabSummary;
+  onSelect: () => void;
+}> = ({ collab, onSelect }) => {
+  const botLabel = collab.botName?.trim() || `bot-${collab.metabotId}`;
+  const lastActivity = formatGroupTaskTime(collab.lastMessageAt);
   return (
-    <div className="shrink-0">
-      {removedNotices.map((notice) => {
-        const reasonText = notice.leftReason?.trim()
-          ? ` — ${i18nService.t('openTeamCollabLeftReason')}: ${notice.leftReason.trim()}`
-          : '';
-        return (
-          <div
-            key={notice.id}
-            className="mx-4 mt-3 flex items-start gap-2 rounded-lg border dark:border-amber-500/40 border-amber-300/70 dark:bg-amber-900/20 bg-amber-50 px-3 py-2"
-          >
-            <span className="flex-1 min-w-0 text-xs dark:text-amber-200 text-amber-800">
-              {i18nService.t('openTeamCollabRemovedNotice')
-                .replace('{bot}', notice.botName?.trim() || `bot-${notice.metabotId}`)
-                .replace('{title}', openTeamCollabTitle(notice))
-                .replace('{reason}', reasonText)}
-            </span>
-            <button
-              type="button"
-              className="shrink-0 text-xs dark:text-amber-300/80 text-amber-700 hover:underline"
-              aria-label={i18nService.t('close')}
-              onClick={() => dismissRemovedNotice(notice.id)}
-            >
-              {i18nService.t('close')}
-            </button>
-          </div>
-        );
-      })}
-      {items.length > 0 && (
-        <>
-          <div className="px-4 pt-4 pb-2">
-            <h2 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              {i18nService.t('openTeamCollabSectionTitle')}
-            </h2>
-          </div>
-          {items.map((collab) => (
-            <OpenTeamCollabCard
-              key={collab.id}
-              collab={collab}
-              onClick={() => onOpenCollab(collab)}
-            />
-          ))}
-        </>
-      )}
-      {guestInvites.length > 0 && (
-        <>
-          <div className="px-4 pt-4 pb-2">
-            <h2 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              {i18nService.t('openTeamGuestInvitesSectionTitle')}
-            </h2>
-          </div>
-          {guestInvites.map((invite) => (
-            <OpenTeamGuestInviteCard key={invite.id} invite={invite} />
-          ))}
-        </>
-      )}
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+      className="px-2.5 py-1.5 rounded-lg cursor-pointer transition-all duration-150 hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+    >
+      <div className="flex items-center gap-2 mb-0.5">
+        <span className="flex-1 min-w-0 truncate text-sm font-medium dark:text-claude-darkText text-claude-text">
+          {openTeamCollabTitle(collab)}
+        </span>
+        <GroupTaskTypeBadge openTeam={true} />
+        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${openTeamCollabStatusBadgeClass(collab)}`}>
+          {openTeamCollabStatusLabel(collab)}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary leading-tight">
+        <span className="truncate">
+          {i18nService.t('openTeamCollabYourBot')}: {botLabel}
+        </span>
+        {lastActivity ? (
+          <span className="shrink-0 whitespace-nowrap">{lastActivity}</span>
+        ) : null}
+      </div>
     </div>
   );
 };
-
-export default OpenTeamCollabsSection;

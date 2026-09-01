@@ -2,6 +2,12 @@
  * Shared messenger-bubble tokens for A2A private chat and group-task
  * transcripts. Keep both surfaces on the same row rhythm, bubble geometry,
  * type scale, and markdown inherit rules so they read as one chat family.
+ *
+ * Width contract: bubbles must fit the transcript width. The column needs
+ * min-w-0 (flex items default to min-width:auto = content min-content), and
+ * text wrapping must use [overflow-wrap:anywhere] — NOT break-words, which
+ * does not shrink min-content, so long unbreakable tokens (pin ids, txids,
+ * URLs) stretch the bubble and force a horizontal scrollbar.
  */
 
 export const messengerRowClassName = (isOutgoing: boolean): string => (
@@ -9,14 +15,14 @@ export const messengerRowClassName = (isOutgoing: boolean): string => (
 );
 
 export const messengerColumnClassName = (isOutgoing: boolean): string => (
-  `flex flex-col max-w-[70%] ${isOutgoing ? 'items-end' : 'items-start'}`
+  `flex flex-col max-w-[70%] min-w-0 ${isOutgoing ? 'items-end' : 'items-start'}`
 );
 
 export const messengerNameClassName =
   'text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mb-0.5 px-1';
 
 export const messengerBubbleClassName = (isOutgoing: boolean): string => (
-  `rounded-2xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words ${
+  `max-w-full rounded-2xl px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] ${
     isOutgoing
       ? 'bg-blue-500 text-white rounded-br-sm'
       : 'dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text rounded-bl-sm'
@@ -34,6 +40,6 @@ export const messengerTxidRowClassName = (isOutgoing: boolean): string => (
 
 export const messengerMarkdownClassName = (isOutgoing: boolean): string => (
   isOutgoing
-    ? 'max-w-none whitespace-normal break-words text-white [&_a]:text-inherit [&_a]:underline [&_h1]:my-0 [&_h1]:text-inherit [&_h2]:my-0 [&_h2]:text-inherit [&_h3]:my-0 [&_h3]:text-inherit [&_h4]:my-0 [&_h4]:text-inherit [&_h5]:my-0 [&_h5]:text-inherit [&_h6]:my-0 [&_h6]:text-inherit [&_p]:my-0 [&_p]:text-inherit [&_ul]:my-1 [&_ul]:text-inherit [&_ol]:my-1 [&_ol]:text-inherit [&_li]:text-inherit [&_strong]:text-inherit [&_em]:text-inherit [&_pre]:my-2 [&_blockquote]:my-1 [&_blockquote]:text-inherit'
-    : 'max-w-none whitespace-normal break-words dark:text-claude-darkText text-claude-text [&_a]:text-inherit [&_a]:underline [&_h1]:my-0 [&_h1]:text-inherit [&_h2]:my-0 [&_h2]:text-inherit [&_h3]:my-0 [&_h3]:text-inherit [&_h4]:my-0 [&_h4]:text-inherit [&_h5]:my-0 [&_h5]:text-inherit [&_h6]:my-0 [&_h6]:text-inherit [&_p]:my-0 [&_p]:text-inherit [&_ul]:my-1 [&_ul]:text-inherit [&_ol]:my-1 [&_ol]:text-inherit [&_li]:text-inherit [&_strong]:text-inherit [&_em]:text-inherit [&_pre]:my-2 [&_blockquote]:my-1 [&_blockquote]:text-inherit'
+    ? 'max-w-none whitespace-normal [overflow-wrap:anywhere] text-white [&_a]:text-inherit [&_a]:underline [&_h1]:my-0 [&_h1]:text-inherit [&_h2]:my-0 [&_h2]:text-inherit [&_h3]:my-0 [&_h3]:text-inherit [&_h4]:my-0 [&_h4]:text-inherit [&_h5]:my-0 [&_h5]:text-inherit [&_h6]:my-0 [&_h6]:text-inherit [&_p]:my-0 [&_p]:text-inherit [&_ul]:my-1 [&_ul]:text-inherit [&_ol]:my-1 [&_ol]:text-inherit [&_li]:text-inherit [&_strong]:text-inherit [&_em]:text-inherit [&_pre]:my-2 [&_blockquote]:my-1 [&_blockquote]:text-inherit'
+    : 'max-w-none whitespace-normal [overflow-wrap:anywhere] dark:text-claude-darkText text-claude-text [&_a]:text-inherit [&_a]:underline [&_h1]:my-0 [&_h1]:text-inherit [&_h2]:my-0 [&_h2]:text-inherit [&_h3]:my-0 [&_h3]:text-inherit [&_h4]:my-0 [&_h4]:text-inherit [&_h5]:my-0 [&_h5]:text-inherit [&_h6]:my-0 [&_h6]:text-inherit [&_p]:my-0 [&_p]:text-inherit [&_ul]:my-1 [&_ul]:text-inherit [&_ol]:my-1 [&_ol]:text-inherit [&_li]:text-inherit [&_strong]:text-inherit [&_em]:text-inherit [&_pre]:my-2 [&_blockquote]:my-1 [&_blockquote]:text-inherit'
 );
