@@ -159,7 +159,20 @@ const createHarness = async () => {
     chairPlanRosterSettleMs: 0,
     chairPlanRosterCapMs: 0,
   };
-  const loop = createGroupTaskDaemonLoop(deps);
+  const loop = (() => {
+    // fix/group-task-flow follow-up: responder turns run as detached async
+    // jobs now. Preserve the historical test contract ("when runTick()
+    // resolves, every triggered turn has completed") by draining pending
+    // turn jobs after the tick — same wrapper as groupTaskDaemon.test.mjs.
+    const rawLoop = createGroupTaskDaemonLoop(deps);
+    return {
+      ...rawLoop,
+      runTick: async () => {
+        await rawLoop.runTick();
+        await rawLoop.whenIdle();
+      },
+    };
+  })();
 
   const createTask = (workerIds = [2], opts = {}) => {
     const task = groupTaskStore.createTask({
