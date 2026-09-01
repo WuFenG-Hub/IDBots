@@ -367,7 +367,17 @@ test('private chat prompt includes recent A2A context and topic-ending policy', 
     analysis,
   });
 
-  assert.match(prompt, /private-chat MetaBot/);
+  // Since ebcbef76 the persona facts live only in the shared
+  // <metabot_identity> block; the channel layer frames around it and never
+  // restates an identity line like "You are <name>, a private-chat MetaBot".
+  assert.match(prompt, /<metabot_identity>/);
+  assert.match(prompt, /<name>Local Bot<\/name>/);
+  assert.match(prompt, /<role>Technical partner<\/role>/);
+  assert.match(prompt, /<soul>direct<\/soul>/);
+  assert.match(prompt, /<goal>useful discussion<\/goal>/);
+  assert.match(prompt, /<bio>MetaID<\/bio>/);
+  assert.match(prompt, /## Private Chat Channel/);
+  assert.match(prompt, /another MetaBot in an autonomous private chat/);
   assert.match(prompt, /valuable discussion/i);
   assert.match(prompt, /coherent topic/i);
   assert.match(prompt, /do not need to reply to every message/i);
