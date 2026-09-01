@@ -5619,3 +5619,100 @@ test('long-turn liveness: a still-running turn posts a placeholder + heartbeats;
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// fix/group-task-flow Phase 5: chair-drive guarantees — a chair trigger that
+// produced a decision but no answer (per-tick cap, suppression, budget) is
+// re-driven once; an idle task with nothing running nudges the chair.
+// ---------------------------------------------------------------------------
+
+test('task #51 chair-drive safety net: a chair trigger dropped by the per-tick cap is re-driven once', async () => {
+  const h = await createHarness({ deps: { chairResponseRedriveMs: 60_000 } });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Two chair-triggering worker questions in one tick: the first dispatches,
+    // the per-tick chair auto-reply cap silently drops the second.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-net-q1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '素材库的地址是哪一个？',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-net-q2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '图标风格定哪一种？',
+      chainTimestamp: Math.floor(startMs / 1000) + 1,
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'per-tick chair cap: only the first trigger dispatched');
+    const q2Id = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-net-q2'])[0].values[0][0];
+    const pending = JSON.parse(h.store.get(`group_task_chair_response_pending:${task.id}`) ?? 'null');
+    assert.equal(pending?.messageId, q2Id, 'the capped trigger stays pending (the answered one does not clear it)');
+
+    // Past the redrive window with the chair still silent: the net re-drives
+    // the dropped trigger through the durable defer queue (same-tick drain).
+    h.state.nowMs = startMs + 120_000;
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 2, 'the dropped trigger is re-driven once');
+    assert.equal(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      undefined,
+      'obligation cleared after the answer',
+    );
+
+    // No third drive — the net fires once per trigger.
+    h.state.nowMs = startMs + 240_000;
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 2, 'no further re-drive');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #51 no-progress nudge: idle minutes with nothing running drives the chair to report status', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-nudge-hello', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] hello',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.sends.length = 0;
+    h.chatCalls.length = 0;
+
+    // 21 idle minutes, no turn in flight → one supervisor nudge is recorded
+    // this tick and drives the chair status turn on the next.
+    h.state.nowMs = startMs + 21 * 60_000;
+    await h.loop.runTick();
+    const signals = h.groupTaskStore.listPendingSupervisorSignals(task.id);
+    assert.equal(signals.length, 1, 'one nudge recorded for the idle episode');
+    assert.equal(signals[0].kind, 'nudge');
+
+    await h.loop.runTick();
+    assert.ok(
+      h.chatCalls.some((call) => call.userMessage.includes('NUDGE')),
+      'the nudge drives a chair turn',
+    );
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'the nudge is marked processed',
+    );
+
+    // Same idle episode: no second nudge (the guard holds until progress).
+    h.state.nowMs = startMs + 30 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'no second nudge within the same idle episode',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

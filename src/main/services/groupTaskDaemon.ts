@@ -107,6 +107,12 @@ const { inferContentTypeFromFilePath } = metaFileUploadShared;
 /** Alias kept for readability; the canonical value lives in groupTaskSession. */
 const CONVERSATION_CHANNEL = GROUP_TASK_CONVERSATION_CHANNEL;
 const DELIVERABLE_TAG = /\[DELIVERABLE\]/i;
+/**
+ * Task #51: workers address the chair by the literal role alias "@chair"
+ * (the chair's display name varies by deployment); treat it as a chair
+ * mention. Negative lookahead keeps "@chairman"-style tokens out.
+ */
+const CHAIR_ALIAS_RE = /@chair(?![\w-])/i;
 const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
 /**
  * GT#47 R1: global variant that collects EVERY [STATUS:*] tag in one message.
@@ -391,6 +397,17 @@ const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
 const ACK_SEEN_PREFIX = 'group_task_ack_seen:';
 const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
+/**
+ * Task #51: the chair owes a response to the latest chair-triggering message.
+ * Armed when the gating produces any chair decision; cleared when the chair
+ * speaks or a chair turn completes. If neither lands within the redrive
+ * window, the trigger is re-driven ONCE through the durable defer queue —
+ * covers chair triggers silently dropped by the per-tick chair auto-reply
+ * cap, the Twin-suppression window, or a spent reply budget.
+ */
+const CHAIR_RESPONSE_PENDING_PREFIX = 'group_task_chair_response_pending:';
+/** Task #51: how long the chair may stay silent on a trigger before one re-drive. */
+const DEFAULT_CHAIR_RESPONSE_REDRIVE_MS = 4 * 60_000;
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /**
  * P1-2/P1-3: one stuck-session reclaim per (task, member) streak — the host
@@ -529,6 +546,14 @@ const DEFAULT_REMOTE_PRESENCE_THROTTLE_MS = 60_000;
 const DEFAULT_NO_PROGRESS_STALL_MS = 60 * 60_000;
 /** G-01: kv stamp for the no-progress anomaly (set on report, cleared on progress). */
 const NO_PROGRESS_STALL_STAMP_PREFIX = 'group_task_no_progress_stall:';
+/** Task #51: kv stamp for the smaller no-progress chair nudge (one per idle episode). */
+const NO_PROGRESS_NUDGE_STAMP_PREFIX = 'group_task_no_progress_nudge:';
+/**
+ * Task #51: idle window before the chair is nudged (via a supervisor signal)
+ * to post a status update when no progress AND no in-flight turn exists —
+ * the task must never sit silent for the full stall window.
+ */
+const DEFAULT_NO_PROGRESS_NUDGE_MS = 20 * 60_000;
 /**
  * P2-7 (round 2): window (ms) in which ANY chair-bot message posted by the
  * Twin side suppresses daemon-driven chair AUTO replies (deliverable /
@@ -772,6 +797,13 @@ export function decideGroupTaskResponders(
     }
     if (isOwnerMessage) {
       decisions.push({ metabotId: member.metabotId, reason: 'chair_owner_message' });
+      continue;
+    }
+    // Task #51: the literal "@chair" role alias from a non-owner member (the
+    // self-send guard above already filtered the chair's own notices, which
+    // carry the alias in their body).
+    if (CHAIR_ALIAS_RE.test(content)) {
+      decisions.push({ metabotId: member.metabotId, reason: 'chair_mentioned' });
       continue;
     }
     if (hasDeliverable) {
@@ -1246,6 +1278,10 @@ export interface GroupTaskDaemonDeps {
   }) => boolean;
   /** G-01: no-progress stall window before the anomaly notice (default 60 min). */
   noProgressStallMs?: number;
+  /** Task #51: idle window before the chair is nudged for a status update (default 20 min). */
+  noProgressNudgeMs?: number;
+  /** Task #51: chair-response redrive window (default 4 min). */
+  chairResponseRedriveMs?: number;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
   getMetaIDGroupCognitionPromptBlock?: (input: {
@@ -1598,6 +1634,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const noProgressStallMs = Math.max(
     5 * 60_000,
     Math.trunc(deps.noProgressStallMs ?? DEFAULT_NO_PROGRESS_STALL_MS),
+  );
+  const noProgressNudgeMs = Math.max(
+    60_000,
+    Math.min(noProgressStallMs, Math.trunc(deps.noProgressNudgeMs ?? DEFAULT_NO_PROGRESS_NUDGE_MS)),
+  );
+  const chairResponseRedriveMs = Math.max(
+    30_000,
+    Math.trunc(deps.chairResponseRedriveMs ?? DEFAULT_CHAIR_RESPONSE_REDRIVE_MS),
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
@@ -4731,6 +4775,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           args.remoteStatusBlock,
         );
         lastReplyAtByKey.set(key, now());
+        // Task #51 safety net: a completed chair turn answers every pending
+        // trigger up to this message; a NEWER trigger survives.
+        if (member.role === 'chair') {
+          const pendingKey = `${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`;
+          const pendingRaw = deps.getStore().get<string>(pendingKey);
+          if (pendingRaw) {
+            let pendingId: number | null = null;
+            try {
+              pendingId = (JSON.parse(pendingRaw) as { messageId?: number }).messageId ?? null;
+            } catch {
+              pendingId = null;
+            }
+            if (pendingId == null || pendingId <= message.id) deps.getStore().delete(pendingKey);
+          }
+        }
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${member.role} turn for bot ${bot.id} completed ` +
           `(message #${message.id})`,
@@ -5599,13 +5658,46 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (progressPoints.length === 0) return; // nothing observable yet — never alarm
     const lastProgressMs = Math.max(...progressPoints);
     const idleMs = now() - lastProgressMs;
-    if (idleMs < noProgressStallMs) {
+    const nudgeKey = `${NO_PROGRESS_NUDGE_STAMP_PREFIX}${task.id}`;
+    if (idleMs < noProgressNudgeMs) {
+      // Fresh progress — re-arm both episode guards.
       if (sqlite.get<string>(stampKey) != null) {
         sqlite.delete(stampKey);
         sqlite.delete(`group_task_milestone_notified:anomaly:${task.id}:stall`);
       }
+      if (sqlite.get<string>(nudgeKey) != null) sqlite.delete(nudgeKey);
       return;
     }
+    // Task #51: past the smaller window with literally NOTHING running (no
+    // dispatched turn, none latched), the task is idle-stuck — nudge the
+    // chair once per episode to post a status update instead of sitting
+    // silent until the stall anomaly. The supervisor-signal channel drives
+    // the chair turn on the next tick.
+    if (sqlite.get<string>(nudgeKey) == null) {
+      const anyTurnInFlight = [...turnInFlight.keys()].some((key) => key.startsWith(`${task.id}:`));
+      if (!anyTurnInFlight) {
+        try {
+          deps.getGroupTaskStore().addSupervisorSignal({
+            taskId: task.id,
+            kind: 'nudge',
+            note:
+              `No progress for ${Math.round(idleMs / 60_000)} min and no turn is running — ` +
+              'post a brief status update to the group: what is done, what is blocked, what happens next.',
+          });
+          sqlite.set(nudgeKey, '1');
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: no progress for ${Math.round(idleMs / 60_000)} min ` +
+            'with no turn in flight — nudged the chair for a status update',
+          );
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: no-progress nudge failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+    if (idleMs < noProgressStallMs) return;
     if (sqlite.get<string>(stampKey) === '1') return; // already reported this episode
     sqlite.set(stampKey, '1');
     emitLog(
@@ -6335,6 +6427,65 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       );
     }
 
+    // Task #51 chair-drive safety net: a chair trigger with no chair speech
+    // and no completed chair turn within the window is re-driven ONCE through
+    // the durable defer queue (the drain below picks it up this same tick).
+    if (
+      (task.status === 'executing' || task.status === 'planning')
+      && !dispatchPausedAtTick
+      && !checkpointOpenAtTick
+      && chairMemberId != null
+    ) {
+      const pendingRaw = sqlite.get<string>(`${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`);
+      if (pendingRaw) {
+        let pending: {
+          messageId?: number;
+          reason?: GroupTaskResponderDecision['reason'];
+          atMs?: number;
+          redriven?: boolean;
+        } | null = null;
+        try {
+          pending = JSON.parse(pendingRaw);
+        } catch {
+          pending = null;
+        }
+        if (
+          pending
+          && typeof pending.messageId === 'number'
+          && typeof pending.atMs === 'number'
+          && pending.reason
+          && now() - pending.atMs >= chairResponseRedriveMs
+        ) {
+          if (pending.redriven) {
+            // One re-drive already happened and the chair is still silent —
+            // stop here; the no-progress stall monitor reports the episode.
+            sqlite.delete(`${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`);
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: chair response for message ${pending.messageId} ` +
+              'still missing after one re-drive; dropping the obligation',
+            );
+          } else if (!turnInFlight.has(keyOf(task.id, chairMemberId))) {
+            sqlite.set(
+              `${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`,
+              JSON.stringify({ ...pending, redriven: true }),
+            );
+            deferReply({
+              taskId: task.id,
+              metabotId: chairMemberId,
+              messageId: pending.messageId,
+              reason: pending.reason,
+              verificationNotes: [],
+            });
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: chair never answered message ${pending.messageId} ` +
+              `within ${Math.round(chairResponseRedriveMs / 60_000)} min; re-driven once via the defer queue`,
+            );
+          }
+          // A chair turn in flight right now gets this tick to land first.
+        }
+      }
+    }
+
     // P0-3c: compensate replies deferred by a cap/cooldown in an earlier tick.
     // Deferred entries get priority over brand-new messages so a skipped worker
     // still gets its chance (the message cursor already advanced past it).
@@ -6470,6 +6621,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const humanGateActive = freshStatus === 'review' || hasOpenCheckpoint;
         // P0-3: [WORKING] ACK / [STANDBY] markers + assignment ACK tracking.
         handleMemberProtocolMarkers(task, message, members, botsById, { humanGateActive });
+        // Task #51 safety net: the chair spoke — every pending trigger up to
+        // this message counts as answered; a NEWER trigger (armed later in
+        // the same tick) survives.
+        if (
+          chairGlobalMetaId
+          && (message.senderGlobalMetaId ?? '').trim().toLowerCase() === chairGlobalMetaId.trim().toLowerCase()
+        ) {
+          const pendingKey = `${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`;
+          const pendingRaw = sqlite.get<string>(pendingKey);
+          if (pendingRaw) {
+            let pendingId: number | null = null;
+            try {
+              pendingId = (JSON.parse(pendingRaw) as { messageId?: number }).messageId ?? null;
+            } catch {
+              pendingId = null;
+            }
+            if (pendingId == null || pendingId <= message.id) sqlite.delete(pendingKey);
+          }
+        }
         const gatingTask: GroupTaskDaemonTask = {
           ...task,
           status: freshStatus,
@@ -6479,6 +6649,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById, {
           entropyFloorGate: entropyP0.floorGate,
         });
+        // Task #51 safety net: a chair decision means the chair owes this
+        // message a response. The entry is cleared by chair speech (above) or
+        // a completed chair turn (dispatchReplyTurn); if neither lands within
+        // the redrive window the trigger is re-driven once via the defer
+        // queue — covering triggers silently dropped by the per-tick chair
+        // auto-reply cap, the Twin-suppression window, or a spent budget.
+        const chairDecision = decisions.find((decision) =>
+          members.find((candidate) => candidate.metabotId === decision.metabotId)?.role === 'chair');
+        if (chairDecision && chairMemberId != null) {
+          sqlite.set(
+            `${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`,
+            JSON.stringify({ messageId: message.id, reason: chairDecision.reason, atMs: now() }),
+          );
+        }
         // P0-1: review-phase silence hint — a chair dispatch to workers during
         // review is intentionally unanswered (workers are gated silent); log
         // it so the operator/chair reopens the task instead of assuming the

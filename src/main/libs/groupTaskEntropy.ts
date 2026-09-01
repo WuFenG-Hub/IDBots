@@ -51,8 +51,17 @@ export function parseGroupTaskEntropyP0Config(raw: string | null | undefined): G
  * status updates (blockers, switch-overs, anything >200 chars) must reach
  * the chair. The question guard is deliberate too — a worker smuggling a
  * real question into its ACK still reaches the chair.
+ *
+ * Task #51: so is a [WORKING] line asking the chair for a RULING. Workers
+ * phrase those without a question mark ("…一处需要 chair 裁定"), and the
+ * ceremony gate used to swallow them — the chair never got a turn and the
+ * step stalled until something else happened to drive it. Any ruling /
+ * approval / blocker keyword keeps the line OUT of the ceremony class.
  */
 const CEREMONY_ACK_MAX_CHARS = 200;
+
+/** Ruling/approval/blocker keywords that exempt a [WORKING] line from ceremony. */
+const CEREMONY_RULING_RE = /(裁定|裁决|定夺|请示|批准|确认一下|decision|approve|blocked)/i;
 
 export function isCeremonyAckLine(content: string): boolean {
   const trimmed = (content ?? '').trim();
@@ -60,7 +69,9 @@ export function isCeremonyAckLine(content: string): boolean {
   if (!(trimmed.startsWith('[WORKING]') || trimmed.startsWith('[STANDBY]'))) return false;
   if (trimmed.length > CEREMONY_ACK_MAX_CHARS) return false;
   if (/(pin|metafile|metaapp|https?):\/\//.test(trimmed)) return false;
-  return !trimmed.includes('?') && !trimmed.includes('？');
+  if (trimmed.includes('?') || trimmed.includes('？')) return false;
+  if (CEREMONY_RULING_RE.test(trimmed)) return false;
+  return true;
 }
 
 export const GROUP_LOG_MESSAGE_MAX_CHARS = 600;

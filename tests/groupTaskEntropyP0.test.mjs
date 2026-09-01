@@ -66,6 +66,15 @@ test('isCeremonyAckLine recognizes ACK shapes but lets questions through', () =>
   assert.equal(isCeremonyAckLine('[DELIVERABLE] pin://abc'), false, 'not an ACK shape');
   assert.equal(isCeremonyAckLine('随便一句话'), false);
   assert.equal(isCeremonyAckLine(''), false);
+  // Task #51: a [WORKING] line asking the chair for a RULING is not ceremony,
+  // even without a question mark — the chair must get a turn.
+  assert.equal(isCeremonyAckLine('[WORKING] 主体完成，一处需要 chair 裁定'), false, 'ruling keyword 裁定');
+  assert.equal(isCeremonyAckLine('[WORKING] 方案有两种，请 chair 定夺'), false, 'ruling keyword 定夺');
+  assert.equal(isCeremonyAckLine('[WORKING] waiting on an approve from the chair'), false, 'ruling keyword approve');
+  assert.equal(isCeremonyAckLine('[WORKING] publish step is blocked on the API key'), false, 'blocker keyword');
+  // The Phase-3 host liveness lines stay ceremony (never drive a chair turn).
+  assert.equal(isCeremonyAckLine('[WORKING] 仍在执行中——本步骤耗时较长，进展正常，完成后会立即汇报。'), true, 'placeholder stays ceremony');
+  assert.equal(isCeremonyAckLine('[WORKING] 长步骤仍在后台执行，一切正常，完成后第一时间汇报进展。'), true, 'heartbeat stays ceremony');
 });
 
 test('group log line truncation keeps head and tail with a marker', () => {
@@ -206,4 +215,41 @@ test('review: substantive [WORKING] lines still reach the chair via floor contro
     TASK, GATE_MEMBERS, GATE_BOTS,
   );
   assert.deepEqual(blocker.map((decision) => decision.reason), ['chair_floor_control']);
+});
+
+test('task #51: a ruling request inside [WORKING] drives a chair turn; the "@chair" alias counts as a mention', () => {
+  // Builder阿码's actual task-#51 line: no question mark, but it asks the
+  // chair for a ruling — the ceremony gate must let it through.
+  const ruling = decideGroupTaskResponders(
+    gateMessage({ content: '[WORKING] 主体完成，一处需要 chair 裁定' }),
+    TASK, GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(ruling.map((decision) => decision.reason), ['chair_floor_control'], 'ruling keyword reaches the chair');
+
+  // The literal role alias "@chair" works regardless of the chair's display
+  // name.
+  const alias = decideGroupTaskResponders(
+    gateMessage({ content: '@chair 素材链接失效了，请确认替代方案' }),
+    TASK, GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(alias, [{ metabotId: 1, reason: 'chair_mentioned' }], '@chair alias wakes the chair');
+
+  // The chair's own host notices carry the alias in their body but must never
+  // self-trigger.
+  const selfNotice = decideGroupTaskResponders(
+    gateMessage({
+      senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin', senderName: 'Twin Bot',
+      content: '@chair ℹ️ Coder Bot is in a long-running turn; no action needed.',
+    }),
+    TASK, GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(selfNotice, [], 'chair-sent @chair notice never self-triggers');
+
+  // An owner message containing the alias keeps the owner reason (owner
+  // dialogue semantics win over the alias).
+  const ownerAlias = decideGroupTaskResponders(
+    gateMessage({ senderGlobalMetaId: BOSS_GMID, senderName: 'Owner', content: '@chair 先停下素材环节' }),
+    TASK, GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(ownerAlias.map((decision) => decision.reason), ['chair_owner_message'], 'owner reason wins over the alias');
 });
