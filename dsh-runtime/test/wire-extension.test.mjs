@@ -116,6 +116,30 @@ const main = async () => {
   await client.close()
   record('clean close', true)
 
+  // ---- 5. initialize accepts process-level effort/maxTokens (0.1.2) -------
+  // IDBots resolves effort through its four-tier ladder and always sends it
+  // per session/ensure, so production keeps initialize provider/model-only;
+  // this pins the wire capability for compositions that want a process-wide
+  // default (and guards the handshake against future protocol drift).
+  {
+    const client2 = runtimeClient({
+      args: [path.join(runtimeDir, 'bin.mjs'), path.join(runtimeDir, 'cordis.test.yml')],
+      env: { ...process.env, SPIKE_QUIET: '1' },
+    })
+    client2.start()
+    try {
+      const identity = await client2.initialize({
+        cwd: runtimeDir, provider: 'fake', model: 'fake-1',
+        reasoningEffort: 'low', maxTokens: 512,
+      })
+      record('initialize accepts reasoningEffort + maxTokens',
+        identity?.serverInfo?.name === 'deepseek-harness-sdk-runtime')
+    } catch (error) {
+      record('initialize accepts reasoningEffort + maxTokens', false, String(error?.message ?? error).slice(0, 80))
+    }
+    await client2.close()
+  }
+
   const failed = results.filter((r) => !r.pass).length
   console.log(`\n${results.length - failed}/${results.length} checks passed`)
   process.exit(failed === 0 ? 0 : 1)
