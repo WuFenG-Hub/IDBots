@@ -127,25 +127,36 @@ const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
  */
 const STATUS_TAG_ALL = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
 /**
- * G-03 (task #47 structural fix): the instruction tag is ONLY the one at the
- * message END (the protocol template instructs the chair to end the message
- * with it, and every host-composed directive does). A tag anywhere in the body
- * is descriptive prose quoted from the goal/acceptance criteria — it is never
- * parsed as an instruction, regardless of position or count. Detection stays
- * regex-only over an ASCII protocol label; no natural-language intent is
- * inferred here.
+ * G-03 (task #47) + task #52: the instruction lives in the message-END FIELD —
+ * the last non-empty line. G-03 first required the tag to be the absolute last
+ * thing in the message, which real chair verdicts break: task #52's final
+ * verdict ended `[STATUS:REVIEW] — 本任务全部完成，现等待 Sunny 在 Tasks UI 验收。`
+ * and the strict form read the instruction as a descriptive body tag, pinning
+ * the task in executing forever (stall nudges, zombie worker re-dispatch).
+ * The end field is now LINE-granular: any [STATUS:*] tag on the last non-empty
+ * line is the instruction (the LAST one when the line carries several). Tags on
+ * earlier lines stay descriptive prose quoted from the goal/acceptance criteria
+ * (task #47 protection unchanged) — the criteria block always precedes the
+ * instruction footer. Detection stays regex-only over an ASCII protocol label;
+ * no natural-language intent is inferred here.
  */
-const STATUS_TAG_TRAILING = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\][ \t]*$/i;
+const STATUS_TAG_END_LINE = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
 
 /**
- * Extract the chair's status instruction from a message body.
- * Returns [] unless a valid tag sits at the (whitespace-trimmed) message end —
- * tags embedded in the body are deliberately ignored (see STATUS_TAG_TRAILING).
+ * Extract the chair's status instruction from a message body: the LAST tag on
+ * the last non-empty line. Returns [] when the end field carries no tag —
+ * tags on earlier lines are deliberately ignored (see STATUS_TAG_END_LINE).
  */
 function extractStatusDirectives(content: string): Array<'executing' | 'review'> {
-  const match = STATUS_TAG_TRAILING.exec(String(content ?? '').trim());
-  if (!match) return [];
-  return [match[1].toLowerCase() as 'executing' | 'review'];
+  const lines = String(content ?? '').trim().split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (!line) continue; // trailing blank lines are not the end field
+    const tags = [...line.matchAll(STATUS_TAG_END_LINE)];
+    if (tags.length === 0) return [];
+    return [tags[tags.length - 1][1].toLowerCase() as 'executing' | 'review'];
+  }
+  return [];
 }
 /**
  * HITL checkpoint tags (chair-only, same trust rule as STATUS tags):
@@ -2108,6 +2119,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const turnInFlight = new Map<string, { startedAt: number }>();
   const pendingTurnJobs = new Set<Promise<void>>();
   const latchWatchers = new Set<ReturnType<typeof setInterval>>();
+  /**
+   * Task #52 self-heal: tasks whose stuck status directive reconciliation was
+   * already attempted this daemon run (success or skip — the parse fix keeps
+   * new directives landing on the normal path, so one attempt per run is the
+   * whole repair budget for legacy stuck tasks).
+   */
+  const statusDirectiveReconciledTasks = new Set<number>();
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
@@ -3680,16 +3698,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const chairGlobalMetaId = (chairMember?.globalmetaid ?? '').trim();
       const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
       if (chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId) {
-        // G-03: the instruction tag is the one at the message end (protocol
-        // template). Any other tag in the body is descriptive text quoted from
-        // the goal/acceptance criteria — logged so the parse is never a silent
-        // judgment call, but never applied.
+        // G-03: the instruction tag is the one in the message-end field (the
+        // last non-empty line — protocol template). Any other tag in the body
+        // is descriptive text quoted from the goal/acceptance criteria —
+        // logged so the parse is never a silent judgment call, but never applied.
         const nextStatus = statusDirectives[statusDirectives.length - 1];
         const bodyTagCount = [...content.matchAll(STATUS_TAG_ALL)].length;
         if (bodyTagCount > 1) {
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: chair message carries ${bodyTagCount} [STATUS:*] tags — ` +
-            `applying the trailing one ([STATUS:${nextStatus.toUpperCase()}]) as the instruction, ` +
+            `applying the message-end one ([STATUS:${nextStatus.toUpperCase()}]) as the instruction, ` +
             `earlier tags treated as descriptive text`,
           );
         }
@@ -3988,7 +4006,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     } else {
       // G-03 observability: a chair message whose BODY cites [STATUS:*] tags
-      // without a trailing instruction tag must not transition silently —
+      // without a message-end instruction tag must not transition silently —
       // leave a log line so a stuck task is always diagnosable (task #47's
       // "zero transitions, zero logs" failure mode).
       const bodyTags = [...content.matchAll(STATUS_TAG_ALL)].map((match) => match[1].toUpperCase());
@@ -3999,7 +4017,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (chairGmidForTags && senderGmidForTags && senderGmidForTags === chairGmidForTags) {
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: chair message cites ${bodyTags.length} [STATUS:*] tag(s) ` +
-            `(${bodyTags.join(' -> ')}) in the body with no trailing instruction tag — ` +
+            `(${bodyTags.join(' -> ')}) with no message-end instruction tag — ` +
             'descriptive tags ignored, no transition applied',
           );
         }
@@ -5769,6 +5787,100 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * Task #52 self-heal: reconcile a stuck chair status directive. A verdict the
+   * parser once rejected (e.g. `[STATUS:REVIEW] — explanation` under the G-03
+   * absolute-trailing rule) left the task pinned in executing AFTER the message
+   * cursor already advanced — fixing the parser alone cannot repair tasks that
+   * already ate the directive. Once per daemon run per task, rescan the
+   * cursor-passed transcript for the NEWEST chair message carrying a
+   * message-end directive; when it differs from the live status (and the
+   * transition is legal, and the message is NEWER than the last recorded
+   * status event — a UI/RPC rework posts no group message, so an older REVIEW
+   * must never flip a re-opened task back), re-run the tag-only processing on
+   * it (the GT#26 drop-time pattern: same idempotency contract — deliverable
+   * rows dedupe by msg pin + uri, the transition itself is legality-checked).
+   * The review ceremony then runs from the normal path, exactly as if the
+   * directive had parsed on arrival. Messages the cursor has NOT passed are
+   * deliberately excluded — they still flow through the normal path.
+   */
+  const reconcileStatusDirective = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+    promptMembers: DaemonPromptMember[],
+    ownerGlobalMetaId: string,
+    memberGmids: Set<string>,
+  ): Promise<void> => {
+    if (!task.groupId) return;
+    if (task.status === 'done' || task.status === 'cancelled') return;
+    const db = deps.getStore().getDatabase();
+    const chairMember = members.find((member) => member.role === 'chair');
+    const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
+    if (!chairGmid) return;
+    // Newest cursor-passed chair row with a message-end directive (newest-first).
+    const candidate = queryRecentMessages(db, task.groupId, 50)
+      .reverse()
+      .find((row) => {
+        if (row.id > task.lastProcessedMsgId) return false; // normal path owns it
+        const senderGmid = (row.sender_global_metaid ?? '').trim().toLowerCase();
+        return senderGmid === chairGmid && !row.sender_suspect
+          && extractStatusDirectives(row.content ?? '').length > 0;
+      });
+    if (!candidate) return;
+    const directive = extractStatusDirectives(candidate.content ?? '')[0];
+    const freshStatus = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
+    if (directive === freshStatus) return; // already applied (or a later state)
+    // Legal chair-directive transitions only (mirrors LEGAL_TRANSITIONS minus
+    // the owner-only terminal moves) — anything else keeps its normal-path
+    // rejection semantics; reconciliation must not manufacture new audit noise.
+    const legalChairMoves: Record<string, string[]> = {
+      planning: ['executing'],
+      executing: ['review'],
+      review: ['executing'],
+      done: [],
+      cancelled: [],
+    };
+    if (!(legalChairMoves[freshStatus] ?? []).includes(directive)) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: status directive reconcile skipped — ` +
+        `${freshStatus} -> ${directive} is not a legal chair move`,
+      );
+      return;
+    }
+    // Rework guard: a re-open (review->executing via Tasks UI / RPC rework)
+    // posts no group message, so the newest tagged chair row can predate it.
+    // Only a directive NEWER than the last recorded status event may
+    // reconcile — group_task_status_events captures every real transition
+    // regardless of the path that drove it (tag, UI rework, RPC, store call).
+    try {
+      const result = db.exec(
+        'SELECT MAX(created_at) FROM group_task_status_events WHERE task_id = ?',
+        [task.id],
+      );
+      const rawEventAt = result[0]?.values?.[0]?.[0];
+      const lastEventMs = rawEventAt == null ? null : parseSqliteUtcMs(String(rawEventAt));
+      const candidateMs = Number(candidate.chain_timestamp) > 0
+        ? Number(candidate.chain_timestamp) * 1000
+        : null;
+      if (lastEventMs != null && candidateMs != null && candidateMs <= lastEventMs) {
+        return;
+      }
+    } catch {
+      // status-events table unreadable — the normal path still guards legality
+    }
+    emitLog(
+      `[GroupTaskDaemon] Task ${task.id}: reconciling stuck status directive ` +
+      `[STATUS:${directive.toUpperCase()}] from chair message ${candidate.id} ` +
+      `(${freshStatus} -> ${directive})`,
+    );
+    const rawMessage = toDaemonMessage(candidate);
+    const tagMessage = await enrichMessageAttribution(rawMessage, memberGmids, ownerGlobalMetaId)
+      .catch(() => rawMessage);
+    await processMessageTags(task, tagMessage, members, botsById, promptMembers);
+    handleMemberProtocolMarkers(task, tagMessage, members, botsById);
+  };
+
+  /**
    * P0-3: chair reminder when an assignment got no [WORKING] ACK within
    * ackTimeoutMs (default 3 min). Fires ONCE per pending assignment; never
    * auto-fails the worker.
@@ -6622,6 +6734,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           remoteStatusBlock,
           entry,
         });
+      }
+    }
+
+    // Task #52 self-heal: once per run, reconcile a stuck chair status
+    // directive (a verdict the old parser rejected after the cursor moved on).
+    // Best-effort — a failure logs and the task simply keeps its status.
+    if (!statusDirectiveReconciledTasks.has(task.id)) {
+      statusDirectiveReconciledTasks.add(task.id);
+      try {
+        await reconcileStatusDirective(task, members, botsById, promptMembers, ownerGlobalMetaId, memberGmids);
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: status directive reconcile failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
 

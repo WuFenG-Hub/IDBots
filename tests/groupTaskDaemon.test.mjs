@@ -1179,6 +1179,152 @@ test('GT#47 R2: an illegal chair [STATUS] directive leaves a rejected-transition
   }
 });
 
+// ---------------------------------------------------------------------------
+// Task #52: the chair's real verdict ended `[STATUS:REVIEW] — trailing prose`
+// on its last line. The G-03 absolute-trailing parse read the instruction as a
+// descriptive body tag, the task stayed pinned in executing (stall nudges,
+// zombie worker re-dispatch), and the acceptance card never appeared. The
+// instruction field is now the last non-empty LINE.
+// ---------------------------------------------------------------------------
+
+test('task #52: a verdict tag followed by explanation prose on the last line applies review', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]); // executing
+    // The literal msg-2436 shape: verdict body, then the tag-led footer line
+    // with an em-dash explanation the old parser choked on.
+    insertGroupMessage(h.db, {
+      pinId: 'verdict52-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '✅ 全部交付核验完成，任务目标达成。\n\n'
+        + '[STATUS:REVIEW] — 本任务全部完成，现等待 Sunny 在 Tasks UI 验收。',
+      chainTimestamp: 100,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    assert.ok(
+      h.groupTaskStore
+        .listTaskTransitions(task.id)
+        .some((t) => t.toStatus === 'review' && /\[STATUS:REVIEW\] tag/.test(t.reason ?? '')),
+      'transition audit row credits the REVIEW tag',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #52: a tag at the END of the last line (prose before it) is the instruction too', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing
+    insertGroupMessage(h.db, {
+      pinId: 'verdict52b-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '终检完成，进入验收 [STATUS:REVIEW]', chainTimestamp: 101,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #52 parse keeps GT#47 protection: a descriptive tag on a NON-last line stays ignored', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    insertGroupMessage(h.db, {
+      pinId: 'plan52-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '目标: 完成技能。验收标准: 全部交付物上链, owner 核验通过后发 [STATUS:REVIEW]。\n'
+        + '分工: @Coder Bot 负责封装。\n以上，计划宣读完毕。',
+      chainTimestamp: 102,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning');
+    assert.ok(
+      logs.some((line) => line.includes('no message-end instruction tag')),
+      'the ignored descriptive tag is logged, not silent',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #52 self-heal: a REVIEW directive the cursor already passed reconciles on the next daemon run', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]); // executing
+    insertGroupMessage(h.db, {
+      pinId: 'stuck-verdict-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '✅ 全部交付核验完成。\n[STATUS:REVIEW] — 本任务全部完成，现等待验收。',
+      chainTimestamp: Math.floor(Date.now() / 1000),
+    });
+    // Simulate the stuck state: the cursor already advanced past the verdict
+    // (the pre-fix daemon processed and ignored it), and no transition newer
+    // than the directive exists (the planning->executing move predates it).
+    const stuckId = h.db
+      .exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['stuck-verdict-i0'])[0].values[0][0];
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = ? WHERE id = ?', [stuckId, task.id]);
+    h.db.run('DELETE FROM group_task_transitions WHERE task_id = ?', [task.id]);
+    h.db.run('DELETE FROM group_task_status_events WHERE task_id = ?', [task.id]);
+
+    // Fresh daemon run: makeLoop() builds a clean loop instance whose
+    // once-per-run reconcile guard has not fired yet.
+    const fresh = h.makeLoop();
+    await fresh.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    assert.ok(
+      h.groupTaskStore
+        .listTaskTransitions(task.id)
+        .some((t) => t.toStatus === 'review' && /\[STATUS:REVIEW\] tag/.test(t.reason ?? '')),
+      'reconciled transition is audited like a normal one',
+    );
+    assert.ok(logs.some((line) => line.includes('reconciling stuck status directive')), 'reconcile logged');
+    // The settle must be idempotent across daemon runs: a second fresh run
+    // finds directive === status and stays quiet.
+    const again = h.makeLoop();
+    await again.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #52 self-heal guard: a directive older than the last transition must not flip a reworked task back', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]); // executing (transition row created_at = now)
+    // Verdict message timestamped in the past (epoch-sec test fixtures) — any
+    // recorded transition is NEWER, so the old REVIEW must not win.
+    insertGroupMessage(h.db, {
+      pinId: 'old-verdict-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '✅ 全部完成。\n[STATUS:REVIEW] — 等待验收。',
+      chainTimestamp: 100,
+    });
+    const oldId = h.db
+      .exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['old-verdict-i0'])[0].values[0][0];
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = ? WHERE id = ?', [oldId, task.id]);
+
+    const fresh = h.makeLoop();
+    await fresh.runTick();
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'an older REVIEW directive never reconciles over a newer transition',
+    );
+    assert.ok(!logs.some((line) => line.includes('reconciling stuck status directive')), 'no reconcile attempt');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT#47 R3: during review, chair mentions arm no ACK watch and worker [WORKING] arms no delivery deadline', async () => {
   const logs = [];
   const h = await createHarness({ emitLog: (message) => logs.push(message) });
@@ -5449,15 +5595,18 @@ test('task #41 residue: an ETA [WORKING] replying to a real chair assignment sti
 // G-01..G-04 enhancement suite (2026-08-30 requirements doc)
 // ---------------------------------------------------------------------------
 
-test('G-03: a chair body tag with no trailing instruction never transitions and is observable', async () => {
+test('G-03: a chair body tag with no message-end instruction never transitions and is observable', async () => {
   const logs = [];
   const h = await createHarness({ emitLog: (line) => logs.push(line) });
   try {
     const task = h.createTask([2]);
+    // The GT#47 plan shape: the criteria quote carries a descriptive tag on a
+    // NON-last line; the last line is prose with no tag. (A tag on the LAST
+    // line is the instruction field — see the task #52 tests above.)
     insertGroupMessage(h.db, {
       pinId: 'g3-body-tag-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Twin Bot',
-      content: '计划如上。验收标准提到 owner 核验通过后发 [STATUS:REVIEW]。',
+      content: '计划如上。验收标准提到 owner 核验通过后发 [STATUS:REVIEW]。\n分工宣读完毕，即刻开工。',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
@@ -5475,7 +5624,7 @@ test('G-03: a chair body tag with no trailing instruction never transitions and 
   }
 });
 
-test('G-03: a tag followed by trailing prose is body text, not an instruction', async () => {
+test('task #52: a tag mid-line on the LAST line is the instruction even with prose around it', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
@@ -5488,8 +5637,8 @@ test('G-03: a tag followed by trailing prose is body text, not an instruction', 
     await h.loop.runTick();
     assert.equal(
       h.groupTaskStore.getTaskById(task.id).status,
-      'executing',
-      'only the message-END field carries the instruction tag',
+      'review',
+      'the message-END field is the whole last line — G-03\'s absolute-trailing form rejected this real verdict shape (task #52)',
     );
   } finally {
     h.cleanup();
