@@ -13,6 +13,7 @@ import {
   OpenTeamCollabSidebarRow,
 } from './groupTasks/OpenTeamCollabsSection';
 import { openTeamCollabService } from '../services/openTeamCollabService';
+import { splitGroupTasksByOpenTeam } from './groupTasks/groupTaskUtils.js';
 import { selectCollab, selectTask as selectGroupTask } from '../store/slices/groupTasksSlice';
 import type { OpenTeamCollabSummary } from '../types/openTeamCollab';
 import { MagnifyingGlassIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon, UserGroupIcon, GlobeAltIcon, ArchiveBoxIcon, XMarkIcon } from '@heroicons/react/24/outline';
@@ -197,6 +198,12 @@ const Sidebar: React.FC<SidebarProps> = ({
     };
   }, [homeSessions]);
   const tabbedSessions = sessionGroups[taskRecordTab];
+  // Locally-stored tasks with at least one remote (OpenTeam invitee) seat —
+  // their records rows carry the Open Team type badge instead of the local one.
+  const openTeamTaskIds = useMemo(
+    () => new Set<number>(splitGroupTasksByOpenTeam(groupTasks).openTeam.map((task) => task.id)),
+    [groupTasks],
+  );
   // Per-tab totals and unread counts, shown on the tab buttons.
   const tabStats = useMemo(() => {
     const unreadSet = new Set(unreadSessionIds);
@@ -663,7 +670,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                   </p>
                 </div>
               ) : (
-                <div className="space-y-4">
+                <div className="space-y-1">
                   {groupTasks.length > 0 && (
                     <GroupTaskSidebarList
                       tasks={groupTasks}
@@ -673,22 +680,16 @@ const Sidebar: React.FC<SidebarProps> = ({
                       onRename={handleRenameGroupTask}
                       onArchive={handleArchiveGroupTask}
                       emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
+                      openTeamTaskIds={openTeamTaskIds}
                     />
                   )}
-                  {openTeamCollabs.length > 0 && (
-                    <div className="space-y-1">
-                      <div className="px-2.5 pb-0.5 pt-1 text-[11px] font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                        {i18nService.t('groupTasksModeOpenTeam')}
-                      </div>
-                      {openTeamCollabs.map((collab) => (
-                        <OpenTeamCollabSidebarRow
-                          key={collab.id}
-                          collab={collab}
-                          onSelect={() => handleSelectOpenTeamCollab(collab.id)}
-                        />
-                      ))}
-                    </div>
-                  )}
+                  {openTeamCollabs.map((collab) => (
+                    <OpenTeamCollabSidebarRow
+                      key={collab.id}
+                      collab={collab}
+                      onSelect={() => handleSelectOpenTeamCollab(collab.id)}
+                    />
+                  ))}
                 </div>
               )
             ) : (

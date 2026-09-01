@@ -98,6 +98,7 @@ tests/*
 !tests/groupTaskSession.test.mjs
 !tests/groupTaskStatusEvents.test.mjs
 !tests/groupTaskUtils.test.mjs
+!tests/groupTaskSidebarTypeBadge.test.tsx
 !tests/groupTaskGoalCollapse.test.mjs
 !tests/groupTaskKickMember.test.mjs
 !tests/groupTaskKickMemberRpc.test.mjs

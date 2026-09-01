@@ -11,6 +11,24 @@ import {
 import { EllipsisHorizontalIcon } from '@heroicons/react/24/outline';
 import type { GroupTaskSummary } from '../../types/groupTask';
 
+/**
+ * Row-level type badge for the unified records list: distinguishes local
+ * group tasks (every seat is one of this machine's bots) from Open Team
+ * entries (remote invitees / remote-hosted) without splitting the list into
+ * separate sections. Shared with the joined-collab sidebar row.
+ */
+export const GroupTaskTypeBadge: React.FC<{ openTeam: boolean }> = ({ openTeam }) => (
+  <span
+    className={`shrink-0 rounded px-1 py-px text-[9px] font-medium leading-none ${
+      openTeam
+        ? 'bg-claude-accent/10 text-claude-accent'
+        : 'border border-claude-border dark:border-claude-darkBorder bg-claude-surfaceMuted dark:bg-claude-darkSurfaceMuted text-claude-textSecondary dark:text-claude-darkTextSecondary'
+    }`}
+  >
+    {i18nService.t(openTeam ? 'groupTasksTaskBadgeOpenTeam' : 'groupTasksTaskBadgeLocal')}
+  </span>
+);
+
 interface GroupTaskSidebarListProps {
   tasks: GroupTaskSummary[];
   selectedTaskId?: number | null;
@@ -20,6 +38,8 @@ interface GroupTaskSidebarListProps {
   onArchive?: (taskId: number) => void;
   /** Empty-state message; defaults to the group-task empty text. */
   emptyText?: string;
+  /** Task ids that carry at least one remote (OpenTeam invitee) seat; they render an Open Team type badge. */
+  openTeamTaskIds?: Set<number>;
 }
 
 /**
@@ -37,6 +57,7 @@ const GroupTaskSidebarList: React.FC<GroupTaskSidebarListProps> = ({
   onRename,
   onArchive,
   emptyText,
+  openTeamTaskIds,
 }) => {
   if (tasks.length === 0) {
     return (
@@ -59,6 +80,7 @@ const GroupTaskSidebarList: React.FC<GroupTaskSidebarListProps> = ({
           onTogglePin={onTogglePin}
           onRename={onRename}
           onArchive={onArchive}
+          isOpenTeam={openTeamTaskIds?.has(task.id) ?? false}
         />
       ))}
     </div>
@@ -72,6 +94,8 @@ interface GroupTaskSidebarRowProps {
   onTogglePin?: (taskId: number, pinned: boolean) => void;
   onRename?: (taskId: number, title: string) => void;
   onArchive?: (taskId: number) => void;
+  /** Renders the Open Team type badge instead of the local one. */
+  isOpenTeam?: boolean;
 }
 
 const GroupTaskSidebarRow: React.FC<GroupTaskSidebarRowProps> = ({
@@ -81,6 +105,7 @@ const GroupTaskSidebarRow: React.FC<GroupTaskSidebarRowProps> = ({
   onTogglePin,
   onRename,
   onArchive,
+  isOpenTeam = false,
 }) => {
   const [hoverRect, setHoverRect] = useState<DOMRect | null>(null);
   const displayTitle = task.displayName?.trim() || task.title;
@@ -158,6 +183,7 @@ const GroupTaskSidebarRow: React.FC<GroupTaskSidebarRowProps> = ({
                 {displayTitle}
               </span>
             )}
+            <GroupTaskTypeBadge openTeam={isOpenTeam} />
             <span
               className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${groupTaskStatusBadgeClass(task.status)}`}
             >
