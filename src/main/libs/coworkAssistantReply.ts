@@ -25,6 +25,41 @@ export const DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER = '[reasoning unavailable]
 export const EMPTY_TERMINAL_TURN_CONTINUE_PROMPT =
   'The previous turn ended without producing any output or tool action. Continue the task from where you left off and perform the next step.';
 
+/**
+ * Provider failure codes that mean "the request never got answered for
+ * environmental reasons" — network unreachable (TRANSPORT), request timed out
+ * (TIMEOUT), provider 429/5xx (RATE_LIMIT/SERVER), or a stream that closed
+ * without any content (EMPTY_RESPONSE). These carry no information about the
+ * model's own behavior: the same prompt is perfectly answerable once the
+ * environment recovers, so the turn is worth resuming instead of failing the
+ * task behind it.
+ */
+export const TRANSIENT_TURN_ERROR_CODES: ReadonlySet<string> = new Set([
+  'TRANSPORT',
+  'TIMEOUT',
+  'RATE_LIMIT',
+  'SERVER',
+  'EMPTY_RESPONSE',
+]);
+
+/**
+ * Cue fed back to the model when a DSH turn died on a transient error (see
+ * TRANSIENT_TURN_ERROR_CODES) and the runner auto-resumes it. Full session
+ * history — including every tool result of the interrupted turn — is
+ * preserved, so the model picks up exactly where the environment cut it off;
+ * no tool side effects are replayed.
+ */
+export const TRANSIENT_TURN_RESUME_PROMPT =
+  'The previous turn was interrupted by a transient network or provider failure. Continue the task from where you left off.';
+
+/** True when a DSH turn outcome is an error whose failure code is transient
+ *  (environmental) and therefore worth an automatic turn-level resume. */
+export function isTransientDshTurnError(outcome: { kind?: string; error?: { code?: string } }): boolean {
+  if (outcome?.kind !== 'error') return false;
+  const code = outcome.error?.code;
+  return typeof code === 'string' && TRANSIENT_TURN_ERROR_CODES.has(code);
+}
+
 const NON_ANSWER_PLACEHOLDERS = new Set<string>([
   DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER,
 ]);

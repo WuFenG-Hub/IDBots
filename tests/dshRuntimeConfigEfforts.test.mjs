@@ -116,3 +116,23 @@ test('non-native routes mount nothing native', () => {
   assert.equal(config.filter((e) => e.name === '@deepseek-ai/dsh-llm-deepseek').length, 0)
   assert.ok(piAiProviders(config).mockgw)
 })
+
+// Outage-tuned retry policy (2026-09-02 incident, session a27be8fa: a ~45–60s
+// Wi-Fi roam exhausted the adapter default — 5 retries, 500ms→10s backoff
+// ≈ 46s total — and killed the turn mid-task). Every route must now carry the
+// widened ladder so transient machine-level network blips are ridden out
+// inside the step instead of failing the turn.
+test('every route carries the outage-tuned retry policy', () => {
+  const expectedPolicy = {
+    mode: 'normal',
+    maxRetries: 8,
+    backoff: { initialDelayMs: 1_000, maxDelayMs: 30_000 },
+  }
+  const config = generateRuntimeConfig(baseInput([
+    nativeDeepSeekRoute,
+    { key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48790/v1', apiKeyEnv: 'K', models: [{ id: 'mock-1', contextWindow: 32_768 }] },
+  ]))
+  const native = entryById(config, 'llm-deepseek-deepseek-official')
+  assert.deepEqual(native.config.retryPolicy, expectedPolicy, 'native route')
+  assert.deepEqual(piAiProviders(config).mockgw.retryPolicy, expectedPolicy, 'pi-ai route')
+})

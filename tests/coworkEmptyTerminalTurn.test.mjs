@@ -73,3 +73,42 @@ test('EMPTY_TERMINAL_TURN_CONTINUE_PROMPT is a real instruction, never a non-ans
   );
 });
 
+// Transient-failure turn resume (2026-09-02 incident, session a27be8fa): a
+// turn ended with kind:'error' + code:'TRANSPORT' after a ~45–60s Wi-Fi roam
+// exhausted the runtime retry ladder, and the task behind the turn stalled.
+// The runner now auto-resumes such turns ONCE via TRANSIENT_TURN_RESUME_PROMPT;
+// the classifier below gates that path.
+test('isTransientDshTurnError classifies only transient-code error outcomes', async () => {
+  const { isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT, isNonAnswerAssistantReply } =
+    await importCompiled('coworkAssistantReply');
+
+  // The incident signature: turn/end error carrying the provider failure in
+  // `error` ({ message, code }) — exactly what DshTurnOutcome passes through.
+  assert.equal(
+    isTransientDshTurnError({ kind: 'error', error: { message: 'DeepSeek API request to https://api.deepseek.com failed', code: 'TRANSPORT' } }),
+    true
+  );
+  assert.equal(isTransientDshTurnError({ kind: 'error', error: { code: 'TIMEOUT' } }), true);
+  assert.equal(isTransientDshTurnError({ kind: 'error', error: { code: 'RATE_LIMIT' } }), true);
+  assert.equal(isTransientDshTurnError({ kind: 'error', error: { code: 'SERVER' } }), true);
+  assert.equal(isTransientDshTurnError({ kind: 'error', error: { code: 'EMPTY_RESPONSE' } }), true);
+
+  // Hard failures must NOT trigger an auto-resume.
+  assert.equal(isTransientDshTurnError({ kind: 'error', error: { code: 'AUTH_FAILED' } }), false, 'auth is not transient');
+  assert.equal(isTransientDshTurnError({ kind: 'error', error: { code: 'CONTEXT_WINDOW_EXCEEDED' } }), false);
+  assert.equal(
+    isTransientDshTurnError({ kind: 'error', reason: 'DSH runtime stream closed: boom' }),
+    false,
+    'codeless errors (e.g. runtime stream closed) stay fatal'
+  );
+  assert.equal(isTransientDshTurnError({ kind: 'stop' }), false, 'clean stops are not errors');
+  assert.equal(isTransientDshTurnError(null), false, 'defensive null');
+
+  // The resume cue is a genuine instruction — same contract as the
+  // empty-terminal continue cue, or the recovery turn itself would be
+  // re-flagged as a non-answer.
+  assert.equal(typeof TRANSIENT_TURN_RESUME_PROMPT, 'string');
+  assert.ok(TRANSIENT_TURN_RESUME_PROMPT.trim().length > 0, 'resume cue must be non-empty');
+  assert.equal(isNonAnswerAssistantReply(TRANSIENT_TURN_RESUME_PROMPT), false);
+});
+

@@ -176,6 +176,10 @@ export interface DshTurnInput {
 export interface DshTurnOutcome {
   kind: string
   reason?: string
+  /** Carried on kind:'error' outcomes: the provider/runtime failure detail
+   *  straight from the turn/end reason ({ message, code }) — e.g. TRANSPORT
+   *  for a network-level fetch failure. */
+  error?: { message?: string; code?: string }
   /** True when the turn stopped cleanly having produced no text and no tool
    * calls (the DeepSeek reasoning-only truncation signature). */
   emptyTerminal?: boolean
