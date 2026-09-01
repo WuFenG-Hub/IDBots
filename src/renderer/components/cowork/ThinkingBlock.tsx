@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
-import { ChevronRightIcon } from '@heroicons/react/24/outline';
+import { ChevronRightIcon, LightBulbIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { CoworkMessage } from '../../types/cowork';
 
@@ -104,6 +104,7 @@ export const ThinkingBlock: React.FC<{
             isExpanded ? 'rotate-90' : ''
           }`}
         />
+        <LightBulbIcon className="h-3.5 w-3.5 dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 flex-shrink-0" />
         <span className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary flex-shrink-0">
           {i18nService.t('reasoning')}
         </span>

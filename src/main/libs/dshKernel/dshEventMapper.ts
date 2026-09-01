@@ -18,8 +18,7 @@
 //    the assembled replay state; commentary ("thinking out loud" around tool
 //    calls) is reclassified into the thinking slot at finalize
 //  - Official DeepSeek on dsh-llm-deepseek has no phase tags: text that
-//    accompanies tool calls is treated as commentary, and the thinking slot
-//    stays open across those tool rounds. Live tokens arrive as
+//    accompanies tool calls is treated as commentary. Live tokens arrive as
 //    `reasoning-chunks` (the DSH web UI stream); assistant/chunk
 //    reasoning-delta is a sparse echo and must not double-count once chunks
 //    have started. A native reasoning block already live this step must not
@@ -32,6 +31,14 @@
 //    earliest proof the text is commentary, so the bubble converts into the
 //    thinking display at that moment (textRidesThinking) instead of at
 //    assistant/message finalize.
+//
+// Think rows are SEGMENTED PER TOOL ROUND (deepseek-harness web parity): each
+// assistant step's thinking is finalized as its own settled Think message at
+// assistant/message, so the next round's reasoning opens a FRESH Think row
+// below the tool rows it precedes — think → tools → think → tools → reply.
+// The earlier design held one streaming ThinkingBlock across every tool round
+// of the turn, which stranded a single ever-scrolling Think row above a pile
+// of tool calls with no interleaving.
 
 import type { DshMapperAction, DshSessionEventEnvelope, DshUsageSnapshot } from './types'
 import { splitThinkTaggedContent } from './thinkTags'
@@ -94,12 +101,6 @@ export class DshEventMapper {
   private textBuf = ''
   private thinkingOpen = false
   private thinkingBuf = ''
-  /**
-   * Thinking already accepted for earlier tool-call steps of this turn.
-   * Held across assistant/message boundaries so one ThinkingBlock stays
-   * streaming instead of collapsing and reopening on every round.
-   */
-  private thinkingHeld = ''
   /** Accumulated raw text-delta (may still contain <think> tags). */
   private rawTextBuf = ''
   /** True once a native reasoning-delta opened the thinking slot this step. */
@@ -116,9 +117,8 @@ export class DshEventMapper {
    * display (tool-call commentary on routes with no live reasoning block —
    * notably effort "off", where commentary is the only process text). The
    * converted message keeps living under the TEXT slot id, so every later
-   * update and finalize of this turn must address slot 'text' while the
-   * thinking bookkeeping (thinkingOpen / thinkingBuf / thinkingHeld) rides
-   * on top of it.
+   * update and finalize of this round must address slot 'text' while the
+   * thinking bookkeeping (thinkingOpen / thinkingBuf) rides on top of it.
    */
   private textRidesThinking = false
   private lastUsage: DshUsageSnapshot | null = null
@@ -171,20 +171,15 @@ export class DshEventMapper {
           const split = splitThinkTaggedContent(this.rawTextBuf)
           if (!this.reasoningFromDeltas && split.thinking.length > 0) {
             this.openThinking(actions)
-            this.thinkingBuf = this.prefixHeld(split.thinking)
+            this.thinkingBuf = split.thinking
             actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
           }
           if (this.textRidesThinking) {
             // Commentary keeps streaming into the converted thinking display
-            // while the first round is still in flight (nothing held yet).
-            // Once a round finalized (thinkingHeld set), later text is held
-            // until finalize — the same contract as the reasoning path, so
-            // the final reply never leaks into the thinking display.
-            if (!this.thinkingHeld) {
-              this.thinkingBuf = split.text
-              actions.push({ kind: 'messageUpdate', slot: 'text', content: this.prefixHeld(this.thinkingBuf) })
-            }
-          } else if (split.text.length > 0 && !this.reasoningBlockLive && !this.thinkingHeld) {
+            // for the rest of this round (settled at assistant/message).
+            this.thinkingBuf = split.text
+            actions.push({ kind: 'messageUpdate', slot: 'text', content: this.thinkingBuf })
+          } else if (split.text.length > 0 && !this.reasoningBlockLive) {
             // Native reasoning already live: hold text until assistant/message
             // proves it is the final answer. Opening a body bubble here is the
             // flash the DSH web UI never does (Think row from the first token).
@@ -204,7 +199,7 @@ export class DshEventMapper {
           if (assembled.length > 0) {
             this.reasoningBlockLive = true
             this.openThinking(actions)
-            this.thinkingBuf = this.prefixHeld(assembled)
+            this.thinkingBuf = assembled
             actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
           }
         } else if (chunk?.type === 'usage') {
@@ -377,9 +372,6 @@ export class DshEventMapper {
   private appendReasoning(actions: DshMapperAction[], piece: string): void {
     if (!piece) return
     this.openThinking(actions)
-    if (this.thinkingHeld && this.thinkingBuf === this.thinkingHeld) {
-      this.thinkingBuf = `${this.thinkingHeld}\n\n`
-    }
     this.thinkingBuf += piece
     actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
   }
@@ -387,13 +379,13 @@ export class DshEventMapper {
   /**
    * Convert the streaming body bubble into the thinking display the moment a
    * tool call proves its text is commentary. No-op unless text is streaming
-   * with no live thinking slot and no held thinking (the effort-"off" native
-   * route; with reasoning live the hold logic already keeps text invisible).
-   * The message id keeps living under the TEXT slot, so the finalize action
-   * retargets that slot and later updates continue on the same message.
+   * with no live thinking slot (the effort-"off" native route; with reasoning
+   * live the hold logic already keeps text invisible). The message id keeps
+   * living under the TEXT slot, so the finalize action retargets that slot
+   * and later updates continue on the same message.
    */
   private convertRidingTextToThinking(actions: DshMapperAction[]): void {
-    if (this.textRidesThinking || !this.textOpen || this.thinkingOpen || this.thinkingHeld) return
+    if (this.textRidesThinking || !this.textOpen || this.thinkingOpen) return
     this.textRidesThinking = true
     this.textOpen = false
     this.thinkingOpen = true
@@ -402,14 +394,9 @@ export class DshEventMapper {
     actions.push({
       kind: 'messageFinalize',
       slot: 'text',
-      content: this.prefixHeld(this.thinkingBuf),
+      content: this.thinkingBuf,
       metadata: { isThinking: true, isStreaming: true },
     })
-  }
-
-  /** Prefix this step's reasoning with thinking already held from earlier tool rounds. */
-  private prefixHeld(stepText: string): string {
-    return joinThinking([this.thinkingHeld, stepText])
   }
 
   /** Collapse any live slots at a real turn boundary so isStreaming cannot stick. */
@@ -419,15 +406,13 @@ export class DshEventMapper {
       // (turn aborted mid-loop): finalize through the text slot id it rides on.
       this.textRidesThinking = false
       this.thinkingOpen = false
-      actions.push({ kind: 'messageFinalize', slot: 'text', content: this.thinkingHeld || this.thinkingBuf, metadata: { isThinking: true } })
+      actions.push({ kind: 'messageFinalize', slot: 'text', content: this.thinkingBuf, metadata: { isThinking: true } })
       this.thinkingBuf = ''
-      this.thinkingHeld = ''
     }
     if (this.thinkingOpen) {
       this.thinkingOpen = false
       actions.push({ kind: 'messageFinalize', slot: 'thinking', content: this.thinkingBuf })
       this.thinkingBuf = ''
-      this.thinkingHeld = ''
     }
     if (this.textOpen) {
       this.textOpen = false
@@ -488,7 +473,7 @@ export class DshEventMapper {
       visibleText = ''
     } else if (!reasoning) {
       const split = splitThinkTaggedContent(visibleText || this.rawTextBuf)
-      reasoning = split.thinking || (!this.thinkingHeld ? this.thinkingBuf : '')
+      reasoning = split.thinking || this.thinkingBuf
       visibleText = split.text
     } else {
       visibleText = splitThinkTaggedContent(visibleText).text
@@ -498,30 +483,28 @@ export class DshEventMapper {
     // converts that message in place (finalize as thinking) — no separate
     // thinking message and no empty visible bubble left behind. Skip when a
     // thinking slot is already live: fold commentary into it instead of
-    // minting a second ThinkingBlock.
+    // minting a second Think row for the same step.
     const convertStreamedTextToThinking = commentary.length > 0
       && visibleText.length === 0
       && this.textOpen
       && !this.thinkingOpen
-      && !this.thinkingHeld
 
-    const combinedThinking = this.prefixHeld(joinThinking([reasoning, commentary]))
+    const combinedThinking = joinThinking([reasoning, commentary])
 
     if (!convertStreamedTextToThinking && combinedThinking.length > 0) {
       this.openThinking(actions)
       this.thinkingBuf = combinedThinking
     }
 
-    if (hasToolCall && this.thinkingOpen) {
-      if (combinedThinking.length > 0) {
-        this.thinkingHeld = this.thinkingBuf
-        actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
-      }
-    } else if (this.thinkingOpen) {
+    // Every round settles its own Think row (deepseek-harness parity): a
+    // tool-call round finalizes this step's thinking so the next round's
+    // reasoning opens a FRESH row below the tool rows, keeping the timeline
+    // interleaved (think → tools → think → tools → reply) instead of one
+    // ever-scrolling Think row stranded above the whole tool pile.
+    if (this.thinkingOpen) {
       this.thinkingOpen = false
       actions.push({ kind: 'messageFinalize', slot: 'thinking', content: this.thinkingBuf })
       this.thinkingBuf = ''
-      this.thinkingHeld = ''
     }
 
     if (visibleText.length > 0) {
@@ -556,12 +539,11 @@ export class DshEventMapper {
    * Finalize one assistant message while the text slot rides as the thinking
    * display (commentary converted at block-start tool-call — the effort-"off"
    * native route). The assembled message text is authoritative for this
-   * round. A tool-call round appends onto the held commentary and keeps the
-   * display streaming across rounds (same contract as the reasoning path's
-   * held ThinkingBlock); the pure reply (no tool call) settles the display
-   * with the commentary it already holds — the reply text itself must NOT
-   * enter the thinking display — and re-opens a fresh body bubble, which
-   * appears in bulk exactly like a held final answer on the reasoning path.
+   * round. Every round settles its own Think row: a tool-call round finalizes
+   * the riding display with this round's commentary so the next round streams
+   * into a FRESH bubble that converts again; the pure reply (no tool call)
+   * settles the display and re-opens a body bubble for the reply text, which
+   * must NOT enter the thinking display.
    */
   private finalizeRidingText(
     actions: DshMapperAction[],
@@ -572,19 +554,18 @@ export class DshEventMapper {
     const split = splitThinkTaggedContent(visibleText || this.rawTextBuf)
     const settles = !hasToolCallIn(blocks)
     const combined = settles
-      ? this.thinkingHeld
-      : this.prefixHeld(joinThinking([reasoning, split.text]))
-    this.thinkingHeld = settles ? '' : combined
+      ? ''
+      : joinThinking([reasoning, split.text])
+    this.textRidesThinking = false
+    this.thinkingOpen = false
     this.thinkingBuf = ''
     actions.push({
       kind: 'messageFinalize',
       slot: 'text',
       content: combined,
-      metadata: settles ? { isThinking: true } : { isThinking: true, isStreaming: true },
+      metadata: { isThinking: true },
     })
     if (!settles) return
-    this.textRidesThinking = false
-    this.thinkingOpen = false
     if (split.text.length > 0) {
       this.openText(actions)
       this.textBuf = split.text
