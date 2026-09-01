@@ -25,7 +25,7 @@ import {
   getMetaidRpcTokenFilePath,
   METAID_RPC_AUTHFILE_ENV,
 } from '../services/metaidRpcEndpoint'
-import { DshKernel } from './dshKernel/dshKernel'
+import { DshKernel, isSessionEncodingMismatchError } from './dshKernel/dshKernel'
 import type { DshKernelOptions } from './dshKernel/dshKernel'
 import type {
   DshApprovalAsk,
@@ -439,7 +439,7 @@ export class DshTurnHub {
       await this.disposeSessionOnSlot(prevKey, input.dshSessionId)
     }
     this.runtimeKeyByDsh.set(input.dshSessionId, nextKey)
-    const kernel = await this.ensureKernel(input)
+    let kernel = await this.ensureKernel(input)
     // The session's live agent may sit on a superseded (draining) kernel when
     // this turn starts — release it there first so exactly one process owns
     // the JSONL (same contract as the cross-provider re-pin above).
@@ -457,7 +457,15 @@ export class DshTurnHub {
     this.pinnedDshIds.set(input.sessionId, input.dshSessionId)
 
     try {
-      await kernel.ensureSession({
+      // Encoding-mismatch self-heal (2026-09-01 incident: a sibling app
+      // instance on an older pre-zstd build sharing this userData kept a
+      // compression:'none' backend alive and dropped plaintext artifacts into
+      // the root after this slot's zstd runtime booted; every session/ensure
+      // then died and the task behind it stalled). The backend caches its
+      // root-encoding rejection, so recovery needs all three steps: re-migrate
+      // the drifted artifacts, swap in a fresh process (clean cache), retry
+      // the ensure there exactly once. Non-mismatch errors propagate as-is.
+      const ensureSessionInput = {
         sessionId: input.dshSessionId,
         provider: input.provider.key,
         model: input.provider.model,
@@ -468,7 +476,30 @@ export class DshTurnHub {
         sections: input.sections,
         hostTools: input.hostTools,
         ...(input.workspace?.cwd ? { cwd: input.workspace.cwd } : {}),
-      })
+      }
+      try {
+        await kernel.ensureSession(ensureSessionInput)
+      } catch (error) {
+        const slot = this.slots.get(nextKey)
+        // Heal only zstd compositions — a plaintext ('none') test composition
+        // must not have its artifacts migrated out from under it.
+        if (!slot || !isSessionEncodingMismatchError(error) || slot.lastConfigJson?.includes('"persistenceCompression":"none"')) {
+          throw error
+        }
+        this.opts.log?.('warn', 'dshTurnHub.encodingMismatchHeal', {
+          runtime: nextKey,
+          sessionId: input.sessionId,
+          message: error instanceof Error ? error.message : String(error),
+        })
+        await kernel.remigrateSessionRootToZstd()
+        const successor = this.supersedeKernel(slot)
+        const config = this.buildRuntimeConfig(slot, input)
+        await successor.ensureRuntime(config)
+        slot.lastConfigJson = JSON.stringify(config)
+        kernel = successor
+        this.kernelByDsh.set(input.dshSessionId, successor)
+        await successor.ensureSession(ensureSessionInput)
+      }
       await kernel.prompt(input.dshSessionId, input.prompt, input.promptImages)
       return await controller.done()
     } finally {

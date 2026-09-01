@@ -69,6 +69,7 @@ tests/*
 !tests/metaidRpcTokenFile.test.mjs
 !tests/httpListenWithRetry.test.mjs
 !tests/coworkDshRestartDefer.test.mjs
+!tests/coworkDshEncodingHeal.test.mjs
 !tests/coworkCwdSelfHeal.test.mjs
 !tests/sessionViewGrouping.test.ts
 !tests/coworkDshRuntimeDrain.test.mjs
