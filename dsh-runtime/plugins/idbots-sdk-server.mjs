@@ -53,6 +53,7 @@
 // races the turn's AbortSignal against our answer and discards late replies.
 
 import { isAbsolute, resolve } from 'node:path'
+import { admitPromptContent } from '@deepseek-ai/dsh-attachment'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '@deepseek-ai/dsh-sdk-jsonrpc-server'
 import * as dshToolSubagent from '@deepseek-ai/dsh-tool-subagent'
@@ -379,7 +380,11 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   // message as [text, ...image blocks] via the stock prompt path. Same route
   // gate as tool-result images: a user message is durable history, so a
   // text-only route never receives image blocks — an omission note rides the
-  // text instead.
+  // text instead. Admission goes through the kernel's shared
+  // admitPromptContent entry (DSH 0.1.2-alpha.3+), so the batch count and
+  // aggregate-byte limits plus the canonical-base64 check apply exactly as
+  // they do to the harness's own browser uploads; a refused batch throws to
+  // the RPC caller instead of partially committing.
   async idbotsPrompt({ sessionId, text, images }) {
     let content = [{ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text ?? '') }]
     const imageList = Array.isArray(images) ? images.filter((image) => typeof image?.data === 'string' && image.data.length > 0) : []
@@ -389,14 +394,15 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       const attachments = this.ctx.get('attachments')
       const imageCapable = attachments !== undefined && await this.idbotsRouteAcceptsImages(agent)
       if (imageCapable) {
-        for (const image of imageList) {
-          const ref = await attachments.saveImage({
-            data: Uint8Array.from(Buffer.from(image.data, 'base64')),
+        content = await admitPromptContent(attachments, [
+          ...content,
+          ...imageList.map((image) => ({
+            type: 'image',
             mediaType: image.mediaType,
+            data: image.data,
             ...typeof image.name === 'string' && image.name.length > 0 ? { name: image.name } : {},
-          })
-          content.push({ type: 'image', attachment: ref })
-        }
+          })),
+        ])
       } else {
         content = [{
           type: 'text',

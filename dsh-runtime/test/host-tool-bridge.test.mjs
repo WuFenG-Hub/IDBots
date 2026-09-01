@@ -263,6 +263,26 @@ const main = async () => {
       (r) => !JSON.stringify(r.body?.messages ?? []).includes('data:image/png;base64,')
     ))
 
+  // Turn 7: batch-count cap — idbots/prompt with more images than the
+  // attachment store's per-message limit must refuse the whole batch through
+  // the kernel's shared admitPromptContent entry (count and aggregate-byte
+  // limits apply to the batch, never member-by-member). The RPC rejects with
+  // the attachment error message and no image block enters the session.
+  const batchSessionId = `${sessionId}-attach-batch`
+  await client.request('session/ensure', { sessionId: batchSessionId, provider: 'mockgw', model: 'mock-1' })
+  let batchError = ''
+  try {
+    await client.request('idbots/prompt', {
+      sessionId: batchSessionId,
+      text: 'Over the cap:',
+      images: Array.from({ length: 11 }, () => ({ data: PNG_1x1_BASE64, mediaType: 'image/png' })),
+    })
+  } catch (error) {
+    batchError = String(error?.message ?? error)
+  }
+  record('image batch over the per-message cap rejects the prompt RPC',
+    /image-count limit/i.test(batchError))
+
   subscription.close()
   await client.close()
   server.close()
