@@ -12,10 +12,14 @@ import LocalFileLink from './ui/LocalFileLink';
 
 const CODE_BLOCK_LINE_LIMIT = 200;
 const CODE_BLOCK_CHAR_LIMIT = 20000;
+// Align with DSH WebUI markdown code blocks: 11px/19px mono, 16px padding.
 const SYNTAX_HIGHLIGHTER_STYLE = {
   margin: 0,
   borderRadius: 0,
   background: '#282c34',
+  padding: '16px',
+  fontSize: '11px',
+  lineHeight: '19px',
 };
 const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file', 'metaid', 'metaapp', 'map', 'metafile', 'pin', 'preview-metaapp']);
 
@@ -283,8 +287,8 @@ const CodeBlock: React.FC<any> = ({ node, className, children, ...props }) => {
     // Simple code block without language - minimal styling
     if (!match) {
       return (
-        <div className="my-2 relative group">
-          <div className="overflow-x-auto rounded-lg bg-[#282c34] text-[13px] leading-6">
+        <div className="my-[16px] relative group">
+          <div className="overflow-x-auto rounded-[12px] bg-[#282c34] text-[11px] leading-[19px]">
             <button
               type="button"
               onClick={handleCopy}
@@ -298,7 +302,7 @@ const CodeBlock: React.FC<any> = ({ node, className, children, ...props }) => {
                 <ClipboardDocumentIcon className="h-4 w-4" />
               )}
             </button>
-            <code className="block px-4 py-3 font-mono text-slate-100 whitespace-pre">
+            <code className="block p-[16px] font-mono text-slate-100 whitespace-pre">
               {trimmedCodeText}
             </code>
           </div>
@@ -308,8 +312,8 @@ const CodeBlock: React.FC<any> = ({ node, className, children, ...props }) => {
 
     // Code block with language - show header with language name
     return (
-      <div className="my-3 rounded-xl overflow-hidden border dark:border-claude-darkBorder border-claude-border relative shadow-subtle">
-        <div className="dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted px-4 py-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary font-medium flex items-center justify-between">
+      <div className="my-[16px] rounded-[12px] overflow-hidden border dark:border-claude-darkBorder border-claude-border relative shadow-subtle">
+        <div className="dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted px-[14px] py-[9px] text-[11px] leading-[18px] dark:text-claude-darkTextSecondary text-claude-textSecondary font-medium flex items-center justify-between">
           <span>{match[1]}</span>
           <button
             type="button"
@@ -335,8 +339,8 @@ const CodeBlock: React.FC<any> = ({ node, className, children, ...props }) => {
             {trimmedCodeText}
           </SyntaxHighlighter>
         ) : (
-          <div className="m-0 overflow-x-auto bg-[#282c34] text-[13px] leading-6">
-            <code className="block px-4 py-3 font-mono text-slate-100 whitespace-pre">
+          <div className="m-0 overflow-x-auto bg-[#282c34] text-[11px] leading-[19px]">
+            <code className="block p-[16px] font-mono text-slate-100 whitespace-pre">
               {trimmedCodeText}
             </code>
           </div>
@@ -346,7 +350,7 @@ const CodeBlock: React.FC<any> = ({ node, className, children, ...props }) => {
   }
 
   const inlineClassName = [
-    'inline bg-transparent px-0.5 text-[0.92em] font-mono font-medium dark:text-claude-darkText text-claude-text',
+    'inline rounded-[6px] px-[5px] text-[0.875em] font-mono dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted dark:text-claude-darkText text-claude-text',
     normalizedClassName,
   ].filter(Boolean).join(' ');
 
@@ -468,7 +472,7 @@ const createMarkdownComponents = (
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void
 ) => ({
   p: ({ node, className, children, ...props }: any) => (
-    <p className="my-1 first:mt-0 last:mb-0 leading-6 dark:text-claude-darkText text-claude-text" {...props}>
+    <p className="my-[16px] first:mt-0 last:mb-0 leading-[24px] dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </p>
   ),
@@ -478,37 +482,37 @@ const createMarkdownComponents = (
     </strong>
   ),
   h1: ({ node, className, children, ...props }: any) => (
-    <h1 className="text-2xl font-semibold mt-6 mb-3 dark:text-claude-darkText text-claude-text" {...props}>
+    <h1 className="text-[21px] leading-[30px] font-bold mt-[32px] mb-[16px] first:mt-0 dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </h1>
   ),
   h2: ({ node, className, children, ...props }: any) => (
-    <h2 className="text-xl font-semibold mt-5 mb-2 dark:text-claude-darkText text-claude-text" {...props}>
+    <h2 className="text-[19px] leading-[28px] font-bold mt-[32px] mb-[16px] first:mt-0 dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </h2>
   ),
   h3: ({ node, className, children, ...props }: any) => (
-    <h3 className="text-lg font-semibold mt-4 mb-2 dark:text-claude-darkText text-claude-text" {...props}>
+    <h3 className="text-[18px] leading-[26px] font-bold mt-[32px] mb-[16px] first:mt-0 dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </h3>
   ),
   ul: ({ node, className, children, ...props }: any) => (
-    <ul className="list-disc pl-5 my-1.5 dark:text-claude-darkText text-claude-text" {...props}>
+    <ul className="list-disc pl-[18px] my-[16px] dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </ul>
   ),
   ol: ({ node, className, children, ...props }: any) => (
-    <ol className="list-decimal pl-6 my-1.5 dark:text-claude-darkText text-claude-text" {...props}>
+    <ol className="list-decimal pl-[18px] my-[16px] dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </ol>
   ),
   li: ({ node, className, children, ...props }: any) => (
-    <li className="my-0.5 leading-6 dark:text-claude-darkText text-claude-text" {...props}>
+    <li className="mt-[6px] first:mt-0 leading-[24px] [&>p]:my-[8px] dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </li>
   ),
   blockquote: ({ node, className, children, ...props }: any) => (
-    <blockquote className="border-l-4 border-claude-accent pl-4 py-1 my-2 dark:bg-claude-darkSurface/30 bg-claude-surfaceHover/30 rounded-r-lg dark:text-claude-darkText text-claude-text" {...props}>
+    <blockquote className="border-l-2 border-claude-accent pl-[14px] my-[16px] dark:bg-claude-darkSurface/30 bg-claude-surfaceHover/30 rounded-r-lg dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </blockquote>
   ),
@@ -536,12 +540,12 @@ const createMarkdownComponents = (
     </tr>
   ),
   th: ({ node, className, children, ...props }: any) => (
-    <th className="px-4 py-2 text-left font-semibold dark:text-claude-darkText text-claude-text" {...props}>
+    <th className="px-[16px] py-[10px] text-left font-semibold dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </th>
   ),
   td: ({ node, className, children, ...props }: any) => (
-    <td className="px-4 py-2 dark:text-claude-darkText text-claude-text" {...props}>
+    <td className="px-[16px] py-[10px] dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </td>
   ),
@@ -549,7 +553,7 @@ const createMarkdownComponents = (
     <img className="max-w-full h-auto rounded-xl my-4" {...props} />
   ),
   hr: ({ node, ...props }: any) => (
-    <hr className="my-5 dark:border-claude-darkBorder border-claude-border" {...props} />
+    <hr className="my-[32px] dark:border-claude-darkBorder border-claude-border" {...props} />
   ),
   a: ({ node, href, className, children, ...props }: any) => {
     if (typeof href === 'string' && href.startsWith('#artifact-')) {
@@ -712,7 +716,7 @@ const MarkdownContent: React.FC<MarkdownContentProps> = ({
     [content]
   );
   return (
-    <div className={`markdown-content ${compact ? 'text-[13px] leading-5' : 'text-[15px] leading-6'} ${className}`}>
+    <div className={`markdown-content ${compact ? 'text-[13px] leading-5' : 'text-[14px] leading-[24px]'} ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={safeUrlTransform}

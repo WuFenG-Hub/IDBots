@@ -271,6 +271,8 @@ interface CoworkPromptInputProps {
   steerDisabled?: boolean;
   scopeKey?: string;
   size?: 'normal' | 'large';
+  /** Large variant only: collapse to a single text row, like the DSH WebUI docked session composer. */
+  singleLine?: boolean;
   workingDirectory?: string;
   onWorkingDirectoryChange?: (dir: string) => void;
   showFolderSelector?: boolean;
@@ -317,6 +319,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       steerDisabled = false,
       scopeKey,
       size = 'normal',
+      singleLine = false,
       workingDirectory = '',
       onWorkingDirectoryChange,
       showFolderSelector = false,
@@ -433,8 +436,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   const inputFileLabel = i18nService.t('coworkInputFileLabel');
 
   const isLarge = size === 'large';
-  const minHeight = isLarge ? 60 : 24;
-  const maxHeight = isLarge ? 200 : 200;
+  const minHeight = isLarge ? (singleLine ? 42 : 60) : 24;
+  const maxHeight = isLarge ? 336 : 200;
 
   // Load skills on mount
   useEffect(() => {
@@ -828,16 +831,16 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   };
 
   const containerClass = isLarge
-    ? 'relative rounded-2xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-card focus-within:shadow-elevated focus-within:ring-1 focus-within:ring-claude-accent/40 focus-within:border-claude-accent'
+    ? 'relative rounded-[22px] border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-card focus-within:shadow-elevated focus-within:ring-1 focus-within:ring-claude-accent/40 focus-within:border-claude-accent'
     : 'relative flex items-end gap-2 p-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface';
 
   const textareaClass = isLarge
-    ? `w-full resize-none bg-transparent px-4 pt-2.5 pb-2 dark:text-claude-darkText text-claude-text placeholder:dark:text-claude-darkTextSecondary/60 placeholder:text-claude-textSecondary/60 focus:outline-none text-[15px] leading-6 min-h-[${minHeight}px] max-h-[${maxHeight}px]`
+    ? `w-full resize-none bg-transparent px-4 pt-2.5 pb-2 dark:text-claude-darkText text-claude-text placeholder:dark:text-claude-darkTextSecondary/60 placeholder:text-claude-textSecondary/60 focus:outline-none text-[14px] leading-[24px] min-h-[${minHeight}px] max-h-[${maxHeight}px]`
     : 'flex-1 resize-none bg-transparent dark:text-claude-darkText text-claude-text placeholder:dark:text-claude-darkTextSecondary placeholder:text-claude-textSecondary focus:outline-none text-sm leading-relaxed min-h-[24px] max-h-[200px]';
 
   // Claimed-command variant of the large textarea: glyphs transparent (the
   // backdrop layer paints them), caret keeps a visible accent color.
-  const claimTextareaClass = 'w-full resize-none bg-transparent px-4 pt-2.5 pb-2 placeholder:dark:text-claude-darkTextSecondary/60 placeholder:text-claude-textSecondary/60 focus:outline-none text-[15px] leading-6 text-transparent caret-claude-accent';
+  const claimTextareaClass = 'w-full resize-none bg-transparent px-4 pt-2.5 pb-2 placeholder:dark:text-claude-darkTextSecondary/60 placeholder:text-claude-textSecondary/60 focus:outline-none text-[14px] leading-[24px] text-transparent caret-claude-accent';
 
   const handleBackdropScrollSync = (event: React.UIEvent<HTMLTextAreaElement>) => {
     if (backdropRef.current) {
@@ -1249,7 +1252,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   ref={backdropRef}
                   aria-hidden
                   data-decoration="command-token"
-                  className="pointer-events-none absolute inset-0 z-10 overflow-hidden px-4 pt-2.5 pb-2 text-[15px] leading-6 whitespace-pre-wrap break-words dark:text-claude-darkText text-claude-text"
+                  className="pointer-events-none absolute inset-0 z-10 overflow-hidden px-4 pt-2.5 pb-2 text-[14px] leading-[24px] whitespace-pre-wrap break-words dark:text-claude-darkText text-claude-text"
                 >
                   <span className="font-medium text-amber-600 dark:text-amber-400">{claim.token}</span>
                   {value.slice(claim.token.length)}
@@ -1270,7 +1273,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                 onScroll={claimActive ? handleBackdropScrollSync : undefined}
                 placeholder={effectivePlaceholder}
                 disabled={disabled || (isStreaming && steerDisabled)}
-                rows={2}
+                rows={isLarge && singleLine ? 1 : 2}
                 className={claimActive ? claimTextareaClass : textareaClass}
                 style={{ minHeight: `${minHeight}px` }}
                 role={commandPickerOpen ? 'combobox' : undefined}
