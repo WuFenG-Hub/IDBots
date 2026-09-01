@@ -77,6 +77,20 @@ export function formatUploadResult(result: MetaFileUploadResult): string {
   const contentType = asString(result.contentType);
   if (contentType) lines.push(`- content type: ${contentType}`);
 
+  // Convention nudge at the exact moment the mistake happens: a readable text
+  // document uploaded to /file should have been a simplenote note cited as
+  // pin:// — metafile:// is reserved for binary payloads.
+  const fileNameForNudge = asString(result.fileName);
+  const ext = path.extname(fileNameForNudge).toLowerCase();
+  if (
+    contentType.startsWith('text/')
+    || ['.md', '.markdown', '.txt'].includes(ext)
+  ) {
+    lines.push(
+      '- note: this looks like a readable text document — if it is meant to be READ (note, report, Markdown deliverable), prefer post_simplenote next time and cite the note as pin://<pinId>; metafile:// is intended for binary files (images, video, audio, PDF, archives).',
+    );
+  }
+
   const uploadMode = asString(result.uploadMode);
   if (uploadMode) lines.push(`- upload mode: ${uploadMode}`);
   const network = asString(result.network);
@@ -136,7 +150,8 @@ export function buildMetaFileUploadAgentTools(deps: {
     'upload_file',
     [
       'Upload ONE local file to MetaWeb. Pass the file path, never file contents (runtime streams bytes from disk).',
-      'Use when the user asks to upload a file, or a later step needs a metafile:// URI.',
+      'Use when the user asks to upload a BINARY file (image, video, audio, PDF, archive…), or a later step needs a metafile:// URI. The file lands on /file and is cited as metafile://<pinId>.',
+      'Do NOT upload Markdown/text documents meant to be read or delivered (notes, reports, specs, articles): publish those with post_simplenote instead and cite pin://<pinId> — metafile:// is reserved for binary payloads so file indexers/CDN treat them as media.',
       'Do NOT publish on-chain files the user did not ask for (permanent, publicly readable). Not for local reads/writes.',
       'Routing and payment are automatic: direct up to 5 MiB, chunked above (MVC-only); BTC/OPCAT direct-only; 50 MiB cap; MVC sponsor first, wallet fallback.',
       'Returns pinId, metafileUri, share/preview/download URLs, size, content type, upload mode, verification status when requested.',

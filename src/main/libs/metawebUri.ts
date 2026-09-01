@@ -10,8 +10,16 @@
  * Scheme choice (map:// intentionally excluded for now):
  * - metaid://<globalMetaId>   — a person/bot identity (idq1…)
  * - metaapp://<pinId>         — pin on /protocols/metaapp (on-chain app)
- * - metafile://<pinId>        — pin on /file (binary: image/video/archive…)
- * - pin://<pinId>             — any other pin; the universal fallback
+ * - metafile://<pinId>        — pin on /file whose payload is a BINARY file
+ *                               (image/video/audio/PDF/archive); the scheme
+ *                               exists so file indexers + CDN treat it as media
+ * - pin://<pinId>             — any other pin; the universal fallback, and the
+ *                               correct reference for readable text content
+ *                               (simplenote notes, buzz posts, …)
+ *
+ * Publishing counterpart: readable text documents (notes, reports, Markdown
+ * deliverables) belong on /protocols/simplenote and are cited as pin:// —
+ * never upload them to /file just to share them.
  */
 
 const METAAPP_PATH = '/protocols/metaapp';
@@ -62,4 +70,4 @@ export function markdownSelfLink(uri: string): string {
  * Wording mirrors the system-prompt worldview rule so the model sees one
  * consistent contract from both surfaces.
  */
-export const METAWEB_CITATION_RULE = 'When you cite this on-chain content in your reply, keep it as a clickable MetaWeb URI markdown link with the scheme shown above (pin:// / metaapp:// / metafile:// for pins, metaid:// for people). ALWAYS show the URI in FULL as the link text — never abbreviate or truncate it with an ellipsis; a shortened URI is neither clickable nor copyable. NEVER construct Web2 viewer URLs (metaid.io, openagentinternet.org, …) for on-chain content — the user\'s app opens MetaWeb URIs directly in its built-in Bot Browser.';
+export const METAWEB_CITATION_RULE = 'When you cite this on-chain content in your reply, keep it as a clickable MetaWeb URI markdown link with the scheme shown above. Scheme contract: pin:// is the universal reference for ANY pin and the correct one for readable text content (simplenote notes, buzz posts, …); metafile:// is ONLY for pins on /file whose payload is a binary file (image, video, audio, PDF, archive) — never cite a text pin as metafile://; metaapp:// for MetaApp packages; metaid:// for people. ALWAYS show the URI in FULL as the link text — never abbreviate or truncate it with an ellipsis; a shortened URI is neither clickable nor copyable. NEVER construct Web2 viewer URLs (metaid.io, openagentinternet.org, …) for on-chain content — the user\'s app opens MetaWeb URIs directly in its built-in Bot Browser.';

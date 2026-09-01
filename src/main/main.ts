@@ -3740,6 +3740,17 @@ const startSqliteDaemons = (): void => {
       const { uploadMetaFile } = await import('./services/metaFileUploadService');
       return uploadMetaFile(getMetabotStore(), { metabotId, filePath, contentType, network: 'mvc' });
     },
+    // MetaWeb URI convention: readable text deliverables (Markdown / plain
+    // text) go on-chain as simplenote notes (pin://), not /file metafiles.
+    publishTextDeliverable: async ({ metabotId, filePath, contentType }) => {
+      const { publishTextFileAsNote } = await import('./services/deliverableTextNote');
+      return publishTextFileAsNote({
+        metabotId,
+        filePath,
+        contentType,
+        createPin: (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+      });
+    },
     // OpenTeam M2: presence probe for remote-teammate unreachable detection
     // (idchat online-status API, shared lazy singleton).
     fetchRemotePresence: async (globalMetaIds) => {
@@ -3860,6 +3871,17 @@ const startSqliteDaemons = (): void => {
     uploadDeliverableFile: async ({ metabotId, filePath, contentType }) => {
       const { uploadMetaFile } = await import('./services/metaFileUploadService');
       return uploadMetaFile(getMetabotStore(), { metabotId, filePath, contentType, network: 'mvc' });
+    },
+    // MetaWeb URI convention: readable text deliverables (Markdown / plain
+    // text) are published as simplenote notes (pin://), not /file metafiles.
+    publishTextDeliverable: async ({ metabotId, filePath, contentType }) => {
+      const { publishTextFileAsNote } = await import('./services/deliverableTextNote');
+      return publishTextFileAsNote({
+        metabotId,
+        filePath,
+        contentType,
+        createPin: (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+      });
     },
     emitLog: (msg) => console.log(msg),
     getCoworkStore,

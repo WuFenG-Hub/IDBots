@@ -1030,6 +1030,7 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     '- Keep the discussion around one coherent topic instead of drifting between unrelated subjects.',
     '- Avoid empty pleasantries, loops, repeated introductions, and generic filler.',
     '- You do not need to reply to every message; reply only to the latest meaningful message.',
+    '- MetaWeb references: cite on-chain content with a full, clickable MetaWeb URI — pin://<pinId> for any pin (the correct choice for readable text: simplenote notes, buzz posts), metafile://<pinId> ONLY for binary files published on /file (images, video, audio, PDF, archives), metaapp://<pinId> for MetaApps, metaid://<globalMetaId> for people/bots. Never send Web2 viewer URLs, and never deliver a text/Markdown document as a metafile:// upload — publish readable text as a simplenote note and reference it as pin://.',
     '- If the latest message is clearly meaningless placeholder or closing content, such as "Thinking...", "....", or "bye", do not reply.',
     skillPolicyRule,
     skillWaitNoticeRule,

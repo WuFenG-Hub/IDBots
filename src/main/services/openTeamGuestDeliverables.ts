@@ -5,16 +5,20 @@
  * This deliberately mirrors the private-chat order flow
  * (serviceDeliveryArtifacts.js + metaFileUploadService): collect the produced
  * file(s) — explicit paths mentioned in the assistant reply first, then a
- * time-windowed scan of the skill working directory — upload each as a
- * metafile paid by the GUEST bot's own wallet, and deliver one
- * `[DELIVERABLE] metafile: metafile://<pinId><ext>` line per file. That line
- * shape is exactly what groupTaskDeliverableParser ingests on the inviter
- * side (one deliverable per line, kind taken from the URI scheme).
+ * time-windowed scan of the skill working directory — and publish each
+ * on-chain paid by the GUEST bot's own wallet, with the protocol chosen by
+ * content kind (MetaWeb URI convention): readable text documents (Markdown /
+ * plain text) become simplenote notes delivered as
+ * `[DELIVERABLE] note: pin://<pinId>` lines, binary files become metafiles
+ * delivered as `[DELIVERABLE] metafile: metafile://<pinId><ext>` lines. Both
+ * line shapes are exactly what groupTaskDeliverableParser ingests on the
+ * inviter side (one deliverable per line, kind taken from the URI scheme).
  *
- * Only the collection helpers live here; the upload itself stays behind the
- * daemon's injected uploadDeliverableFile seam (wired to
- * metaFileUploadService.uploadMetaFile in main.ts) so tests never touch a
- * wallet or the chain.
+ * Only the collection helpers live here; the upload/publish itself stays
+ * behind the daemon's injected seams (uploadDeliverableFile →
+ * metaFileUploadService.uploadMetaFile, publishTextDeliverable →
+ * deliverableTextNote.publishTextFileAsNote, both wired in main.ts) so tests
+ * never touch a wallet or the chain.
  */
 
 import fs from 'fs';
@@ -292,4 +296,20 @@ export function buildGuestMetafileDeliverableLine(input: {
   });
   if (!uri) return null;
   return `[DELIVERABLE] metafile: ${uri}`;
+}
+
+/**
+ * Build the group deliverable line for a readable text document published as
+ * a simplenote note: `[DELIVERABLE] note: pin://<pinId>` — recorded by
+ * groupTaskDeliverableParser as a valid `pinid` deliverable. MetaWeb URI
+ * convention: text documents cite pin://; metafile:// is for binary payloads.
+ * Returns null when the publish produced no usable pinId.
+ */
+export function buildGuestNoteDeliverableLine(input: {
+  pinId: string;
+  fileName?: string;
+}): string | null {
+  const pinId = typeof input.pinId === 'string' ? input.pinId.trim().toLowerCase() : '';
+  if (!pinId) return null;
+  return `[DELIVERABLE] note: pin://${pinId}`;
 }

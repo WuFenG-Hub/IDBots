@@ -528,7 +528,7 @@ const SKILL_PINID = `${'ef'.repeat(32)}i0`;
  */
 const createSkillHarness = async (overrides = {}) => {
   const artifactDir = makeTempDir();
-  const skillCalls = { routing: [], skillTurn: [], upload: [] };
+  const skillCalls = { routing: [], skillTurn: [], upload: [], publish: [] };
   const logs = [];
   const state = {
     routing: overrides.routing ?? { prompt: 'SKILL ROUTING PROMPT', activeSkillIds: ['skill-doc'] },
@@ -537,6 +537,8 @@ const createSkillHarness = async (overrides = {}) => {
     skillError: overrides.skillError ?? null,
     uploadError: overrides.uploadError ?? null,
     uploadPinId: overrides.uploadPinId ?? SKILL_PINID,
+    publishError: overrides.publishError ?? null,
+    publishPinId: overrides.publishPinId ?? SKILL_PINID,
   };
   const harness = await createHarness({
     replyText: overrides.replyText,
@@ -561,6 +563,11 @@ const createSkillHarness = async (overrides = {}) => {
         skillCalls.upload.push(input);
         if (state.uploadError) throw new Error(state.uploadError);
         return { pinId: state.uploadPinId };
+      },
+      publishTextDeliverable: async (input) => {
+        skillCalls.publish.push(input);
+        if (state.publishError) throw new Error(state.publishError);
+        return { pinId: state.publishPinId };
       },
       emitLog: (line) => logs.push(String(line)),
       ...(overrides.realNow ? { now: () => Date.now() } : {}),
@@ -664,6 +671,71 @@ test('skill: a mentioned file artifact uploads and delivers one [DELIVERABLE] me
   }
 });
 
+test('skill: a mentioned Markdown artifact publishes as a simplenote note (pin://), never metafile', async () => {
+  let notePath = '';
+  const { store, db, membershipStore, loop, calls, skillCalls, artifactDir } = await createSkillHarness({
+    // Evaluated at turn time; the file is written below before runTick.
+    skillReply: () => `Report is ready.\n${notePath}`,
+  });
+  try {
+    notePath = path.join(artifactDir, 'report.md');
+    fs.writeFileSync(notePath, '# Report\n\nAll done.');
+    joinAndMention(db, membershipStore, `${'f'.repeat(64)}i0`);
+    await loop.runTick();
+
+    assert.equal(calls.chat.length, 0);
+    assert.equal(skillCalls.publish.length, 1, 'text document goes through the simplenote seam');
+    assert.equal(skillCalls.publish[0].metabotId, 7);
+    assert.equal(skillCalls.publish[0].filePath, notePath);
+    assert.equal(skillCalls.upload.length, 0, 'no /file metafile upload for a text document');
+
+    assert.equal(calls.send.length, 1);
+    const content = calls.send[0][2].content;
+    const expectedLine = `[DELIVERABLE] note: pin://${SKILL_PINID}`;
+    assert.ok(
+      content.split('\n').includes(expectedLine),
+      `expected its own note deliverable line, got:\n${content}`,
+    );
+
+    // The inviter-side parser ingests the line as one valid pinid deliverable.
+    const parsed = parseDeliverableLines(content);
+    assert.equal(parsed.length, 1);
+    assert.deepEqual(parsed[0], {
+      kind: 'pinid',
+      uri: `pin://${SKILL_PINID}`,
+      valid: true,
+      note: null,
+    });
+  } finally {
+    store.close();
+  }
+});
+
+test('skill: a Markdown artifact whose note publish yields no pinId falls back to metafile', async () => {
+  let notePath = '';
+  const { store, db, membershipStore, loop, calls, skillCalls, artifactDir } = await createSkillHarness({
+    skillReply: () => `Report is ready.\n${notePath}`,
+    publishPinId: '',
+  });
+  try {
+    notePath = path.join(artifactDir, 'report.md');
+    fs.writeFileSync(notePath, '# Report\n\nAll done.');
+    joinAndMention(db, membershipStore, `${'9'.repeat(64)}i0`);
+    await loop.runTick();
+
+    assert.equal(skillCalls.publish.length, 1);
+    assert.equal(skillCalls.upload.length, 1, 'empty note pinId falls back to the metafile upload');
+    const content = calls.send[0][2].content;
+    const expectedLine = `[DELIVERABLE] metafile: metafile://${SKILL_PINID}.md`;
+    assert.ok(
+      content.split('\n').includes(expectedLine),
+      `expected the metafile fallback line, got:\n${content}`,
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test('skill: an unmentioned file in the skill cwd is found by the turn-window scan', async () => {
   const { store, db, membershipStore, loop, calls, skillCalls, artifactDir } = await createSkillHarness({
     skillReply: 'Here is the image you asked for.',
@@ -755,7 +827,7 @@ test('skill: an upload failure keeps the text reply and adds NO fake [DELIVERABL
     assert.equal(calls.send.length, 1);
     const content = calls.send[0][2].content;
     assert.match(content, /Report is ready\./);
-    assert.match(content, /On-chain upload failed for: report\.pdf/);
+    assert.match(content, /On-chain publish failed for: report\.pdf/);
     assert.ok(!content.includes('[DELIVERABLE]'), 'no deliverable tag may be emitted for a failed upload');
     assert.deepEqual(parseDeliverableLines(content), []);
   } finally {

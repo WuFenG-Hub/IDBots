@@ -258,6 +258,7 @@ man_base_data_pebble/
 !tests/networkServicesAgentTools.test.mjs
 !tests/onlineBotsAgentTools.test.mjs
 !tests/metaFileUploadAgentTools.test.mjs
+!tests/deliverableTextNote.test.mjs
 !tests/postBuzzAgentTools.test.mjs
 !tests/omniCasterAgentTools.test.mjs
 !tests/privateChatAgentTools.test.mjs
