@@ -250,6 +250,115 @@ test('episode archival step is wired into the nightly run', async () => {
   }
 });
 
+test('episode reconcile settles open rows whose source reached a terminal state', async () => {
+  const { MetaIDExperienceStore } = await loadExperienceStoreModule();
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  const now = 1_800_000_000_000;
+  const experience = new MetaIDExperienceStore(db, () => {}, () => now);
+  const owner = 'idq1observer';
+
+  // A completed order with a still-open episode (the live 2026-09-02 shape:
+  // 91 of 107 open service episodes mapped to already-terminal orders).
+  db.run(`
+    INSERT INTO service_orders (
+      id, role, local_metabot_id, counterparty_global_metaid, service_name,
+      payment_txid, payment_chain, payment_amount, payment_currency, status,
+      first_response_deadline_at, delivery_deadline_at, created_at, updated_at
+    ) VALUES ('order-settled', 'buyer', 9, 'idq1peer', 'svc', 'tx', 'mvc', '1', 'SPACE',
+      'completed', ?, ?, ?, ?)
+  `, [now, now, now, now]);
+  const orderEpisode = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'service_order',
+    sourceChannel: 'service_order',
+    sourceKey: 'order:order-settled',
+    status: 'open',
+    startedAt: now - 86_400_000,
+  }).episode;
+
+  // A done task with a still-open participation episode.
+  db.run(`
+    INSERT INTO group_tasks (id, title, goal, status, chair_metabot_id, closed_at)
+    VALUES (501, 't', 'g', 'done', 9, datetime(?, 'unixepoch'))
+  `, [Math.floor((now - 3_600_000) / 1000)]);
+  const taskEpisode = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'task_participation',
+    sourceChannel: 'group_task',
+    sourceKey: 'task:501',
+    status: 'open',
+    startedAt: now - 86_400_000,
+  }).episode;
+  db.run(`
+    INSERT INTO group_tasks (id, title, goal, status, chair_metabot_id, closed_at)
+    VALUES (502, 't2', 'g2', 'cancelled', 9, datetime(?, 'unixepoch'))
+  `, [Math.floor((now - 3_600_000) / 1000)]);
+  const cancelledTaskEpisode = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'task_participation',
+    sourceChannel: 'group_task',
+    sourceKey: 'task:502',
+    status: 'open',
+    startedAt: now - 86_400_000,
+  }).episode;
+
+  // Dormant direct interaction: evidence only long before the horizon, and
+  // one fresh conversation that must stay open.
+  const dormant = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'direct_interaction',
+    sourceChannel: 'metaweb_private',
+    sourceKey: 'a2a:dormant',
+    status: 'open',
+    startedAt: now - 400 * 86_400_000,
+  }).episode;
+  experience.addEvidence({
+    episodeId: dormant.id,
+    evidenceType: 'message',
+    sourceKey: 'message:old',
+    occurredAt: now - 400 * 86_400_000,
+  });
+  const fresh = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'direct_interaction',
+    sourceChannel: 'metaweb_private',
+    sourceKey: 'a2a:fresh',
+    status: 'open',
+    startedAt: now - 86_400_000,
+  }).episode;
+  experience.addEvidence({
+    episodeId: fresh.id,
+    evidenceType: 'message',
+    sourceKey: 'message:new',
+    occurredAt: now - 60_000,
+  });
+
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, globalmetaid: 'metaid://stub-owner' }] },
+    metaidExperienceStore: experience,
+    now: () => new Date(now),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.episodesReconciled, 3, 'two task episodes + one settled order');
+    assert.equal(stats.counts.dormantInteractionsClosed, 1);
+    assert.equal(experience.getEpisode(orderEpisode.id).status, 'completed');
+    assert.equal(experience.getEpisode(taskEpisode.id).status, 'completed');
+    assert.equal(experience.getEpisode(cancelledTaskEpisode.id).status, 'abandoned');
+    assert.equal(experience.getEpisode(dormant.id).status, 'completed');
+    assert.equal(experience.getEpisode(fresh.id).status, 'open', 'recent activity keeps the episode open');
+    // Idempotent: a second pass settles nothing new.
+    const again = await service.runNow();
+    assert.equal(again.counts.episodesReconciled, 0);
+    assert.equal(again.counts.dormantInteractionsClosed, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test('impression compaction step is wired into the nightly run', async () => {
   const { MetaIDImpressionStore } = await loadImpressionStoreModule();
   const { MetaIDExperienceStore } = await loadExperienceStoreModule();

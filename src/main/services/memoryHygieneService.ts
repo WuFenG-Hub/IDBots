@@ -144,19 +144,33 @@ export class MemoryHygieneService {
         };
       },
     });
-    // Episodes: soft-archive terminal episodes past the retention horizon so
-    // dream candidates / contact views / cognition context stop scanning them;
-    // explicit experience_recall keeps them visible with an (archived) mark.
+    // Episodes: reconcile open rows whose source (order / task) already
+    // reached a terminal state, or whose conversation went long-dormant —
+    // live event wiring is best-effort and missed terminal transitions
+    // otherwise stay 'open' forever (invisible to the archive stroke
+    // below, which only touches terminal rows). Then soft-archive
+    // terminal episodes past the retention horizon so dream candidates /
+    // contact views / cognition context stop scanning them; explicit
+    // experience_recall keeps them visible with an (archived) mark.
     this.steps.push({
       name: 'episodes',
       run: (context) => {
         if (!context.experienceStore) return {};
+        const settled = context.experienceStore.reconcileOpenEpisodes({
+          nowMs: context.nowMs,
+          dormantCutoffMs: context.nowMs - context.config.episodeArchiveDays * 86_400_000,
+          excludeOwners: context.disabledOwners,
+        });
         const archived = context.experienceStore.archiveEpisodes({
           cutoffMs: context.nowMs - context.config.episodeArchiveDays * 86_400_000,
           archivedAt: context.nowMs,
           excludeOwners: context.disabledOwners,
         });
-        return { episodesArchived: archived };
+        return {
+          episodesReconciled: settled.serviceOrdersSettled + settled.taskEpisodesSettled,
+          dormantInteractionsClosed: settled.dormantInteractionsClosed,
+          episodesArchived: archived,
+        };
       },
     });
     // Dream memories: decay-archive entries untouched past the horizon
