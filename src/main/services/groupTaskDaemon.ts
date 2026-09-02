@@ -31,7 +31,9 @@ import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import {
+  GROUP_LOG_PROTOCOL_MAX_CHARS,
   isCeremonyAckLine,
+  isProtocolCarryingLine,
   parseGroupTaskEntropyP0Config,
   renderGroupLogLines,
   truncateGroupLogLine,
@@ -2561,7 +2563,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     });
     const lines = renderGroupLogLines(entries, { fold: logEntropyP0.logFold });
     return [
-      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; long messages truncated, acknowledgment lines folded)]`,
+      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; protocol lines ([DELIVERABLE]/[FREEZE]/[STATUS:]/[PLAN_CHANGE]/[CHECKPOINT]) and the triggering message are shown in full, other long messages are head+tail truncated, acknowledgment lines folded; to read any message in full use the group-task show action with view=full / before_id paging)]`,
       ...lines,
     ].join('\n');
   };

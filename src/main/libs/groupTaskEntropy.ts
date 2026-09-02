@@ -74,8 +74,28 @@ export function isCeremonyAckLine(content: string): boolean {
   return true;
 }
 
-export const GROUP_LOG_MESSAGE_MAX_CHARS = 600;
-const GROUP_LOG_TAIL_CHARS = 200;
+export const GROUP_LOG_MESSAGE_MAX_CHARS = 1200;
+const GROUP_LOG_TAIL_CHARS = 300;
+/**
+ * fix/group-task-fix-v2 (B1): protocol-carrying messages ride a much larger
+ * budget — a delivery/rework checklist whose middle is elided costs the chair
+ * a resend round-trip (task #55 burned ~78 min of critical path on exactly
+ * that). Still capped so one runaway message cannot blow the turn context.
+ */
+export const GROUP_LOG_PROTOCOL_MAX_CHARS = 4000;
+
+/**
+ * Protocol tags whose message body IS the payload (deliverable lists, freeze
+ * declarations, status directives, plan-change disclosures, checkpoints).
+ * [WORKING]/[STANDBY] deliberately stay out — they are the ceremony class the
+ * fold pass handles.
+ */
+const GROUP_LOG_PROTOCOL_TAG_RE = /\[(DELIVERABLE|FREEZE\s*:|STATUS\s*:|PLAN_CHANGE\s*:|CHECKPOINT(?:_RESOLVED)?\s*:)/i;
+
+/** True when the message carries protocol content that must not lose its middle. */
+export function isProtocolCarryingLine(content: string | null | undefined): boolean {
+  return GROUP_LOG_PROTOCOL_TAG_RE.test(content ?? '');
+}
 
 /**
  * Head+tail truncation for one group-log message: heads carry the intent,
@@ -88,8 +108,9 @@ const GROUP_LOG_TAIL_CHARS = 200;
 export function truncateGroupLogLine(content: string, maxChars = GROUP_LOG_MESSAGE_MAX_CHARS): string {
   const text = content ?? '';
   if (text.length <= maxChars) return text;
-  const headChars = Math.max(1, maxChars - GROUP_LOG_TAIL_CHARS - 3);
-  return `${truncateUtf16Units(text, headChars)} … ${truncateUtf16UnitsFromEnd(text, GROUP_LOG_TAIL_CHARS)}`;
+  const tailChars = Math.min(GROUP_LOG_TAIL_CHARS, Math.max(1, Math.floor(maxChars / 3)));
+  const headChars = Math.max(1, maxChars - tailChars - 3);
+  return `${truncateUtf16Units(text, headChars)} … ${truncateUtf16UnitsFromEnd(text, tailChars)}`;
 }
 
 export interface GroupLogEntry {
@@ -103,6 +124,11 @@ export interface GroupLogEntry {
  * Render the group log window: truncate every line, then fold runs of
  * consecutive ceremony ACK lines (never the triggering message) into a single
  * counter line. Folding is skipped entirely when `fold` is false.
+ *
+ * fix/group-task-fix-v2 (B1): protocol-carrying lines ([DELIVERABLE],
+ * [FREEZE], [STATUS:], [PLAN_CHANGE], [CHECKPOINT]) and the triggering
+ * message ride the large protocol budget — their middles are exactly the
+ * content a resend round-trip would otherwise have to recover.
  */
 export function renderGroupLogLines(
   entries: GroupLogEntry[],
@@ -121,7 +147,10 @@ export function renderGroupLogLines(
     foldNames = [];
   };
   for (const entry of entries) {
-    const line = `${entry.senderName}${entry.suspect ? ' [SUSPECT]' : ''}: ${truncateGroupLogLine(entry.content)}`;
+    const budget = entry.isTrigger || isProtocolCarryingLine(entry.content)
+      ? GROUP_LOG_PROTOCOL_MAX_CHARS
+      : GROUP_LOG_MESSAGE_MAX_CHARS;
+    const line = `${entry.senderName}${entry.suspect ? ' [SUSPECT]' : ''}: ${truncateGroupLogLine(entry.content, budget)}`;
     if (fold && !entry.isTrigger && isCeremonyAckLine(entry.content)) {
       foldNames.push(entry.senderName);
       continue;
