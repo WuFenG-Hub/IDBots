@@ -147,7 +147,7 @@ export async function createGroupChat(
     path: '/protocols/simplegroupcreate',
     contentType: 'application/json',
     payload: JSON.stringify(body),
-  }, { feeRate: getGlobalFeeRate('mvc') });
+  }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:group-chat' });
   return { groupId: result.pinId, pinId: result.pinId };
 }
 
@@ -171,7 +171,7 @@ export async function joinGroupChat(
     path: '/protocols/simplegroupjoin',
     contentType: 'application/json',
     payload: JSON.stringify(body),
-  }, { feeRate: getGlobalFeeRate('mvc') });
+  }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:group-chat' });
   return { pinId: result.pinId };
 }
 
@@ -200,7 +200,7 @@ export async function removeGroupChatMember(
     contentType: 'application/json',
     encryption: '0',
     payload: JSON.stringify(body),
-  }, { feeRate: getGlobalFeeRate('mvc') });
+  }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:group-chat' });
   return { pinId: result.pinId };
 }
 
@@ -291,7 +291,7 @@ export async function sendGroupChatMessage(
     path: '/protocols/simplegroupchat',
     contentType: 'application/json',
     payload: JSON.stringify(body),
-  }, { feeRate: getGlobalFeeRate('mvc') });
+  }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:group-chat' });
   return { pinId: result.pinId };
 }
 

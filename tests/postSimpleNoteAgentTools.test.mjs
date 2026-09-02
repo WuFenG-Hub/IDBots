@@ -77,7 +77,7 @@ test('publishes a markdown note with the simplenote 1.0.1 payload shape', async 
   assert.equal(calls.createPin.length, 1);
   const { metabotId, metaidData, options } = calls.createPin[0];
   assert.equal(metabotId, METABOT_ID);
-  assert.deepEqual(options, { network: 'mvc' });
+  assert.deepEqual(options, { network: 'mvc', origin: 'tool:post_simplenote' });
   assert.equal(metaidData.operation, 'create');
   assert.equal(metaidData.path, '/protocols/simplenote');
   assert.equal(metaidData.version, '1.0.1');

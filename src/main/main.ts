@@ -239,6 +239,8 @@ import {
   parseMetawebStudyRunReport,
 } from './services/metawebStudyService';
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
+import { ChainContentHistoryStore } from './chainContentHistoryStore';
+import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
@@ -958,7 +960,9 @@ const publishSkillServiceOrderPin = async (input: {
     version: '1.0.0',
     contentType: 'application/json',
     payload: JSON.stringify(payload),
-  }, { feeRate: getGlobalFeeRate('mvc') });
+    // Order pins live in the service_orders table; keep them out of the
+    // chain write ledger.
+  }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:service-order' });
 
   const pinId = toSafeString(result.pinId).trim();
   if (!pinId) {
@@ -2626,6 +2630,7 @@ let knowledgeBaseStore: KnowledgeBaseStore | null = null;
 let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
 let metawebStudyService: MetawebStudyService | null = null;
+let chainContentHistoryStore: ChainContentHistoryStore | null = null;
 let serviceOrderLifecycleService: ServiceOrderLifecycleService | null = null;
 let serviceRefundSyncService: ServiceRefundSyncService | null = null;
 let serviceRefundSettlementService: ServiceRefundSettlementService | null = null;
@@ -3069,6 +3074,8 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   knowledgeBaseService = null;
   metawebStudyJobStore = null;
   metawebStudyService = null;
+  chainContentHistoryStore = null;
+  setChainContentHistoryStore(null);
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
   serviceRefundSettlementService = null;
@@ -3202,6 +3209,8 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
 
 const startSqliteDaemons = (): void => {
   const skillMgr = getSkillManager();
+  // Publish the chain write ledger store before any daemon/RPC flow can pin.
+  getChainContentHistoryStore();
   setGroupChatTransportMetabotStoreGetter(getMetabotStore);
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
@@ -3434,7 +3443,7 @@ const startSqliteDaemons = (): void => {
     getCoworkStore(),
     getMetabotStore(),
     getCoworkRunner(),
-    (metabotStore, metabot_id, payload) => createPin(metabotStore, metabot_id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+    (metabotStore, metabot_id, payload, options) => createPin(metabotStore, metabot_id, payload, { ...options, feeRate: getGlobalFeeRate('mvc') }),
     (msg) => console.log(msg),
     getServiceOrderLifecycleService(),
     async ({ skillId, skillName, allowedSkillNames, strictScope }) => {
@@ -3750,7 +3759,7 @@ const startSqliteDaemons = (): void => {
         metabotId,
         filePath,
         contentType,
-        createPin: (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+        createPin: (id, payload, options) => createPin(getMetabotStore(), id, payload, { ...options, feeRate: getGlobalFeeRate('mvc') }),
       });
     },
     // OpenTeam M2: presence probe for remote-teammate unreachable detection
@@ -3887,7 +3896,7 @@ const startSqliteDaemons = (): void => {
         metabotId,
         filePath,
         contentType,
-        createPin: (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+        createPin: (id, payload, options) => createPin(getMetabotStore(), id, payload, { ...options, feeRate: getGlobalFeeRate('mvc') }),
       });
     },
     emitLog: (msg) => console.log(msg),
@@ -6498,6 +6507,24 @@ const getMetawebStudyJobStore = (): MetawebStudyJobStore => {
   return metawebStudyJobStore;
 };
 
+/**
+ * Chain content history ledger ("MetaBot 发布账本"): lazily built like the
+ * other SQLite-backed stores, then published into the leaf runtime accessor so
+ * services/metaidCore.ts createPin can record successful pins without
+ * importing main.ts (cycle) — see chainContentHistoryRuntime.ts.
+ */
+const getChainContentHistoryStore = (): ChainContentHistoryStore => {
+  if (!chainContentHistoryStore) {
+    const sqliteStore = getStore();
+    chainContentHistoryStore = new ChainContentHistoryStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+    setChainContentHistoryStore(chainContentHistoryStore);
+  }
+  return chainContentHistoryStore;
+};
+
 const getMetawebStudyService = (): MetawebStudyService => {
   if (!metawebStudyService) {
     metawebStudyService = new MetawebStudyService({
@@ -6704,7 +6731,7 @@ const getServiceOrderLifecycleService = () => {
             version: '1.0.0',
             contentType: 'application/json',
             payload: JSON.stringify(payload),
-          }, { feeRate: getGlobalFeeRate('mvc') });
+          }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:service-order' });
           return {
             pinId: result.pinId ?? result.txids?.[0] ?? null,
             txid: result.txids?.[0] ?? null,
@@ -6882,7 +6909,7 @@ const getServiceRefundSettlementService = () => {
             version: '1.0.0',
             contentType: 'application/json',
             payload: JSON.stringify(payload),
-          }, { feeRate: getGlobalFeeRate('mvc') });
+          }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:service-order' });
           return {
             pinId: result.pinId ?? result.txids?.[0] ?? null,
             txid: result.txids?.[0] ?? null,
@@ -12322,7 +12349,7 @@ if (!gotTheLock) {
         version: '1.1.0',
         contentType: 'application/json',
         payload: payloadJson,
-      }, { feeRate: getGlobalFeeRate('mvc') });
+      }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:gig-square' });
 
       const localServiceRecord = {
         id: result.pinId,
@@ -12412,7 +12439,7 @@ if (!gotTheLock) {
         getMetabotStore(),
         validation.creatorMetabotId,
         buildGigSquareRevokeMetaidPayload(currentService.currentPinId),
-        { feeRate: getGlobalFeeRate('mvc') },
+        { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:gig-square' },
       );
       markGigSquareLocalServiceRevoked(currentService);
 
@@ -12575,7 +12602,7 @@ if (!gotTheLock) {
       const result = await createPin(store, validation.creatorMetabotId, buildGigSquareModifyMetaidPayload({
         targetPinId: currentService.currentPinId,
         payloadJson,
-      }), { feeRate: getGlobalFeeRate('mvc') });
+      }), { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:gig-square' });
       updateGigSquareLocalServiceAfterModify({
         targetService: currentService,
         currentPinId: toSafeString(result.pinId).trim() || currentService.currentPinId,
@@ -14646,6 +14673,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
     store = await initStore();
     startupLog('store ready');
+
+    // Chain write ledger: wire the store into the runtime accessor before the
+    // RPC server / daemons can broadcast the first pin.
+    getChainContentHistoryStore();
+    startupLog('chain content history store ready');
 
     // Start man-p2p local indexer (non-fatal if binary not present)
     try {

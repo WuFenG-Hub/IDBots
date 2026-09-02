@@ -2125,7 +2125,7 @@ interface RatingFlowParams {
   buyerOrderMapping: import('../coworkStore').CoworkConversationMapping;
   sellerGlobalMetaId: string;
   sharedSecretForReply: string;
-  createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload) => Promise<{ txids: string[]; pinId?: string }>;
+  createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload, options?: { origin?: string }) => Promise<{ txids: string[]; pinId?: string }>;
   performChat: (
     systemPrompt: string,
     userMessage: string,
@@ -2556,7 +2556,7 @@ async function handleRatingFlow(params: RatingFlowParams): Promise<void> {
       version: '1.0.0',
       contentType: 'application/json',
       payload: ratingPayload,
-    });
+    }, { origin: 'internal:service-order' });
     ratingPinId = (ratingResult as { pinId?: string }).pinId ?? ratingResult.txids?.[0] ?? '';
     emitLog(`[Rating] skill-service-rate published: pinId=${ratingPinId}`);
   } catch (e) {
@@ -2593,7 +2593,7 @@ async function handleRatingFlow(params: RatingFlowParams): Promise<void> {
       version: '1.0.0',
       contentType: 'application/json',
       payload: payloadStr,
-    });
+    }, { origin: 'internal:private-chat' });
     combinedMessageMetadata = buildA2AChainMetadata({
       txids: combinedMessageResult.txids,
       pinId: combinedMessageResult.pinId,
@@ -3121,7 +3121,7 @@ async function processOne(
   saveDb: SaveDbFn,
   coworkStore: CoworkStore,
   metabotStore: MetabotStore,
-  createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload) => Promise<{ txids: string[]; pinId?: string }>,
+  createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload, options?: { origin?: string }) => Promise<{ txids: string[]; pinId?: string }>,
   performChat: PrivateChatPerformChatFn,
   emitLog: (msg: string) => void,
   orderCoworkHandler: PrivateChatOrderCowork | null,
@@ -3408,7 +3408,7 @@ async function processOne(
         version: '1.0.0',
         contentType: 'application/json',
         payload,
-      }),
+      }, { origin: 'internal:private-chat' }),
     });
 
     if (handshakeWord === 'ping') {
@@ -4872,7 +4872,7 @@ export function startPrivateChatDaemon(
   coworkStore: CoworkStore,
   metabotStore: MetabotStore,
   coworkRunner: CoworkRunner,
-  createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload) => Promise<{ txids: string[]; pinId?: string }>,
+  createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload, options?: { origin?: string }) => Promise<{ txids: string[]; pinId?: string }>,
   emitLog: (msg: string) => void,
   serviceOrderLifecycle: ServiceOrderLifecycleService | null,
   getSkillsPrompt?: GetSellerOrderSkillsPromptFn,

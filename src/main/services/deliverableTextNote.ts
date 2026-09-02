@@ -38,7 +38,7 @@ export type TextNoteCreatePin = (
     contentType: string;
     payload: string;
   },
-  options?: { network?: string },
+  options?: { network?: string; origin?: string },
 ) => Promise<{ pinId?: string; txids?: string[] }>;
 
 /**
@@ -133,7 +133,9 @@ export async function publishTextFileAsNote(deps: {
       contentType: 'application/json',
       payload: buildTextNotePayload(doc),
     },
-    { network: 'mvc' },
+    // Deliverable notes already live in the group-task deliverable records;
+    // the origin keeps them out of the chain write ledger.
+    { network: 'mvc', origin: 'internal:group-task-deliverable' },
   );
   const pinId = typeof result?.pinId === 'string' ? result.pinId.trim() : '';
   return pinId ? { pinId } : null;

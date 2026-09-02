@@ -22,7 +22,7 @@ export type ChainWriteCreatePin = (
     payload: string;
     encoding?: 'utf-8' | 'base64';
   },
-  options?: { feeRate?: number; network?: 'mvc' | 'doge' | 'btc' | 'opcat' },
+  options?: { feeRate?: number; network?: 'mvc' | 'doge' | 'btc' | 'opcat'; origin?: string },
 ) => Promise<{ txids: string[]; pinId: string; totalCost: number }>;
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
@@ -195,7 +195,7 @@ export function buildPostBuzzAgentTools(deps: {
             contentType: 'application/json',
             payload,
           },
-          { network },
+          { network, origin: 'tool:post_buzz' },
         );
         return textResult(
           formatBuzzResult({
