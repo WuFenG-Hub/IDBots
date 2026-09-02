@@ -62,6 +62,7 @@ tests/*
 !tests/coworkDshWebSearch.test.mjs
 !tests/coworkDshModelSwitch.test.mjs
 !tests/llmSafeText.test.mjs
+!tests/skillImageProviderEnv.test.mjs
 !tests/twinWorkerSessionStop.test.mjs
 !tests/dshUsageProjection.test.mjs
 !tests/dshPluginManager.test.mjs

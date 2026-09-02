@@ -108,6 +108,16 @@ export interface AppConfig {
       apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
+    // 火山引擎方舟（Volcengine Ark）：豆包聊天模型走 OpenAI 兼容端点；
+    // 同一 apiKey 也是内置 seedance/seedream 技能的 ARK_API_KEY 来源
+    // （见 skillImageProviderEnv.ts），配置一次即可同时驱动聊天与生成。
+    volcengine: {
+      enabled: boolean;
+      apiKey: string;
+      baseUrl: string;
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
+      models?: ConfiguredModel[];
+    };
     ollama: {
       enabled: boolean;
       apiKey: string;
@@ -376,6 +386,7 @@ function detectLegacyProviderFromApiBaseUrl(baseUrl: string): keyof NonNullable<
   if (normalizedBaseUrl.includes('bigmodel.cn')) return 'zhipu';
   if (normalizedBaseUrl.includes('minimax')) return 'minimax';
   if (normalizedBaseUrl.includes('dashscope')) return 'qwen';
+  if (normalizedBaseUrl.includes('volces.com')) return 'volcengine';
   if (normalizedBaseUrl.includes('openrouter.ai')) return 'openrouter';
   if (normalizedBaseUrl.includes('googleapis')) return 'gemini';
   if (normalizedBaseUrl.includes('anthropic')) return 'anthropic';
@@ -673,6 +684,18 @@ export const defaultConfig: AppConfig = {
       models: [
         { id: 'mimo-v2.5-pro', name: 'MiMo V2.5 Pro', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'mimo-v2.5', name: 'MiMo V2.5', supportsImage: true, contextWindow: 1_000_000 }
+      ]
+    },
+    // 火山引擎方舟（Ark）：OpenAI 兼容端点 /api/v3；apiKey 同时作为内置
+    // seedance/seedream 技能的 ARK_API_KEY 自动注入（skillImageProviderEnv.ts）。
+    volcengine: {
+      enabled: false,
+      apiKey: '',
+      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      apiFormat: 'openai',
+      models: [
+        { id: 'doubao-seed-1-6-250615', name: 'Doubao Seed 1.6', supportsImage: false, contextWindow: 256_000 },
+        { id: 'doubao-seed-1-6-flash-250717', name: 'Doubao Seed 1.6 Flash', supportsImage: false, contextWindow: 256_000 }
       ]
     },
     openrouter: {

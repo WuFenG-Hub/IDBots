@@ -17,6 +17,8 @@ official: true
 - **认证方式**: `Authorization: Bearer {API_KEY}`
 - **SDK**: 兼容火山方舟 Python SDK
 
+> IDBots 用户：若已在 设置 > 模型 配置「火山引擎 (Volcengine Ark)」供应商，其 API Key 会自动注入为 `ARK_API_KEY`，无需手动配置环境变量。
+
 ### 如何配置 API Key
 
 **方式一：通过环境变量配置（推荐）**
