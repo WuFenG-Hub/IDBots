@@ -250,6 +250,115 @@ test('episode archival step is wired into the nightly run', async () => {
   }
 });
 
+test('episode reconcile settles open rows whose source reached a terminal state', async () => {
+  const { MetaIDExperienceStore } = await loadExperienceStoreModule();
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  const now = 1_800_000_000_000;
+  const experience = new MetaIDExperienceStore(db, () => {}, () => now);
+  const owner = 'idq1observer';
+
+  // A completed order with a still-open episode (the live 2026-09-02 shape:
+  // 91 of 107 open service episodes mapped to already-terminal orders).
+  db.run(`
+    INSERT INTO service_orders (
+      id, role, local_metabot_id, counterparty_global_metaid, service_name,
+      payment_txid, payment_chain, payment_amount, payment_currency, status,
+      first_response_deadline_at, delivery_deadline_at, created_at, updated_at
+    ) VALUES ('order-settled', 'buyer', 9, 'idq1peer', 'svc', 'tx', 'mvc', '1', 'SPACE',
+      'completed', ?, ?, ?, ?)
+  `, [now, now, now, now]);
+  const orderEpisode = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'service_order',
+    sourceChannel: 'service_order',
+    sourceKey: 'order:order-settled',
+    status: 'open',
+    startedAt: now - 86_400_000,
+  }).episode;
+
+  // A done task with a still-open participation episode.
+  db.run(`
+    INSERT INTO group_tasks (id, title, goal, status, chair_metabot_id, closed_at)
+    VALUES (501, 't', 'g', 'done', 9, datetime(?, 'unixepoch'))
+  `, [Math.floor((now - 3_600_000) / 1000)]);
+  const taskEpisode = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'task_participation',
+    sourceChannel: 'group_task',
+    sourceKey: 'task:501',
+    status: 'open',
+    startedAt: now - 86_400_000,
+  }).episode;
+  db.run(`
+    INSERT INTO group_tasks (id, title, goal, status, chair_metabot_id, closed_at)
+    VALUES (502, 't2', 'g2', 'cancelled', 9, datetime(?, 'unixepoch'))
+  `, [Math.floor((now - 3_600_000) / 1000)]);
+  const cancelledTaskEpisode = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'task_participation',
+    sourceChannel: 'group_task',
+    sourceKey: 'task:502',
+    status: 'open',
+    startedAt: now - 86_400_000,
+  }).episode;
+
+  // Dormant direct interaction: evidence only long before the horizon, and
+  // one fresh conversation that must stay open.
+  const dormant = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'direct_interaction',
+    sourceChannel: 'metaweb_private',
+    sourceKey: 'a2a:dormant',
+    status: 'open',
+    startedAt: now - 400 * 86_400_000,
+  }).episode;
+  experience.addEvidence({
+    episodeId: dormant.id,
+    evidenceType: 'message',
+    sourceKey: 'message:old',
+    occurredAt: now - 400 * 86_400_000,
+  });
+  const fresh = experience.createEpisode({
+    ownerGlobalMetaID: owner,
+    episodeType: 'direct_interaction',
+    sourceChannel: 'metaweb_private',
+    sourceKey: 'a2a:fresh',
+    status: 'open',
+    startedAt: now - 86_400_000,
+  }).episode;
+  experience.addEvidence({
+    episodeId: fresh.id,
+    evidenceType: 'message',
+    sourceKey: 'message:new',
+    occurredAt: now - 60_000,
+  });
+
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, globalmetaid: 'metaid://stub-owner' }] },
+    metaidExperienceStore: experience,
+    now: () => new Date(now),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.episodesReconciled, 3, 'two task episodes + one settled order');
+    assert.equal(stats.counts.dormantInteractionsClosed, 1);
+    assert.equal(experience.getEpisode(orderEpisode.id).status, 'completed');
+    assert.equal(experience.getEpisode(taskEpisode.id).status, 'completed');
+    assert.equal(experience.getEpisode(cancelledTaskEpisode.id).status, 'abandoned');
+    assert.equal(experience.getEpisode(dormant.id).status, 'completed');
+    assert.equal(experience.getEpisode(fresh.id).status, 'open', 'recent activity keeps the episode open');
+    // Idempotent: a second pass settles nothing new.
+    const again = await service.runNow();
+    assert.equal(again.counts.episodesReconciled, 0);
+    assert.equal(again.counts.dormantInteractionsClosed, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test('impression compaction step is wired into the nightly run', async () => {
   const { MetaIDImpressionStore } = await loadImpressionStoreModule();
   const { MetaIDExperienceStore } = await loadExperienceStoreModule();
@@ -509,12 +618,14 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
   db.run('UPDATE user_memories SET updated_at = ?, last_used_at = ? WHERE metabot_id = 9', [recentBeforeSnapshot, recentBeforeSnapshot]);
 
   const calls = [];
+  const callOptions = [];
   const service = new MemoryHygieneService({
     coworkStore,
     metabotStore: { listMetabots: () => [{ id: 9, name: 'Twin', llm_id: null, globalmetaid: 'metaid://stub-owner' }] },
     metaidKnowledgeStore: knowledge,
-    performChat: async (_system, user) => {
+    performChat: async (_system, user, _llmId, options) => {
       calls.push(user);
+      callOptions.push(options);
       return '```json\n' + JSON.stringify({
         retire_memory_ids: [boundaryIds[0], 'bogus-memory-id', conversationBoundary],
         retire_knowledge_ids: [knowledgeId, 'bogus-knowledge-id'],
@@ -532,6 +643,12 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
     assert.equal(calls.length, 1);
     assert.match(calls[0], /value_boundary/);
     assert.match(calls[0], /deploy steps/);
+    // The consolidation call must opt out of the Responses-path web_search
+    // injection (prose drift root cause) and pin an explicit output budget
+    // (4096 default truncated real inventories mid-JSON).
+    assert.equal(callOptions[0]?.webSearch, false);
+    assert.equal(callOptions[0]?.maxTokens, 12_288);
+    assert.equal(callOptions[0]?.thinking, 'disabled');
 
     const visibleBoundaries = coworkStore.listUserMemories({
       metabotId: 9,
@@ -551,6 +668,44 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
     const again = await service.runNow();
     assert.equal(again.counts.deepConsolidationBots, 0, 'cadence gate skips within the interval');
     assert.equal(calls.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('deep consolidation reports why the output was unparseable', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  for (let index = 0; index < 8; index += 1) {
+    coworkStore.createUserMemory({
+      metabotId: 9,
+      text: `boundary rule ${index}`,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+      forceNew: true,
+    });
+  }
+  // The 2026-09-02 live failure: output cut mid-JSON at the token budget.
+  const truncated = '{"retire_memory_ids": ["item-a", "item-b", "item-c"';
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, name: 'Twin', llm_id: null, globalmetaid: 'metaid://stub-owner' }] },
+    performChat: async () => truncated,
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.deepRetiredMemories, 0);
+    assert.ok(
+      stats.errors.some((line) =>
+        line.includes('deep-consolidation bot 9: unparseable output (no complete JSON object in')
+        && line.includes('truncated at the output-token budget')),
+      `diagnostic missing from errors: ${JSON.stringify(stats.errors)}`
+    );
+    assert.equal(coworkStore.getDeepConsolidationLastRunAt(9), null, 'failed parse never stamps the cadence');
   } finally {
     cleanup();
   }

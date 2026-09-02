@@ -30,7 +30,7 @@ function loadTestUtils() {
   }
 }
 
-const { resolveThinkingForModel, extractAnthropicThinkingText, resolveDeepSeekResponsesReasoning, resolveDefaultMaxOutputTokens } = loadTestUtils();
+const { resolveThinkingForModel, extractAnthropicThinkingText, resolveDeepSeekResponsesReasoning, resolveDefaultMaxOutputTokens, buildDeepSeekResponsesTools } = loadTestUtils();
 
 test('one-shot completion reads the Anthropic thinking field emitted by the proxy', () => {
   assert.equal(
@@ -65,4 +65,28 @@ test('default output budget leaves headroom for thinking-mode reasoning', () => 
   assert.equal(resolveDefaultMaxOutputTokens('disabled'), 4_096);
   assert.equal(resolveDefaultMaxOutputTokens('enabled'), 16_384);
   assert.equal(resolveDefaultMaxOutputTokens(undefined), 16_384);
+});
+
+test('Responses tools keep the default web_search injection for chat callers', () => {
+  // 982fca66 product behavior: flash/pro chat via the Responses API carries
+  // the built-in web_search tool first, caller tools after.
+  assert.deepEqual(buildDeepSeekResponsesTools(undefined, undefined), [{ type: 'web_search' }]);
+  assert.deepEqual(buildDeepSeekResponsesTools(undefined, true), [{ type: 'web_search' }]);
+  const callerTool = { type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } };
+  assert.deepEqual(buildDeepSeekResponsesTools([callerTool], undefined), [
+    { type: 'web_search' },
+    { type: 'function', name: 'lookup', parameters: { type: 'object' } },
+  ]);
+});
+
+test('webSearch:false strips the built-in search from the Responses tools', () => {
+  // Structured JSON tasks (deep-consolidation, culture distillation, dream)
+  // opt out: a stray search call derails the JSON contract — the 2026-09-02
+  // "unparseable output" root cause.
+  const callerTool = { type: 'function', function: { name: 'lookup' } };
+  assert.deepEqual(buildDeepSeekResponsesTools([callerTool], false), [
+    { type: 'function', name: 'lookup', parameters: {} },
+  ]);
+  // No caller tools + opt-out means the request body must omit tools entirely.
+  assert.deepEqual(buildDeepSeekResponsesTools(undefined, false), []);
 });

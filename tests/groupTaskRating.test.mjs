@@ -31,7 +31,12 @@ const groupTaskService = require('../dist-electron/main/services/groupTaskServic
 
 Module._load = originalLoad;
 
-const { closeGroupTask, setGroupTaskServiceGroupTaskStoreGetter, setGroupTaskServiceOrchestrationBridgeGetter } = groupTaskService;
+const {
+  closeGroupTask,
+  setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceOrchestrationBridgeGetter,
+} = groupTaskService;
+const { setTeamCultureDistillationDeps } = require('../dist-electron/main/services/teamCultureDistillation.js');
 
 const makeTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-group-task-rating-'));
 
@@ -93,6 +98,88 @@ test('updateTaskRating validates 1-5 and persists rating/comment/ratedAt; re-rat
     assert.equal(rerated.ratingComment, null);
     assert.equal(groupTaskStore.getTaskById(task.id)?.rating, 2);
   } finally {
+    store.close();
+  }
+});
+
+test('rated close still runs the shared tail: culture distillation fires on owner acceptance', async () => {
+  const tempDir = makeTempDir();
+  const { store, groupTaskStore } = await openStores(tempDir);
+  try {
+    setGroupTaskServiceGroupTaskStoreGetter(() => groupTaskStore);
+    setGroupTaskServiceOrchestrationBridgeGetter(null);
+
+    // The 2026-09-02 regression: the rated-acceptance early return skipped
+    // recordTaskCloseImpressions + distillTeamCultureFromTaskClose +
+    // recordTaskCommStats, so the culture layer stayed empty while 34/42
+    // real closes were rated. Observe the tail through the distillation hook.
+    const distilledTaskIds = [];
+    const upserts = [];
+    setTeamCultureDistillationDeps({
+      getTeamCultureStore: () => ({
+        getCultureConfig: () => ({ enabled: true }),
+        listCulture: () => [],
+        upsertCulture: (entry) => {
+          upserts.push(entry);
+          return { entry: { ...entry, pendingApproval: false }, displaced: null };
+        },
+      }),
+      getGroupTaskStore: () => groupTaskStore,
+      performChat: async () => '```json\n'
+        + JSON.stringify({
+          glossary: [{ term: 'chair gate', definition: 'review checkpoint held by the chair' }],
+          conventions: [],
+          lessons: [],
+        })
+        + '\n```',
+    });
+    // Spy on the distillation prompt by capturing the taskId through the
+    // summary the hook reads; the hook is fire-and-forget so poll for it.
+    const originalGetLatest = groupTaskStore.getLatestAcceptanceSummary.bind(groupTaskStore);
+    groupTaskStore.getLatestAcceptanceSummary = (taskId) => {
+      distilledTaskIds.push(taskId);
+      return originalGetLatest(taskId);
+    };
+
+    const task = groupTaskStore.createTask({
+      groupId: 'group-rated-tail-1', title: 'T', goal: 'G', chairMetabotId: 1, createdBy: 'user',
+    });
+    groupTaskStore.saveAcceptanceSummary({
+      taskId: task.id,
+      goal: 'G',
+      acceptanceCriteria: null,
+      deliverables: [{ kind: 'text', uri: null, status: 'accepted', confirmation: 'confirmed', authorName: 'w' }],
+      members: [
+        { name: 'chair', role: 'chair', workStatus: 'done' },
+        { name: 'worker', role: 'worker', workStatus: 'done' },
+      ],
+      guidance: 'g',
+    });
+
+    const done = await closeGroupTask(task.id, { status: 'done', rating: 5, ratingComment: 'great' });
+    assert.equal(done.rating, 5);
+    // The hook is fire-and-forget: wait for the async distillation to land.
+    await (async () => {
+      for (let i = 0; i < 100 && upserts.length === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    })();
+    assert.ok(
+      distilledTaskIds.includes(task.id),
+      'the rated close reached distillTeamCultureFromTaskClose',
+    );
+    assert.equal(upserts.length, 1, 'one glossary entry distilled through the upsert channel');
+    assert.equal(upserts[0].topic, 'chair gate');
+    assert.equal(upserts[0].origin, 'distillation');
+  } finally {
+    setGroupTaskServiceOrchestrationBridgeGetter(null);
+    // Neutral stub: providers must stay non-null (the deps setter reads them
+    // eagerly) but the disabled switch makes any stray hook call a no-op.
+    setTeamCultureDistillationDeps({
+      getTeamCultureStore: () => ({ getCultureConfig: () => ({ enabled: false }) }),
+      getGroupTaskStore: () => groupTaskStore,
+      performChat: async () => '',
+    });
     store.close();
   }
 });

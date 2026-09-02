@@ -782,6 +782,91 @@ export class MetaIDExperienceStore {
     return ids.length;
   }
 
+  /**
+   * Deterministic status reconcile for open episodes whose source of truth
+   * already reached a terminal state. Live event wiring is best-effort: a
+   * terminal transition that never emitted an experience event (restarts,
+   * flows added after the fact, historical rows) leaves the episode 'open'
+   * forever — and the archive step above only ever touches terminal
+   * episodes, so open rows also never compress. Three buckets:
+   *  - service_order episodes whose order is completed/refunded/failed;
+   *  - group_task participation episodes whose task is done/cancelled;
+   *  - direct_interaction episodes with no evidence inside the activity
+   *    window (long-dormant conversations; dream and contact queries key on
+   *    evidence time, not status, so closing changes no recall semantics —
+   *    the next message on the same source key simply attaches new
+   *    evidence to the settled row).
+   * Idempotent: terminal rows are never re-touched.
+   */
+  reconcileOpenEpisodes(input: {
+    nowMs: number;
+    dormantCutoffMs: number;
+    excludeOwners?: ReadonlySet<string>;
+  }): { serviceOrdersSettled: number; taskEpisodesSettled: number; dormantInteractionsClosed: number } {
+    const now = Math.floor(input.nowMs);
+    const excludedOwners = input.excludeOwners ? [...input.excludeOwners] : [];
+    const ownerExclusion = excludedOwners.length > 0
+      ? ` AND e.owner_globalmetaid NOT IN (${excludedOwners.map(() => '?').join(', ')})`
+      : '';
+    const settle = (
+      rows: Array<{ id: string; status: string; endedAt: number }>,
+    ): number => {
+      for (const row of rows) {
+        // The status guard re-check keeps the sweep idempotent even if a
+        // live writer settled the same row concurrently.
+        this.db.run(
+          `UPDATE metaid_experience_episodes
+           SET status = ?, ended_at = ?, updated_at = ?
+           WHERE id = ? AND status = 'open'`,
+          [row.status, Math.floor(row.endedAt), now, row.id],
+        );
+      }
+      return rows.length;
+    };
+
+    const serviceRows = this.getAll<{ id: string; status: string; endedAt: number }>(`
+      SELECT e.id AS id,
+             CASE WHEN o.status = 'failed' THEN 'failed' ELSE 'completed' END AS status,
+             COALESCE(o.updated_at, e.started_at, e.created_at) AS endedAt
+      FROM metaid_experience_episodes e
+      JOIN service_orders o ON ('order:' || o.id) = e.source_key
+      WHERE e.episode_type = 'service_order' AND e.status = 'open' AND e.archived_at IS NULL
+        AND o.status IN ('completed', 'refunded', 'failed')${ownerExclusion}
+    `, excludedOwners);
+
+    const taskRows = this.getAll<{ id: string; status: string; endedAt: number }>(`
+      SELECT e.id AS id,
+             CASE WHEN t.status = 'cancelled' THEN 'abandoned' ELSE 'completed' END AS status,
+             COALESCE(CAST(strftime('%s', t.closed_at) AS INTEGER) * 1000, e.started_at, e.created_at) AS endedAt
+      FROM metaid_experience_episodes e
+      JOIN group_tasks t ON ('task:' || t.id) = e.source_key
+      WHERE e.episode_type = 'task_participation' AND e.status = 'open' AND e.archived_at IS NULL
+        AND t.status IN ('done', 'cancelled')${ownerExclusion}
+    `, excludedOwners);
+
+    const dormantRows = this.getAll<{ id: string; endedAt: number }>(`
+      SELECT e.id AS id,
+             COALESCE((SELECT MAX(ev.occurred_at) FROM metaid_experience_evidence ev
+                       WHERE ev.episode_id = e.id), e.started_at, e.created_at) AS endedAt
+      FROM metaid_experience_episodes e
+      WHERE e.episode_type = 'direct_interaction' AND e.status = 'open' AND e.archived_at IS NULL
+        AND e.started_at < ?${ownerExclusion}
+        AND NOT EXISTS (
+          SELECT 1 FROM metaid_experience_evidence ev
+          WHERE ev.episode_id = e.id AND ev.occurred_at >= ?
+        )
+    `, [Math.floor(input.dormantCutoffMs), ...excludedOwners])
+      .map((row) => ({ ...row, status: 'completed' as const }));
+
+    const serviceOrdersSettled = settle(serviceRows);
+    const taskEpisodesSettled = settle(taskRows);
+    const dormantInteractionsClosed = settle(dormantRows);
+    if (serviceOrdersSettled + taskEpisodesSettled + dormantInteractionsClosed > 0) {
+      this.saveDb();
+    }
+    return { serviceOrdersSettled, taskEpisodesSettled, dormantInteractionsClosed };
+  }
+
   /** Reverse the soft-archive mark; archived data becomes hot again. */
   unarchiveEpisodes(input: { episodeIds: string[] }): number {
     const ids = input.episodeIds.map((id) => asText(id)).filter(Boolean);

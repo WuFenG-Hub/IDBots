@@ -200,6 +200,9 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [hygiene, setHygiene] = useState<MemoryHygieneConfig | null>(null);
   const [hygieneLastRun, setHygieneLastRun] = useState<MemoryHygieneRunStats | null>(null);
   const [hygieneOpen, setHygieneOpen] = useState(false);
+  // Eight numeric knobs is a wall of inputs — keep the thresholds block
+  // collapsed until the user asks for it.
+  const [hygieneThresholdsOpen, setHygieneThresholdsOpen] = useState(false);
   const [hygieneSaving, setHygieneSaving] = useState(false);
   const [hygieneRunning, setHygieneRunning] = useState(false);
   const [hygieneNotice, setHygieneNotice] = useState<string | null>(null);
@@ -1664,31 +1667,43 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                   disabled={hygieneSaving || !hygiene.enabled}
                 />
 
-                {/* Thresholds */}
-                <div className="space-y-3 rounded-lg border px-3 py-3 dark:border-claude-darkBorder border-claude-border">
-                  <div className="text-[10px] uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('memoryHygieneThresholds')}
-                  </div>
-                  {hygieneThresholdFields.map(({ field, min, max, labelKey, hintKey }) => (
-                    <label key={field} className="flex items-center justify-between gap-3">
-                      <span className="text-xs dark:text-claude-darkText text-claude-text">
-                        <span className="block">{i18nService.t(labelKey)}</span>
-                        <span className="block text-[11px] font-normal dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t(hintKey)}</span>
-                      </span>
-                      <input
-                        type="number"
-                        min={min}
-                        max={max}
-                        value={Number(hygiene[field])}
-                        onChange={(event) => {
-                          const next = Number(event.target.value);
-                          updateHygieneField(field, Number.isFinite(next) ? Math.max(min, Math.min(max, Math.floor(next))) : min);
-                        }}
-                        className="w-20 rounded border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                        disabled={hygieneSaving}
-                      />
-                    </label>
-                  ))}
+                {/* Thresholds — collapsed by default; eight numeric knobs
+                    expanded at once reads as a wall of inputs */}
+                <div className="rounded-lg border dark:border-claude-darkBorder border-claude-border">
+                  <button
+                    type="button"
+                    onClick={() => setHygieneThresholdsOpen((open) => !open)}
+                    className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left"
+                  >
+                    <span className="text-[10px] uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {i18nService.t('memoryHygieneThresholds')}
+                    </span>
+                    <ChevronRightIcon className={`h-3.5 w-3.5 transition-transform dark:text-claude-darkTextSecondary text-claude-textSecondary ${hygieneThresholdsOpen ? 'rotate-90' : ''}`} />
+                  </button>
+                  {hygieneThresholdsOpen && (
+                    <div className="space-y-3 border-t px-3 py-3 dark:border-claude-darkBorder border-claude-border">
+                      {hygieneThresholdFields.map(({ field, min, max, labelKey, hintKey }) => (
+                        <label key={field} className="flex items-center justify-between gap-3">
+                          <span className="text-xs dark:text-claude-darkText text-claude-text">
+                            <span className="block">{i18nService.t(labelKey)}</span>
+                            <span className="block text-[11px] font-normal dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t(hintKey)}</span>
+                          </span>
+                          <input
+                            type="number"
+                            min={min}
+                            max={max}
+                            value={Number(hygiene[field])}
+                            onChange={(event) => {
+                              const next = Number(event.target.value);
+                              updateHygieneField(field, Number.isFinite(next) ? Math.max(min, Math.min(max, Math.floor(next))) : min);
+                            }}
+                            className="w-20 rounded border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                            disabled={hygieneSaving}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* Last-run stats */}

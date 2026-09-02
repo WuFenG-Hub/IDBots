@@ -42,7 +42,12 @@ export const DEFAULT_MEMORY_HYGIENE_CONFIG: MemoryHygieneConfig = {
   knowledgeRevisionKeep: 5,
   dreamRunRetentionDays: 90,
   deepConsolidationEnabled: true,
-  deepConsolidationIntervalDays: 30,
+  // Weekly by default: dream writes add ~10 belief-layer rows per bot per
+  // night with forceNew (per-date batch replacement skips cross-date dedupe
+  // by design), so a 30-day cadence let the layer grow ~300 rows between
+  // passes while one pass can retire at most 25% of the 160-item inventory —
+  // the recycle valve mathematically could not keep up with the inflow.
+  deepConsolidationIntervalDays: 7,
 };
 
 /** Result record persisted after each pass; drives the settings stats view. */
