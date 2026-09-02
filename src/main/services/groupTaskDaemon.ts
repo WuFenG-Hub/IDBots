@@ -10,7 +10,7 @@
  * plain-LLM reply path only (no skill turns).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SqliteDatabase as Database } from '../sqliteTypes';
@@ -102,6 +102,7 @@ import {
 import { buildMetafileUri } from './serviceDeliveryArtifacts.js';
 import metaFileUploadShared from './metaFileUploadShared.js';
 import { isTextDocumentDeliverable } from './deliverableTextNote';
+import { downloadMetafileBytes } from '../libs/metafileDownload';
 
 const { inferContentTypeFromFilePath } = metaFileUploadShared;
 
@@ -272,6 +273,19 @@ const ACK_KV_PREFIX = 'group_task_ack:';
  * referenced upstream deliverable lands (bounded wait, then proceeds).
  */
 const DEPENDS_ON_TAG = /\[DEPENDS_ON:\s*([^\]]+)\]/i;
+const DEPENDS_ON_TAG_GLOBAL = new RegExp(DEPENDS_ON_TAG.source, 'gi');
+/**
+ * fix/group-task-dep-wait: all [DEPENDS_ON: <token>] tokens of a message. The
+ * P2-6 dispatch gate enforces the FIRST tag (DEPENDS_ON_TAG); watchers such as
+ * the stale-[WORKING] dependency-wait exemption audit every tag instead.
+ */
+function extractDependsOnTokens(content: string | null | undefined): string[] {
+  const text = (content ?? '').trim();
+  if (!text) return [];
+  return [...text.matchAll(DEPENDS_ON_TAG_GLOBAL)]
+    .map((match) => match[1].trim())
+    .filter((token) => token.length > 0);
+}
 const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
 /**
  * P2-8: multi-driver mutex — kv heartbeat claim per task
@@ -436,6 +450,21 @@ const GROUP_TASK_STUCK_RECLAIM_PREFIX = 'group_task_stuck_reclaim:';
 const GROUP_TASK_TIMEOUT_HINT_PREFIX = 'group_task_timeout_hint:';
 /** R6 L3: one owner brief per (task, member) timeout streak (distinct from the L2 chair hint). */
 const GROUP_TASK_TIMEOUT_OWNER_PREFIX = 'group_task_timeout_owner:';
+/**
+ * fix/group-task-dep-wait: audit note kept while the stale-[WORKING] monitor
+ * exempts a member whose latest chair assignment waits on an undelivered
+ * [DEPENDS_ON] upstream (`group_task_dep_wait_exempt:<taskId>:<metabotId>`;
+ * deleted once the wait lifts). Distinct from DEP_WAIT_KV_PREFIX, which tracks
+ * the P2-6 dispatch gate's bounded wait per assignment message.
+ */
+const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
+/**
+ * G-04 retry budget: failed chair-answer attempts per supervisor signal
+ * (`group_task_sup_sig_attempts:<signalId>` = count). At 3 attempts the signal
+ * is closed out with a null pin + one anomaly milestone; the counter is
+ * cleared on a successful chair answer.
+ */
+const GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX = 'group_task_sup_sig_attempts:';
 /**
  * #14 follow-up: when a worker turn already in flight lands AFTER the chair's
  * closing ceremony (so the last group message is a worker's, not the host's),
@@ -1025,7 +1054,8 @@ export function gateChairDrivingSend(input: GateChairDrivingSendInput):
         `Task ${input.taskId} is being driven by another session (${holder.slice(0, 12)}…) — ` +
         `the driver claim is ${Math.round(result.claimAgeMs / 1000)}s old; retry in ` +
         `${Math.ceil(result.retryAfterMs / 1000)}s or wait for the active driver to yield ` +
-        `(same-session sends pass driver_id to keep driving)`,
+        `(same-session sends pass driver_id to keep driving) ` +
+        `(grace window ${Math.round(input.graceMs / 1000)}s)`,
     };
   }
   return { ok: true };
@@ -1388,7 +1418,9 @@ export interface GroupTaskDaemonDeps {
    * metafile paid by the author bot's wallet, so a worker's local file path
    * becomes verifiable chain evidence. Same seam the OpenTeam guest daemon
    * uses (metaFileUploadService.uploadMetaFile). Unwired = text deliverables
-   * are recorded as-is (no on-chain upgrade).
+   * are recorded as-is (no on-chain upgrade). The result carries the uploaded
+   * bytes' sha256 as `contentHash` (P2 same-bytes dedupe) when the direct
+   * upload path computed it.
    */
   uploadDeliverableFile?: (input: {
     metabotId: number;
@@ -1895,6 +1927,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * P2-6 ledger check for one [DEPENDS_ON] token: pinid/txid-shaped tokens are
+   * enforced against the task's recorded deliverables; free-text descriptions
+   * are advisory only (always satisfied). Shared by dependencyStatus and the
+   * stale-[WORKING] dependency-wait exemption.
+   */
+  const dependencyTokenSatisfied = (task: GroupTask, token: string): boolean => {
+    const pinish = PINID_FORMAT.test(token) || TXID_FORMAT.test(token);
+    if (!pinish) return true;
+    const lower = token.toLowerCase();
+    const deliverables = deps.getGroupTaskStore().listDeliverables(task.id);
+    return deliverables.some((deliverable) =>
+      (deliverable.msgPinId ?? '').toLowerCase() === lower
+      || (deliverable.uri ?? '').toLowerCase().includes(lower),
+    );
+  };
+
+  /**
    * P2-6: [DEPENDS_ON: <token>] gate. Pinid/txid-shaped tokens are enforced
    * against the task's recorded deliverables (the worker dispatch is held
    * until the upstream deliverable lands); free-text descriptions are
@@ -1908,15 +1957,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const match = DEPENDS_ON_TAG.exec(message.content ?? '');
     if (!match) return { token: null, satisfied: true };
     const token = match[1].trim();
-    const pinish = PINID_FORMAT.test(token) || TXID_FORMAT.test(token);
-    if (!pinish) return { token, satisfied: true };
-    const lower = token.toLowerCase();
-    const deliverables = deps.getGroupTaskStore().listDeliverables(task.id);
-    const satisfied = deliverables.some((deliverable) =>
-      (deliverable.msgPinId ?? '').toLowerCase() === lower
-      || (deliverable.uri ?? '').toLowerCase().includes(lower),
-    );
-    return { token, satisfied };
+    return { token, satisfied: dependencyTokenSatisfied(task, token) };
   };
 
   /**
@@ -3577,11 +3618,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                     fileName: path.basename(filePath),
                     contentType,
                   });
-                  store.updateDeliverableUri(deliverable.id, uri, 'metafile');
+                  // P2: same-bytes dedupe BEFORE the row is rewritten — an
+                  // identical earlier deliverable (same sha256) absorbs this
+                  // one; the duplicate row is deleted and never upgraded.
+                  const uploadContentHash = typeof upload?.contentHash === 'string'
+                    ? upload.contentHash.trim()
+                    : '';
+                  const dedupe: {
+                    outcome: 'current-deleted' | 'other-deleted' | 'none';
+                    survivorVerification?: string;
+                  } = uploadContentHash
+                    ? dedupeDeliverableByContentHash(task, deliverable, uploadContentHash)
+                    : { outcome: 'none' };
+                  if (dedupe.outcome === 'current-deleted') {
+                    continue;
+                  }
+                  store.updateDeliverableUri(deliverable.id, uri, 'metafile', uploadContentHash || null);
                   // Reuse the pinid verification path so the upgraded row gets
                   // the same on-chain confirmation semantics as a native one.
+                  // When this row absorbed a later duplicate, merge onto the
+                  // annotation the dedupe just wrote (never clobber it).
                   const report = await verifyPinSources(pinId);
-                  store.updateDeliverableVerification(deliverable.id, JSON.stringify(report));
+                  const mergedReport = dedupe.survivorVerification != null
+                    ? { ...JSON.parse(dedupe.survivorVerification), ...report }
+                    : report;
+                  store.updateDeliverableVerification(deliverable.id, JSON.stringify(mergedReport));
                   store.updateDeliverableConfirmation(
                     deliverable.id,
                     report.verified ? 'confirmed' : 'unconfirmed',
@@ -4391,6 +4452,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * stamped with the response pin. Pause/resume rows arrive already processed
    * (host-applied gates). While a human gate is active (review / open
    * checkpoint) the turn is deferred; terminal tasks just close the rows.
+   * Signals the chair can never answer (no local chair bot, or 3 failed
+   * attempts) are closed with a null pin + one anomaly milestone instead of
+   * retrying forever.
    */
   const processSupervisorSignals = async (
     task: GroupTask,
@@ -4399,11 +4463,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     promptMembers: DaemonPromptMember[],
   ): Promise<void> => {
     const store = deps.getGroupTaskStore();
+    const sqlite = deps.getStore();
     const pending = store.listPendingSupervisorSignals(task.id)
       .filter((signal) => signal.kind === 'nudge' || signal.kind === 'flag');
     if (pending.length === 0) return;
+    const pendingIds = pending.map((signal) => signal.id);
     if (task.status === 'done' || task.status === 'cancelled') {
-      store.markSupervisorSignalsProcessed(pending.map((signal) => signal.id), null);
+      store.markSupervisorSignalsProcessed(pendingIds, null);
       return;
     }
     if (task.status === 'review' || store.getOpenCheckpoint(task.id) != null) {
@@ -4413,7 +4479,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const chairMember = members.find((member) => member.role === 'chair');
     const bot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
     if (!chairMember || !bot) {
+      // No local chair can ever answer — close the rows (null pin = no chair
+      // receipt, same convention as the done/cancelled close-out above)
+      // instead of skipping them every tick, and alert the origin session once.
+      store.markSupervisorSignalsProcessed(pendingIds, null);
       emitLog(`[GroupTaskDaemon] Task ${task.id}: supervisor signal turn skipped (no chair bot found)`);
+      notifySourceSessionMilestone(
+        task,
+        'anomaly',
+        buildSourceSessionAnomalyNotice({
+          title: task.title,
+          status: task.status,
+          summary:
+            `Supervisor signal(s) #${pendingIds.join(', #')} were closed WITHOUT a chair answer: ` +
+            'this task has no local chair bot to respond. Review the signals in the task detail ' +
+            'and apply the supervision manually.',
+        }),
+        `supervisor_signals_no_chair:${pendingIds.join('-')}`,
+      );
       return;
     }
 
@@ -4460,15 +4543,53 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const posted = await postGroupMessage(task.id, bot.id, reply);
       // P2-7 r2: the daemon's own reply must not count as "Twin activity".
       rememberDaemonChairPin(task.id, posted.pinId);
-      store.markSupervisorSignalsProcessed(pending.map((signal) => signal.id), posted.pinId);
+      store.markSupervisorSignalsProcessed(pendingIds, posted.pinId);
+      // Answered — the per-signal failed-attempt counters are obsolete.
+      for (const id of pendingIds) {
+        sqlite.delete(`${GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX}${id}`);
+      }
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: chair answered ${pending.length} supervisor signal(s) ` +
         `(pin ${posted.pinId})`,
       );
     } catch (error) {
+      // Retry budget: a failed turn leaves the rows pending for the next tick,
+      // but a signal the chair fails to answer 3 times is closed out (null
+      // pin) with one anomaly milestone — a broken chair LLM must not wedge
+      // the supervisor channel open forever.
+      const exhaustedIds: number[] = [];
+      for (const id of pendingIds) {
+        const attemptsKey = `${GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX}${id}`;
+        const prev = Number(sqlite.get<string>(attemptsKey));
+        const attempts = (Number.isFinite(prev) ? prev : 0) + 1;
+        if (attempts >= 3) {
+          exhaustedIds.push(id);
+          sqlite.delete(attemptsKey);
+        } else {
+          sqlite.set(attemptsKey, String(attempts));
+        }
+      }
+      if (exhaustedIds.length > 0) {
+        store.markSupervisorSignalsProcessed(exhaustedIds, null);
+        notifySourceSessionMilestone(
+          task,
+          'anomaly',
+          buildSourceSessionAnomalyNotice({
+            title: task.title,
+            status: task.status,
+            summary:
+              `The chair did not answer supervisor signal(s) #${exhaustedIds.join(', #')} after 3 attempts; ` +
+              'the signals were closed without a chair response. Check the chair bot and its LLM configuration.',
+          }),
+          `supervisor_signals_unanswered:${exhaustedIds.join('-')}`,
+        );
+      }
       emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: supervisor signal turn failed (signals stay pending): ` +
-        `${error instanceof Error ? error.message : String(error)}`,
+        `[GroupTaskDaemon] Task ${task.id}: supervisor signal turn failed (` +
+        (exhaustedIds.length > 0
+          ? `signals #${exhaustedIds.join(', #')} closed after 3 failed attempts; the rest stay pending`
+          : 'signals stay pending') +
+        `): ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   };
@@ -5263,6 +5384,53 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * fix/group-task-dep-wait: the [DEPENDS_ON] state of the member's LATEST
+   * chair assignment (chair-sent, @mentioning the member, skipping host
+   * notices / roll calls — the same gates the ACK-watch arming path applies).
+   * Returns null when no assignment can be located or checked; otherwise the
+   * assignment's upstream tokens and the subset still undelivered. A member
+   * with a pending upstream is legitimately WAITING (the P2-6 dispatch gate
+   * holds it the same way), so its silence must not read as a stuck signal.
+   */
+  const checkMemberDependencyWait = (
+    task: GroupTask,
+    member: GroupTaskMember,
+    chairMember: GroupTaskMember | undefined,
+  ): { tokens: string[]; pendingTokens: string[] } | null => {
+    const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
+    if (!task.groupId || !chairGmid || member.metabotId == null) return null;
+    const bot = deps.getMetabotStore().getMetabotById(member.metabotId);
+    if (!bot) return null;
+    let assignment: GroupTaskDaemonMessage | null = null;
+    try {
+      const rows = mapMessageRows(deps.getStore().getDatabase().exec(
+        `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
+                chain_timestamp, reply_pin, sender_suspect
+         FROM group_chat_messages
+         WHERE group_id = ? AND sender_global_metaid = ?
+         ORDER BY id DESC LIMIT 50`,
+        [task.groupId, chairGmid],
+      ));
+      for (const row of rows) {
+        const message = toDaemonMessage(row);
+        if (hasGroupTaskNotice(message.content) || isRollCallPresenceCheck(message.content)) continue;
+        if (isMentioned(message, bot)) {
+          assignment = message;
+          break;
+        }
+      }
+    } catch {
+      return null;
+    }
+    if (!assignment) return null;
+    const tokens = extractDependsOnTokens(assignment.content);
+    return {
+      tokens,
+      pendingTokens: tokens.filter((token) => !dependencyTokenSatisfied(task, token)),
+    };
+  };
+
+  /**
    * R6 L2: once a working/assigned LOCAL worker's [WORKING] signal goes stale
    * (older than the timeout window), inject a deterministic "re-assign" hint
    * into the chair's next turn and mark the authoritative state timeout. This
@@ -5272,7 +5440,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * suspended" suggestion, not just another alert. Best-effort: never blocks
    * the tick; the store status change is the authoritative signal, the chair
    * hint is advisory. A member with a non-rejected deliverable on the ledger
-   * is skipped entirely — delivered-then-idle is done, not stuck.
+   * is skipped entirely — delivered-then-idle is done, not stuck. A member
+   * whose latest chair assignment is [DEPENDS_ON]-gated on an undelivered
+   * upstream deliverable is skipped too — dependency-wait is waiting, not
+   * stuck (fix/group-task-dep-wait).
    */
   const monitorLocalWorkerTimeout = async (
     task: GroupTask,
@@ -5343,6 +5514,39 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       });
       if (liveness === 'alive') continue;
 
+      // fix/group-task-dep-wait: a member whose latest chair assignment is
+      // [DEPENDS_ON]-gated on an undelivered upstream deliverable is correctly
+      // WAITING (the P2-6 dispatch gate holds it the same way) — silence is
+      // expected, not a stuck signal. Exempt it from the unreachable / hint /
+      // reclaim verdict and leave an auditable kv note; the live check re-runs
+      // every tick, so the exemption lifts on its own once the upstream lands.
+      const depWait = checkMemberDependencyWait(task, member, chairMember);
+      if (depWait && depWait.pendingTokens.length > 0) {
+        sqlite.set(
+          `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
+          JSON.stringify({
+            upstreamTokens: depWait.pendingTokens,
+            upstreamDelivered: false,
+            checkedAt: now(),
+          }),
+        );
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: dependency-wait exemption: member ${name} ` +
+          `waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
+        );
+        continue;
+      }
+      // Not waiting (no [DEPENDS_ON] tag, or the upstream has delivered since):
+      // clear a stale exemption note so the audit trail reflects the lift.
+      if (depWait) {
+        sqlite.delete(`${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`);
+      }
+      const depContext = depWait == null
+        ? null
+        : depWait.tokens.length === 0
+          ? 'no upstream dependency'
+          : `upstream ${depWait.tokens.join(', ')} delivered`;
+
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
       // once per (task, member) streak. Anti-flap (fix/group-member-status,
       // review follow-up): write 'unreachable' only in states where
@@ -5373,7 +5577,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       const hintKey = `${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`;
       if (sqlite.get<string>(hintKey) !== '1') {
-        timedOut.push(name);
+        timedOut.push(depContext ? `${name} (${depContext})` : name);
         sqlite.set(hintKey, '1');
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${name} [WORKING] signal stale (${memberTimeoutAfterMinutes}+ min); ` +
@@ -5388,7 +5592,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const reclaimNote = reclaimStuckWorkerSession(
         task,
         member,
-        `[WORKING] signal stale ${memberTimeoutAfterMinutes}+ min with zero cowork-session activity`,
+        `[WORKING] signal stale ${memberTimeoutAfterMinutes}+ min with zero cowork-session activity` +
+        (depContext ? `; ${depContext}` : ''),
       );
       if (reclaimNote) reclaimNotes.push(reclaimNote);
 
@@ -6100,6 +6305,70 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * P2: same-bytes deliverable dedupe. Within one task, rows carrying the same
+   * sha256 content hash (identical bytes registered under different pins)
+   * collapse to the EARLIEST row: the later duplicate is deleted and the
+   * survivor's verification JSON gains one append-only `duplicates` entry
+   * naming the absorbed row's pin/uri. Rejected rows never participate (see
+   * findDeliverableByContentHash). `outcome` is 'current-deleted' when the
+   * caller's row was absorbed (the caller must stop touching it),
+   * 'other-deleted' when the caller's row absorbed a later duplicate (then
+   * `survivorVerification` carries the caller row's NEW verification JSON so
+   * the caller can refresh its stale in-memory copy), 'none' when no
+   * same-bytes row exists.
+   */
+  const dedupeDeliverableByContentHash = (
+    task: GroupTask,
+    deliverable: GroupTaskDeliverable,
+    contentHash: string,
+  ): {
+    outcome: 'current-deleted' | 'other-deleted' | 'none';
+    survivorVerification?: string;
+  } => {
+    const store = deps.getGroupTaskStore();
+    const hit = store.findDeliverableByContentHash(task.id, contentHash, deliverable.id);
+    if (!hit) return { outcome: 'none' };
+    const survivor = hit.id < deliverable.id ? hit : deliverable;
+    const duplicate = hit.id < deliverable.id ? deliverable : hit;
+    // Merge into the survivor's existing verification report (append-only);
+    // a corrupt/missing report degrades to a fresh object, same as the
+    // re-verification pass's parse idiom.
+    let report: Record<string, unknown> = {};
+    try {
+      if (survivor.verification) report = JSON.parse(survivor.verification);
+    } catch {
+      report = {};
+    }
+    const duplicates = Array.isArray(report.duplicates) ? report.duplicates : [];
+    duplicates.push({
+      msgPinId: duplicate.msgPinId ?? null,
+      uri: duplicate.uri ?? null,
+      notedAt: new Date().toISOString(),
+    });
+    report.duplicates = duplicates;
+    const survivorVerification = JSON.stringify(report);
+    store.updateDeliverableVerification(survivor.id, survivorVerification);
+    store.deleteDeliverable(duplicate.id);
+    emitLog(
+      `[GroupTaskDaemon] Task ${task.id}: deliverable #${duplicate.id} duplicates #${survivor.id} ` +
+      `(same bytes, sha256 ${contentHash.slice(0, 12)}…); merged into the earliest row`,
+    );
+    return duplicate.id === deliverable.id
+      ? { outcome: 'current-deleted' }
+      : { outcome: 'other-deleted', survivorVerification };
+  };
+
+  /** P2: hard cap for download-and-hash of metafile deliverables (bytes). */
+  const DELIVERABLE_CONTENT_HASH_MAX_BYTES = 25 * 1024 * 1024;
+  /**
+   * P2: deliverables whose bytes were already downloaded-and-hashed (or
+   * attempted) in this daemon lifetime — the verification monitor runs every
+   * tick, so an unhashable/oversized row must not re-download each pass.
+   * Keyed by `id:uri` so a corrected uri is hashed again.
+   */
+  const contentHashAttempted = new Set<string>();
+
+  /**
    * P0-4: periodic re-verification for deliverables that are NOT verified yet
    * (indexer lag / 40400). Re-checks every verificationRetryMinutes (default
    * 10) per deliverable until verified.
@@ -6110,6 +6379,41 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const nowMs = now();
     for (const deliverable of deliverables) {
       if (deliverable.status === 'rejected') continue;
+      // P2: content-hash backfill for direct metafile refs — rows recorded
+      // from a `[DELIVERABLE] metafile://<pin>` tag carry no hash at record
+      // time, so download the bytes once (size-capped) and hash them here,
+      // off the hot message loop, then run the same-bytes dedupe. Any
+      // network/parse failure leaves the hash NULL and never breaks
+      // verification or ingestion.
+      const deliverableUri = (deliverable.uri ?? '').trim();
+      if (deliverable.contentHash == null && deliverableUri.startsWith('metafile://')) {
+        const attemptKey = `${deliverable.id}:${deliverableUri}`;
+        if (!contentHashAttempted.has(attemptKey)) {
+          contentHashAttempted.add(attemptKey);
+          try {
+            const { buffer } = await downloadMetafileBytes(deliverableUri);
+            if (buffer.length <= DELIVERABLE_CONTENT_HASH_MAX_BYTES) {
+              const contentHash = createHash('sha256').update(buffer).digest('hex');
+              const dedupe = dedupeDeliverableByContentHash(task, deliverable, contentHash);
+              if (dedupe.outcome === 'current-deleted') {
+                continue; // absorbed into an earlier row — nothing left to verify here
+              }
+              store.updateDeliverableContentHash(deliverable.id, contentHash);
+              if (dedupe.survivorVerification != null) {
+                // This row absorbed a later duplicate — refresh the in-memory
+                // report so the re-verification write below cannot clobber
+                // the just-merged `duplicates` annotation.
+                deliverable.verification = dedupe.survivorVerification;
+              }
+            }
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} content hashing skipped: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }
       const pinid = pinidFromDeliverable(deliverable.uri);
       if (!pinid) continue;
       let report: { verified?: boolean; checkedAt?: number } = {};
@@ -6135,7 +6439,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (nowMs - checkedAt < verificationRetryMs) continue;
       try {
         const fresh = await verifyPinSources(pinid);
-        store.updateDeliverableVerification(deliverable.id, JSON.stringify(fresh));
+        // P2: re-verification refreshes the source probe fields but must not
+        // clobber annotation keys (e.g. the `duplicates` dedupe audit trail)
+        // merged into the report by other passes.
+        store.updateDeliverableVerification(
+          deliverable.id,
+          JSON.stringify({ ...(report as Record<string, unknown>), ...fresh }),
+        );
         // Issue #8: the re-verification pass is the chain-confirmation-driven
         // update path — a pin that becomes verifiable on-chain (indexer lag
         // caught up) flips the ledger's confirmation state.

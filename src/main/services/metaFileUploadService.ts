@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { app } from 'electron';
@@ -281,6 +282,11 @@ export async function uploadMetaFile(
 
   if (uploadMode === 'direct') {
     const buffer = dataBuffer ?? await fs.promises.readFile(resolvedFilePath);
+    // P2: sha256 of the exact uploaded bytes — the group-task deliverable
+    // dedupe key. The buffer is already in memory, so hashing adds no I/O.
+    // Chunked uploads stay unhashed here; the daemon's verification pass
+    // backfills them (with a size cap) from the on-chain bytes.
+    const contentHash = createHash('sha256').update(buffer).digest('hex');
     const metabot = metabotStore.getMetabotById(params.metabotId);
 
     const selfPaidDirect = async (feeAssist?: MvcSponsorFeeAssistMetadata) => {
@@ -312,6 +318,7 @@ export async function uploadMetaFile(
         totalCost: result.totalCost,
         globalMetaId: metabot?.metaid?.trim() || undefined,
       });
+      normalized.contentHash = contentHash;
       if (feeAssist) {
         normalized.feeAssist = feeAssist;
       }
@@ -321,7 +328,7 @@ export async function uploadMetaFile(
     if (network === 'mvc' && !useData && metabot && isMvcSponsorUploadEnabled(metabotStore, params.metabotId)) {
       const sponsorWallet = metabotStore.getMetabotWalletByMetabotId(params.metabotId);
       if (sponsorWallet?.mnemonic?.trim() && metabot.mvc_address?.trim()) {
-        return attachVerificationIfRequested(
+        const sponsorResult = await attachVerificationIfRequested(
           await uploadMvcSponsorDirectFile({
             filePath: resolvedFilePath,
             fileName,
@@ -337,6 +344,8 @@ export async function uploadMetaFile(
           }),
           params,
         );
+        sponsorResult.contentHash = contentHash;
+        return sponsorResult;
       }
     }
 

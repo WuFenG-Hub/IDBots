@@ -1727,6 +1727,8 @@ export interface CoworkRunnerOptions {
   metabotChainWrite?: {
     createPin: ChainWriteCreatePin;
     encryptGroupMessage: (message: string, groupId: string) => string;
+    /** Registered-name resolver; omni_cast pins the group-chat nickName to it. */
+    getMetabotDisplayName?: (metabotId: number) => string;
   };
   /**
    * When set, every cowork session gets send_private_chat (replacing the
@@ -8549,6 +8551,7 @@ export class CoworkRunner extends EventEmitter {
           tool,
           createPin: this.metabotChainWrite.createPin,
           encryptGroupMessage: this.metabotChainWrite.encryptGroupMessage,
+          getMetabotDisplayName: this.metabotChainWrite.getMetabotDisplayName,
           sessionId,
           resolveMetabotId,
           gateLocalFile,

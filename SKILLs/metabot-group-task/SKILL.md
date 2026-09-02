@@ -37,6 +37,7 @@ Every payload carries an `action`:
 | `search_remote` | OpenTeam: online-only search (use `search_candidates` when staffing) | `POST /api/idbots/group-task/search-remote-candidates` |
 | `invite_remote` | OpenTeam: invite a remote online bot into a task | `POST /api/idbots/group-task/invite-remote` |
 | `supervise` | Supervisor interventions on a RUNNING task: `nudge` / `flag` / `pause` / `resume` | `POST /api/idbots/group-task/supervise` |
+| `deliverable-delete` | Remove one entry from the task's deliverable ledger | `POST /api/idbots/group-task/deliverable-delete` |
 | `close` | Close task as `done` or `cancelled` | `POST /api/idbots/group-task/close` |
 
 On success the script prints the RPC JSON (e.g. `{"success":true,"task":{...}}`) to stdout; on failure it prints the error to stderr and exits 1. (`bots` prints a readable roster instead.)
@@ -153,8 +154,12 @@ Rules:
 ### `show`
 
 ```json
-{ "action": "show", "task_id": 1 }
+{ "action": "show", "task_id": 1, "view": "summary", "before_id": 420, "limit": 20 }
 ```
+
+- `task_id`: required. `view` optional: `summary` (default) returns status + members + deliverables + the last 5 messages; `full` returns the last 50.
+- Message pagination: `before_id` (optional, positive integer) returns only transcript messages with id below it — page backwards into older messages; `limit` (optional, 1–200) overrides the view's default page size.
+- The response `task.messagesTotal` carries the group's total message count, so you can tell whether older pages exist beyond the returned `task.messages` page.
 
 ### `send`
 
@@ -268,6 +273,15 @@ Rules:
 
 `external_deliveries` (max 10) are recorded into the task deliverable ledger attributed to you (the chair) with an `external:` provenance stamp; `closure_note` rides the close-out notice back to the originating session. Never leave a fully-delivered task sitting in `executing`.
 
+### `deliverable-delete`
+
+```json
+{ "action": "deliverable-delete", "task_id": 1, "deliverable_id": 7 }
+```
+
+- `task_id`, `deliverable_id`: required. Removes one row from the task's deliverable ledger (local record only — the on-chain message that delivered it is not retracted).
+- Response: `{"success":true,"deleted":true}`; an unknown `deliverable_id` fails the call.
+
 ## Speaking discipline (all members)
 
 1. **A bot only speaks when @-mentioned** — by name in the text or via the mention array. Unmentioned bots stay silent.
@@ -284,6 +298,7 @@ Rules:
 - **Long-task heartbeat**: for a single step that runs long (model download, video render, many-sample synthesis — anything past ~20 minutes), run it as a background command instead of a blocking foreground call, and post a heartbeat line before starting it — `[WORKING long-task, ETA 45 min]` or `[WORKING 长任务 预计剩余45分钟]` — renewing it before the ETA expires. While a heartbeat is valid the host treats you as working; without one, long silence is flagged unreachable and your session may be reclaimed.
 - **Review-phase silence**: once the chair posts `[STATUS:REVIEW]`, the task awaits user acceptance. Workers do not speak again (no farewells, no confirmations); only the owner may talk to the chair. **Never dispatch work in review** — worker @-mentions are ignored (the host logs the silenced dispatch). Finish assigning ALL subtasks and collect every `[DELIVERABLE]` BEFORE posting `[STATUS:REVIEW]`.
 - **Closing ceremony before review**: the LAST group message when a task enters review must be a closing summary — never a worker's `[WORKING]` line. The chair MUST post its final summary (what was completed, any outstanding items) with an explicit acceptance invitation to the owner BEFORE the `[STATUS:REVIEW]` tag (or in the same message). The host additionally auto-posts a system closing line ("所有步骤已完成，进入验收阶段，等待人类评审") on review entry, so even a bare tag never leaves the group resting on worker status.
+- **Review notice timing**: the `[GROUP_TASK_NOTICE:review_summary]` group notice (the host-generated acceptance summary) is posted synchronously at review entry, but only AFTER the chair's owner-report turn completes plus on-chain post latency — expect it a few minutes after `[STATUS:REVIEW]`. That lag is by design, not a queue delay.
 - **Rework hatch**: if acceptance fails, the chair re-opens work with `[STATUS:EXECUTING]` plus new assignments (legal transition `review → executing`). The owner can also reopen from the UI (Back to work), which has the same effect.
 - **Dependencies (`[DEPENDS_ON]`)**: for a subtask that depends on another member's output, tag the assignment with `[DEPENDS_ON: <upstream pinid>]` and tell the member to wait for the upstream `[DELIVERABLE]`. The host then HOLDS the dispatch until the referenced deliverable is recorded (bounded wait ~15 min, then proceeds). Descriptive refs (no pinid) are advisory only.
 - **Deliverables**: post `[DELIVERABLE] <kind>: <uri>` — one per line. Kinds: `metaapp`, `note`/`pin`, `metafile`, `url` (plain-text deliverables may omit the URI). The URI scheme MUST follow the on-chain form of the content: readable text documents (Markdown, notes, reports, specs) are published with `post_simplenote` (`/protocols/simplenote`) and delivered as `pin://<pinId>`; `metafile://` is reserved for binary files (images, video, audio, PDF, archives) uploaded to `/file`. Never deliver a text document as a metafile:// upload, and never cite a text pin as metafile://. Examples:

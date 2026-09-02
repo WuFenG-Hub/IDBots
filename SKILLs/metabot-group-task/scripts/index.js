@@ -164,6 +164,16 @@ async function main() {
       // Round-4: view=summary (default) keeps the output small; view=full returns everything.
       const view = String(params.view ?? '').trim();
       body.view = view === 'full' ? 'full' : 'summary';
+      if (params.before_id !== undefined) {
+        const beforeId = Number(params.before_id);
+        if (!Number.isInteger(beforeId) || beforeId <= 0) fail('before_id must be a positive integer for show');
+        body.before_id = beforeId;
+      }
+      if (params.limit !== undefined) {
+        const limit = Number(params.limit);
+        if (!Number.isInteger(limit) || limit <= 0) fail('limit must be a positive integer for show');
+        body.limit = limit;
+      }
       break;
     }
     case 'member_status': {
@@ -288,6 +298,24 @@ async function main() {
       body = { task_id: taskId, status };
       const reason = String(params.reason ?? '').trim();
       if (reason) body.reason = reason;
+      break;
+    }
+    case 'supervise': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for supervise');
+      const signal = String(params.signal ?? '').trim();
+      if (signal !== 'nudge' && signal !== 'flag' && signal !== 'pause' && signal !== 'resume') {
+        fail("supervise signal must be one of: 'nudge', 'flag', 'pause', 'resume'");
+      }
+      const note = String(params.note ?? '').trim();
+      if (!note) fail('note is required for supervise (what to check / flag / why pause or resume)');
+      if (signal === 'resume' && params.confirm_owner !== true) {
+        fail("resume requires the owner's explicit confirmation — pass confirm_owner: true only after the owner confirms");
+      }
+      body = { task_id: taskId, signal, note };
+      const target = String(params.target ?? '').trim();
+      if (target) body.target = target;
+      if (params.confirm_owner === true) body.confirm_owner = true;
       break;
     }
     case 'deliverable-delete': {

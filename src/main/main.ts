@@ -5460,6 +5460,8 @@ const getCoworkRunner = () => {
             feeRate: options?.feeRate ?? resolveCreatePinFeeRate(options?.network ?? 'mvc'),
           }),
         encryptGroupMessage: (message, groupId) => encryptGroupMessageECB(message, groupId),
+        getMetabotDisplayName: (metabotId) =>
+          getMetabotStore().getMetabotById(metabotId)?.name?.trim() || '',
       },
       // send_private_chat tool backend (replacing metabot-chat-privatechat).
       // Mirrors the skill script: resolve the peer chatpubkey on-chain, then
@@ -5514,11 +5516,15 @@ const getCoworkRunner = () => {
             payload: JSON.stringify(payload),
           }, { network: resolvedNetwork, feeRate: resolveCreatePinFeeRate(resolvedNetwork) });
         },
-        sendGroupMessage: async ({ metabotId, groupId, content, nickName, replyPin, channelId, mention, network }) => {
+        // The caller-supplied nickName is deliberately ignored (not even
+        // destructured): a model-chosen nickname must never override the
+        // registered MetaBot name in the permanent on-chain payload
+        // (incident: sender_name "claude bot"). The field stays on the
+        // GroupChatControl input type for interface stability; resolution
+        // mirrors getMetabotDisplayName above.
+        sendGroupMessage: async ({ metabotId, groupId, content, replyPin, channelId, mention, network }) => {
           const metabotStore = getMetabotStore();
-          const resolvedNickName = nickName
-            || metabotStore.getMetabotById(metabotId)?.name?.trim()
-            || '';
+          const resolvedNickName = metabotStore.getMetabotById(metabotId)?.name?.trim() || '';
           const payload: Record<string, unknown> = {
             groupId,
             nickName: resolvedNickName,

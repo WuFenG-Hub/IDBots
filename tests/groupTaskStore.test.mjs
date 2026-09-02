@@ -655,3 +655,79 @@ test('listDeliverables joins the producing message body for folded text display'
     store.close();
   }
 });
+
+test('P2: deliverable content_hash column + same-bytes dedupe lookup', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    // Migration: the column exists on a fresh DB, and pre-feature rows stay NULL.
+    assert.ok(
+      getColumns(db, 'group_task_deliverables').includes('content_hash'),
+      'group_task_deliverables.content_hash should exist',
+    );
+    const task = groupTaskStore.createTask({
+      groupId: 'group-p2', title: 'P2', goal: 'dedupe', chairMetabotId: 1, createdBy: 'user',
+    });
+    const legacy = groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'pin-legacy',
+      kind: 'metafile',
+      uri: `metafile://${'a'.repeat(64)}i0`,
+    });
+    assert.equal(legacy.contentHash, null, 'rows inserted without a hash stay NULL');
+
+    // addDeliverable round-trips the hash.
+    const hashA = 'aa'.repeat(32);
+    const first = groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'pin-a1',
+      kind: 'metafile',
+      uri: `metafile://${'b'.repeat(64)}i0`,
+      contentHash: hashA,
+    });
+    assert.equal(first.contentHash, hashA);
+    assert.equal(groupTaskStore.listDeliverables(task.id)
+      .find((d) => d.id === first.id).contentHash, hashA);
+
+    // Same bytes under a DIFFERENT pin: the lookup finds the earliest row.
+    const second = groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'pin-a2',
+      kind: 'metafile',
+      uri: `metafile://${'c'.repeat(64)}i0`,
+      contentHash: hashA,
+    });
+    assert.equal(groupTaskStore.findDeliverableByContentHash(task.id, hashA)?.id, first.id);
+    // excludeId hides the row itself (the daemon's "a DIFFERENT row" check).
+    assert.equal(groupTaskStore.findDeliverableByContentHash(task.id, hashA, first.id)?.id, second.id);
+    assert.equal(groupTaskStore.findDeliverableByContentHash(task.id, hashA, second.id)?.id, first.id);
+
+    // No match: unknown hash / other task / NULL hashes never collide.
+    assert.equal(groupTaskStore.findDeliverableByContentHash(task.id, 'bb'.repeat(32)), undefined);
+    const otherTask = groupTaskStore.createTask({
+      groupId: 'group-p2-other', title: 'P2 other', goal: 'dedupe', chairMetabotId: 1, createdBy: 'user',
+    });
+    assert.equal(groupTaskStore.findDeliverableByContentHash(otherTask.id, hashA), undefined);
+
+    // Rejected rows are excluded: a re-delivery of rejected bytes must not be
+    // absorbed into the rejected row.
+    groupTaskStore.updateDeliverableStatus(first.id, 'rejected');
+    assert.equal(groupTaskStore.findDeliverableByContentHash(task.id, hashA)?.id, second.id);
+
+    // updateDeliverableContentHash persists onto an existing row.
+    groupTaskStore.updateDeliverableContentHash(legacy.id, hashA);
+    assert.equal(groupTaskStore.listDeliverables(task.id)
+      .find((d) => d.id === legacy.id).contentHash, hashA);
+
+    // updateDeliverableUri writes the hash when given and CLEARS it when not
+    // (a corrected uri means new bytes — the stale hash must not survive).
+    groupTaskStore.updateDeliverableUri(legacy.id, 'metafile://' + 'd'.repeat(64) + 'i0', 'metafile', 'cc'.repeat(32));
+    assert.equal(groupTaskStore.listDeliverables(task.id)
+      .find((d) => d.id === legacy.id).contentHash, 'cc'.repeat(32));
+    groupTaskStore.updateDeliverableUri(legacy.id, 'metafile://' + 'e'.repeat(64) + 'i0', 'metafile');
+    assert.equal(groupTaskStore.listDeliverables(task.id)
+      .find((d) => d.id === legacy.id).contentHash, null);
+  } finally {
+    store.close();
+  }
+});
