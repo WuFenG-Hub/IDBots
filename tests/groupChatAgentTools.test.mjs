@@ -203,7 +203,7 @@ test('join_group surfaces control failures as an error result without throwing',
   assert.match(result.content[0].text, /Join group failed: insufficient balance/);
 });
 
-test('send_group_message defaults nick_name to the MetaBot display name and forwards extras', async () => {
+test('send_group_message uses the MetaBot display name as nickName and forwards extras', async () => {
   const { calls, byName } = makeHarness();
   const result = await byName.group_chat.handler({
     action: 'send_group_message',
@@ -231,17 +231,19 @@ test('send_group_message defaults nick_name to the MetaBot display name and forw
   assert.match(text, /txids: tx-s/);
 });
 
-test('send_group_message honors an explicit nick_name override', async () => {
+test('send_group_message ignores a model-supplied nick_name (regression: sender_name "claude bot")', async () => {
   const { calls, byName } = makeHarness();
   await byName.group_chat.handler({
     action: 'send_group_message',
     group_id: GROUP_ID,
     target_metabot_name: 'helper',
     content: 'hi',
-    nick_name: 'Custom Nick',
+    // The nick_name param no longer exists in the tool schema; even if a raw
+    // caller still passes it, the registered MetaBot name must win.
+    nick_name: 'claude bot',
   });
   assert.equal(calls.send[0].metabotId, NAMED_METABOT_ID);
-  assert.equal(calls.send[0].nickName, 'Custom Nick');
+  assert.equal(calls.send[0].nickName, 'Helper Bot');
 });
 
 test('send_group_message rejects an empty content', async () => {

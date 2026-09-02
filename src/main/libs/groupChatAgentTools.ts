@@ -141,10 +141,6 @@ export function buildGroupChatAgentTools(deps: {
         .min(1)
         .optional()
         .describe('send_group_message: plaintext message; the host AES-encrypts it before broadcast.'),
-      nick_name: z
-        .string()
-        .optional()
-        .describe('send_group_message: in-group nickname; omit to use the MetaBot display name.'),
       reply_pin: z.string().optional().describe('send_group_message: pin id of the message being replied to.'),
       channel_id: z.string().optional().describe('send_group_message: channel id within the group.'),
       mention: z
@@ -168,7 +164,6 @@ export function buildGroupChatAgentTools(deps: {
       referrer?: string;
       k?: string;
       content?: string;
-      nick_name?: string;
       reply_pin?: string;
       channel_id?: string;
       mention?: string[];
@@ -254,7 +249,10 @@ export function buildGroupChatAgentTools(deps: {
       if (!content) {
         return textResult('group_chat send_group_message requires `content` (the plaintext message).', true);
       }
-      const nickName = asString(args.nick_name) || control.getMetabotDisplayName(metabotId) || undefined;
+      // The nickName is always the registered MetaBot display name — the model
+      // cannot pick one (incident: on-chain sender_name "claude bot"); the host
+      // re-resolves it from the metabot store anyway.
+      const nickName = control.getMetabotDisplayName(metabotId) || undefined;
       const mention = Array.isArray(args.mention)
         ? args.mention.map(asString).filter(Boolean)
         : [];

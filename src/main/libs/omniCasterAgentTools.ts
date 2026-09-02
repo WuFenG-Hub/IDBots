@@ -91,6 +91,13 @@ export function buildOmniCasterAgentTools(deps: {
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | undefined;
   /**
+   * Registered MetaBot display-name resolver. The on-chain nickName of a
+   * /protocols/simplegroupchat payload is always the registered name, never a
+   * model-authored one (incident: sender_name "claude bot" on an otherwise
+   * correct pin).
+   */
+  getMetabotDisplayName?: (metabotId: number) => string;
+  /**
    * Owner-approval gate for payload_file (chainUploadGate.checkUploadAllowed):
    * returns null when the file may be published, or the denial message.
    * Publishing a local file on-chain is irreversible, so files outside the
@@ -99,7 +106,7 @@ export function buildOmniCasterAgentTools(deps: {
    */
   gateLocalFile?: (filePath: string) => Promise<string | null>;
 }): unknown[] {
-  const { tool, createPin, encryptGroupMessage, sessionId, resolveMetabotId, gateLocalFile } = deps;
+  const { tool, createPin, encryptGroupMessage, sessionId, resolveMetabotId, gateLocalFile, getMetabotDisplayName } = deps;
 
   const omniCast = tool(
     'omni_cast',
@@ -223,6 +230,14 @@ export function buildOmniCasterAgentTools(deps: {
             }
             parsed.content = encryptGroupMessage(parsed.content, groupId);
             parsed.encryption = 'aes';
+            // The on-chain nickName is always the acting MetaBot's registered
+            // name — never a model-authored one (incident: sender_name
+            // "claude bot" on an otherwise-correct pin).
+            delete parsed.nickName;
+            const displayName = getMetabotDisplayName?.(metabotId)?.trim();
+            if (displayName) {
+              parsed.nickName = displayName;
+            }
           }
           cleanPayload = JSON.stringify(parsed);
         } else {
