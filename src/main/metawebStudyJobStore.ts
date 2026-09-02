@@ -268,6 +268,20 @@ export class MetawebStudyJobStore {
   }
 
   /**
+   * Fail a job WITHOUT running it — a config-level refusal (e.g. memory
+   * disabled for the bot, so the study session would have no knowledge-base
+   * tools to save into). Unlike recordRun this moves no run counters and sets
+   * no last_run_at: nothing ran, so nothing should be counted.
+   */
+  markFailedWithoutRun(id: string, input: { error: string; nowIso: string }): void {
+    this.db.run(
+      `UPDATE metaweb_study_jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?`,
+      [input.error, input.nowIso, id],
+    );
+    this.saveDb();
+  }
+
+  /**
    * Crash recovery: a job left 'running' by a killed process becomes pending
    * again. `excludeId` protects a job that is still running IN THIS PROCESS
    * (sqlite recovery restarts the schedule while an in-flight run lives on) —

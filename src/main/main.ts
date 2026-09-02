@@ -6502,6 +6502,12 @@ const getMetawebStudyService = (): MetawebStudyService => {
   if (!metawebStudyService) {
     metawebStudyService = new MetawebStudyService({
       store: getMetawebStudyJobStore(),
+      // Mirror of the coworkRunner memory gate on knowledge-base tools: with
+      // memory disabled for the bot a study session could search/read but save
+      // nothing, and the empty run would be misrecorded as 'done'. Fail the
+      // job loudly before a session is ever launched.
+      isMemoryEnabled: (metabotId) =>
+        getCoworkStore().getEffectiveMemoryPolicyForMetabot(metabotId).memoryEnabled,
       // One bounded background cowork session per job run, through the same
       // orchestrator bridge the Twin/Worker flow uses. The session carries the
       // bot's metabotId, so the whole inline tool surface (search_metaweb,
