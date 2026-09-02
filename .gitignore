@@ -39,6 +39,7 @@ docs/*
 !docs/group-task-orchestration-improvements-2026-08-09.md
 !docs/metaweb-learning-roadmap.md
 !docs/metaweb-search-backend-requirements.md
+!docs/metaweb-search-quality-requirements.md
 !docs/gasfee-flow/
 !docs/gasfee-flow/**
 !docs/analysis/
