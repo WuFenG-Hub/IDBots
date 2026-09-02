@@ -1053,7 +1053,8 @@ export function gateChairDrivingSend(input: GateChairDrivingSendInput):
         `Task ${input.taskId} is being driven by another session (${holder.slice(0, 12)}…) — ` +
         `the driver claim is ${Math.round(result.claimAgeMs / 1000)}s old; retry in ` +
         `${Math.ceil(result.retryAfterMs / 1000)}s or wait for the active driver to yield ` +
-        `(same-session sends pass driver_id to keep driving)`,
+        `(same-session sends pass driver_id to keep driving) ` +
+        `(grace window ${Math.round(input.graceMs / 1000)}s)`,
     };
   }
   return { ok: true };
