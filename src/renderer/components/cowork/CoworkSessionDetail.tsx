@@ -1744,7 +1744,7 @@ const UserMessageItem: React.FC<{
                 className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-60 ${
                   action === 'rewind'
                     ? 'bg-red-500 hover:opacity-90 text-white'
-                    : 'bg-claude-accent hover:opacity-90 text-white'
+                    : 'bg-claude-accent hover:opacity-90 text-claude-accentInk'
                 }`}
               >
                 {isSubmitting
@@ -1951,7 +1951,7 @@ const A2AGuidanceControls = React.memo(({
             <button
               type="submit"
               disabled={isSubmittingA2AGuidance || !guidanceText.trim()}
-              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-claude-accent px-3 text-xs font-medium text-white transition-colors hover:bg-claude-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-claude-accent px-3 text-xs font-medium text-claude-accentInk transition-colors hover:bg-claude-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <PaperAirplaneIcon className="h-4 w-4" />
               {isSubmittingA2AGuidance ? i18nService.t('a2aGuidanceSubmitting') : i18nService.t('a2aGuidanceSend')}

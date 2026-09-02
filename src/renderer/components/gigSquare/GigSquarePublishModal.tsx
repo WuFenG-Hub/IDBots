@@ -433,7 +433,7 @@ const GigSquarePublishModal: React.FC<GigSquarePublishModalProps> = ({
                   disabled={isFormDisabled}
                   className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
                     paymentTiming === item.value
-                      ? 'bg-claude-accent text-white'
+                      ? 'bg-claude-accent text-claude-accentInk'
                       : 'text-claude-textSecondary hover:bg-claude-surfaceHover dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover'
                   }`}
                 >

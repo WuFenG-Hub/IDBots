@@ -211,7 +211,7 @@ const SkillScopeEditor: React.FC<SkillScopeEditorProps> = ({ skill, metabots, on
                           : 'dark:border-claude-darkBorder border-claude-border'
                       }`}
                     >
-                      {checked.has(bot.id) && <CheckIcon className="w-2.5 h-2.5 text-white" />}
+                      {checked.has(bot.id) && <CheckIcon className="w-2.5 h-2.5 text-claude-accentInk" />}
                     </span>
                     <span className="truncate">{bot.name}</span>
                   </button>

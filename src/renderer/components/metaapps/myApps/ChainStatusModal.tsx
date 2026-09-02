@@ -60,7 +60,7 @@ const ChainStatusModal: React.FC<ChainStatusModalProps> = ({ status, title, txid
             <button
               type="button"
               onClick={onClose}
-              className="px-3 py-1.5 text-sm rounded-lg bg-claude-accent text-white hover:opacity-90 transition-opacity"
+              className="px-3 py-1.5 text-sm rounded-lg bg-claude-accent text-claude-accentInk hover:opacity-90 transition-opacity"
             >
               {t('close') || 'Close'}
             </button>

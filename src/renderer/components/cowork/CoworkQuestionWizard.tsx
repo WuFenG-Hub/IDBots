@@ -308,7 +308,7 @@ const CoworkQuestionWizard: React.FC<CoworkQuestionWizardProps> = ({
                         onClick={() => setCurrentStep(index)}
                         className={`relative flex items-center justify-center w-7 h-7 rounded-full text-xs font-medium transition-all ${
                           isActive
-                            ? 'bg-claude-accent text-white shadow-md'
+                            ? 'bg-claude-accent text-claude-accentInk shadow-md'
                             : isAnswered
                             ? 'bg-green-500/20 dark:bg-green-600/20 text-green-700 dark:text-green-400 border border-green-500 dark:border-green-600 hover:scale-105'
                             : 'bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover text-claude-textSecondary dark:text-claude-darkTextSecondary hover:bg-claude-accent/20 dark:hover:bg-claude-accent/20 hover:scale-105'
@@ -363,7 +363,7 @@ const CoworkQuestionWizard: React.FC<CoworkQuestionWizardProps> = ({
                             : 'border-claude-border dark:border-claude-darkBorder'
                         }`}>
                           {isSelected && (
-                            <svg className="w-full h-full text-white" viewBox="0 0 16 16" fill="none">
+                            <svg className="w-full h-full text-claude-accentInk" viewBox="0 0 16 16" fill="none">
                               <path d="M13 4L6 11L3 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                             </svg>
                           )}
