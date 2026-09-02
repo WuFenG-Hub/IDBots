@@ -702,7 +702,7 @@ test('release packaging wires nested DSH runtime install, extraResources, and pa
   );
   assert.equal(
     runtimePkg.dependencies['@deepseek-ai/dsh-sdk-client'],
-    '0.1.2-alpha.3',
+    '0.1.2-alpha.4',
     'dsh-sdk-client is a packaged runtime dependency of the Electron host, not a test-only devDependency',
   );
   assert.equal(

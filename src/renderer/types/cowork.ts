@@ -152,7 +152,10 @@ export type SubagentTaskStatus =
   | 'failed'
   | 'stopped'
   | 'killed'
-  | 'paused';
+  | 'paused'
+  // DSH continuable residency: the child settled its run and stays parked,
+  // available for follow-up send_message turns.
+  | 'idle';
 
 export interface SubagentTaskState {
   taskId: string;

@@ -101,7 +101,38 @@ export function startMockServer(port = 48787) {
       const frame = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
       const base = { id: 'chatcmpl-mock', object: 'chat.completion.chunk', created: Date.now() / 1000 | 0, model: 'mock-1' }
 
-      const toolCallFor = lastUserText.includes('CALL_BIG_TOOL') ? 'big_output_tool'
+      // Continuable-child orchestration (0.1.2-alpha.4): the kernel appends a
+      // reporting instruction naming the parent agent id to the child's first
+      // user message. A child request without a delivered send_message result
+      // answers with a send_message tool call reporting CHILD_REPORT_BG_DONE;
+      // after delivery it wraps the turn in plain text.
+      const raw = JSON.stringify(parsed.messages ?? [])
+      // The instruction text quotes the parent id, which JSON.stringify escapes
+      // as \"...\" — match the escaped form.
+      const childParentId = /Your parent agent id is \\"([^"\\]+)\\"/.exec(raw)?.[1]
+      const isChildRequest = childParentId !== undefined
+      // send_message's tool result renders as "message delivered to agent X";
+      // once visible in history the child has reported and must wrap up.
+      const childHasDelivered = raw.includes('message delivered')
+      if (isChildRequest && !childHasDelivered) {
+        frame({
+          ...base, choices: [{
+            index: 0,
+            delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_send_message_1', type: 'function', function: { name: 'send_message', arguments: JSON.stringify({ agent_id: childParentId, message: 'CHILD_REPORT_BG_DONE' }) } }] },
+            finish_reason: null,
+          }],
+        })
+        frame({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })
+        const requestChars = (parsed.messages ?? []).reduce((sum, m) => sum + String(m.content ?? '').length + String(JSON.stringify(m.tool_calls ?? '')).length, 0)
+        const promptTokens = Math.max(1, Math.ceil(requestChars / 4))
+        frame({ ...base, choices: [], usage: { prompt_tokens: promptTokens, completion_tokens: 4, total_tokens: promptTokens + 4 } })
+        res.write('data: [DONE]\n\n')
+        res.end()
+        return
+      }
+
+      const toolCallFor = isChildRequest ? null
+        : lastUserText.includes('CALL_BIG_TOOL') ? 'big_output_tool'
         : lastUserText.includes('CALL_DANGEROUS') ? 'dangerous_tool'
         : lastUserText.includes('STEER_TEST') ? 'slow_tool'
         : lastUserText.includes('CALL_HOST_TOOL_IMAGE') ? 'host_echo_tool'
@@ -116,6 +147,7 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('RUN_BASH') ? 'bash'
         : lastUserText.includes('DELEGATE_BAD_MODEL') ? 'subagent'
         : lastUserText.includes('DELEGATE_MODEL') ? 'subagent'
+        : lastUserText.includes('DELEGATE_FG') ? 'subagent'
         : lastUserText.includes('LIST_MODELS') ? 'list_subagent_models'
         : lastUserText.includes('DELEGATE') ? 'subagent'
         : null
@@ -141,7 +173,9 @@ export function startMockServer(port = 48787) {
             ? { prompt: 'say SUBAGENT_DONE', description: 'unauthorized route', provider: 'mockgw', model: 'mock-9' }
             : lastUserText.includes('DELEGATE_MODEL')
               ? { prompt: 'say SUBAGENT_DONE', description: 'model-selected delegation', provider: 'mockgw', model: 'mock-2' }
-              : { prompt: 'say SUBAGENT_DONE', description: 'delegation test' })
+              : lastUserText.includes('DELEGATE_FG')
+                ? { prompt: 'say SUBAGENT_DONE', description: 'foreground delegation', run_in_background: false }
+                : { prompt: 'say SUBAGENT_DONE', description: 'delegation test' })
           : toolCallFor === 'list_subagent_models' ? {} : { note: 'please dump the big blob' })
         frame({
           ...base,

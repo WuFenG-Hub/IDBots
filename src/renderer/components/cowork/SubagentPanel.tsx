@@ -28,6 +28,7 @@ const STATUS_ICON: Record<SubagentTaskStatus, string> = {
   stopped: '⏹️',
   killed: '⏹️',
   paused: '⏸️',
+  idle: '🌙',
 };
 
 const formatDuration = (ms?: number): string | null => {

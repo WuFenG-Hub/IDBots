@@ -661,6 +661,14 @@ export class DshTurnHub {
     return result.messages ?? []
   }
 
+  /** Subagent panel stop: kernel 'user'-authority interrupt (DSH sessions). */
+  async interruptSubagent(coworkSessionId: string, agentId: string): Promise<{ accepted: boolean; reason?: string }> {
+    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
+    const kernel = this.kernelForDsh(dshId)
+    if (!kernel || !dshId) return { accepted: false, reason: 'DSH kernel not running for this session' }
+    return kernel.interruptSubagent(dshId, agentId)
+  }
+
   /**
    * Official token-meter projections for the usage panel (cowork session id
    * in, DSH routing inside; post-turn safe via the pinned-id fallback).
