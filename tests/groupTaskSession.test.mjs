@@ -188,6 +188,38 @@ test('fix-v2 B6: a mid-task session (re)creation injects the authoritative task 
   }
 });
 
+test('fix-v2 B4: each task gets its own workspace folder; recreation keeps it', async () => {
+  const { store, coworkStore, groupTaskStore, task } = await setup();
+  try {
+    const { resolveGroupTaskSessionWorkspace } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(coworkStore, task, 2, 'Coder Bot');
+    assert.ok(session.cwd.endsWith(`group-task-${task.id}`), `per-task folder, got ${session.cwd}`);
+
+    // A second task for the same bot lands in a DIFFERENT folder — previous
+    // episodes' files cannot leak into this task's context.
+    const task2 = groupTaskStore.createTask({
+      groupId: `${'cd'.repeat(32)}i0`,
+      title: 'Second task',
+      goal: 'Another goal',
+      chairMetabotId: 1,
+      createdBy: 'user',
+    });
+    const second = ensureGroupTaskSession(coworkStore, task2, 2, 'Coder Bot');
+    assert.notEqual(second.session.cwd, session.cwd, 'distinct folders per task');
+    assert.ok(second.session.cwd.endsWith(`group-task-${task2.id}`));
+
+    // Same task, recreated session (mapping lost) → SAME folder, so mid-task
+    // rebuilds keep their artifacts.
+    const again = resolveGroupTaskSessionWorkspace('/tmp/base', `group-task:${task.id}`);
+    assert.equal(again, `/tmp/base/group-task-${task.id}`);
+    // Guest bindings sanitize the on-chain group id (no ':' in a folder name).
+    const guest = resolveGroupTaskSessionWorkspace('/tmp/base', `openteam:${'ab'.repeat(32)}i0`);
+    assert.ok(!guest.includes(':') && guest.includes('openteam-'));
+  } finally {
+    store.close();
+  }
+});
+
 test('guest sessions bind to the on-chain group id and inject the guest snapshot', async () => {
   const { store, coworkStore, tempDir } = await setup();
   try {
