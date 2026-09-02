@@ -8,13 +8,22 @@ Companion memory: `dsh-phase1-m1-progress` (project memory, auto-recalled)
 IDBots runs a **dual-kernel architecture**: cowork sessions run either on the
 Claude Agent SDK (original path, untouched) or on **DSH (DeepSeek Harness)**
 via `dsh-runtime/` — a self-composed Cordis plugin runtime consumed strictly
-as pinned npm packages (`@deepseek-ai/*@0.1.2-alpha.3`, zero forks; 0.1.2
+as pinned npm packages (`@deepseek-ai/*@0.1.2-alpha.4`, zero forks; 0.1.2
 line reached via rc.2 → alpha.2 (2026-08-31) → alpha.3 (2026-09-01: subagent
 image follow-ups, shared batch prompt admission, read_image signature sniffing,
-identity-gated projection change feed; note the steer-at-clean-exit fix landed
-on the branch but was dropped by an upstream merge and is NOT in published
-alpha.3). Alpha keeps the 0.1.1 replay semantics and adds the Remote surface +
-waterfall seams; old rc-line history still replays). Phase 1
+identity-gated projection change feed) → alpha.4 (2026-09-02: adjacent-agent
+`send_message` replaces the one-way `report` tool, `Session.events` replaced by
+on-demand reads `seq`/`eventAt()`/`snapshotEvents()`/`ownEvents()`, branded
+`SessionSeq`/`SessionLogOffset` types (wire stays numbers), per-package local
+`invariant.js` consolidated into the shared invariants package. IDBots needed
+zero code adaptation for alpha.4: our six static imports (app-boot, attachment,
+attachment-local, sdk-protocol, sdk-jsonrpc-server, tool-subagent) kept their
+surfaces, projection reads still go through `sessionProjections.snapshot()`,
+and we never parse JSONL header lines directly. Note the steer-at-clean-exit
+fix landed on the branch but was dropped by an upstream merge and is NOT in
+published alpha.3 or alpha.4 tarballs — recheck `pendingWakes` in
+dsh-agent-loop on every bump). Alpha keeps the 0.1.1 replay semantics and
+adds the Remote surface + waterfall seams; old rc-line history still replays). Phase 1
 (26 commits on `feat/dsh-phase1`, merged as `946361a7`) plus a soak-fix
 series on main is complete and live-verified: kernel swap, full tool surface,
 skills (bash-executed), permission chain, compaction, retry, session-scoped
@@ -170,7 +179,7 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 - **Mapper never echoes user/message** (submission path records user bubbles).
 - **DSH session teardown**: `removeActiveSession` after completion (else next
   input classifies as a dangling steer); re-register at turn start.
-- **npm**: pin the `alpha` tag / exact `0.1.2-alpha.3` — `latest`/`next`
+- **npm**: pin the `alpha` tag / exact `0.1.2-alpha.4` — `latest`/`next`
   dist-tags lag behind and ERESOLVE-conflict.
 - **Session artifact encoding (0.1.2)**: default `zstd` (Node builtin zlib,
   no native addon; Electron 41 = Node 24 has it). The jsonl backend refuses
