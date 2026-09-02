@@ -10,7 +10,7 @@
  * plain-LLM reply path only (no skill turns).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SqliteDatabase as Database } from '../sqliteTypes';
@@ -102,6 +102,7 @@ import {
 import { buildMetafileUri } from './serviceDeliveryArtifacts.js';
 import metaFileUploadShared from './metaFileUploadShared.js';
 import { isTextDocumentDeliverable } from './deliverableTextNote';
+import { downloadMetafileBytes } from '../libs/metafileDownload';
 
 const { inferContentTypeFromFilePath } = metaFileUploadShared;
 
@@ -1417,7 +1418,9 @@ export interface GroupTaskDaemonDeps {
    * metafile paid by the author bot's wallet, so a worker's local file path
    * becomes verifiable chain evidence. Same seam the OpenTeam guest daemon
    * uses (metaFileUploadService.uploadMetaFile). Unwired = text deliverables
-   * are recorded as-is (no on-chain upgrade).
+   * are recorded as-is (no on-chain upgrade). The result carries the uploaded
+   * bytes' sha256 as `contentHash` (P2 same-bytes dedupe) when the direct
+   * upload path computed it.
    */
   uploadDeliverableFile?: (input: {
     metabotId: number;
@@ -3615,11 +3618,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                     fileName: path.basename(filePath),
                     contentType,
                   });
-                  store.updateDeliverableUri(deliverable.id, uri, 'metafile');
+                  // P2: same-bytes dedupe BEFORE the row is rewritten — an
+                  // identical earlier deliverable (same sha256) absorbs this
+                  // one; the duplicate row is deleted and never upgraded.
+                  const uploadContentHash = typeof upload?.contentHash === 'string'
+                    ? upload.contentHash.trim()
+                    : '';
+                  const dedupe: {
+                    outcome: 'current-deleted' | 'other-deleted' | 'none';
+                    survivorVerification?: string;
+                  } = uploadContentHash
+                    ? dedupeDeliverableByContentHash(task, deliverable, uploadContentHash)
+                    : { outcome: 'none' };
+                  if (dedupe.outcome === 'current-deleted') {
+                    continue;
+                  }
+                  store.updateDeliverableUri(deliverable.id, uri, 'metafile', uploadContentHash || null);
                   // Reuse the pinid verification path so the upgraded row gets
                   // the same on-chain confirmation semantics as a native one.
+                  // When this row absorbed a later duplicate, merge onto the
+                  // annotation the dedupe just wrote (never clobber it).
                   const report = await verifyPinSources(pinId);
-                  store.updateDeliverableVerification(deliverable.id, JSON.stringify(report));
+                  const mergedReport = dedupe.survivorVerification != null
+                    ? { ...JSON.parse(dedupe.survivorVerification), ...report }
+                    : report;
+                  store.updateDeliverableVerification(deliverable.id, JSON.stringify(mergedReport));
                   store.updateDeliverableConfirmation(
                     deliverable.id,
                     report.verified ? 'confirmed' : 'unconfirmed',
@@ -6282,6 +6305,70 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * P2: same-bytes deliverable dedupe. Within one task, rows carrying the same
+   * sha256 content hash (identical bytes registered under different pins)
+   * collapse to the EARLIEST row: the later duplicate is deleted and the
+   * survivor's verification JSON gains one append-only `duplicates` entry
+   * naming the absorbed row's pin/uri. Rejected rows never participate (see
+   * findDeliverableByContentHash). `outcome` is 'current-deleted' when the
+   * caller's row was absorbed (the caller must stop touching it),
+   * 'other-deleted' when the caller's row absorbed a later duplicate (then
+   * `survivorVerification` carries the caller row's NEW verification JSON so
+   * the caller can refresh its stale in-memory copy), 'none' when no
+   * same-bytes row exists.
+   */
+  const dedupeDeliverableByContentHash = (
+    task: GroupTask,
+    deliverable: GroupTaskDeliverable,
+    contentHash: string,
+  ): {
+    outcome: 'current-deleted' | 'other-deleted' | 'none';
+    survivorVerification?: string;
+  } => {
+    const store = deps.getGroupTaskStore();
+    const hit = store.findDeliverableByContentHash(task.id, contentHash, deliverable.id);
+    if (!hit) return { outcome: 'none' };
+    const survivor = hit.id < deliverable.id ? hit : deliverable;
+    const duplicate = hit.id < deliverable.id ? deliverable : hit;
+    // Merge into the survivor's existing verification report (append-only);
+    // a corrupt/missing report degrades to a fresh object, same as the
+    // re-verification pass's parse idiom.
+    let report: Record<string, unknown> = {};
+    try {
+      if (survivor.verification) report = JSON.parse(survivor.verification);
+    } catch {
+      report = {};
+    }
+    const duplicates = Array.isArray(report.duplicates) ? report.duplicates : [];
+    duplicates.push({
+      msgPinId: duplicate.msgPinId ?? null,
+      uri: duplicate.uri ?? null,
+      notedAt: new Date().toISOString(),
+    });
+    report.duplicates = duplicates;
+    const survivorVerification = JSON.stringify(report);
+    store.updateDeliverableVerification(survivor.id, survivorVerification);
+    store.deleteDeliverable(duplicate.id);
+    emitLog(
+      `[GroupTaskDaemon] Task ${task.id}: deliverable #${duplicate.id} duplicates #${survivor.id} ` +
+      `(same bytes, sha256 ${contentHash.slice(0, 12)}…); merged into the earliest row`,
+    );
+    return duplicate.id === deliverable.id
+      ? { outcome: 'current-deleted' }
+      : { outcome: 'other-deleted', survivorVerification };
+  };
+
+  /** P2: hard cap for download-and-hash of metafile deliverables (bytes). */
+  const DELIVERABLE_CONTENT_HASH_MAX_BYTES = 25 * 1024 * 1024;
+  /**
+   * P2: deliverables whose bytes were already downloaded-and-hashed (or
+   * attempted) in this daemon lifetime — the verification monitor runs every
+   * tick, so an unhashable/oversized row must not re-download each pass.
+   * Keyed by `id:uri` so a corrected uri is hashed again.
+   */
+  const contentHashAttempted = new Set<string>();
+
+  /**
    * P0-4: periodic re-verification for deliverables that are NOT verified yet
    * (indexer lag / 40400). Re-checks every verificationRetryMinutes (default
    * 10) per deliverable until verified.
@@ -6292,6 +6379,41 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const nowMs = now();
     for (const deliverable of deliverables) {
       if (deliverable.status === 'rejected') continue;
+      // P2: content-hash backfill for direct metafile refs — rows recorded
+      // from a `[DELIVERABLE] metafile://<pin>` tag carry no hash at record
+      // time, so download the bytes once (size-capped) and hash them here,
+      // off the hot message loop, then run the same-bytes dedupe. Any
+      // network/parse failure leaves the hash NULL and never breaks
+      // verification or ingestion.
+      const deliverableUri = (deliverable.uri ?? '').trim();
+      if (deliverable.contentHash == null && deliverableUri.startsWith('metafile://')) {
+        const attemptKey = `${deliverable.id}:${deliverableUri}`;
+        if (!contentHashAttempted.has(attemptKey)) {
+          contentHashAttempted.add(attemptKey);
+          try {
+            const { buffer } = await downloadMetafileBytes(deliverableUri);
+            if (buffer.length <= DELIVERABLE_CONTENT_HASH_MAX_BYTES) {
+              const contentHash = createHash('sha256').update(buffer).digest('hex');
+              const dedupe = dedupeDeliverableByContentHash(task, deliverable, contentHash);
+              if (dedupe.outcome === 'current-deleted') {
+                continue; // absorbed into an earlier row — nothing left to verify here
+              }
+              store.updateDeliverableContentHash(deliverable.id, contentHash);
+              if (dedupe.survivorVerification != null) {
+                // This row absorbed a later duplicate — refresh the in-memory
+                // report so the re-verification write below cannot clobber
+                // the just-merged `duplicates` annotation.
+                deliverable.verification = dedupe.survivorVerification;
+              }
+            }
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} content hashing skipped: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }
       const pinid = pinidFromDeliverable(deliverable.uri);
       if (!pinid) continue;
       let report: { verified?: boolean; checkedAt?: number } = {};
@@ -6317,7 +6439,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (nowMs - checkedAt < verificationRetryMs) continue;
       try {
         const fresh = await verifyPinSources(pinid);
-        store.updateDeliverableVerification(deliverable.id, JSON.stringify(fresh));
+        // P2: re-verification refreshes the source probe fields but must not
+        // clobber annotation keys (e.g. the `duplicates` dedupe audit trail)
+        // merged into the report by other passes.
+        store.updateDeliverableVerification(
+          deliverable.id,
+          JSON.stringify({ ...(report as Record<string, unknown>), ...fresh }),
+        );
         // Issue #8: the re-verification pass is the chain-confirmation-driven
         // update path — a pin that becomes verifiable on-chain (indexer lag
         // caught up) flips the ledger's confirmation state.

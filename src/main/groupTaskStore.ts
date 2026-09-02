@@ -210,6 +210,11 @@ export interface GroupTaskDeliverable {
   /** P0-4: JSON verification report (sources + outcomes) for a deliverable. */
   verification: string | null;
   /**
+   * P2: sha256 hex of the deliverable's bytes — the same-bytes dedupe key.
+   * NULL until the row is hashed (upload-time or the daemon's backfill pass).
+   */
+  contentHash?: string | null;
+  /**
    * Issue #8: on-chain confirmation of the deliverable's pin, driven by the
    * daemon's multi-source verification (verified=true => 'confirmed'). This is
    * ORTHOGONAL to `status`: a pin can be on-chain confirmed while still
@@ -410,6 +415,8 @@ export interface AddGroupTaskDeliverableInput {
   authorGlobalmetaid?: string | null;
   kind?: string | null;
   uri?: string | null;
+  /** P2: sha256 hex of the deliverable bytes, when known at record time. */
+  contentHash?: string | null;
 }
 export interface GroupTaskTransition {
   id: number;
@@ -497,6 +504,8 @@ interface GroupTaskDeliverableRow {
   created_at: string | null;
   verification: string | null;
   confirmation: string | null;
+  /** P2: sha256 hex of the deliverable bytes (migrated-in column). */
+  content_hash?: string | null;
   /** Joined from group_chat_messages by listDeliverables only. */
   source_content?: string | null;
   source_sender_name?: string | null;
@@ -912,6 +921,7 @@ function rowToGroupTaskDeliverable(row: GroupTaskDeliverableRow): GroupTaskDeliv
       : 'pending',
     createdAt: row.created_at ?? null,
     verification: row.verification ?? null,
+    contentHash: row.content_hash ?? null,
     confirmation: row.confirmation === 'confirmed' ? 'confirmed' : 'unconfirmed',
     sourceContent: row.source_content ?? null,
     sourceSenderName: row.source_sender_name ?? null,
@@ -2163,14 +2173,15 @@ export class GroupTaskStore {
     // column default; the daemon flips it to 'confirmed' once multi-source
     // on-chain verification succeeds (Issue #8).
     this.db.run(
-      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, confirmation)
-       VALUES (?, ?, ?, ?, ?, 'unconfirmed')`,
+      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, content_hash, confirmation)
+       VALUES (?, ?, ?, ?, ?, ?, 'unconfirmed')`,
       [
         input.taskId,
         input.msgPinId ?? null,
         input.authorGlobalmetaid ?? null,
         input.kind ?? null,
         input.uri ?? null,
+        input.contentHash ?? null,
       ],
     );
     const id = this.lastInsertId();
@@ -2225,6 +2236,33 @@ export class GroupTaskStore {
        LIMIT 1`,
       [taskId, msgPinId, uri, kind],
     );
+    return row ? rowToGroupTaskDeliverable(row) : undefined;
+  }
+
+  /**
+   * P2: same-bytes dedupe lookup — the EARLIEST non-rejected deliverable in
+   * this task carrying the given sha256 content hash. Rejected rows are
+   * excluded so a re-delivery of already-rejected bytes is never absorbed
+   * into the rejected row (the chair's rework loop must stay visible).
+   */
+  findDeliverableByContentHash(
+    taskId: number,
+    contentHash: string,
+    excludeId?: number,
+  ): GroupTaskDeliverable | undefined {
+    const row = excludeId == null
+      ? this.getOne<GroupTaskDeliverableRow>(
+          `SELECT * FROM group_task_deliverables
+           WHERE task_id = ? AND content_hash = ? AND status != 'rejected'
+           ORDER BY id ASC LIMIT 1`,
+          [taskId, contentHash],
+        )
+      : this.getOne<GroupTaskDeliverableRow>(
+          `SELECT * FROM group_task_deliverables
+           WHERE task_id = ? AND content_hash = ? AND status != 'rejected' AND id != ?
+           ORDER BY id ASC LIMIT 1`,
+          [taskId, contentHash, excludeId],
+        );
     return row ? rowToGroupTaskDeliverable(row) : undefined;
   }
 
@@ -2380,11 +2418,26 @@ export class GroupTaskStore {
     }));
   }
 
-  /** Round-4: in-place update of a deliverable (correction-first aggregation). */
-  updateDeliverableUri(id: number, uri: string | null, kind: string): void {
+  /**
+   * Round-4: in-place update of a deliverable (correction-first aggregation).
+   * P2: `contentHash` is written alongside; callers that rewrite the uri
+   * WITHOUT knowing the new content's hash (corrections, pinid upgrades)
+   * leave it NULL so the stale hash of the superseded bytes never survives —
+   * the daemon's verification pass re-hashes the new content.
+   */
+  updateDeliverableUri(id: number, uri: string | null, kind: string, contentHash?: string | null): void {
     this.db.run(
-      'UPDATE group_task_deliverables SET uri = ?, kind = ? WHERE id = ?',
-      [uri, kind, id],
+      'UPDATE group_task_deliverables SET uri = ?, kind = ?, content_hash = ? WHERE id = ?',
+      [uri, kind, contentHash ?? null, id],
+    );
+    this.saveDb();
+  }
+
+  /** P2: persist the sha256 content hash computed for an existing deliverable. */
+  updateDeliverableContentHash(id: number, contentHash: string | null): void {
+    this.db.run(
+      'UPDATE group_task_deliverables SET content_hash = ? WHERE id = ?',
+      [contentHash, id],
     );
     this.saveDb();
   }

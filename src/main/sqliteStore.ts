@@ -1002,6 +1002,8 @@ export class SqliteStore {
     this.migrateGroupTaskDeliverablesConfirmation();
     // P3 (v1.1): widen the legacy status CHECK to include 'delivered'.
     this.migrateGroupTaskDeliverablesDeliveredStatus();
+    // P2: same-bytes deliverable dedupe key (sha256 of the deliverable bytes).
+    this.migrateGroupTaskDeliverablesContentHash();
     // P0-8: public integrity declarations (honest corrections/reports).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_integrity_events (
@@ -2380,6 +2382,25 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskDeliverablesVerification:', error);
+    }
+  }
+
+  /**
+   * Migration (P2): deliverable content-hash column (sha256 hex of the
+   * deliverable bytes), the dedupe key for same-bytes re-registrations.
+   * Idempotent PRAGMA-guarded; existing rows stay NULL (unhashed) until the
+   * daemon's verification pass backfills them.
+   */
+  private migrateGroupTaskDeliverablesContentHash(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_deliverables)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('content_hash')) {
+        this.db.run('ALTER TABLE group_task_deliverables ADD COLUMN content_hash TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskDeliverablesContentHash:', error);
     }
   }
 
