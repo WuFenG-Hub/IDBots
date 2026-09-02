@@ -35,6 +35,16 @@ export function shouldRunDeepConsolidation(itemCount: number): boolean {
   return itemCount >= MIN_ITEMS_TO_CONSIDER;
 }
 
+/**
+ * Maximum combined retire/rewrite actions one pass may propose — a quarter
+ * of the inventory, rounded up. Shared by the prompt (so the model budgets
+ * its own proposal) and the service guardrail (which refuses larger lists
+ * as suspected hallucinated purges).
+ */
+export function deepConsolidationRetireCap(itemCount: number): number {
+  return Math.ceil(itemCount * 0.25);
+}
+
 export function buildDeepConsolidationPrompt(input: {
   botName: string;
   items: DeepConsolidationInventoryItem[];
@@ -51,6 +61,8 @@ export function buildDeepConsolidationPrompt(input: {
     '- Retire knowledge points that duplicate another point or have been proven wrong; prefer rewriting (merging several stale points into one accurate point) over deletion when the underlying lesson still has value.',
     '- Rewrites must reuse an existing id and keep the topic focused; the system stores the prior text as a version, so rewrites are reversible.',
     '- Be conservative: when unsure, keep the item and explain in notes.',
+    `- Propose at most ${deepConsolidationRetireCap(input.items.length)} combined retire/rewrite actions (a quarter of the inventory); the system refuses larger lists.`,
+    '- Keep notes under 80 words and answer with the JSON object only — long per-item commentary is not read by anyone.',
     '- Output ONLY a JSON object, no prose around it.',
     '',
     'Output JSON shape:',
@@ -101,4 +113,24 @@ export function parseDeepConsolidationOutput(raw: string): DeepConsolidationOutp
     }
   }
   return null;
+}
+
+/**
+ * Human-readable diagnosis for a parse failure — distinguishes an answer
+ * with no JSON object at all (prose drift or truncation before the object
+ * finished, e.g. the output-token budget cut the stream mid-list) from a
+ * complete-but-malformed object, so the settings error line points at the
+ * actual cause instead of a bare "unparseable output".
+ */
+export function describeDeepConsolidationParseFailure(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return 'empty output';
+  }
+  const firstBrace = trimmed.indexOf('{');
+  const lastBrace = trimmed.lastIndexOf('}');
+  if (firstBrace < 0 || lastBrace <= firstBrace) {
+    return `no complete JSON object in ${trimmed.length} chars of output (prose answer, or truncated at the output-token budget)`;
+  }
+  return `malformed JSON object (${trimmed.length} chars)`;
 }

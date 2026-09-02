@@ -12,6 +12,8 @@ import {
 } from '../libs/memoryHygienePolicy';
 import {
   buildDeepConsolidationPrompt,
+  deepConsolidationRetireCap,
+  describeDeepConsolidationParseFailure,
   parseDeepConsolidationOutput,
   shouldRunDeepConsolidation,
   type DeepConsolidationInventoryItem,
@@ -36,6 +38,12 @@ import {
 const HYGIENE_TICK_INTERVAL_MS = 60_000;
 const HYGIENE_STATUS_CHANNEL = 'memoryHygiene:statusChanged';
 const DEEP_CONSOLIDATION_LLM_TIMEOUT_MS = 120_000;
+// Explicit output budget for the consolidation JSON. The transport default
+// for thinking-disabled calls (4_096) truncated real inventories mid-JSON
+// (bots with 150+ belief-layer rows hit "unparseable output" on 2026-09-02);
+// 12_288 keeps 2-3x headroom over observed well-formed proposals while
+// staying inside the deepseek catalog caps (flash 32_768 / pro 16_000).
+const DEEP_CONSOLIDATION_MAX_OUTPUT_TOKENS = 12_288;
 
 export interface MemoryHygieneMetabotLike {
   id: number;
@@ -84,6 +92,8 @@ export type MemoryHygienePerformChat = (
     signal?: AbortSignal;
     maxTokens?: number;
     thinking?: 'enabled' | 'disabled';
+    /** Pass false: a stray built-in web search derails the JSON contract. */
+    webSearch?: boolean;
   }
 ) => Promise<string>;
 
@@ -272,7 +282,14 @@ export class MemoryHygieneService {
               'You are a memory consolidation assistant. Respond only with the requested JSON object.',
               buildDeepConsolidationPrompt({ botName: bot.name ?? `MetaBot ${bot.id}`, items }),
               bot.llm_id ?? undefined,
-              { thinking: 'disabled', signal: AbortSignal.timeout(DEEP_CONSOLIDATION_LLM_TIMEOUT_MS) },
+              {
+                thinking: 'disabled',
+                signal: AbortSignal.timeout(DEEP_CONSOLIDATION_LLM_TIMEOUT_MS),
+                maxTokens: DEEP_CONSOLIDATION_MAX_OUTPUT_TOKENS,
+                // The Responses-path default web_search injection turns this
+                // into a search-plus-prose answer that blows the JSON budget.
+                webSearch: false,
+              },
             );
           } catch (error) {
             errors.push(`deep-consolidation bot ${bot.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -280,7 +297,9 @@ export class MemoryHygieneService {
           }
           const output = parseDeepConsolidationOutput(raw);
           if (!output) {
-            errors.push(`deep-consolidation bot ${bot.id}: unparseable output`);
+            errors.push(
+              `deep-consolidation bot ${bot.id}: unparseable output (${describeDeepConsolidationParseFailure(raw)})`
+            );
             continue;
           }
           const errorsBeforeApply = errors.length;
@@ -304,7 +323,7 @@ export class MemoryHygieneService {
           // refuse the whole proposal and let the cadence retry later.
           // (Bogus and conversation-origin ids are already filtered out, so
           // junk output cannot trip the guardrail by itself.)
-          const retireCap = Math.ceil(items.length * 0.25);
+          const retireCap = deepConsolidationRetireCap(items.length);
           if (retireMemories.length + retireKnowledge.length > retireCap) {
             errors.push(
               `deep-consolidation bot ${bot.id}: retire list exceeds guardrail` +

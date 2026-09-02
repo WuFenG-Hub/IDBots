@@ -509,12 +509,14 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
   db.run('UPDATE user_memories SET updated_at = ?, last_used_at = ? WHERE metabot_id = 9', [recentBeforeSnapshot, recentBeforeSnapshot]);
 
   const calls = [];
+  const callOptions = [];
   const service = new MemoryHygieneService({
     coworkStore,
     metabotStore: { listMetabots: () => [{ id: 9, name: 'Twin', llm_id: null, globalmetaid: 'metaid://stub-owner' }] },
     metaidKnowledgeStore: knowledge,
-    performChat: async (_system, user) => {
+    performChat: async (_system, user, _llmId, options) => {
       calls.push(user);
+      callOptions.push(options);
       return '```json\n' + JSON.stringify({
         retire_memory_ids: [boundaryIds[0], 'bogus-memory-id', conversationBoundary],
         retire_knowledge_ids: [knowledgeId, 'bogus-knowledge-id'],
@@ -532,6 +534,12 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
     assert.equal(calls.length, 1);
     assert.match(calls[0], /value_boundary/);
     assert.match(calls[0], /deploy steps/);
+    // The consolidation call must opt out of the Responses-path web_search
+    // injection (prose drift root cause) and pin an explicit output budget
+    // (4096 default truncated real inventories mid-JSON).
+    assert.equal(callOptions[0]?.webSearch, false);
+    assert.equal(callOptions[0]?.maxTokens, 12_288);
+    assert.equal(callOptions[0]?.thinking, 'disabled');
 
     const visibleBoundaries = coworkStore.listUserMemories({
       metabotId: 9,
@@ -551,6 +559,44 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
     const again = await service.runNow();
     assert.equal(again.counts.deepConsolidationBots, 0, 'cadence gate skips within the interval');
     assert.equal(calls.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('deep consolidation reports why the output was unparseable', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  for (let index = 0; index < 8; index += 1) {
+    coworkStore.createUserMemory({
+      metabotId: 9,
+      text: `boundary rule ${index}`,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+      forceNew: true,
+    });
+  }
+  // The 2026-09-02 live failure: output cut mid-JSON at the token budget.
+  const truncated = '{"retire_memory_ids": ["item-a", "item-b", "item-c"';
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, name: 'Twin', llm_id: null, globalmetaid: 'metaid://stub-owner' }] },
+    performChat: async () => truncated,
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.deepRetiredMemories, 0);
+    assert.ok(
+      stats.errors.some((line) =>
+        line.includes('deep-consolidation bot 9: unparseable output (no complete JSON object in')
+        && line.includes('truncated at the output-token budget')),
+      `diagnostic missing from errors: ${JSON.stringify(stats.errors)}`
+    );
+    assert.equal(coworkStore.getDeepConsolidationLastRunAt(9), null, 'failed parse never stamps the cadence');
   } finally {
     cleanup();
   }
