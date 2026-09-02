@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { truncateUtf16Units } from './llmSafeText';
+import { readInputFromOmniJson, recordChainReadSafe } from './chainReadLedger';
 
 /**
  * Control surface the host (main.ts) provides for the omni_read tool. Pure
@@ -133,8 +134,11 @@ type OmniReadArgs = {
 export function buildOmniReaderAgentTools(deps: {
   tool: SdkToolFactory;
   control: OmniReaderControl;
+  /** Session attribution for the chain-read ledger; omit to disable recording. */
+  sessionId?: string;
+  resolveMetabotId?: (sessionId: string) => number | null | undefined;
 }): unknown[] {
-  const { tool, control } = deps;
+  const { tool, control, sessionId, resolveMetabotId } = deps;
 
   const omniRead = tool(
     'omni_read',
@@ -258,7 +262,11 @@ export function buildOmniReaderAgentTools(deps: {
             const pinId = asString(args.pinId);
             if (!pinId) return textResult('omni_read buzz_info requires pinId.', true);
             const url = buildUrl(SHOWNOW_BASE, 'social/buzz/info', { pinId });
-            return textResult(formatData(await control.fetchJson(url)));
+            const json = await control.fetchJson(url);
+            // Fire-and-forget chain-read ledger entry; the raw indexer JSON
+            // is not normalized, so extraction is best-effort.
+            recordChainReadSafe(readInputFromOmniJson(args.action, json, pinId, resolveMetabotId?.(sessionId ?? '')));
+            return textResult(formatData(json));
           }
 
           case 'notifications': {
@@ -290,7 +298,11 @@ export function buildOmniReaderAgentTools(deps: {
             const pinId = asString(args.pinId);
             if (!pinId) return textResult('omni_read pin requires pinId.', true);
             const url = buildUrl(MANAPI_BASE, `api/pin/${encodeURIComponent(pinId)}`);
-            return textResult(formatData(await control.fetchJson(url)));
+            const json = await control.fetchJson(url);
+            // Fire-and-forget chain-read ledger entry; the raw indexer JSON
+            // is not normalized, so extraction is best-effort.
+            recordChainReadSafe(readInputFromOmniJson(args.action, json, pinId, resolveMetabotId?.(sessionId ?? '')));
+            return textResult(formatData(json));
           }
 
           case 'pin_version': {
@@ -358,6 +370,9 @@ export function buildOmniReaderAgentTools(deps: {
             if (!pinId) return textResult('omni_read pin_content requires pinId.', true);
             const url = buildUrl(MANAPI_BASE, `content/${encodeURIComponent(pinId)}`);
             const body = await control.fetchText(url);
+            // Fire-and-forget chain-read ledger entry; the raw content body
+            // has no metadata, so only pin id + text are recorded.
+            recordChainReadSafe(readInputFromOmniJson(args.action, body, pinId, resolveMetabotId?.(sessionId ?? '')));
             const text = body.length > MAX_RESULT_CHARS
               ? `${truncateUtf16Units(body, MAX_RESULT_CHARS)}\n...(truncated, narrow the query with cursor/size)`
               : body;

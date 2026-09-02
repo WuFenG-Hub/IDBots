@@ -6,6 +6,7 @@ import type {
   KnowledgeBaseDocumentSource,
   KnowledgeBaseLearnSummary,
 } from '../services/knowledgeBaseService';
+import { markChainReadSavedToKbSafe } from './chainReadLedger';
 
 /**
  * Control surface the host (main.ts) provides for the knowledge base tools.
@@ -249,6 +250,12 @@ export function buildKnowledgeBaseAgentTools(deps: {
           content: args.content,
           source,
         });
+        // Back-fill the chain-read ledger: a MetaWeb pin saved into a KB was
+        // typically read earlier — flag saved_to_kb on its reads row. No-op
+        // when the pin was never recorded as read.
+        if (source.type === 'metaweb' && pinId) {
+          markChainReadSavedToKbSafe(metabotId, pinId, saved.kbId);
+        }
         return textResult(
           [
             `Saved document "${truncate(title, 120)}" into knowledge base "${saved.kbId}" at ${saved.relpath}.`,

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { SocialPostItem, SocialCommentItem } from '../services/socialRecallService';
 import { buildPinBrowserUri, markdownSelfLink } from './metawebUri';
 import { truncateUtf16Units } from './llmSafeText';
+import { readInputFromSocialPost, recordChainReadSafe } from './chainReadLedger';
 
 /** A feed candidate from the Social Recall API, marked when authored by one of the user's own MetaBots. */
 export type SocialPostCandidate = SocialPostItem & { isOwn?: boolean };
@@ -189,8 +190,11 @@ export function buildSocialRecallAgentTools(deps: {
   socialRecall: SocialRecallControl;
   /** True for browser-type sessions (Bot Browser side panel with bot_browser_open_uri available). */
   openBestMatchInBrowser: boolean;
+  /** Session attribution for the chain-read ledger; omit to disable recording. */
+  sessionId?: string;
+  resolveMetabotId?: (sessionId: string) => number | null | undefined;
 }): unknown[] {
-  const { tool, socialRecall, openBestMatchInBrowser } = deps;
+  const { tool, socialRecall, openBestMatchInBrowser, sessionId, resolveMetabotId } = deps;
 
   const candidatesGuidance = openBestMatchInBrowser
     ? 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: post snippets MUST remain pin:// links, author names MUST remain metaid:// links, and pinIds must stay intact (they are needed for social_post_detail / social_post_comments). When the user wants to view an author, open their page with bot_browser_open_uri on the metaid:// URI (prefer newTab=true). Never invent posts, authors, or engagement numbers, and never turn an on-chain pin into a Web2 URL.'
@@ -289,6 +293,9 @@ export function buildSocialRecallAgentTools(deps: {
       }
       try {
         const post = await socialRecall.post(pinId);
+        // Fire-and-forget chain-read ledger entry (metabot_chain_reads);
+        // only the full detail read is recorded — search and comments are not.
+        recordChainReadSafe(readInputFromSocialPost(post, resolveMetabotId?.(sessionId ?? '')));
         return textResult([
           formatSocialPostDetail(post),
           detailGuidance,

@@ -3,6 +3,7 @@ import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 import type { MetawebSearchItem, MetawebSearchProtocol } from '../services/metawebSearchService';
 import type { MetawebPin } from '../services/metawebPinService';
 import { METAWEB_CITATION_RULE, buildPinBrowserUri, buildSearchItemBrowserUri, markdownSelfLink } from './metawebUri';
+import { readInputFromMetawebPin, recordChainReadSafe } from './chainReadLedger';
 
 /**
  * Control surface the host (main.ts) provides for the MetaWeb learning tools.
@@ -144,8 +145,11 @@ export function formatMetawebPinDetail(pin: MetawebPin): string {
 export function buildMetawebLearningAgentTools(deps: {
   tool: SdkToolFactory;
   metawebLearning: MetawebLearningControl;
+  /** Session attribution for the chain-read ledger; omit to disable recording. */
+  sessionId?: string;
+  resolveMetabotId?: (sessionId: string) => number | null | undefined;
 }): unknown[] {
-  const { tool, metawebLearning } = deps;
+  const { tool, metawebLearning, sessionId, resolveMetabotId } = deps;
 
   const searchGuidance = [
     'Judge these candidates by title + summary, then open the 1-3 most promising pins with read_metaweb_pin (use the pin: ids above verbatim — they work for any protocol).',
@@ -237,6 +241,10 @@ export function buildMetawebLearningAgentTools(deps: {
         if (pin.text == null) {
           return textResult(`Pin "${pinId}" (${pin.protocol || 'unknown protocol'}) has no readable text content (encrypted, binary, or empty). Skip it and try another search result; do NOT invent its content.`);
         }
+        // Fire-and-forget chain-read ledger entry (metabot_chain_reads); the
+        // nightly MetaWeb study jobs read through this same tool, so their
+        // reads are recorded too — that is intended.
+        recordChainReadSafe(readInputFromMetawebPin(pin, resolveMetabotId?.(sessionId ?? ''), 'read_metaweb_pin'));
         return textResult([
           formatMetawebPinDetail(pin),
           METAWEB_CITATION_RULE,

@@ -8577,7 +8577,12 @@ export class CoworkRunner extends EventEmitter {
     }
     if (this.omniReader) {
       memoryTools.push(
-        ...buildOmniReaderAgentTools({ tool, control: this.omniReader })
+        ...buildOmniReaderAgentTools({
+          tool,
+          control: this.omniReader,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
+        })
       );
     }
     // browser_open complements bot_browser_* (browser-session only): it runs
@@ -8657,6 +8662,8 @@ export class CoworkRunner extends EventEmitter {
           tool,
           socialRecall: this.socialRecall,
           openBestMatchInBrowser: isBrowserSession,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })
       );
     }
@@ -8668,6 +8675,8 @@ export class CoworkRunner extends EventEmitter {
         ...buildMetawebLearningAgentTools({
           tool,
           metawebLearning: this.metawebLearning,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })
       );
     }
