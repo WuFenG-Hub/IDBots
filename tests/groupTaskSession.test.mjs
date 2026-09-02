@@ -145,6 +145,49 @@ test('ensureGroupTaskMemberReady injects goal, roster and recent transcript into
   }
 });
 
+test('fix-v2 B6: a mid-task session (re)creation injects the authoritative task ledger', async () => {
+  const { store, db, coworkStore, groupTaskStore, task, tempDir } = await setup();
+  try {
+    // Simulate a task mid-flight: status moved to executing, one deliverable
+    // delivered by the worker (the chair's session was rebuilt at this point
+    // in task #55 — it must recover this state from the host, not memory).
+    groupTaskStore.updateTaskStatus(task.id, 'executing');
+    groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'delivery-pin-i0',
+      authorGlobalmetaid: 'gmid-w2',
+      kind: 'metaapp',
+      uri: `metaapp://${'cd'.repeat(32)}i0`,
+    });
+    // The source message whose pin matches the deliverable row — the ledger
+    // joins the author name from it.
+    db.run(
+      `INSERT INTO group_chat_messages (pin_id, tx_id, group_id, sender_metaid, sender_global_metaid,
+        sender_name, protocol, content, mention, is_processed)
+       VALUES ('delivery-pin-i0', 'del', ?, 'metaid-2', 'gmid-w2', 'Coder Bot',
+        '/protocols/simplegroupchat', '[DELIVERABLE] metaapp done', '[]', 0)`,
+      [task.groupId],
+    );
+
+    const { sessionId, created } = ensureGroupTaskMemberReady({
+      coworkStore,
+      groupTaskStore,
+      task: groupTaskStore.getTaskById(task.id),
+      botId: 1,
+      botName: 'Twin Bot',
+    });
+    assert.equal(created, true);
+    const snapshot = coworkStore.getSessionMessages(sessionId)[0].content;
+    assert.match(snapshot, /Task ledger \(authoritative host state/);
+    assert.match(snapshot, /Status: executing/);
+    assert.match(snapshot, /Status trail: planning -> executing/);
+    assert.match(snapshot, /Deliverables on the ledger \(1\)/);
+    assert.match(snapshot, /\[metaapp\] metaapp:\/\/cd+.*\(pending, unconfirmed\) by Coder Bot/);
+  } finally {
+    store.close();
+  }
+});
+
 test('guest sessions bind to the on-chain group id and inject the guest snapshot', async () => {
   const { store, coworkStore, tempDir } = await setup();
   try {

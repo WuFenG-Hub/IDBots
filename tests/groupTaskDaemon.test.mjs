@@ -471,9 +471,13 @@ test('happy path: kickoff mentioning two workers triggers both, chair stays sile
       assert.equal(session.sessionType, 'group_task');
       assert.equal(session.metabotId, workerId);
       const messages = h.coworkStore.getSessionMessages(session.id);
-      assert.deepEqual(messages.map((m) => m.type), ['user', 'assistant']);
-      assert.match(messages[0].content, /recent group log/);
-      assert.equal(messages[1].content, `reply-for-llm-${workerId}`);
+      // fix-v2 (B6): a daemon-created session gets the context snapshot
+      // (with the task ledger) injected before the first turn's user message.
+      assert.deepEqual(messages.map((m) => m.type), ['user', 'user', 'assistant']);
+      assert.match(messages[0].content, /group context snapshot/);
+      assert.match(messages[0].content, /Task ledger/);
+      assert.match(messages[1].content, /recent group log/);
+      assert.equal(messages[2].content, `reply-for-llm-${workerId}`);
     }
 
     // cursor advanced past the kickoff message
@@ -1779,7 +1783,9 @@ test('skill path: routing hit runs the skill turn in the existing session, plain
     assert.equal(h.sends[0].metabotId, 2, 'reply posted as the worker bot');
     assert.equal(h.sends[0].content, 'skill-turn-reply');
     const messages = h.coworkStore.getSessionMessages(mapping.coworkSessionId);
-    assert.deepEqual(messages.map((m) => m.type), ['user']);
+    // fix-v2 (B6): injected context snapshot precedes the turn's user message.
+    assert.deepEqual(messages.map((m) => m.type), ['user', 'user']);
+    assert.match(messages[0].content, /group context snapshot/);
   } finally {
     h.cleanup();
   }
@@ -1926,12 +1932,12 @@ test('[NO_REPLY] plain path: suppressed on-chain, session kept, cooldown recorde
 
     assert.equal(h.chatCalls.length, 1, 'LLM was consulted');
     assert.equal(h.sends.length, 0, 'nothing went on-chain');
-    // session continuity: user + assistant ([NO_REPLY]) both appended
+    // session continuity: snapshot + user + assistant ([NO_REPLY]) all appended
     const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
     assert.ok(mapping);
     const sessionMessages = h.coworkStore.getSessionMessages(mapping.coworkSessionId);
-    assert.deepEqual(sessionMessages.map((m) => m.type), ['user', 'assistant']);
-    assert.equal(sessionMessages[1].content, '[NO_REPLY]');
+    assert.deepEqual(sessionMessages.map((m) => m.type), ['user', 'user', 'assistant']);
+    assert.equal(sessionMessages[2].content, '[NO_REPLY]');
 
     // cooldown recorded: an immediate second mention never reaches the LLM
     insertGroupMessage(h.db, {
@@ -2067,9 +2073,10 @@ test('chair planning turn: fires once for a new planning task (kv, directive, ro
 
     const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 1);
     assert.ok(mapping, 'chair session on the metaweb_group_task channel');
+    // fix-v2 (B6): snapshot + directive + chair reply.
     assert.deepEqual(
       h.coworkStore.getSessionMessages(mapping.coworkSessionId).map((m) => m.type),
-      ['user', 'assistant'],
+      ['user', 'user', 'assistant'],
     );
   } finally {
     h.cleanup();

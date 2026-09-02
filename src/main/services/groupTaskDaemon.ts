@@ -75,6 +75,7 @@ import {
   isRollCallPresenceCheck,
 } from '../libs/groupTaskCopy';
 import {
+  ensureGroupTaskMemberReady,
   ensureGroupTaskSession,
   GROUP_TASK_CONVERSATION_CHANNEL,
 } from './groupTaskSession';
@@ -2581,6 +2582,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * fix-v2 (B6): one authoritative host-state line on EVERY turn — the task's
+   * live status, the ledger size, and the review gate. A rebuilt or long-lived
+   * session must never narrate "awaiting owner acceptance" from memory while
+   * the host DB says the task never entered review (task #55's chair amnesia
+   * misreport). The line states facts for every role; the chair playbook rules
+   * make the review gate explicit.
+   */
+  const buildAuthoritativeStateLine = (task: GroupTask): string => {
+    let ledgerNote = '';
+    try {
+      const deliverables = deps.getGroupTaskStore().listDeliverables(task.id);
+      const confirmed = deliverables.filter((deliverable) => deliverable.confirmation === 'confirmed').length;
+      ledgerNote = `deliverables on ledger: ${deliverables.length} (${confirmed} on-chain confirmed); `;
+    } catch {
+      // best-effort ledger read
+    }
+    const reviewGate = task.status === 'review'
+      ? 'the task IS in review — owner acceptance is pending'
+      : 'the task is NOT in review — never announce that it is finished or awaiting owner acceptance until [STATUS:REVIEW] has been applied';
+    return `[Authoritative task state (host DB): status=${task.status}; ${ledgerNote}${reviewGate}]`;
+  };
+
   const buildGroupLogUserMessage = (
     db: Database,
     task: GroupTask,
@@ -2606,6 +2630,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     });
     const lines = renderGroupLogLines(entries, { fold: logEntropyP0.logFold });
     return [
+      buildAuthoritativeStateLine(task),
       `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; protocol lines ([DELIVERABLE]/[FREEZE]/[STATUS:]/[PLAN_CHANGE]/[CHECKPOINT]) and the triggering message are shown in full, other long messages are head+tail truncated, acknowledgment lines folded; to read any message in full use the group-task show action with view=full / before_id paging)]`,
       ...lines,
     ].join('\n');
@@ -2615,13 +2640,33 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * Per-turn session lookup, delegated to the shared helper (groupTaskSession)
    * so the eager pre-creation path (invite/join) and the daemon always agree
    * on the SAME mapping (P1-3: one session-creation code path).
+   *
+   * fix-v2 (B6): creation goes through ensureGroupTaskMemberReady so a session
+   * (re)created MID-task — a lost mapping or a rebuilt chair session — gets the
+   * full context snapshot INCLUDING the authoritative task ledger (status,
+   * status trail, deliverables). Rebuilding from the truncated recent-message
+   * window alone is exactly how task #55's chair lost its acceptance memory
+   * and misreported "waiting for owner acceptance" while still executing.
    */
   const ensureTaskSession = (
     coworkStore: CoworkStore,
     task: GroupTask,
     botId: number,
     botName: string,
-  ): CoworkSession => ensureGroupTaskSession(coworkStore, task, botId, botName).session;
+  ): CoworkSession => {
+    const { sessionId } = ensureGroupTaskMemberReady({
+      coworkStore,
+      groupTaskStore: deps.getGroupTaskStore(),
+      task,
+      botId,
+      botName,
+    });
+    const session = coworkStore.getSession(sessionId);
+    if (session) return session;
+    // Unreachable in practice (the session was just created); fall back to the
+    // bare find-or-create so the turn never crashes on a store hiccup.
+    return ensureGroupTaskSession(coworkStore, task, botId, botName).session;
+  };
 
   /**
    * Unambiguous per-turn local time line (mirrors coworkRunner's Local Time

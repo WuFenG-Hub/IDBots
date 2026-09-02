@@ -97,10 +97,54 @@ export interface GroupTaskContextMessage {
 }
 
 /**
- * Inject the group context (goal, acceptance, roster, recent transcript)
- * into the member's session as one clearly-marked [SYSTEM] user message.
- * Only injects into sessions that have no messages yet — re-injection would
- * duplicate the context on every eager-join retry.
+ * fix-v2 (B6): the authoritative task ledger for a context snapshot — task
+ * status, the recorded status trail, and every deliverable row (kind, uri,
+ * ledger status, on-chain confirmation, author). A session (re)created
+ * mid-task must rebuild its task knowledge from this host state, not from
+ * the truncated recent-message window alone: task #55's rebuilt chair
+ * session lost every earlier acceptance and misreported "waiting for owner
+ * acceptance" while the task was still executing.
+ */
+export function buildGroupTaskLedgerLines(
+  store: GroupTaskStore,
+  task: GroupTaskSessionTaskLike & { status?: string | null },
+): string[] {
+  const lines: string[] = [];
+  const status = (task.status ?? '').trim();
+  if (status) lines.push(`- Status: ${status}`);
+  try {
+    const events = store.listStatusEvents(task.id);
+    if (events.length > 0) {
+      const trail = events.map((event) => `${event.fromStatus} -> ${event.toStatus}`).join(', ');
+      lines.push(`- Status trail: ${trail}`);
+    }
+  } catch {
+    // best-effort ledger read
+  }
+  try {
+    const deliverables = store.listDeliverables(task.id);
+    if (deliverables.length === 0) {
+      lines.push('- Deliverables: none recorded on the ledger yet');
+    } else {
+      lines.push(`- Deliverables on the ledger (${deliverables.length}):`);
+      for (const deliverable of deliverables) {
+        lines.push(
+          `  - [${deliverable.kind ?? 'text'}] ${deliverable.uri ?? '(no uri)'} ` +
+          `(${deliverable.status}, ${deliverable.confirmation}) by ${deliverable.sourceSenderName ?? 'unknown'}`,
+        );
+      }
+    }
+  } catch {
+    // best-effort ledger read
+  }
+  return lines;
+}
+
+/**
+ * Inject the group context (goal, acceptance, ledger, roster, recent
+ * transcript) into the member's session as one clearly-marked [SYSTEM] user
+ * message. Only injects into sessions that have no messages yet —
+ * re-injection would duplicate the context on every eager-join retry.
  */
 export function injectGroupTaskContext(input: {
   coworkStore: CoworkStore;
@@ -113,6 +157,8 @@ export function injectGroupTaskContext(input: {
   members: GroupTaskContextMember[];
   recentMessages: GroupTaskContextMessage[];
   recentCount?: number;
+  /** fix-v2 (B6): authoritative host task-ledger lines (status/deliverables). */
+  ledgerLines?: string[];
 }): void {
   const session = input.coworkStore.getSession(input.sessionId);
   if (!session || session.messages.length > 0) return;
@@ -125,11 +171,16 @@ export function injectGroupTaskContext(input: {
     ? recent.map((message) => `${message.senderName ?? 'Unknown'}: ${message.content ?? ''}`)
     : ['(no messages yet)'];
   const acceptance = (input.task.acceptanceCriteria ?? '').trim() || '(none specified)';
+  const ledgerLines = (input.ledgerLines ?? []).filter((line) => line.trim());
+  const ledgerSection = ledgerLines.length > 0
+    ? ['', 'Task ledger (authoritative host state — trust it over the message window):', ...ledgerLines]
+    : [];
   const snapshot = [
     '[SYSTEM group context snapshot — injected by the host at join time, not a group participant message]',
     `Task: ${input.task.title}`,
     `Goal: ${input.task.goal}`,
     `Acceptance criteria: ${acceptance}`,
+    ...ledgerSection,
     '',
     'Roster:',
     membersText,
@@ -224,6 +275,7 @@ export function ensureGroupTaskMemberReady(input: {
       members: members.map((member) => ({ name: member.name, role: member.role })),
       recentMessages,
       recentCount: input.recentCount,
+      ledgerLines: buildGroupTaskLedgerLines(input.groupTaskStore, input.task),
     });
   }
   return { sessionId: session.id, created };
