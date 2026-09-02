@@ -4511,9 +4511,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
         const bossGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
         // Trust the owner AND the chair: the twin chairs on the owner's behalf.
-        // Widened turns unlock the worker's FULL visible set (bundled + global
-        // + assigned) — capped at the bot, never the whole library; routing
-        // still decides WHICH skills; no routing hit -> plain path remains.
+        // Baseline (any sender): bundled + the worker's assigned skills;
+        // widened (boss/chair) additionally unlocks global external skills.
+        // Routing still decides WHICH skills; no routing hit -> plain path
+        // remains.
         const senderIsBoss = Boolean(
           senderGlobalMetaId && bossGlobalMetaId && senderGlobalMetaId === bossGlobalMetaId,
         );

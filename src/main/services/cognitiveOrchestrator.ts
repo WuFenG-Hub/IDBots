@@ -627,9 +627,9 @@ async function runReplyPipeline(
     getChatSkillsRoutingPrompt && allowedRoots.length > 0
       ? getChatSkillsRoutingPrompt({
           metabotId: metabot.id,
-          // Boss-triggered turns widen to the bot's FULL visible set
-          // (bundled + global + assigned) — capped at the bot, never the
-          // whole library.
+          // Baseline: bundled + assigned skills. Boss-triggered turns widen
+          // to the bot's FULL visible set, additionally unlocking global
+          // external skills.
           widened: triggerReason === 'Boss',
         })
       : null;
