@@ -164,6 +164,16 @@ export interface ChatCompletionOptions {
   maxTokens?: number;
   temperature?: number;
   /**
+   * Built-in DeepSeek web_search injection on the Responses API path.
+   * Defaults to enabled — the chat product behavior since the Responses
+   * switch — but structured JSON tasks (memory consolidation, distillation,
+   * classification) must pass false: a stray search call both delays the
+   * reply and derails the model into prose analysis instead of the JSON
+   * contract (the 2026-09-02 deep-consolidation "unparseable output" root
+   * cause).
+   */
+  webSearch?: boolean;
+  /**
    * Thinking-mode toggle. DeepSeek v4-pro enables thinking by default with
    * effort=high, which makes lightweight llm.complete calls (e.g. chess moves)
    * take minutes and hit timeouts. Client may opt out with 'disabled'.
@@ -245,7 +255,8 @@ async function chatCompletionSingleAttempt(
         options.maxTokens,
         options.temperature,
         thinking,
-        effort
+        effort,
+        options.webSearch
       );
     } else if (apiType === 'anthropic') {
       result = await callAnthropicStyleWithTools(
@@ -306,6 +317,8 @@ export async function performChatCompletionForOrchestrator(
     llmProvider?: string | null;
     throwOnEmptyContent?: boolean;
     thinking?: 'enabled' | 'disabled';
+    /** See ChatCompletionOptions.webSearch — pass false for structured JSON tasks. */
+    webSearch?: boolean;
   } = {}
 ): Promise<string> {
   const messages: ChatMessage[] = [
@@ -323,6 +336,7 @@ export async function performChatCompletionForOrchestrator(
     maxTokens: options.maxTokens,
     throwOnEmptyContent: options.throwOnEmptyContent,
     thinking: options.thinking,
+    webSearch: options.webSearch,
   });
   const content = result.content?.trim() ?? '';
   if (result.tool_calls?.length) {
@@ -499,6 +513,7 @@ export const __cognitiveChatCompletionTestUtils = {
   extractAnthropicThinkingText,
   shouldUseDeepSeekResponses,
   buildDeepSeekResponsesURL,
+  buildDeepSeekResponsesTools,
   normalizeDeepSeekResponsesEffort,
   resolveDeepSeekResponsesReasoning,
   resolveDefaultMaxOutputTokens,
@@ -606,6 +621,29 @@ async function callOpenAIStyleWithTools(
 }
 
 /**
+ * Tools array for the DeepSeek Responses path: the server-side web_search
+ * tool first (stable across turns for cache) unless the caller opted out,
+ * then any caller-supplied function tools. Returns an empty array when the
+ * caller opted out and passed no tools — in that case the request body
+ * should omit `tools` entirely.
+ */
+export function buildDeepSeekResponsesTools(
+  tools?: OpenAITool[],
+  webSearch?: boolean
+): Array<Record<string, unknown>> {
+  const responseTools: Array<Record<string, unknown>> = [];
+  if (webSearch !== false) {
+    responseTools.push({ type: 'web_search' });
+  }
+  if (Array.isArray(tools)) {
+    for (const t of tools) {
+      responseTools.push({ type: 'function', name: t.function.name, parameters: t.function.parameters ?? {} });
+    }
+  }
+  return responseTools;
+}
+
+/**
  * DeepSeek Responses API (/responses) call with optional tools.
  *
  * Unlike chat/completions, the Responses API takes `instructions` (system) and
@@ -626,7 +664,8 @@ async function callDeepSeekResponsesStyle(
   maxTokens?: number,
   temperature?: number,
   thinking?: 'enabled' | 'disabled',
-  effort?: LlmEffortLevel | null
+  effort?: LlmEffortLevel | null,
+  webSearch?: boolean
 ): Promise<ChatCompletionResult> {
   const url = buildDeepSeekResponsesURL(baseURL);
   const instructions: string[] = [];
@@ -666,21 +705,19 @@ async function callDeepSeekResponsesStyle(
     }
   }
 
-  // Tools: web_search first (server-side, stable across turns for cache), then
-  // any caller-supplied function tools.
-  const responseTools: Array<Record<string, unknown>> = [{ type: 'web_search' }];
-  if (Array.isArray(tools)) {
-    for (const t of tools) {
-      responseTools.push({ type: 'function', name: t.function.name, parameters: t.function.parameters ?? {} });
-    }
-  }
+  // Tools: web_search first (server-side, stable across turns for cache) —
+  // injected by default for the chat experience, opt out with webSearch:false —
+  // then any caller-supplied function tools.
+  const responseTools = buildDeepSeekResponsesTools(tools, webSearch);
 
   const body: Record<string, unknown> = {
     model,
     input,
-    tools: responseTools,
-    tool_choice: 'auto',
   };
+  if (responseTools.length > 0) {
+    body.tools = responseTools;
+    body.tool_choice = 'auto';
+  }
   if (instructions.length > 0) {
     body.instructions = instructions.join('\n\n');
   }
