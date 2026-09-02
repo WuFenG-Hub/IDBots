@@ -36,6 +36,8 @@ const {
   resolveDerivedAssignmentUpstream,
   buildOpenTeamPlanningStatusBlock,
   buildMemberJoinWelcomeText,
+  parseGroupTaskStuckReclaimMode,
+  hasProseDependencyDeclaration,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 const { SkillTurnTimeoutError } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
@@ -633,6 +635,8 @@ test('P1-2/P1-3: a genuinely inert worker session is reclaimed once per streak (
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
   });
   try {
+    // fix-v2 (B2): reclaim is opt-in now; the default mode is alert-only.
+    h.store.set('groupTaskStuckReclaim', JSON.stringify({ mode: 'auto' }));
     const task = h.createTask([2]);
     const startMs = Date.now();
     h.state.nowMs = startMs;
@@ -664,11 +668,113 @@ test('P1-2/P1-3: a genuinely inert worker session is reclaimed once per streak (
   }
 });
 
+test('fix-v2 B2: stuck reclaim mode parser defaults to alert-only', () => {
+  assert.equal(parseGroupTaskStuckReclaimMode(null), 'alert_only');
+  assert.equal(parseGroupTaskStuckReclaimMode(''), 'alert_only');
+  assert.equal(parseGroupTaskStuckReclaimMode('garbage'), 'alert_only');
+  assert.equal(parseGroupTaskStuckReclaimMode('{"mode":"weird"}'), 'alert_only');
+  assert.equal(parseGroupTaskStuckReclaimMode('{"mode":"auto"}'), 'auto');
+  assert.equal(parseGroupTaskStuckReclaimMode('auto'), 'auto');
+});
+
+test('fix-v2 B2: prose dependency declarations in a chair dispatch are recognized', () => {
+  assert.equal(hasProseDependencyDeclaration('@小新 开始 S5，依赖 S4 的交付'), true);
+  assert.equal(hasProseDependencyDeclaration('S4 待 S2、S3 交付后开始合成'), true);
+  assert.equal(hasProseDependencyDeclaration('等 S2 交付完成后再做质检'), true);
+  assert.equal(hasProseDependencyDeclaration('S5 depends on S4'), true);
+  assert.equal(hasProseDependencyDeclaration('blocked by the upstream render'), true);
+  assert.equal(hasProseDependencyDeclaration('waiting for the design deliverable'), true);
+  assert.equal(hasProseDependencyDeclaration('@小新 请开始制作主视觉'), false);
+  assert.equal(hasProseDependencyDeclaration(''), false);
+});
+
+test('fix-v2 B2: default stuck verdict is alert-only — the session is never stopped', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    // No groupTaskStuckReclaim kv → alert_only default. Same inert setup as
+    // the auto-mode reclaim test above.
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-alert-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const staleId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['working-stale-alert-i0'])[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, staleId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    assert.equal(stoppedSessions.length, 0, 'alert-only mode never stops the session');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), undefined, 'no reclaim recorded');
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'alert recorded once per streak');
+
+    // Idempotent: the alert fires once per streak, not every tick.
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1');
+    assert.equal(stoppedSessions.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 B2: a prose-declared upstream dependency exempts the waiting worker (no flag, no alert)', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // The chair's dispatch declares the dependency IN PROSE (the #54/#55
+    // pattern — no structured [DEPENDS_ON] tag): S5 waits on S4.
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-prose-dep-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S5 质检，依赖 S4 的交付，等它上线后开始。',
+      chainTimestamp: Math.floor((startMs - 150_000) / 1000),
+    });
+    // The worker ACKed and then correctly went quiet waiting for upstream.
+    insertGroupMessage(h.db, {
+      pinId: 'working-prose-dep-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，等 S4', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'a prose-dependency waiter keeps its working status');
+    assert.equal(stoppedSessions.length, 0);
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), undefined);
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), undefined, 'no stuck alert for a declared dependency wait');
+    const exemptRaw = h.store.get('group_task_dep_wait_exempt:1:2');
+    assert.ok(exemptRaw, 'dependency-wait exemption recorded');
+    assert.match(exemptRaw, /prose-declared upstream/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('review fix: a delivered-then-idle worker is never flagged or reclaimed by the local-worker timeout', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
   });
   try {
+    // fix-v2 (B2): reclaim is opt-in now; the default mode is alert-only.
+    h.store.set('groupTaskStuckReclaim', JSON.stringify({ mode: 'auto' }));
     const task = h.createTask([2, 3]);
     const startMs = Date.now();
     h.state.nowMs = startMs;
