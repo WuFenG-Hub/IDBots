@@ -1676,7 +1676,12 @@ export class SkillManager {
     const scriptPath = selectedEntry;
     const scriptArgs = ['--payload', payloadJson];
 
-    const timeoutMs = 60_000;
+    // fix-v2 (B3): chain-facing skill scripts are long operations — the
+    // group-task create flow (on-chain group create + indexing waits + member
+    // joins) routinely exceeds a minute and used to be SIGTERMed at 60s
+    // although the task was actually created (task #55). 180s covers the slow
+    // chain cadence without letting a wedged script run forever.
+    const timeoutMs = 180_000;
     const result = await this.runSkillScriptWithEnv(skillDir, scriptPath, scriptArgs, env, envOverrides, timeoutMs);
 
     const observation = result.success

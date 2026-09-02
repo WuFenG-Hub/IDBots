@@ -39,9 +39,11 @@ const {
 const {
   parseGroupTaskEntropyP0Config,
   isCeremonyAckLine,
+  isProtocolCarryingLine,
   truncateGroupLogLine,
   renderGroupLogLines,
   GROUP_LOG_MESSAGE_MAX_CHARS,
+  GROUP_LOG_PROTOCOL_MAX_CHARS,
 } = loadModule('libs/groupTaskEntropy.js');
 
 // ---------------------------------------------------------------------------
@@ -86,6 +88,38 @@ test('group log line truncation keeps head and tail with a marker', () => {
   assert.ok(truncated.startsWith('HEAD'));
   assert.ok(truncated.endsWith('TAIL'));
   assert.ok(truncated.includes(' … '));
+});
+
+test('fix-v2 B1: protocol-carrying and trigger lines keep their middles in the group log', () => {
+  // A delivery checklist longer than the plain cap but under the protocol cap
+  // must reach the chair intact — task #55 burned ~78 min on a resend loop
+  // caused by elided middles.
+  assert.equal(isProtocolCarryingLine('[DELIVERABLE] pin://abc 交付清单如下'), true);
+  assert.equal(isProtocolCarryingLine('结尾 [STATUS:REVIEW]'), true);
+  assert.equal(isProtocolCarryingLine('[FREEZE: pin://abc]'), true);
+  assert.equal(isProtocolCarryingLine('[PLAN_CHANGE: a -> b -> c]'), true);
+  assert.equal(isProtocolCarryingLine('[CHECKPOINT: 方案确认]'), true);
+  assert.equal(isProtocolCarryingLine('[WORKING] 已接单'), false, 'ceremony stays out of the protocol class');
+  assert.equal(isProtocolCarryingLine('普通长消息'), false);
+
+  const middle = '清单中段'.repeat(300); // 1200 chars of payload in the middle
+  const deliverable = `[DELIVERABLE] S2 交付：亲测通过+文案包 头部...${middle}...尾部 pin://abc123i0`;
+  const plain = `普通消息 头部...${middle}...尾部`;
+  const trigger = `触发消息 头部...${middle}...尾部`;
+  const lines = renderGroupLogLines([
+    { senderName: 'Lucy', content: deliverable },
+    { senderName: 'Bob', content: plain },
+    { senderName: 'Owner', content: trigger, isTrigger: true },
+  ], { fold: false });
+  assert.ok(lines[0].includes(middle), 'protocol line keeps its full middle');
+  assert.ok(!lines[1].includes(middle), 'plain long line is still truncated');
+  assert.ok(lines[1].includes(' … '), 'plain long line carries the elision marker');
+  assert.ok(lines[2].includes(middle), 'trigger line keeps its full middle');
+
+  // The protocol budget is still a cap, not unlimited.
+  const giant = `[DELIVERABLE] ${'x'.repeat(GROUP_LOG_PROTOCOL_MAX_CHARS + 5000)}`;
+  const giantLines = renderGroupLogLines([{ senderName: 'Lucy', content: giant }], { fold: false });
+  assert.ok(giantLines[0].length <= GROUP_LOG_PROTOCOL_MAX_CHARS + 100, 'protocol budget bounded');
 });
 
 test('renderGroupLogLines folds consecutive ceremony lines and never the trigger', () => {

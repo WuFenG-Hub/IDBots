@@ -31,7 +31,9 @@ import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import {
+  GROUP_LOG_PROTOCOL_MAX_CHARS,
   isCeremonyAckLine,
+  isProtocolCarryingLine,
   parseGroupTaskEntropyP0Config,
   renderGroupLogLines,
   truncateGroupLogLine,
@@ -73,6 +75,7 @@ import {
   isRollCallPresenceCheck,
 } from '../libs/groupTaskCopy';
 import {
+  ensureGroupTaskMemberReady,
   ensureGroupTaskSession,
   GROUP_TASK_CONVERSATION_CHANNEL,
 } from './groupTaskSession';
@@ -287,6 +290,42 @@ function extractDependsOnTokens(content: string | null | undefined): string[] {
     .filter((token) => token.length > 0);
 }
 const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
+
+/**
+ * fix/group-task-fix-v2 (B2): stuck-verdict reclaim mode. The default is
+ * 'alert_only' — a stuck verdict raises an alert for the chair to verify but
+ * never stops the member's session: tasks #54/#55 showed the automatic
+ * reclaim repeatedly killing sessions of members who were correctly waiting
+ * on upstream deliverables (3 false reclaims across the two tasks, all
+ * mislabeled "no upstream dependency"). kv `groupTaskStuckReclaim` accepts
+ * JSON `{"mode":"auto"}` to restore the reclaim behavior once the dependency
+ * graph is trustworthy.
+ */
+export type GroupTaskStuckReclaimMode = 'alert_only' | 'auto';
+export function parseGroupTaskStuckReclaimMode(raw: string | null | undefined): GroupTaskStuckReclaimMode {
+  const text = (raw ?? '').trim();
+  if (!text) return 'alert_only';
+  try {
+    const parsed = JSON.parse(text) as { mode?: unknown };
+    return parsed.mode === 'auto' ? 'auto' : 'alert_only';
+  } catch {
+    return text === 'auto' ? 'auto' : 'alert_only';
+  }
+}
+
+/**
+ * fix/group-task-fix-v2 (B2): prose-form dependency declarations in a chair
+ * dispatch. The structured form is `[DEPENDS_ON: <pinid>]`, but chairs
+ * routinely write dependencies in prose ("S5 依赖 S4", "S4 待 S2、S3 交付后
+ * 开始", "S5 depends on S4"). For the stuck verdict those prose declarations
+ * count as a real upstream wait — reading only the structured tag (and then
+ * annotating "no upstream dependency" when it is absent) was wrong three
+ * times in a row in tasks #54/#55.
+ */
+const PROSE_DEPENDENCY_RE = /(依赖|前置|上游|在[^，。；\n]{1,24}之后|等[^，。；\n]{1,24}(交付|完成|产出|落地)|待[^，。；\n]{1,24}(交付|完成|产出|落地)|depends\s+on|dependent\s+on|blocked\s+by|waiting\s+(?:for|on)|after\s+[^,.;\n]{1,32}(?:delivers|lands|completes|is\s+done))/i;
+export function hasProseDependencyDeclaration(content: string | null | undefined): boolean {
+  return PROSE_DEPENDENCY_RE.test(content ?? '');
+}
 /**
  * P2-8: multi-driver mutex — kv heartbeat claim per task
  * (`group_task_driver:<taskId>` = `<instanceId>|<epochMs>`). Only the most
@@ -442,6 +481,13 @@ const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
  * future stuck spell reclaims afresh.
  */
 const GROUP_TASK_STUCK_RECLAIM_PREFIX = 'group_task_stuck_reclaim:';
+/**
+ * fix/group-task-fix-v2 (B2): one stuck ALERT per (task, member) streak —
+ * the alert-only reclaim mode raises this instead of stopping the session.
+ * Same streak lifecycle as GROUP_TASK_STUCK_RECLAIM_PREFIX (cleared when the
+ * member speaks/ACKs again).
+ */
+const GROUP_TASK_STUCK_ALERT_PREFIX = 'group_task_stuck_alert:';
 /**
  * R6 L2: one re-assign hint per (task, member) timeout streak — mirrors the
  * ACK_REMINDED kv guard so the chair isn't spammed every tick while a member
@@ -2570,6 +2616,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * fix-v2 (B6): one authoritative host-state line on EVERY turn — the task's
+   * live status, the ledger size, and the review gate. A rebuilt or long-lived
+   * session must never narrate "awaiting owner acceptance" from memory while
+   * the host DB says the task never entered review (task #55's chair amnesia
+   * misreport). The line states facts for every role; the chair playbook rules
+   * make the review gate explicit.
+   */
+  const buildAuthoritativeStateLine = (task: GroupTask): string => {
+    let ledgerNote = '';
+    try {
+      const deliverables = deps.getGroupTaskStore().listDeliverables(task.id);
+      const confirmed = deliverables.filter((deliverable) => deliverable.confirmation === 'confirmed').length;
+      ledgerNote = `deliverables on ledger: ${deliverables.length} (${confirmed} on-chain confirmed); `;
+    } catch {
+      // best-effort ledger read
+    }
+    const reviewGate = task.status === 'review'
+      ? 'the task IS in review — owner acceptance is pending'
+      : 'the task is NOT in review — never announce that it is finished or awaiting owner acceptance until [STATUS:REVIEW] has been applied';
+    return `[Authoritative task state (host DB): status=${task.status}; ${ledgerNote}${reviewGate}]`;
+  };
+
   const buildGroupLogUserMessage = (
     db: Database,
     task: GroupTask,
@@ -2595,7 +2664,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     });
     const lines = renderGroupLogLines(entries, { fold: logEntropyP0.logFold });
     return [
-      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; long messages truncated, acknowledgment lines folded)]`,
+      buildAuthoritativeStateLine(task),
+      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; protocol lines ([DELIVERABLE]/[FREEZE]/[STATUS:]/[PLAN_CHANGE]/[CHECKPOINT]) and the triggering message are shown in full, other long messages are head+tail truncated, acknowledgment lines folded; to read any message in full use the group-task show action with view=full / before_id paging)]`,
       ...lines,
     ].join('\n');
   };
@@ -2604,13 +2674,33 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * Per-turn session lookup, delegated to the shared helper (groupTaskSession)
    * so the eager pre-creation path (invite/join) and the daemon always agree
    * on the SAME mapping (P1-3: one session-creation code path).
+   *
+   * fix-v2 (B6): creation goes through ensureGroupTaskMemberReady so a session
+   * (re)created MID-task — a lost mapping or a rebuilt chair session — gets the
+   * full context snapshot INCLUDING the authoritative task ledger (status,
+   * status trail, deliverables). Rebuilding from the truncated recent-message
+   * window alone is exactly how task #55's chair lost its acceptance memory
+   * and misreported "waiting for owner acceptance" while still executing.
    */
   const ensureTaskSession = (
     coworkStore: CoworkStore,
     task: GroupTask,
     botId: number,
     botName: string,
-  ): CoworkSession => ensureGroupTaskSession(coworkStore, task, botId, botName).session;
+  ): CoworkSession => {
+    const { sessionId } = ensureGroupTaskMemberReady({
+      coworkStore,
+      groupTaskStore: deps.getGroupTaskStore(),
+      task,
+      botId,
+      botName,
+    });
+    const session = coworkStore.getSession(sessionId);
+    if (session) return session;
+    // Unreachable in practice (the session was just created); fall back to the
+    // bare find-or-create so the turn never crashes on a store hiccup.
+    return ensureGroupTaskSession(coworkStore, task, botId, botName).session;
+  };
 
   /**
    * Unambiguous per-turn local time line (mirrors coworkRunner's Local Time
@@ -5300,6 +5390,54 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * fix/group-task-fix-v2 (B2): alert-only counterpart of
+   * reclaimStuckWorkerSession — one alert per silence streak, but the
+   * member's session is NEVER stopped and the orchestration attempt is not
+   * failed. The chair gets a verify-before-acting directive (the member may
+   * legitimately be waiting on an upstream deliverable or a long local
+   * step), and the origin session gets one anomaly notice so a human can
+   * look too. Returns null when the alert already fired for this streak.
+   */
+  const alertStuckWorkerSession = (
+    task: GroupTask,
+    member: GroupTaskMember,
+    reason: string,
+  ): string | null => {
+    if (member.metabotId == null) return null;
+    const sqlite = deps.getStore();
+    const alertKey = `${GROUP_TASK_STUCK_ALERT_PREFIX}${task.id}:${member.metabotId}`;
+    if (sqlite.get<string>(alertKey) === '1') return null;
+    sqlite.set(alertKey, '1');
+    const name = member.name ?? `bot-${member.metabotId}`;
+    const sessionInfo = getLocalMemberSessionInfo(task.id, member.metabotId);
+    emitLog(
+      `[GroupTaskDaemon] Task ${task.id}: stuck alert (no reclaim) for ${name} (${reason}; ` +
+      `session ${sessionInfo?.sessionId ?? 'none'} left running)`,
+    );
+    notifySourceSessionMilestone(
+      task,
+      'anomaly',
+      buildSourceSessionAnomalyNotice({
+        title: task.title,
+        status: task.status,
+        summary:
+          `Member "${name}" looks stuck (${reason}); the host raised an alert but did NOT stop the session ` +
+          '(alert-only mode). The chair will verify — the member may be waiting on an upstream deliverable — ' +
+          'and re-dispatch or re-assign if it is genuinely stuck.',
+      }),
+      `worker_stuck_alert:${member.metabotId}`,
+    );
+    return [
+      `Host stuck alert (alert-only — no automatic reclaim): ${name} looks stuck (${reason}).`,
+      sessionInfo
+        ? `Session ${sessionInfo.sessionId} was left running; its working directory is ${sessionInfo.cwd ?? '(unknown)'}.`
+        : 'No local cowork session was found for the member.',
+      `Verify before acting: ${name} may legitimately be waiting on an upstream deliverable or a long local step. ` +
+      `If it is genuinely stuck, re-dispatch the subtask with an explicit @${name} or re-assign it to a standby member.`,
+    ].join(' ');
+  };
+
+  /**
    * P0-2: auto-mark silent assigned/working members as unreachable after
    * memberUnreachableAfterMinutes without any chain speech. Baseline = last
    * speak time (fallback: member join time); never marks chair members, done
@@ -5377,6 +5515,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
         continue;
       }
+      // fix-v2 (B2): a member whose latest chair assignment waits on an
+      // undelivered upstream ([DEPENDS_ON] tag or prose declaration) is
+      // WAITING, not unreachable — the same exemption the stale-[WORKING]
+      // monitor applies (tasks #54/#55 stamped correctly waiting members).
+      if (member.metabotId != null) {
+        const chairMember = members.find((m) => m.role === 'chair');
+        const depWait = checkMemberDependencyWait(task, member, chairMember);
+        if (depWait && depWait.pendingTokens.length > 0) continue;
+      }
       const speakSec = gmid ? speakMap.get(gmid) ?? null : null;
       const lastMs = speakSec != null
         ? speakSec * 1000
@@ -5438,7 +5585,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     task: GroupTask,
     member: GroupTaskMember,
     chairMember: GroupTaskMember | undefined,
-  ): { tokens: string[]; pendingTokens: string[] } | null => {
+  ): { tokens: string[]; pendingTokens: string[]; proseDeclared: boolean } | null => {
     const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
     if (!task.groupId || !chairGmid || member.metabotId == null) return null;
     const bot = deps.getMetabotStore().getMetabotById(member.metabotId);
@@ -5466,9 +5613,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
     if (!assignment) return null;
     const tokens = extractDependsOnTokens(assignment.content);
+    // fix-v2 (B2): chairs routinely declare dependencies in prose instead of
+    // the structured [DEPENDS_ON: <pinid>] tag. A prose declaration counts as
+    // a pending upstream too — without this, the stale-[WORKING] monitor saw
+    // zero tokens, annotated "no upstream dependency" (wrong 3/3 times in
+    // tasks #54/#55) and let the verdict fall on a correctly waiting member.
+    if (tokens.length === 0 && hasProseDependencyDeclaration(assignment.content)) {
+      return { tokens, pendingTokens: ['(prose-declared upstream)'], proseDeclared: true };
+    }
     return {
       tokens,
       pendingTokens: tokens.filter((token) => !dependencyTokenSatisfied(task, token)),
+      proseDeclared: false,
     };
   };
 
@@ -5586,7 +5742,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const depContext = depWait == null
         ? null
         : depWait.tokens.length === 0
-          ? 'no upstream dependency'
+          ? 'no upstream dependency declared in the dispatch'
           : `upstream ${depWait.tokens.join(', ')} delivered`;
 
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
@@ -5627,17 +5783,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
       }
 
-      // P1-2/P1-3: the member is genuinely inert (no speech, no session
-      // activity, no heartbeat) — reclaim the stuck session once per streak
-      // and hand the chair an actionable directive (session id, reason,
-      // preserved working directory, re-dispatch instruction).
-      const reclaimNote = reclaimStuckWorkerSession(
-        task,
-        member,
+      // P1-2/P1-3 + fix-v2 (B2): the member reads inert (no speech, no
+      // session activity, no heartbeat). The DEFAULT reclaim mode is
+      // ALERT-ONLY — a stuck verdict raises one alert for the chair to
+      // verify and act on, but never stops the member's session: the
+      // automatic reclaim kept killing sessions of correctly waiting members
+      // (tasks #54/#55, 3 false reclaims). kv `groupTaskStuckReclaim` =
+      // {"mode":"auto"} restores the reclaim behavior.
+      const stuckReason =
         `[WORKING] signal stale ${memberTimeoutAfterMinutes}+ min with zero cowork-session activity` +
-        (depContext ? `; ${depContext}` : ''),
-      );
-      if (reclaimNote) reclaimNotes.push(reclaimNote);
+        (depContext ? `; ${depContext}` : '');
+      if (parseGroupTaskStuckReclaimMode(sqlite.get<string>('groupTaskStuckReclaim')) === 'auto') {
+        const reclaimNote = reclaimStuckWorkerSession(task, member, stuckReason);
+        if (reclaimNote) reclaimNotes.push(reclaimNote);
+      } else {
+        const alertNote = alertStuckWorkerSession(task, member, stuckReason);
+        if (alertNote) reclaimNotes.push(alertNote);
+      }
 
       // L3: if the member is STILL silent past the escalation window (L2 + lag),
       // brief the owner ONCE per streak via the private report channel — local
@@ -5859,9 +6021,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
       clearPendingAck();
-      // The member is alive again — clear the stuck-reclaim streak so a future
-      // stuck spell reclaims afresh.
+      // The member is alive again — clear the stuck-reclaim/stuck-alert streak
+      // so a future stuck spell reclaims/alerts afresh.
       sqlite.delete(`${GROUP_TASK_STUCK_RECLAIM_PREFIX}${task.id}:${member.metabotId}`);
+      sqlite.delete(`${GROUP_TASK_STUCK_ALERT_PREFIX}${task.id}:${member.metabotId}`);
       // P2-2: an ETA-bearing [WORKING] (ACK or long-task heartbeat) extends the
       // member's liveness lease — the watchdogs honor it before flagging
       // unreachable/timeout.
@@ -5991,7 +6154,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // the chair turn on the next tick.
     if (sqlite.get<string>(nudgeKey) == null) {
       const anyTurnInFlight = [...turnInFlight.keys()].some((key) => key.startsWith(`${task.id}:`));
-      if (!anyTurnInFlight) {
+      // fix-v2 (B2): group silence is not idleness — a local member whose
+      // cowork session worked within the window is making progress that has
+      // not surfaced as a message yet (long renders, tool chains). Nudging
+      // the chair there only forces a wasted status report (task #55: the
+      // 20-min nudges landed on the chair itself mid-run).
+      const anyLocalSessionActive = (() => {
+        try {
+          return deps.getGroupTaskStore().listMembers(task.id).some((member) => {
+            if (member.metabotId == null) return false;
+            const activityMs = getLocalMemberSessionInfo(task.id, member.metabotId)?.lastActivityMs ?? null;
+            return activityMs != null && now() - activityMs <= noProgressNudgeMs;
+          });
+        } catch {
+          return false;
+        }
+      })();
+      if (!anyTurnInFlight && !anyLocalSessionActive) {
         try {
           deps.getGroupTaskStore().addSupervisorSignal({
             taskId: task.id,
@@ -6207,8 +6386,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // R6 L2: the member recovered — reset the timeout-hint streak so a
           // future silence window triggers a fresh re-assign hint.
           sqlite.delete(`${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`);
-          // P1-2: same for the stuck-reclaim streak.
+          // P1-2: same for the stuck-reclaim/stuck-alert streak.
           sqlite.delete(`${GROUP_TASK_STUCK_RECLAIM_PREFIX}${task.id}:${member.metabotId}`);
+          sqlite.delete(`${GROUP_TASK_STUCK_ALERT_PREFIX}${task.id}:${member.metabotId}`);
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} spoke after ` +
             `assignment #${entry.messageId} (implicit ACK); no no-ACK reminder`,

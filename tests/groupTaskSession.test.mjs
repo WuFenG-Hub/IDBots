@@ -145,6 +145,81 @@ test('ensureGroupTaskMemberReady injects goal, roster and recent transcript into
   }
 });
 
+test('fix-v2 B6: a mid-task session (re)creation injects the authoritative task ledger', async () => {
+  const { store, db, coworkStore, groupTaskStore, task, tempDir } = await setup();
+  try {
+    // Simulate a task mid-flight: status moved to executing, one deliverable
+    // delivered by the worker (the chair's session was rebuilt at this point
+    // in task #55 — it must recover this state from the host, not memory).
+    groupTaskStore.updateTaskStatus(task.id, 'executing');
+    groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'delivery-pin-i0',
+      authorGlobalmetaid: 'gmid-w2',
+      kind: 'metaapp',
+      uri: `metaapp://${'cd'.repeat(32)}i0`,
+    });
+    // The source message whose pin matches the deliverable row — the ledger
+    // joins the author name from it.
+    db.run(
+      `INSERT INTO group_chat_messages (pin_id, tx_id, group_id, sender_metaid, sender_global_metaid,
+        sender_name, protocol, content, mention, is_processed)
+       VALUES ('delivery-pin-i0', 'del', ?, 'metaid-2', 'gmid-w2', 'Coder Bot',
+        '/protocols/simplegroupchat', '[DELIVERABLE] metaapp done', '[]', 0)`,
+      [task.groupId],
+    );
+
+    const { sessionId, created } = ensureGroupTaskMemberReady({
+      coworkStore,
+      groupTaskStore,
+      task: groupTaskStore.getTaskById(task.id),
+      botId: 1,
+      botName: 'Twin Bot',
+    });
+    assert.equal(created, true);
+    const snapshot = coworkStore.getSessionMessages(sessionId)[0].content;
+    assert.match(snapshot, /Task ledger \(authoritative host state/);
+    assert.match(snapshot, /Status: executing/);
+    assert.match(snapshot, /Status trail: planning -> executing/);
+    assert.match(snapshot, /Deliverables on the ledger \(1\)/);
+    assert.match(snapshot, /\[metaapp\] metaapp:\/\/cd+.*\(pending, unconfirmed\) by Coder Bot/);
+  } finally {
+    store.close();
+  }
+});
+
+test('fix-v2 B4: each task gets its own workspace folder; recreation keeps it', async () => {
+  const { store, coworkStore, groupTaskStore, task } = await setup();
+  try {
+    const { resolveGroupTaskSessionWorkspace } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(coworkStore, task, 2, 'Coder Bot');
+    assert.ok(session.cwd.endsWith(`group-task-${task.id}`), `per-task folder, got ${session.cwd}`);
+
+    // A second task for the same bot lands in a DIFFERENT folder — previous
+    // episodes' files cannot leak into this task's context.
+    const task2 = groupTaskStore.createTask({
+      groupId: `${'cd'.repeat(32)}i0`,
+      title: 'Second task',
+      goal: 'Another goal',
+      chairMetabotId: 1,
+      createdBy: 'user',
+    });
+    const second = ensureGroupTaskSession(coworkStore, task2, 2, 'Coder Bot');
+    assert.notEqual(second.session.cwd, session.cwd, 'distinct folders per task');
+    assert.ok(second.session.cwd.endsWith(`group-task-${task2.id}`));
+
+    // Same task, recreated session (mapping lost) → SAME folder, so mid-task
+    // rebuilds keep their artifacts.
+    const again = resolveGroupTaskSessionWorkspace('/tmp/base', `group-task:${task.id}`);
+    assert.equal(again, `/tmp/base/group-task-${task.id}`);
+    // Guest bindings sanitize the on-chain group id (no ':' in a folder name).
+    const guest = resolveGroupTaskSessionWorkspace('/tmp/base', `openteam:${'ab'.repeat(32)}i0`);
+    assert.ok(!guest.includes(':') && guest.includes('openteam-'));
+  } finally {
+    store.close();
+  }
+});
+
 test('guest sessions bind to the on-chain group id and inject the guest snapshot', async () => {
   const { store, coworkStore, tempDir } = await setup();
   try {

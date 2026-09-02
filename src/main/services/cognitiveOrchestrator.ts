@@ -29,7 +29,15 @@ const LOG_EVERY_N_TICKS = 6; // log summary every ~1 min when no trigger
 /** Max tool-call rounds for Read/Bash loop (allow multiple Read + Bash steps). */
 const MAX_TOOL_CALLS = 10;
 const READ_FILE_MAX_CHARS = 80_000;
-const BASH_TIMEOUT_MS = 60_000;
+/**
+ * fix-v2 (B3): skill scripts that talk to the chain are LONG operations —
+ * group-task create does on-chain group creation + indexing waits + member
+ * joins and routinely exceeds a minute (task #55: the 60s SIGTERM killed the
+ * create call although the task itself was created fine). 180s covers the
+ * slow GLM-era chain cadence without leaving a genuinely wedged script
+ * running forever.
+ */
+const BASH_TIMEOUT_MS = 180_000;
 
 let tickCount = 0;
 
