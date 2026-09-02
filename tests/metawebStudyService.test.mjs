@@ -28,6 +28,7 @@ const setup = (overrides = {}) => {
   const service = new MetawebStudyService({
     store,
     now: () => nowValue,
+    isMemoryEnabled: overrides.isMemoryEnabled,
     runStudyJob: overrides.runStudyJob ?? (async (job) => {
       runs.push(job.id);
       return { newPinIds: [`pin-${job.runCount + 1}i0`], summary: 'saved one pin' };
@@ -204,4 +205,43 @@ test('buildMetawebStudySessionPrompt carries topic, budget and already-processed
   assert.match(prompt, /AT MOST 5 NEW pins/);
   assert.match(prompt, /old1i0/);
   assert.match(prompt, /unattended/i);
+});
+
+test('memory disabled fails the job loudly without launching a session or consuming a run', async () => {
+  const { service, store, runs } = setup({ isMemoryEnabled: (metabotId) => metabotId !== 7 });
+  const blocked = service.enqueueStudyJob(7, { topic: 'video' }).job;
+  const allowed = service.enqueueStudyJob(8, { topic: 'music' }).job;
+  const result = await service.runTick();
+  assert.equal(result.ran, 1, 'only the memory-enabled bot ran a session');
+  assert.deepEqual(runs, [allowed.id]);
+  const blockedAfter = store.getById(blocked.id);
+  assert.equal(blockedAfter.status, 'failed');
+  assert.equal(blockedAfter.runCount, 0, 'no session ran, so no run is consumed');
+  assert.equal(blockedAfter.consecutiveFailures, 0);
+  assert.deepEqual(blockedAfter.processedPinIds, []);
+  assert.match(blockedAfter.lastError, /Memory is disabled/);
+  assert.match(blockedAfter.lastError, /re-enqueue/);
+  assert.equal(store.getById(allowed.id).status, 'pending');
+});
+
+test('an unreadable memory policy leaves the job pending for the next tick', async () => {
+  const { service, store, runs } = setup({
+    isMemoryEnabled: () => { throw new Error('sqlite recovering'); },
+  });
+  const job = service.enqueueStudyJob(7, { topic: 'video' }).job;
+  const result = await service.runTick();
+  assert.equal(result.ran, 0);
+  assert.deepEqual(runs, []);
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'pending');
+  assert.equal(after.runCount, 0);
+});
+
+test('omitting the memory gate preserves the previous always-run behavior', async () => {
+  const { service, store, runs } = setup();
+  const job = service.enqueueStudyJob(7, { topic: 'video' }).job;
+  const result = await service.runTick();
+  assert.equal(result.ran, 1);
+  assert.deepEqual(runs, [job.id]);
+  assert.equal(store.getById(job.id).status, 'pending');
 });

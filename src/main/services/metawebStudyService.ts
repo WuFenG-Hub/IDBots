@@ -56,6 +56,15 @@ export interface MetawebStudyServiceDeps {
   store: MetawebStudyJobStore;
   runStudyJob: MetawebStudyRunHook;
   now?: () => Date;
+  /**
+   * Knowledge-base tools are gated on the bot's memory policy (coworkRunner's
+   * sessionMemoryEnabled), so with memory disabled a study session could
+   * search and read but save NOTHING — and the empty run would be misrecorded
+   * as 'done'. When provided, runTick checks this before launching a session
+   * and fails the job loudly instead of burning a session on a guaranteed
+   * no-op. Omitting it preserves the previous behavior (always run).
+   */
+  isMemoryEnabled?: (metabotId: number) => boolean;
 }
 
 function inStudyWindow(date: Date): boolean {
@@ -142,6 +151,7 @@ export class MetawebStudyService {
   private readonly store: MetawebStudyJobStore;
   private readonly runStudyJob: MetawebStudyRunHook;
   private readonly now: () => Date;
+  private readonly isMemoryEnabled?: (metabotId: number) => boolean;
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Runs are serialized globally — one background study session at a time. */
   private running = false;
@@ -152,6 +162,7 @@ export class MetawebStudyService {
     this.store = deps.store;
     this.runStudyJob = deps.runStudyJob;
     this.now = deps.now ?? (() => new Date());
+    this.isMemoryEnabled = deps.isMemoryEnabled;
   }
 
   enqueueStudyJob(
@@ -233,6 +244,31 @@ export class MetawebStudyService {
     let ran = 0;
     for (const job of this.store.listPending()) {
       if (!inStudyWindow(this.now())) break;
+      // Memory gate: with memory disabled for this bot the study session has
+      // no knowledge-base tools to save into, so the run would be a guaranteed
+      // no-op misrecorded as 'done'. Fail loudly instead — no session burned,
+      // no run consumed. An unreadable policy (e.g. mid sqlite recovery) skips
+      // the job this tick and leaves it pending for the next one.
+      let memoryEnabled = true;
+      try {
+        memoryEnabled = this.isMemoryEnabled ? this.isMemoryEnabled(job.metabotId) : true;
+      } catch {
+        continue;
+      }
+      if (!memoryEnabled) {
+        try {
+          this.store.markFailedWithoutRun(job.id, {
+            error:
+              'Memory is disabled for this bot, so study sessions have no knowledge-base tools to save into. Re-enable memory for this bot and re-enqueue the topic.',
+            nowIso: this.now().toISOString(),
+          });
+        } catch (bookkeepingError) {
+          // Same posture as run-failure bookkeeping below: an unhealthy store
+          // must not kill the batch — the job stays pending and is retried.
+          console.error('[MetawebStudy] failed to record memory-gated refusal:', bookkeepingError instanceof Error ? bookkeepingError.message : String(bookkeepingError));
+        }
+        continue;
+      }
       this.running = true;
       this.runningJobId = job.id;
       try {
