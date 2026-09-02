@@ -1,6 +1,6 @@
 ---
 name: metabot-metaapp
-description: 统一的 MetaApp 技能。用于指导和执行 Bot Browser 里的静态 MetaApp 开发、Agent Internet 协议链接接入、MetaID PIN 写链、MetaFile 上传，以及 MetaApp 的发布、修改、删除、分享和 Bot homepage/Bot Page 制作。只要用户提到 MetaApp、静态网站上链、Bot Page/homepage、metaid://、pin://、metafile://、metaapp://、map://、MetaApp 发布/修改/分享，就优先使用这个技能，而不是旧的 IDFramework 专用技能或旧的发布单点技能。
+description: 统一的 MetaApp 技能。用于指导和执行 Bot Browser 里的静态 MetaApp 开发、Agent Internet 协议链接接入、MetaID PIN 写链、MetaFile 上传，以及 MetaApp 的发布、修改、删除、分享和 Bot homepage/Bot Page 制作。只要用户提到 MetaApp、静态网站上链、Bot Page/homepage、metaid://、pin://、metafile://、metaapp://、map://、MetaApp 发布/修改/分享，就使用这个技能。
 official: true
 ---
 
@@ -32,7 +32,7 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
 4. 做 Bot homepage / Bot Page：
    先读 `references/agent-browser-metaapp.md`，再补读 `references/bot-homepage-v3.md`
 5. 用户问的是旧的 IDFramework MetaApp：
-   只有在用户明确要维护 IDFramework 老项目时，才考虑旧技能；普通 MetaApp 工作一律走本技能
+   按 IDFramework 项目自带的代码与文档维护即可（专用技能已从默认包移除）；普通 MetaApp 工作一律走本技能
 
 ## 开发规则
 

@@ -920,6 +920,15 @@ export class SkillManager {
     // (post_buzz / send_private_chat / group_chat / omni_read / omni_cast /
     // browser_open — see src/main/libs/*AgentTools.ts). Retire the external
     // skills so existing installs drop them (dir + skills.config entry).
+    //
+    // The 2026-09 bundled-set prune removed ten more skills from the default
+    // bundle: metabot-create-metaapp / metabot-post-metaapp were superseded by
+    // the unified metabot-metaapp skill (IDFramework legacy + standalone
+    // publish flow); the rest (proactive-agent, create-plan, develop-web-game,
+    // films-search, music-search, remotion, find-skills, technology-news-
+    // search) were ecosystem imports overlapping built-in tools or marginal
+    // for the product. Existing installs drop them on upgrade; owners who
+    // still want one can reinstall it from the skill market.
     const retiredSkillIds = [
       'metabot-upload-largefile',
       'metabot-upload-file',
@@ -929,6 +938,16 @@ export class SkillManager {
       'metabot-omni-reader',
       'metabot-omni-caster',
       'metabot-browser-open',
+      'metabot-create-metaapp',
+      'metabot-post-metaapp',
+      'proactive-agent-3.1.0',
+      'create-plan',
+      'develop-web-game',
+      'films-search',
+      'music-search',
+      'remotion',
+      'find-skills-0.1.0',
+      'technology-news-search',
     ];
     for (const retiredId of retiredSkillIds) {
       const legacyDir = path.join(userRoot, retiredId);
