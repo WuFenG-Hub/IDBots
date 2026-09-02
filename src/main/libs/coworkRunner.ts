@@ -7031,28 +7031,6 @@ export class CoworkRunner extends EventEmitter {
     cwd: string,
     systemPrompt: string
   ): Promise<void> {
-    let kernelChoice: ReturnType<typeof resolveKernelChoice> = 'dsh';
-    try {
-      kernelChoice = this.resolveSessionKernelChoice(activeSession);
-    } catch (error) {
-      coworkLog('WARN', 'runLocalKernel', 'Kernel routing failed; continuing on DSH so the turn error is visible', {
-        sessionId: activeSession.sessionId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      kernelChoice = 'dsh';
-    }
-    if (kernelChoice === 'unavailable') {
-      this.handleError(
-        activeSession.sessionId,
-        tApp(
-          'Anthropic Messages 协议暂时不可用。请将供应商切换为 OpenAI-compatible 或 Responses。',
-          'The Anthropic Messages API format is temporarily unavailable. Switch the provider to OpenAI-compatible or Responses.'
-        )
-      );
-      this.clearPendingPermissions(activeSession.sessionId);
-      this.removeActiveSession(activeSession.sessionId, activeSession);
-      return;
-    }
     await this.runDshSessionLocal(activeSession, prompt, cwd, systemPrompt);
   }
 

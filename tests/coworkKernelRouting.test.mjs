@@ -12,7 +12,6 @@ const {
   dshSessionIdOf,
   makeDshSessionHandle,
   isDshEligibleApiType,
-  isAnthropicDirectUnavailable,
   dshApiFormatOf,
   resolveKernelChoice,
   buildClaudeToDshHandoff,
@@ -33,7 +32,6 @@ test('apiType eligibility includes Anthropic Messages', () => {
   assert.equal(isDshEligibleApiType('responses'), true)
   assert.equal(isDshEligibleApiType('anthropic'), true)
   assert.equal(isDshEligibleApiType(undefined), false)
-  assert.equal(isAnthropicDirectUnavailable('anthropic'), false)
 })
 
 test('dshApiFormatOf preserves anthropic and responses', () => {
