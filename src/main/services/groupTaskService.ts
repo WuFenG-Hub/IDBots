@@ -2691,25 +2691,26 @@ export async function closeGroupTask(
     // doesn't outlive the accepted task (the read path also projects this).
     normalizeDeliveredMemberStatuses(taskId);
   }
-  if (closed.status === 'done' && opts.rating != null) {
-    const rated = getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);
-    // R2: relay the acceptance result back to the originating CoWork session
-    // (best-effort; never throws into the close flow). Done after the rating is
-    // persisted so the notification carries the final rating.
-    notifySourceSession(rated, opts.status, opts.rating, opts.ratingComment, opts.closureNote);
-    return getGroupTask(taskId);
+  let settled = closed;
+  if (settled.status === 'done' && opts.rating != null) {
+    // R2: persist the rating first so the closing notification below carries
+    // the final rating.
+    settled = getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);
   }
   // OpenTeam M3: the chair sediments one participation impression per REMOTE
   // teammate (recorded for cancelled tasks too). Best-effort: the task is
-  // already closed; the recorder never throws into this flow.
+  // already closed; the recorder never throws into this flow. Runs for rated
+  // closes too — the early return that used to skip this tail on the rating
+  // path silenced impressions, culture distillation and comm stats for every
+  // owner-accepted task (34/42 real closes before this fix).
   recordTaskCloseImpressions(taskId, opts.status, opts.reason);
   // P3 culture base: distill team-level glossary/conventions/lessons from the
   // acceptance summary. Fire-and-forget; best-effort, never blocks the close.
-  distillTeamCultureFromTaskClose(taskId, opts.status, closed.title, closed.goal);
+  distillTeamCultureFromTaskClose(taskId, opts.status, settled.title, settled.goal);
   // P3 metric: stamp inter-agent traffic so bytes-per-deliverable can be
   // watched as the shared culture base compresses coordination.
   try {
-    getGroupTaskStore().recordTaskCommStats(taskId, closed.groupId ?? null);
+    getGroupTaskStore().recordTaskCommStats(taskId, settled.groupId ?? null);
   } catch (error) {
     console.warn(
       `[GroupTask] Failed to record comm stats on close of task ${taskId}: ` +
@@ -2717,8 +2718,8 @@ export async function closeGroupTask(
     );
   }
   // R2: relay the acceptance result back to the originating CoWork session
-  // (covers cancelled and automated/RPC closes without a rating).
-  notifySourceSession(closed, opts.status, opts.rating, opts.ratingComment, opts.closureNote);
+  // (covers every close path, rated or not).
+  notifySourceSession(settled, opts.status, opts.rating, opts.ratingComment, opts.closureNote);
   return getGroupTask(taskId);
 }
 
