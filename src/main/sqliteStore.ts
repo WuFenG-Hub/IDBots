@@ -19,6 +19,7 @@ import { ensureMetaIDMemoryGrantSchema } from './metaidMemoryGrantStore';
 import { ensureMetaIDKnowledgeSchema } from './metaidKnowledgeStore';
 import { ensureKnowledgeBaseSchema } from './knowledgeBaseStore';
 import { ensureMetawebStudyJobSchema } from './metawebStudyJobStore';
+import { ensureChainContentHistorySchema } from './chainContentHistoryStore';
 
 type ChangePayload<T = unknown> = {
   key: string;
@@ -2170,6 +2171,10 @@ export class SqliteStore {
     // MetaWeb study jobs ("自主学习任务"): the M4 owner-assigned study-topic
     // queue drained by nightly bounded background sessions. Same pattern.
     ensureMetawebStudyJobSchema(this.db);
+    // Chain content history ("链上内容经历"): what each bot published to the
+    // chain (buzz/simplenote/metafile/…) and what it fully read from the
+    // chain. Same idempotent pattern.
+    ensureChainContentHistorySchema(this.db);
 
     this.save();
   }
