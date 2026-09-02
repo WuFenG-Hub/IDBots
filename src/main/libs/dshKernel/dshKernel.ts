@@ -42,6 +42,15 @@ const dynamicImport = new Function('specifier', 'return import(specifier)') as (
 
 export const DSH_PUMP_YIELD_EVERY = 8
 
+/** Fingerprint of the jsonl persistence backend's encoding-uniformity
+ *  rejection ("…uses .jsonl[.zstd], but this backend is configured for
+ *  compression …"). Upstream error message — stable substring, upstream
+ *  error fingerprints are the one sanctioned class of text matching. */
+export function isSessionEncodingMismatchError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return message.includes('but this backend is configured for compression')
+}
+
 /** Composition JSON filename. Each provider-keyed runtime writes its own file
  *  so two kernels sharing sessionRoot cannot clobber each other. */
 export function dshRuntimeConfigFileName(runtimeId?: string): string {
@@ -66,6 +75,7 @@ export class DshKernel {
   private mappers = new Map<string, DshEventMapper>()
   private slotIds = new Map<string, Partial<Record<DshStreamSlot, string>>>()
   private runtimeConfig: DshRuntimeConfigInput | null = null
+  private rootMigration: { sessionRoot: string; migrate: (root: string, opts?: unknown) => Promise<unknown> } | null = null
   private closed = false
   private pumpEventsSinceYield = 0
 
@@ -132,6 +142,7 @@ export class DshKernel {
     // an fs-level failure would be a silent lie about durability instead.
     const migrationUrl = pathToFileURL(join(runtimeDir, 'lib', 'migrate-session-root-zstd.mjs')).href
     const { migrateSessionRootToZstd } = await dynamicImport(migrationUrl)
+    this.rootMigration = { sessionRoot: config.sessionRoot, migrate: migrateSessionRootToZstd }
     await migrateSessionRootToZstd(config.sessionRoot, {
       log: (level, event, data) => this.opts.log?.(level, `dshKernel.${event}`, data),
     })
@@ -167,9 +178,21 @@ export class DshKernel {
     this.opts.log?.('info', 'dshKernel.ensureRuntime', { configPath, providers: config.providers.length })
   }
 
+  /** Re-run the plaintext→zstd artifact migration for this kernel's session
+   *  root (idempotent). Self-heal path: a sibling app instance on an older
+   *  build sharing this userData can drop plaintext artifacts into the root
+   *  AFTER this runtime booted — the boot-time migration alone does not see
+   *  that drift. No-op before the first ensureRuntime. */
+  async remigrateSessionRootToZstd(): Promise<void> {
+    if (!this.rootMigration) return
+    await this.rootMigration.migrate(this.rootMigration.sessionRoot, {
+      log: (level: string, event: string, data: unknown) =>
+        this.opts.log?.(level as 'info' | 'warn' | 'error', `dshKernel.${event}`, data),
+    })
+  }
+
   /** Ensure a live agent for the session: fresh create or restart-resume. */
-  async ensureSession(input: {
-    sessionId: string
+  async ensureSession(input: {    sessionId: string
     provider?: string
     model?: string
     maxTokens?: number
