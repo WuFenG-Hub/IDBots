@@ -134,7 +134,8 @@ export function buildRecentDailySummariesBlock(
     'ARE your dreams (做梦), written by yourself during the nightly dream consolidation. When the user',
     'asks whether you dreamed, what you dreamed about, or whether you remember a certain day',
     '(做梦/梦境/梦到/还记得), answer from these summaries, and call the experience_recall tool for',
-    'any earlier date range or a full-history search.',
+    'any earlier date range or a full-history search. To recall the exact pins you published or fully',
+    'read on-chain (with their pin ids), call the chain_history_recall tool instead.',
     '</instruction>',
   ].join('\n');
 }

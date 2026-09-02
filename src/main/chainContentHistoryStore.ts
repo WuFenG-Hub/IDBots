@@ -269,6 +269,21 @@ function initialSummaryStatus(contentLength: number): ChainSummaryStatus {
   return contentLength >= SUMMARY_MIN_CONTENT_CHARS ? 'pending' : 'skipped';
 }
 
+/** Escape %, _ and \ so a user query is matched literally in LIKE. */
+const escapeLikePattern = (raw: string): string => raw.replace(/[\\%_]/g, (char) => `\\${char}`);
+
+/** Optional filters for the recall queries (chain_history_recall tool). */
+export interface ChainContentSearchOptions {
+  /** Keyword matched against text fields (title/summary/excerpt/path/pinId). */
+  query?: string;
+  /** Inclusive lower bound, epoch ms. */
+  fromMs?: number;
+  /** Exclusive upper bound, epoch ms. */
+  toMs?: number;
+  /** Result cap (clamped to 1..50). */
+  limit?: number;
+}
+
 export class ChainContentHistoryStore {
   constructor(
     private readonly db: Database,
@@ -485,6 +500,75 @@ export class ChainContentHistoryStore {
        WHERE metabot_id = ? AND last_read_at_ms >= ? AND last_read_at_ms < ?
        ORDER BY last_read_at_ms ASC LIMIT ?`,
       [metabotId, dayStartMs, dayEndMs, limit],
+    ).map(readRowToRecord);
+  }
+
+  /**
+   * Recall what this bot published: newest first, optional keyword (matched
+   * against stored text, summary, path and pin id) and time window. The
+   * chain_history_recall tool's search path.
+   */
+  searchWrites(metabotId: number, options: ChainContentSearchOptions = {}): MetabotChainWriteRecord[] {
+    const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 20)));
+    const clauses: string[] = ['metabot_id = ?'];
+    const params: Array<string | number> = [metabotId];
+    if (Number.isFinite(options.fromMs)) {
+      clauses.push('occurred_at_ms >= ?');
+      params.push(Number(options.fromMs));
+    }
+    if (Number.isFinite(options.toMs)) {
+      clauses.push('occurred_at_ms < ?');
+      params.push(Number(options.toMs));
+    }
+    const query = options.query?.trim();
+    if (query) {
+      const pattern = `%${escapeLikePattern(query)}%`;
+      clauses.push(
+        `(content_text LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
+          OR path LIKE ? ESCAPE '\\' OR pin_id LIKE ? ESCAPE '\\')`,
+      );
+      params.push(pattern, pattern, pattern, pattern);
+    }
+    return this.getAll<ChainWriteRow>(
+      `SELECT * FROM metabot_chain_writes
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY occurred_at_ms DESC LIMIT ?`,
+      [...params, limit],
+    ).map(writeRowToRecord);
+  }
+
+  /**
+   * Recall what this bot fully read: newest read first, optional keyword
+   * (matched against title, excerpt, summary, author, path, protocol and pin
+   * id) and time window. The chain_history_recall tool's search path.
+   */
+  searchReads(metabotId: number, options: ChainContentSearchOptions = {}): MetabotChainReadRecord[] {
+    const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 20)));
+    const clauses: string[] = ['metabot_id = ?'];
+    const params: Array<string | number> = [metabotId];
+    if (Number.isFinite(options.fromMs)) {
+      clauses.push('last_read_at_ms >= ?');
+      params.push(Number(options.fromMs));
+    }
+    if (Number.isFinite(options.toMs)) {
+      clauses.push('last_read_at_ms < ?');
+      params.push(Number(options.toMs));
+    }
+    const query = options.query?.trim();
+    if (query) {
+      const pattern = `%${escapeLikePattern(query)}%`;
+      clauses.push(
+        `(title LIKE ? ESCAPE '\\' OR content_excerpt LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
+          OR author_globalmetaid LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\'
+          OR protocol LIKE ? ESCAPE '\\' OR pin_id LIKE ? ESCAPE '\\')`,
+      );
+      params.push(pattern, pattern, pattern, pattern, pattern, pattern, pattern);
+    }
+    return this.getAll<ChainReadRow>(
+      `SELECT * FROM metabot_chain_reads
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY last_read_at_ms DESC LIMIT ?`,
+      [...params, limit],
     ).map(readRowToRecord);
   }
 }

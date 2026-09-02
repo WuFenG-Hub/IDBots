@@ -188,3 +188,76 @@ test('listWritesForDay / listReadsForDay filter by bot and day window', () => {
     ['r-in'],
   );
 });
+
+test('searchWrites: keyword, pinId match, time window, newest first and limit', () => {
+  const { store } = setup();
+  store.recordWrite(makeWrite({ pinId: 'w-old', contentText: '关于 MetaWeb 的发布', occurredAtMs: T0 }));
+  store.recordWrite(makeWrite({ pinId: 'w-new', contentText: '另一条内容', path: '/protocols/simplenote', occurredAtMs: T0 + 2 * DAY }));
+  store.recordWrite(makeWrite({ pinId: 'w-other', metabotId: 8, contentText: '关于 MetaWeb 的别的', occurredAtMs: T0 + DAY }));
+
+  const hits = store.searchWrites(7, { query: 'MetaWeb' });
+  assert.deepEqual(hits.map((row) => row.pinId), ['w-old'], 'keyword matches content_text, bot-scoped');
+
+  const byPinId = store.searchWrites(7, { query: 'w-new' });
+  assert.deepEqual(byPinId.map((row) => row.pinId), ['w-new'], 'pinId is searchable too');
+
+  const windowed = store.searchWrites(7, { fromMs: T0 + DAY, toMs: T0 + 3 * DAY });
+  assert.deepEqual(windowed.map((row) => row.pinId), ['w-new'], 'time window filtering');
+
+  const ordered = store.searchWrites(7, {});
+  assert.deepEqual(ordered.map((row) => row.pinId), ['w-new', 'w-old'], 'newest first');
+  const capped = store.searchWrites(7, { limit: 1 });
+  assert.deepEqual(capped.map((row) => row.pinId), ['w-new'], 'limit applies');
+});
+
+test('searchWrites escapes LIKE wildcards in the query', () => {
+  const { store } = setup();
+  store.recordWrite(makeWrite({ pinId: 'w1', contentText: 'literal 50%_off note' }));
+  store.recordWrite(makeWrite({ pinId: 'w2', contentText: 'something else' }));
+  assert.deepEqual(
+    store.searchWrites(7, { query: '50%_off' }).map((row) => row.pinId),
+    ['w1'],
+    'percent and underscore are matched literally',
+  );
+});
+
+test('searchReads: keyword over title/excerpt/summary/author, window and newest-first', () => {
+  const { store } = setup();
+  store.recordRead(makeRead({
+    pinId: 'r-guide', title: 'MetaWeb 使用指南', contentText: '介绍 MetaWeb 用法', readAtMs: T0,
+  }));
+  store.recordRead(makeRead({
+    pinId: 'r-later', title: '别的文章', authorGlobalMetaId: 'gm-metaweb-fan',
+    contentText: '与标题无关的正文', readAtMs: T0 + DAY,
+  }));
+  store.recordRead(makeRead({
+    pinId: 'r-other', metabotId: 8, title: 'MetaWeb 别人的', contentText: 'x', readAtMs: T0,
+  }));
+
+  const byTitle = store.searchReads(7, { query: '使用指南' });
+  assert.deepEqual(byTitle.map((row) => row.pinId), ['r-guide'], 'title match, bot-scoped');
+
+  const byAuthor = store.searchReads(7, { query: 'gm-metaweb-fan' });
+  assert.deepEqual(byAuthor.map((row) => row.pinId), ['r-later'], 'author match');
+
+  const byExcerpt = store.searchReads(7, { query: '正文' });
+  assert.deepEqual(byExcerpt.map((row) => row.pinId), ['r-later'], 'excerpt match');
+
+  const windowed = store.searchReads(7, { fromMs: T0 + 1000, toMs: T0 + 2 * DAY });
+  assert.deepEqual(windowed.map((row) => row.pinId), ['r-later'], 'last_read_at window');
+
+  const ordered = store.searchReads(7, {});
+  assert.deepEqual(ordered.map((row) => row.pinId), ['r-later', 'r-guide'], 'newest read first');
+});
+
+test('searchReads: summary becomes searchable once the async summary lands', () => {
+  const { store } = setup();
+  store.recordRead(makeRead({ pinId: 'r1', title: '普通标题', contentText: '正文内容' }));
+  assert.equal(store.searchReads(7, { query: '中心思想' }).length, 0);
+  store.applySummarySuccess('read', store.getReadByPinId(7, 'r1').id, '这篇文章的中心思想是链上记录', T0 + 500);
+  assert.deepEqual(
+    store.searchReads(7, { query: '中心思想' }).map((row) => row.pinId),
+    ['r1'],
+    'a landed summary is immediately recallable',
+  );
+});
