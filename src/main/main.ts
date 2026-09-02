@@ -195,6 +195,7 @@ import {
 import {
   startGroupTaskDaemon,
   stopGroupTaskDaemon,
+  getGroupTaskTurnActivity,
   type GroupTaskDaemonSendOwnerReportFn,
 } from './services/groupTaskDaemon';
 import { groupTaskLog } from './libs/groupTaskLogger';
@@ -10393,6 +10394,16 @@ if (!gotTheLock) {
       return { success: true, tasks };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to list group tasks' };
+    }
+  });
+
+  ipcMain.handle('groupTask:getTurnActivity', async () => {
+    // Sidebar badge: in-memory snapshot of the daemon's in-flight turns so a
+    // freshly (re)loaded renderer does not wait for the next change event.
+    try {
+      return { success: true, turns: getGroupTaskTurnActivity() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get turn activity' };
     }
   });
 

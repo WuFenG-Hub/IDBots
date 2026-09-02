@@ -345,6 +345,20 @@ export interface GroupTaskCheckpointChangedEvent {
   at: number;
 }
 
+/** One in-flight MetaBot group-task background turn (sidebar badge). */
+export interface GroupTaskTurnActivityEntry {
+  taskId: number;
+  metabotId: number;
+  startedAt: number;
+}
+
+/** Daemon broadcast: full snapshot of in-flight background turns after a change. */
+export interface GroupTaskTurnActivityEvent {
+  type: 'groupTask:turnActivityChanged';
+  turns: GroupTaskTurnActivityEntry[];
+  at: number;
+}
+
 export interface GroupTaskCreateInput {
   title: string;
   goal: string;

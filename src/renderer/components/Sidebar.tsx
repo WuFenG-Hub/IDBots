@@ -746,7 +746,7 @@ const Sidebar: React.FC<SidebarProps> = ({
             </svg>
             {i18nService.t('settings')}
           </button>
-          <BackgroundTasksBadge />
+          <BackgroundTasksBadge onShowGroupTasks={onShowGroupTasks} />
           <P2PStatusBadge />
         </div>
       </div>

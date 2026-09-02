@@ -1387,9 +1387,11 @@ interface IElectronAPI {
     archive: (input: { taskId: number }) => Promise<any>;
     unarchive: (input: { taskId: number }) => Promise<any>;
     listArchived: (options?: { offset?: number; limit?: number }) => Promise<any>;
+    getTurnActivity: () => Promise<any>;
     onStatusChanged: (callback: (data: any) => void) => () => void;
     onOwnerReportDelivery: (callback: (data: any) => void) => () => void;
     onCheckpointChanged: (callback: (data: any) => void) => () => void;
+    onTurnActivityChanged: (callback: (data: any) => void) => () => void;
   };
   openTeamCollab: {
     list: () => Promise<{ success: boolean; items?: OpenTeamCollabSummary[]; error?: string }>;

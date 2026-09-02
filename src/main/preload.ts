@@ -851,6 +851,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('groupTask:unarchive', input),
     listArchived: (options?: { offset?: number; limit?: number }) =>
       ipcRenderer.invoke('groupTask:listArchived', options),
+    // Sidebar background-task badge: current in-flight MetaBot turn snapshot.
+    getTurnActivity: () => ipcRenderer.invoke('groupTask:getTurnActivity'),
     onStatusChanged: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('groupTask:statusChanged', handler);
@@ -866,6 +868,12 @@ contextBridge.exposeInMainWorld('electron', {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('groupTask:checkpointChanged', handler);
       return () => ipcRenderer.removeListener('groupTask:checkpointChanged', handler);
+    },
+    // Fired whenever the daemon's in-flight MetaBot turn set changes (badge).
+    onTurnActivityChanged: (callback: (data: any) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('groupTask:turnActivityChanged', handler);
+      return () => ipcRenderer.removeListener('groupTask:turnActivityChanged', handler);
     },
   },
   openTeamCollab: {

@@ -5908,6 +5908,58 @@ test('long-turn liveness: a still-running turn posts a placeholder + heartbeats;
 });
 
 // ---------------------------------------------------------------------------
+// Sidebar background-task badge: dispatching a turn broadcasts a
+// groupTask:turnActivityChanged snapshot (and settle broadcasts the removal),
+// so the renderer can show how many MetaBot background turns are running.
+// ---------------------------------------------------------------------------
+
+test('turn activity: dispatch/settle broadcasts groupTask:turnActivityChanged snapshots', async () => {
+  let releaseTurn;
+  const gate = new Promise((resolve) => { releaseTurn = resolve; });
+  const h = await createHarness({
+    deps: {
+      performChat: async () => {
+        await gate;
+        return '[WORKING] done';
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-ta-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    // Raw loop: the drained wrapper would hang on the gated turn forever.
+    const rawLoop = createGroupTaskDaemonLoop(h.deps);
+    await rawLoop.runTick();
+
+    const activityEvents = () => h.events.filter((event) => event.type === 'groupTask:turnActivityChanged');
+    assert.ok(
+      activityEvents().some((event) =>
+        event.turns.some((turn) => turn.taskId === task.id && turn.metabotId === 2)),
+      'dispatch broadcasts the in-flight turn',
+    );
+    assert.deepEqual(
+      rawLoop.getTurnActivity().map((turn) => [turn.taskId, turn.metabotId]),
+      [[task.id, 2]],
+      'the loop exposes the in-flight turn snapshot for the IPC pull',
+    );
+
+    releaseTurn();
+    await rawLoop.whenIdle();
+    const lastEvent = activityEvents().at(-1);
+    assert.deepEqual(lastEvent.turns, [], 'settle broadcasts an empty snapshot');
+    assert.deepEqual(rawLoop.getTurnActivity(), [], 'the snapshot is empty once the turn settles');
+  } finally {
+    releaseTurn();
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // fix/group-task-flow Phase 5: chair-drive guarantees — a chair trigger that
 // produced a decision but no answer (per-tick cap, suppression, budget) is
 // re-driven once; an idle task with nothing running nudges the chair.

@@ -1,5 +1,5 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import type { GroupTaskSummary } from '../../types/groupTask';
+import type { GroupTaskSummary, GroupTaskTurnActivityEntry } from '../../types/groupTask';
 
 interface GroupTasksState {
   tasks: GroupTaskSummary[];
@@ -8,6 +8,8 @@ interface GroupTasksState {
   selectedCollabId: number | null;
   loading: boolean;
   error: string | null;
+  /** In-flight MetaBot background turns reported by the daemon (sidebar badge). */
+  activeTurns: GroupTaskTurnActivityEntry[];
 }
 
 const initialState: GroupTasksState = {
@@ -16,6 +18,7 @@ const initialState: GroupTasksState = {
   selectedCollabId: null,
   loading: false,
   error: null,
+  activeTurns: [],
 };
 
 const groupTasksSlice = createSlice({
@@ -84,6 +87,9 @@ const groupTasksSlice = createSlice({
       state.selectedCollabId = action.payload;
       state.selectedTaskId = null;
     },
+    setActiveTurns(state, action: PayloadAction<GroupTaskTurnActivityEntry[]>) {
+      state.activeTurns = action.payload;
+    },
   },
 });
 
@@ -98,6 +104,7 @@ export const {
   removeTask,
   selectTask,
   selectCollab,
+  setActiveTurns,
 } = groupTasksSlice.actions;
 
 export default groupTasksSlice.reducer;
