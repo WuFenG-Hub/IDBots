@@ -316,6 +316,7 @@ man_base_data_pebble/
 !tests/deepseekReasoningRoundtrip.test.mjs
 !tests/llmEffort.test.mjs
 !tests/modelCatalog.test.ts
+!tests/coworkComposerEffortDefault.test.mjs
 !tests/avatarSource.test.mjs
 
 !tests/metabotSettingsService.test.mjs

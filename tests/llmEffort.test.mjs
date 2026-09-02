@@ -49,6 +49,23 @@ test('convertLegacyEffortLevel maps leftover five-step tokens only', () => {
   assert.equal(convertLegacyEffortLevel('turbo'), null);
 });
 
+test('the explicit-Default sentinel stays truthy and resolves to the model default', () => {
+  const sentinel = llmEffort.LLM_EFFORT_DEFAULT_SENTINEL;
+  assert.equal(sentinel, 'default');
+  // Truthiness is the contract: the per-turn chain is
+  // `effortOverride ?? brainEffort ?? globalEffort ?? modelDefault`, so the
+  // sentinel must stop that chain before the brain/global rungs…
+  assert.ok(Boolean(sentinel), 'sentinel must be truthy to short-circuit the ?? chain');
+  assert.equal(isLlmEffortLevel(sentinel), false);
+  // …while converting to null = the model's own default.
+  assert.equal(convertLegacyEffortLevel(sentinel), null);
+  assert.equal(toLlmEffortLevel(sentinel), null);
+  // Runtime chain shape: a sentinel override beats brain/global values, a
+  // null override still falls through to them.
+  assert.equal(toLlmEffortLevel(sentinel ?? 'max' ?? 'high'), null);
+  assert.equal(toLlmEffortLevel(null ?? 'max' ?? 'high'), 'max');
+});
+
 test('toLlmEffortLevel passes canonical values through and converts leftover tokens', () => {
   assert.equal(toLlmEffortLevel('off'), 'off');
   assert.equal(toLlmEffortLevel('low'), 'low');

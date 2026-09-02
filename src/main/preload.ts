@@ -431,7 +431,7 @@ contextBridge.exposeInMainWorld('electron', {
     setSessionModel: (options: {
       sessionId: string;
       model: string | null;
-      /** Optional per-session effort (off/low/high/max); undefined leaves it unchanged. */
+      /** Optional per-session effort (off/low/high/max, or the 'default' sentinel for an explicit Default pick); undefined leaves it unchanged. */
       effort?: string | null;
       /** Provider key the model was picked from; required when model ids collide. */
       modelProvider?: string | null;

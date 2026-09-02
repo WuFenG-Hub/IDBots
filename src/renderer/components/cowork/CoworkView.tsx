@@ -10,7 +10,7 @@ import { projectsService } from '../../services/projects';
 import { metaAppService } from '../../services/metaApp';
 import { quickActionService } from '../../services/quickAction';
 import { i18nService } from '../../services/i18n';
-import { convertLegacyEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
+import { effortDisplayForPick, effortForSessionStart, type ComposerModelEffortPick } from '../../services/modelCatalog';
 import CoworkPromptInput, { type CoworkPromptInputRef } from './CoworkPromptInput';
 import CoworkSessionDetail from './CoworkSessionDetail';
 import { buildNewTaskComposerCommands } from './composerCommandCatalog';
@@ -77,12 +77,11 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     llm_effort?: string | null;
   } | null>(null);
   // Pending model+effort for the session about to be started from this home
-  // view. nulls = follow the selected bot's brain (its model and effort).
-  const [pendingModelEffort, setPendingModelEffort] = useState<{
-    modelId: string | null;
-    providerKey?: string | null;
-    effort: string | null;
-  } | null>(null);
+  // view. The whole state being null = follow the selected bot's brain (its
+  // model and effort). Inside a pick, effort null is an EXPLICIT "Default"
+  // choice (model default wins over brain/global) — it must not fall through
+  // to the brain/global rungs the way a missing pick does.
+  const [pendingModelEffort, setPendingModelEffort] = useState<ComposerModelEffortPick | null>(null);
   // Permission mode is a global preference persisted in app_config; the new
   // task composer shows and updates the same value every session/Bot uses.
   const [permissionMode, setPermissionModeState] = useState<CoworkPermissionMode>(
@@ -443,7 +442,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         activeSkillIds: sessionSkillIds,
         model: pendingPick?.modelId ?? undefined,
         modelProvider: pendingPick?.providerKey ?? undefined,
-        effort: pendingPick?.effort ?? undefined,
+        effort: effortForSessionStart(pendingPick),
         projectId: resolvedProjectId ?? undefined,
         messages: [
           {
@@ -496,10 +495,12 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         metabotId: selectedMetabotId,
         permissionMode,
         // Pending picker selection from the home composer; empty pick falls
-        // back to the selected bot's brain (its model and effort).
+        // back to the selected bot's brain (its model and effort). An explicit
+        // pick with effort null carries the 'default' sentinel so the session
+        // runs at the model default instead of the brain/global rungs.
         model: pendingPick?.modelId ?? undefined,
         modelProvider: pendingPick?.providerKey ?? undefined,
-        effort: pendingPick?.effort ?? undefined,
+        effort: effortForSessionStart(pendingPick),
         source: isQuickActionPrompt ? 'quick_action' : undefined,
         projectId: resolvedProjectId ?? undefined,
         // Only an active pending goal rides along; a paused one stays local.
@@ -803,9 +804,12 @@ const CoworkView: React.FC<CoworkViewProps> = ({
               providerKey: pendingModelEffort?.modelId == null
                 ? (selectedMetabotBrain?.llm_provider ?? null)
                 : (pendingModelEffort?.providerKey ?? null),
-              effort: (pendingModelEffort?.effort
-                ?? (selectedMetabotBrain?.llm_effort ? convertLegacyEffortLevel(selectedMetabotBrain.llm_effort) : null)
-                ?? convertLegacyEffortLevel(configService.getConfig().coworkEffortLevel ?? null)) as LlmEffortLevel | null,
+              // An explicit pick sticks as chosen (null = Default); only a
+              // missing pick resolves the brain → global fallback chain.
+              effort: effortDisplayForPick(pendingModelEffort, [
+                selectedMetabotBrain?.llm_effort ?? null,
+                configService.getConfig().coworkEffortLevel ?? null,
+              ]),
             }}
             onModelEffortChange={(value) => {
               setPendingModelEffort({

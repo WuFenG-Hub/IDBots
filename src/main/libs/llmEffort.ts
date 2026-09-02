@@ -5,6 +5,10 @@
 // surface (MetaBot brain fields, cowork session effort) stores values from
 // this vocabulary; `null` means "follow the model default".
 //
+// One non-ladder token is legal on the cowork session effort column:
+// LLM_EFFORT_DEFAULT_SENTINEL records an explicit "Default" pick from a
+// composer picker. See its doc below for why it must stay a truthy string.
+//
 // The renderer mirror of the vocabulary lives in
 // src/renderer/services/modelCatalog.ts (LlmEffortLevel) — keep the two in
 // sync when the ladder changes.
@@ -18,6 +22,19 @@
 export type LlmEffortLevel = 'off' | 'low' | 'high' | 'max';
 
 export const LLM_EFFORT_LEVELS: readonly LlmEffortLevel[] = ['off', 'low', 'high', 'max'];
+
+/**
+ * Marker stored on cowork_sessions.effort (and passed as the session
+ * effortOverride) when the user explicitly picks the "Default" rung in a
+ * composer/session picker. It must be a TRUTHY string that is NOT a canonical
+ * level: the per-turn resolution chain is
+ * `effortOverride ?? brainEffort ?? globalEffort ?? modelDefault`, so a truthy
+ * sentinel stops the chain before the bot brain / global rungs, while
+ * toLlmEffortLevel maps it to null — i.e. the model's own default. A plain
+ * null cannot express that: it falls through to the brain/global defaults,
+ * which is what made the Default rung snap to the highest tier before.
+ */
+export const LLM_EFFORT_DEFAULT_SENTINEL = 'default';
 
 const LEVEL_SET = new Set<string>(LLM_EFFORT_LEVELS);
 
@@ -33,6 +50,8 @@ export function isLlmEffortLevel(value: unknown): value is LlmEffortLevel {
  *
  *   null → null (auto / model default)
  *   off / low / high / max → themselves
+ *   'default' → null (explicit Default pick; the sentinel's explicitness is
+ *               carried by the token itself, the result is model default)
  *   minimal / none / disabled → 'off'
  *   medium → 'low'
  *   xhigh → 'max'
@@ -43,6 +62,8 @@ export function convertLegacyEffortLevel(value: unknown): LlmEffortLevel | null 
   if (!normalized) return null;
   if (isLlmEffortLevel(normalized)) return normalized;
   switch (normalized) {
+    case LLM_EFFORT_DEFAULT_SENTINEL:
+      return null;
     case 'minimal':
     case 'none':
     case 'disabled':

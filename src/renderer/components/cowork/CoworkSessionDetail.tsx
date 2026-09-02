@@ -3,7 +3,7 @@ import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { i18nService } from '../../services/i18n';
 import type { ModelEffortValue } from '../ModelEffortPicker';
-import { convertLegacyEffortLevel } from '../../services/modelCatalog';
+import { convertLegacyEffortLevel, LLM_EFFORT_DEFAULT_SENTINEL } from '../../services/modelCatalog';
 import type {
   CoworkMessage,
   CoworkMessageMetadata,
@@ -2533,7 +2533,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     : (currentSession?.modelProvider ?? null);
   // Per-session effort picked in the composer's model+effort picker. Optimistic
   // local state on top of the persisted currentSession.effort; reset when
-  // switching sessions.
+  // switching sessions. Holds the wire vocabulary: a canonical rung, or the
+  // 'default' sentinel for an explicit "Default" pick (model default wins over
+  // the bot brain / global rungs — a plain null would fall back to them).
   const [sessionEffortOverride, setSessionEffortOverride] = useState<string | null>(null);
   useEffect(() => {
     setSessionEffortOverride(null);
@@ -2544,13 +2546,13 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       modelId: value.modelId,
       providerKey: value.providerKey ?? null,
     });
-    setSessionEffortOverride(value.effort ?? '');
+    setSessionEffortOverride(value.effort ?? LLM_EFFORT_DEFAULT_SENTINEL);
     try {
       await window.electron?.cowork?.setSessionModel({
         sessionId: currentSession.id,
         model: value.modelId,
         modelProvider: value.providerKey ?? null,
-        effort: value.effort ?? '',
+        effort: value.effort ?? LLM_EFFORT_DEFAULT_SENTINEL,
       });
     } catch (modelError) {
       console.error('Failed to set session model:', modelError);
@@ -2658,7 +2660,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // Picker value: session pick wins, else the bound bot's brain (model id or
   // legacy provider key — the picker resolves legacy keys for display), else
   // nothing (global default). Effort mirrors the runtime tiering:
-  // session pick > bot brain effort > global default > model default.
+  // session pick > bot brain effort > global default > model default. A
+  // persisted 'default' sentinel (explicit Default pick) converts to null and
+  // displays as Default instead of snapping to a fallback rung.
   const sessionUsesBrainModel = sessionModelId == null && Boolean(sessionMetabot?.llm_id);
   const sessionModelEffortValue: ModelEffortValue = {
     modelId: sessionModelId ?? sessionMetabot?.llm_id ?? null,
@@ -2666,7 +2670,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       ? (sessionMetabot?.llm_provider ?? null)
       : sessionModelProvider,
     effort: (() => {
-      if (sessionEffortOverride != null) return (sessionEffortOverride || null) as ModelEffortValue['effort'];
+      if (sessionEffortOverride != null) return convertLegacyEffortLevel(sessionEffortOverride);
       if (currentSession?.effort) return convertLegacyEffortLevel(currentSession.effort);
       if (sessionMetabot?.llm_effort) return convertLegacyEffortLevel(sessionMetabot.llm_effort);
       return convertLegacyEffortLevel(configService.getConfig().coworkEffortLevel ?? null);

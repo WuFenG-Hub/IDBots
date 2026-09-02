@@ -7,7 +7,8 @@
  * MetaBot brain selectors used, which silently hid custom providers.
  *
  * The effort vocabulary mirrors src/main/libs/llmEffort.ts (off/low/high/max,
- * null = model default). Keep the two in sync.
+ * null = model default) plus the LLM_EFFORT_DEFAULT_SENTINEL marker for an
+ * explicit "Default" pick. Keep the two in sync.
  */
 
 import type { AppConfig } from '../config';
@@ -16,6 +17,15 @@ import { providerRequiresApiKey } from './llmConnection';
 export type LlmEffortLevel = 'off' | 'low' | 'high' | 'max';
 
 export const LLM_EFFORT_LEVELS: readonly LlmEffortLevel[] = ['off', 'low', 'high', 'max'];
+
+/**
+ * Wire marker for an explicit "Default" rung pick in a composer/session
+ * picker. Persisted as the cowork session's effort so the main-process
+ * resolution chain (session ?? bot brain ?? global ?? model default) stops at
+ * it and runs at the model's own default. Mirrors
+ * llmEffort.LLM_EFFORT_DEFAULT_SENTINEL — keep the two identical.
+ */
+export const LLM_EFFORT_DEFAULT_SENTINEL = 'default';
 
 export function isLlmEffortLevel(value: unknown): value is LlmEffortLevel {
   return typeof value === 'string' && (LLM_EFFORT_LEVELS as readonly string[]).includes(value);
@@ -119,15 +129,56 @@ export function resolveBrainModelInGroups(
 /**
  * Map a leftover five-step effort token onto the current four-step ladder.
  * Canonical off/low/high/max pass through; `low` is the current "light
- * thinking" rung and must not be rewritten to `off`.
+ * thinking" rung and must not be rewritten to `off`. The 'default' sentinel
+ * (explicit Default pick) maps to null = model default.
  */
 export function convertLegacyEffortLevel(value: unknown): LlmEffortLevel | null {
   if (value == null) return null;
   const normalized = String(value).trim().toLowerCase();
   if (!normalized) return null;
   if (isLlmEffortLevel(normalized)) return normalized;
+  if (normalized === LLM_EFFORT_DEFAULT_SENTINEL) return null;
   if (normalized === 'minimal' || normalized === 'none' || normalized === 'disabled') return 'off';
   if (normalized === 'medium') return 'low';
   if (normalized === 'xhigh') return 'max';
   return null;
+}
+
+/** A composer's pending model+effort pick (ModelEffortPicker output shape). */
+export interface ComposerModelEffortPick {
+  modelId: string | null;
+  providerKey?: string | null;
+  effort: LlmEffortLevel | null;
+}
+
+/**
+ * Effort the picker chip should display. An explicit pick sticks as chosen —
+ * including null ("Default") — while no pick at all resolves the fallback
+ * chain (bot brain effort, then the global default), first valid rung wins.
+ * The old `pick?.effort ?? fallbacks` chain conflated "picked Default" with
+ * "never picked", so Default snapped back to the highest fallback rung.
+ */
+export function effortDisplayForPick(
+  pick: ComposerModelEffortPick | null | undefined,
+  fallbacks: ReadonlyArray<unknown>,
+): LlmEffortLevel | null {
+  if (pick != null) return pick.effort ?? null;
+  for (const fallback of fallbacks) {
+    const level = convertLegacyEffortLevel(fallback);
+    if (level != null) return level;
+  }
+  return null;
+}
+
+/**
+ * Effort to send when starting a session from a composer. An explicit pick
+ * always yields a value — a null effort becomes the 'default' sentinel so the
+ * session records "model default wins over brain/global". No pick at all
+ * yields undefined so the main process keeps the tiered defaults.
+ */
+export function effortForSessionStart(
+  pick: ComposerModelEffortPick | null | undefined,
+): LlmEffortLevel | typeof LLM_EFFORT_DEFAULT_SENTINEL | undefined {
+  if (pick == null) return undefined;
+  return pick.effort ?? LLM_EFFORT_DEFAULT_SENTINEL;
 }

@@ -1175,7 +1175,7 @@ interface ActiveSession {
   metawebStudySession?: { pinBudget: number };
   /** Permission mode controlling tool gating (default/plan/acceptEdits/bypassPermissions). */
   permissionMode: CoworkPermissionMode;
-  /** Runtime effort override from the UI toggle; null = use per-model default. */
+  /** Runtime effort override from the UI picker; a canonical rung, the 'default' sentinel (model default, skipping brain/global), or null = tiered defaults (brain → global → per-model). */
   effortOverride: string | null;
   /** Runtime thinking override from the UI toggle; null = use per-model default. */
   thinkingOverride: { type: string } | null;
@@ -6348,7 +6348,8 @@ export class CoworkRunner extends EventEmitter {
   /**
    * Updates the effort level override for an active session. Takes effect on the
    * next turn (effort is set per query invocation). Pass null to revert to the
-   * per-model default.
+   * tiered defaults (bot brain → global → per-model); pass the 'default'
+   * sentinel to skip those rungs and run at the model's own default.
    */
   setEffortOverride(sessionId: string, effort: string | null): void {
     const activeSession = this.activeSessions.get(sessionId);
