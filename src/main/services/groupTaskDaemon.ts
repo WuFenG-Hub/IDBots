@@ -1185,7 +1185,24 @@ export type GroupTaskDaemonTaskEvent =
     checkpointId: number;
     status: 'open' | 'resolved';
     at: number;
+  }
+  | {
+    /**
+     * Snapshot of the daemon's in-flight turns (one MetaBot background turn
+     * per entry) after any change; drives the sidebar background-task badge so
+     * the owner can see bots working instead of wondering about silence.
+     */
+    type: 'groupTask:turnActivityChanged';
+    turns: GroupTaskTurnActivityEntry[];
+    at: number;
   };
+
+/** One in-flight MetaBot group-task background turn (a detached reply/chair job). */
+export interface GroupTaskTurnActivityEntry {
+  taskId: number;
+  metabotId: number;
+  startedAt: number;
+}
 
 /** On-chain existence check for deliverable verification (main.ts wires getPinData). */
 export type GroupTaskDaemonReadPinFn = (
@@ -1447,6 +1464,8 @@ export interface GroupTaskDaemonLoop {
   runTick(): Promise<void>;
   /** Resolves when every turn job dispatched so far has settled (tests / shutdown). */
   whenIdle(): Promise<void>;
+  /** Snapshot of the in-flight background turns (for the sidebar badge IPC). */
+  getTurnActivity(): GroupTaskTurnActivityEntry[];
   start(): void;
   stop(): void;
   isRunning(): boolean;
@@ -2160,6 +2179,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const turnInFlight = new Map<string, { startedAt: number }>();
   const pendingTurnJobs = new Set<Promise<void>>();
   const latchWatchers = new Set<ReturnType<typeof setInterval>>();
+
+  /**
+   * Sidebar background-task badge: every turnInFlight mutation broadcasts a
+   * full snapshot (turns are few and changes are rare, so replace semantics
+   * beat delta bookkeeping) and the renderer can also pull the same snapshot
+   * via the groupTask:getTurnActivity IPC on mount.
+   */
+  const currentTurnActivity = (): GroupTaskTurnActivityEntry[] =>
+    [...turnInFlight.entries()].map(([key, value]) => {
+      const [taskId, metabotId] = key.split(':').map(Number);
+      return { taskId, metabotId, startedAt: value.startedAt };
+    });
+  const emitTurnActivity = (): void => {
+    deps.emitTaskEvent?.({ type: 'groupTask:turnActivityChanged', turns: currentTurnActivity(), at: now() });
+  };
   /**
    * Task #52 self-heal: tasks whose stuck status directive reconciliation was
    * already attempted this daemon run (success or skip — the parse fix keeps
@@ -4818,6 +4852,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const latchInFlightUntilSessionIdle = (key: string, sessionId: string | null, taskId: number, botId: number): void => {
     if (!sessionId) {
       turnInFlight.delete(key);
+      emitTurnActivity();
       return;
     }
     const startedAt = now();
@@ -4832,6 +4867,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       clearInterval(watcher);
       latchWatchers.delete(watcher);
       turnInFlight.delete(key);
+      emitTurnActivity();
       emitLog(
         `[GroupTaskDaemon] Task ${taskId}: in-flight latch for bot ${botId} released ` +
         `(session status ${status ?? 'unknown'}${status === 'running' ? ', latch cap reached' : ''})`,
@@ -4938,6 +4974,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const key = keyOf(task.id, bot.id);
     const sessionId = ensureTaskSession(deps.getCoworkStore(), task, bot.id, bot.name).id;
     turnInFlight.set(key, { startedAt: now() });
+    emitTurnActivity();
     // The reply budget is charged at dispatch (committed work — a retry storm
     // must not be free); the cooldown timestamp only moves on SUCCESS (a failed
     // turn posted nothing, so its durable-queue retry must not sit out a
@@ -5020,7 +5057,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       } finally {
         for (const timer of livenessTimers) clearTimeout(timer);
         livenessTimers.length = 0;
-        if (!keepLatched) turnInFlight.delete(key);
+        if (!keepLatched) {
+          turnInFlight.delete(key);
+          emitTurnActivity();
+        }
         pendingTurnJobs.delete(job);
         noteTickProgress();
       }
@@ -5048,6 +5088,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       return false;
     }
     turnInFlight.set(guardKey, { startedAt: now() });
+    emitTurnActivity();
     const livenessTimers: Array<ReturnType<typeof setTimeout>> = [];
     const job: Promise<void> = (async () => {
       try {
@@ -5061,6 +5102,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         for (const timer of livenessTimers) clearTimeout(timer);
         livenessTimers.length = 0;
         turnInFlight.delete(guardKey);
+        emitTurnActivity();
         pendingTurnJobs.delete(job);
         noteTickProgress();
       }
@@ -7517,6 +7559,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   return {
     runTick,
     whenIdle,
+    getTurnActivity: () => currentTurnActivity(),
     start() {
       if (timer) return;
       runGuardedTick();
@@ -7554,4 +7597,9 @@ export function stopGroupTaskDaemon(): void {
 
 export function isGroupTaskDaemonRunning(): boolean {
   return Boolean(activeDaemonLoop?.isRunning());
+}
+
+/** Sidebar badge: current in-flight MetaBot background turns ([] when no daemon). */
+export function getGroupTaskTurnActivity(): GroupTaskTurnActivityEntry[] {
+  return activeDaemonLoop?.getTurnActivity() ?? [];
 }

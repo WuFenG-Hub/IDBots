@@ -9,6 +9,7 @@ import {
   updateTaskPinned,
   updateTaskDisplayName,
   removeTask,
+  setActiveTurns,
 } from '../store/slices/groupTasksSlice';
 import type {
   GroupTaskCreateInput,
@@ -17,6 +18,7 @@ import type {
   GroupTaskStatus,
   GroupTaskStatusEvent,
   GroupTaskSummary,
+  GroupTaskTurnActivityEvent,
   GroupChatTranscriptMessage,
 } from '../types/groupTask';
 
@@ -35,7 +37,7 @@ class GroupTaskService {
     this.initialized = true;
 
     this.setupListeners();
-    await this.loadTasks();
+    await Promise.all([this.loadTasks(), this.loadTurnActivity()]);
   }
 
   destroy(): void {
@@ -66,6 +68,13 @@ class GroupTaskService {
     });
     this.cleanupFns.push(cleanup);
 
+    // Sidebar badge: the daemon pushes a full in-flight-turn snapshot on every
+    // change; replace semantics keep the renderer mirror trivially in sync.
+    const cleanupTurnActivity = api.onTurnActivityChanged((event: GroupTaskTurnActivityEvent) => {
+      store.dispatch(setActiveTurns(Array.isArray(event.turns) ? event.turns : []));
+    });
+    this.cleanupFns.push(cleanupTurnActivity);
+
     const cleanupOwnerReport = api.onOwnerReportDelivery((event: GroupTaskOwnerReportDeliveryEvent) => {
       const isCheckpoint = event.kind === 'checkpoint';
       let message: string;
@@ -83,6 +92,21 @@ class GroupTaskService {
       window.dispatchEvent(new CustomEvent<string>('app:showToast', { detail: message }));
     });
     this.cleanupFns.push(cleanupOwnerReport);
+  }
+
+  /** Pull the daemon's current in-flight turns (renderer mount / reload). */
+  async loadTurnActivity(): Promise<void> {
+    const api = window.electron?.groupTask;
+    if (!api?.getTurnActivity) return;
+
+    try {
+      const result = await api.getTurnActivity();
+      if (result?.success && Array.isArray(result.turns)) {
+        store.dispatch(setActiveTurns(result.turns));
+      }
+    } catch {
+      // Best-effort badge state: the next change event resyncs it.
+    }
   }
 
   async loadTasks(status?: GroupTaskStatus): Promise<void> {
