@@ -290,6 +290,24 @@ async function main() {
       if (reason) body.reason = reason;
       break;
     }
+    case 'supervise': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for supervise');
+      const signal = String(params.signal ?? '').trim();
+      if (signal !== 'nudge' && signal !== 'flag' && signal !== 'pause' && signal !== 'resume') {
+        fail("supervise signal must be one of: 'nudge', 'flag', 'pause', 'resume'");
+      }
+      const note = String(params.note ?? '').trim();
+      if (!note) fail('note is required for supervise (what to check / flag / why pause or resume)');
+      if (signal === 'resume' && params.confirm_owner !== true) {
+        fail("resume requires the owner's explicit confirmation — pass confirm_owner: true only after the owner confirms");
+      }
+      body = { task_id: taskId, signal, note };
+      const target = String(params.target ?? '').trim();
+      if (target) body.target = target;
+      if (params.confirm_owner === true) body.confirm_owner = true;
+      break;
+    }
     case 'deliverable-delete': {
       const taskId = Number(params.task_id);
       if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for deliverable-delete');

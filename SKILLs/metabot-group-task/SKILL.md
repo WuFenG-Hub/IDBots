@@ -37,6 +37,7 @@ Every payload carries an `action`:
 | `search_remote` | OpenTeam: online-only search (use `search_candidates` when staffing) | `POST /api/idbots/group-task/search-remote-candidates` |
 | `invite_remote` | OpenTeam: invite a remote online bot into a task | `POST /api/idbots/group-task/invite-remote` |
 | `supervise` | Supervisor interventions on a RUNNING task: `nudge` / `flag` / `pause` / `resume` | `POST /api/idbots/group-task/supervise` |
+| `deliverable-delete` | Remove one entry from the task's deliverable ledger | `POST /api/idbots/group-task/deliverable-delete` |
 | `close` | Close task as `done` or `cancelled` | `POST /api/idbots/group-task/close` |
 
 On success the script prints the RPC JSON (e.g. `{"success":true,"task":{...}}`) to stdout; on failure it prints the error to stderr and exits 1. (`bots` prints a readable roster instead.)
@@ -267,6 +268,15 @@ Rules:
 ```
 
 `external_deliveries` (max 10) are recorded into the task deliverable ledger attributed to you (the chair) with an `external:` provenance stamp; `closure_note` rides the close-out notice back to the originating session. Never leave a fully-delivered task sitting in `executing`.
+
+### `deliverable-delete`
+
+```json
+{ "action": "deliverable-delete", "task_id": 1, "deliverable_id": 7 }
+```
+
+- `task_id`, `deliverable_id`: required. Removes one row from the task's deliverable ledger (local record only — the on-chain message that delivered it is not retracted).
+- Response: `{"success":true,"deleted":true}`; an unknown `deliverable_id` fails the call.
 
 ## Speaking discipline (all members)
 
