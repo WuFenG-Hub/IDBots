@@ -2296,6 +2296,18 @@ export class GroupTaskStore {
   }
 
   /**
+   * Total decrypted message count of one group — feeds the `show` detail's
+   * messagesTotal so callers can page the transcript with beforeId.
+   */
+  countGroupChatMessages(groupId: string): number {
+    const row = this.getOne<{ n: number }>(
+      'SELECT COUNT(*) AS n FROM group_chat_messages WHERE group_id = ?',
+      [groupId],
+    );
+    return Number(row?.n ?? 0);
+  }
+
+  /**
    * OpenTeam M3: one sender's non-suspect message count in a group — feeds the
    * participation stats of collaboration impressions.
    */

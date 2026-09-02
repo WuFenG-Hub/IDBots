@@ -172,6 +172,12 @@ export interface GroupTaskDetail extends GroupTask {
   /** Latest group transcript page (P2-6: chair can read the message flow). */
   messages: GroupChatTranscriptMessage[];
   /**
+   * Total decrypted message count of the task's group — the `messages` field
+   * is only the latest page (or the beforeId window); use this to decide
+   * whether older pages exist. 0 when the task has no group yet.
+   */
+  messagesTotal?: number;
+  /**
    * Round-4 stall signal: true when a NON-TERMINAL task has had no host drive
    * (lastDrivenAt, falling back to updatedAt) for longer than
    * stallAfterMinutes — the pipeline looks stuck.
@@ -1425,6 +1431,17 @@ export interface GetGroupTaskOptions {
    * blob; 'full' returns everything (50 messages).
    */
   view?: 'summary' | 'full';
+  /**
+   * Message pagination cursor: only transcript rows with id < beforeId are
+   * returned (chat semantics — page backwards to older messages). Undefined
+   * returns the latest page.
+   */
+  beforeId?: number;
+  /**
+   * Message page size override: when given it replaces the view default
+   * (summary = last 5, full = last 50); the store clamps to 1..200.
+   */
+  messageLimit?: number;
 }
 
 export async function getGroupTask(
@@ -1601,8 +1618,13 @@ export async function getGroupTask(
     transitions: store.listTaskTransitions(id),
     integrityEvents: store.listIntegrityEvents(id),
     messages: task.groupId
-      ? store.listGroupChatMessages(task.groupId, { limit: view === 'full' ? 50 : 5 })
+      ? store.listGroupChatMessages(task.groupId, {
+        beforeId: opts?.beforeId,
+        limit: opts?.messageLimit ?? (view === 'full' ? 50 : 5),
+      })
       : [],
+    // 0 mirrors the empty messages page when the task has no group yet.
+    messagesTotal: task.groupId ? store.countGroupChatMessages(task.groupId) : 0,
     stall: stall.stall,
     stallAfterMinutes: stall.stallAfterMinutes,
     // P1-5: status transition history (who/when/from->to).

@@ -1476,9 +1476,9 @@ export function startMetaidRpcServer(
       for await (const chunk of req) {
         body += chunk;
       }
-      let parsed: { task_id?: number; view?: string };
+      let parsed: { task_id?: number; view?: string; before_id?: number; limit?: number };
       try {
-        parsed = JSON.parse(body) as { task_id?: number; view?: string };
+        parsed = JSON.parse(body) as { task_id?: number; view?: string; before_id?: number; limit?: number };
       } catch {
         res.writeHead(400);
         res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
@@ -1490,11 +1490,33 @@ export function startMetaidRpcServer(
         res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
         return;
       }
+      // Optional message pagination: before_id pages the transcript backwards;
+      // limit overrides the view default page size (store clamps to 1..200).
+      let beforeId: number | undefined;
+      if (parsed.before_id !== undefined) {
+        const candidate = Number(parsed.before_id);
+        if (!Number.isInteger(candidate) || candidate <= 0) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ success: false, error: 'before_id must be a positive integer' }));
+          return;
+        }
+        beforeId = candidate;
+      }
+      let messageLimit: number | undefined;
+      if (parsed.limit !== undefined) {
+        const candidate = Number(parsed.limit);
+        if (!Number.isInteger(candidate) || candidate < 1 || candidate > 200) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ success: false, error: 'limit must be an integer between 1 and 200' }));
+          return;
+        }
+        messageLimit = candidate;
+      }
       // Round-4: view=summary (default: status + members incl. last speak time
       // + deliverables + last 5 messages) or view=full (everything).
       const view = parsed.view === 'full' ? 'full' : 'summary';
       try {
-        const task = await getGroupTask(taskId, { view });
+        const task = await getGroupTask(taskId, { view, beforeId, messageLimit });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, task, view }));
       } catch (err) {

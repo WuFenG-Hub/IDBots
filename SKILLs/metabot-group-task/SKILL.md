@@ -154,8 +154,12 @@ Rules:
 ### `show`
 
 ```json
-{ "action": "show", "task_id": 1 }
+{ "action": "show", "task_id": 1, "view": "summary", "before_id": 420, "limit": 20 }
 ```
+
+- `task_id`: required. `view` optional: `summary` (default) returns status + members + deliverables + the last 5 messages; `full` returns the last 50.
+- Message pagination: `before_id` (optional, positive integer) returns only transcript messages with id below it — page backwards into older messages; `limit` (optional, 1–200) overrides the view's default page size.
+- The response `task.messagesTotal` carries the group's total message count, so you can tell whether older pages exist beyond the returned `task.messages` page.
 
 ### `send`
 

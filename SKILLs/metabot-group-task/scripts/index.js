@@ -164,6 +164,16 @@ async function main() {
       // Round-4: view=summary (default) keeps the output small; view=full returns everything.
       const view = String(params.view ?? '').trim();
       body.view = view === 'full' ? 'full' : 'summary';
+      if (params.before_id !== undefined) {
+        const beforeId = Number(params.before_id);
+        if (!Number.isInteger(beforeId) || beforeId <= 0) fail('before_id must be a positive integer for show');
+        body.before_id = beforeId;
+      }
+      if (params.limit !== undefined) {
+        const limit = Number(params.limit);
+        if (!Number.isInteger(limit) || limit <= 0) fail('limit must be a positive integer for show');
+        body.limit = limit;
+      }
       break;
     }
     case 'member_status': {
