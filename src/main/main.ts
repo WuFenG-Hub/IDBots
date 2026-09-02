@@ -238,6 +238,10 @@ import {
   buildMetawebStudySessionPrompt,
   parseMetawebStudyRunReport,
 } from './services/metawebStudyService';
+import {
+  ContentSummaryService,
+  OrchestratorSummarizerProvider,
+} from './services/contentSummaryService';
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
@@ -2631,6 +2635,7 @@ let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
 let metawebStudyService: MetawebStudyService | null = null;
 let chainContentHistoryStore: ChainContentHistoryStore | null = null;
+let contentSummaryService: ContentSummaryService | null = null;
 let serviceOrderLifecycleService: ServiceOrderLifecycleService | null = null;
 let serviceRefundSyncService: ServiceRefundSyncService | null = null;
 let serviceRefundSettlementService: ServiceRefundSettlementService | null = null;
@@ -3076,6 +3081,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   metawebStudyService = null;
   chainContentHistoryStore = null;
   setChainContentHistoryStore(null);
+  contentSummaryService = null;
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
   serviceRefundSettlementService = null;
@@ -3997,6 +4003,11 @@ const startSqliteDaemons = (): void => {
   // bases). One session at a time; no proactive reporting.
   getMetawebStudyService().startSchedule();
 
+  // Chain content summaries: asynchronously fills LLM gists for the chain
+  // write/read ledger's pending rows on a slow tick, cost-gated per tick and
+  // per bot per day. Provider is pluggable (see contentSummaryService.ts).
+  getContentSummaryService().startSchedule();
+
   // Agent-Game-v2 persistent App/Game Runtime (docs/14). Wire the host once the
   // sqlite stores + group-chat transport are ready. Survives MetaApp close and
   // host restart; reuses the existing LLM / pin-write / group-chat infra.
@@ -4022,6 +4033,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   stopMemoryHygieneService();
   knowledgeBaseService?.stopAutoLearnSchedule();
   metawebStudyService?.stopSchedule();
+  contentSummaryService?.stopSchedule();
   stopPrivateChatBackfill();
   stopGroupChatBackfill();
   stopGroupTaskDaemon();
@@ -6576,6 +6588,37 @@ const getMetawebStudyService = (): MetawebStudyService => {
     });
   }
   return metawebStudyService;
+};
+
+/**
+ * Content summary service ("链上内容异步摘要"): drains the chain content
+ * history ledger's pending summary queue through the pluggable
+ * SummarizerProvider seam. The default provider calls the orchestrator chat
+ * completion with the bot's own brain pair; cowork_config gates:
+ * contentSummaryEnabled ('0'/'false' off), contentSummaryDailyCap,
+ * contentSummaryLlmId (global model override).
+ */
+const getContentSummaryService = (): ContentSummaryService => {
+  if (!contentSummaryService) {
+    const getConfigValue = (key: string): string | null => getDreamStore().getCoworkConfigValue(key);
+    contentSummaryService = new ContentSummaryService({
+      store: getChainContentHistoryStore(),
+      getConfigValue,
+      provider: new OrchestratorSummarizerProvider({
+        performChat: performChatCompletionForOrchestrator,
+        getConfigValue,
+        resolveBotLlm: (metabotId) => {
+          const metabot = getMetabotStore().getMetabotById(metabotId);
+          if (!metabot) return null;
+          return {
+            llmId: normalizeMetabotLlmId(metabot.llm_id),
+            fallbackLlmId: normalizeMetabotLlmId(metabot.fallback_llm_id),
+          };
+        },
+      }),
+    });
+  }
+  return contentSummaryService;
 };
 
 const captureServiceOrderExperience = (
