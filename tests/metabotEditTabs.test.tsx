@@ -44,7 +44,10 @@ const baseInitialValues: Partial<MetaBotEditValues> = {
   homepage_initial: null,
 };
 
-function renderTabsMarkup(initialValues: Partial<MetaBotEditValues> = {}) {
+function renderTabsMarkup(
+  initialValues: Partial<MetaBotEditValues> = {},
+  skillOptions: Array<import('../src/renderer/types/skill').Skill> = [],
+) {
   return renderToStaticMarkup(
     <MetaBotEditTabs
       initialValues={{ ...baseInitialValues, ...initialValues }}
@@ -52,7 +55,7 @@ function renderTabsMarkup(initialValues: Partial<MetaBotEditValues> = {}) {
       onCancel={() => {}}
       onSaveTab={async () => {}}
       llmOptions={[{ id: 'codex', label: 'Codex' }]}
-      skillOptions={[]}
+      skillOptions={skillOptions}
       onOpenDefaultHomepage={() => {}}
       onPreviewMetaAppHomepage={() => true}
     />,
@@ -126,6 +129,32 @@ test('Chat Settings panel hosts the allow-chat-skills editor and Advanced panel 
   const advancedPanel = panelMarkup(markup, 'advanced');
   assert.match(advancedPanel, /data-slot="metabot-homepage-control-row"/);
   assert.match(advancedPanel, /data-slot="metabot-edit-save-advanced"/);
+});
+
+test('Chat Settings panel lists bundled skills read-only and keeps them out of the assign picker', () => {
+  const skillOptions = [
+    { id: 'seedream', name: 'seedream', description: 'img', enabled: true, isOfficial: true, isBuiltIn: true, updatedAt: 1, prompt: 'p', skillPath: '/x' },
+    { id: 'docx', name: 'docx', description: 'doc', enabled: true, isOfficial: true, isBuiltIn: true, updatedAt: 1, prompt: 'p', skillPath: '/x' },
+    { id: 'baoyu-image-studio', name: 'baoyu-image-studio', description: 'third-party', enabled: true, isOfficial: false, isBuiltIn: false, updatedAt: 1, prompt: 'p', skillPath: '/x' },
+    { id: 'disabled-bundled', name: 'disabled-bundled', description: 'off', enabled: false, isOfficial: true, isBuiltIn: true, updatedAt: 1, prompt: 'p', skillPath: '/x' },
+  ] as Array<import('../src/renderer/types/skill').Skill>;
+
+  const chatPanel = panelMarkup(renderTabsMarkup({}, skillOptions), 'chatSettings');
+
+  // Read-only bundled section present with only the enabled built-in skills.
+  assert.ok(chatPanel.includes('data-slot="metabot-bundled-skills"'), 'bundled skills section renders');
+  assert.match(chatPanel, /data-slot="metabot-bundled-skills-list"/);
+  assert.match(chatPanel, /seedream/);
+  assert.match(chatPanel, /docx/);
+
+  // The assign picker still excludes built-ins; the third-party skill stays assignable.
+  const pickerOptions = chatPanel.slice(chatPanel.indexOf('id="metabot-allow-chat-skills"'), chatPanel.indexOf('data-slot="metabot-bundled-skills"'));
+  assert.match(pickerOptions, /baoyu-image-studio/);
+  assert.doesNotMatch(pickerOptions, /seedream/);
+
+  // No bundled section when the library has no enabled built-in skills.
+  const externalOnly = renderTabsMarkup({}, [skillOptions[2]]);
+  assert.doesNotMatch(externalOnly, /data-slot="metabot-bundled-skills"/);
 });
 
 test('tab field and sync group mappings pin each editable field to its tab', () => {

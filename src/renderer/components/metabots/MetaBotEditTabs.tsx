@@ -393,6 +393,10 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
     () => skillOptions.filter((skill) => skill.enabled && !skill.isBuiltIn),
     [skillOptions],
   );
+  const bundledSkillOptions = useMemo(
+    () => skillOptions.filter((skill) => skill.enabled && skill.isBuiltIn),
+    [skillOptions],
+  );
   const skillNameById = useMemo(
     () => new Map(skillOptions.map((skill) => [skill.id, skill.name])),
     [skillOptions],
@@ -1114,6 +1118,39 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
             )}
           </div>
         </div>
+
+        {/* Bundled skills are implicitly available to every bot (work sessions
+            plus every chat-routing surface since the routing-baseline change);
+            a collapsed read-only list keeps that discoverable without implying
+            they are assignable here. */}
+        {bundledSkillOptions.length > 0 && (
+          <div className={rowClass} data-slot="metabot-bundled-skills">
+            <label className={labelClass}>
+              {i18nService.t('metabotBundledSkills')}
+            </label>
+            <div className="min-w-0">
+              <details className="group">
+                <summary className="cursor-pointer select-none text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText">
+                  {i18nService.t('metabotBundledSkillsSummary').replace('{count}', String(bundledSkillOptions.length))}
+                </summary>
+                <div className="mt-2 flex flex-wrap gap-2" data-slot="metabot-bundled-skills-list">
+                  {bundledSkillOptions.map((skill) => (
+                    <span
+                      key={skill.id}
+                      title={skill.id}
+                      className="inline-flex max-w-full items-center rounded-full border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary"
+                    >
+                      <span className="max-w-[10rem] truncate">{skill.name}</span>
+                    </span>
+                  ))}
+                </div>
+              </details>
+              <p className={hintClass}>
+                {i18nService.t('metabotBundledSkillsHint')}
+              </p>
+            </div>
+          </div>
+        )}
 
         <div className={rowClass}>
           <label htmlFor="metabot-a2a-max-turns" className={labelClass}>

@@ -33,6 +33,9 @@ type ProviderSpec = {
 };
 
 const BAOYU_IMAGE_SKILL_ID = 'baoyu-image-studio';
+/** Settings > Models provider whose apiKey doubles as the bundled
+ *  seedance/seedream skills' ARK_API_KEY. */
+const ARK_APP_PROVIDER_KEY = 'volcengine';
 
 const PROVIDER_SPECS: Record<ImageProviderId, ProviderSpec> = {
   openai: {
@@ -120,6 +123,27 @@ const shouldInjectForSkillIds = (skillIds?: string[]): boolean => {
 
   const normalized = normalizeSkillIds(skillIds);
   return normalized.has(BAOYU_IMAGE_SKILL_ID) || normalized.has(BAOYU_IMAGE_SKILL_ID.replace(/-/g, '_'));
+};
+
+/**
+ * ARK_API_KEY for the bundled seedance/seedream skills. Priority: the
+ * Settings > Models "volcengine" provider key, then the process env. Unlike
+ * the baoyu chain there is no provider selection — both skills always talk
+ * to Volcengine Ark. Injected unconditionally when resolvable (host-level
+ * credential, like IDBOTS_RPC_TOKEN): a session with an unrelated pinned
+ * skill can still free-route to seedream, and a skill-id gate would fail
+ * there silently.
+ */
+const resolveArkEnvOverrides = (
+  appConfig: AppConfig | null | undefined,
+  processEnv: NodeJS.ProcessEnv
+): Record<string, string> | null => {
+  const appApiKey = getAppProviderApiKey(appConfig, ARK_APP_PROVIDER_KEY);
+  if (appApiKey) {
+    return { ARK_API_KEY: appApiKey };
+  }
+  const envApiKey = normalizeString(processEnv.ARK_API_KEY);
+  return envApiKey ? { ARK_API_KEY: envApiKey } : null;
 };
 
 const getAppProviderApiKey = (
@@ -224,12 +248,22 @@ export function buildImageSkillEnvOverrides(input: {
   appConfig?: AppConfig | null;
   processEnv?: NodeJS.ProcessEnv;
 }): Record<string, string> {
-  if (!shouldInjectForSkillIds(input.activeSkillIds)) {
-    return {};
-  }
-
   const processEnv = input.processEnv ?? process.env;
   const appConfig = input.appConfig ?? null;
+  const overrides: Record<string, string> = {};
+
+  // Seedance/Seedream always talk to Volcengine Ark: mirror the volcengine
+  // provider key (Settings > Models) into ARK_API_KEY so the bundled skills
+  // work out of the box instead of demanding a manual per-skill .env.
+  const arkEnv = resolveArkEnvOverrides(appConfig, processEnv);
+  if (arkEnv) {
+    Object.assign(overrides, arkEnv);
+  }
+
+  if (!shouldInjectForSkillIds(input.activeSkillIds)) {
+    return overrides;
+  }
+
   const brainProviderKey = normalizeString(input.metabotLlmProvider || input.metabotLlmId).toLowerCase();
   const mappedProvider = METABOT_PROVIDER_MAPPING[brainProviderKey];
   const orderedProviders: ImageProviderId[] = [];
@@ -253,9 +287,12 @@ export function buildImageSkillEnvOverrides(input: {
   for (const providerId of orderedProviders) {
     const resolved = resolveProviderFromAppOrEnv(providerId, appConfig, processEnv);
     if (resolved) {
-      return resolved;
+      // The ARK key from the configured provider wins over any value the
+      // fallback chain might have mirrored from the environment.
+      Object.assign(overrides, resolved, overrides.ARK_API_KEY ? { ARK_API_KEY: overrides.ARK_API_KEY } : {});
+      return overrides;
     }
   }
 
-  return {};
+  return overrides;
 }

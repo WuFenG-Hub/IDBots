@@ -124,15 +124,16 @@ test('applyMetabotAssignedSkills resolves names, drops bundled skills, and repla
 
   assert.deepEqual(resolved, ['assigned-skill', 'assigned-by-name']);
 
-  // Replace-set semantics: second call drops the first entry.
+  // Replace-set semantics: second call drops the first entry. The baseline
+  // also carries bundled skills for every peer-triggered turn.
   manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-by-name'], 'ui');
   assert.deepEqual(
     manager.resolveChatSkillIds({ metabotId: BOT_ID }),
-    ['assigned-by-name']
+    ['assigned-by-name', 'official-core-skill']
   );
 });
 
-test('chat routing baseline: only the bot\'s assigned enabled skills are routable', () => {
+test('chat routing baseline: bundled + assigned enabled skills are routable', () => {
   const { manager } = createManager();
   manager.applyMetabotAssignedSkills(BOT_ID, [
     'assigned-skill',
@@ -143,11 +144,23 @@ test('chat routing baseline: only the bot\'s assigned enabled skills are routabl
 
   const result = manager.buildChatSkillsRoutingPrompt({ metabotId: BOT_ID });
 
-  assert.deepEqual(result.activeSkillIds, ['assigned-skill', 'assigned-by-name']);
+  assert.deepEqual(result.activeSkillIds, ['assigned-skill', 'assigned-by-name', 'official-core-skill']);
   assert.deepEqual(extractSkillIds(result.prompt), result.activeSkillIds);
   assert.doesNotMatch(result.prompt, /disabled-skill/);
   assert.doesNotMatch(result.prompt, /library-skill/);
-  assert.doesNotMatch(result.prompt, /official-core-skill/);
+});
+
+test('chat routing baseline keeps global external skills locked to widened turns', () => {
+  const { manager } = createManager();
+  manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-skill'], 'ui');
+  manager.setSkillScopeForSkill('library-skill', 'global');
+
+  const baseline = manager.buildChatSkillsRoutingPrompt({ metabotId: BOT_ID });
+  assert.deepEqual(baseline.activeSkillIds, ['assigned-skill', 'official-core-skill']);
+  assert.doesNotMatch(baseline.prompt, /library-skill/);
+
+  const widened = manager.buildChatSkillsRoutingPrompt({ metabotId: BOT_ID, widened: true });
+  assert.ok(widened.activeSkillIds.includes('library-skill'));
 });
 
 test('chat routing widened: capped at the bot\'s full visible set (bundled + global + assigned)', () => {
@@ -166,13 +179,13 @@ test('chat routing widened: capped at the bot\'s full visible set (bundled + glo
   assert.doesNotMatch(result.prompt, /assigned-by-name/);
 });
 
-test('unassigned bot and bot-less sessions route no assigned-only skills', () => {
+test('unassigned bot and bot-less sessions still route bundled skills', () => {
   const { manager } = createManager();
   manager.applyMetabotAssignedSkills(BOT_ID, ['assigned-skill'], 'ui');
 
-  assert.deepEqual(manager.resolveChatSkillIds({ metabotId: BOT_ID + 1 }), []);
-  assert.deepEqual(manager.resolveChatSkillIds({ metabotId: null }), []);
-  assert.deepEqual(manager.resolveChatSkillIds({}), []);
+  assert.deepEqual(manager.resolveChatSkillIds({ metabotId: BOT_ID + 1 }), ['official-core-skill']);
+  assert.deepEqual(manager.resolveChatSkillIds({ metabotId: null }), ['official-core-skill']);
+  assert.deepEqual(manager.resolveChatSkillIds({}), ['official-core-skill']);
 });
 
 test('listSkillsForMetabot: bot-less view = bundled + global only', () => {

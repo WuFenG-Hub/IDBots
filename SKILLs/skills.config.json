@@ -9,9 +9,23 @@
       "installedAt": 1740969600000,
       "enabled": true
     },
+    "metabot-post-skill": {
+      "order": 13,
+      "version": "1.0.0",
+      "creator-metaid": "",
+      "installedAt": 1740969600000,
+      "enabled": true
+    },
     "metabot-trade-metaidmarket": {
       "order": 17,
       "version": "1.0.1",
+      "creator-metaid": "",
+      "installedAt": 1740969600000,
+      "enabled": true
+    },
+    "metabot-group-task": {
+      "order": 18,
+      "version": "1.0.0",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
@@ -23,30 +37,9 @@
       "installedAt": 1740969600000,
       "enabled": true
     },
-    "metabot-create-metaapp": {
-      "order": 23,
-      "version": "1.0.2",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "metabot-post-metaapp": {
-      "order": 24,
-      "version": "1.0.1",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
     "metabot-create-wiki": {
       "order": 21,
       "version": "1.0.1",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "proactive-agent-3.1.0": {
-      "order": 40,
-      "version": "1.0.0",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
@@ -86,6 +79,20 @@
       "installedAt": 1740969600000,
       "enabled": true
     },
+    "seedream": {
+      "order": 105,
+      "version": "1.0.0",
+      "creator-metaid": "",
+      "installedAt": 1740969600000,
+      "enabled": true
+    },
+    "seedance": {
+      "order": 106,
+      "version": "1.0.0",
+      "creator-metaid": "",
+      "installedAt": 1740969600000,
+      "enabled": true
+    },
     "scheduled-task": {
       "order": 110,
       "version": "1.0.0",
@@ -93,29 +100,8 @@
       "installedAt": 1740969600000,
       "enabled": true
     },
-    "remotion": {
-      "order": 120,
-      "version": "1.0.0",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "develop-web-game": {
-      "order": 130,
-      "version": "1.0.0",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
     "playwright": {
       "order": 140,
-      "version": "1.0.0",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "create-plan": {
-      "order": 150,
       "version": "1.0.0",
       "creator-metaid": "",
       "installedAt": 1740969600000,
@@ -151,13 +137,6 @@
     },
     "imap-smtp-email": {
       "order": 211,
-      "version": "1.0.0",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
-    "technology-news-search": {
-      "order": 214,
       "version": "1.0.0",
       "creator-metaid": "",
       "installedAt": 1740969600000,

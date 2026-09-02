@@ -4464,8 +4464,9 @@ async function processOne(
       try {
         chatSkillsRouting = await getChatSkillsRoutingPrompt({
           metabotId: metabot.id,
-          // Owner turns widen to the bot's full visible set (bundled + global
-          // + assigned); peer turns route over the assigned baseline only.
+          // Baseline (any peer): bundled + assigned skills. Owner turns widen
+          // to the bot's full visible set, additionally unlocking global
+          // external skills.
           widened: autoReplyPolicy.reason === 'owner',
         });
       } catch (error) {

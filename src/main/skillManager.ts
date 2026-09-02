@@ -920,6 +920,15 @@ export class SkillManager {
     // (post_buzz / send_private_chat / group_chat / omni_read / omni_cast /
     // browser_open — see src/main/libs/*AgentTools.ts). Retire the external
     // skills so existing installs drop them (dir + skills.config entry).
+    //
+    // The 2026-09 bundled-set prune removed ten more skills from the default
+    // bundle: metabot-create-metaapp / metabot-post-metaapp were superseded by
+    // the unified metabot-metaapp skill (IDFramework legacy + standalone
+    // publish flow); the rest (proactive-agent, create-plan, develop-web-game,
+    // films-search, music-search, remotion, find-skills, technology-news-
+    // search) were ecosystem imports overlapping built-in tools or marginal
+    // for the product. Existing installs drop them on upgrade; owners who
+    // still want one can reinstall it from the skill market.
     const retiredSkillIds = [
       'metabot-upload-largefile',
       'metabot-upload-file',
@@ -929,6 +938,16 @@ export class SkillManager {
       'metabot-omni-reader',
       'metabot-omni-caster',
       'metabot-browser-open',
+      'metabot-create-metaapp',
+      'metabot-post-metaapp',
+      'proactive-agent-3.1.0',
+      'create-plan',
+      'develop-web-game',
+      'films-search',
+      'music-search',
+      'remotion',
+      'find-skills-0.1.0',
+      'technology-news-search',
     ];
     for (const retiredId of retiredSkillIds) {
       const legacyDir = path.join(userRoot, retiredId);
@@ -1046,11 +1065,23 @@ export class SkillManager {
     return skillIds.filter((id) => visibleIds.has(id));
   }
 
-  /** The bot's assigned external skills (chat-routing baseline; no bundled/global). */
-  private listAssignedSkillRecordsForMetabot(metabotId: number): SkillRecord[] {
+  /**
+   * Chat-routing baseline (anyone messaging the bot): BUNDLED skills + the
+   * bot's ASSIGNED external skills. Bundled skills are host-blessed and must
+   * stay usable by every peer (A2A chats, group-task workers, OpenTeam
+   * guests) — otherwise they would be unreachable for every bot but the
+   * owner/chair. Global external skills stay OUT of the baseline: they are
+   * community-installed code the owner only meant to share across their own
+   * bots, so peer-triggered turns must not run them.
+   */
+  private listChatRoutingBaselineSkills(metabotId: number | null): SkillRecord[] {
+    const enabled = this.listSkills().filter((skill) => skill.enabled && skill.prompt);
+    if (metabotId == null) {
+      return enabled.filter((skill) => skill.isBuiltIn);
+    }
     this.ensureAssignmentSchema();
     const assigned = new Set(listAssignedSkillIds(this.getStore().getDatabase(), metabotId));
-    return this.listSkills().filter((skill) => assigned.has(skill.id) && skill.enabled && skill.prompt);
+    return enabled.filter((skill) => skill.isBuiltIn || assigned.has(skill.id));
   }
 
   /** Library metadata for the Skills UI: scope + assigned bots, external skills only. */
@@ -1287,20 +1318,18 @@ export class SkillManager {
 
   /**
    * Chat-surface skill routing under the assignment model.
-   * Baseline (anyone messaging the bot): the bot's ASSIGNED external skills
-   * only — the successor of the legacy allow_chat_skills allowlist (which the
-   * one-time migration converts into assignment rows).
+   * Baseline (anyone messaging the bot): bundled skills + the bot's ASSIGNED
+   * external skills — the successor of the legacy allow_chat_skills allowlist
+   * (which the one-time migration converts into assignment rows), widened to
+   * keep bundled skills reachable for peers.
    * Widened (owner / boss / chair): the bot's full visible set (bundled +
-   * global + assigned) — capped at the bot, never the whole library.
+   * global + assigned) — the only tier that unlocks GLOBAL external skills.
    */
   resolveChatSkillIds(input: { metabotId?: number | null; widened?: boolean } = {}): string[] {
     if (input.widened) {
       return this.listSkillsForMetabot(input.metabotId ?? null).map((skill) => skill.id);
     }
-    if (input.metabotId == null) {
-      return [];
-    }
-    return this.listAssignedSkillRecordsForMetabot(input.metabotId).map((skill) => skill.id);
+    return this.listChatRoutingBaselineSkills(input.metabotId ?? null).map((skill) => skill.id);
   }
 
   buildChatSkillsRoutingPrompt(input: {
@@ -1309,7 +1338,7 @@ export class SkillManager {
   } = {}): ChatSkillsRoutingPromptResult {
     const activeSkills = input.widened
       ? this.listSkillsForMetabot(input.metabotId ?? null)
-      : this.listAssignedSkillRecordsForMetabot(input.metabotId ?? -1);
+      : this.listChatRoutingBaselineSkills(input.metabotId ?? null);
     const activeSkillIds = activeSkills.map((skill) => skill.id);
     return {
       prompt: this.buildScopedRoutingPrompt(activeSkills),

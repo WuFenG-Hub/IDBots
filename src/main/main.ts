@@ -3849,9 +3849,9 @@ const startSqliteDaemons = (): void => {
     // never arrives.
     fetchGroupMembers,
     // OpenTeam M3: same chat-skill routing + skill-turn seams as the
-    // group-task daemon, scoped to the guest bot's assigned skills
-    // (widened stays false inside the daemon — external members are
-    // never the owner).
+    // group-task daemon, baseline = bundled + the guest bot's assigned
+    // skills (widened stays false inside the daemon — external members are
+    // never the owner, so global external skills stay locked).
     getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
     runSkillTurn: async (params) => {
       // Run inside the guest session's own per-bot workspace instead of the
