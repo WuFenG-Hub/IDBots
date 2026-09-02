@@ -272,6 +272,19 @@ const ACK_KV_PREFIX = 'group_task_ack:';
  * referenced upstream deliverable lands (bounded wait, then proceeds).
  */
 const DEPENDS_ON_TAG = /\[DEPENDS_ON:\s*([^\]]+)\]/i;
+const DEPENDS_ON_TAG_GLOBAL = new RegExp(DEPENDS_ON_TAG.source, 'gi');
+/**
+ * fix/group-task-dep-wait: all [DEPENDS_ON: <token>] tokens of a message. The
+ * P2-6 dispatch gate enforces the FIRST tag (DEPENDS_ON_TAG); watchers such as
+ * the stale-[WORKING] dependency-wait exemption audit every tag instead.
+ */
+function extractDependsOnTokens(content: string | null | undefined): string[] {
+  const text = (content ?? '').trim();
+  if (!text) return [];
+  return [...text.matchAll(DEPENDS_ON_TAG_GLOBAL)]
+    .map((match) => match[1].trim())
+    .filter((token) => token.length > 0);
+}
 const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
 /**
  * P2-8: multi-driver mutex — kv heartbeat claim per task
@@ -436,6 +449,14 @@ const GROUP_TASK_STUCK_RECLAIM_PREFIX = 'group_task_stuck_reclaim:';
 const GROUP_TASK_TIMEOUT_HINT_PREFIX = 'group_task_timeout_hint:';
 /** R6 L3: one owner brief per (task, member) timeout streak (distinct from the L2 chair hint). */
 const GROUP_TASK_TIMEOUT_OWNER_PREFIX = 'group_task_timeout_owner:';
+/**
+ * fix/group-task-dep-wait: audit note kept while the stale-[WORKING] monitor
+ * exempts a member whose latest chair assignment waits on an undelivered
+ * [DEPENDS_ON] upstream (`group_task_dep_wait_exempt:<taskId>:<metabotId>`;
+ * deleted once the wait lifts). Distinct from DEP_WAIT_KV_PREFIX, which tracks
+ * the P2-6 dispatch gate's bounded wait per assignment message.
+ */
+const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
 /**
  * #14 follow-up: when a worker turn already in flight lands AFTER the chair's
  * closing ceremony (so the last group message is a worker's, not the host's),
@@ -1895,6 +1916,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * P2-6 ledger check for one [DEPENDS_ON] token: pinid/txid-shaped tokens are
+   * enforced against the task's recorded deliverables; free-text descriptions
+   * are advisory only (always satisfied). Shared by dependencyStatus and the
+   * stale-[WORKING] dependency-wait exemption.
+   */
+  const dependencyTokenSatisfied = (task: GroupTask, token: string): boolean => {
+    const pinish = PINID_FORMAT.test(token) || TXID_FORMAT.test(token);
+    if (!pinish) return true;
+    const lower = token.toLowerCase();
+    const deliverables = deps.getGroupTaskStore().listDeliverables(task.id);
+    return deliverables.some((deliverable) =>
+      (deliverable.msgPinId ?? '').toLowerCase() === lower
+      || (deliverable.uri ?? '').toLowerCase().includes(lower),
+    );
+  };
+
+  /**
    * P2-6: [DEPENDS_ON: <token>] gate. Pinid/txid-shaped tokens are enforced
    * against the task's recorded deliverables (the worker dispatch is held
    * until the upstream deliverable lands); free-text descriptions are
@@ -1908,15 +1946,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const match = DEPENDS_ON_TAG.exec(message.content ?? '');
     if (!match) return { token: null, satisfied: true };
     const token = match[1].trim();
-    const pinish = PINID_FORMAT.test(token) || TXID_FORMAT.test(token);
-    if (!pinish) return { token, satisfied: true };
-    const lower = token.toLowerCase();
-    const deliverables = deps.getGroupTaskStore().listDeliverables(task.id);
-    const satisfied = deliverables.some((deliverable) =>
-      (deliverable.msgPinId ?? '').toLowerCase() === lower
-      || (deliverable.uri ?? '').toLowerCase().includes(lower),
-    );
-    return { token, satisfied };
+    return { token, satisfied: dependencyTokenSatisfied(task, token) };
   };
 
   /**
@@ -5263,6 +5293,53 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * fix/group-task-dep-wait: the [DEPENDS_ON] state of the member's LATEST
+   * chair assignment (chair-sent, @mentioning the member, skipping host
+   * notices / roll calls — the same gates the ACK-watch arming path applies).
+   * Returns null when no assignment can be located or checked; otherwise the
+   * assignment's upstream tokens and the subset still undelivered. A member
+   * with a pending upstream is legitimately WAITING (the P2-6 dispatch gate
+   * holds it the same way), so its silence must not read as a stuck signal.
+   */
+  const checkMemberDependencyWait = (
+    task: GroupTask,
+    member: GroupTaskMember,
+    chairMember: GroupTaskMember | undefined,
+  ): { tokens: string[]; pendingTokens: string[] } | null => {
+    const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
+    if (!task.groupId || !chairGmid || member.metabotId == null) return null;
+    const bot = deps.getMetabotStore().getMetabotById(member.metabotId);
+    if (!bot) return null;
+    let assignment: GroupTaskDaemonMessage | null = null;
+    try {
+      const rows = mapMessageRows(deps.getStore().getDatabase().exec(
+        `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
+                chain_timestamp, reply_pin, sender_suspect
+         FROM group_chat_messages
+         WHERE group_id = ? AND sender_global_metaid = ?
+         ORDER BY id DESC LIMIT 50`,
+        [task.groupId, chairGmid],
+      ));
+      for (const row of rows) {
+        const message = toDaemonMessage(row);
+        if (hasGroupTaskNotice(message.content) || isRollCallPresenceCheck(message.content)) continue;
+        if (isMentioned(message, bot)) {
+          assignment = message;
+          break;
+        }
+      }
+    } catch {
+      return null;
+    }
+    if (!assignment) return null;
+    const tokens = extractDependsOnTokens(assignment.content);
+    return {
+      tokens,
+      pendingTokens: tokens.filter((token) => !dependencyTokenSatisfied(task, token)),
+    };
+  };
+
+  /**
    * R6 L2: once a working/assigned LOCAL worker's [WORKING] signal goes stale
    * (older than the timeout window), inject a deterministic "re-assign" hint
    * into the chair's next turn and mark the authoritative state timeout. This
@@ -5272,7 +5349,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * suspended" suggestion, not just another alert. Best-effort: never blocks
    * the tick; the store status change is the authoritative signal, the chair
    * hint is advisory. A member with a non-rejected deliverable on the ledger
-   * is skipped entirely — delivered-then-idle is done, not stuck.
+   * is skipped entirely — delivered-then-idle is done, not stuck. A member
+   * whose latest chair assignment is [DEPENDS_ON]-gated on an undelivered
+   * upstream deliverable is skipped too — dependency-wait is waiting, not
+   * stuck (fix/group-task-dep-wait).
    */
   const monitorLocalWorkerTimeout = async (
     task: GroupTask,
@@ -5343,6 +5423,39 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       });
       if (liveness === 'alive') continue;
 
+      // fix/group-task-dep-wait: a member whose latest chair assignment is
+      // [DEPENDS_ON]-gated on an undelivered upstream deliverable is correctly
+      // WAITING (the P2-6 dispatch gate holds it the same way) — silence is
+      // expected, not a stuck signal. Exempt it from the unreachable / hint /
+      // reclaim verdict and leave an auditable kv note; the live check re-runs
+      // every tick, so the exemption lifts on its own once the upstream lands.
+      const depWait = checkMemberDependencyWait(task, member, chairMember);
+      if (depWait && depWait.pendingTokens.length > 0) {
+        sqlite.set(
+          `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
+          JSON.stringify({
+            upstreamTokens: depWait.pendingTokens,
+            upstreamDelivered: false,
+            checkedAt: now(),
+          }),
+        );
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: dependency-wait exemption: member ${name} ` +
+          `waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
+        );
+        continue;
+      }
+      // Not waiting (no [DEPENDS_ON] tag, or the upstream has delivered since):
+      // clear a stale exemption note so the audit trail reflects the lift.
+      if (depWait) {
+        sqlite.delete(`${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`);
+      }
+      const depContext = depWait == null
+        ? null
+        : depWait.tokens.length === 0
+          ? 'no upstream dependency'
+          : `upstream ${depWait.tokens.join(', ')} delivered`;
+
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
       // once per (task, member) streak. Anti-flap (fix/group-member-status,
       // review follow-up): write 'unreachable' only in states where
@@ -5373,7 +5486,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       const hintKey = `${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`;
       if (sqlite.get<string>(hintKey) !== '1') {
-        timedOut.push(name);
+        timedOut.push(depContext ? `${name} (${depContext})` : name);
         sqlite.set(hintKey, '1');
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${name} [WORKING] signal stale (${memberTimeoutAfterMinutes}+ min); ` +
@@ -5388,7 +5501,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const reclaimNote = reclaimStuckWorkerSession(
         task,
         member,
-        `[WORKING] signal stale ${memberTimeoutAfterMinutes}+ min with zero cowork-session activity`,
+        `[WORKING] signal stale ${memberTimeoutAfterMinutes}+ min with zero cowork-session activity` +
+        (depContext ? `; ${depContext}` : ''),
       );
       if (reclaimNote) reclaimNotes.push(reclaimNote);
 
