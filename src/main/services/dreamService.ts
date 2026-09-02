@@ -90,6 +90,7 @@ export type DreamPerformChat = (
     fallbackLlmId?: string | null;
     throwOnEmptyContent?: boolean;
     thinking?: 'enabled' | 'disabled';
+    webSearch?: boolean;
   }
 ) => Promise<string>;
 
@@ -359,6 +360,10 @@ export class DreamService {
         // DeepSeek automation models default to reasoning mode. Dream prompts
         // need the output budget for the final JSON, not hidden reasoning.
         thinking: 'disabled',
+        // Dream prompts summarize the bot's own day — a stray built-in
+        // web search both wastes the fragment budget and drags outside
+        // noise into the diary JSON.
+        webSearch: false,
         // Empty content must fail inside runWithLlmFallback so a configured
         // secondary provider gets a chance before the dream attempt fails.
         throwOnEmptyContent: true,

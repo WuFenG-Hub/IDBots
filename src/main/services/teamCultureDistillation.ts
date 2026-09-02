@@ -121,7 +121,7 @@ export type CultureDistillationPerformChat = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { signal?: AbortSignal; maxTokens?: number; thinking?: 'enabled' | 'disabled' },
+  options?: { signal?: AbortSignal; maxTokens?: number; thinking?: 'enabled' | 'disabled'; webSearch?: boolean },
 ) => Promise<string>;
 
 /** Core distillation step: gather → prompt → parse → apply via the store. */
@@ -154,7 +154,13 @@ export async function runCultureDistillation(input: {
       archivedTopics,
     }),
     undefined,
-    { thinking: 'disabled', signal: AbortSignal.timeout(DISTILLATION_LLM_TIMEOUT_MS) },
+    {
+      thinking: 'disabled',
+      signal: AbortSignal.timeout(DISTILLATION_LLM_TIMEOUT_MS),
+      // Same JSON contract as deep-consolidation: a stray built-in web
+      // search derails the output into prose the parser must drop.
+      webSearch: false,
+    },
   );
   const parsed = parseCultureDistillationOutput(raw);
   if (!parsed) {
