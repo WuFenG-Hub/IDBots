@@ -274,6 +274,15 @@ export class DshKernel {
   }
 
   /**
+   * Subagent panel stop for DSH sessions: kernel 'user'-authority interrupt —
+   * cancels only the child's current turn; a continuable child stays resident.
+   */
+  async interruptSubagent(dshSessionId: string, agentId: string): Promise<{ accepted: boolean; reason?: string }> {
+    this.requireClient()
+    return this.client.request('idbots/subagent/interrupt', { sessionId: dshSessionId, agentId })
+  }
+
+  /**
    * Official token-meter session projections for the usage panel (cumulative
    * disjoint token buckets + context pressure/composition). Degrades to
    * { available: false } when the runtime composition lacks the projection

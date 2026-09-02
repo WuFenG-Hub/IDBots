@@ -57,6 +57,7 @@ import { admitPromptContent } from '@deepseek-ai/dsh-attachment'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '@deepseek-ai/dsh-sdk-jsonrpc-server'
 import * as dshToolSubagent from '@deepseek-ai/dsh-tool-subagent'
+import * as dshToolSubagentControl from '@deepseek-ai/dsh-tool-subagent-control'
 
 const RESPOND_OUTCOMES = new Set(['allowed-once', 'rejected'])
 
@@ -105,10 +106,22 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       Promise.resolve(agent.ctx.plugin(dshToolSubagent, {
         provider: 'spawn',
         toolName: 'subagent',
-        enableRunInBackground: false,
+        // 0.1.2-alpha.4 continuable delegation: background by default, the
+        // child stays resident with a durable id, and parent↔child exchange
+        // follow-ups through the global send_message / interrupt_agent tools
+        // registered by dsh-tool-subagent-control below.
+        enableRunInBackground: true,
+        backgroundMode: 'continuable',
         modelSelectionSettings: this.idbotsSubagentModelSelection,
       })).catch((error) => {
         this.ctx.logger.warn(`idbots-sdk-server: agent-scoped tool-subagent mount failed for ${String(agent.id)}: ${String(error?.message ?? error)}`)
+      })
+      // Control tools are agent-scoped too (they register into ctx.tools):
+      // every agent — root parents AND resident children — gets send_message
+      // (children are prompted by the kernel to report through it) and
+      // interrupt_agent (ancestor-scoped turn cancellation).
+      Promise.resolve(agent.ctx.plugin(dshToolSubagentControl)).catch((error) => {
+        this.ctx.logger.warn(`idbots-sdk-server: agent-scoped tool-subagent-control mount failed for ${String(agent.id)}: ${String(error?.message ?? error)}`)
       })
       // Subagent lineage lives FLATTENED on the session header (not under a
       // meta subobject): header.origin === 'subagent' + header.parentSession.
@@ -116,10 +129,18 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       if (header?.origin === 'subagent' && header?.parentSession !== undefined) {
         const parent = String(header.parentSession)
         const agentId = String(agent.id)
+        // A continuable child re-materializes on every send_message follow-up
+        // after settling (dematerialize + agent/created again): keep one row
+        // per child and keep the accumulated transcript buffer.
         const children = this.idbotsSubagentChildren.get(parent) ?? []
-        children.push({ agentId, status: 'running', startedAt: Date.now() })
+        const existing = children.find((c) => c.agentId === agentId)
+        if (existing === undefined) {
+          children.push({ agentId, status: 'running', startedAt: Date.now() })
+        } else {
+          existing.status = 'running'
+        }
         this.idbotsSubagentChildren.set(parent, children)
-        this.idbotsChildEvents.set(agentId, [])
+        if (!this.idbotsChildEvents.has(agentId)) this.idbotsChildEvents.set(agentId, [])
         this.idbotsChildParents.set(agentId, parent)
         // Live task rows: the host renders these through the same
         // task_started/task_notification channel the Claude path emits.
@@ -149,6 +170,16 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       buffer.push(event)
       if (buffer.length > 500) buffer.splice(0, buffer.length - 500)
       const parent = this.idbotsChildParents.get(sid)
+      // Continuable residency: a resident child does NOT dispose after its
+      // run settles, so turn lifecycle is the live signal distinguishing an
+      // idle child (parked, awaiting send_message) from a running one.
+      if (parent !== undefined && (event.type === 'turn/start' || event.type === 'turn/end')) {
+        this.idbotsTransport.notify('idbots/subagent/progress', {
+          sessionId: parent,
+          agentId: sid,
+          status: event.type === 'turn/start' ? 'running' : 'idle',
+        })
+      }
       if (!hadUserMessage && event.type === 'user/message' && parent !== undefined) {
         const text = (event.data?.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join(' ').trim()
         if (text.length > 0) {
@@ -189,6 +220,14 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       this.idbotsCompaction = compactionCtx.compaction
       return () => { this.idbotsCompaction = null }
     })
+    // Subagent service (dsh-subagent): host-side interrupt for continuable
+    // children uses the kernel's 'user' authority (parentSessionId-checked).
+    // Reactive inject keeps test compositions without subagents mountable.
+    this.idbotsSubagents = null
+    ctx.inject(['subagents'], (subagentCtx) => {
+      this.idbotsSubagents = subagentCtx.subagents
+      return () => { this.idbotsSubagents = null }
+    })
   }
 
   liveAgent(sessionId) {
@@ -212,12 +251,13 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'idbots/ask/respond': return this.idbotsAskRespond(params)
       case 'idbots/subagents/list': return this.idbotsSubagentsList(params)
       case 'idbots/subagents/messages': return this.idbotsSubagentsMessages(params)
+      case 'idbots/subagent/interrupt': return this.idbotsSubagentInterrupt(params)
       case 'idbots/usage': return this.idbotsUsage(params)
       case 'idbots/compact': return this.idbotsCompact(params)
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'session/dispose', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/usage', 'idbots/compact'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'session/dispose', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/subagent/interrupt', 'idbots/usage', 'idbots/compact'],
         }
       }
       default: return super.handleRequest(method, params)
@@ -820,6 +860,33 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }
     const capped = Number.isFinite(limit) && limit > 0 ? messages.slice(-limit) : messages
     return { messages: capped }
+  }
+
+  /**
+   * Host-side stop for a continuable child: the kernel's 'user' authority
+   * cancels only the child's CURRENT turn (queued inbox messages stay parked;
+   * the child itself stays resident for later send_message follow-ups). The
+   * kernel re-validates that the child belongs to parentSessionId.
+   */
+  idbotsSubagentInterrupt({ sessionId, agentId }) {
+    const parent = String(sessionId ?? '')
+    const target = String(agentId ?? '')
+    if (parent.length === 0 || target.length === 0) {
+      throw new Error('idbots/subagent/interrupt requires sessionId and agentId')
+    }
+    if (this.idbotsSubagents === null) {
+      throw new Error('idbots/subagent/interrupt: subagent service not composed')
+    }
+    try {
+      this.idbotsSubagents.interrupt(target, { kind: 'user', parentSessionId: parent })
+    } catch (error) {
+      // Stale panel rows (child already gone, or lineage moved on) surface as
+      // a graceful declined stop instead of a JSON-RPC exception.
+      const message = error instanceof Error ? error.message : String(error)
+      if (!/UNAUTHORIZED|belongs to another parent|is not a live/i.test(message)) throw error
+      return { accepted: false, reason: message }
+    }
+    return { accepted: true }
   }
 
   async idbotsPolicyRespond({ id, decision, reason }) {

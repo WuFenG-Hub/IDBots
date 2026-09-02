@@ -6285,6 +6285,23 @@ export class CoworkRunner extends EventEmitter {
    * only; sandbox sessions have no host-side Query object.
    */
   async stopSubagentTask(sessionId: string, taskId: string): Promise<{ success: boolean; error?: string }> {
+    // DSH sessions have no SDK task control; route the panel stop to the
+    // kernel's user-authority interrupt (cancels the child's current turn,
+    // keeps a continuable child resident).
+    const activeSessionForStop = this.activeSessions.get(sessionId);
+    if (activeSessionForStop && isDshSessionHandle(activeSessionForStop.claudeSessionId)) {
+      try {
+        const result = await this.dshInterruptSubagent(sessionId, taskId);
+        coworkLog('INFO', 'stopSubagentTask', 'DSH interrupt requested', { sessionId, taskId, accepted: result.accepted });
+        return result.accepted
+          ? { success: true }
+          : { success: false, error: result.reason ?? 'interrupt declined' };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        coworkLog('WARN', 'stopSubagentTask', 'DSH interrupt failed', { sessionId, taskId, error: message });
+        return { success: false, error: message };
+      }
+    }
     const control = this.activeSessions.get(sessionId)?.sdkTaskControl;
     if (!control) {
       return { success: false, error: 'Task control unavailable (session not running).' };
@@ -7048,6 +7065,12 @@ export class CoworkRunner extends EventEmitter {
     return this.dshTurnHub.getSubagentMessages(sessionId, agentId, limit)
   }
 
+  /** Subagent panel stop for DSH sessions (kernel user-authority interrupt). */
+  dshInterruptSubagent(sessionId: string, agentId: string): Promise<{ accepted: boolean; reason?: string }> {
+    if (!this.dshTurnHub) return Promise.resolve({ accepted: false, reason: 'DSH turn hub unavailable' })
+    return this.dshTurnHub.interruptSubagent(sessionId, agentId)
+  }
+
   /**
    * One cowork turn on the DSH runtime: resolve the provider route from the
    * current API config, run the turn through the shared hub, and land every
@@ -7536,12 +7559,14 @@ export class CoworkRunner extends EventEmitter {
                 startedAt: Date.now(),
               });
             } else if (event.kind === 'progress') {
+              // DSH continuable residency reports turn lifecycle: 'idle' means
+              // the resident child settled and awaits send_message follow-ups.
               this.emitSubagentEvent(sessionId, {
                 event: 'task_progress',
                 taskId: event.agentId,
                 subagentType: 'subagent',
                 summary: event.summary,
-                status: 'running',
+                status: event.status === 'idle' ? 'idle' : 'running',
                 updatedAt: Date.now(),
               });
             } else if (event.kind === 'finished') {
