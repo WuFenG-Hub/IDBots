@@ -458,6 +458,13 @@ const GROUP_TASK_TIMEOUT_OWNER_PREFIX = 'group_task_timeout_owner:';
  */
 const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
 /**
+ * G-04 retry budget: failed chair-answer attempts per supervisor signal
+ * (`group_task_sup_sig_attempts:<signalId>` = count). At 3 attempts the signal
+ * is closed out with a null pin + one anomaly milestone; the counter is
+ * cleared on a successful chair answer.
+ */
+const GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX = 'group_task_sup_sig_attempts:';
+/**
  * #14 follow-up: when a worker turn already in flight lands AFTER the chair's
  * closing ceremony (so the last group message is a worker's, not the host's),
  * the chair re-posts the closing line. This kv stores the straggler message id
@@ -4421,6 +4428,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * stamped with the response pin. Pause/resume rows arrive already processed
    * (host-applied gates). While a human gate is active (review / open
    * checkpoint) the turn is deferred; terminal tasks just close the rows.
+   * Signals the chair can never answer (no local chair bot, or 3 failed
+   * attempts) are closed with a null pin + one anomaly milestone instead of
+   * retrying forever.
    */
   const processSupervisorSignals = async (
     task: GroupTask,
@@ -4429,11 +4439,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     promptMembers: DaemonPromptMember[],
   ): Promise<void> => {
     const store = deps.getGroupTaskStore();
+    const sqlite = deps.getStore();
     const pending = store.listPendingSupervisorSignals(task.id)
       .filter((signal) => signal.kind === 'nudge' || signal.kind === 'flag');
     if (pending.length === 0) return;
+    const pendingIds = pending.map((signal) => signal.id);
     if (task.status === 'done' || task.status === 'cancelled') {
-      store.markSupervisorSignalsProcessed(pending.map((signal) => signal.id), null);
+      store.markSupervisorSignalsProcessed(pendingIds, null);
       return;
     }
     if (task.status === 'review' || store.getOpenCheckpoint(task.id) != null) {
@@ -4443,7 +4455,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const chairMember = members.find((member) => member.role === 'chair');
     const bot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
     if (!chairMember || !bot) {
+      // No local chair can ever answer — close the rows (null pin = no chair
+      // receipt, same convention as the done/cancelled close-out above)
+      // instead of skipping them every tick, and alert the origin session once.
+      store.markSupervisorSignalsProcessed(pendingIds, null);
       emitLog(`[GroupTaskDaemon] Task ${task.id}: supervisor signal turn skipped (no chair bot found)`);
+      notifySourceSessionMilestone(
+        task,
+        'anomaly',
+        buildSourceSessionAnomalyNotice({
+          title: task.title,
+          status: task.status,
+          summary:
+            `Supervisor signal(s) #${pendingIds.join(', #')} were closed WITHOUT a chair answer: ` +
+            'this task has no local chair bot to respond. Review the signals in the task detail ' +
+            'and apply the supervision manually.',
+        }),
+        `supervisor_signals_no_chair:${pendingIds.join('-')}`,
+      );
       return;
     }
 
@@ -4490,15 +4519,53 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const posted = await postGroupMessage(task.id, bot.id, reply);
       // P2-7 r2: the daemon's own reply must not count as "Twin activity".
       rememberDaemonChairPin(task.id, posted.pinId);
-      store.markSupervisorSignalsProcessed(pending.map((signal) => signal.id), posted.pinId);
+      store.markSupervisorSignalsProcessed(pendingIds, posted.pinId);
+      // Answered — the per-signal failed-attempt counters are obsolete.
+      for (const id of pendingIds) {
+        sqlite.delete(`${GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX}${id}`);
+      }
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: chair answered ${pending.length} supervisor signal(s) ` +
         `(pin ${posted.pinId})`,
       );
     } catch (error) {
+      // Retry budget: a failed turn leaves the rows pending for the next tick,
+      // but a signal the chair fails to answer 3 times is closed out (null
+      // pin) with one anomaly milestone — a broken chair LLM must not wedge
+      // the supervisor channel open forever.
+      const exhaustedIds: number[] = [];
+      for (const id of pendingIds) {
+        const attemptsKey = `${GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX}${id}`;
+        const prev = Number(sqlite.get<string>(attemptsKey));
+        const attempts = (Number.isFinite(prev) ? prev : 0) + 1;
+        if (attempts >= 3) {
+          exhaustedIds.push(id);
+          sqlite.delete(attemptsKey);
+        } else {
+          sqlite.set(attemptsKey, String(attempts));
+        }
+      }
+      if (exhaustedIds.length > 0) {
+        store.markSupervisorSignalsProcessed(exhaustedIds, null);
+        notifySourceSessionMilestone(
+          task,
+          'anomaly',
+          buildSourceSessionAnomalyNotice({
+            title: task.title,
+            status: task.status,
+            summary:
+              `The chair did not answer supervisor signal(s) #${exhaustedIds.join(', #')} after 3 attempts; ` +
+              'the signals were closed without a chair response. Check the chair bot and its LLM configuration.',
+          }),
+          `supervisor_signals_unanswered:${exhaustedIds.join('-')}`,
+        );
+      }
       emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: supervisor signal turn failed (signals stay pending): ` +
-        `${error instanceof Error ? error.message : String(error)}`,
+        `[GroupTaskDaemon] Task ${task.id}: supervisor signal turn failed (` +
+        (exhaustedIds.length > 0
+          ? `signals #${exhaustedIds.join(', #')} closed after 3 failed attempts; the rest stay pending`
+          : 'signals stay pending') +
+        `): ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   };

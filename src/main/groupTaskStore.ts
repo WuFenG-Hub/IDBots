@@ -1539,7 +1539,13 @@ export class GroupTaskStore {
     return this.listSupervisorSignals(taskId).map((signal) => {
       const target = signal.target?.trim();
       const prefix = target ? `[${signal.kind.toUpperCase()} → ${target}]` : `[${signal.kind.toUpperCase()}]`;
-      return `${prefix} ${signal.note}`;
+      // Acceptance record must show whether the daemon already drove the
+      // chair's response to each signal (pause/resume are host-applied on
+      // record, so they read processed immediately).
+      const processed = signal.processedAt != null
+        ? `; processed${signal.chairResponsePinId ? ` (chair response ${signal.chairResponsePinId})` : ''}`
+        : '; unprocessed';
+      return `${prefix} ${signal.note}${processed}`;
     });
   }
 
