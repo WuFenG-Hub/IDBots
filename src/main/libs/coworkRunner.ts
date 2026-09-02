@@ -45,6 +45,12 @@ import {
 } from './coworkSdkResultDiagnostics';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
 import {
+  formatChainHistoryRecallResults,
+  resolveChainHistoryRecallQuery,
+  type ChainHistoryRecallArgs,
+} from './chainHistoryRecallBlocks';
+import { getChainContentHistoryStore } from '../chainContentHistoryRuntime';
+import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
   formatExperienceRecallResults,
   formatExperienceTimelineFallback,
@@ -3157,6 +3163,40 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  /**
+   * chain_history_recall tool: retrieval over the bot's chain content history
+   * ledger — pins it published and chain pins it fully read. Answers "what
+   * exactly did I publish/read" with pin ids, complementing the day-narrative
+   * recall of experience_recall.
+   */
+  private runChainHistoryRecallTool(args: ChainHistoryRecallArgs, sessionId: string): { text: string; isError: boolean } {
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) {
+      return { text: 'chain_history_recall failed: could not resolve MetaBot for session', isError: true };
+    }
+    const store = getChainContentHistoryStore();
+    if (!store) {
+      return { text: 'chain_history_recall unavailable: chain content history store is not configured', isError: true };
+    }
+    try {
+      const resolved = resolveChainHistoryRecallQuery(args);
+      const options = {
+        query: resolved.query ?? undefined,
+        fromMs: resolved.fromMs ?? undefined,
+        toMs: resolved.toMs ?? undefined,
+        limit: resolved.limit,
+      };
+      const writes = resolved.kind === 'read' ? [] : store.searchWrites(metabotId, options);
+      const reads = resolved.kind === 'write' ? [] : store.searchReads(metabotId, options);
+      return { text: formatChainHistoryRecallResults(writes, reads), isError: false };
+    } catch (error) {
+      return {
+        text: `chain_history_recall failed: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+  }
+
   /** Resolve the bot's GlobalMetaID and fetch raw episodes for the fallback. */
   private buildExperienceTimelineFallback(
     metabotId: number,
@@ -4772,6 +4812,7 @@ export class CoworkRunner extends EventEmitter {
           ? '- Use `memory_user_edits` when the user asks to remember, update, list, or delete memory facts, or when you discover a durable fact worth persisting.'
           : '- Use `memory_user_edits` only when the user explicitly asks to remember, update, list, or delete memory facts.',
         '- Use `experience_recall` to look up your own past days: a bare call returns the last 30 days of your daily summaries, `query` searches your full history, and `date_from`/`date_to` (YYYY-MM-DD) pin a range.',
+        '- Use `chain_history_recall` to look up the exact pins you published to the chain or fully read from it (buzz/notes/articles): `query` keyword search, `kind` write/read, `date_from`/`date_to` pin a range — a returned pinId can be re-opened with `read_metaweb_pin` for the full text.',
         '- When a task resembles something you have done before, first search it with `experience_recall` (keyword), then read the referenced IDBots:// session with `idbots_session_read_all`: reuse the approaches that worked last time and avoid the pitfalls you already hit.',
         '- When <recent_daily_summaries> is present, those summaries are your own nightly dreams (做梦): questions like "did you dream / what did you dream about / do you remember that day" should be answered from them first.',
         '- Never write transient conversation facts, news content, or source citations into user memory unless the user explicitly asks.'
@@ -6709,6 +6750,21 @@ export class CoworkRunner extends EventEmitter {
         };
       }
 
+      if (toolName === 'chain_history_recall') {
+        const kindRaw = typeof toolInput.kind === 'string' ? toolInput.kind : undefined;
+        const result = this.runChainHistoryRecallTool({
+          query: typeof toolInput.query === 'string' ? toolInput.query : undefined,
+          kind: kindRaw === 'write' || kindRaw === 'read' ? kindRaw : undefined,
+          date_from: typeof toolInput.date_from === 'string' ? toolInput.date_from : undefined,
+          date_to: typeof toolInput.date_to === 'string' ? toolInput.date_to : undefined,
+          limit: typeof toolInput.limit === 'number' ? toolInput.limit : undefined,
+        }, sessionId);
+        return {
+          success: !result.isError,
+          text: result.text,
+        };
+      }
+
       if (toolName === 'knowledge_recall') {
         const kindRaw = typeof toolInput.kind === 'string' ? toolInput.kind : undefined;
         const kind = kindRaw === 'know_how' || kindRaw === 'pitfall' || kindRaw === 'principle' ? kindRaw : undefined;
@@ -8252,6 +8308,28 @@ export class CoworkRunner extends EventEmitter {
         )
       );
     }
+    if (sessionMemoryEnabled && getChainContentHistoryStore()) {
+      memoryTools.push(
+        tool(
+          'chain_history_recall',
+          'Recall YOUR OWN on-chain content history — the pins YOU published to the chain (buzz, notes, metafiles, …) and the chain pins YOU fully read. query keyword-searches titles, summaries, excerpts and pin ids; kind narrows to write (things you published) or read (things you read); date_from/date_to (YYYY-MM-DD) pin a range; limit caps the count (1-50). Every result carries its pinId — pass it to read_metaweb_pin to fetch the full content again. Bare call: your most recent publications and reads. For day-by-day narrative memories use experience_recall instead; this tool answers "what exactly did I publish/read" with pin ids.',
+          {
+            query: z.string().optional(),
+            kind: z.enum(['write', 'read']).optional(),
+            date_from: z.string().optional(),
+            date_to: z.string().optional(),
+            limit: z.number().int().min(1).max(50).optional(),
+          },
+          async (args: ChainHistoryRecallArgs) => {
+            const result = this.runChainHistoryRecallTool(args, sessionId);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: result.isError,
+            } as any;
+          }
+        )
+      );
+    }
     if (sessionMemoryEnabled && this.knowledgeStore) {
       memoryTools.push(
         tool(
@@ -8580,7 +8658,12 @@ export class CoworkRunner extends EventEmitter {
     }
     if (this.omniReader) {
       memoryTools.push(
-        ...buildOmniReaderAgentTools({ tool, control: this.omniReader })
+        ...buildOmniReaderAgentTools({
+          tool,
+          control: this.omniReader,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
+        })
       );
     }
     // browser_open complements bot_browser_* (browser-session only): it runs
@@ -8660,6 +8743,8 @@ export class CoworkRunner extends EventEmitter {
           tool,
           socialRecall: this.socialRecall,
           openBestMatchInBrowser: isBrowserSession,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })
       );
     }
@@ -8671,6 +8756,8 @@ export class CoworkRunner extends EventEmitter {
         ...buildMetawebLearningAgentTools({
           tool,
           metawebLearning: this.metawebLearning,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })
       );
     }

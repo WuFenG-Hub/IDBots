@@ -97,7 +97,7 @@ test('posts a text-only buzz with the simplebuzz 7-tuple', async () => {
       quotePin: '',
     }),
   });
-  assert.deepEqual(call.options, { network: 'mvc' });
+  assert.deepEqual(call.options, { network: 'mvc', origin: 'tool:post_buzz' });
   const text = result.content[0].text;
   assert.equal(result.isError, undefined);
   assert.match(text, /Buzz posted on-chain\./);
@@ -131,7 +131,7 @@ test('uploads doge-network attachments on mvc while writing the buzz on doge', a
   const { calls, byName } = makeHarness();
   await byName.post_buzz.handler({ content: 'doge buzz', attachments: [fixture], network: 'doge' });
   assert.equal(calls.upload[0].network, 'mvc');
-  assert.deepEqual(calls.createPin[0].options, { network: 'doge' });
+  assert.deepEqual(calls.createPin[0].options, { network: 'doge', origin: 'tool:post_buzz' });
 });
 
 test('forwards content_type and quote_pin into the buzz payload', async () => {

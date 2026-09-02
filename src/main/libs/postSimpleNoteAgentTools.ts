@@ -188,7 +188,7 @@ export function buildPostSimpleNoteAgentTools(deps: {
             contentType: 'application/json',
             payload,
           },
-          { network },
+          { network, origin: 'tool:post_simplenote' },
         );
         return textResult(
           formatSimpleNoteResult({

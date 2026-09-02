@@ -143,6 +143,30 @@ export interface DreamGroupChatActivity {
   messages: DreamGroupChatMessage[];
 }
 
+/** A pin the bot itself broadcast to the chain that day (writes ledger). */
+export interface DreamChainWriteActivity {
+  pinId: string;
+  path: string | null;
+  operation: string | null;
+  /** Async LLM gist when available; the prompt falls back to stored text. */
+  summary: string | null;
+  contentText: string | null;
+  occurredAtMs: number;
+}
+
+/** A chain pin the bot fully read that day (reads ledger). */
+export interface DreamChainReadActivity {
+  pinId: string;
+  path: string | null;
+  protocol: string | null;
+  title: string | null;
+  authorGlobalMetaId: string | null;
+  summary: string | null;
+  contentExcerpt: string | null;
+  savedToKb: boolean;
+  lastReadAtMs: number;
+}
+
 export interface DreamDayActivity {
   sessions: DreamSessionActivity[];
   taskRuns: DreamTaskRunActivity[];
@@ -152,6 +176,10 @@ export interface DreamDayActivity {
   groupTasks: DreamGroupTaskEvaluation[];
   /** On-chain group-chat transcripts for member tasks that had messages that day. */
   groupChats?: DreamGroupChatActivity[];
+  /** Pins this bot published to the chain that day (chain content history). */
+  chainWrites?: DreamChainWriteActivity[];
+  /** Chain pins this bot fully read that day (chain content history). */
+  chainReads?: DreamChainReadActivity[];
 }
 
 interface DreamRunRow {
@@ -203,6 +231,8 @@ interface DailySummaryRow {
 
 /** Bound one task's on-chain transcript so a busy group cannot flood the dream. */
 const MAX_GROUP_CHAT_MESSAGES_PER_TASK = 400;
+/** Bound each chain-content-history kind per day so a heavy bot cannot flood the dream. */
+const MAX_CHAIN_CONTENT_ENTRIES_PER_KIND = 50;
 
 const parseIdNumber = (value: unknown): number | null => {
   const parsed = Number(value);
@@ -757,7 +787,8 @@ export class DreamStore {
    * Everything the bot did on [dayStartMs, dayEndMs): cowork sessions with
    * user/assistant messages that day (orders flagged via service_orders),
    * scheduled task runs, same-day group-task acceptances / in-progress
-   * summaries, and on-chain group-chat transcripts for member tasks.
+   * summaries, on-chain group-chat transcripts for member tasks, and the
+   * chain content history (pins published / pins fully read that day).
    * Hidden sessions are included on purpose — order execution sessions are
    * hidden from the UI list but are still experience.
    */
@@ -977,12 +1008,68 @@ export class DreamStore {
         dayMessageCount: dayMessageCountByTask.get(row.id),
       }));
 
+    // Chain content history (own writes / full reads): timestamps are epoch
+    // milliseconds, so the day window applies directly (no seconds conversion
+    // like group_chat_messages needs).
+    const chainWrites = this.getAll<{
+      pin_id: string;
+      path: string | null;
+      operation: string | null;
+      summary: string | null;
+      content_text: string | null;
+      occurred_at_ms: number | string;
+    }>(`
+      SELECT pin_id, path, operation, summary, content_text, occurred_at_ms
+      FROM metabot_chain_writes
+      WHERE metabot_id = ? AND occurred_at_ms >= ? AND occurred_at_ms < ?
+      ORDER BY occurred_at_ms ASC
+      LIMIT ?
+    `, [metabotId, dayStartMs, dayEndMs, MAX_CHAIN_CONTENT_ENTRIES_PER_KIND]).map((row) => ({
+      pinId: row.pin_id,
+      path: row.path ?? null,
+      operation: row.operation ?? null,
+      summary: row.summary ?? null,
+      contentText: row.content_text ?? null,
+      occurredAtMs: Number(row.occurred_at_ms) || dayStartMs,
+    }));
+
+    const chainReads = this.getAll<{
+      pin_id: string;
+      path: string | null;
+      protocol: string | null;
+      title: string | null;
+      author_globalmetaid: string | null;
+      summary: string | null;
+      content_excerpt: string | null;
+      saved_to_kb: number | string;
+      last_read_at_ms: number | string;
+    }>(`
+      SELECT pin_id, path, protocol, title, author_globalmetaid,
+        summary, content_excerpt, saved_to_kb, last_read_at_ms
+      FROM metabot_chain_reads
+      WHERE metabot_id = ? AND last_read_at_ms >= ? AND last_read_at_ms < ?
+      ORDER BY last_read_at_ms ASC
+      LIMIT ?
+    `, [metabotId, dayStartMs, dayEndMs, MAX_CHAIN_CONTENT_ENTRIES_PER_KIND]).map((row) => ({
+      pinId: row.pin_id,
+      path: row.path ?? null,
+      protocol: row.protocol ?? null,
+      title: row.title ?? null,
+      authorGlobalMetaId: row.author_globalmetaid ?? null,
+      summary: row.summary ?? null,
+      contentExcerpt: row.content_excerpt ?? null,
+      savedToKb: Number(row.saved_to_kb) === 1,
+      lastReadAtMs: Number(row.last_read_at_ms) || dayStartMs,
+    }));
+
     return {
       sessions,
       taskRuns,
       orderCount: parseIdNumber(orderCountRow?.n) ?? 0,
       groupTasks: [...acceptedTasks, ...activeTasks],
       groupChats,
+      chainWrites,
+      chainReads,
     };
   }
 

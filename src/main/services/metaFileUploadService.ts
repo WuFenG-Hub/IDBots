@@ -91,6 +91,8 @@ export interface UploadMetaFileParams {
   network?: string;
   /** Request post-upload availability verification when supported. */
   verify?: boolean;
+  /** Ledger tag forwarded to the createPin options of the direct /file pin. */
+  origin?: string;
   chunkThresholdBytes?: number;
   maxSizeBytes?: number;
   uploaderBaseUrl?: string;
@@ -305,6 +307,7 @@ export async function uploadMetaFile(
         {
           network,
           feeRate,
+          origin: params.origin,
         },
       );
       const normalized = normalizeRpcUploadResult({

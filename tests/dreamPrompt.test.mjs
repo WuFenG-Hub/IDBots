@@ -500,3 +500,73 @@ test('buildDreamPrompt renders same-day group chat and in-progress group tasks',
     'dream schema must match parseCollaborationFacts (taskId/title/pinIds, not pinId/taskTitle)',
   );
 });
+
+test('buildDreamPrompt renders the day\'s chain writes and reads with gists', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [],
+      taskRuns: [],
+      orderCount: 0,
+      chainWrites: [
+        {
+          pinId: 'w1', path: '/protocols/simplebuzz', operation: 'create',
+          summary: null, contentText: '今天试了链上记录功能', occurredAtMs: 1,
+        },
+        {
+          pinId: 'w2', path: '/file', operation: 'create',
+          summary: null, contentText: null, occurredAtMs: 2,
+        },
+      ],
+      chainReads: [
+        {
+          pinId: 'r1', path: '/protocols/simplenote', protocol: 'simplenote',
+          title: 'MetaWeb 使用指南', authorGlobalMetaId: 'gm-author',
+          summary: '介绍 MetaWeb 的基本用法', contentExcerpt: '指南正文',
+          savedToKb: true, lastReadAtMs: 3,
+        },
+      ],
+    },
+  });
+  assert.ok(user.includes('## 当日写入链上的内容'), 'writes get their own section');
+  assert.ok(user.includes('今天试了链上记录功能'), 'write falls back to stored text without a summary');
+  assert.ok(user.includes('(二进制内容)'), 'binary write renders as metadata-only');
+  assert.ok(user.includes('## 当日阅读的链上内容'), 'reads get their own section');
+  assert.ok(user.includes('MetaWeb 使用指南'));
+  assert.ok(user.includes('作者=gm-author'));
+  assert.ok(user.includes('已存入知识库'), 'KB flag surfaces in the read line');
+  assert.ok(user.includes('介绍 MetaWeb 的基本用法'), 'read gist prefers the summary');
+  assert.ok(user.includes('写入链上内容 2 条'), 'inventory counts writes');
+  assert.ok(user.includes('阅读链上内容 1 条'), 'inventory counts reads');
+  assert.equal(DREAM_VERSION, 11, 'chain content history integration bumps the dream algorithm version');
+});
+
+test('buildDreamPrompt hides chain content sections when empty or in fragment mode', () => {
+  const { user: raw } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: { sessions: [], taskRuns: [], orderCount: 0 },
+  });
+  assert.ok(!raw.includes('当日写入链上的内容'), 'no writes section without data');
+  assert.ok(!raw.includes('当日阅读的链上内容'), 'no reads section without data');
+
+  const { user: fragment } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    sourceMode: 'fragment',
+    activity: {
+      sessions: [{
+        sessionId: 's1', title: '分块', sessionType: 'standard', peerName: null, isOrder: false,
+        messages: [{ type: 'user', content: '你好', createdAt: 1 }],
+      }],
+      taskRuns: [],
+      orderCount: 0,
+      chainWrites: [{
+        pinId: 'w1', path: '/protocols/simplebuzz', operation: 'create',
+        summary: null, contentText: '不该出现', occurredAtMs: 1,
+      }],
+    },
+  });
+  assert.ok(!fragment.includes('不该出现'), 'fragment pre-summary prompts never render chain content');
+});

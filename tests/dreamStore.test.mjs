@@ -455,3 +455,94 @@ test('purgeOldRunsAndFragments removes only completed history past the horizon',
     cleanup();
   }
 });
+
+test('getActivityForDate includes the day\'s chain writes and reads, scoped and windowed', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    createCoworkStore(db); // session-column migrations the activity query relies on
+    const dreamStore = new DreamStore(db, () => {});
+
+    const insertWrite = (pinId, metabotId, occurredAtMs, extra = {}) => db.run(
+      `INSERT INTO metabot_chain_writes
+        (metabot_id, pin_id, path, operation, content_text, summary, summary_status, origin, occurred_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        metabotId, pinId,
+        extra.path ?? '/protocols/simplebuzz', extra.operation ?? 'create',
+        extra.contentText ?? null, extra.summary ?? null,
+        extra.summaryStatus ?? 'skipped', extra.origin ?? 'tool:post_buzz', occurredAtMs,
+      ]
+    );
+    const insertRead = (pinId, metabotId, lastReadAtMs, extra = {}) => db.run(
+      `INSERT INTO metabot_chain_reads
+        (metabot_id, pin_id, path, title, author_globalmetaid, content_excerpt, summary,
+         summary_status, saved_to_kb, source, first_read_at_ms, last_read_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        metabotId, pinId, extra.path ?? '/protocols/simplenote', extra.title ?? null,
+        extra.author ?? null, extra.excerpt ?? null, extra.summary ?? null,
+        extra.summaryStatus ?? 'skipped', extra.savedToKb ?? 0,
+        extra.source ?? 'read_metaweb_pin', lastReadAtMs, lastReadAtMs,
+      ]
+    );
+
+    insertWrite('w-in', 5, DAY_START + 1000, { contentText: '今天发布了 buzz', summaryStatus: 'skipped' });
+    insertWrite('w-in-summary', 5, DAY_START + 1500, {
+      path: '/protocols/simplenote', operation: 'create',
+      contentText: '很长的正文……', summary: '关于某话题的长文', summaryStatus: 'done', origin: 'tool:post_simplenote',
+    });
+    insertWrite('w-prev-day', 5, PREV_DAY, {});
+    insertWrite('w-other-bot', 6, DAY_START + 2000, {});
+
+    insertRead('r-in', 5, DAY_START + 3000, {
+      title: 'MetaWeb 使用指南', author: 'gm-author', excerpt: '指南正文',
+      summary: '介绍 MetaWeb 的基本用法', summaryStatus: 'done', savedToKb: 1,
+    });
+    insertRead('r-prev', 5, PREV_DAY, {});
+    insertRead('r-other-bot', 6, DAY_START + 4000, {});
+
+    const activity = dreamStore.getActivityForDate(5, DAY_START, DAY_END);
+    assert.deepEqual(activity.chainWrites.map((w) => w.pinId), ['w-in', 'w-in-summary']);
+    assert.equal(activity.chainWrites[0].contentText, '今天发布了 buzz');
+    assert.equal(activity.chainWrites[1].summary, '关于某话题的长文');
+    assert.deepEqual(activity.chainReads.map((r) => r.pinId), ['r-in']);
+    assert.equal(activity.chainReads[0].title, 'MetaWeb 使用指南');
+    assert.equal(activity.chainReads[0].authorGlobalMetaId, 'gm-author');
+    assert.equal(activity.chainReads[0].summary, '介绍 MetaWeb 的基本用法');
+    assert.equal(activity.chainReads[0].savedToKb, true);
+
+    const otherBot = dreamStore.getActivityForDate(6, DAY_START, DAY_END);
+    assert.deepEqual(otherBot.chainWrites.map((w) => w.pinId), ['w-other-bot']);
+    assert.deepEqual(otherBot.chainReads.map((r) => r.pinId), ['r-other-bot']);
+  } finally {
+    cleanup();
+  }
+});
+
+test('getActivityForDate caps chain writes/reads per kind so a heavy day cannot flood the dream', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    createCoworkStore(db); // session-column migrations the activity query relies on
+    const dreamStore = new DreamStore(db, () => {});
+    for (let i = 0; i < 55; i += 1) {
+      db.run(
+        `INSERT INTO metabot_chain_writes
+          (metabot_id, pin_id, path, operation, content_text, summary_status, origin, occurred_at_ms)
+         VALUES (?, ?, '/protocols/simplebuzz', 'create', ?, 'skipped', 'tool:post_buzz', ?)`,
+        [5, `w-${i}`, `buzz ${i}`, DAY_START + i * 1000]
+      );
+      db.run(
+        `INSERT INTO metabot_chain_reads
+          (metabot_id, pin_id, path, content_excerpt, summary_status, source, first_read_at_ms, last_read_at_ms)
+         VALUES (?, ?, '/protocols/simplenote', ?, 'skipped', 'read_metaweb_pin', ?, ?)`,
+        [5, `r-${i}`, `read ${i}`, DAY_START + i * 1000, DAY_START + i * 1000]
+      );
+    }
+    const activity = dreamStore.getActivityForDate(5, DAY_START, DAY_END);
+    assert.equal(activity.chainWrites.length, 50);
+    assert.equal(activity.chainReads.length, 50);
+    assert.equal(activity.chainWrites[0].pinId, 'w-0', 'chronological order preserved');
+  } finally {
+    cleanup();
+  }
+});

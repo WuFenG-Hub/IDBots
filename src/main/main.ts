@@ -238,7 +238,13 @@ import {
   buildMetawebStudySessionPrompt,
   parseMetawebStudyRunReport,
 } from './services/metawebStudyService';
+import {
+  ContentSummaryService,
+  OrchestratorSummarizerProvider,
+} from './services/contentSummaryService';
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
+import { ChainContentHistoryStore } from './chainContentHistoryStore';
+import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
@@ -958,7 +964,9 @@ const publishSkillServiceOrderPin = async (input: {
     version: '1.0.0',
     contentType: 'application/json',
     payload: JSON.stringify(payload),
-  }, { feeRate: getGlobalFeeRate('mvc') });
+    // Order pins live in the service_orders table; keep them out of the
+    // chain write ledger.
+  }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:service-order' });
 
   const pinId = toSafeString(result.pinId).trim();
   if (!pinId) {
@@ -2626,6 +2634,8 @@ let knowledgeBaseStore: KnowledgeBaseStore | null = null;
 let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
 let metawebStudyService: MetawebStudyService | null = null;
+let chainContentHistoryStore: ChainContentHistoryStore | null = null;
+let contentSummaryService: ContentSummaryService | null = null;
 let serviceOrderLifecycleService: ServiceOrderLifecycleService | null = null;
 let serviceRefundSyncService: ServiceRefundSyncService | null = null;
 let serviceRefundSettlementService: ServiceRefundSettlementService | null = null;
@@ -3069,6 +3079,9 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   knowledgeBaseService = null;
   metawebStudyJobStore = null;
   metawebStudyService = null;
+  chainContentHistoryStore = null;
+  setChainContentHistoryStore(null);
+  contentSummaryService = null;
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
   serviceRefundSettlementService = null;
@@ -3202,6 +3215,8 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
 
 const startSqliteDaemons = (): void => {
   const skillMgr = getSkillManager();
+  // Publish the chain write ledger store before any daemon/RPC flow can pin.
+  getChainContentHistoryStore();
   setGroupChatTransportMetabotStoreGetter(getMetabotStore);
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
@@ -3434,7 +3449,7 @@ const startSqliteDaemons = (): void => {
     getCoworkStore(),
     getMetabotStore(),
     getCoworkRunner(),
-    (metabotStore, metabot_id, payload) => createPin(metabotStore, metabot_id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+    (metabotStore, metabot_id, payload, options) => createPin(metabotStore, metabot_id, payload, { ...options, feeRate: getGlobalFeeRate('mvc') }),
     (msg) => console.log(msg),
     getServiceOrderLifecycleService(),
     async ({ skillId, skillName, allowedSkillNames, strictScope }) => {
@@ -3750,7 +3765,7 @@ const startSqliteDaemons = (): void => {
         metabotId,
         filePath,
         contentType,
-        createPin: (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+        createPin: (id, payload, options) => createPin(getMetabotStore(), id, payload, { ...options, feeRate: getGlobalFeeRate('mvc') }),
       });
     },
     // OpenTeam M2: presence probe for remote-teammate unreachable detection
@@ -3887,7 +3902,7 @@ const startSqliteDaemons = (): void => {
         metabotId,
         filePath,
         contentType,
-        createPin: (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+        createPin: (id, payload, options) => createPin(getMetabotStore(), id, payload, { ...options, feeRate: getGlobalFeeRate('mvc') }),
       });
     },
     emitLog: (msg) => console.log(msg),
@@ -3988,6 +4003,11 @@ const startSqliteDaemons = (): void => {
   // bases). One session at a time; no proactive reporting.
   getMetawebStudyService().startSchedule();
 
+  // Chain content summaries: asynchronously fills LLM gists for the chain
+  // write/read ledger's pending rows on a slow tick, cost-gated per tick and
+  // per bot per day. Provider is pluggable (see contentSummaryService.ts).
+  getContentSummaryService().startSchedule();
+
   // Agent-Game-v2 persistent App/Game Runtime (docs/14). Wire the host once the
   // sqlite stores + group-chat transport are ready. Survives MetaApp close and
   // host restart; reuses the existing LLM / pin-write / group-chat infra.
@@ -4013,6 +4033,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   stopMemoryHygieneService();
   knowledgeBaseService?.stopAutoLearnSchedule();
   metawebStudyService?.stopSchedule();
+  contentSummaryService?.stopSchedule();
   stopPrivateChatBackfill();
   stopGroupChatBackfill();
   stopGroupTaskDaemon();
@@ -6504,6 +6525,24 @@ const getMetawebStudyJobStore = (): MetawebStudyJobStore => {
   return metawebStudyJobStore;
 };
 
+/**
+ * Chain content history ledger ("MetaBot 发布账本"): lazily built like the
+ * other SQLite-backed stores, then published into the leaf runtime accessor so
+ * services/metaidCore.ts createPin can record successful pins without
+ * importing main.ts (cycle) — see chainContentHistoryRuntime.ts.
+ */
+const getChainContentHistoryStore = (): ChainContentHistoryStore => {
+  if (!chainContentHistoryStore) {
+    const sqliteStore = getStore();
+    chainContentHistoryStore = new ChainContentHistoryStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+    setChainContentHistoryStore(chainContentHistoryStore);
+  }
+  return chainContentHistoryStore;
+};
+
 const getMetawebStudyService = (): MetawebStudyService => {
   if (!metawebStudyService) {
     metawebStudyService = new MetawebStudyService({
@@ -6555,6 +6594,37 @@ const getMetawebStudyService = (): MetawebStudyService => {
     });
   }
   return metawebStudyService;
+};
+
+/**
+ * Content summary service ("链上内容异步摘要"): drains the chain content
+ * history ledger's pending summary queue through the pluggable
+ * SummarizerProvider seam. The default provider calls the orchestrator chat
+ * completion with the bot's own brain pair; cowork_config gates:
+ * contentSummaryEnabled ('0'/'false' off), contentSummaryDailyCap,
+ * contentSummaryLlmId (global model override).
+ */
+const getContentSummaryService = (): ContentSummaryService => {
+  if (!contentSummaryService) {
+    const getConfigValue = (key: string): string | null => getDreamStore().getCoworkConfigValue(key);
+    contentSummaryService = new ContentSummaryService({
+      store: getChainContentHistoryStore(),
+      getConfigValue,
+      provider: new OrchestratorSummarizerProvider({
+        performChat: performChatCompletionForOrchestrator,
+        getConfigValue,
+        resolveBotLlm: (metabotId) => {
+          const metabot = getMetabotStore().getMetabotById(metabotId);
+          if (!metabot) return null;
+          return {
+            llmId: normalizeMetabotLlmId(metabot.llm_id),
+            fallbackLlmId: normalizeMetabotLlmId(metabot.fallback_llm_id),
+          };
+        },
+      }),
+    });
+  }
+  return contentSummaryService;
 };
 
 const captureServiceOrderExperience = (
@@ -6710,7 +6780,7 @@ const getServiceOrderLifecycleService = () => {
             version: '1.0.0',
             contentType: 'application/json',
             payload: JSON.stringify(payload),
-          }, { feeRate: getGlobalFeeRate('mvc') });
+          }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:service-order' });
           return {
             pinId: result.pinId ?? result.txids?.[0] ?? null,
             txid: result.txids?.[0] ?? null,
@@ -6888,7 +6958,7 @@ const getServiceRefundSettlementService = () => {
             version: '1.0.0',
             contentType: 'application/json',
             payload: JSON.stringify(payload),
-          }, { feeRate: getGlobalFeeRate('mvc') });
+          }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:service-order' });
           return {
             pinId: result.pinId ?? result.txids?.[0] ?? null,
             txid: result.txids?.[0] ?? null,
@@ -12328,7 +12398,7 @@ if (!gotTheLock) {
         version: '1.1.0',
         contentType: 'application/json',
         payload: payloadJson,
-      }, { feeRate: getGlobalFeeRate('mvc') });
+      }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:gig-square' });
 
       const localServiceRecord = {
         id: result.pinId,
@@ -12418,7 +12488,7 @@ if (!gotTheLock) {
         getMetabotStore(),
         validation.creatorMetabotId,
         buildGigSquareRevokeMetaidPayload(currentService.currentPinId),
-        { feeRate: getGlobalFeeRate('mvc') },
+        { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:gig-square' },
       );
       markGigSquareLocalServiceRevoked(currentService);
 
@@ -12581,7 +12651,7 @@ if (!gotTheLock) {
       const result = await createPin(store, validation.creatorMetabotId, buildGigSquareModifyMetaidPayload({
         targetPinId: currentService.currentPinId,
         payloadJson,
-      }), { feeRate: getGlobalFeeRate('mvc') });
+      }), { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:gig-square' });
       updateGigSquareLocalServiceAfterModify({
         targetService: currentService,
         currentPinId: toSafeString(result.pinId).trim() || currentService.currentPinId,
@@ -14652,6 +14722,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
     store = await initStore();
     startupLog('store ready');
+
+    // Chain write ledger: wire the store into the runtime accessor before the
+    // RPC server / daemons can broadcast the first pin.
+    getChainContentHistoryStore();
+    startupLog('chain content history store ready');
 
     // Start man-p2p local indexer (non-fatal if binary not present)
     try {

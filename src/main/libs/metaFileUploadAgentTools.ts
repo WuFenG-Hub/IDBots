@@ -19,6 +19,8 @@ export type MetaFileUploadControl = {
     contentType?: string;
     network?: string;
     verify?: boolean;
+    /** Ledger tag forwarded to the createPin options of the /file pin. */
+    origin?: string;
   }): Promise<MetaFileUploadResult>;
 };
 
@@ -206,6 +208,7 @@ export function buildMetaFileUploadAgentTools(deps: {
           contentType: asString(args.content_type) || undefined,
           network: args.network,
           verify: args.verify === true,
+          origin: 'tool:upload_file',
         });
         return textResult(formatUploadResult(result));
       } catch (error) {

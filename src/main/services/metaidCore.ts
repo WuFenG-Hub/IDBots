@@ -35,6 +35,7 @@ import { OWNER_BINDING_PATH } from './ownerBindingService';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 import { runMvcSponsorCreatePin, type CreatePinFeeAssistMetadata } from './mvcSponsorCreatePin';
+import { recordChainWriteFromCreatePin } from '../libs/chainWriteLedger';
 import { getConfiguredTrafficApiBase, resolveSponsorTrafficAccount } from './trafficAccountService';
 import type { MvcSponsorTrafficAccount } from './mvcSponsorClient';
 import {
@@ -119,6 +120,13 @@ export interface CreatePinOptions {
   sponsorFetchImpl?: typeof fetch;
   /** Reserved pass-through for traffic-account billing (backend not yet live). */
   sponsorTrafficAccount?: MvcSponsorTrafficAccount;
+  /**
+   * Ledger tag: which caller/flow published this pin (e.g. 'rpc',
+   * 'tool:post_buzz', 'internal:metaapp'). Recorded into
+   * metabot_chain_writes.origin by the chain write ledger; internal origins
+   * are excluded from the ledger entirely (see libs/chainWriteLedger.ts).
+   */
+  origin?: string;
 }
 
 /** createPin result: the worker fields plus optional fee-assist diagnostics. */
@@ -695,7 +703,7 @@ export async function createPin(
       operation: metaidData.operation,
       path: metaidData.path || '',
     });
-    return getMvcSpendCoordinator().runMvcSpendJob<CreatePinResult>({
+    const result = await getMvcSpendCoordinator().runMvcSpendJob<CreatePinResult>({
       metabotId: metabot_id,
       action: `createPin:${metaidData.path || metaidData.operation}`,
       execute: async () => {
@@ -834,9 +842,15 @@ export async function createPin(
         );
       },
     });
+    // Ledger: record the broadcast pin (no-op for draft-phase results, chat
+    // paths, /info/* sync pins, and internal origins — see chainWriteLedger).
+    recordChainWriteFromCreatePin(metabot_id, metaidData, result, options?.origin);
+    return result;
   }
 
-  return spawnCreatePinWorker({ mnemonic, walletPath, metaidData, options });
+  const result = await spawnCreatePinWorker({ mnemonic, walletPath, metaidData, options });
+  recordChainWriteFromCreatePin(metabot_id, metaidData, result, options?.origin);
+  return result;
 }
 
 /** Sleep for ms milliseconds. Used between sequential chain ops to avoid UTXO double-spend. */
@@ -1154,7 +1168,9 @@ export async function syncMetaBotToChain(
         contentType: step.contentType,
         payload: step.payload,
         encoding: step.encoding,
-      });
+        // /info/* is already ledger-excluded by path; the origin tag is a
+        // second layer so identity sync never lands in metabot_chain_writes.
+      }, { origin: 'internal:identity-sync' });
       const txid = result.txids[0];
       if (!txid) {
         const message = `${step.key} pin failed: no txid`;

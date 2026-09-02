@@ -71,6 +71,7 @@ test('resolves the session metabotId and forwards absolute path + flags to uploa
     contentType: 'application/zip',
     network: 'mvc',
     verify: true,
+    origin: 'tool:upload_file',
   });
   const text = result.content[0].text;
   assert.equal(result.isError, undefined);

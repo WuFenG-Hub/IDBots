@@ -2338,6 +2338,7 @@ export function startMetaidRpcServer(
       const result = await createPin(store, metabot_id, metaidData as MetaidDataPayload, {
         network: network as 'mvc' | 'doge' | 'btc',
         feeRate,
+        origin: 'rpc',
       });
       res.writeHead(200);
       const txid = result.txids[0];

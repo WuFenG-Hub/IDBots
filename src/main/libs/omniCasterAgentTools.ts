@@ -261,7 +261,7 @@ export function buildOmniCasterAgentTools(deps: {
             payload: cleanPayload,
             ...(encoding === 'base64' ? { encoding: 'base64' as const } : {}),
           },
-          { network },
+          { network, origin: 'tool:omni_cast' },
         );
         return textResult(
           formatCastResult({
