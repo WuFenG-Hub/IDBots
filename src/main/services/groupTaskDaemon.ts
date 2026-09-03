@@ -4869,25 +4869,70 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
       const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
       const brain = metabotBrainOptions(bot);
-      const reply = (await performChatWithTimeout(
-        systemPromptParts.systemPrompt,
-        [systemPromptParts.volatileContext, directive].filter(Boolean).join('\n\n'),
-        brain.llmId ?? undefined,
-        {
-          llmProvider: brain.llmProvider,
-          fallbackLlmId: brain.fallbackLlmId,
-          fallbackLlmProvider: brain.fallbackLlmProvider,
-          effort: brain.effort,
-          fallbackEffort: brain.fallbackEffort,
-          thinking: 'enabled',
-        },
-      )).trim();
+      const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
+      const userTurn = [systemPromptParts.volatileContext, directive].filter(Boolean).join('\n\n');
+      // GT-06 (task #56): the supervisor-signal answer used to be a TOOL-LESS
+      // plain completion. During the outage that plain path kept "working"
+      // (it has its own LLM fallback) while every tool-driven turn stalled —
+      // so the chair answered nudges without any ability to actually CHECK
+      // the group, the ledger, or the chain. Route this turn like a
+      // message-driven one: a routing hit runs ONE skill turn in the chair's
+      // task session (tools available); a miss keeps the plain path below.
+      // The supervisor acts on the owner's behalf — widened routing, same as
+      // an owner message.
+      let routing: { prompt: string | null; activeSkillIds: string[] } = { prompt: null, activeSkillIds: [] };
+      if (deps.getChatSkillsRoutingPrompt && deps.runSkillTurn) {
+        try {
+          routing = await deps.getChatSkillsRoutingPrompt({ metabotId: bot.id, widened: true });
+        } catch (routingError) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: skill routing failed for supervisor turn (bot ${bot.id}): ` +
+            `${routingError instanceof Error ? routingError.message : String(routingError)}`,
+          );
+        }
+      }
+      const canRunSkillTurn = Boolean(
+        routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
+      );
+      coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
+      let reply = '';
+      if (canRunSkillTurn) {
+        const skillSystemPrompt = [
+          systemPromptParts.systemPrompt,
+          '',
+          routing.prompt!,
+          '',
+          'After using Read/Bash to run a skill, reply concisely in the group. Do not paste full skill logs.',
+        ].join('\n');
+        const skillTurnResult = await deps.runSkillTurn!({
+          sessionId: session.id,
+          systemPrompt: skillSystemPrompt,
+          userMessage: userTurn,
+          activeSkillIds: routing.activeSkillIds,
+        });
+        reply = (skillTurnResult.replyText ?? '').trim();
+        // The runner appends the assistant message to the session itself.
+      } else {
+        reply = (await performChatWithTimeout(
+          systemPromptParts.systemPrompt,
+          userTurn,
+          brain.llmId ?? undefined,
+          {
+            llmProvider: brain.llmProvider,
+            fallbackLlmId: brain.fallbackLlmId,
+            fallbackLlmProvider: brain.fallbackLlmProvider,
+            effort: brain.effort,
+            fallbackEffort: brain.fallbackEffort,
+            thinking: 'enabled',
+          },
+        )).trim();
+        if (reply) {
+          coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
+        }
+      }
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
         throw new Error('supervisor signal turn produced no usable reply');
       }
-      const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
-      coworkStore.addMessage(session.id, { type: 'user', content: directive });
-      coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
       const posted = await postGroupMessage(task.id, bot.id, reply);
       // P2-7 r2: the daemon's own reply must not count as "Twin activity".
       rememberDaemonChairPin(task.id, posted.pinId);

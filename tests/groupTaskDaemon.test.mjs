@@ -6328,6 +6328,52 @@ test('G-04: a supervisor pause holds the planning turn; nudge drives a chair res
   }
 });
 
+test('GT-06: a supervisor nudge runs a TOOL-EQUIPPED skill turn when routing hits', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing
+    h.groupTaskStore.addSupervisorSignal({
+      taskId: task.id,
+      kind: 'nudge',
+      note: 'check whether the worker actually delivered',
+    });
+    // Routing hit: the chair's supervision answer must be able to LOOK at the
+    // group/ledger/chain (task #56: the tool-less plain path answered nudges
+    // blindly while every tool-driven turn was stalled).
+    h.state.routing = { prompt: 'ACTIVE SKILLS: metabot-group-task', activeSkillIds: ['metabot-group-task'] };
+    h.state.skillReply = '核验过了：交付物已齐，链上可查。';
+    await h.loop.runTick();
+
+    const skillTurn = h.skillTurnCalls.find((call) => call.userMessage.includes('[NUDGE]'));
+    assert.ok(skillTurn, 'the supervisor answer went through the skill-turn path');
+    assert.deepEqual(skillTurn.activeSkillIds, ['metabot-group-task'], 'the routed skills ride the turn');
+    assert.ok(
+      skillTurn.systemPrompt.includes('ACTIVE SKILLS: metabot-group-task'),
+      'the routing prompt rides the system prompt',
+    );
+    assert.equal(
+      h.chatCalls.filter((call) => call.userMessage.includes('[NUDGE]')).length,
+      0,
+      'the tool-less plain path did NOT also run',
+    );
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 1 && send.content.includes('核验过了')),
+      'the chair answer was posted to the group',
+    );
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'the nudge is marked processed with the response pin',
+    );
+    assert.ok(
+      h.routingCalls.some((call) => call.metabotId === 1 && call.widened === true),
+      'supervisor turns route with owner-level widening',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // fix/group-task-flow Phase 3: long-turn liveness — a still-running turn
 // posts a host placeholder + bounded heartbeats instead of sitting silent,
