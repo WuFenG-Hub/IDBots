@@ -6461,11 +6461,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   /**
    * G-01: no-progress stall monitor — one anomaly notice to the origin session
-   * when an executing task shows zero observable progress (no group message,
-   * no deliverable) for the window. The stamp resets when progress resumes so
-   * each stall episode reports at most once; the paired milestone guard lives
-   * in the SAME kv store the service reads (production wires both to the app
-   * sqlite kv), so clearing it here re-arms the service-side once-guard.
+   * when an executing/planning task shows zero observable progress (no group
+   * message, no deliverable) for the window. The stamp resets when progress
+   * resumes so each stall episode reports at most once; the paired milestone
+   * guard lives in the SAME kv store the service reads (production wires both
+   * to the app sqlite kv), so clearing it here re-arms the service-side
+   * once-guard. GT-03 (task #56): planning coverage — a planning task whose
+   * chair plan attempts are exhausted gets ONE re-armed attempt per stall
+   * episode instead of the executing-task status nudge.
    */
   const monitorNoProgressStall = (task: GroupTask): void => {
     const sqlite = deps.getStore();
@@ -6534,24 +6537,46 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
       })();
       if (!anyTurnInFlight && !anyLocalSessionActive) {
-        try {
-          deps.getGroupTaskStore().addSupervisorSignal({
-            taskId: task.id,
-            kind: 'nudge',
-            note:
-              `No progress for ${Math.round(idleMs / 60_000)} min and no turn is running — ` +
-              'post a brief status update to the group: what is done, what is blocked, what happens next.',
-          });
-          sqlite.set(nudgeKey, '1');
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: no progress for ${Math.round(idleMs / 60_000)} min ` +
-            'with no turn in flight — nudged the chair for a status update',
-          );
-        } catch (error) {
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: no-progress nudge failed: ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-          );
+        // GT-03 (task #56): a PLANNING task needs its planning turn re-armed,
+        // not a status-report nudge — the chair has nothing to report yet and
+        // the supervisor directive forbids [STATUS:*] anyway. When the plan was
+        // never posted and the bounded attempts are exhausted (the state #56
+        // wedged into during the outage), release ONE more attempt per stall
+        // episode: bounded self-heal that can never spin.
+        if (task.status === 'planning') {
+          const plannedKey = `${CHAIR_PLANNED_KV_PREFIX}${task.id}`;
+          const attemptsKey = `${CHAIR_PLAN_ATTEMPTS_KV_PREFIX}${task.id}`;
+          const attempts = Number(sqlite.get<number>(attemptsKey) ?? 0) || 0;
+          if (sqlite.get<string>(plannedKey) !== '1' && attempts >= MAX_CHAIR_PLAN_ATTEMPTS) {
+            sqlite.set(attemptsKey, MAX_CHAIR_PLAN_ATTEMPTS - 1);
+            sqlite.set(nudgeKey, '1');
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: planning stalled for ${Math.round(idleMs / 60_000)} min ` +
+              'with the chair plan attempts exhausted — re-armed one planning attempt (one per stall episode)',
+            );
+          }
+          // Planning tasks never take the status-report nudge below; the stall
+          // anomaly further down still applies to them (GT-03 visibility).
+        } else {
+          try {
+            deps.getGroupTaskStore().addSupervisorSignal({
+              taskId: task.id,
+              kind: 'nudge',
+              note:
+                `No progress for ${Math.round(idleMs / 60_000)} min and no turn is running — ` +
+                'post a brief status update to the group: what is done, what is blocked, what happens next.',
+            });
+            sqlite.set(nudgeKey, '1');
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: no progress for ${Math.round(idleMs / 60_000)} min ` +
+              'with no turn in flight — nudged the chair for a status update',
+            );
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: no-progress nudge failed: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
       }
     }
@@ -7433,10 +7458,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
-    // G-01: no-progress stall — an executing task with no new group message and
-    // no new deliverable for the window looks stuck; tell the origin session
-    // once per re-arm window instead of sitting silent.
-    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick && task.groupId) {
+    // G-01: no-progress stall — a task with no new group message and no new
+    // deliverable for the window looks stuck; tell the origin session once
+    // per re-arm window instead of sitting silent.
+    // GT-03 (task #56): PLANNING tasks are covered too — the old executing-only
+    // gate left a task pinned in planning (chair plan attempts exhausted during
+    // the outage) completely blind: no nudge, no stall anomaly, stall=False
+    // forever in the detail view.
+    if ((task.status === 'executing' || task.status === 'planning') && !checkpointOpenAtTick && !dispatchPausedAtTick && task.groupId) {
       monitorNoProgressStall(task);
     }
 

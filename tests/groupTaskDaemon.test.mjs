@@ -6186,6 +6186,61 @@ test('G-01: the no-progress stall anomaly fires once per episode', async () => {
   }
 });
 
+test('GT-03: a stalled PLANNING task re-arms one exhausted plan attempt per episode and still reports the stall anomaly', async () => {
+  const logs = [];
+  const milestones = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    deps: {
+      noProgressNudgeMs: 60_000,
+      noProgressStallMs: 300_000,
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning — the #56 blind spot
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt03', task.id]);
+    // The wedged state: all 3 plan attempts burned during the outage, plan
+    // never posted, cursor long past the last observable message.
+    h.store.set(`group_task_chair_plan_attempts:${task.id}`, 3);
+    insertGroupMessage(h.db, {
+      pinId: 'gt03-old-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '收到任务，准备规划。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 400, // 400s old: past both windows
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      Number(h.store.get(`group_task_chair_plan_attempts:${task.id}`)),
+      2,
+      'one planning attempt re-armed for the stalled planning task',
+    );
+    assert.ok(logs.some((line) => line.includes('re-armed one planning attempt')), 're-arm logged');
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'planning tasks never get the executing-task status-report nudge',
+    );
+    assert.ok(
+      milestones.some((entry) => entry.kind === 'anomaly' && entry.subject === 'stall'),
+      'the stall anomaly now covers planning (GT-03 visibility)',
+    );
+
+    // The re-armed attempt lets the next tick actually run the planning turn.
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 1 && send.content.includes('[STATUS:EXECUTING]')),
+      'chair planning turn posted the plan after the re-arm',
+    );
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1', 'plan marked posted');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('gating (G-04): while dispatch is paused the chair answers only the owner; workers unchanged', () => {
   const pausedTask = { id: 1, status: 'executing', dispatchPaused: true };
   const ownerMessage = gateMessage({ senderGlobalMetaId: BOSS_GMID, senderMetaId: 'metaid-human', senderName: 'Owner', content: 'what is the status?' });
