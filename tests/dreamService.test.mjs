@@ -171,6 +171,17 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
       );
     }
 
+    // Chain content of that day: day-level evidence that must survive the
+    // fragment map-reduce path into the final synthesis prompt.
+    ctx.db.run(
+      'INSERT INTO metabot_chain_writes (metabot_id, pin_id, path, operation, content_text, occurred_at_ms) VALUES (?, ?, ?, ?, ?, ?)',
+      [5, 'chain-w1', '/protocols/simplebuzz', 'create', '今天试了链上记录功能', DAY_START + 4000]
+    );
+    ctx.db.run(
+      'INSERT INTO metabot_chain_reads (metabot_id, pin_id, path, protocol, title, content_excerpt, first_read_at_ms, last_read_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [5, 'chain-r1', '/protocols/simplenote', 'simplenote', 'MetaWeb 使用指南', '指南正文', DAY_START + 5000, DAY_START + 5000]
+    );
+
     await ctx.service.runNow(5, DAY);
     const fragments = ctx.dreamStore.listDreamFragments(5, DAY);
     assert.ok(fragments.length > 1, 'large day should produce multiple fragments');
@@ -179,6 +190,12 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
     assert.ok(calls.some((call) => call.user.includes('分块证据摘要')));
     assert.ok(calls.some((call) => call.maxTokens === 4096), 'fragment calls use a compact output budget');
     assert.equal(calls.at(-1).maxTokens, 8192, 'final synthesis uses the default model output limit');
+    const synthesisCall = calls.find((call) => call.user.includes('分块证据摘要'));
+    assert.ok(synthesisCall, 'fragment synthesis call exists');
+    assert.ok(synthesisCall.user.includes('## 当日写入链上的内容'), 'synthesis keeps published chain content');
+    assert.ok(synthesisCall.user.includes('今天试了链上记录功能'), 'synthesis renders the write text');
+    assert.ok(synthesisCall.user.includes('## 当日阅读的链上内容'), 'synthesis keeps read chain content');
+    assert.ok(synthesisCall.user.includes('MetaWeb 使用指南'), 'synthesis renders the read title');
     const attemptsBefore = fragments.map((fragment) => fragment.attemptCount);
     const callsBefore = calls.length;
 
@@ -188,6 +205,8 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
       ctx.dreamStore.listDreamFragments(5, DAY).map((fragment) => fragment.attemptCount),
       attemptsBefore,
     );
+    const retriedSynthesis = calls.at(-1);
+    assert.ok(retriedSynthesis.user.includes('## 当日写入链上的内容'), 'retried synthesis still carries chain content');
   } finally {
     ctx.cleanup();
   }

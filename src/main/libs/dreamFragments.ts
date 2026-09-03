@@ -1,5 +1,7 @@
 import type {
   DreamActivityMessage,
+  DreamChainReadActivity,
+  DreamChainWriteActivity,
   DreamDayActivity,
   DreamGroupChatActivity,
   DreamGroupTaskEvaluation,
@@ -243,6 +245,8 @@ export function summariesToActivity(
   taskRuns: DreamTaskRunActivity[],
   orderCount: number,
   groupTasks: DreamGroupTaskEvaluation[] = [],
+  chainWrites: DreamChainWriteActivity[] = [],
+  chainReads: DreamChainReadActivity[] = [],
 ): DreamDayActivity {
   return {
     sessions: summaries.map((summary) => ({
@@ -266,5 +270,10 @@ export function summariesToActivity(
     taskRuns,
     orderCount,
     groupTasks,
+    // Chain content is day-level evidence that never enters per-chunk
+    // summarization; carry it into the synthesis activity so busy days
+    // (fragment mode) keep the bot's own publications and reads in the dream.
+    chainWrites,
+    chainReads,
   };
 }
