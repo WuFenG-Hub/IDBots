@@ -893,6 +893,10 @@ export interface SyncMetaBotResult {
   chatPublicKeyPinId?: string;
   /** TXIDs in attempted sync order. */
   txids?: string[];
+  /** Step keys this sync planned to publish (create/partial reporting). */
+  plannedSteps?: SyncMetaBotStep[];
+  /** Step keys that actually confirmed on-chain (txid returned). */
+  syncedSteps?: SyncMetaBotStep[];
 }
 
 export type SyncMetaBotStep = 'name' | 'avatar' | 'chatpubkey' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage' | 'owner';
@@ -1139,6 +1143,7 @@ export async function syncMetaBotToChain(
   });
 
   const txids: string[] = [];
+  const syncedSteps: SyncMetaBotStep[] = [];
   let chatPublicKeyPinId: string | null = null;
   let metabotInfoPinId: string | null = null;
   let ownerBindingPinId: string | null = null;
@@ -1183,6 +1188,7 @@ export async function syncMetaBotToChain(
         lastError = message;
       } else {
         txids.push(txid);
+        syncedSteps.push(step.key);
         if (step.key === 'chatpubkey') {
           chatPublicKeyPinId = result.pinId ?? `${txid}i0`;
         } else if (isProfileSyncStep(step.key)) {
@@ -1226,6 +1232,8 @@ export async function syncMetaBotToChain(
       error: lastError,
       canSkip: true,
       txids,
+      plannedSteps: plannedSteps.map((step) => step.key),
+      syncedSteps,
       metabotInfoPinId: metabotInfoPinId ?? undefined,
       chatPublicKeyPinId: chatPublicKeyPinId ?? undefined,
     };
@@ -1271,6 +1279,8 @@ export async function syncMetaBotToChain(
   log('syncMetaBotToChain completed successfully');
   return {
     success: true,
+    plannedSteps: plannedSteps.map((step) => step.key),
+    syncedSteps,
     metabotInfoPinId: metabotInfoPinId ?? undefined,
     chatPublicKeyPinId: chatPublicKeyPinId ?? undefined,
     txids,

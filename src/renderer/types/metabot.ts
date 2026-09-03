@@ -47,6 +47,15 @@ export interface Metabot {
   homepage?: string | null;
   /** Runtime flag merged by main: this bot is currently running its dream consolidation. */
   dreaming?: boolean;
+  /**
+   * Runtime flag merged by main: chain-honest on-chain sync state.
+   * 'partial' = identity registered but some info pins unpublished (or a
+   * persisted pending plan exists); 'synced' only when a pin id is on record.
+   * Absent on older lists — fall back to the metabot_info_pinid check.
+   */
+  chain_sync_state?: 'synced' | 'partial';
+  /** Unpublished step keys behind a 'partial' state (empty for legacy partials). */
+  chain_sync_pending_steps?: string[];
   created_at: number;
   updated_at: number;
 }

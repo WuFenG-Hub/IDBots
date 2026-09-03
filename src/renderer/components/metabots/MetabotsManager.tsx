@@ -602,6 +602,31 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
             {i18nService.t('metabotEditTitle')}
           </h2>
         </div>
+        {(editMetabot.chain_sync_state ?? (editMetabot.metabot_info_pinid?.trim() ? 'synced' : 'partial')) === 'partial' && (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/40 dark:border-amber-400/40 bg-amber-500/10 dark:bg-amber-400/10 px-4 py-3">
+            <span className="inline-flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400 min-w-0">
+              <span className="inline-block h-2 w-2 rounded-full bg-amber-500 shrink-0" aria-hidden />
+              <span className="min-w-0">
+                {i18nService.t('metabotChainSyncPartialBadge')}
+                {(editMetabot.chain_sync_pending_steps?.length ?? 0) > 0 && (
+                  <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {' '}
+                    ({editMetabot.chain_sync_pending_steps!.join(', ')})
+                  </span>
+                )}
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleResyncPartial(editMetabot)}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 hover:underline shrink-0"
+              data-slot="metabot-resync-partial"
+            >
+              <ArrowPathIcon className="h-3.5 w-3.5" aria-hidden />
+              <span>{i18nService.t('metabotChainSyncResyncNow')}</span>
+            </button>
+          </div>
+        )}
         <MetaBotEditTabs
           initialValues={buildEditFormValues(editMetabot)}
           metabotId={editMetabot.id}
@@ -788,6 +813,60 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     void performSyncToChain(metabot);
   };
 
+  /**
+   * One-click re-sync for a bot whose chain sync is partial (FR4). When main
+   * persisted the unpublished steps, republish EXACTLY those via the edit-sync
+   * plan (on-chain pins are not idempotent — never re-send confirmed steps);
+   * legacy partials without a persisted plan (or with a pending chatpubkey
+   * step, which the edit plan cannot carry) fall back to the full resync,
+   * which itself skips already-pinned chatpubkey.
+   */
+  const handleResyncPartial = async (metabot: Metabot) => {
+    const steps = metabot.chain_sync_pending_steps ?? [];
+    if (steps.length > 0 && !steps.includes('chatpubkey')) {
+      setCreateSuccessModal({
+        metabot,
+        subsidySuccess: true,
+        mode: 'syncOnly',
+        syncStepKeys: undefined,
+        showSubsidyStatus: false,
+      });
+      setEditSyncRemaining(null);
+      setSyncStatus('syncing');
+      setSyncError('');
+      try {
+        const result = await window.electron.idbots.syncMetaBotEditChanges({
+          metabotId: metabot.id,
+          syncName: steps.includes('name'),
+          syncAvatar: steps.includes('avatar'),
+          syncBio: steps.includes('bio'),
+          syncPersona: steps.includes('persona'),
+          syncLlm: steps.includes('llm'),
+          syncChatSkills: steps.includes('chatSkills'),
+          syncHomepage: steps.includes('homepage'),
+          syncOwner: steps.includes('owner'),
+        });
+        // Reload either way: main folds confirmed steps into the persisted
+        // plan, so the badge/pending list always reflects the chain truth.
+        await loadList();
+        if (result.success) {
+          setSyncStatus('success');
+          window.dispatchEvent(
+            new CustomEvent('app:showToast', { detail: i18nService.t('metabotChainSyncResynced') }),
+          );
+        } else {
+          setSyncStatus('error');
+          setSyncError(result.error ?? 'Unknown error');
+        }
+      } catch (err) {
+        setSyncStatus('error');
+        setSyncError(err instanceof Error ? err.message : 'Sync failed');
+      }
+      return;
+    }
+    handleSyncUnsyncedMetabot(metabot);
+  };
+
   const handleRestoreCompleted = (metabot: Metabot) => {
     setList((prev) => (prev.some((m) => m.id === metabot.id) ? prev : sortMetabotsByCreatedAtAsc([...prev, metabot])));
     dispatch(setPreferredMetabotId(metabot.id));
@@ -869,7 +948,8 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
                 onEdit={() => handleEdit(m.id)}
                 onToggleEnabled={(enabled) => handleToggleEnabled(m.id, enabled)}
                 isChainSynced={!!(m.metabot_info_pinid && m.metabot_info_pinid.trim())}
-                onSyncToChain={() => handleSyncUnsyncedMetabot(m)}
+                chainSyncState={m.chain_sync_state}
+                onSyncToChain={() => void handleResyncPartial(m)}
                 onOpenMetabotInBrowser={onOpenMetabotInBrowser}
               />
             ))}

@@ -102,6 +102,8 @@ export interface ChainSyncResult {
   error?: string;
   txids?: string[];
   syncedSteps?: string[];
+  /** Step keys the full sync planned to publish (create-path partial reporting). */
+  plannedSteps?: string[];
 }
 
 /** On-chain edit sync input (mirrors SyncMetaBotEditChangesInput). */
@@ -159,6 +161,13 @@ export interface MetabotManageDeps {
    * Absent = assignment write skipped (bare-embedding callers).
    */
   applyChatSkillAssignments?: (metabotId: number, skillIdsOrNames: readonly string[]) => string[];
+  /**
+   * Balance pre-check seam (wired to addressBalanceService). Returns the MVC
+   * address balance in satoshis AFTER the gas subsidy settled, or null when
+   * the balance API itself failed (pre-check then fails open). Absent = the
+   * create-time balance gate is skipped entirely (tests, bare-embedding callers).
+   */
+  checkWalletBalance?: (mvcAddress: string) => Promise<number | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,14 +330,159 @@ export function applyChatSkillOp(
 }
 
 // ---------------------------------------------------------------------------
+// Chain-sync pending state (partial-publish persistence, FR4)
+// ---------------------------------------------------------------------------
+
+/**
+ * metabot_settings key holding the on-chain steps that were planned but never
+ * confirmed (create partial / edit partial). An empty/absent step list means
+ * "nothing pending" — the value is written as `{"remainingSteps":[],...}` on
+ * completion so the row doubles as a "cleared" marker without needing a
+ * settings-delete path.
+ */
+const CHAIN_SYNC_PENDING_KEY = 'chainSyncPending';
+
+export interface ChainSyncPending {
+  /** Step keys still unpublished (subset of the sync step vocabulary). */
+  remainingSteps: string[];
+  error?: string;
+  updatedAt: number;
+}
+
+/** Read the persisted pending plan; null when absent or already empty. */
+export function readChainSyncPending(store: MetabotStore, metabotId: number): ChainSyncPending | null {
+  try {
+    const raw = store.getMetabotSetting(metabotId, CHAIN_SYNC_PENDING_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<ChainSyncPending>;
+    const remainingSteps = Array.isArray(parsed.remainingSteps)
+      ? parsed.remainingSteps.map((s) => String(s)).filter(Boolean)
+      : [];
+    if (remainingSteps.length === 0) return null;
+    return {
+      remainingSteps,
+      error: typeof parsed.error === 'string' ? parsed.error : undefined,
+      updatedAt: Number(parsed.updatedAt) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Persist (or clear, when steps are empty) the pending sync plan. Best-effort. */
+function writeChainSyncPending(
+  store: MetabotStore,
+  metabotId: number,
+  pending: { remainingSteps: string[]; error?: string } | null,
+): void {
+  try {
+    store.setMetabotSetting(
+      metabotId,
+      CHAIN_SYNC_PENDING_KEY,
+      JSON.stringify({
+        remainingSteps: pending?.remainingSteps ?? [],
+        error: pending?.error,
+        updatedAt: Date.now(),
+      }),
+    );
+  } catch (error) {
+    console.warn(
+      `[metabotManage] failed to persist chainSyncPending for metabot ${metabotId}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+export interface MetabotChainSyncStateView {
+  state: 'synced' | 'partial';
+  /** Steps still unpublished (empty for synced, and for partials created before this tracking existed). */
+  pendingSteps: string[];
+}
+
+/**
+ * Derive the bot's chain-sync state for the UI. Never reports synced without a
+ * pin on record: a pending plan wins, then metabot_info_pinid (a confirmed
+ * profile pin) — anything else is partial, matching the legacy
+ * isChainSynced badge fallback.
+ */
+export function deriveChainSyncState(
+  metabot: Pick<Metabot, 'metabot_info_pinid' | 'globalmetaid'>,
+  pending: ChainSyncPending | null,
+): MetabotChainSyncStateView {
+  if (pending && pending.remainingSteps.length > 0) {
+    return { state: 'partial', pendingSteps: pending.remainingSteps };
+  }
+  if (metabot.metabot_info_pinid && metabot.metabot_info_pinid.trim()) {
+    return { state: 'synced', pendingSteps: [] };
+  }
+  return { state: 'partial', pendingSteps: [] };
+}
+
+/**
+ * Persist the pending plan from a FULL sync outcome (create path and the
+ * manual idbots:syncMetaBot resync path): everything planned-but-unconfirmed
+ * becomes the bot's pending steps; a fully confirmed sync clears the plan.
+ */
+export function recordFullSyncOutcome(
+  store: MetabotStore,
+  metabotId: number,
+  outcome: { plannedSteps?: string[]; syncedSteps?: string[]; error?: string },
+): void {
+  const planned = outcome.plannedSteps ?? [];
+  const synced = new Set(outcome.syncedSteps ?? []);
+  const remainingSteps = planned.filter((step) => !synced.has(step));
+  writeChainSyncPending(
+    store,
+    metabotId,
+    remainingSteps.length > 0 ? { remainingSteps, error: outcome.error } : null,
+  );
+}
+
+/** Convenience wrapper: read persisted pending + derive in one call. */
+export function getMetabotChainSyncState(
+  store: MetabotStore,
+  metabot: Pick<Metabot, 'id' | 'metabot_info_pinid' | 'globalmetaid'>,
+): MetabotChainSyncStateView {
+  return deriveChainSyncState(metabot, readChainSyncPending(store, metabot.id));
+}
+
+/**
+ * Fold a re-sync's confirmed steps into the persisted pending plan (a retry
+ * only republishes what is left — on-chain pins are NOT idempotent). Called
+ * from the sync IPC handlers after every edit-changes sync attempt.
+ */
+export function applyChainSyncProgress(store: MetabotStore, metabotId: number, syncedSteps: string[]): void {
+  const pending = readChainSyncPending(store, metabotId);
+  if (!pending) return;
+  const synced = new Set(syncedSteps);
+  const remainingSteps = pending.remainingSteps.filter((step) => !synced.has(step));
+  if (remainingSteps.length === pending.remainingSteps.length) return;
+  writeChainSyncPending(
+    store,
+    metabotId,
+    remainingSteps.length > 0 ? { remainingSteps, error: pending.error } : null,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Create
 // ---------------------------------------------------------------------------
 
 /**
- * Create a MetaBot end-to-end: wallet → gas subsidy → DB insert → on-chain
- * publish → P2P refresh. Behavior-preserving lift of the original
+ * Conservative floor for the freshly-subsidized wallet to even start creating:
+ * a minimal create publishes name + chatpubkey + llm pins, each costing a few
+ * hundred sats. Below this the name pin may land but the rest is doomed to a
+ * partial publish, so we refuse up front with the shortfall instead.
+ * Calibrate against observed pin fees when chain rates change.
+ */
+const MIN_CREATE_GAS_SATS = 1400;
+
+/**
+ * Create a MetaBot end-to-end: wallet → gas subsidy → balance gate → DB insert
+ * → on-chain publish → P2P refresh. Behavior-preserving lift of the original
  * idbots:createMetaBotOnChain IPC handler. Mandatory step (name) failure rolls
- * back the DB records; a partial publish (canSkip) still succeeds locally.
+ * back the DB records; a partial publish (canSkip) still succeeds locally and
+ * its unpublished steps are persisted as the bot's chainSyncPending plan.
  */
 export async function createMetaBotOnChainCore(
   input: CreateMetaBotOnChainInput,
@@ -338,6 +492,18 @@ export async function createMetaBotOnChainCore(
   let metabotId: number | null = null;
   try {
     assertCanCreateMetabot(store);
+    // Pre-create name check: metabots.name is UNIQUE — surface a clear error
+    // up front instead of a raw constraint violation after wallet generation.
+    const wantedName = String(input.name ?? '').trim();
+    const nameConflict = wantedName
+      ? store.listMetabots().find((m) => m.name.trim() === wantedName)
+      : undefined;
+    if (nameConflict) {
+      return {
+        success: false,
+        error: `NAME_ALREADY_EXISTS: a MetaBot named "${wantedName}" already exists (id=${nameConflict.id}). Pick another name.`,
+      };
+    }
     const llmId = requireMetabotLlmIdForCreate(input.llm_id);
     const fallbackLlmId = normalizeMetabotLlmId(input.fallback_llm_id);
     // Reject legacy provider-key-shaped brain values (see legacyLlmProviderKeyError).
@@ -361,6 +527,27 @@ export async function createMetaBotOnChainCore(
       });
     } catch (e) {
       subsidyResult = { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
+
+    // 2b. Balance gate: the fresh wallet (plus whatever the subsidy just
+    // delivered) must cover the minimal create publish. Fails CLOSED on a
+    // confirmed low balance — with the shortfall reported and nothing written,
+    // the "identity registered, info-pins partial" state never starts. Fails
+    // OPEN when the balance API itself errors (never block creation on an
+    // explorer outage). Skipped when the seam is not wired.
+    if (deps.checkWalletBalance) {
+      let balanceSats: number | null = null;
+      try {
+        balanceSats = await deps.checkWalletBalance(walletResult.mvc_address);
+      } catch {
+        balanceSats = null;
+      }
+      if (balanceSats != null && balanceSats < MIN_CREATE_GAS_SATS) {
+        return {
+          success: false,
+          error: `INSUFFICIENT_BALANCE: creating "${wantedName}" needs roughly ${MIN_CREATE_GAS_SATS}+ sats of chain fee, but the fresh wallet holds ${balanceSats} sats (short by ${MIN_CREATE_GAS_SATS - balanceSats} sats). Top up MVC/SPACE gas for the bot wallet (or retry the gas subsidy) and create again — nothing was created.`,
+        };
+      }
     }
 
     // 3. Insert wallet + metabot into DB (syncMetaBotToChain reads from DB)
@@ -448,7 +635,16 @@ export async function createMetaBotOnChainCore(
       return { success: false, error: syncResult.error ?? 'Chain publish failed' };
     }
 
-    // 5b. Chain succeeded (or partial with canSkip) — reload metabot with updated pinIds
+    // 5b. Chain succeeded (or partial with canSkip) — persist what (if
+    // anything) is still unpublished so the My Bots partial badge and the
+    // re-sync entry have a durable, chain-honest plan to work from.
+    if (metabot.id) {
+      recordFullSyncOutcome(store, metabot.id, {
+        plannedSteps: syncResult.plannedSteps,
+        syncedSteps: syncResult.syncedSteps,
+        error: syncResult.error,
+      });
+    }
     const updatedMetabot = store.getMetabotById(metabot.id) ?? metabot;
     await onAfterMutation?.();
     return {
@@ -773,6 +969,9 @@ export async function updateMetaBotCore(
     }
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
+    // Publish attempt blew up mid-flight: persist what was still in the plan
+    // so the partial badge + re-sync survive a restart.
+    writeChainSyncPending(store, id, { remainingSteps: flagsToStepKeys(plan), error: errMsg });
     return {
       success: true,
       metabot: local.metabot,
@@ -789,6 +988,12 @@ export async function updateMetaBotCore(
   const updated = store.getMetabotById(id) ?? local.metabot;
   const overallSuccess = syncResult.success || Boolean(syncResult.canSkip);
   const remainingAfter = subtractSyncedFlags({ ...flags, ownerBindingPayload }, syncResult.syncedSteps ?? []);
+  const remainingAfterKeys = flagsToStepKeys(remainingAfter);
+  writeChainSyncPending(
+    store,
+    id,
+    remainingAfterKeys.length > 0 ? { remainingSteps: remainingAfterKeys, error: syncResult.error } : null,
+  );
   return {
     success: overallSuccess,
     metabot: updated,
