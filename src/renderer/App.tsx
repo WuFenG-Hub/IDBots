@@ -534,12 +534,16 @@ const App: React.FC = () => {
   }, [botBrowserShell.openUri]);
 
   // In-renderer requests (e.g. clickable metaid:// metaapp:// links in the
-  // Co-Work panel) ride a DOM event to reach the shell.
+  // Co-Work panel) ride a DOM event to reach the shell. Every dispatcher on
+  // this channel is a user click, so the URI opens a NEW browser tab instead
+  // of replacing the tab the user is reading; an explicit newTab: false in the
+  // detail opts back into navigate-in-place.
   useEffect(() => {
     const handler = (event: Event) => {
-      const uri = (event as CustomEvent<{ uri?: unknown }>).detail?.uri;
+      const detail = (event as CustomEvent<{ uri?: unknown; newTab?: unknown }>).detail;
+      const uri = detail?.uri;
       if (typeof uri === 'string' && uri.trim()) {
-        void botBrowserShell.openUri({ uri: uri.trim() });
+        void botBrowserShell.openUri({ uri: uri.trim(), newTab: detail?.newTab !== false });
       }
     };
     window.addEventListener('botBrowser:openUri', handler);

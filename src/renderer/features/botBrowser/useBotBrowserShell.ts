@@ -125,7 +125,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
       return;
     }
     if (!await showBrowser()) return;
-    openUriWhenBrowserReady({ uri, actorId });
+    openUriWhenBrowserReady({ uri, actorId, newTab: true });
   }, [openUriWhenBrowserReady, showBrowser, showToast]);
 
   const openRemoteBot = useCallback(async (target: { globalMetaId: string }) => {
@@ -135,7 +135,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
       return;
     }
     if (!await showBrowser()) return;
-    openUriWhenBrowserReady({ uri });
+    openUriWhenBrowserReady({ uri, newTab: true });
   }, [openUriWhenBrowserReady, showBrowser, showToast]);
 
   const openUri = useCallback(async (input: BotBrowserOpenUriInput) => {
@@ -143,12 +143,13 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     const actorId = typeof input?.actorId === 'string' && input.actorId.trim()
       ? input.actorId.trim()
       : null;
+    const newTab = input?.newTab === true;
     if (!uri) {
       showToast('Bot Browser URI is missing.');
       return;
     }
     if (!await showBrowser()) return;
-    openUriWhenBrowserReady({ uri, actorId });
+    openUriWhenBrowserReady({ uri, actorId, newTab });
   }, [openUriWhenBrowserReady, showBrowser, showToast]);
 
   const openMetaApp = useCallback(async (app: MetaAppRecord): Promise<boolean> => {
@@ -162,7 +163,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     }
 
     if (!await showBrowser()) return true;
-    openUriWhenBrowserReady({ uri });
+    openUriWhenBrowserReady({ uri, newTab: true });
     return true;
   }, [openUriWhenBrowserReady, showBrowser]);
 
@@ -172,7 +173,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     if (!normalized) return false;
     const uri = `metaapp://${encodeURIComponent(normalized)}`;
     if (!await showBrowser()) return true;
-    openUriWhenBrowserReady({ uri });
+    openUriWhenBrowserReady({ uri, newTab: true });
     return true;
   }, [openUriWhenBrowserReady, showBrowser]);
 

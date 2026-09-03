@@ -29,6 +29,13 @@ export type BotBrowserIntent =
 export interface BotBrowserOpenUriInput {
   uri: string;
   actorId?: string | null;
+  /**
+   * Open the URI in a newly created tab instead of navigating the active tab.
+   * Set for user-initiated opens (chat/group-task URI clicks, avatar bot
+   * pages, MetaApp launches) so they never replace what the user is reading;
+   * agent/RPC-initiated opens keep the navigate-in-place default.
+   */
+  newTab?: boolean;
 }
 
 export type BotBrowserTabAction =

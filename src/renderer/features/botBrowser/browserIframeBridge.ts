@@ -284,10 +284,19 @@ export function buildBrowserIframeBridgeScript(): string {
     try {
       var uri = textValue(input && input.uri);
       var actorId = textValue(input && input.actorId);
+      var newTab = Boolean(input && input.newTab);
       if (!uri) {
         throw new Error('Browser URI is required.');
       }
       await ensureRuntimeReady();
+      // newTab marks user-initiated opens (chat links, deliverables, avatar bot
+      // pages): openTab creates + activates a fresh tab and seeds the actor onto
+      // it directly. selectUsingIdentity is only correct for the navigate-in-place
+      // path — it writes the actor onto the currently active tab.
+      if (newTab && typeof globalThis.AgentBrowserTabs.openTab === 'function') {
+        globalThis.AgentBrowserTabs.openTab(uri, actorId || undefined);
+        return;
+      }
       if (actorId) {
         await globalThis.selectUsingIdentity(actorId);
       }
