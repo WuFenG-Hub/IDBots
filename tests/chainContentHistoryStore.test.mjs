@@ -10,6 +10,7 @@ const {
   MAX_WRITE_CONTENT_CHARS,
   MAX_READ_EXCERPT_CHARS,
   MAX_SUMMARY_ATTEMPTS,
+  MAX_LEDGER_ROWS_PER_BOT,
 } = await import('../dist-electron/main/chainContentHistoryStore.js')
   .catch(() => import('../dist-electron/chainContentHistoryStore.js'));
 
@@ -259,5 +260,47 @@ test('searchReads: summary becomes searchable once the async summary lands', () 
     store.searchReads(7, { query: '中心思想' }).map((row) => row.pinId),
     ['r1'],
     'a landed summary is immediately recallable',
+  );
+});
+
+test('release-review P2: no-op writes never trigger a full-db save', () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  assert.ok(db, 'native sqlite available in test runtime');
+  let saves = 0;
+  const store = new ChainContentHistoryStore(db, () => { saves += 1; });
+  assert.equal(store.recordWrite(makeWrite()).created, true);
+  const savesAfterFirst = saves;
+  assert.ok(savesAfterFirst >= 1, 'a real insert saves');
+  assert.equal(store.recordWrite(makeWrite()).created, false, 'duplicate pin ignored');
+  assert.equal(saves, savesAfterFirst, 'an ignored INSERT OR IGNORE does not save');
+  assert.equal(store.markReadSavedToKb(7, 'unknown-pin', 'kb-1'), false);
+  assert.equal(saves, savesAfterFirst, 'an UPDATE matching zero rows does not save');
+});
+
+test('release-review P2: retention prunes each bot to the newest MAX_LEDGER_ROWS_PER_BOT rows', () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  assert.ok(db, 'native sqlite available in test runtime');
+  const store = new ChainContentHistoryStore(db, () => {});
+  for (let i = 0; i < MAX_LEDGER_ROWS_PER_BOT + 5; i += 1) {
+    store.recordWrite(makeWrite({ pinId: `pin-prune-${i}`, occurredAtMs: T0 + i * 60_000 }));
+  }
+  // The prune gate is once a day per store instance, so a fresh instance over
+  // the same db is what triggers the retention pass on its next record.
+  const store2 = new ChainContentHistoryStore(db, () => {});
+  store2.recordRead(makeRead({ metabotId: 8, pinId: 'pin-read-other', readAtMs: T0 + 100 * DAY }));
+
+  const countWrites = db.exec(
+    'SELECT COUNT(*) AS n FROM metabot_chain_writes WHERE metabot_id = ?', [7],
+  )[0].values[0][0];
+  assert.equal(countWrites, MAX_LEDGER_ROWS_PER_BOT, 'bot 7 keeps the newest rows only');
+  assert.equal(
+    store2.searchWrites(7, { fromMs: T0, toMs: T0 + 5 * 60_000 }).length,
+    0,
+    'the five oldest rows were pruned',
+  );
+  assert.equal(
+    store2.searchWrites(7, { fromMs: T0 + 5 * 60_000, toMs: T0 + 10 * 60_000 }).length,
+    5,
+    'rows past the pruned head survive',
   );
 });

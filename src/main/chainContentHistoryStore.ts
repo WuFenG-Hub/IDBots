@@ -37,6 +37,15 @@ export const MAX_WRITE_CONTENT_CHARS = 16_000;
 export const MAX_READ_EXCERPT_CHARS = 8_000;
 /** A pending summary is retried on later ticks until this many attempts. */
 export const MAX_SUMMARY_ATTEMPTS = 3;
+/**
+ * release-review P2: retention — newest rows per bot kept per table. Recall
+ * and dream never read past the newest 50 rows, so 1000 per bot preserves
+ * ample history while bounding a long-lived install's growth (rows hold up
+ * to 16 KB of text each). Pruning runs at most once a day, time-gated inside
+ * the record paths so no new scheduler wiring is needed.
+ */
+export const MAX_LEDGER_ROWS_PER_BOT = 1_000;
+const LEDGER_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface MetabotChainWriteRecord {
   id: number;
@@ -285,6 +294,8 @@ export interface ChainContentSearchOptions {
 }
 
 export class ChainContentHistoryStore {
+  private lastPrunedAtMs = 0;
+
   constructor(
     private readonly db: Database,
     private readonly saveDb: () => void,
@@ -306,6 +317,49 @@ export class ChainContentHistoryStore {
     return (result[0]?.values ?? []).map((values) =>
       Object.fromEntries(columns.map((column, index) => [column, values[index]])) as T
     );
+  }
+
+  /**
+   * release-review P2: persist only when the last statement actually modified
+   * a row — the sql.js fallback's save() exports and atomically rewrites the
+   * WHOLE database file, so an INSERT OR IGNORE that ignored or an UPDATE
+   * that matched nothing must not trigger it.
+   */
+  private saveIfModified(): void {
+    if ((this.db.getRowsModified?.() ?? 0) > 0) this.saveDb();
+  }
+
+  /**
+   * release-review P2: retention prune (see MAX_LEDGER_ROWS_PER_BOT).
+   * Time-gated to once a day; failures degrade to a warn — retention must
+   * never break a recording path.
+   */
+  private pruneIfDue(nowMs: number): void {
+    if (nowMs - this.lastPrunedAtMs < LEDGER_PRUNE_INTERVAL_MS) return;
+    this.lastPrunedAtMs = nowMs;
+    try {
+      for (const table of ['metabot_chain_writes', 'metabot_chain_reads'] as const) {
+        const timeColumn = table === 'metabot_chain_writes' ? 'occurred_at_ms' : 'last_read_at_ms';
+        const bots = this.getAll<{ metabot_id: number }>(
+          `SELECT DISTINCT metabot_id FROM ${table}`,
+        );
+        for (const row of bots) {
+          this.db.run(
+            `DELETE FROM ${table} WHERE metabot_id = ? AND id NOT IN (
+               SELECT id FROM ${table} WHERE metabot_id = ?
+               ORDER BY ${timeColumn} DESC, id DESC LIMIT ?
+             )`,
+            [row.metabot_id, row.metabot_id, MAX_LEDGER_ROWS_PER_BOT],
+          );
+        }
+      }
+      this.saveIfModified();
+    } catch (error) {
+      console.warn(
+        '[ChainContentHistory] retention prune failed:',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
 
   /**
@@ -345,8 +399,10 @@ export class ChainContentHistoryStore {
         occurredAtMs,
       ],
     );
-    this.saveDb();
-    return { created: (this.db.getRowsModified?.() ?? 0) > 0 };
+    const created = (this.db.getRowsModified?.() ?? 0) > 0;
+    if (created) this.saveDb();
+    this.pruneIfDue(occurredAtMs);
+    return { created };
   }
 
   getWriteByPinId(pinId: string): MetabotChainWriteRecord | null {
@@ -407,7 +463,8 @@ export class ChainContentHistoryStore {
         readAtMs,
       ],
     );
-    this.saveDb();
+    this.saveIfModified();
+    this.pruneIfDue(readAtMs);
   }
 
   getReadByPinId(metabotId: number, pinId: string): MetabotChainReadRecord | null {
@@ -425,8 +482,9 @@ export class ChainContentHistoryStore {
        WHERE metabot_id = ? AND pin_id = ?`,
       [kbId ?? null, metabotId, pinId],
     );
-    this.saveDb();
-    return (this.db.getRowsModified?.() ?? 0) > 0;
+    const modified = (this.db.getRowsModified?.() ?? 0) > 0;
+    if (modified) this.saveDb();
+    return modified;
   }
 
   /** Oldest first across ALL bots — the summary service drains this queue. */
@@ -467,7 +525,7 @@ export class ChainContentHistoryStore {
        WHERE id = ?`,
       [summary, nowMs, id],
     );
-    this.saveDb();
+    this.saveIfModified();
   }
 
   /** A failed attempt keeps the row pending until MAX_SUMMARY_ATTEMPTS. */
@@ -480,7 +538,7 @@ export class ChainContentHistoryStore {
        WHERE id = ?`,
       [MAX_SUMMARY_ATTEMPTS, id],
     );
-    this.saveDb();
+    this.saveIfModified();
   }
 
   /** What the bot published within [dayStartMs, dayEndMs) — dream input. */
