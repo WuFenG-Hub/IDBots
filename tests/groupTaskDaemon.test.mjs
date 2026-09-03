@@ -693,6 +693,19 @@ test('fix-v2 B2: prose dependency declarations in a chair dispatch are recognize
   assert.equal(hasProseDependencyDeclaration(''), false);
 });
 
+test('release-review P1: negated prose statements do NOT read as dependency declarations', () => {
+  assert.equal(hasProseDependencyDeclaration('不依赖任何人，独立完成 S5'), false);
+  assert.equal(hasProseDependencyDeclaration('无依赖，可以直接开始'), false);
+  assert.equal(hasProseDependencyDeclaration('S5 不依赖 S4 即可开始'), false);
+  assert.equal(hasProseDependencyDeclaration('没有任何前置条件'), false);
+  assert.equal(hasProseDependencyDeclaration('不在 S4 之后开始'), false);
+  assert.equal(hasProseDependencyDeclaration('无需依赖任何人，立刻开工'), false);
+  assert.equal(hasProseDependencyDeclaration('does not depend on S4'), false);
+  assert.equal(hasProseDependencyDeclaration('no dependency on the render'), false);
+  assert.equal(hasProseDependencyDeclaration('independent of S4'), false);
+  assert.equal(hasProseDependencyDeclaration('never waiting for the design'), false);
+});
+
 test('fix-v2 B2: default stuck verdict is alert-only — the session is never stopped', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
@@ -768,6 +781,108 @@ test('fix-v2 B2: a prose-declared upstream dependency exempts the waiting worker
     const exemptRaw = h.store.get('group_task_dep_wait_exempt:1:2');
     assert.ok(exemptRaw, 'dependency-wait exemption recorded');
     assert.match(exemptRaw, /prose-declared upstream/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('release-review P1: a prose dependency-wait exemption expires — monitoring resumes after the cap', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Chair dispatches with a prose dependency; the worker ACKs then goes
+    // completely silent. With the old never-expiring exemption this member
+    // could die without a single alert forever.
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-prose-expire-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S5 质检，依赖 S4 的交付，等它上线后开始。',
+      chainTimestamp: Math.floor((startMs - 150_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'working-prose-expire-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，等 S4', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    // Within the cap: still exempt, no alert.
+    await h.loop.runTick();
+    let member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 'within the cap the prose waiter stays exempt');
+    assert.ok(h.store.get('group_task_dep_wait_exempt:1:2'), 'exemption note present');
+
+    // Past the 3-hour cap with the SAME chair assignment: the exemption
+    // lifts and the normal unreachable verdict stamps the silent member.
+    h.state.nowMs = startMs + 180 * 60_000 + 60_000;
+    await h.loop.runTick();
+    member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'unreachable', 'after the cap the silent member is flagged again');
+    const expiredNote = JSON.parse(h.store.get('group_task_dep_wait_exempt:1:2'));
+    assert.equal(expiredNote.proseExemptionExpired, true, 'the exhausted exemption is stamped, not silently re-armed');
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'the stuck alert fires once monitoring resumes');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('release-review P1: a NEW chair assignment re-arms the prose exemption window', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-prose-rearm-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S5 质检，依赖 S4 的交付，等它上线后开始。',
+      chainTimestamp: Math.floor((startMs - 150_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'working-prose-rearm-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，等 S4', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+    const dispatchMsgId = h.db.exec(
+      'SELECT id FROM group_chat_messages WHERE pin_id = ?', ['dispatch-prose-rearm-i0'],
+    )[0].values[0][0];
+    let note = JSON.parse(h.store.get('group_task_dep_wait_exempt:1:2'));
+    assert.ok(note.grantedAt, 'first grant stamps grantedAt');
+    assert.equal(note.assignmentMsgId, dispatchMsgId, 'the note tracks the chair dispatch message');
+
+    // Half the cap later the chair re-dispatches (still prose): the window
+    // restarts from the new assignment instead of expiring.
+    h.state.nowMs = startMs + 90 * 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-prose-rearm-i1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 继续 S5，仍依赖 S4 交付后再开始。',
+      chainTimestamp: Math.floor((startMs + 90 * 60_000) / 1000),
+    });
+    const newDispatchMsgId = h.db.exec(
+      'SELECT id FROM group_chat_messages WHERE pin_id = ?', ['dispatch-prose-rearm-i1'],
+    )[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, newDispatchMsgId);
+    await h.loop.runTick();
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working', 're-armed by the new assignment, the waiter stays exempt');
+    note = JSON.parse(h.store.get('group_task_dep_wait_exempt:1:2'));
+    assert.equal(note.assignmentMsgId, newDispatchMsgId, 'the note tracks the new assignment message');
+    assert.ok(note.grantedAt >= startMs + 90 * 60_000, 'grantedAt restarted with the new assignment');
   } finally {
     h.cleanup();
   }

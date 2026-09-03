@@ -393,8 +393,28 @@ export function parseGroupTaskStuckReclaimMode(raw: string | null | undefined): 
  * count as a real upstream wait — reading only the structured tag (and then
  * annotating "no upstream dependency" when it is absent) was wrong three
  * times in a row in tasks #54/#55.
+ *
+ * Release-review P1 hardening: this regex is only a CANDIDATE detector, not a
+ * semantic parser — negated statements ("不依赖任何人", "无依赖，独立完成",
+ * "does not depend on", "independent of") must not read as declarations, so
+ * every branch carries a negation lookbehind. The exemption a prose hit
+ * grants is additionally time-capped (PROSE_DEPENDENCY_EXEMPTION_MAX_MS)
+ * because prose declarations, unlike ledger-verified [DEPENDS_ON] tokens,
+ * can never self-lift.
  */
-const PROSE_DEPENDENCY_RE = /(依赖|前置|上游|在[^，。；\n]{1,24}之后|等[^，。；\n]{1,24}(交付|完成|产出|落地)|待[^，。；\n]{1,24}(交付|完成|产出|落地)|depends\s+on|dependent\s+on|blocked\s+by|waiting\s+(?:for|on)|after\s+[^,.;\n]{1,32}(?:delivers|lands|completes|is\s+done))/i;
+const PROSE_NEGATION_LOOKBEHIND = '(?<!(?:不|无|未|勿|莫|别|没|休|免|非|何|没有|无需|不必|不用|不存在))';
+const PROSE_NEGATION_LOOKBEHIND_EN = '(?<!(?:\\bno\\s+|\\bnot\\s+|\\bwithout\\s+|\\bnever\\s+|\\bindependen(?:t|tly)\\s+(?:of\\s+)?))';
+const PROSE_DEPENDENCY_RE = new RegExp(
+  '(?:'
+  + `${PROSE_NEGATION_LOOKBEHIND}依赖|${PROSE_NEGATION_LOOKBEHIND}前置|${PROSE_NEGATION_LOOKBEHIND}上游|`
+  + `${PROSE_NEGATION_LOOKBEHIND}在[^，。；\\n]{1,24}之后|`
+  + `${PROSE_NEGATION_LOOKBEHIND}等[^，。；\\n]{1,24}(?:交付|完成|产出|落地)|`
+  + `${PROSE_NEGATION_LOOKBEHIND}待[^，。；\\n]{1,24}(?:交付|完成|产出|落地)|`
+  + `${PROSE_NEGATION_LOOKBEHIND_EN}(?:depends?\\s+on|dependent\\s+on|blocked\\s+by|waiting\\s+(?:for|on))|`
+  + `${PROSE_NEGATION_LOOKBEHIND_EN}after\\s+[^,.;\\n]{1,32}(?:delivers|lands|completes|is\\s+done)`
+  + ')',
+  'i',
+);
 export function hasProseDependencyDeclaration(content: string | null | undefined): boolean {
   return PROSE_DEPENDENCY_RE.test(content ?? '');
 }
@@ -578,6 +598,17 @@ const GROUP_TASK_TIMEOUT_OWNER_PREFIX = 'group_task_timeout_owner:';
  * 'waiting' work status (single source of truth, no duplicated parsing).
  */
 export const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
+/**
+ * Release-review P1: a prose dependency declaration carries no structured
+ * [DEPENDS_ON] token to verify against the ledger, so the exemption it grants
+ * can never self-lift — it is time-capped. After this long with the SAME
+ * latest chair assignment still declaring the wait, the monitors stop
+ * honoring the prose and fall through to the normal unreachable/stuck/
+ * deadline verdicts: a genuinely dead member cannot hide behind a stale prose
+ * sentence forever. A NEW chair assignment (different message id) re-arms
+ * the window.
+ */
+export const PROSE_DEPENDENCY_EXEMPTION_MAX_MS = 180 * 60_000;
 /**
  * G-04 retry budget: failed chair-answer attempts per supervisor signal
  * (`group_task_sup_sig_attempts:<signalId>` = count). At 3 attempts the signal
@@ -5946,10 +5977,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // undelivered upstream ([DEPENDS_ON] tag or prose declaration) is
       // WAITING, not unreachable — the same exemption the stale-[WORKING]
       // monitor applies (tasks #54/#55 stamped correctly waiting members).
+      // Release-review P1: a prose declaration is honored for a bounded
+      // window only — once it expires, monitoring resumes and a silently
+      // dead member gets stamped again.
       if (member.metabotId != null) {
         const chairMember = members.find((m) => m.role === 'chair');
         const depWait = checkMemberDependencyWait(task, member, chairMember);
-        if (depWait && depWait.pendingTokens.length > 0) continue;
+        if (depWait && depWait.pendingTokens.length > 0 && !depWait.proseDeclared) continue;
+        if (depWait?.proseDeclared) {
+          if (applyProseDependencyExemption(task, member, depWait.pendingTokens, depWait.assignmentMsgId)) continue;
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: prose dependency-wait exemption expired for member ` +
+            `${member.name ?? member.metabotId} (${Math.round(PROSE_DEPENDENCY_EXEMPTION_MAX_MS / 60_000)} min ` +
+            'with the same chair assignment) — unreachable monitoring resumes',
+          );
+        }
       }
       const speakSec = gmid ? speakMap.get(gmid) ?? null : null;
       const lastMs = speakSec != null
@@ -6012,7 +6054,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     task: GroupTask,
     member: GroupTaskMember,
     chairMember: GroupTaskMember | undefined,
-  ): { tokens: string[]; pendingTokens: string[]; proseDeclared: boolean } | null => {
+  ): { tokens: string[]; pendingTokens: string[]; proseDeclared: boolean; assignmentMsgId: number | null } | null => {
     const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
     if (!task.groupId || !chairGmid || member.metabotId == null) return null;
     const bot = deps.getMetabotStore().getMetabotById(member.metabotId);
@@ -6045,14 +6087,91 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // a pending upstream too — without this, the stale-[WORKING] monitor saw
     // zero tokens, annotated "no upstream dependency" (wrong 3/3 times in
     // tasks #54/#55) and let the verdict fall on a correctly waiting member.
+    // Release-review P1: prose cannot be ledger-verified, so the exemption it
+    // grants is time-capped per assignment message (the monitors gate it
+    // through applyProseDependencyExemption).
     if (tokens.length === 0 && hasProseDependencyDeclaration(assignment.content)) {
-      return { tokens, pendingTokens: ['(prose-declared upstream)'], proseDeclared: true };
+      return {
+        tokens,
+        pendingTokens: ['(prose-declared upstream)'],
+        proseDeclared: true,
+        assignmentMsgId: assignment.id,
+      };
     }
     return {
       tokens,
       pendingTokens: tokens.filter((token) => !dependencyTokenSatisfied(task, token)),
       proseDeclared: false,
+      assignmentMsgId: assignment.id,
     };
+  };
+
+  /**
+   * Release-review P1 gate for the prose dependency-wait exemption. A prose
+   * declaration carries no ledger-verifiable token, so the exemption is
+   * granted per (task, member) for a bounded window only. The FIRST grant
+   * stamps the exemption kv note with grantedAt + the assignment message id;
+   * while the same assignment stays the member's latest, the exemption is
+   * honored for at most PROSE_DEPENDENCY_EXEMPTION_MAX_MS. A new chair
+   * assignment (different message id) re-arms the window. Once the window is
+   * exhausted the note is stamped proseExemptionExpired and the monitors fall
+   * through to the normal unreachable/stuck/deadline verdicts. The note
+   * (upstreamDelivered:false) also keeps the GT-09 panel projecting 'waiting'
+   * while the exemption is active.
+   */
+  const applyProseDependencyExemption = (
+    task: GroupTask,
+    member: GroupTaskMember,
+    pendingTokens: string[],
+    assignmentMsgId: number | null,
+  ): boolean => {
+    const key = `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`;
+    const sqlite = deps.getStore();
+    const nowMs = now();
+    let grantedAt = nowMs;
+    const raw = sqlite.get<string>(key);
+    if (raw) {
+      try {
+        const note = JSON.parse(raw) as {
+          grantedAt?: number;
+          assignmentMsgId?: number | null;
+          proseExemptionExpired?: boolean;
+        };
+        const sameAssignment = assignmentMsgId == null
+          || note.assignmentMsgId == null
+          || note.assignmentMsgId === assignmentMsgId;
+        if (sameAssignment && note.proseExemptionExpired) return false;
+        if (sameAssignment && typeof note.grantedAt === 'number' && Number.isFinite(note.grantedAt)) {
+          grantedAt = note.grantedAt;
+          if (nowMs - grantedAt > PROSE_DEPENDENCY_EXEMPTION_MAX_MS) {
+            // Expired: stamp the note as exhausted (idempotent) instead of
+            // deleting it — the other monitors in the same tick must observe
+            // the same expired state, and a bare delete would read as "first
+            // grant" to them and silently re-arm the window. GT-09 also reads
+            // this flag to stop projecting 'waiting'.
+            sqlite.set(key, JSON.stringify({
+              upstreamTokens: pendingTokens,
+              upstreamDelivered: false,
+              checkedAt: nowMs,
+              grantedAt,
+              assignmentMsgId,
+              proseExemptionExpired: true,
+            }));
+            return false;
+          }
+        }
+      } catch {
+        // Corrupt note — treat as a fresh grant.
+      }
+    }
+    sqlite.set(key, JSON.stringify({
+      upstreamTokens: pendingTokens,
+      upstreamDelivered: false,
+      checkedAt: nowMs,
+      grantedAt,
+      assignmentMsgId,
+    }));
+    return true;
   };
 
   /**
@@ -6147,23 +6266,43 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // every tick, so the exemption lifts on its own once the upstream lands.
       const depWait = checkMemberDependencyWait(task, member, chairMember);
       if (depWait && depWait.pendingTokens.length > 0) {
-        sqlite.set(
-          `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
-          JSON.stringify({
-            upstreamTokens: depWait.pendingTokens,
-            upstreamDelivered: false,
-            checkedAt: now(),
-          }),
-        );
-        emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: dependency-wait exemption: member ${name} ` +
-          `waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
-        );
-        continue;
+        // Release-review P1: prose declarations are gated by the time-capped
+        // exemption helper (it stamps the kv note itself); structured tokens
+        // keep the inline note and self-lift via the ledger.
+        if (depWait.proseDeclared) {
+          if (applyProseDependencyExemption(task, member, depWait.pendingTokens, depWait.assignmentMsgId)) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: dependency-wait exemption: member ${name} ` +
+              `waiting on upstream ${depWait.pendingTokens.join(', ')} (prose-declared, time-capped)`,
+            );
+            continue;
+          }
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: prose dependency-wait exemption expired for member ${name} ` +
+            `(${Math.round(PROSE_DEPENDENCY_EXEMPTION_MAX_MS / 60_000)} min with the same chair assignment) — ` +
+            'stuck monitoring resumes',
+          );
+        } else {
+          sqlite.set(
+            `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
+            JSON.stringify({
+              upstreamTokens: depWait.pendingTokens,
+              upstreamDelivered: false,
+              checkedAt: now(),
+            }),
+          );
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: dependency-wait exemption: member ${name} ` +
+            `waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
+          );
+          continue;
+        }
       }
       // Not waiting (no [DEPENDS_ON] tag, or the upstream has delivered since):
       // clear a stale exemption note so the audit trail reflects the lift.
-      if (depWait) {
+      // Prose notes are managed exclusively by applyProseDependencyExemption
+      // (they carry the grantedAt/expiry state — never delete them here).
+      if (depWait && !depWait.proseDeclared) {
         sqlite.delete(`${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`);
       }
       // GT-09 honesty: only pinid/txid tokens are ledger-verified — free-text
@@ -7248,19 +7387,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const chairForDepWait = members.find((candidate) => candidate.role === 'chair');
         const depWait = checkMemberDependencyWait(task, member, chairForDepWait);
         if (depWait && depWait.pendingTokens.length > 0) {
-          sqlite.set(
-            `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
-            JSON.stringify({
-              upstreamTokens: depWait.pendingTokens,
-              upstreamDelivered: false,
-              checkedAt: nowMs,
-            }),
-          );
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: delivery-deadline escalation skipped for ${member.name ?? member.metabotId} ` +
-            `— waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
-          );
-          continue;
+          // Release-review P1: prose declarations are gated by the
+          // time-capped exemption helper (it stamps the kv note itself).
+          if (depWait.proseDeclared) {
+            if (applyProseDependencyExemption(task, member, depWait.pendingTokens, depWait.assignmentMsgId)) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: delivery-deadline escalation skipped for ${member.name ?? member.metabotId} ` +
+                `— waiting on upstream ${depWait.pendingTokens.join(', ')} (prose-declared, time-capped)`,
+              );
+              continue;
+            }
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: prose dependency-wait exemption expired for ` +
+              `${member.name ?? member.metabotId} — delivery-deadline escalation resumes`,
+            );
+          } else {
+            sqlite.set(
+              `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
+              JSON.stringify({
+                upstreamTokens: depWait.pendingTokens,
+                upstreamDelivered: false,
+                checkedAt: nowMs,
+              }),
+            );
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: delivery-deadline escalation skipped for ${member.name ?? member.metabotId} ` +
+              `— waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
+            );
+            continue;
+          }
         }
         const deadlineReclaimReason =
           'estimated delivery missed past the grace window with no [DELIVERABLE] and zero cowork-session activity';
