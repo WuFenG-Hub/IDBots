@@ -265,6 +265,10 @@ man_base_data_pebble/
 !tests/postBuzzAgentTools.test.mjs
 !tests/omniCasterAgentTools.test.mjs
 !tests/privateChatAgentTools.test.mjs
+!tests/walletQueryService.test.mjs
+!tests/walletTransferService.test.mjs
+!tests/walletAgentTools.test.mjs
+!tests/metaidRpcWalletToolsRoutes.test.mjs
 !tests/groupChatAgentTools.test.mjs
 !tests/omniReaderAgentTools.test.mjs
 !tests/browserOpenAgentTools.test.mjs
