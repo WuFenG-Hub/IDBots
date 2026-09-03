@@ -551,7 +551,14 @@ export class DreamService {
       ));
     }
 
-    const synthesisActivity = summariesToActivity(summaries, activity.taskRuns, activity.orderCount, activity.groupTasks);
+    const synthesisActivity = summariesToActivity(
+      summaries,
+      activity.taskRuns,
+      activity.orderCount,
+      activity.groupTasks,
+      activity.chainWrites ?? [],
+      activity.chainReads ?? [],
+    );
     const prompt = buildDreamPrompt({
       botName: metabot.name,
       role: metabot.role,

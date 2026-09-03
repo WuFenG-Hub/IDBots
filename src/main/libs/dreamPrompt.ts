@@ -39,7 +39,7 @@ export const MAX_KNOWLEDGE_UPDATES = 6;
  * prompt, budgeting, stats or write semantics — completed in-window dates with
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0. */
-export const DREAM_VERSION = 11;
+export const DREAM_VERSION = 12;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];

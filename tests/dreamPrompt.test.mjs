@@ -539,7 +539,7 @@ test('buildDreamPrompt renders the day\'s chain writes and reads with gists', ()
   assert.ok(user.includes('介绍 MetaWeb 的基本用法'), 'read gist prefers the summary');
   assert.ok(user.includes('写入链上内容 2 条'), 'inventory counts writes');
   assert.ok(user.includes('阅读链上内容 1 条'), 'inventory counts reads');
-  assert.equal(DREAM_VERSION, 11, 'chain content history integration bumps the dream algorithm version');
+  assert.equal(DREAM_VERSION, 12, 'chain content in fragment synthesis bumps the dream algorithm version');
 });
 
 test('buildDreamPrompt hides chain content sections when empty or in fragment mode', () => {
@@ -569,4 +569,37 @@ test('buildDreamPrompt hides chain content sections when empty or in fragment mo
     },
   });
   assert.ok(!fragment.includes('不该出现'), 'fragment pre-summary prompts never render chain content');
+});
+
+test('buildDreamPrompt renders chain sections in the fragment_summaries synthesis mode', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    sourceMode: 'fragment_summaries',
+    activity: {
+      sessions: [{
+        sessionId: 'session:s1:0', title: '分块摘要:长会话#1', sessionType: 'dream_fragment',
+        peerName: null, isOrder: false,
+        messages: [{ type: 'assistant', content: JSON.stringify({ fragment_key: 'session:s1:0', summary: { dailySummary: '证据' } }), createdAt: 0 }],
+      }],
+      taskRuns: [],
+      orderCount: 0,
+      chainWrites: [{
+        pinId: 'w1', path: '/protocols/simplebuzz', operation: 'create',
+        summary: '发布了一条 buzz', contentText: '链上记录功能上线', occurredAtMs: 1,
+      }],
+      chainReads: [{
+        pinId: 'r1', path: '/protocols/simplenote', protocol: 'simplenote',
+        title: 'MetaWeb 使用指南', authorGlobalMetaId: 'gm-author',
+        summary: '介绍 MetaWeb 的基本用法', contentExcerpt: '指南正文',
+        savedToKb: false, lastReadAtMs: 2,
+      }],
+    },
+  });
+  assert.ok(user.includes('## 当日写入链上的内容'), 'busy-day synthesis keeps the writes section');
+  assert.ok(user.includes('发布了一条 buzz'), 'write summary renders in synthesis mode');
+  assert.ok(user.includes('## 当日阅读的链上内容'), 'busy-day synthesis keeps the reads section');
+  assert.ok(user.includes('MetaWeb 使用指南'), 'read title renders in synthesis mode');
+  assert.ok(user.includes('写入链上内容 1 条'), 'inventory counts writes in synthesis mode');
+  assert.ok(user.includes('阅读链上内容 1 条'), 'inventory counts reads in synthesis mode');
 });

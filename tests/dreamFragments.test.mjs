@@ -53,6 +53,27 @@ test('summariesToActivity retains fragment provenance and day-level counters', (
   assert.equal(activity.orderCount, 3);
 });
 
+test('summariesToActivity carries chain writes and reads into the synthesis activity', () => {
+  const chainWrites = [{
+    pinId: 'w1', path: '/protocols/simplebuzz', operation: 'create',
+    summary: '发布了一条 buzz', contentText: '链上记录功能上线', occurredAtMs: 1,
+  }];
+  const chainReads = [{
+    pinId: 'r1', path: '/protocols/simplenote', protocol: 'simplenote',
+    title: 'MetaWeb 使用指南', authorGlobalMetaId: 'gm-author',
+    summary: '介绍 MetaWeb 的基本用法', contentExcerpt: '指南正文',
+    savedToKb: false, lastReadAtMs: 2,
+  }];
+
+  const synthesis = summariesToActivity([], [], 0, [], chainWrites, chainReads);
+  assert.deepEqual(synthesis.chainWrites, chainWrites, 'published pins reach the synthesis prompt');
+  assert.deepEqual(synthesis.chainReads, chainReads, 'read pins reach the synthesis prompt');
+
+  const bare = summariesToActivity([], [], 0);
+  assert.deepEqual(bare.chainWrites, [], 'defaults stay empty for legacy call sites');
+  assert.deepEqual(bare.chainReads, [], 'defaults stay empty for legacy call sites');
+});
+
 test('chunkDreamActivity and summariesToActivity carry group task evaluations', () => {
   const groupTasks = [{
     taskId: 1, title: '海报设计', goal: 'G', memberRole: 'worker', rating: 4, ratingComment: null,
