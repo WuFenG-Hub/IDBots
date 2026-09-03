@@ -123,6 +123,7 @@ test('rated close still runs the shared tail: culture distillation fires on owne
           upserts.push(entry);
           return { entry: { ...entry, pendingApproval: false }, displaced: null };
         },
+        recordCultureDistillation: () => {},
       }),
       getGroupTaskStore: () => groupTaskStore,
       performChat: async () => '```json\n'
@@ -176,7 +177,10 @@ test('rated close still runs the shared tail: culture distillation fires on owne
     // Neutral stub: providers must stay non-null (the deps setter reads them
     // eagerly) but the disabled switch makes any stray hook call a no-op.
     setTeamCultureDistillationDeps({
-      getTeamCultureStore: () => ({ getCultureConfig: () => ({ enabled: false }) }),
+      getTeamCultureStore: () => ({
+        getCultureConfig: () => ({ enabled: false }),
+        recordCultureDistillation: () => {},
+      }),
       getGroupTaskStore: () => groupTaskStore,
       performChat: async () => '',
     });

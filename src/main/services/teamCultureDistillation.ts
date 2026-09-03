@@ -1,5 +1,5 @@
 import type { TeamCultureStore } from '../teamCultureStore';
-import { normalizeTeamCultureKind, type TeamCultureKind } from '../teamCultureStore';
+import { normalizeTeamCultureKind, type TeamCultureDistillationOutcome, type TeamCultureKind } from '../teamCultureStore';
 import type { GroupTaskStore } from '../groupTaskStore';
 
 /**
@@ -36,6 +36,16 @@ export interface CultureDistillationCounts {
   capacitySkipped: number;
   /** Distilled conventions stored pending owner approval (never injected until approved). */
   pendingConventions: number;
+}
+
+/**
+ * One distillation pass's verdict. 'not-done' is returned for cancelled/
+ * summary-less tasks but never persisted — the recorded outcomes (see
+ * TeamCultureDistillationRecord) are the ones worth surfacing in settings.
+ */
+export interface CultureDistillationResult extends CultureDistillationCounts {
+  outcome: TeamCultureDistillationOutcome | 'not-done';
+  error?: string | null;
 }
 
 const MAX_PROPOSALS_PER_KIND = 3;
@@ -129,14 +139,14 @@ export async function runCultureDistillation(input: {
   task: CultureDistillationTaskInput;
   cultureStore: TeamCultureStore;
   performChat: CultureDistillationPerformChat;
-}): Promise<CultureDistillationCounts> {
+}): Promise<CultureDistillationResult> {
   const counts: CultureDistillationCounts = { applied: 0, protectedEntries: 0, capacitySkipped: 0, pendingConventions: 0 };
   if (input.task.status !== 'done' || !input.task.summary) {
-    return counts;
+    return { ...counts, outcome: 'not-done' };
   }
   const memberCount = input.task.summary.members.length;
   if (memberCount < 2) {
-    return counts;
+    return { ...counts, outcome: 'few-members' };
   }
   const existingTopics = input.cultureStore
     .listCulture({ status: 'active', limit: 200 })
@@ -144,33 +154,44 @@ export async function runCultureDistillation(input: {
   const archivedTopics = input.cultureStore
     .listCulture({ status: 'archived', limit: 200 })
     .map((entry) => entry.topic);
-  const raw = await input.performChat(
-    'You are a team-culture distillation assistant. Respond only with the requested JSON object.',
-    buildCultureDistillationPrompt({
-      title: input.task.title,
-      goal: input.task.goal,
-      summary: input.task.summary,
-      existingTopics,
-      archivedTopics,
-    }),
-    undefined,
-    {
-      thinking: 'disabled',
-      signal: AbortSignal.timeout(DISTILLATION_LLM_TIMEOUT_MS),
-      // Same JSON contract as deep-consolidation: a stray built-in web
-      // search derails the output into prose the parser must drop.
-      webSearch: false,
-    },
-  );
+  let raw: string;
+  try {
+    raw = await input.performChat(
+      'You are a team-culture distillation assistant. Respond only with the requested JSON object.',
+      buildCultureDistillationPrompt({
+        title: input.task.title,
+        goal: input.task.goal,
+        summary: input.task.summary,
+        existingTopics,
+        archivedTopics,
+      }),
+      undefined,
+      {
+        thinking: 'disabled',
+        signal: AbortSignal.timeout(DISTILLATION_LLM_TIMEOUT_MS),
+        // Same JSON contract as deep-consolidation: a stray built-in web
+        // search derails the output into prose the parser must drop.
+        webSearch: false,
+      },
+    );
+  } catch (error) {
+    // LLM failures used to vanish into a console.warn; carry the message so
+    // the close-out hook can record it into the visible distillation log.
+    return { ...counts, outcome: 'llm-error', error: error instanceof Error ? error.message : String(error) };
+  }
   const parsed = parseCultureDistillationOutput(raw);
   if (!parsed) {
-    return counts;
+    return { ...counts, outcome: 'unparseable' };
   }
   const proposals: Array<{ kind: TeamCultureKind; topic: string; text: string }> = [
     ...parsed.glossary.map((item) => ({ kind: 'glossary' as const, topic: item.term, text: item.definition })),
     ...parsed.conventions.map((item) => ({ kind: 'convention' as const, topic: item.topic, text: item.text })),
     ...parsed.lessons.map((item) => ({ kind: 'team_lesson' as const, topic: item.topic, text: item.text })),
   ];
+  if (proposals.length === 0) {
+    // Empty arrays are a valid answer: nothing team-level worth carrying.
+    return { ...counts, outcome: 'empty' };
+  }
   for (const proposal of proposals) {
     const result = input.cultureStore.upsertCulture({
       kind: normalizeTeamCultureKind(proposal.kind),
@@ -193,7 +214,7 @@ export async function runCultureDistillation(input: {
       }
     }
   }
-  return counts;
+  return { ...counts, outcome: 'applied' };
 }
 
 // --- task-close wiring -------------------------------------------------------
@@ -217,6 +238,11 @@ export function setTeamCultureDistillationDeps(deps: {
  * the close flow. Cancelled tasks are skipped — their lessons are usually
  * noise; only completed (done) tasks with a recorded acceptance summary and
  * at least two members distill.
+ *
+ * Every done-close verdict (including the skip reasons) is persisted to the
+ * culture store's distillation log, so the settings culture tab can show why
+ * recent closes did or did not land entries — previously every failure mode
+ * here was a console.warn nobody saw, which read as "the feature is dead".
  */
 export function distillTeamCultureFromTaskClose(
   taskId: number,
@@ -227,13 +253,46 @@ export function distillTeamCultureFromTaskClose(
   void (async () => {
     try {
       if (!cultureStoreProvider || !performChatProvider || !groupTaskStoreProvider) return;
+      // Cancelled closes are routine and noisy — never distilled, never logged.
+      if (status !== 'done') return;
       const cultureStore = cultureStoreProvider();
+      const record = (
+        outcome: TeamCultureDistillationOutcome,
+        counts?: CultureDistillationCounts,
+        error?: string | null,
+      ): void => {
+        try {
+          cultureStore.recordCultureDistillation({
+            at: Date.now(),
+            taskId,
+            taskTitle: title,
+            outcome,
+            applied: counts?.applied ?? 0,
+            pendingConventions: counts?.pendingConventions ?? 0,
+            error: error ?? null,
+          });
+        } catch (logError) {
+          console.warn(
+            `[TeamCulture] Failed to record the distillation outcome for task ${taskId}: ` +
+              `${logError instanceof Error ? logError.message : String(logError)}`,
+          );
+        }
+      };
       // Master switch gates BOTH the distillation LLM spend and injection.
-      if (!cultureStore.getCultureConfig().enabled) return;
+      if (!cultureStore.getCultureConfig().enabled) {
+        record('disabled');
+        return;
+      }
       const groupTaskStore = groupTaskStoreProvider();
       const summaryRow = groupTaskStore.getLatestAcceptanceSummary(taskId);
-      if (!summaryRow) return;
-      const counts = await runCultureDistillation({
+      if (!summaryRow) {
+        // The single most common "why is the culture base empty" cause: the
+        // task never went through the review ceremony, so there is nothing to
+        // distill from.
+        record('no-summary');
+        return;
+      }
+      const result = await runCultureDistillation({
         task: {
           taskId,
           title,
@@ -256,11 +315,19 @@ export function distillTeamCultureFromTaskClose(
         cultureStore: cultureStore,
         performChat: performChatProvider,
       });
-      if (counts.applied > 0) {
+      if (result.outcome !== 'not-done') {
+        record(result.outcome, result, result.error);
+      }
+      if (result.applied > 0) {
         console.log(
-          `[TeamCulture] Distilled ${counts.applied} culture entr(ies) from task ${taskId}` +
-            ` (protected: ${counts.protectedEntries}, capacity-skipped: ${counts.capacitySkipped}` +
-            `, pending approval: ${counts.pendingConventions})`,
+          `[TeamCulture] Distilled ${result.applied} culture entr(ies) from task ${taskId}` +
+            ` (protected: ${result.protectedEntries}, capacity-skipped: ${result.capacitySkipped}` +
+            `, pending approval: ${result.pendingConventions})`,
+        );
+      } else {
+        console.log(
+          `[TeamCulture] Distillation for task ${taskId}: ${result.outcome}` +
+            (result.error ? ` — ${result.error}` : ''),
         );
       }
     } catch (error) {
