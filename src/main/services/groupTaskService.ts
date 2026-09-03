@@ -69,6 +69,7 @@ import {
 import {
   clearGroupTaskReviewDeliveryGuards,
   extractCheckpointDecisionSummary,
+  GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX,
   GROUP_TASK_DRIVER_KV_PREFIX,
   GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX,
   GROUP_TASK_REWORK_AT_KV_PREFIX,
@@ -223,10 +224,12 @@ export interface GroupTaskDriverInfo {
 /** P1-4/R6: host-computed member work state. 'timeout' (R6) = a self-reported
  * working/assigned member whose [WORKING] signal has gone stale — the
  * authoritative "went silent" read, distinct from 'idle' (spoke, not currently
- * working). 'done' (terminal tasks only) = the member's deliverable was
- * delivered/accepted after the task closed; liveness-derived values no longer
- * apply to a finished member. */
-export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'idle' | 'unknown' | 'done';
+ * working). 'waiting' (GT-09) = a working/assigned member whose stale signal is
+ * explained by an undelivered upstream [DEPENDS_ON] dependency — correctly
+ * waiting, NOT stuck. 'done' (terminal tasks only) = the member's deliverable
+ * was delivered/accepted after the task closed; liveness-derived values no
+ * longer apply to a finished member. */
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'waiting' | 'idle' | 'unknown' | 'done';
 
 /** Minutes a [WORKING] tag stays "working" after its last occurrence. */
 export const GROUP_TASK_WORKING_WINDOW_MINUTES = 20;
@@ -1318,6 +1321,9 @@ function toEpochMs(value: number | null | undefined): number | null {
  *     NOT currently `working` => error. A `working` member's failed attempt is
  *     a retryable blip (auth hiccup, skill crash, next turn still coming) and
  *     must not paint the panel "出错" next to the state-machine "working" badge;
+ *  4b. GT-09: a working/assigned member whose stale signal is explained by an
+ *     undelivered upstream [DEPENDS_ON] (the daemon's dep-wait exemption note)
+ *     => waiting — correctly waiting on the upstream, NOT stuck;
  *  5. a working/assigned member whose `[WORKING]` signal is past the timeout
  *     window => timeout;
  *  6. member still in state-machine `working` => working;
@@ -1341,6 +1347,9 @@ export function computeGroupTaskMemberWorkStatus(input: {
   /** P2-2: epoch ms the member's `[WORKING long-task]` heartbeat lease is
    * valid until; null/absent when no lease is armed. */
   heartbeatUntilMs?: number | null;
+  /** GT-09: true while the daemon's dependency-wait exemption note stands for
+   * this member (an undelivered upstream [DEPENDS_ON] explains the silence). */
+  dependencyWaiting?: boolean;
 }): GroupTaskMemberWorkStatus {
   const nowMs = input.nowMs ?? Date.now();
   const lastSpeakAtMs = toEpochMs(input.lastSpeakAt);
@@ -1395,6 +1404,16 @@ export function computeGroupTaskMemberWorkStatus(input: {
     // crashed. Fall through so R6 timeout / the working self-report can win
     // instead of stacking "出错" on top of "working".
     if (input.memberStatus !== 'working') return 'error';
+  }
+  // GT-09: a working/assigned member whose silence is explained by an
+  // undelivered upstream dependency is correctly WAITING — never 'timeout'
+  // (task #56's panel misread waiting members as 超时). The daemon maintains
+  // the note live (written on the stale check, deleted when the wait lifts).
+  if (
+    input.dependencyWaiting === true
+    && (input.memberStatus === 'working' || input.memberStatus === 'assigned')
+  ) {
+    return 'waiting';
   }
   // R6: a working/assigned member whose [WORKING] signal is stale (older than
   // the timeout window) reads 'timeout' — the authoritative "went silent"
@@ -1563,6 +1582,22 @@ export async function getGroupTask(
         return null;
       }
     })();
+    // GT-09: the daemon's dependency-wait exemption note (written for a stale
+    // member whose latest chair assignment waits on an undelivered upstream;
+    // deleted when the wait lifts) is the single source of truth for the
+    // panel's 'waiting' read — no duplicated [DEPENDS_ON] parsing here.
+    const dependencyWaiting = ((): boolean => {
+      if (member.metabotId == null || !kvStoreGetter) return false;
+      if (member.status !== 'working' && member.status !== 'assigned') return false;
+      try {
+        const raw = getKvStore().get<string>(`${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${id}:${member.metabotId}`);
+        if (!raw) return false;
+        const parsed = JSON.parse(raw) as { upstreamDelivered?: boolean } | null;
+        return parsed?.upstreamDelivered === false;
+      } catch {
+        return false;
+      }
+    })();
     const invite = inviteByGmid.get(gmid);
     const memberDelivered = (taskDone || taskAccepting) && gmid !== '' && deliveredAuthorIds.has(gmid);
     // P2-1: newest real activity across every signal, epoch ms.
@@ -1602,6 +1637,7 @@ export async function getGroupTask(
             memberStatus: member.status,
             lastSessionActivityAt,
             heartbeatUntilMs,
+            dependencyWaiting,
           }),
       inviteStatus: deriveGroupTaskMemberInviteStatus({
         metabotId: member.metabotId,

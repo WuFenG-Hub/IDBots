@@ -117,6 +117,8 @@ export function groupTaskWorkStatusLabelKey(status) {
       return 'groupTasksWorkStatusError';
     case 'timeout':
       return 'groupTasksWorkStatusTimeout';
+    case 'waiting':
+      return 'groupTasksWorkStatusWaiting';
     case 'idle':
       return 'groupTasksWorkStatusIdle';
     case 'done':

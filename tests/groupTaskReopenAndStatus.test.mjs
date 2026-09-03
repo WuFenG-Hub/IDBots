@@ -361,6 +361,60 @@ test('computeGroupTaskMemberWorkStatus pure derivation', () => {
   );
 });
 
+test('GT-09: a dependency-waiting member reads waiting, never timeout', () => {
+  const base = { metabotId: 2, lastSpeakAt: 1_700_000_000, lastWorkingAt: null, attemptStatus: null, attemptAtMs: null };
+  // The exact task #56 panel misread: stale [WORKING] + working member would
+  // read 'timeout' — with the daemon's dep-wait exemption note standing, it
+  // must read 'waiting' instead.
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: 'working',
+      lastWorkingAt: 1_700_000_000_000, nowMs: 1_700_000_000_000 + 30 * 60_000,
+      dependencyWaiting: true,
+    }),
+    'waiting',
+    'dependency wait beats the timeout read',
+  );
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: 'assigned',
+      lastWorkingAt: 1_700_000_000_000, nowMs: 1_700_000_000_000 + 30 * 60_000,
+      dependencyWaiting: true,
+    }),
+    'waiting',
+    'assigned members waiting on upstream read waiting too',
+  );
+  // Without the note the timeout read is unchanged.
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: 'working',
+      lastWorkingAt: 1_700_000_000_000, nowMs: 1_700_000_000_000 + 30 * 60_000,
+      dependencyWaiting: false,
+    }),
+    'timeout',
+    'no exemption note → timeout as before',
+  );
+  // The note never masks a genuinely fresh signal or a non-working member.
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: 'working',
+      lastWorkingAt: 1_700_000_000_000, nowMs: 1_700_000_000_000 + 10 * 60_000,
+      dependencyWaiting: true,
+    }),
+    'working',
+    'a fresh [WORKING] still reads working while waiting',
+  );
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({
+      ...base, memberStatus: 'standby',
+      lastWorkingAt: 1_700_000_000_000, nowMs: 1_700_000_000_000 + 30 * 60_000,
+      dependencyWaiting: true,
+    }),
+    'idle',
+    'waiting never applies to a member nobody expects to work',
+  );
+});
+
 test('getGroupTaskMemberStatus surfaces [WORKING]-tag working state from the transcript', async () => {
   const h = await createHarness();
   try {

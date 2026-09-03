@@ -874,6 +874,74 @@ test('review fix: a late deliverable is never reclaimed by the delivery-timeout 
   }
 });
 
+test('GT-09: the delivery-deadline escalation honors alert-only mode instead of reclaiming directly', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    // Escalation residue state: deadline blown, reminder sent, member inert.
+    // Default reclaim mode is ALERT-ONLY — the escalation branch used to
+    // reclaim anyway (bypassing the mode entirely).
+    h.store.set('group_task_expected_delivery:1:2', JSON.stringify({ dueAt: startMs - 5 * 60_000 }));
+    h.store.set('group_task_delivery_reminded:1:2', '1');
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+    assert.deepEqual(stoppedSessions, [], 'alert-only mode: the escalation never stops the session');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), undefined, 'no reclaim recorded');
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'an alert is raised instead');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-09: the delivery-deadline escalation skips a member waiting on an undelivered upstream', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    // The chair's latest assignment for the worker is [DEPENDS_ON]-gated on an
+    // upstream pinid that has NOT landed on the ledger.
+    insertGroupMessage(h.db, {
+      pinId: 'gt09-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: `@Coder Bot 请基于上游结果做二次封装 [DEPENDS_ON: ${'ef'.repeat(32)}i0]`,
+      chainTimestamp: Math.floor(startMs / 1000) - 400,
+    });
+    h.store.set('group_task_expected_delivery:1:2', JSON.stringify({ dueAt: startMs - 5 * 60_000 }));
+    h.store.set('group_task_delivery_reminded:1:2', '1');
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+    assert.deepEqual(stoppedSessions, [], 'a dependency-waiting member is never reclaimed');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), undefined, 'no reclaim recorded');
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), undefined, 'no stuck alert either — waiting is not stuck');
+    const note = h.store.get(`group_task_dep_wait_exempt:${task.id}:2`);
+    assert.ok(note, 'the dependency-wait exemption note stands');
+    assert.equal(JSON.parse(note).upstreamDelivered, false);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('review fix: a new ETA ACK resets the delivery-reminded flag before re-arming', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },

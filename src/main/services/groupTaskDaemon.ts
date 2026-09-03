@@ -574,8 +574,10 @@ const GROUP_TASK_TIMEOUT_OWNER_PREFIX = 'group_task_timeout_owner:';
  * [DEPENDS_ON] upstream (`group_task_dep_wait_exempt:<taskId>:<metabotId>`;
  * deleted once the wait lifts). Distinct from DEP_WAIT_KV_PREFIX, which tracks
  * the P2-6 dispatch gate's bounded wait per assignment message.
+ * GT-09: exported — the service reads this same note to project the panel's
+ * 'waiting' work status (single source of truth, no duplicated parsing).
  */
-const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
+export const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
 /**
  * G-04 retry budget: failed chair-answer attempts per supervisor signal
  * (`group_task_sup_sig_attempts:<signalId>` = count). At 3 attempts the signal
@@ -6148,11 +6150,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (depWait) {
         sqlite.delete(`${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`);
       }
+      // GT-09 honesty: only pinid/txid tokens are ledger-verified — free-text
+      // tokens are advisory (always "satisfied") and must never read as
+      // "delivered" in the chair-facing annotation.
       const depContext = depWait == null
         ? null
         : depWait.tokens.length === 0
           ? 'no upstream dependency declared in the dispatch'
-          : `upstream ${depWait.tokens.join(', ')} delivered`;
+          : (() => {
+              const verified = depWait.tokens.filter((token) => PINID_FORMAT.test(token) || TXID_FORMAT.test(token));
+              const advisoryCount = depWait.tokens.length - verified.length;
+              const parts: string[] = [];
+              if (verified.length > 0) parts.push(`upstream ${verified.join(', ')} delivered`);
+              if (advisoryCount > 0) {
+                parts.push(`${advisoryCount} advisory free-text upstream token(s) not ledger-verifiable`);
+              }
+              return parts.join('; ');
+            })();
 
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
       // once per (task, member) streak. Anti-flap (fix/group-member-status,
@@ -7211,12 +7225,36 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           thresholdMs: memberTimeoutAfterMinutes * 60_000,
         });
         if (liveness === 'alive') continue;
-        const note = reclaimStuckWorkerSession(
-          task,
-          member,
-          `estimated delivery missed past the grace window with no [DELIVERABLE] and zero cowork-session activity`,
-        );
-        if (note) reclaimNotes.push(note);
+        // GT-09: the escalation branch must honor the SAME two gates as the
+        // timeout monitor — it used to reclaim directly, killing the session
+        // of a member who was correctly WAITING on an undelivered upstream
+        // (and ignoring the alert-only reclaim mode entirely).
+        const chairForDepWait = members.find((candidate) => candidate.role === 'chair');
+        const depWait = checkMemberDependencyWait(task, member, chairForDepWait);
+        if (depWait && depWait.pendingTokens.length > 0) {
+          sqlite.set(
+            `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
+            JSON.stringify({
+              upstreamTokens: depWait.pendingTokens,
+              upstreamDelivered: false,
+              checkedAt: nowMs,
+            }),
+          );
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: delivery-deadline escalation skipped for ${member.name ?? member.metabotId} ` +
+            `— waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
+          );
+          continue;
+        }
+        const deadlineReclaimReason =
+          'estimated delivery missed past the grace window with no [DELIVERABLE] and zero cowork-session activity';
+        if (parseGroupTaskStuckReclaimMode(sqlite.get<string>('groupTaskStuckReclaim')) === 'auto') {
+          const note = reclaimStuckWorkerSession(task, member, deadlineReclaimReason);
+          if (note) reclaimNotes.push(note);
+        } else {
+          const note = alertStuckWorkerSession(task, member, deadlineReclaimReason);
+          if (note) reclaimNotes.push(note);
+        }
         continue;
       }
       const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
