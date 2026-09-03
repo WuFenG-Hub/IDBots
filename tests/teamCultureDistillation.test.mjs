@@ -77,6 +77,38 @@ test('distillation applies capped proposals through the governed upsert channel'
   }
 });
 
+test('release-review P2: a mid-apply store failure records apply-error with partial counts instead of vanishing', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new TeamCultureStore(db, () => {}, () => 1_800_000_000_000);
+    const originalUpsert = store.upsertCulture.bind(store);
+    let upsertCalls = 0;
+    const flakyStore = Object.create(store);
+    flakyStore.upsertCulture = (input) => {
+      upsertCalls += 1;
+      if (upsertCalls === 2) throw new Error('sqlite: database is locked');
+      return originalUpsert(input);
+    };
+    const result = await runCultureDistillation({
+      task: { taskId: 8, title: 'Partial write', goal: 'g', status: 'done', summary: SUMMARY },
+      cultureStore: flakyStore,
+      performChat: async () => '```json\n' + PROPOSAL_JSON + '\n```',
+    });
+    assert.equal(result.outcome, 'apply-error');
+    assert.equal(result.applied, 1, 'the first proposal landed before the failure');
+    assert.match(result.error, /database is locked/);
+    assert.match(result.error, /after 1 applied/);
+    assert.equal(
+      store.listCulture({ status: 'active' }).length,
+      1,
+      'the partially applied entry really is in the store',
+    );
+  } finally {
+    harness.cleanup?.();
+  }
+});
+
 test('distillation never revives archived entries', async () => {
   const harness = await createSqliteStore();
   try {

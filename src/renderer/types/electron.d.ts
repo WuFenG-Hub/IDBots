@@ -531,6 +531,7 @@ type TeamCultureDistillationOutcome =
   | 'empty'
   | 'unparseable'
   | 'llm-error'
+  | 'apply-error'
   | 'few-members'
   | 'no-summary'
   | 'disabled';
