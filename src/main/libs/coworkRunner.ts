@@ -188,6 +188,11 @@ import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
+  buildWalletAgentTools,
+  type WalletToolsControl,
+} from './walletAgentTools';
+import type { ExternalTransferInfo } from '../services/walletTransferService';
+import {
   buildPrivateChatAgentTools,
   type PrivateChatControl,
 } from './privateChatAgentTools';
@@ -1702,6 +1707,13 @@ export interface CoworkRunnerOptions {
    */
   metaFileUpload?: MetaFileUploadControl;
   /**
+   * When set, every cowork session gets the wallet_balance / wallet_transfer
+   * tools (R1/R2 wallet tools requirement): UTXO-sum balance snapshots for
+   * the local roster and two-channel MVC transfers from the session bot's
+   * own wallet, with every attempt recorded in the audit ledger.
+   */
+  walletTools?: WalletToolsControl;
+  /**
    * When set, every cowork session gets the describe_image tool backed by
    * recognizeImageViaRelay() (services/visionRelayService.ts). The relay's
    * VLM reads a local image and returns a text description + OCR, so sessions
@@ -1853,6 +1865,7 @@ export class CoworkRunner extends EventEmitter {
   private knowledgeBase?: KnowledgeBaseControl;
   private metawebStudy?: MetawebStudyControl;
   private metaFileUpload?: MetaFileUploadControl;
+  private walletTools?: WalletToolsControl;
   private visionRelay?: VisionRelayControl;
   private mediaTools?: MediaToolsControl;
   private metabotManage?: MetabotManageControl;
@@ -1962,6 +1975,7 @@ export class CoworkRunner extends EventEmitter {
     this.knowledgeBase = options?.knowledgeBase;
     this.metawebStudy = options?.metawebStudy;
     this.metaFileUpload = options?.metaFileUpload;
+    this.walletTools = options?.walletTools;
     this.visionRelay = options?.visionRelay;
     this.mediaTools = options?.mediaTools;
     this.metabotManage = options?.metabotManage;
@@ -5693,6 +5707,44 @@ export class CoworkRunner extends EventEmitter {
     };
   }
 
+  /**
+   * Channel-B owner gate for wallet_transfer (R2): transfers to addresses
+   * OUTSIDE the local metabot roster need an explicit owner approval
+   * (from/to/amount/estimated fee) unless the settings gate is disabled.
+   * Local-roster transfers never reach this dialog. timeout/aborted count
+   * as NOT approved — an external transfer needs an explicit yes.
+   */
+  private async confirmExternalTransfer(sessionId: string, info: ExternalTransferInfo): Promise<boolean> {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) {
+      return false;
+    }
+    const space = (sats: number) => `${sats} sats (${(sats / 100_000_000).toFixed(8)} SPACE)`;
+    const question = tApp(
+      `Agent 将从本机 MetaBot 钱包向【外部地址】转账（不可撤销）：\n` +
+      `- from: ${info.fromAddress}\n- to: ${info.toAddress}\n` +
+      `- 金额: ${space(info.amountSats)}\n- 预估手续费: ${space(info.estimatedFeeSats)}\n` +
+      `是否允许本次转账？`,
+      `The agent is about to transfer SPACE from a local MetaBot wallet to an EXTERNAL address (irreversible):\n` +
+      `- from: ${info.fromAddress}\n- to: ${info.toAddress}\n` +
+      `- amount: ${space(info.amountSats)}\n- estimated fee: ${space(info.estimatedFeeSats)}\n` +
+      `Allow this transfer?`
+    );
+    const outcome = await this.requestSafetyApproval(
+      sessionId,
+      activeSession.abortController.signal,
+      activeSession,
+      question,
+      'wallet_transfer',
+      {
+        to: info.toAddress,
+        amount_sats: info.amountSats,
+        estimated_fee_sats: info.estimatedFeeSats,
+      } as Record<string, unknown>
+    );
+    return outcome === 'approved';
+  }
+
   private markCrossSessionTurnRunning(sessionId: string): void {
     this.crossSessionRunningTurns.add(sessionId);
   }
@@ -8728,6 +8780,21 @@ export class CoworkRunner extends EventEmitter {
           sessionId,
           resolveMetabotId,
           gateLocalFile,
+        })
+      );
+    }
+    // Wallet tools (R1/R2): wallet_balance + wallet_transfer for every
+    // cowork surface. Transfers spend the session bot's OWN wallet;
+    // channel-B (external) transfers render the owner approval dialog via
+    // confirmExternalTransfer unless the settings gate is disabled.
+    if (this.walletTools) {
+      memoryTools.push(
+        ...buildWalletAgentTools({
+          tool,
+          control: this.walletTools,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
+          confirmExternalTransfer: (info) => this.confirmExternalTransfer(sessionId, info),
         })
       );
     }

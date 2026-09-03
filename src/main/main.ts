@@ -96,6 +96,14 @@ import {
 } from './services/transferService';
 import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, initFeeRateStore, resolveCreatePinFeeRate } from './services/feeRateStore';
 import {
+  getMetabotWalletBalances,
+  getWalletBalanceSnapshot,
+  withMvcBalanceHint,
+  type WalletQueryChain,
+} from './services/walletQueryService';
+import { executeWalletMvcTransfer } from './services/walletTransferService';
+import { BotWalletTransferStore } from './services/botWalletTransferStore';
+import {
   buildTokenTransferPreview as buildTokenTransferPreviewService,
   executeTokenTransfer as executeTokenTransferService,
   getTokenTransferChain,
@@ -3028,6 +3036,25 @@ const getStore = (): SqliteStore => {
   return store;
 };
 
+/**
+ * R3: rough upper-bound MVC fee estimate for a typical pin (funding + payload
+ * outputs, ~600 vB at the resolved fee rate) — feeds the `need ~N sats` part
+ * of balance-hint error messages. Marked as an estimate everywhere it shows.
+ */
+function estimateMvcPinNeedSats(): number {
+  return Math.ceil(resolveCreatePinFeeRate('mvc') * 600);
+}
+
+/** Audit ledger for bot wallet transfers (botWalletTransferStore), memoized. */
+let botWalletTransferStore: BotWalletTransferStore | undefined;
+function getBotWalletTransferStore(): BotWalletTransferStore {
+  botWalletTransferStore ??= new BotWalletTransferStore(
+    getStore().getDatabase(),
+    getStore().getSaveFunction(),
+  );
+  return botWalletTransferStore;
+}
+
 interface SqliteBackedRestartState {
   restartScheduler: boolean;
   restartListener: boolean;
@@ -5467,7 +5494,11 @@ const getCoworkRunner = () => {
       metaFileUpload: {
         upload: async (params) => {
           const { uploadMetaFile } = await import('./services/metaFileUploadService');
-          return uploadMetaFile(getMetabotStore(), params);
+          // R3: funding failures surface with the bot's current MVC balance.
+          return withMvcBalanceHint(getMetabotStore(), params.metabotId, params.network, () =>
+            uploadMetaFile(getMetabotStore(), params), {
+            estimateNeedSats: () => estimateMvcPinNeedSats(),
+          });
         },
       },
       // post_buzz / omni_cast tool backends (replacing the metabot-post-buzz
@@ -5477,13 +5508,43 @@ const getCoworkRunner = () => {
       // (resolveCreatePinFeeRate) applied when the caller omits feeRate.
       metabotChainWrite: {
         createPin: (metabotId, metaidData, options) =>
-          createPin(getMetabotStore(), metabotId, metaidData, {
-            ...options,
-            feeRate: options?.feeRate ?? resolveCreatePinFeeRate(options?.network ?? 'mvc'),
-          }),
+          // R3: funding failures surface with the bot's current MVC balance.
+          withMvcBalanceHint(
+            getMetabotStore(),
+            metabotId,
+            options?.network,
+            () => createPin(getMetabotStore(), metabotId, metaidData, {
+              ...options,
+              feeRate: options?.feeRate ?? resolveCreatePinFeeRate(options?.network ?? 'mvc'),
+            }),
+            { estimateNeedSats: () => estimateMvcPinNeedSats() },
+          ),
         encryptGroupMessage: (message, groupId) => encryptGroupMessageECB(message, groupId),
         getMetabotDisplayName: (metabotId) =>
           getMetabotStore().getMetabotById(metabotId)?.name?.trim() || '',
+      },
+      // wallet_balance / wallet_transfer tool backends (R1/R2): UTXO-sum
+      // balance snapshots per chain, and MVC transfers under the two-channel
+      // policy (local roster = auto, external = owner-gated, settings
+      // toggle) with every attempt recorded in the audit ledger.
+      walletTools: {
+        getBalances: (input) => getMetabotWalletBalances(getMetabotStore(), input),
+        getBalanceForAddress: (chain: WalletQueryChain, address: string) =>
+          getWalletBalanceSnapshot(chain, address),
+        resolveMetabotIdByName: (name) => resolveMetabotIdByName(getMetabotStore(), name),
+        getMetabotMvcAddress: (metabotId) =>
+          getMetabotStore().getMetabotById(metabotId)?.mvc_address ?? null,
+        transfer: (params) => executeWalletMvcTransfer(
+          {
+            metabotStore: getMetabotStore(),
+            transferStore: getBotWalletTransferStore(),
+            settingsReader: getStore(),
+            getFeeRate: () => getGlobalFeeRate('mvc'),
+          },
+          params,
+        ),
+        listTransfers: (limit, metabotId) =>
+          getBotWalletTransferStore().list(limit, metabotId),
       },
       // send_private_chat tool backend (replacing metabot-chat-privatechat).
       // Mirrors the skill script: resolve the peer chatpubkey on-chain, then

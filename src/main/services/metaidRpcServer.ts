@@ -57,6 +57,15 @@ import {
 import { buildMetabotDirectory } from './metabotDirectoryService';
 import type { GroupTaskStatus, GroupTaskMemberStatus } from '../groupTaskStore';
 import { getAddressBalance } from './addressBalanceService';
+import {
+  getMetabotWalletBalances,
+  getWalletBalanceSnapshot,
+  normalizeWalletQueryChain,
+  WALLET_QUERY_CHAINS,
+  type WalletQueryChain,
+} from './walletQueryService';
+import { executeWalletMvcTransfer } from './walletTransferService';
+import { BotWalletTransferStore } from './botWalletTransferStore';
 import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, resolveCreatePinFeeRate } from './feeRateStore';
 import { listenWithRetry } from './httpListenWithRetry';
 import {
@@ -99,6 +108,9 @@ const SIGN_BTC_MESSAGE_PATH = '/api/idbots/wallet/btc/sign-message';
 const SIGN_BTC_PSBT_PATH = '/api/idbots/wallet/btc/sign-psbt';
 const UPLOAD_LARGEFILE_PATH = '/api/idbots/files/upload-largefile';
 const EXECUTE_TRANSFER_PATH = '/api/idbots/wallet/transfer';
+const WALLET_BALANCE_PATH = '/api/idbots/wallet/balance';
+const WALLET_MVC_TRANSFER_PATH = '/api/idbots/wallet/mvc/transfer';
+const WALLET_TRANSFER_RECORDS_PATH = '/api/idbots/wallet/transfer/records';
 const BOT_BROWSER_OPEN_PATH = '/api/idbots/bot-browser/open';
 const BOT_BROWSER_TABS_PATH = '/api/idbots/bot-browser/tabs';
 const SET_METABOT_HOMEPAGE_METAAPP_PATH = '/api/idbots/metabot/homepage/set-metaapp';
@@ -258,6 +270,17 @@ export function startMetaidRpcServer(
   setMetaidCoreStore(getStore);
   const openBotBrowserUri = options.openBotBrowserUri ?? defaultOpenBotBrowserUri;
   const controlBotBrowserTabs = options.controlBotBrowserTabs;
+
+  // Audit ledger for wallet transfers; created lazily once per server so the
+  // idempotent schema ensure does not run on every request.
+  let walletTransferStoreCache: BotWalletTransferStore | undefined;
+  const getWalletTransferStore = (): BotWalletTransferStore => {
+    walletTransferStoreCache ??= new BotWalletTransferStore(
+      getStore().getDatabase(),
+      getStore().getSaveFunction(),
+    );
+    return walletTransferStoreCache;
+  };
 
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -946,6 +969,177 @@ export function startMetaidRpcServer(
         }
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, txid: result.txId }));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === WALLET_BALANCE_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: {
+        metabot_id?: number;
+        metabot_ids?: unknown;
+        address?: string;
+        chain?: string;
+      };
+      try {
+        parsed = JSON.parse(body || '{}') as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+
+      const chainParam = parsed.chain == null || String(parsed.chain).trim() === ''
+        ? null
+        : normalizeWalletQueryChain(parsed.chain);
+      if (parsed.chain != null && String(parsed.chain).trim() !== '' && !chainParam) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'chain must be one of mvc | btc | doge' }));
+        return;
+      }
+      const chains: WalletQueryChain[] = chainParam ? [chainParam] : WALLET_QUERY_CHAINS;
+
+      const metabotIds: number[] = [];
+      const single = Number(parsed.metabot_id);
+      if (Number.isInteger(single) && single > 0) metabotIds.push(single);
+      if (Array.isArray(parsed.metabot_ids)) {
+        for (const raw of parsed.metabot_ids) {
+          const id = Number(raw);
+          if (!Number.isInteger(id) || id <= 0) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ success: false, error: 'metabot_ids must contain positive integers' }));
+            return;
+          }
+          if (!metabotIds.includes(id)) metabotIds.push(id);
+        }
+      }
+      const rawAddress = typeof parsed.address === 'string' ? parsed.address.trim() : '';
+      if (metabotIds.length === 0 && !rawAddress) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'metabot_id, metabot_ids, or address is required' }));
+        return;
+      }
+
+      try {
+        const results: unknown[] = [];
+        if (metabotIds.length > 0) {
+          const batch = await getMetabotWalletBalances(getMetabotStore(), { metabotIds, chains });
+          results.push(...batch.entries);
+        }
+        if (rawAddress) {
+          const balances: Record<string, unknown> = {};
+          const errors: Record<string, string> = {};
+          await Promise.all(
+            chains.map(async (chain) => {
+              try {
+                balances[chain] = await getWalletBalanceSnapshot(chain, rawAddress);
+              } catch (error) {
+                errors[chain] = error instanceof Error ? error.message : String(error);
+              }
+            }),
+          );
+          results.push({ address: rawAddress, balances, errors });
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, queried_at: new Date().toISOString(), results }));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === WALLET_MVC_TRANSFER_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: {
+        metabot_id?: number;
+        to?: string;
+        amount_sats?: number;
+        memo?: string;
+        external_confirmed?: boolean;
+        fee_rate?: number;
+      };
+      try {
+        parsed = JSON.parse(body || '{}') as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+
+      try {
+        const result = await executeWalletMvcTransfer(
+          {
+            metabotStore: getMetabotStore(),
+            transferStore: getWalletTransferStore(),
+            settingsReader: getStore(),
+            getFeeRate: () => getGlobalFeeRate('mvc'),
+          },
+          {
+            metabotId: Number(parsed.metabot_id),
+            to: String(parsed.to || '').trim(),
+            amountSats: Number(parsed.amount_sats),
+            memo: typeof parsed.memo === 'string' ? parsed.memo : undefined,
+            externalConfirmed: parsed.external_confirmed === true,
+            feeRate: Number.isFinite(Number(parsed.fee_rate)) && Number(parsed.fee_rate) > 0
+              ? Number(parsed.fee_rate)
+              : undefined,
+            origin: 'rpc:wallet/mvc/transfer',
+          },
+        );
+        if (result.success) {
+          res.writeHead(200);
+          res.end(JSON.stringify({
+            success: true,
+            txid: result.txid,
+            fee_sats: result.fee_sats,
+            channel: result.channel,
+            to_metabot_id: result.to_metabot_id,
+            audit_id: result.audit_id,
+          }));
+        } else {
+          res.writeHead(400);
+          res.end(JSON.stringify(result));
+        }
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === WALLET_TRANSFER_RECORDS_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: { limit?: number; metabot_id?: number };
+      try {
+        parsed = JSON.parse(body || '{}') as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      try {
+        const limit = Number.isFinite(Number(parsed.limit)) && Number(parsed.limit) > 0
+          ? Math.floor(Number(parsed.limit))
+          : 50;
+        const metabotId = Number.isInteger(Number(parsed.metabot_id)) && Number(parsed.metabot_id) > 0
+          ? Number(parsed.metabot_id)
+          : undefined;
+        const records = getWalletTransferStore().list(limit, metabotId);
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, records }));
       } catch (err) {
         res.writeHead(400);
         res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
