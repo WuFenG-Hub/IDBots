@@ -156,6 +156,11 @@ export interface StatusDirectiveVerdict {
   instruction: 'executing' | 'review' | null;
   /** Candidate tags rejected as illegal from the current status (deduped). */
   rejected: Array<'executing' | 'review'>;
+  /** Candidate tags re-asserting the live status — benign no-ops, neither
+   * instructions nor rejections (deduped). The chair prompt tells a partially
+   * confused chair to "re-issue the review message"; the duplicate lands on a
+   * task already in that status and must not read as an anomaly. */
+  noOp: Array<'executing' | 'review'>;
   /** Tags treated as descriptive prose, never instructions (deduped). */
   descriptive: Array<'executing' | 'review'>;
   /** Total [STATUS:*] occurrences found after code-quote stripping. */
@@ -221,8 +226,15 @@ export function adjudicateStatusDirectives(
   const candidateSet = new Set(candidates);
   const legal = CHAIR_STATUS_MOVES[currentStatus] ?? [];
   const instructionOcc = candidates.find((occ) => legal.includes(occ.tag)) ?? null;
+  // A candidate equal to the live status is a re-assert, not an illegal move:
+  // CHAIR_STATUS_MOVES has no self-transitions, so without this bucket the
+  // tag would land in `rejected` and mint an "illegal_transition" audit row
+  // for a benign duplicate (the old parser treated it as a silent no-op).
   const rejected = [...new Set(
-    candidates.filter((occ) => occ !== instructionOcc && !legal.includes(occ.tag)).map((occ) => occ.tag),
+    candidates.filter((occ) => occ !== instructionOcc && !legal.includes(occ.tag) && occ.tag !== currentStatus).map((occ) => occ.tag),
+  )];
+  const noOp = [...new Set(
+    candidates.filter((occ) => occ !== instructionOcc && occ.tag === currentStatus).map((occ) => occ.tag),
   )];
   const descriptive = [...new Set(
     occurrences.filter((occ) => !candidateSet.has(occ)).map((occ) => occ.tag),
@@ -230,6 +242,7 @@ export function adjudicateStatusDirectives(
   return {
     instruction: instructionOcc?.tag ?? null,
     rejected,
+    noOp,
     descriptive,
     tagCount: occurrences.length,
   };
@@ -4375,8 +4388,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         // GROUP — the rejected part of the chair's intent must be visible
         // where the chair can read and correct it, not silently dropped
         // (task #56: the group watched a dispatch land while the end-line
-        // REVIEW mention silently died).
-        if (statusVerdict.rejected.length > 0) {
+        // REVIEW mention silently died). Gate on appliedStatusDirective: when
+        // the StaleReviewReentry debounce skipped the verdict above, the note
+        // would announce "Status update applied" for a transition that was
+        // deliberately NOT applied.
+        if (appliedStatusDirective && statusVerdict.rejected.length > 0) {
           await postStatusDirectiveNote(task, chairMember, message, statusVerdict, nextStatus, statusAtParse);
         }
       } else if (isChairSender && statusVerdict.rejected.length > 0) {
@@ -4429,6 +4445,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `[GroupTaskDaemon] Task ${task.id}: chair message cites ${statusVerdict.descriptive.length} descriptive [STATUS:*] tag(s) ` +
           `(${statusVerdict.descriptive.map((tag) => tag.toUpperCase()).join(' -> ')}) with no instruction tag — ` +
           'descriptive tags ignored, no transition applied',
+        );
+      } else if (isChairSender && statusVerdict.noOp.length > 0) {
+        // A chair tag re-asserting the live status (e.g. a re-issued verdict
+        // duplicating one already applied) is a benign no-op — the old
+        // grouping filed it under `rejected`, minting an illegal-transition
+        // audit row and an anomaly notice that goaded the chair into
+        // "correcting" a state that was already correct. Log-only.
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: chair [STATUS:*] tag(s) re-assert the live status ` +
+          `(${statusVerdict.noOp.map((tag) => tag.toUpperCase()).join(', ')}) — treated as a no-op`,
         );
       }
     }

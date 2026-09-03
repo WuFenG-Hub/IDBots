@@ -406,10 +406,13 @@ export function buildStatusDirectiveNote(input: {
     : '提示：把单个裸 [STATUS:*] 标签独立成行或放在消息末尾；用 `反引号` 包裹的标签只视为引用，不会被执行。';
   const lines: string[] = [];
   if (input.appliedTag) {
+    // The applied tag is backtick-wrapped like the rejected ones: this note
+    // is chair-facing prose, and a bare [STATUS:*] in it must never read as
+    // an instruction if a future parser stops exempting host notices.
     lines.push(
       language === 'en'
-        ? `⚙️ Status update applied: ${tagText(input.appliedTag)} — task moved ${input.fromStatus} -> ${input.appliedTag}.`
-        : `⚙️ 状态已更新：${tagText(input.appliedTag)}——任务从 ${input.fromStatus} 迁移到 ${input.appliedTag}。`,
+        ? `⚙️ Status update applied: \`${tagText(input.appliedTag)}\` — task moved ${input.fromStatus} -> ${input.appliedTag}.`
+        : `⚙️ 状态已更新：\`${tagText(input.appliedTag)}\`——任务从 ${input.fromStatus} 迁移到 ${input.appliedTag}。`,
     );
     if (input.rejected.length > 0) {
       lines.push(

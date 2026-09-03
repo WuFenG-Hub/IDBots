@@ -1664,6 +1664,25 @@ test('GT-04 adjudication: pure verdicts across the historical message shapes', (
   const terminal = adjudicateStatusDirectives('重启执行\n[STATUS:EXECUTING]', 'done');
   assert.equal(terminal.instruction, null);
   assert.deepEqual(terminal.rejected, ['executing']);
+
+  // A chair tag re-asserting the LIVE status is a benign no-op — neither an
+  // instruction nor an illegal sibling (the chair prompt explicitly tells a
+  // partially confused chair to re-issue its verdict; the duplicate must not
+  // mint an illegal-transition audit row).
+  const reassert = adjudicateStatusDirectives('再次确认\n[STATUS:REVIEW]', 'review');
+  assert.equal(reassert.instruction, null);
+  assert.deepEqual(reassert.rejected, []);
+  assert.deepEqual(reassert.noOp, ['review']);
+
+  // Mixed: a legal instruction plus a same-status sibling — the sibling is a
+  // no-op, not a "rejected" tag the group gets scolded about.
+  const mixed = adjudicateStatusDirectives(
+    '重派说明如上。\n[STATUS:EXECUTING]\n此前误发的 [STATUS:REVIEW] 作废。',
+    'review',
+  );
+  assert.equal(mixed.instruction, 'executing');
+  assert.deepEqual(mixed.rejected, []);
+  assert.deepEqual(mixed.noOp, ['review']);
 });
 
 test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-line REVIEW, and the group hears why', async () => {
