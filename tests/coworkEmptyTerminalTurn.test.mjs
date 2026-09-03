@@ -76,8 +76,9 @@ test('EMPTY_TERMINAL_TURN_CONTINUE_PROMPT is a real instruction, never a non-ans
 // Transient-failure turn resume (2026-09-02 incident, session a27be8fa): a
 // turn ended with kind:'error' + code:'TRANSPORT' after a ~45–60s Wi-Fi roam
 // exhausted the runtime retry ladder, and the task behind the turn stalled.
-// The runner now auto-resumes such turns ONCE via TRANSIENT_TURN_RESUME_PROMPT;
-// the classifier below gates that path.
+// The runner now auto-resumes such turns up to DSH_TRANSIENT_TURN_MAX_RESUMES
+// (3) times via TRANSIENT_TURN_RESUME_PROMPT; the classifier below gates that
+// path.
 test('isTransientDshTurnError classifies only transient-code error outcomes', async () => {
   const { isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT, isNonAnswerAssistantReply } =
     await importCompiled('coworkAssistantReply');
