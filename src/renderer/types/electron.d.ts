@@ -526,6 +526,25 @@ interface TeamCultureActiveCounts {
   team_lesson: number;
 }
 
+type TeamCultureDistillationOutcome =
+  | 'applied'
+  | 'empty'
+  | 'unparseable'
+  | 'llm-error'
+  | 'few-members'
+  | 'no-summary'
+  | 'disabled';
+
+interface TeamCultureDistillationRecord {
+  at: number;
+  taskId: number | null;
+  taskTitle: string;
+  outcome: TeamCultureDistillationOutcome;
+  applied: number;
+  pendingConventions: number;
+  error?: string | null;
+}
+
 interface TaskCommTrendRow {
   taskId: number;
   title: string;
@@ -1186,6 +1205,11 @@ interface IElectronAPI {
       success: boolean;
       entries?: TeamCultureEntry[];
       activeCounts?: TeamCultureActiveCounts;
+      error?: string;
+    }>;
+    listTeamCultureDistillationLog: () => Promise<{
+      success: boolean;
+      records?: TeamCultureDistillationRecord[];
       error?: string;
     }>;
     upsertTeamCulture: (input: {

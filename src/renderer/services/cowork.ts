@@ -43,6 +43,7 @@ import type {
   MemoryHygieneRunStats,
   TeamCultureEntry,
   TeamCultureActiveCounts,
+  TeamCultureDistillationRecord,
   TeamCultureKind,
   TeamCultureStatus,
   TaskCommTrendRow,
@@ -1218,6 +1219,13 @@ class CoworkService {
     if (!api) return [];
     const result = await api();
     return result?.tasks ?? [];
+  }
+
+  async listTeamCultureDistillationLog(): Promise<TeamCultureDistillationRecord[]> {
+    const api = window.electron?.cowork?.listTeamCultureDistillationLog;
+    if (!api) return [];
+    const result = await api();
+    return Array.isArray(result?.records) ? result.records : [];
   }
 
   async getTeamCultureConfig(): Promise<{ enabled: boolean }> {

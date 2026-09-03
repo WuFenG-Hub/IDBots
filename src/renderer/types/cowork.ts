@@ -626,6 +626,30 @@ export interface TeamCultureActiveCounts {
   team_lesson: number;
 }
 
+/**
+ * One task-close distillation verdict (Settings → Memory → Team culture →
+ * recent distillation results). Persisted in the main process so the tab can
+ * answer "why did the last closes (not) land entries".
+ */
+export type TeamCultureDistillationOutcome =
+  | 'applied'
+  | 'empty'
+  | 'unparseable'
+  | 'llm-error'
+  | 'few-members'
+  | 'no-summary'
+  | 'disabled';
+
+export interface TeamCultureDistillationRecord {
+  at: number;
+  taskId: number | null;
+  taskTitle: string;
+  outcome: TeamCultureDistillationOutcome;
+  applied: number;
+  pendingConventions: number;
+  error?: string | null;
+}
+
 /** Communication-entropy observation row (bytes-per-deliverable per task). */
 export interface TaskCommTrendRow {
   taskId: number;

@@ -26,6 +26,31 @@ export type TeamCultureKind = 'glossary' | 'convention' | 'team_lesson';
 export type TeamCultureOrigin = 'owner' | 'distillation';
 export type TeamCultureStatus = 'active' | 'superseded' | 'archived';
 
+/**
+ * Why one task-close distillation pass ended the way it did. Persisted per
+ * close (bounded log) so the settings page can answer "why is the culture
+ * base still empty" instead of leaving every skip/failure in a console.warn
+ * nobody sees.
+ */
+export type TeamCultureDistillationOutcome =
+  | 'applied'      // proposals were processed; counts carry the detail
+  | 'empty'        // the LLM deliberately returned empty arrays (valid silence)
+  | 'unparseable'  // the LLM reply was not usable JSON
+  | 'llm-error'    // the distillation LLM call itself failed
+  | 'few-members'  // acceptance summary listed fewer than 2 members
+  | 'no-summary'   // the task closed without a recorded acceptance summary
+  | 'disabled';    // the culture master switch was off
+
+export interface TeamCultureDistillationRecord {
+  at: number;
+  taskId: number | null;
+  taskTitle: string;
+  outcome: TeamCultureDistillationOutcome;
+  applied: number;
+  pendingConventions: number;
+  error?: string | null;
+}
+
 export interface TeamCultureEntry {
   id: string;
   kind: TeamCultureKind;
@@ -108,6 +133,36 @@ const KIND_VALUES: TeamCultureKind[] = ['glossary', 'convention', 'team_lesson']
 export function normalizeTeamCultureKind(value: unknown): TeamCultureKind {
   const kind = String(value ?? '').trim();
   return kind === 'convention' || kind === 'team_lesson' ? kind : 'glossary';
+}
+
+const MAX_DISTILLATION_LOG_ERROR_CHARS = 300;
+const TEAM_CULTURE_DISTILLATION_LOG_KEY = 'teamCultureDistillationLog';
+/** Bounded ring: the settings panel shows the recent close-out attempts. */
+const TEAM_CULTURE_DISTILLATION_LOG_LIMIT = 20;
+
+const DISTILLATION_OUTCOMES: readonly TeamCultureDistillationOutcome[] = [
+  'applied', 'empty', 'unparseable', 'llm-error', 'few-members', 'no-summary', 'disabled',
+];
+
+/** Defensive read normalization for the kv-persisted log (user data). */
+function normalizeDistillationRecord(value: unknown): TeamCultureDistillationRecord | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const outcome = String(record.outcome ?? '') as TeamCultureDistillationOutcome;
+  if (!DISTILLATION_OUTCOMES.includes(outcome)) return null;
+  const at = Number(record.at);
+  if (!Number.isFinite(at) || at <= 0) return null;
+  return {
+    at,
+    taskId: Number.isFinite(Number(record.taskId)) ? Math.floor(Number(record.taskId)) : null,
+    taskTitle: String(record.taskTitle ?? ''),
+    outcome,
+    applied: Math.max(0, Math.floor(Number(record.applied) || 0)),
+    pendingConventions: Math.max(0, Math.floor(Number(record.pendingConventions) || 0)),
+    error: typeof record.error === 'string' && record.error
+      ? truncateUtf16Units(record.error, MAX_DISTILLATION_LOG_ERROR_CHARS)
+      : null,
+  };
 }
 
 export function teamCultureFingerprintOf(topic: string): string {
@@ -658,5 +713,43 @@ export class TeamCultureStore {
     `, [JSON.stringify({ enabled }), this.now()]);
     this.saveDb();
     return { enabled };
+  }
+
+  // --- distillation outcome log (kv ring in cowork_config; the settings ---
+  //     culture tab renders it as "why did the last task closes distill or
+  //     not" instead of leaving every skip in an invisible console.warn) ---
+
+  recordCultureDistillation(record: TeamCultureDistillationRecord): void {
+    const normalized = normalizeDistillationRecord(record);
+    if (!normalized) return;
+    const log = [normalized, ...this.listCultureDistillationLog()]
+      .slice(0, TEAM_CULTURE_DISTILLATION_LOG_LIMIT);
+    this.db.run(
+      `INSERT INTO cowork_config (key, value, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+      [TEAM_CULTURE_DISTILLATION_LOG_KEY, JSON.stringify(log), this.now()],
+    );
+    this.saveDb();
+  }
+
+  listCultureDistillationLog(): TeamCultureDistillationRecord[] {
+    const row = this.getOne<{ value: string }>(
+      'SELECT value FROM cowork_config WHERE key = ?',
+      [TEAM_CULTURE_DISTILLATION_LOG_KEY],
+    );
+    if (!row?.value) return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.value);
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(normalizeDistillationRecord)
+      .filter((record): record is TeamCultureDistillationRecord => record !== null);
   }
 }

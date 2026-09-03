@@ -580,6 +580,8 @@ contextBridge.exposeInMainWorld('electron', {
       offset?: number;
     }) =>
       ipcRenderer.invoke('teamCulture:list', input),
+    listTeamCultureDistillationLog: () =>
+      ipcRenderer.invoke('teamCulture:distillationLog'),
     upsertTeamCulture: (input: {
       kind?: 'glossary' | 'convention' | 'team_lesson';
       topic: string;

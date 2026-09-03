@@ -11016,6 +11016,20 @@ if (!gotTheLock) {
     }
   });
 
+  // Recent task-close distillation verdicts — the "why is the culture base
+  // (still) empty" answer, persisted across restarts.
+  ipcMain.handle('teamCulture:distillationLog', async () => {
+    try {
+      const store = getTeamCultureStore();
+      return { success: true, records: store.listCultureDistillationLog() };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list culture distillation log',
+      };
+    }
+  });
+
   ipcMain.handle('teamCulture:upsert', async (_event, input: {
     kind?: TeamCultureKind;
     topic: string;

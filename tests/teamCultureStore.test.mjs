@@ -264,3 +264,65 @@ test('prompt block respects the line budget, always closes the tag, and honors t
     harness.cleanup();
   }
 });
+
+test('distillation outcome log: newest-first ring, capped at 20, defensive reads', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new TeamCultureStore(db, () => {}, () => 1_800_000_000_000);
+    assert.deepEqual(store.listCultureDistillationLog(), [], 'empty before any close');
+
+    for (let index = 1; index <= 25; index += 1) {
+      store.recordCultureDistillation({
+        at: 1_800_000_000_000 + index,
+        taskId: index,
+        taskTitle: `Task ${index}`,
+        outcome: index % 2 === 0 ? 'empty' : 'llm-error',
+        applied: index % 3,
+        pendingConventions: 0,
+        error: index % 2 === 0 ? null : `boom ${index}`,
+      });
+    }
+    const log = store.listCultureDistillationLog();
+    assert.equal(log.length, 20, 'the ring is capped at 20 records');
+    assert.equal(log[0].taskId, 25, 'newest first');
+    assert.equal(log[19].taskId, 6, 'the oldest retained record is #6');
+    assert.equal(log[0].outcome, 'llm-error');
+    assert.equal(log[0].error, 'boom 25');
+
+    store.recordCultureDistillation({
+      at: 1_800_000_000_100,
+      taskId: 26,
+      taskTitle: 'Long error',
+      outcome: 'llm-error',
+      applied: 0,
+      pendingConventions: 0,
+      error: 'x'.repeat(400),
+    });
+    assert.equal(store.listCultureDistillationLog()[0].error.length, 300, 'errors are truncated');
+
+    // Defensive reads: unknown outcomes and malformed entries are dropped, not fatal.
+    db.run(
+      `INSERT INTO cowork_config (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      ['teamCultureDistillationLog', JSON.stringify([
+        { at: 1_800_000_100_000, taskId: 99, taskTitle: 'ok', outcome: 'no-summary', applied: 0, pendingConventions: 0 },
+        { at: 1_800_000_100_001, taskId: 100, taskTitle: 'bad', outcome: 'mystery', applied: 0, pendingConventions: 0 },
+        'garbage',
+        null,
+      ]), 1_800_000_100_002],
+    );
+    const filtered = store.listCultureDistillationLog();
+    assert.equal(filtered.length, 1);
+    assert.equal(filtered[0].outcome, 'no-summary');
+
+    db.run(
+      `INSERT INTO cowork_config (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      ['teamCultureDistillationLog', '{not json', 1_800_000_100_003],
+    );
+    assert.deepEqual(store.listCultureDistillationLog(), [], 'corrupt JSON reads as empty');
+  } finally {
+    harness.cleanup();
+  }
+});

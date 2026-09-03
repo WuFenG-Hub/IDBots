@@ -23,6 +23,7 @@ import type {
   MemoryHygieneRunStats,
   TeamCultureEntry,
   TeamCultureActiveCounts,
+  TeamCultureDistillationRecord,
   TeamCultureKind,
   TaskCommTrendRow,
 } from '../../types/cowork';
@@ -217,6 +218,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [editingCultureId, setEditingCultureId] = useState<string | null>(null);
   const [commTrend, setCommTrend] = useState<TaskCommTrendRow[]>([]);
   const [cultureEnabled, setCultureEnabled] = useState<boolean>(true);
+  const [cultureDistillationLog, setCultureDistillationLog] = useState<TeamCultureDistillationRecord[]>([]);
   const [cultureDraft, setCultureDraft] = useState<{ kind: TeamCultureKind; topic: string; text: string }>({
     kind: 'convention',
     topic: '',
@@ -813,6 +815,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       setCultureCounts(activeCounts);
       setCommTrend(await coworkService.listTaskCommTrend());
       setCultureEnabled((await coworkService.getTeamCultureConfig()).enabled);
+      setCultureDistillationLog(await coworkService.listTeamCultureDistillationLog());
     } catch (cultureError) {
       console.error('Failed to load team culture:', cultureError);
       setCultureEntries([]);
@@ -1762,6 +1765,16 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     team_lesson: i18nService.t('memoryCultureKindTeamLesson'),
   };
 
+  const cultureDistillOutcomeLabels: Record<string, string> = {
+    applied: i18nService.t('memoryCultureDistillOutcomeApplied'),
+    empty: i18nService.t('memoryCultureDistillOutcomeEmpty'),
+    unparseable: i18nService.t('memoryCultureDistillOutcomeUnparseable'),
+    'llm-error': i18nService.t('memoryCultureDistillOutcomeLlmError'),
+    'few-members': i18nService.t('memoryCultureDistillOutcomeFewMembers'),
+    'no-summary': i18nService.t('memoryCultureDistillOutcomeNoSummary'),
+    disabled: i18nService.t('memoryCultureDistillOutcomeDisabled'),
+  };
+
   const renderCulture = () => (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-2">
@@ -1787,6 +1800,38 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           void coworkService.setTeamCultureConfig(value);
         }}
       />
+
+      {/* Recent task-close distillation verdicts: why the latest closes did
+          or did not land culture entries (previously every skip/failure was
+          an invisible console.warn, reading as "the feature is dead"). */}
+      <div className="space-y-1 rounded-lg border px-3 py-2 dark:border-claude-darkBorder border-claude-border">
+        <div className="text-[10px] uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('memoryCultureDistillTitle')}
+        </div>
+        {cultureDistillationLog.length === 0 ? (
+          <div className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('memoryCultureDistillEmpty')}
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {cultureDistillationLog.slice(0, 5).map((record) => (
+              <div
+                key={`${record.at}-${record.taskId ?? 'na'}`}
+                className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary"
+              >
+                {`${new Date(record.at).toLocaleString()} · #${record.taskId ?? '-'} ${record.taskTitle} · ${cultureDistillOutcomeLabels[record.outcome] ?? record.outcome}`}
+                {record.outcome === 'applied' && record.applied > 0
+                  ? ` · +${record.applied} ${i18nService.t('memoryCultureDistillEntriesApplied')}`
+                  : ''}
+                {record.pendingConventions > 0
+                  ? ` · ${record.pendingConventions} ${i18nService.t('memoryCultureDistillPendingCount')}`
+                  : ''}
+                {record.error ? ` · ${record.error}` : ''}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="flex flex-wrap items-center gap-2">
         {(['all', 'glossary', 'convention', 'team_lesson'] as const).map((kind) => {

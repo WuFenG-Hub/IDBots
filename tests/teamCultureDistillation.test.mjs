@@ -6,13 +6,17 @@ import { createSqliteStore } from './memoryTestUtils.mjs';
 let TeamCultureStore;
 let runCultureDistillation;
 let buildCultureDistillationPrompt;
+let distillTeamCultureFromTaskClose;
+let setTeamCultureDistillationDeps;
 try {
   ({ TeamCultureStore } = await import('../dist-electron/main/teamCultureStore.js'));
-  ({ runCultureDistillation, buildCultureDistillationPrompt } =
+  ({ runCultureDistillation, buildCultureDistillationPrompt,
+    distillTeamCultureFromTaskClose, setTeamCultureDistillationDeps } =
     await import('../dist-electron/main/services/teamCultureDistillation.js'));
 } catch {
   ({ TeamCultureStore } = await import('../dist-electron/teamCultureStore.js'));
-  ({ runCultureDistillation, buildCultureDistillationPrompt } =
+  ({ runCultureDistillation, buildCultureDistillationPrompt,
+    distillTeamCultureFromTaskClose, setTeamCultureDistillationDeps } =
     await import('../dist-electron/services/teamCultureDistillation.js'));
 }
 
@@ -187,6 +191,137 @@ test('unparseable output is a silent no-op and the prompt carries existing topic
     });
     assert.match(staticPrompt, /silence is a valid answer/);
   } finally {
+    harness.cleanup();
+  }
+});
+
+test('distillation outcome values: applied, empty, unparseable, llm-error, few-members, not-done', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new TeamCultureStore(db, () => {}, () => 1_800_000_000_000);
+    const baseTask = { taskId: 21, title: 'T', goal: 'G', status: 'done', summary: SUMMARY };
+
+    const empty = await runCultureDistillation({
+      task: baseTask,
+      cultureStore: store,
+      performChat: async () => '```json\n{"glossary":[],"conventions":[],"lessons":[]}\n```',
+    });
+    assert.equal(empty.outcome, 'empty', 'a deliberate all-empty reply is valid silence');
+    assert.equal(empty.applied, 0);
+
+    const garbage = await runCultureDistillation({
+      task: baseTask,
+      cultureStore: store,
+      performChat: async () => 'no json here',
+    });
+    assert.equal(garbage.outcome, 'unparseable');
+
+    const failed = await runCultureDistillation({
+      task: baseTask,
+      cultureStore: store,
+      performChat: async () => {
+        throw new Error('502 net::ERR_CONNECTION_CLOSED');
+      },
+    });
+    assert.equal(failed.outcome, 'llm-error');
+    assert.match(failed.error, /ERR_CONNECTION_CLOSED/);
+
+    const solo = await runCultureDistillation({
+      task: { ...baseTask, summary: { ...SUMMARY, members: [{ name: 'Twin Bot', role: 'chair' }] } },
+      cultureStore: store,
+      performChat: async () => PROPOSAL_JSON,
+    });
+    assert.equal(solo.outcome, 'few-members');
+
+    const cancelled = await runCultureDistillation({
+      task: { ...baseTask, status: 'cancelled' },
+      cultureStore: store,
+      performChat: async () => PROPOSAL_JSON,
+    });
+    assert.equal(cancelled.outcome, 'not-done');
+
+    const applied = await runCultureDistillation({
+      task: baseTask,
+      cultureStore: store,
+      performChat: async () => '```json\n' + PROPOSAL_JSON + '\n```',
+    });
+    assert.equal(applied.outcome, 'applied');
+    assert.equal(applied.applied, 3);
+    assert.equal(applied.pendingConventions, 1);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('close hook records every done-close verdict into the store log', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new TeamCultureStore(db, () => {}, () => 1_800_000_000_000);
+    const summaries = new Map();
+    setTeamCultureDistillationDeps({
+      getTeamCultureStore: () => store,
+      getGroupTaskStore: () => ({
+        getLatestAcceptanceSummary: (taskId) => summaries.get(taskId) ?? null,
+      }),
+      performChat: async () => '```json\n' + PROPOSAL_JSON + '\n```',
+    });
+    const waitForLog = async (length) => {
+      for (let i = 0; i < 200 && store.listCultureDistillationLog().length < length; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return store.listCultureDistillationLog();
+    };
+
+    // Cancelled closes are routine noise: never distilled, never logged.
+    distillTeamCultureFromTaskClose(31, 'cancelled', 'T31', 'G');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(store.listCultureDistillationLog().length, 0);
+
+    // Disabled master switch records 'disabled'.
+    store.setCultureConfig(false);
+    distillTeamCultureFromTaskClose(32, 'done', 'T32', 'G');
+    let log = await waitForLog(1);
+    assert.equal(log.length, 1);
+    assert.equal(log[0].outcome, 'disabled');
+    assert.equal(log[0].taskId, 32);
+
+    // A done close without an acceptance summary records 'no-summary' — the
+    // single most common "why is the culture base empty" cause.
+    store.setCultureConfig(true);
+    distillTeamCultureFromTaskClose(33, 'done', 'T33', 'G');
+    log = await waitForLog(2);
+    assert.equal(log[0].outcome, 'no-summary');
+    assert.equal(log[0].taskId, 33);
+
+    // Full success records 'applied' with the counts.
+    summaries.set(34, {
+      conclusion: SUMMARY.conclusion,
+      outcome: SUMMARY.outcome,
+      planChanges: SUMMARY.planChanges,
+      deliverables: SUMMARY.deliverables,
+      members: SUMMARY.members,
+    });
+    distillTeamCultureFromTaskClose(34, 'done', 'T34', 'G');
+    log = await waitForLog(3);
+    assert.equal(log[0].outcome, 'applied');
+    assert.equal(log[0].applied, 3);
+    assert.equal(log[0].pendingConventions, 1);
+    const distilled = store.listCulture({ status: 'all' })
+      .filter((entry) => entry.origin === 'distillation');
+    assert.equal(distilled.length, 3);
+  } finally {
+    // Neutral stub: providers must stay non-null, and the disabled switch
+    // makes any stray hook call a no-op.
+    setTeamCultureDistillationDeps({
+      getTeamCultureStore: () => ({
+        getCultureConfig: () => ({ enabled: false }),
+        recordCultureDistillation: () => {},
+      }),
+      getGroupTaskStore: () => ({ getLatestAcceptanceSummary: () => null }),
+      performChat: async () => '',
+    });
     harness.cleanup();
   }
 });
