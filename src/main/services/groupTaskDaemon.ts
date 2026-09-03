@@ -375,6 +375,15 @@ function extractDependsOnTokens(content: string | null | undefined): string[] {
     .filter((token) => token.length > 0);
 }
 const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
+/**
+ * release-review P2: bounded hold timestamp for a trigger whose (task, bot)
+ * session is still running a prior turn (the post-hard-cap window where the
+ * guard is gone but the dangling job's runner turn is still active). Same
+ * startedAt-cap pattern as DEP_WAIT; deleted once the session idles or the
+ * hold expires. Not carried in DeferredReplyEntry so the hold survives queue
+ * rewrites without touching the durable schema.
+ */
+const SESSION_BUSY_HOLD_PREFIX = 'group_task_session_busy_hold:';
 
 /**
  * fix/group-task-fix-v2 (B2): stuck-verdict reclaim mode. The default is
@@ -2349,7 +2358,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * one-turn-per-(task,bot)-session invariant; pendingTurnJobs lets tests and
    * shutdown observe completion via whenIdle().
    */
-  const turnInFlight = new Map<string, { startedAt: number }>();
+  // Each in-flight entry carries an ownership token (unique per dispatch): a
+  // hard-cap force-settle releases the guard while the original job's await
+  // still dangles, so a NEWER dispatch may already own the key by the time the
+  // old job's finally (or a late hard-cap fire) runs — deletes must confirm
+  // ownership or they would break the one-turn-per-session invariant for the
+  // replacement turn.
+  const turnInFlight = new Map<string, { startedAt: number; token: object }>();
   const pendingTurnJobs = new Set<Promise<void>>();
   const latchWatchers = new Set<ReturnType<typeof setInterval>>();
   /**
@@ -5371,7 +5386,55 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const { task, member, bot, message } = args;
     const key = keyOf(task.id, bot.id);
     const sessionId = ensureTaskSession(deps.getCoworkStore(), task, bot.id, bot.name).id;
-    turnInFlight.set(key, { startedAt: now() });
+    // GT-01 follow-up: a hard-cap force-settle releases this guard while the
+    // ORIGINAL runner turn may still be active on the session (its await never
+    // settled — that is what tripped the cap). Dispatching now would start a
+    // second concurrent turn on the same session, and runner events are keyed
+    // by sessionId — the stale turn's late completion could resolve ours with
+    // its reply. Hold the trigger in the durable queue (budget uncharged)
+    // until the session reports idle, bounded by one hard-cap window; past
+    // the bound we dispatch anyway and the ordinary retry budget governs.
+    {
+      let sessionStatus: string | null = null;
+      try {
+        sessionStatus = deps.getCoworkStore().getSession(sessionId)?.status ?? null;
+      } catch {
+        sessionStatus = null;
+      }
+      if (sessionStatus === 'running') {
+        const holdKey = `${SESSION_BUSY_HOLD_PREFIX}${task.id}:${bot.id}:${message.id}`;
+        const priorHeldSince = Number(deps.getStore().get<number>(holdKey) ?? 0);
+        const heldSince = priorHeldSince || now();
+        deps.getStore().set(holdKey, heldSince);
+        if (now() - heldSince < turnHardCapMs) {
+          deferReply({
+            taskId: task.id,
+            metabotId: bot.id,
+            messageId: message.id,
+            reason: args.reason,
+            verificationNotes: args.verificationNotes,
+            failures: args.entry?.failures,
+          });
+          if (!priorHeldSince) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: holding the trigger for message #${message.id} — ` +
+              `bot ${bot.id}'s session is still running a prior turn (bounded wait of ` +
+              `${Math.round(turnHardCapMs / 60_000)} min, then the retry budget governs)`,
+            );
+          }
+          return;
+        }
+        deps.getStore().delete(holdKey);
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: session-busy hold for message #${message.id} expired — ` +
+          'dispatching anyway (the retry budget now governs)',
+        );
+      } else {
+        deps.getStore().delete(`${SESSION_BUSY_HOLD_PREFIX}${task.id}:${bot.id}:${message.id}`);
+      }
+    }
+    const turnToken: object = {};
+    turnInFlight.set(key, { startedAt: now(), token: turnToken });
     emitTurnActivity();
     noteDriveActivity(task.id); // a dispatched turn is real drive work
     // GT-01 (task #56): absolute wall-clock cap on the in-flight guard. Every
@@ -5387,15 +5450,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // this timer in its finally block below.
     const hardCapTimer = setTimeout(() => {
       // The latch path (SkillTurnTimeoutError) already owns latched keys — its
-      // watcher re-queues and releases on its own schedule.
-      if (!turnInFlight.has(key) || latchedTurnKeys.has(key)) return;
+      // watcher re-queues and releases on its own schedule. Ownership: a newer
+      // dispatch's entry must survive this late fire of the OLD timer.
+      const current = turnInFlight.get(key);
+      if (!current || current.token !== turnToken || latchedTurnKeys.has(key)) return;
       turnInFlight.delete(key);
       emitTurnActivity();
       const failures = (args.entry?.failures ?? 0) + 1;
       if (failures >= MSG_RETRY_MAX_FAILURES) {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} dropped ` +
-          `after ${failures} wedged-turn force-settles — giving up`,
+          `after ${failures} failed attempts (this one a wedged-turn force-settle) — giving up`,
         );
         notifySourceSessionMilestone(
           task,
@@ -5405,7 +5470,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             status: task.status,
             summary:
               `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} did not answer ` +
-              `message #${message.id}: ${failures} turns wedged in a row (an in-flight call never settled). ` +
+              `message #${message.id}: ${failures} consecutive failed turn attempts — the latest was a ` +
+              'wedged in-flight call that never settled (earlier attempts may have failed fast instead). ' +
               'The trigger was dropped — investigate the member bot and re-drive it manually.',
           }),
           `wedged_turn_drop:${task.id}:${bot.id}:${message.id}`,
@@ -5585,8 +5651,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         for (const timer of livenessTimers) clearTimeout(timer);
         livenessTimers.length = 0;
         if (!keepLatched) {
-          turnInFlight.delete(key);
-          emitTurnActivity();
+          // Ownership: a hard-cap fire may have already released this key and a
+          // REPLACEMENT dispatch may own it now — deleting unconditionally
+          // would break the replacement's one-turn-per-session guard.
+          if (turnInFlight.get(key)?.token === turnToken) {
+            turnInFlight.delete(key);
+            emitTurnActivity();
+          }
         }
         pendingTurnJobs.delete(job);
         noteTickProgress();
@@ -5614,15 +5685,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       emitLog(`[GroupTaskDaemon] ${label}: skipped — a turn is already in flight for ${guardKey}`);
       return false;
     }
-    turnInFlight.set(guardKey, { startedAt: now() });
+    const turnToken: object = {};
+    turnInFlight.set(guardKey, { startedAt: now(), token: turnToken });
     emitTurnActivity();
     if (liveness) noteDriveActivity(liveness.taskId); // a dispatched turn is real drive work
     // GT-01: same hard cap as dispatchReplyTurn — a task-level chair turn whose
     // await never settles must not leak the guard (and with it the chair's
     // whole turn budget) forever. On fire the guard releases so later ticks
-    // re-drive the work; the dangling job is left to rot.
+    // re-drive the work; the dangling job is left to rot. Ownership: a newer
+    // re-drive's entry must survive this late fire of the OLD timer.
     const hardCapTimer = setTimeout(() => {
-      if (!turnInFlight.has(guardKey)) return;
+      const current = turnInFlight.get(guardKey);
+      if (!current || current.token !== turnToken) return;
       turnInFlight.delete(guardKey);
       emitTurnActivity();
       emitLog(
@@ -5644,8 +5718,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         clearTimeout(hardCapTimer);
         for (const timer of livenessTimers) clearTimeout(timer);
         livenessTimers.length = 0;
-        turnInFlight.delete(guardKey);
-        emitTurnActivity();
+        if (turnInFlight.get(guardKey)?.token === turnToken) {
+          turnInFlight.delete(guardKey);
+          emitTurnActivity();
+        }
         pendingTurnJobs.delete(job);
         noteTickProgress();
       }

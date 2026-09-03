@@ -6068,6 +6068,91 @@ test('GT-01: a wedged turn (await never settles) is force-settled at the hard ca
   }
 });
 
+test('release-review P2: a re-driven trigger waits for the session to go idle (bounded), then dispatches', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    workerCooldownMs: 0,
+    chairCooldownMs: 0,
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // First exchange creates the (task, bot) session and completes normally.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-busy-hold-m1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot first thing',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'the first exchange lands before the hold is armed',
+    );
+
+    // Simulate the post-hard-cap window: the guard is gone but the dangling
+    // job's runner turn still reports the session as running.
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    assert.ok(mapping, 'the worker session mapping exists');
+    h.coworkStore.updateSession(mapping.coworkSessionId, { status: 'running' });
+
+    h.sends.length = 0;
+    logs.length = 0;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-busy-hold-m2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot second thing',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.ok(
+      logs.some((line) => line.includes('holding the trigger for message #')),
+      'the busy session holds the trigger instead of dispatching a concurrent turn',
+    );
+    assert.ok(
+      !h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'no worker answer is dispatched while the session still runs the prior turn',
+    );
+    assert.ok(h.store.get(`group_task_deferred:${task.id}`), 'the held trigger sits in the durable queue');
+
+    // The session goes idle — the held trigger drains and the reply lands.
+    h.coworkStore.updateSession(mapping.coworkSessionId, { status: 'completed' });
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'the held trigger is dispatched once the session idles',
+    );
+
+    // Expiry branch: a session that never idles stops holding after one
+    // hard-cap window and dispatches anyway (retry budget governs).
+    h.coworkStore.updateSession(mapping.coworkSessionId, { status: 'running' });
+    h.sends.length = 0;
+    logs.length = 0;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-busy-hold-m3-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot third thing',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) => line.includes('holding the trigger for message #')),
+      'the busy hold arms again for the third trigger',
+    );
+    h.state.nowMs += 46 * 60_000; // past the 45-min hard-cap window
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) => line.includes('session-busy hold for message #') && line.includes('expired')),
+      'the hold expires after one hard-cap window',
+    );
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'the expired hold dispatches anyway',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Task #41 residue: an ETA-bearing [WORKING] threaded under a host notice or
 // roll call (replyPin → [GROUP_TASK_NOTICE:*] / 请确认在线) is a presence
