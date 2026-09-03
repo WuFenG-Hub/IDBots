@@ -3547,13 +3547,30 @@ test('GT#26 regression: control tags on a dropped message still land via the tag
   }
 });
 
-test('round-4: lastDrivenAt heartbeat is written every tick', async () => {
+test('GT-01: lastDrivenAt tracks real drive work — idle ticks never fake-heartbeat it', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
     await h.loop.runTick();
-    const row = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
-    assert.equal(row, 1_000_000_000, 'heartbeat = floor(now()/1000)');
+    const first = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
+
+    // An idle tick one hour later must NOT move the timestamp (the #56 fake
+    // heartbeat kept it fresh through hours of zero dispatch → stall stayed
+    // False for the whole outage).
+    h.state.nowMs += 60 * 60_000;
+    await h.loop.runTick();
+    const second = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
+    assert.equal(second, first, 'an idle tick must not refresh lastDrivenAt');
+
+    // Processing a new message IS real drive work.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-drive-activity-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 处理中',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const third = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
+    assert.equal(third, Math.floor(h.state.nowMs / 1000), 'a processed message refreshes lastDrivenAt');
   } finally {
     h.cleanup();
   }
@@ -5602,11 +5619,67 @@ test('task #41: a skill-turn watchdog timeout advances the cursor without burnin
       undefined,
       'watchdog fire is not a transient failure — no retry counter burned',
     );
+    // GT-01: the unanswered trigger is re-queued DURABLY at latch time (the
+    // pre-fix latch dropped it silently, so a provider outage never recovered).
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'watchdog-timed-out trigger re-queued in the durable defer queue');
+    assert.equal(queued[0].messageId, msgId);
+    assert.equal(queued[0].metabotId, 2);
+    assert.equal(queued[0].failures, 1);
 
-    // A later tick must not re-run the same turn (the pre-fix pile-up re-ran
-    // it five times and then dropped the trigger message unanswered).
+    // While the latch is up the in-flight guard still blocks the drain: the
+    // same turn must not re-run (the pre-fix pile-up re-ran it five times and
+    // then dropped the trigger message unanswered).
     await h.loop.runTick();
-    assert.equal(skillTurnAttempts.length, 1, 'timed-out message is not retried on later ticks');
+    assert.equal(skillTurnAttempts.length, 1, 'latched turn is not re-dispatched while latched');
+    const queuedAgain = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queuedAgain.length, 1, 'the trigger stays queued behind the latch');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-01: a wedged turn (await never settles) is force-settled at the hard cap and the trigger recovers', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    workerCooldownMs: 0,
+    chairCooldownMs: 0,
+    deps: { turnHardCapMs: 500, intervalMs: 20 },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // The first group send (the worker auto-ACK) never settles — the wedged
+    // await that used to leak the in-flight guard forever.
+    const realPost = h.deps.postGroupTaskMessage;
+    let postCalls = 0;
+    h.deps.postGroupTaskMessage = async (...args) => {
+      postCalls += 1;
+      if (postCalls === 1) return new Promise(() => {});
+      return realPost(...args);
+    };
+    insertGroupMessage(h.db, {
+      pinId: 'pin-wedged-turn-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the thing',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    h.loop.start();
+    await sleep(3200); // tick 1 dispatches the wedged turn; the 500ms hard cap
+    // force-settles the guard and re-queues the trigger; a later tick
+    // re-dispatches it and the (now healthy) send path lands the reply.
+    h.loop.stop();
+
+    assert.ok(
+      logs.some((line) => line.includes('exceeded the hard in-flight cap')),
+      'the wedged turn is force-settled at the hard cap',
+    );
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'the re-queued trigger is re-driven and the worker answer lands',
+    );
   } finally {
     h.cleanup();
   }

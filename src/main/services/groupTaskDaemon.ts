@@ -1402,6 +1402,10 @@ export interface GroupTaskDaemonDeps {
   intervalMs?: number;
   /** Tick watchdog window (ms) — see DEFAULT_TICK_WATCHDOG_MS. */
   tickWatchdogMs?: number;
+  /** GT-01: absolute wall-clock cap (ms) for one in-flight turn guard — the
+   * last-resort force-settle for an await that never rejects (default: the
+   * 45-min latch cap). */
+  turnHardCapMs?: number;
   workerCooldownMs?: number;
   chairCooldownMs?: number;
   replyBudget?: number;
@@ -1900,8 +1904,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    */
   const claimDriverOrYield = (taskId: number): boolean => {
     if (driverGraceMs <= 0) return true;
+    // GT-01 observability: a stale-claim TAKEOVER (previous holder wedged or
+    // its app restarted) used to be silent — the only claim log was the yield
+    // branch below. Log it once here so a driver swap is always diagnosable.
+    const priorRaw = deps.getStore().get<string>(`${GROUP_TASK_DRIVER_KV_PREFIX}${taskId}`);
     const result = tryAcquireGroupTaskDriver(deps.getStore(), taskId, driverInstanceId, driverGraceMs, now(), false);
-    if (result.ok) return true;
+    if (result.ok) {
+      if (priorRaw) {
+        const [priorOwner, priorAtText] = priorRaw.split('|');
+        const priorAgeMs = now() - (Number(priorAtText) || 0);
+        if (priorOwner && priorOwner !== driverInstanceId && priorAgeMs >= driverGraceMs) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${taskId}: took over the stale driver claim from ` +
+            `${priorOwner.slice(0, 8)}… (silent for ${Math.round(priorAgeMs / 1000)}s)`,
+          );
+        }
+      }
+      return true;
+    }
     emitLog(
       `[GroupTaskDaemon] Task ${taskId}: another chair session (${(result.driverId ?? 'unknown').slice(0, 8)}…) ` +
       `holds the driver claim (${Math.round(result.claimAgeMs / 1000)}s old); this instance yields this tick`,
@@ -1921,6 +1941,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * GT-01 (task #56): lastDrivenAt is the show/stall signal's primary input —
+   * it must mirror REAL drive work (a dispatched turn, a posted message, a
+   * processed message), not the tick loop's liveness. The old per-tick
+   * heartbeat kept it fresh through hours of zero dispatch ("fake heartbeat"),
+   * so a wedged task read stall=False forever. This is the single writer; every
+   * call site below is a place the daemon observably MOVED the task forward.
+   */
+  const noteDriveActivity = (taskId: number): void => {
+    try {
+      deps.getGroupTaskStore().updateLastDrivenAt(taskId, Math.floor(now() / 1000));
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${taskId}: lastDrivenAt update failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  /**
    * F2 (GT#11): single choke point for every daemon group-message post —
    * refreshes the driver claim on success so the claim freshness mirrors
    * actual driving activity.
@@ -1934,6 +1973,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     try {
       const result = await deps.postGroupTaskMessage(taskId, metabotId, content, opts);
       refreshDriverClaim(taskId);
+      noteDriveActivity(taskId); // a posted message is real drive work
       noteTickProgress(); // a completed send proves the in-flight tick is alive
       return result;
     } catch (sendError) {
@@ -2225,6 +2265,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const turnInFlight = new Map<string, { startedAt: number }>();
   const pendingTurnJobs = new Set<Promise<void>>();
   const latchWatchers = new Set<ReturnType<typeof setInterval>>();
+  /**
+   * GT-01 (task #56): keys whose turn outlived the skill-turn watchdog and are
+   * latched until the session idles. A latched turn is NOT a legitimate
+   * in-flight attempt — it already failed from the daemon's perspective — so
+   * it must not refresh lastDrivenAt nor suppress the no-progress nudge.
+   */
+  const latchedTurnKeys = new Set<string>();
 
   /**
    * Sidebar background-task badge: every turnInFlight mutation broadcasts a
@@ -4937,10 +4984,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * fix/group-task-flow: upper bound for the post-timeout in-flight latch. A
    * skill-turn watchdog fire means the turn keeps running inside the session;
    * the guard stays latched until the session leaves 'running' (or this cap).
+   * GT-01 (task #56): the latched key is tracked in latchedTurnKeys for the
+   * whole latch so it stops counting as live drive activity; the retry
+   * obligation was already re-queued durably at latch time (dispatchReplyTurn),
+   * so the deferred-queue drain picks the message up on the first tick after
+   * the release — including after an app restart (the durable queue survives
+   * even though this in-memory latch does not).
    */
   const TURN_LATCH_MAX_MS = 45 * 60_000;
+  /** GT-01: resolved hard cap for one in-flight turn guard (see deps). */
+  const turnHardCapMs = Math.max(1_000, Math.trunc(deps.turnHardCapMs ?? TURN_LATCH_MAX_MS));
   const latchInFlightUntilSessionIdle = (key: string, sessionId: string | null, taskId: number, botId: number): void => {
     if (!sessionId) {
+      latchedTurnKeys.delete(key);
       turnInFlight.delete(key);
       emitTurnActivity();
       return;
@@ -4956,11 +5012,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (status === 'running' && now() - startedAt < TURN_LATCH_MAX_MS) return;
       clearInterval(watcher);
       latchWatchers.delete(watcher);
+      latchedTurnKeys.delete(key);
       turnInFlight.delete(key);
       emitTurnActivity();
       emitLog(
         `[GroupTaskDaemon] Task ${taskId}: in-flight latch for bot ${botId} released ` +
-        `(session status ${status ?? 'unknown'}${status === 'running' ? ', latch cap reached' : ''})`,
+        `(session status ${status ?? 'unknown'}${status === 'running' ? ', latch cap reached' : ''}); ` +
+        'the deferred queue re-drives the unanswered trigger on the next tick',
       );
     }, 15_000);
     watcher.unref?.();
@@ -5065,6 +5123,74 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const sessionId = ensureTaskSession(deps.getCoworkStore(), task, bot.id, bot.name).id;
     turnInFlight.set(key, { startedAt: now() });
     emitTurnActivity();
+    noteDriveActivity(task.id); // a dispatched turn is real drive work
+    // GT-01 (task #56): absolute wall-clock cap on the in-flight guard. Every
+    // production turn is already bounded from inside (10-min plain / 30-min
+    // skill-turn watchdogs, then the 45-min latch), but those all require the
+    // hung await to REJECT — an await that never settles at all (observed in
+    // the wild as a hung on-chain send, task #45) used to leak the guard
+    // forever: the wedged member never took another turn, and the leaked entry
+    // kept lastDrivenAt fresh (a second fake-heartbeat channel). On fire the
+    // trigger re-enters the durable defer queue (bounded by the same failure
+    // budget), the guard releases, and the dangling job is left to rot — the
+    // same contract as the tick watchdog. A job that settles in time clears
+    // this timer in its finally block below.
+    const hardCapTimer = setTimeout(() => {
+      // The latch path (SkillTurnTimeoutError) already owns latched keys — its
+      // watcher re-queues and releases on its own schedule.
+      if (!turnInFlight.has(key) || latchedTurnKeys.has(key)) return;
+      turnInFlight.delete(key);
+      emitTurnActivity();
+      const failures = (args.entry?.failures ?? 0) + 1;
+      if (failures >= MSG_RETRY_MAX_FAILURES) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} dropped ` +
+          `after ${failures} wedged-turn force-settles — giving up`,
+        );
+        notifySourceSessionMilestone(
+          task,
+          'anomaly',
+          buildSourceSessionAnomalyNotice({
+            title: task.title,
+            status: task.status,
+            summary:
+              `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} did not answer ` +
+              `message #${message.id}: ${failures} turns wedged in a row (an in-flight call never settled). ` +
+              'The trigger was dropped — investigate the member bot and re-drive it manually.',
+          }),
+          `wedged_turn_drop:${task.id}:${bot.id}:${message.id}`,
+        );
+        return;
+      }
+      deferReply({
+        taskId: task.id,
+        metabotId: bot.id,
+        messageId: message.id,
+        reason: args.reason,
+        verificationNotes: args.verificationNotes,
+        failures,
+      });
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn exceeded the hard in-flight cap ` +
+        `(message #${message.id}, attempt ${failures}/${MSG_RETRY_MAX_FAILURES}) — guard force-settled, ` +
+        'trigger re-queued; the dangling job is left to rot',
+      );
+      notifySourceSessionMilestone(
+        task,
+        'anomaly',
+        buildSourceSessionAnomalyNotice({
+          title: task.title,
+          status: task.status,
+          summary:
+            `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} had a turn wedged ` +
+            `past the hard in-flight cap while answering message #${message.id} (an in-flight call never ` +
+            'settled). The guard was force-settled and the trigger re-queued — if this repeats, check the ' +
+            'member bot\'s LLM/chain connectivity.',
+        }),
+        `wedged_turn:${task.id}:${bot.id}:${message.id}:${failures}`,
+      );
+    }, turnHardCapMs);
+    hardCapTimer.unref?.();
     // The reply budget is charged at dispatch (committed work — a retry storm
     // must not be free); the cooldown timestamp only moves on SUCCESS (a failed
     // turn posted nothing, so its durable-queue retry must not sit out a
@@ -5113,13 +5239,57 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
       } catch (error) {
         if (error instanceof SkillTurnTimeoutError) {
-          keepLatched = true;
-          latchInFlightUntilSessionIdle(key, sessionId, task.id, bot.id);
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn hit the skill-turn watchdog ` +
-            `(message #${message.id}); the turn keeps running in the session — no retry queued, ` +
-            'guard latched until the session goes idle',
-          );
+          // GT-01 (task #56): the old path latched the guard and queued NO
+          // retry — during a provider outage every member turn burned the
+          // watchdog, latched, and the unanswered trigger was silently lost
+          // (the cursor had already advanced past it), so the task never
+          // recovered on its own after the provider came back. Now the
+          // obligation re-enters the DURABLE defer queue at latch time: the
+          // drain holds it while the latch is up and re-drives it once the
+          // session idles — and it survives an app restart, which the
+          // in-memory latch does not. Bounded by the same MSG_RETRY_MAX_FAILURES
+          // budget as ordinary failures so a multi-hour outage cannot loop
+          // forever; on exhaustion the trigger drops with an anomaly alert
+          // instead of another latch.
+          const failures = (args.entry?.failures ?? 0) + 1;
+          if (failures >= MSG_RETRY_MAX_FAILURES) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} ` +
+              `dropped after ${failures} skill-turn watchdog timeouts: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+            notifySourceSessionMilestone(
+              task,
+              'anomaly',
+              buildSourceSessionAnomalyNotice({
+                title: task.title,
+                status: task.status,
+                summary:
+                  `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} did not answer ` +
+                  `message #${message.id}: ${failures} turns in a row exceeded the skill-turn time budget ` +
+                  '(typically a provider outage). The trigger was dropped — re-drive the member manually ' +
+                  '(a supervisor nudge) once the provider is healthy again.',
+              }),
+              `skill_turn_timeout_drop:${task.id}:${bot.id}:${message.id}`,
+            );
+          } else {
+            keepLatched = true;
+            latchedTurnKeys.add(key);
+            deferReply({
+              taskId: task.id,
+              metabotId: bot.id,
+              messageId: message.id,
+              reason: args.reason,
+              verificationNotes: args.verificationNotes,
+              failures,
+            });
+            latchInFlightUntilSessionIdle(key, sessionId, task.id, bot.id);
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn hit the skill-turn watchdog ` +
+              `(message #${message.id}, attempt ${failures}/${MSG_RETRY_MAX_FAILURES}); the turn keeps ` +
+              'running in the session — trigger re-queued durably, guard latched until the session goes idle',
+            );
+          }
         } else {
           const failures = (args.entry?.failures ?? 0) + 1;
           if (failures >= MSG_RETRY_MAX_FAILURES) {
@@ -5145,6 +5315,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           }
         }
       } finally {
+        clearTimeout(hardCapTimer);
         for (const timer of livenessTimers) clearTimeout(timer);
         livenessTimers.length = 0;
         if (!keepLatched) {
@@ -5179,6 +5350,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
     turnInFlight.set(guardKey, { startedAt: now() });
     emitTurnActivity();
+    if (liveness) noteDriveActivity(liveness.taskId); // a dispatched turn is real drive work
+    // GT-01: same hard cap as dispatchReplyTurn — a task-level chair turn whose
+    // await never settles must not leak the guard (and with it the chair's
+    // whole turn budget) forever. On fire the guard releases so later ticks
+    // re-drive the work; the dangling job is left to rot.
+    const hardCapTimer = setTimeout(() => {
+      if (!turnInFlight.has(guardKey)) return;
+      turnInFlight.delete(guardKey);
+      emitTurnActivity();
+      emitLog(
+        `[GroupTaskDaemon] ${label}: exceeded the hard in-flight cap — guard force-settled; ` +
+        'the dangling job is left to rot',
+      );
+    }, turnHardCapMs);
+    hardCapTimer.unref?.();
     const livenessTimers: Array<ReturnType<typeof setTimeout>> = [];
     const job: Promise<void> = (async () => {
       try {
@@ -5189,6 +5375,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `${error instanceof Error ? error.message : String(error)}`,
         );
       } finally {
+        clearTimeout(hardCapTimer);
         for (const timer of livenessTimers) clearTimeout(timer);
         livenessTimers.length = 0;
         turnInFlight.delete(guardKey);
@@ -6153,7 +6340,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // silent until the stall anomaly. The supervisor-signal channel drives
     // the chair turn on the next tick.
     if (sqlite.get<string>(nudgeKey) == null) {
-      const anyTurnInFlight = [...turnInFlight.keys()].some((key) => key.startsWith(`${task.id}:`));
+      // GT-01: a watchdog-LATCHED turn is not a legitimate in-flight attempt —
+      // it already failed from the daemon's perspective and only waits for the
+      // session to idle. Excluding it lets the nudge fire during a provider
+      // outage instead of waiting out the 45-min latch cap in silence.
+      const anyTurnInFlight = [...turnInFlight.keys()].some(
+        (key) => key.startsWith(`${task.id}:`) && !latchedTurnKeys.has(key),
+      );
       // fix-v2 (B2): group silence is not idleness — a local member whose
       // cowork session worked within the window is making progress that has
       // not surfaced as a message yet (long renders, tool chains). Nudging
@@ -7005,16 +7198,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       );
     }
 
-    // Round-4: per-tick heartbeat — lastDrivenAt (epoch seconds) is the host's
-    // last drive timestamp, the primary input for the show stall signal.
-    try {
-      store.updateLastDrivenAt(task.id, Math.floor(now() / 1000));
-    } catch (error) {
-      emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: lastDrivenAt heartbeat failed: ` +
-        `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    // GT-01 (task #56): lastDrivenAt (epoch seconds) is the show stall
+    // signal's primary input, so it must track REAL drive work — a posted
+    // message, a dispatched turn, or a processed message (see noteDriveActivity
+    // call sites). The old per-tick heartbeat refreshed it even while the
+    // daemon dispatched nothing for hours ("fake heartbeat": stall stayed
+    // False through the whole #56 outage). The one legitimate per-tick refresh
+    // that remains: a LIVE (non-latched) turn in flight for this task — a long
+    // skill turn that stopped posting heartbeats is still genuine drive
+    // activity, while a watchdog-latched turn (latchedTurnKeys) is not.
+    const hasLiveTurn = [...turnInFlight.keys()].some(
+      (key) => key.startsWith(`${task.id}:`) && !latchedTurnKeys.has(key),
+    );
+    if (hasLiveTurn) noteDriveActivity(task.id);
 
     // HITL: while a human checkpoint is open the group is paused waiting for
     // the owner's decision — skip member nudging (unreachable marking, ACK and
@@ -7556,6 +7752,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
         // Round-4: cursor advances only on SUCCESSFUL processing.
         store.updateLastProcessedMsgId(task.id, message.id);
+        noteDriveActivity(task.id); // a processed message is real drive work
         noteTickProgress(); // a processed message proves the in-flight tick is alive
         const retryKey = `${MSG_RETRY_PREFIX}${task.id}:${message.id}`;
         if (sqlite.get<number>(retryKey) != null) {
@@ -7607,6 +7804,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
           }
           store.updateLastProcessedMsgId(task.id, row.id);
+          noteDriveActivity(task.id); // a settled (dropped) message is real drive work
           noteTickProgress();
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: message ${row.id} dropped after ` +
