@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { CpuChipIcon, DocumentDuplicateIcon, MoonIcon } from '@heroicons/react/24/outline';
+import { ArrowPathIcon, CpuChipIcon, DocumentDuplicateIcon, MoonIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { Metabot } from '../../types/metabot';
 import TwinBadge from './TwinBadge';
@@ -22,6 +22,12 @@ interface MetaBotListCardProps {
   isChainSynced: boolean;
   onSyncToChain: () => void;
   onOpenMetabotInBrowser?: (metabot: Metabot) => void;
+  /**
+   * Chain-honest sync state merged by main (metabot:list). When present it
+   * wins over the legacy isChainSynced pin-id heuristic; 'partial' means the
+   * on-chain identity is registered but some info pins are still unpublished.
+   */
+  chainSyncState?: 'synced' | 'partial';
 }
 
 const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
@@ -31,6 +37,7 @@ const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
   isChainSynced,
   onSyncToChain,
   onOpenMetabotInBrowser,
+  chainSyncState,
 }) => {
   const copyGlobalMetaId = (globalMetaId: string) => {
     copyGlobalMetaIdToClipboard(globalMetaId, navigator.clipboard).then((didCopy: boolean) => {
@@ -45,6 +52,9 @@ const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
     enabled: metabot.enabled,
     variant: 'enable',
   });
+  // Main's merged state wins; the pin-id heuristic stays as the fallback for
+  // lists that predate it. Never report synced without a confirmed pin.
+  const isPartialSync = chainSyncState != null ? chainSyncState === 'partial' : !isChainSynced;
 
   return (
     <div
@@ -151,19 +161,28 @@ const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
         </p>
       )}
 
-      {!isChainSynced && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onSyncToChain();
-          }}
-          className="inline-flex items-center gap-2 text-xs text-red-500 dark:text-red-400 hover:underline"
-          title={i18nService.t('metabotUnsyncedSyncNow')}
-        >
-          <span className="inline-block h-2 w-2 rounded-full bg-red-500 dark:bg-red-400" aria-hidden />
-          <span>{i18nService.t('metabotUnsyncedSyncNow')}</span>
-        </button>
+      {isPartialSync && (
+        <div className="flex items-center justify-between gap-2">
+          <span
+            className="inline-flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400"
+            title={i18nService.t('metabotChainSyncPartialHint')}
+          >
+            <span className="inline-block h-2 w-2 rounded-full bg-amber-500 shrink-0" aria-hidden />
+            <span>{i18nService.t('metabotChainSyncPartialBadge')}</span>
+          </span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSyncToChain();
+            }}
+            className="inline-flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400 hover:underline shrink-0"
+            title={i18nService.t('metabotChainSyncResyncNow')}
+          >
+            <ArrowPathIcon className="h-3.5 w-3.5" aria-hidden />
+            <span>{i18nService.t('metabotChainSyncResyncNow')}</span>
+          </button>
+        </div>
       )}
     </div>
   );

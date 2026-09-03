@@ -76,6 +76,7 @@ bash "$SKILLS_ROOT/scheduled-task/scripts/create-task.sh" @/tmp/scheduled-task.j
 | `prompt` | ✅ | 任务运行时 Claude 收到的指令（应清晰完整） |
 | `schedule` | ✅ | 调度配置（见上方类型说明） |
 | `workingDirectory` | ❌ | 执行目录（默认空） |
+| `metabotId` | ❌ | 定时会话所属 MetaBot 的数字 id（默认 null = Twin/默认会话身份）。传入后任务将以该 bot 的身份运行：会话归属该 bot，且未显式指定 `workingDirectory` 时自动使用该 bot 的专属工作目录。适合「让某个 Worker bot 每天以本人身份跑自己的活」的场景（如新员工入职首跑、每日简报）。bot id 可通过 metabot_list / My Bots 查看 |
 | `description` | ❌ | 详细描述（默认空） |
 | `systemPrompt` | ❌ | 自定义系统提示词（默认空） |
 | `executionMode` | ❌ | `"auto"` / `"local"` / `"sandbox"`（默认 `"local"`） |

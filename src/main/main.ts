@@ -116,10 +116,13 @@ import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/med
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import {
+  applyChainSyncProgress,
   createMetaBotOnChainCore,
   deleteMetaBotCore,
+  getMetabotChainSyncState,
   listConfiguredLlmProviders,
   listMetabotsForManagement,
+  recordFullSyncOutcome,
   requireMetabotLlmIdForCreate,
   normalizeMetabotLlmEffort,
   assertCanCreateMetabot,
@@ -6373,6 +6376,16 @@ function getMetabotManageDeps(): MetabotManageDeps {
     store: getMetabotStore(),
     createWallet: () => createMetaBotWallet({}),
     requestSubsidy: requestMvcGasSubsidy,
+    // Balance pre-check seam (FR4): confirmed satoshis after the subsidy, or
+    // null when the balance API failed (gate then fails open).
+    checkWalletBalance: async (mvcAddress: string): Promise<number | null> => {
+      try {
+        const balance = await getAddressBalance('mvc', mvcAddress);
+        return balance.satoshis;
+      } catch {
+        return null;
+      }
+    },
     signOwnerBinding: signOwnerBindingForLocalUser,
     syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
     syncEditChanges: (store, input) => syncMetaBotEditChangesToChain(store, input),
@@ -10922,10 +10935,18 @@ if (!gotTheLock) {
   ipcMain.handle('metabot:list', async () => withSqliteRecovery('metabot:list', async () => {
     try {
       const dreamService = getDreamService();
-      const list = getMetabotStore().listMetabots().map((metabot) => ({
-        ...metabot,
-        dreaming: dreamService?.isDreaming(metabot.id) ?? false,
-      }));
+      const metabotStore = getMetabotStore();
+      const list = metabotStore.listMetabots().map((metabot) => {
+        // Chain-honest sync state for the My Bots partial badge (FR4):
+        // derived from the persisted pending plan + confirmed pin ids.
+        const chainSync = getMetabotChainSyncState(metabotStore, metabot);
+        return {
+          ...metabot,
+          dreaming: dreamService?.isDreaming(metabot.id) ?? false,
+          chain_sync_state: chainSync.state,
+          chain_sync_pending_steps: chainSync.pendingSteps,
+        };
+      });
       return { success: true, list };
     } catch (error) {
       rethrowSqliteWasmBoundsError(error);
@@ -11888,6 +11909,14 @@ if (!gotTheLock) {
       console.log('[MetaBot] idbots:syncMetaBot requested', { metabotId });
       const store = getMetabotStore();
       const result = await syncMetaBotToChain(store, metabotId);
+      // Keep the persisted pending plan in step with what this full resync
+      // confirmed (clears it when everything landed) so the partial badge
+      // never lingers or lies after a successful re-sync.
+      recordFullSyncOutcome(store, metabotId, {
+        plannedSteps: result.plannedSteps,
+        syncedSteps: result.syncedSteps,
+        error: result.error,
+      });
       console.log('[MetaBot] idbots:syncMetaBot result', {
         success: result.success,
         error: result.error,
@@ -11935,6 +11964,9 @@ if (!gotTheLock) {
         }
       }
       const result = await syncMetaBotEditChangesToChain(store, { ...input, ownerBindingPayload });
+      // Fold the confirmed steps into the persisted pending plan; when the
+      // last step lands this clears it and the partial badge disappears.
+      applyChainSyncProgress(store, input.metabotId, result.syncedSteps ?? []);
       console.log('[MetaBot] idbots:syncMetaBotEditChanges result', {
         success: result.success,
         error: result.error,
