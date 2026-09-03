@@ -702,6 +702,37 @@ test('P2: deliverable content_hash column + same-bytes dedupe lookup', async () 
     assert.equal(groupTaskStore.findDeliverableByContentHash(task.id, hashA, first.id)?.id, second.id);
     assert.equal(groupTaskStore.findDeliverableByContentHash(task.id, hashA, second.id)?.id, first.id);
 
+    // release-review P2: author-scoped lookup — member B re-attaching bytes
+    // identical to member A's deliverable is a DISTINCT delivery (own row,
+    // own credit); only the same author re-delivering collapses. GlobalMetaID
+    // compare is case-insensitive.
+    const authored = groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'pin-a3',
+      kind: 'metafile',
+      uri: `metafile://${'d'.repeat(64)}i0`,
+      contentHash: hashA,
+      authorGlobalmetaid: 'GMID-A',
+    });
+    assert.equal(
+      groupTaskStore.findDeliverableByContentHash(task.id, hashA, authored.id, 'GMID-B'),
+      undefined,
+      'another author\'s identical bytes never match A\'s row',
+    );
+    const authoredAgain = groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'pin-a4',
+      kind: 'metafile',
+      uri: `metafile://${'e'.repeat(64)}i0`,
+      contentHash: hashA,
+      authorGlobalmetaid: 'gmid-a',
+    });
+    assert.equal(
+      groupTaskStore.findDeliverableByContentHash(task.id, hashA, authoredAgain.id, 'GMID-A')?.id,
+      authored.id,
+      'the same author\'s earlier same-bytes row matches (case-insensitive)',
+    );
+
     // No match: unknown hash / other task / NULL hashes never collide.
     assert.equal(groupTaskStore.findDeliverableByContentHash(task.id, 'bb'.repeat(32)), undefined);
     const otherTask = groupTaskStore.createTask({

@@ -25,6 +25,14 @@ export type DownloadBytesOptions = {
   fetchImpl?: typeof fetch;
   /** When true, a local P2P hit that is not a ZIP is treated as a miss. */
   requireZip?: boolean;
+  /**
+   * Hard byte cap for callers that only want bounded payloads (hashing,
+   * sniffing). Enforced twice: a Content-Length pre-check aborts before any
+   * body byte is read, and the streamed read cancels the body the moment the
+   * cap is exceeded — a server that lies about (or omits) Content-Length
+   * cannot make the caller buffer a multi-hundred-MB body.
+   */
+  maxBytes?: number;
 };
 
 /** Strip `metafile://` and an optional file-extension suffix; return the pin id. */
@@ -80,6 +88,47 @@ async function followRedirects(
 }
 
 /**
+ * Read a response body with an optional hard byte cap: Content-Length is
+ * checked first (abort before reading), then the stream is cancelled the
+ * instant the cap is exceeded. Without a cap this is equivalent to
+ * response.arrayBuffer().
+ */
+async function readBodyCapped(response: Response, maxBytes?: number): Promise<Buffer> {
+  if (maxBytes == null || !Number.isFinite(maxBytes) || maxBytes <= 0) {
+    return Buffer.from(await response.arrayBuffer());
+  }
+  const contentLength = Number(response.headers.get('content-length') || '');
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    try { await response.body?.cancel(); } catch { /* best-effort cancel */ }
+    throw new Error(`Download aborted: content-length ${contentLength} exceeds the ${maxBytes}-byte cap.`);
+  }
+  const body = response.body;
+  if (!body) {
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > maxBytes) {
+      throw new Error(`Download aborted: body of ${buffer.length} bytes exceeds the ${maxBytes}-byte cap.`);
+    }
+    return buffer;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      total += value.byteLength;
+      if (total > maxBytes) {
+        try { await reader.cancel(); } catch { /* best-effort cancel */ }
+        throw new Error(`Download aborted: body exceeded the ${maxBytes}-byte cap.`);
+      }
+      chunks.push(value);
+    }
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+}
+
+/**
  * Download a metafile pin (or a plain http(s) URL) and return the raw bytes.
  * For metafile:// refs this always uses the accelerate + indexer content
  * endpoints — never `man.metaid.io/content/<pinId>` (that returns a JSON
@@ -104,7 +153,7 @@ export async function downloadMetafileBytes(
     if (!response.ok) {
       throw new Error(`Download failed: HTTP ${response.status} ${response.statusText}`.trim());
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
+    const buffer = await readBodyCapped(response, options?.maxBytes);
     return {
       buffer,
       contentType: response.headers.get('content-type') || '',
@@ -131,7 +180,16 @@ export async function downloadMetafileBytes(
         lastError = `HTTP ${response.status} ${response.statusText}`.trim();
         continue;
       }
-      const buffer = Buffer.from(await response.arrayBuffer());
+      let buffer: Buffer;
+      try {
+        buffer = await readBodyCapped(response, options?.maxBytes);
+      } catch (error) {
+        // A cap abort is a miss for THIS candidate — keep trying the next
+        // content source (which may serve the same bytes with a honest
+        // Content-Length or not at all).
+        lastError = error instanceof Error ? error.message : String(error);
+        continue;
+      }
       if (buffer.length === 0) {
         lastError = 'empty response body';
         continue;

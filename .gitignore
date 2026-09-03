@@ -97,6 +97,7 @@ tests/*
 !tests/groupTaskPlanChange.test.mjs
 !tests/groupTaskAcceptanceCard.test.mjs
 !tests/groupTaskDeliverableParser.test.mjs
+!tests/metafileDownloadCap.test.mjs
 !tests/groupTaskReopenAndStatus.test.mjs
 !tests/groupTaskSession.test.mjs
 !tests/groupTaskStatusEvents.test.mjs

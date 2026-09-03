@@ -7159,7 +7159,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     survivorVerification?: string;
   } => {
     const store = deps.getGroupTaskStore();
-    const hit = store.findDeliverableByContentHash(task.id, contentHash, deliverable.id);
+    // release-review P2: scope the same-bytes lookup to the SAME author —
+    // member B re-attaching bytes identical to member A's deliverable (a
+    // shared asset, a chair-directed re-upload) is a distinct delivery that
+    // must keep its row and delivery credit; only the same author
+    // re-delivering collapses. Null author keeps the legacy unscoped match
+    // (rare, legacy rows only).
+    const hit = store.findDeliverableByContentHash(
+      task.id,
+      contentHash,
+      deliverable.id,
+      deliverable.authorGlobalmetaid,
+    );
     if (!hit) return { outcome: 'none' };
     const survivor = hit.id < deliverable.id ? hit : deliverable;
     const duplicate = hit.id < deliverable.id ? deliverable : hit;
@@ -7224,7 +7235,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (!contentHashAttempted.has(attemptKey)) {
           contentHashAttempted.add(attemptKey);
           try {
-            const { buffer } = await downloadMetafileBytes(deliverableUri);
+            // maxBytes: the download aborts at the cap (Content-Length
+            // pre-check + streamed cancel) — a multi-hundred-MB deliverable
+            // must never be fully buffered into the main process just to be
+            // measured against the cap and discarded.
+            const { buffer } = await downloadMetafileBytes(deliverableUri, {
+              maxBytes: DELIVERABLE_CONTENT_HASH_MAX_BYTES,
+            });
             if (buffer.length <= DELIVERABLE_CONTENT_HASH_MAX_BYTES) {
               const contentHash = createHash('sha256').update(buffer).digest('hex');
               const dedupe = dedupeDeliverableByContentHash(task, deliverable, contentHash);
