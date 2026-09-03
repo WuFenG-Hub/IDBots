@@ -339,7 +339,7 @@ test('getPersistedCoworkEffortLevel converts legacy five-step values onto the fo
   const read = (coworkEffortLevel) =>
     withAppConfig({ coworkEffortLevel }, () => getPersistedCoworkEffortLevel());
 
-  assert.equal(read('low'), 'off', 'legacy 快速(low) means thinking off');
+  assert.equal(read('low'), 'low', 'canonical low passes through (light thinking, NOT thinking off)');
   assert.equal(read('medium'), 'low', 'legacy 标准(medium) maps to low');
   assert.equal(read('high'), 'high');
   assert.equal(read('max'), 'max');
@@ -368,4 +368,59 @@ test('resolveModelOptions normalizes legacy reasoningEffort defaults', () => {
   const options = withAppConfig(config, () => resolveModelOptions('m1'));
   assert.equal(options?.reasoningEffort, 'low', 'legacy medium default becomes low');
   assert.deepEqual(options?.thinking, { type: 'enabled' });
+});
+
+test('proxy-routed resolution pins the session upstream and scopes the base URL', async () => {
+  // One-shot cognitive callers (dreams, memory hygiene, summaries) share the
+  // proxy's singleton upstream unless they pin a session key — a concurrent
+  // configure then forwards their request to the WRONG provider (the
+  // 2026-09-03 deep-consolidation "you passed glm-5.3-flash" 400). With a
+  // session key the returned baseURL must carry the /s/<key> route so
+  // handleRequest resolves the per-session entry, not the singleton.
+  let proxy;
+  try {
+    proxy = await import('../dist-electron/main/libs/coworkOpenAICompatProxy.js');
+  } catch {
+    proxy = await import('../dist-electron/libs/coworkOpenAICompatProxy.js');
+  }
+  const {
+    startCoworkOpenAICompatProxy,
+    stopCoworkOpenAICompatProxy,
+    getCoworkOpenAICompatProxyBaseURL,
+    getUpstreamForSession,
+    clearCoworkSessionUpstream,
+  } = proxy;
+
+  await startCoworkOpenAICompatProxy();
+  try {
+    const appConfig = {
+      model: { defaultModel: 'deepseek-v4-flash', availableModels: [] },
+      providers: {
+        deepseek: {
+          enabled: true,
+          apiKey: 'sk-test',
+          baseUrl: 'https://api.deepseek.com',
+          apiFormat: 'openai',
+          models: [{ id: 'deepseek-v4-flash' }],
+        },
+      },
+    };
+
+    const unscoped = withAppConfig(appConfig, () => resolveApiConfigForModel('deepseek-v4-flash', 'local'));
+    assert.equal(unscoped.error, undefined);
+    const proxyBase = getCoworkOpenAICompatProxyBaseURL('local');
+    assert.ok(proxyBase, 'proxy base URL available while running');
+    assert.equal(unscoped.config?.baseURL, proxyBase, 'no session key keeps the legacy unscoped route');
+
+    const scoped = withAppConfig(appConfig, () =>
+      resolveApiConfigForModel('deepseek-v4-flash', 'local', 'oneshot-test-pin'));
+    assert.equal(scoped.error, undefined);
+    assert.equal(scoped.config?.baseURL, `${proxyBase}/s/oneshot-test-pin`);
+    const pinned = getUpstreamForSession('oneshot-test-pin');
+    assert.equal(pinned?.model, 'deepseek-v4-flash');
+    assert.equal(pinned?.baseURL, 'https://api.deepseek.com');
+    clearCoworkSessionUpstream('oneshot-test-pin');
+  } finally {
+    await stopCoworkOpenAICompatProxy();
+  }
 });

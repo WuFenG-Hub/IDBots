@@ -90,3 +90,61 @@ test('webSearch:false strips the built-in search from the Responses tools', () =
   // No caller tools + opt-out means the request body must omit tools entirely.
   assert.deepEqual(buildDeepSeekResponsesTools(undefined, false), []);
 });
+
+test('one-shot attempts pin their upstream under a throwaway key and clear it after', async () => {
+  // Regression cover for the 2026-09-03 cross-provider clobber: every attempt
+  // (primary AND fallback retry) must resolve with its own oneshot-* pin key
+  // so the proxy request rides the per-session registry, and the pin must be
+  // released when the attempt settles.
+  const originalLoad = Module._load;
+  const resolvedKeys = [];
+  const clearedKeys = [];
+  Module._load = function patchedLoad(request, ...rest) {
+    if (request === '../libs/claudeSettings') {
+      return {
+        resolveApiConfigForModel: (_modelId, _target, sessionKey) => {
+          resolvedKeys.push(sessionKey ?? null);
+          return { config: null, error: 'test: config unavailable' };
+        },
+      };
+    }
+    if (request === '../libs/coworkOpenAICompatProxy') {
+      return {
+        clearCoworkSessionUpstream: (key) => clearedKeys.push(key),
+      };
+    }
+    if (request === 'electron') {
+      return {
+        app: { isPackaged: false, getAppPath: () => process.cwd(), getPath: () => process.cwd() },
+        BrowserWindow: { getAllWindows: () => [] },
+        session: {},
+      };
+    }
+    return originalLoad.call(this, request, ...rest);
+  };
+  let mod;
+  try {
+    let resolved;
+    try {
+      resolved = require.resolve('../dist-electron/main/services/cognitiveChatCompletion.js');
+    } catch {
+      resolved = require.resolve('../dist-electron/services/cognitiveChatCompletion.js');
+    }
+    delete require.cache[resolved];
+    mod = require(resolved);
+  } finally {
+    Module._load = originalLoad;
+  }
+
+  await assert.rejects(
+    mod.chatCompletionWithTools(
+      [{ role: 'user', content: 'hi' }],
+      { llmId: 'glm-5.3-flash', fallbackLlmId: 'deepseek-v4-flash' }
+    ),
+    /test: config unavailable/
+  );
+  assert.equal(resolvedKeys.length, 2, 'primary + fallback attempts each resolve with their own pin');
+  assert.ok(resolvedKeys.every((key) => typeof key === 'string' && key.startsWith('oneshot-')));
+  assert.notEqual(resolvedKeys[0], resolvedKeys[1], 'each attempt pins a distinct upstream entry');
+  assert.deepEqual([...clearedKeys].sort(), [...resolvedKeys].sort(), 'every pin is cleared after the attempt');
+});
