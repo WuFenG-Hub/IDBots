@@ -2,44 +2,6 @@ import type { BrowserPageDefinition } from '@openagentinternet/agent-browser-ui/
 
 export const BROWSER_INIT_MARKER = "if (document.readyState === 'loading') {";
 
-/**
- * ABC only refreshes the shared toolbar's back/forward disabled state inside
- * syncToolbarForActiveTab(), which runs on tab open/close/switch — never after
- * in-tab navigation (pushHistory / goBack / goForward only mirror state via
- * applyActiveTabState()). Once an empty open-tab, a last-tab close, or a tab
- * switch disables the buttons, every later navigation in that tab leaves them
- * disabled forever, so Back/Forward look and behave dead in IDBots.
- * applyActiveTabState() runs after every history mutation (its own comment:
- * "Call after every navigation write and every switchTab"), so appending a
- * toolbar sync there keeps the buttons correct on every path.
- */
-export const APPLY_ACTIVE_TAB_STATE_TAIL =
-  '  syncAutoWriteContext();\n  renderUsingIdentity();\n}';
-export const APPLY_ACTIVE_TAB_STATE_TAIL_PATCHED =
-  '  syncAutoWriteContext();\n' +
-  '  renderUsingIdentity();\n' +
-  "  if (typeof syncToolbarForActiveTab === 'function') syncToolbarForActiveTab();\n}";
-export const NAV_TOOLBAR_SYNC_MARKER = "syncToolbarForActiveTab();";
-
-export function patchBrowserNavButtonSync(
-  definition: BrowserPageDefinition,
-): BrowserPageDefinition {
-  const sourceScript = definition.script || '';
-  // Already patched, or the upstream layout changed — never double-splice.
-  if (
-    sourceScript.includes(APPLY_ACTIVE_TAB_STATE_TAIL_PATCHED) ||
-    !sourceScript.includes(APPLY_ACTIVE_TAB_STATE_TAIL)
-  ) {
-    return definition;
-  }
-  return {
-    ...definition,
-    script: sourceScript.replace(
-      APPLY_ACTIVE_TAB_STATE_TAIL,
-      APPLY_ACTIVE_TAB_STATE_TAIL_PATCHED,
-    ),
-  };
-}
 const METAAPP_IFRAME_SANDBOX_RE = /(<iframe\b(?=[^>]*\bclass=["']browser-html-frame["'])(?=[^>]*\bsandbox=["'])[^>]*\bsandbox=["'])allow-scripts(["'][^>]*>)/gu;
 
 export function buildBrowserIframeBridgeScript(): string {

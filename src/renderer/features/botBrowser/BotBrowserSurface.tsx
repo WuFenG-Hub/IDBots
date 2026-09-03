@@ -15,7 +15,7 @@ import { i18nService } from '../../services/i18n';
 import { themeService } from '../../services/theme';
 import { createBrowserEndpointShim, type BrowserEndpointShimResponse } from './browserEndpointShim';
 import { createIdbotsBrowserHostAdapter } from './idbotsBrowserHostAdapter';
-import { injectBrowserIframeBridge, patchBrowserNavButtonSync, relaxMetaAppIframeSandbox } from './browserIframeBridge';
+import { injectBrowserIframeBridge, relaxMetaAppIframeSandbox } from './browserIframeBridge';
 import { useBotBrowserCapture } from './useBotBrowserCapture';
 import type {
   BotBrowserConversationRequest,
@@ -278,7 +278,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
       const buildPromise = (async () => {
         try {
           const definition = injectBrowserIframeBridge(
-            patchBrowserNavButtonSync(buildBrowserPageDefinition()),
+            buildBrowserPageDefinition(),
           );
           const html = relaxMetaAppIframeSandbox(
             await renderBrowserPageHtml(
