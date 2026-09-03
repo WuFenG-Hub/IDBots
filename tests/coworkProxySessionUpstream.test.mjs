@@ -6,10 +6,11 @@
  * clobbered each other: a request carrying model A was forwarded to provider B's
  * baseURL with provider B's apiKey.
  *
- * configureCoworkOpenAICompatProxy now additionally pins the upstream under the
- * cowork session key; handleRequest resolves that per-session entry first and
- * falls back to the singleton for non-session callers. Requires
- * `npm run compile:electron` to have run.
+ * configureCoworkOpenAICompatProxy pins a per-session upstream under the cowork
+ * session key WITHOUT republishing the shared singleton; only unscoped configures
+ * (no sessionKey — legacy / non-session callers) republish the singleton.
+ * handleRequest resolves the per-session entry first and falls back to the
+ * singleton for non-session callers. Requires `npm run compile:electron`.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,12 +39,27 @@ const upstreamB = {
   apiFormat: 'responses',
 };
 
+test('unscoped configure republishes the shared singleton', () => {
+  configureCoworkOpenAICompatProxy({ ...upstreamA });
+  // Unknown session, null, and empty all fall back to the singleton (upstreamA).
+  assert.equal(getUpstreamForSession(null).baseURL, upstreamA.baseURL);
+  assert.equal(getUpstreamForSession('').baseURL, upstreamA.baseURL);
+  assert.equal(getUpstreamForSession('never-registered').baseURL, upstreamA.baseURL);
+});
+
+test('session-scoped configure does NOT republish the shared singleton', () => {
+  configureCoworkOpenAICompatProxy({ ...upstreamA });
+  // Pinning sessionB must not clobber the singleton that an unscoped caller
+  // (memory judge, title generation) is currently relying on.
+  configureCoworkOpenAICompatProxy({ ...upstreamB, sessionKey: 'sessionB' });
+  assert.equal(getUpstreamForSession(null).baseURL, upstreamA.baseURL);
+  assert.equal(getUpstreamForSession('sessionB').baseURL, upstreamB.baseURL);
+});
+
 test('two sessions on different providers do not clobber each other', () => {
   configureCoworkOpenAICompatProxy({ ...upstreamA, sessionKey: 'sessionA' });
   configureCoworkOpenAICompatProxy({ ...upstreamB, sessionKey: 'sessionB' });
 
-  // Each session resolves its OWN upstream, even though the singleton was
-  // overwritten to upstreamB by the second call.
   assert.equal(getUpstreamForSession('sessionA').baseURL, upstreamA.baseURL);
   assert.equal(getUpstreamForSession('sessionA').apiKey, 'sk-a');
   assert.equal(getUpstreamForSession('sessionB').baseURL, upstreamB.baseURL);
@@ -51,7 +67,7 @@ test('two sessions on different providers do not clobber each other', () => {
 });
 
 test('per-session entry wins over the shared singleton', () => {
-  // sessionA pinned to A; singleton then set to B by registering sessionB.
+  configureCoworkOpenAICompatProxy({ ...upstreamA });
   configureCoworkOpenAICompatProxy({ ...upstreamA, sessionKey: 'sessionA' });
   configureCoworkOpenAICompatProxy({ ...upstreamB, sessionKey: 'sessionB' });
 
@@ -60,27 +76,20 @@ test('per-session entry wins over the shared singleton', () => {
   assert.notEqual(resolved.baseURL, upstreamB.baseURL);
 });
 
-test('non-session callers fall back to the shared singleton', () => {
-  configureCoworkOpenAICompatProxy({ ...upstreamB, sessionKey: 'sessionB' });
-  // Unknown session, null, and empty all resolve to the singleton (upstreamB).
-  assert.equal(getUpstreamForSession('never-registered').baseURL, upstreamB.baseURL);
-  assert.equal(getUpstreamForSession(null).baseURL, upstreamB.baseURL);
-  assert.equal(getUpstreamForSession('').baseURL, upstreamB.baseURL);
-});
-
 test('clearCoworkSessionUpstream makes the session fall back to the singleton', () => {
-  configureCoworkOpenAICompatProxy({ ...upstreamA, sessionKey: 'sessionA' });
+  configureCoworkOpenAICompatProxy({ ...upstreamA });
   configureCoworkOpenAICompatProxy({ ...upstreamB, sessionKey: 'sessionB' });
-  // Before clearing, sessionA is pinned to A despite the singleton being B.
-  assert.equal(getUpstreamForSession('sessionA').baseURL, upstreamA.baseURL);
+  // Before clearing, sessionB is pinned to B.
+  assert.equal(getUpstreamForSession('sessionB').baseURL, upstreamB.baseURL);
 
-  clearCoworkSessionUpstream('sessionA');
-  // After clearing, sessionA has no per-session entry and falls back to the
-  // singleton (upstreamB).
-  assert.equal(getUpstreamForSession('sessionA').baseURL, upstreamB.baseURL);
+  clearCoworkSessionUpstream('sessionB');
+  // After clearing, sessionB has no per-session entry and falls back to the
+  // singleton (upstreamA).
+  assert.equal(getUpstreamForSession('sessionB').baseURL, upstreamA.baseURL);
 });
 
 test('clearCoworkSessionUpstream is a no-op for unknown / empty keys', () => {
+  configureCoworkOpenAICompatProxy({ ...upstreamB });
   const before = getUpstreamForSession(null);
   clearCoworkSessionUpstream(null);
   clearCoworkSessionUpstream('');

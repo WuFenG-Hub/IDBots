@@ -41,11 +41,12 @@ export type OpenAICompatUpstreamConfig = {
   apiFormat?: 'anthropic' | 'openai' | 'responses';
   /**
    * Optional cowork session id. When set, configureCoworkOpenAICompatProxy
-   * additionally records this upstream under the session key so concurrent
-   * sessions on DIFFERENT openai/responses providers no longer clobber each
-   * other via the shared singleton (the historical default). The runner passes
-   * the cowork sessionId here; handleRequest then resolves the per-session
-   * entry first and falls back to the singleton when absent.
+   * records this upstream ONLY under the session key and leaves the shared
+   * singleton untouched, so concurrent sessions on DIFFERENT openai/responses
+   * providers neither clobber each other nor re-point in-flight unscoped
+   * callers (memory judge, title generation). The runner passes the cowork
+   * sessionId here; handleRequest then resolves the per-session entry first and
+   * falls back to the singleton when absent.
    */
   sessionKey?: string;
 };
@@ -4063,13 +4064,18 @@ export function configureCoworkOpenAICompatProxy(config: OpenAICompatUpstreamCon
     baseURL: config.baseURL.trim(),
     apiKey: config.apiKey?.trim(),
   };
-  // Always (re)publish the singleton so legacy / non-session callers keep
-  // working. Additionally pin a per-session copy so this session's traffic is
-  // isolated from concurrent sessions on other providers.
-  upstreamConfig = normalized;
   const sessionKey = config.sessionKey?.trim();
   if (sessionKey) {
+    // Session-scoped configure: pin ONLY this session's upstream. Do not touch
+    // the shared singleton — republishing it here is what let an in-flight
+    // unscoped caller (memory judge, title generation, summaries) get re-pointed
+    // to a different provider mid-request (400/502). Unscoped resolves set the
+    // singleton themselves via the no-sessionKey branch below.
     sessionUpstreams.set(sessionKey, normalized);
+  } else {
+    // Unscoped configure (legacy / non-session callers): republish the shared
+    // singleton so those callers keep resolving the current default provider.
+    upstreamConfig = normalized;
   }
   lastProxyError = null;
 }

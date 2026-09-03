@@ -454,9 +454,10 @@ function buildApiConfigFromMatched(
 
   // A pinned session gets the session-scoped route (/s/<key>/v1/messages) so
   // handleRequest resolves the per-session upstream registered above instead of
-  // the shared singleton. The singleton is republished on EVERY configure call,
-  // so unscoped one-shot callers (dreams, memory hygiene, summaries running in
-  // the same window) can forward a request to the wrong provider mid-flight.
+  // the shared singleton. configureCoworkOpenAICompatProxy now pins the
+  // per-session entry WITHOUT republishing the singleton, so an unscoped
+  // one-shot caller (dreams, memory hygiene, summaries running in the same
+  // window) no longer gets re-pointed to a different provider mid-flight.
   const pinKey = sessionKey?.trim();
   const scopedProxyBaseURL = pinKey
     ? `${proxyBaseURL}/s/${encodeURIComponent(pinKey)}`
