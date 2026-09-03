@@ -547,7 +547,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   const [customProviderName, setCustomProviderName] = useState('');
   const [customProviderBaseUrl, setCustomProviderBaseUrl] = useState('');
   const [customProviderApiKey, setCustomProviderApiKey] = useState('');
-  const [customProviderApiFormat, setCustomProviderApiFormat] = useState<'anthropic' | 'openai' | 'responses'>('anthropic');
+  // release-review P2: custom relays are overwhelmingly OpenAI-compatible; an
+  // ignored format dropdown must not default new providers into Anthropic
+  // Messages format (every request fails). The normalize default for stored
+  // values stays 'anthropic' for legacy-row compatibility.
+  const [customProviderApiFormat, setCustomProviderApiFormat] = useState<'anthropic' | 'openai' | 'responses'>('openai');
   const [customProviderModels, setCustomProviderModels] = useState<Model[]>([]);
   const [customModelName, setCustomModelName] = useState('');
   const [customModelId, setCustomModelId] = useState('');
@@ -1419,7 +1423,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setCustomProviderName('');
     setCustomProviderBaseUrl('');
     setCustomProviderApiKey('');
-    setCustomProviderApiFormat('anthropic');
+    setCustomProviderApiFormat('openai');
     setCustomProviderModels([]);
     setCustomModelName('');
     setCustomModelId('');
