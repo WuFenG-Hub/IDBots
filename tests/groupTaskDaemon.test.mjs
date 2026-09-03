@@ -773,6 +773,59 @@ test('fix-v2 B2: a prose-declared upstream dependency exempts the waiting worker
   }
 });
 
+test('release-review P2: the dep-wait exemption survives chair chatter pushing the assignment past the old 50-message window', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Structured dependency dispatch, then the worker ACKs and waits quietly.
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-window-dep-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: `@Coder Bot 你负责 S5 质检，[DEPENDS_ON: ${'f'.repeat(64)}i0] 等 S4 交付后开始。`,
+      chainTimestamp: Math.floor((startMs - 150_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'working-window-dep-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，等 S4', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    // 60 chair chatter messages AFTER the assignment (no @mention of the
+    // worker) — the old scan (chair's latest 50 messages) lost sight of the
+    // assignment; the widened keyset scan must still find it.
+    for (let i = 0; i < 60; i += 1) {
+      insertGroupMessage(h.db, {
+        pinId: `chair-chatter-${i}-i0`, senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+        senderName: 'Twin Bot', content: `例行同步 ${i}：其余成员进展正常。`,
+        chainTimestamp: Math.floor((startMs - 110_000 + i) / 1000),
+      });
+    }
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    assert.equal(stoppedSessions.length, 0, 'the waiting worker is not reclaimed');
+    assert.equal(
+      h.store.get('group_task_stuck_alert:1:2'),
+      undefined,
+      'no stuck alert — the assignment is still found past the old 50-message window',
+    );
+    const exemptRaw = h.store.get('group_task_dep_wait_exempt:1:2');
+    assert.ok(exemptRaw, 'dependency-wait exemption still recorded');
+    assert.match(exemptRaw, /f{64}i0/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('review fix: a delivered-then-idle worker is never flagged or reclaimed by the local-worker timeout', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },

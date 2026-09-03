@@ -6138,6 +6138,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * release-review P2: memoize the "latest chair @mention assignment" scan
+   * per (task, member) against the chair's newest message id — the widened
+   * scan window (up to 2000 chair messages) must not re-scan every tick.
+   * Only the assignment MESSAGE is memoized; tokens/pendingTokens recompute
+   * per call so an upstream delivery still lifts the wait immediately.
+   */
+  const depWaitAssignmentMemo = new Map<string, { maxChairMsgId: number; assignment: GroupTaskDaemonMessage | null }>();
+  /**
    * fix/group-task-dep-wait: the [DEPENDS_ON] state of the member's LATEST
    * chair assignment (chair-sent, @mentioning the member, skipping host
    * notices / roll calls — the same gates the ACK-watch arming path applies).
@@ -6157,22 +6165,48 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (!bot) return null;
     let assignment: GroupTaskDaemonMessage | null = null;
     try {
-      const rows = mapMessageRows(deps.getStore().getDatabase().exec(
-        `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
-                chain_timestamp, reply_pin, sender_suspect
-         FROM group_chat_messages
-         WHERE group_id = ? AND sender_global_metaid = ?
-         ORDER BY id DESC LIMIT 50`,
-        [task.groupId, chairGmid],
-      ));
-      for (const row of rows) {
-        const message = toDaemonMessage(row);
-        if (hasGroupTaskNotice(message.content) || isRollCallPresenceCheck(message.content)) continue;
-        if (isMentioned(message, bot)) {
-          assignment = message;
-          break;
+      // release-review P2: the latest chair @mention may sit far behind the
+      // chair's 50 most recent messages in a long task (host notices, roll
+      // calls, chatter to other members) — the exemption used to silently
+      // evaporate once the assignment scrolled out, reviving false stuck
+      // verdicts mid-task. Page backwards (keyset, newest first) with a
+      // bounded budget; page 1 doubles as the memo freshness probe so the
+      // steady state stays one page query per call.
+      const db = deps.getStore().getDatabase();
+      const PAGE_SIZE = 100;
+      const MAX_PAGES = 20; // 2000 chair messages — beyond any real dispatch gap
+      let beforeId = Number.MAX_SAFE_INTEGER;
+      let newestChairMsgId = 0;
+      const memoKey = `${task.id}:${member.metabotId}`;
+      for (let page = 0; page < MAX_PAGES && !assignment; page += 1) {
+        const rows = mapMessageRows(db.exec(
+          `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
+                  chain_timestamp, reply_pin, sender_suspect
+           FROM group_chat_messages
+           WHERE group_id = ? AND sender_global_metaid = ? AND id < ?
+           ORDER BY id DESC LIMIT ${PAGE_SIZE}`,
+          [task.groupId, chairGmid, beforeId],
+        ));
+        if (rows.length === 0) break;
+        if (page === 0) {
+          newestChairMsgId = toDaemonMessage(rows[0]).id;
+          const memo = depWaitAssignmentMemo.get(memoKey);
+          if (memo && memo.maxChairMsgId === newestChairMsgId) {
+            assignment = memo.assignment; // may be null — nothing changed since the last scan
+            break;
+          }
         }
+        for (const row of rows) {
+          const message = toDaemonMessage(row);
+          if (hasGroupTaskNotice(message.content) || isRollCallPresenceCheck(message.content)) continue;
+          if (isMentioned(message, bot)) {
+            assignment = message;
+            break;
+          }
+        }
+        beforeId = toDaemonMessage(rows[rows.length - 1]).id;
       }
+      depWaitAssignmentMemo.set(memoKey, { maxChairMsgId: newestChairMsgId, assignment });
     } catch {
       return null;
     }
