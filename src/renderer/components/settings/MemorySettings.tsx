@@ -1770,6 +1770,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     empty: i18nService.t('memoryCultureDistillOutcomeEmpty'),
     unparseable: i18nService.t('memoryCultureDistillOutcomeUnparseable'),
     'llm-error': i18nService.t('memoryCultureDistillOutcomeLlmError'),
+    'apply-error': i18nService.t('memoryCultureDistillOutcomeApplyError'),
     'few-members': i18nService.t('memoryCultureDistillOutcomeFewMembers'),
     'no-summary': i18nService.t('memoryCultureDistillOutcomeNoSummary'),
     disabled: i18nService.t('memoryCultureDistillOutcomeDisabled'),
@@ -1814,9 +1815,9 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           </div>
         ) : (
           <div className="space-y-1">
-            {cultureDistillationLog.slice(0, 5).map((record) => (
+            {cultureDistillationLog.slice(0, 5).map((record, index) => (
               <div
-                key={`${record.at}-${record.taskId ?? 'na'}`}
+                key={`${record.at}-${record.taskId ?? 'na'}-${index}`}
                 className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary"
               >
                 {`${new Date(record.at).toLocaleString()} · #${record.taskId ?? '-'} ${record.taskTitle} · ${cultureDistillOutcomeLabels[record.outcome] ?? record.outcome}`}

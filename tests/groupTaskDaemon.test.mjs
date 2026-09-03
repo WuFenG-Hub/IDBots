@@ -888,6 +888,59 @@ test('release-review P1: a NEW chair assignment re-arms the prose exemption wind
   }
 });
 
+test('release-review P2: the dep-wait exemption survives chair chatter pushing the assignment past the old 50-message window', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Structured dependency dispatch, then the worker ACKs and waits quietly.
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-window-dep-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: `@Coder Bot 你负责 S5 质检，[DEPENDS_ON: ${'f'.repeat(64)}i0] 等 S4 交付后开始。`,
+      chainTimestamp: Math.floor((startMs - 150_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'working-window-dep-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，等 S4', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    // 60 chair chatter messages AFTER the assignment (no @mention of the
+    // worker) — the old scan (chair's latest 50 messages) lost sight of the
+    // assignment; the widened keyset scan must still find it.
+    for (let i = 0; i < 60; i += 1) {
+      insertGroupMessage(h.db, {
+        pinId: `chair-chatter-${i}-i0`, senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+        senderName: 'Twin Bot', content: `例行同步 ${i}：其余成员进展正常。`,
+        chainTimestamp: Math.floor((startMs - 110_000 + i) / 1000),
+      });
+    }
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    await h.loop.runTick();
+    assert.equal(stoppedSessions.length, 0, 'the waiting worker is not reclaimed');
+    assert.equal(
+      h.store.get('group_task_stuck_alert:1:2'),
+      undefined,
+      'no stuck alert — the assignment is still found past the old 50-message window',
+    );
+    const exemptRaw = h.store.get('group_task_dep_wait_exempt:1:2');
+    assert.ok(exemptRaw, 'dependency-wait exemption still recorded');
+    assert.match(exemptRaw, /f{64}i0/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('review fix: a delivered-then-idle worker is never flagged or reclaimed by the local-worker timeout', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
@@ -1779,6 +1832,25 @@ test('GT-04 adjudication: pure verdicts across the historical message shapes', (
   const terminal = adjudicateStatusDirectives('重启执行\n[STATUS:EXECUTING]', 'done');
   assert.equal(terminal.instruction, null);
   assert.deepEqual(terminal.rejected, ['executing']);
+
+  // A chair tag re-asserting the LIVE status is a benign no-op — neither an
+  // instruction nor an illegal sibling (the chair prompt explicitly tells a
+  // partially confused chair to re-issue its verdict; the duplicate must not
+  // mint an illegal-transition audit row).
+  const reassert = adjudicateStatusDirectives('再次确认\n[STATUS:REVIEW]', 'review');
+  assert.equal(reassert.instruction, null);
+  assert.deepEqual(reassert.rejected, []);
+  assert.deepEqual(reassert.noOp, ['review']);
+
+  // Mixed: a legal instruction plus a same-status sibling — the sibling is a
+  // no-op, not a "rejected" tag the group gets scolded about.
+  const mixed = adjudicateStatusDirectives(
+    '重派说明如上。\n[STATUS:EXECUTING]\n此前误发的 [STATUS:REVIEW] 作废。',
+    'review',
+  );
+  assert.equal(mixed.instruction, 'executing');
+  assert.deepEqual(mixed.rejected, []);
+  assert.deepEqual(mixed.noOp, ['review']);
 });
 
 test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-line REVIEW, and the group hears why', async () => {
@@ -6158,6 +6230,91 @@ test('GT-01: a wedged turn (await never settles) is force-settled at the hard ca
     assert.ok(
       h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
       'the re-queued trigger is re-driven and the worker answer lands',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('release-review P2: a re-driven trigger waits for the session to go idle (bounded), then dispatches', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    workerCooldownMs: 0,
+    chairCooldownMs: 0,
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // First exchange creates the (task, bot) session and completes normally.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-busy-hold-m1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot first thing',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'the first exchange lands before the hold is armed',
+    );
+
+    // Simulate the post-hard-cap window: the guard is gone but the dangling
+    // job's runner turn still reports the session as running.
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    assert.ok(mapping, 'the worker session mapping exists');
+    h.coworkStore.updateSession(mapping.coworkSessionId, { status: 'running' });
+
+    h.sends.length = 0;
+    logs.length = 0;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-busy-hold-m2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot second thing',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.ok(
+      logs.some((line) => line.includes('holding the trigger for message #')),
+      'the busy session holds the trigger instead of dispatching a concurrent turn',
+    );
+    assert.ok(
+      !h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'no worker answer is dispatched while the session still runs the prior turn',
+    );
+    assert.ok(h.store.get(`group_task_deferred:${task.id}`), 'the held trigger sits in the durable queue');
+
+    // The session goes idle — the held trigger drains and the reply lands.
+    h.coworkStore.updateSession(mapping.coworkSessionId, { status: 'completed' });
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'the held trigger is dispatched once the session idles',
+    );
+
+    // Expiry branch: a session that never idles stops holding after one
+    // hard-cap window and dispatches anyway (retry budget governs).
+    h.coworkStore.updateSession(mapping.coworkSessionId, { status: 'running' });
+    h.sends.length = 0;
+    logs.length = 0;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-busy-hold-m3-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot third thing',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) => line.includes('holding the trigger for message #')),
+      'the busy hold arms again for the third trigger',
+    );
+    h.state.nowMs += 46 * 60_000; // past the 45-min hard-cap window
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) => line.includes('session-busy hold for message #') && line.includes('expired')),
+      'the hold expires after one hard-cap window',
+    );
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'the expired hold dispatches anyway',
     );
   } finally {
     h.cleanup();

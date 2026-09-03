@@ -193,25 +193,39 @@ export async function runCultureDistillation(input: {
     return { ...counts, outcome: 'empty' };
   }
   for (const proposal of proposals) {
-    const result = input.cultureStore.upsertCulture({
-      kind: normalizeTeamCultureKind(proposal.kind),
-      topic: proposal.topic,
-      text: proposal.text,
-      origin: 'distillation',
-      // Conventions steer every future task's prompt — task content is an
-      // untrusted injection surface, so distilled conventions land pending
-      // and only join injection after the owner approves them. Glossary
-      // terms and lessons stay low-risk and auto-activate.
-      pendingApproval: proposal.kind === 'convention',
-      taskId: input.task.taskId,
-    });
-    if (result.protected) counts.protectedEntries += 1;
-    else if (result.capacitySkipped) counts.capacitySkipped += 1;
-    else if (result.created || result.revised) {
-      counts.applied += 1;
-      if (proposal.kind === 'convention' && result.entry?.pendingApproval) {
-        counts.pendingConventions += 1;
+    // release-review P2: a store write that fails MID-APPLY used to throw
+    // straight out of here and land in the close-out hook's console.warn —
+    // the partial writes (and the failure itself) left no distillation
+    // record, which is exactly the invisible-failure mode this log exists
+    // to prevent. Capture the error with the counts so far and let the hook
+    // record an 'apply-error' row.
+    try {
+      const result = input.cultureStore.upsertCulture({
+        kind: normalizeTeamCultureKind(proposal.kind),
+        topic: proposal.topic,
+        text: proposal.text,
+        origin: 'distillation',
+        // Conventions steer every future task's prompt — task content is an
+        // untrusted injection surface, so distilled conventions land pending
+        // and only join injection after the owner approves them. Glossary
+        // terms and lessons stay low-risk and auto-activate.
+        pendingApproval: proposal.kind === 'convention',
+        taskId: input.task.taskId,
+      });
+      if (result.protected) counts.protectedEntries += 1;
+      else if (result.capacitySkipped) counts.capacitySkipped += 1;
+      else if (result.created || result.revised) {
+        counts.applied += 1;
+        if (proposal.kind === 'convention' && result.entry?.pendingApproval) {
+          counts.pendingConventions += 1;
+        }
       }
+    } catch (error) {
+      return {
+        ...counts,
+        outcome: 'apply-error',
+        error: `${error instanceof Error ? error.message : String(error)} (after ${counts.applied} applied; proposal topic: ${proposal.topic})`,
+      };
     }
   }
   return { ...counts, outcome: 'applied' };

@@ -37,6 +37,7 @@ export type TeamCultureDistillationOutcome =
   | 'empty'        // the LLM deliberately returned empty arrays (valid silence)
   | 'unparseable'  // the LLM reply was not usable JSON
   | 'llm-error'    // the distillation LLM call itself failed
+  | 'apply-error'  // a store write failed MID-APPLY; counts carry the partial writes
   | 'few-members'  // acceptance summary listed fewer than 2 members
   | 'no-summary'   // the task closed without a recorded acceptance summary
   | 'disabled';    // the culture master switch was off
@@ -141,7 +142,7 @@ const TEAM_CULTURE_DISTILLATION_LOG_KEY = 'teamCultureDistillationLog';
 const TEAM_CULTURE_DISTILLATION_LOG_LIMIT = 20;
 
 const DISTILLATION_OUTCOMES: readonly TeamCultureDistillationOutcome[] = [
-  'applied', 'empty', 'unparseable', 'llm-error', 'few-members', 'no-summary', 'disabled',
+  'applied', 'empty', 'unparseable', 'llm-error', 'apply-error', 'few-members', 'no-summary', 'disabled',
 ];
 
 /** Defensive read normalization for the kv-persisted log (user data). */

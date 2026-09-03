@@ -2244,12 +2244,40 @@ export class GroupTaskStore {
    * this task carrying the given sha256 content hash. Rejected rows are
    * excluded so a re-delivery of already-rejected bytes is never absorbed
    * into the rejected row (the chair's rework loop must stay visible).
+   *
+   * release-review P2: scoped to the SAME author when one is given — member B
+   * re-attaching bytes identical to member A's deliverable (a shared asset, a
+   * chair-directed re-upload) is a distinct delivery that must keep its own
+   * row and credit; only the same author re-delivering collapses (the
+   * duplicate-pin shape this dedupe exists for). Authors compare
+   * case-insensitively (GlobalMetaID convention), and a null author never
+   * matches another row (unknown provenance is not proven sameness).
    */
   findDeliverableByContentHash(
     taskId: number,
     contentHash: string,
     excludeId?: number,
+    authorGlobalmetaid?: string | null,
   ): GroupTaskDeliverable | undefined {
+    const authorKey = authorGlobalmetaid == null ? null : String(authorGlobalmetaid).trim().toLowerCase();
+    if (authorKey != null) {
+      const row = excludeId == null
+        ? this.getOne<GroupTaskDeliverableRow>(
+            `SELECT * FROM group_task_deliverables
+             WHERE task_id = ? AND content_hash = ? AND status != 'rejected'
+               AND LOWER(TRIM(author_globalmetaid)) = ?
+             ORDER BY id ASC LIMIT 1`,
+            [taskId, contentHash, authorKey],
+          )
+        : this.getOne<GroupTaskDeliverableRow>(
+            `SELECT * FROM group_task_deliverables
+             WHERE task_id = ? AND content_hash = ? AND status != 'rejected' AND id != ?
+               AND LOWER(TRIM(author_globalmetaid)) = ?
+             ORDER BY id ASC LIMIT 1`,
+            [taskId, contentHash, excludeId, authorKey],
+          );
+      return row ? rowToGroupTaskDeliverable(row) : undefined;
+    }
     const row = excludeId == null
       ? this.getOne<GroupTaskDeliverableRow>(
           `SELECT * FROM group_task_deliverables
