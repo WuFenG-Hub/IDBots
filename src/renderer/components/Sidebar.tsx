@@ -605,7 +605,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                       type="button"
                       onClick={() => void handleConfirmBatchArchive()}
                       disabled={batchSelectedIds.length === 0}
-                      className="inline-flex h-6 items-center rounded-md bg-claude-accent px-2.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-6 items-center rounded-md bg-claude-accent px-2.5 text-xs font-medium text-claude-accentInk transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {i18nService.t('batchArchiveConfirm')}
                       {batchSelectedIds.length > 0 ? ` (${batchSelectedIds.length})` : ''}

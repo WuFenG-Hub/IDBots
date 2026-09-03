@@ -702,7 +702,7 @@ export interface CoworkSession {
    * Null on legacy rows and when the session inherits the bot/global default.
    */
   modelProvider?: string | null;
-  /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
+  /** Per-session reasoning effort (off/low/high/max, or the 'default' sentinel = explicit Default pick; null = follow the model default chain). */
   effort?: string | null;
   /** Source session id when this session was created by forking another session. */
   parentSessionId?: string | null;
@@ -755,7 +755,7 @@ export interface CoworkSessionSummary {
   model?: string | null;
   /** Provider key for the session model override (see CoworkSession.modelProvider). */
   modelProvider?: string | null;
-  /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
+  /** Per-session reasoning effort (off/low/high/max, or the 'default' sentinel; null = follow the model default chain). */
   effort?: string | null;
   hiddenFromSessionList?: boolean;
   /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
@@ -1222,7 +1222,7 @@ export class CoworkStore implements MemoryBackend {
         changed = true;
       }
       if (!sessionColumns.includes('effort')) {
-        // Per-session reasoning effort (off/low/high/max; NULL = model default chain).
+        // Per-session reasoning effort (off/low/high/max/'default'; NULL = model default chain).
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN effort TEXT;');
         changed = true;
       }

@@ -944,7 +944,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    // Same contract as the new-task composer: Enter sends,
+                    // Shift+Enter inserts a newline. Enter during IME
+                    // composition confirms the candidate instead of sending.
+                    const isComposing = e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
+                    if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
                       e.preventDefault();
                       void handleSend();
                     }

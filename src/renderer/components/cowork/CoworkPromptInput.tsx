@@ -1326,7 +1326,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   <button
                     type="button"
                     onClick={handleStopClick}
-                    className="p-2 rounded-xl bg-claude-accent hover:bg-claude-accentHover text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
+                    className="p-2 rounded-xl bg-claude-accent hover:bg-claude-accentHover text-claude-accentInk transition-all shadow-subtle hover:shadow-card active:scale-95"
                     aria-label={i18nService.t('stop')}
                   >
                     <StopIcon className="h-5 w-5" />
@@ -1336,7 +1336,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                     type="button"
                     onClick={() => { void handleSubmit(); }}
                     disabled={!canSubmit}
-                    className="p-2 rounded-xl bg-claude-accent hover:bg-claude-accentHover text-white transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="p-2 rounded-xl bg-claude-accent hover:bg-claude-accentHover text-claude-accentInk transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                     aria-label={isSteerSubmit ? i18nService.t('coworkSendSteer') : i18nService.t('sendMessage')}
                   >
                     <PaperAirplaneIcon className="h-5 w-5" />
@@ -1375,7 +1375,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               <button
                 type="button"
                 onClick={handleStopClick}
-                className="flex-shrink-0 p-2 rounded-lg bg-claude-accent hover:bg-claude-accentHover text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
+                className="flex-shrink-0 p-2 rounded-lg bg-claude-accent hover:bg-claude-accentHover text-claude-accentInk transition-all shadow-subtle hover:shadow-card active:scale-95"
                 aria-label={i18nService.t('stop')}
               >
                 <StopIcon className="h-4 w-4" />
@@ -1385,7 +1385,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                 type="button"
                 onClick={() => { void handleSubmit(); }}
                 disabled={!canSubmit}
-                className="flex-shrink-0 p-2 rounded-lg bg-claude-accent hover:bg-claude-accentHover text-white transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex-shrink-0 p-2 rounded-lg bg-claude-accent hover:bg-claude-accentHover text-claude-accentInk transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                 aria-label={isSteerSubmit ? i18nService.t('coworkSendSteer') : i18nService.t('sendMessage')}
               >
                 <PaperAirplaneIcon className="h-4 w-4" />

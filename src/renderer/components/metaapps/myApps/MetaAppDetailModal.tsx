@@ -60,7 +60,7 @@ const MetaAppDetailModal: React.FC<MetaAppDetailModalProps> = ({ record, onRun, 
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             <button type="button" onClick={onRun} disabled={record.disabled}
-              className="px-2.5 py-1 text-xs rounded-lg bg-claude-accent text-white hover:opacity-90 disabled:opacity-40">
+              className="px-2.5 py-1 text-xs rounded-lg bg-claude-accent text-claude-accentInk hover:opacity-90 disabled:opacity-40">
               {t('run') || 'Run'}
             </button>
             <button type="button" onClick={onShare} className={`${btnBase} dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text`}>

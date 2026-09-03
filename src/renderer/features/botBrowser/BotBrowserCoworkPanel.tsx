@@ -8,7 +8,7 @@ import { buildSessionComposerCommands } from '../../components/cowork/composerCo
 import FolderSelectorPopover from '../../components/cowork/FolderSelectorPopover';
 import MetaBotSelector, { type MetaBotForSelector } from '../../components/cowork/MetaBotSelector';
 import ModelEffortPicker from '../../components/ModelEffortPicker';
-import { convertLegacyEffortLevel } from '../../services/modelCatalog';
+import { effortDisplayForPick, effortForSessionStart, type ComposerModelEffortPick } from '../../services/modelCatalog';
 import { ActiveSkillBadge } from '../../components/skills';
 import { RootState } from '../../store';
 import { clearActiveSkills } from '../../store/slices/skillSlice';
@@ -203,13 +203,10 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
 
   const effectiveMetabotId = selectedMetabotId ?? metabots[0]?.id ?? null;
   const selectedMetabot = metabots.find((m) => m.id === effectiveMetabotId) ?? null;
-  // Pending model+effort for the session about to start from this panel;
-  // nulls = follow the selected bot's brain (its model and effort).
-  const [pendingModelEffort, setPendingModelEffort] = useState<{
-    modelId: string | null;
-    providerKey?: string | null;
-    effort: string | null;
-  } | null>(null);
+  // Pending model+effort for the session about to start from this panel. The
+  // whole state being null = follow the selected bot's brain (its model and
+  // effort); inside a pick, effort null is an EXPLICIT "Default" choice.
+  const [pendingModelEffort, setPendingModelEffort] = useState<ComposerModelEffortPick | null>(null);
 
   // Slash commands for the '+' menu: browser sessions are regular cowork
   // sessions, so once one is live the full session command set applies; in
@@ -257,7 +254,7 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
       await browserCoworkService.start(prompt, effectiveMetabotId, startCwd, {
         model: pendingModelEffort?.modelId ?? undefined,
         modelProvider: pendingModelEffort?.providerKey ?? undefined,
-        effort: pendingModelEffort?.effort ?? undefined,
+        effort: effortForSessionStart(pendingModelEffort),
       }, skills, startProjectId);
       setPendingModelEffort(null);
     }
@@ -377,8 +374,9 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
               providerKey: pendingModelEffort?.modelId == null
                 ? (selectedMetabot?.llm_provider ?? null)
                 : (pendingModelEffort?.providerKey ?? null),
-              effort: (pendingModelEffort?.effort
-                ?? (selectedMetabot?.llm_effort ? convertLegacyEffortLevel(selectedMetabot.llm_effort) : null)) as ReturnType<typeof convertLegacyEffortLevel>,
+              // An explicit pick sticks as chosen (null = Default); only a
+              // missing pick resolves the bot brain fallback.
+              effort: effortDisplayForPick(pendingModelEffort, [selectedMetabot?.llm_effort ?? null]),
             }}
             onChange={(value) => {
               setPendingModelEffort({

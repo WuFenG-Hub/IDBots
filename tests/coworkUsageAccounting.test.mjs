@@ -60,6 +60,19 @@ test('UsageStatsChip renders the per-model breakdown with i18n in zh and en', ()
   assert.ok(occurrences >= 2, 'coworkUsagePerModelTitle must exist in both zh and en dictionaries');
 });
 
+test('UsageStatsChip omits the per-round T1..TN miss-event rows (panel declutter)', () => {
+  const chip = read('src/renderer/components/cowork/UsageStatsChip.tsx');
+
+  // The per-round cache-miss rows (T{n} · reason · tokens) were removed at
+  // user request; the aggregate cache-hit rates carry the signal. Guard
+  // against the detail rows creeping back.
+  assert.ok(!chip.includes('cacheMissEvents'), 'the chip must not render per-round miss events');
+  assert.ok(!chip.includes('recentMisses'), 'the recent-misses list must stay removed');
+  // The aggregate rows stay.
+  assert.match(chip, /deepseekCacheHitRateAll/);
+  assert.match(chip, /deepseekLastTurnCacheHitRate/);
+});
+
 test('DeepSeek cost/totals never double-count input_tokens (it already includes cache tokens)', () => {
   const chip = read('src/renderer/components/cowork/UsageStatsChip.tsx');
 

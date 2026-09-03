@@ -412,7 +412,7 @@ const McpManager: React.FC<McpManagerProps> = ({
                 onClick={() => setActiveCategory(cat.id)}
                 className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${
                   activeCategory === cat.id
-                    ? 'bg-claude-accent text-white'
+                    ? 'bg-claude-accent text-claude-accentInk'
                     : 'dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover border dark:border-claude-darkBorder border-claude-border'
                 }`}
               >

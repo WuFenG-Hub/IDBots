@@ -1125,7 +1125,7 @@ const App: React.FC = () => {
         <div className="flex-1 flex items-center justify-center dark:bg-claude-darkBg bg-claude-bg">
           <div className="flex flex-col items-center space-y-4">
             <div className="w-16 h-16 rounded-full bg-gradient-to-br from-claude-accent to-claude-accentHover flex items-center justify-center shadow-glow-accent animate-pulse">
-              <ChatBubbleLeftRightIcon className="h-8 w-8 text-white" />
+              <ChatBubbleLeftRightIcon className="h-8 w-8 text-claude-accentInk" />
             </div>
             <div className="w-24 h-1 rounded-full bg-claude-accent/20 overflow-hidden">
               <div className="h-full w-1/2 rounded-full bg-claude-accent animate-shimmer" />

@@ -1504,7 +1504,7 @@ const GigSquareMyServicesModal: React.FC<GigSquareMyServicesModalProps> = ({
                             disabled={isModifySubmitting}
                             className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
                               modifyDraft.paymentTiming === item.value
-                                ? 'bg-claude-accent text-white'
+                                ? 'bg-claude-accent text-claude-accentInk'
                                 : 'text-claude-textSecondary hover:bg-claude-surfaceHover dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover'
                             }`}
                           >

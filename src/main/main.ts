@@ -8322,8 +8322,10 @@ if (!gotTheLock) {
         null,
         options.permissionMode ?? 'default',
         options.model?.trim() || null,
-        // undefined effort keeps the tiered defaults (bot brain → global);
-        // an explicit '' pick means "model default" and is persisted as null.
+        // undefined effort keeps the tiered defaults (bot brain → global); an
+        // explicit pick persists as sent — the 'default' sentinel records an
+        // explicit "Default" choice (model default wins over brain/global),
+        // '' normalizes to null (tiered defaults).
         options.effort === undefined ? null : (options.effort?.trim() || null),
         options.modelProvider?.trim() || null,
         options.projectId?.trim() || null,
@@ -9412,7 +9414,7 @@ if (!gotTheLock) {
   ipcMain.handle('cowork:session:setModel', async (_event, options: {
     sessionId: string;
     model: string | null;
-    /** Optional per-session effort (off/low/high/max); undefined leaves it unchanged. */
+    /** Optional per-session effort (off/low/high/max, or the 'default' sentinel for an explicit Default pick); undefined leaves it unchanged. */
     effort?: string | null;
     /** Provider key the model was picked from; required when model ids collide. */
     modelProvider?: string | null;

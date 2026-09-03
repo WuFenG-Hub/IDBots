@@ -201,7 +201,7 @@ const SkillsPopover: React.FC<SkillsPopoverProps> = ({
               >
                 <div className={`mt-0.5 w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${
                   isActive
-                    ? 'bg-claude-accent text-white'
+                    ? 'bg-claude-accent text-claude-accentInk'
                     : 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover'
                 }`}>
                   {isActive ? (

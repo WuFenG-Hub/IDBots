@@ -8,6 +8,9 @@ import {
   buildModelGroupsFromConfig,
   resolveBrainModelInGroups,
   convertLegacyEffortLevel,
+  LLM_EFFORT_DEFAULT_SENTINEL,
+  effortDisplayForPick,
+  effortForSessionStart,
 } from '../src/renderer/services/modelCatalog';
 
 const configWithCustomProvider = {
@@ -140,4 +143,33 @@ test('convertLegacyEffortLevel mirrors the main-process ladder', () => {
   assert.equal(convertLegacyEffortLevel('max'), 'max');
   assert.equal(convertLegacyEffortLevel('minimal'), 'off');
   assert.equal(convertLegacyEffortLevel('xhigh'), 'max');
+  // The explicit-Default sentinel converts to null (model default) for display.
+  assert.equal(convertLegacyEffortLevel(LLM_EFFORT_DEFAULT_SENTINEL), null);
+  assert.equal(convertLegacyEffortLevel('default'), null);
+});
+
+test('effortDisplayForPick keeps an explicit pick and resolves fallbacks only when unpicked', () => {
+  // Explicit Default pick sticks — it must not snap to the brain/global rung.
+  assert.equal(effortDisplayForPick({ modelId: 'm', effort: null }, ['max', 'high']), null);
+  // Explicit rung pick sticks.
+  assert.equal(effortDisplayForPick({ modelId: 'm', effort: 'low' }, ['max']), 'low');
+  // No pick at all: first valid fallback rung wins (brain, then global).
+  assert.equal(effortDisplayForPick(null, ['max', 'high']), 'max');
+  assert.equal(effortDisplayForPick(null, [null, 'high']), 'high');
+  assert.equal(effortDisplayForPick(null, [null, null]), null);
+  assert.equal(effortDisplayForPick(null, []), null);
+  // Legacy brain tokens convert at the boundary.
+  assert.equal(effortDisplayForPick(null, ['medium', null]), 'low');
+});
+
+test('effortForSessionStart carries an explicit Default pick as the sentinel', () => {
+  // No pick: undefined keeps the main-process tiered defaults.
+  assert.equal(effortForSessionStart(null), undefined);
+  assert.equal(effortForSessionStart(undefined), undefined);
+  // Explicit rung picks pass through.
+  assert.equal(effortForSessionStart({ modelId: 'm', effort: 'low' }), 'low');
+  assert.equal(effortForSessionStart({ modelId: null, effort: 'max' }), 'max');
+  // Explicit Default pick becomes the 'default' sentinel.
+  assert.equal(effortForSessionStart({ modelId: 'm', effort: null }), LLM_EFFORT_DEFAULT_SENTINEL);
+  assert.equal(effortForSessionStart({ modelId: 'm', effort: null }), 'default');
 });
