@@ -20,6 +20,7 @@ import { ensureMetaIDKnowledgeSchema } from './metaidKnowledgeStore';
 import { ensureKnowledgeBaseSchema } from './knowledgeBaseStore';
 import { ensureMetawebStudyJobSchema } from './metawebStudyJobStore';
 import { ensureChainContentHistorySchema } from './chainContentHistoryStore';
+import { ensureBotWalletTransferSchema } from './services/botWalletTransferStore';
 
 type ChangePayload<T = unknown> = {
   key: string;
@@ -2177,6 +2178,10 @@ export class SqliteStore {
     // chain (buzz/simplenote/metafile/…) and what it fully read from the
     // chain. Same idempotent pattern.
     ensureChainContentHistorySchema(this.db);
+    // Bot wallet transfer ledger (R2 audit): every wallet_transfer attempt
+    // (broadcast/refused/failed) with txid/from/to/amount/fee/session.
+    // Same idempotent pattern.
+    ensureBotWalletTransferSchema(this.db);
 
     this.save();
   }
