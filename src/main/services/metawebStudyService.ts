@@ -252,7 +252,16 @@ export class MetawebStudyService {
       let memoryEnabled = true;
       try {
         memoryEnabled = this.isMemoryEnabled ? this.isMemoryEnabled(job.metabotId) : true;
-      } catch {
+      } catch (policyError) {
+        // release-review P2: an unreadable policy (e.g. mid sqlite recovery)
+        // used to skip the job with zero trace — a bot stuck in recovery had
+        // its study jobs silently pending every 30-min tick. Log it like every
+        // other failure path in this tick does.
+        console.warn(
+          '[MetawebStudy] memory policy unreadable; job kept pending for the next tick:',
+          `job=${job.id} metabot=${job.metabotId}`,
+          policyError instanceof Error ? policyError.message : String(policyError),
+        );
         continue;
       }
       if (!memoryEnabled) {
