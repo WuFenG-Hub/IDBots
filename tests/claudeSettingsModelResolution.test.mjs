@@ -339,7 +339,7 @@ test('getPersistedCoworkEffortLevel converts legacy five-step values onto the fo
   const read = (coworkEffortLevel) =>
     withAppConfig({ coworkEffortLevel }, () => getPersistedCoworkEffortLevel());
 
-  assert.equal(read('low'), 'off', 'legacy 快速(low) means thinking off');
+  assert.equal(read('low'), 'low', 'canonical low passes through (light thinking, NOT thinking off)');
   assert.equal(read('medium'), 'low', 'legacy 标准(medium) maps to low');
   assert.equal(read('high'), 'high');
   assert.equal(read('max'), 'max');
