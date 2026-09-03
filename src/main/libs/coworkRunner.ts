@@ -320,6 +320,10 @@ const SANDBOX_HISTORY_MAX_MESSAGES = 24;
 const SANDBOX_HISTORY_MAX_TOTAL_CHARS = 32000;
 const SANDBOX_HISTORY_MAX_MESSAGE_CHARS = 4000;
 const STREAM_UPDATE_THROTTLE_MS = 90;
+// Auto-resume budget for a DSH turn that died on a transient environmental
+// error (see TRANSIENT_TURN_ERROR_CODES): how many times the runner feeds the
+// resume cue back before settling the turn as failed.
+const DSH_TRANSIENT_TURN_MAX_RESUMES = 3;
 const STREAMING_TEXT_MAX_CHARS = 120_000;
 const STREAMING_THINKING_MAX_CHARS = 60_000;
 const TOOL_RESULT_MAX_CHARS = 120_000;
@@ -7646,16 +7650,18 @@ export class CoworkRunner extends EventEmitter {
       // EMPTY_RESPONSE): the runtime's step-level retry ladder has already
       // stretched to ~3 minutes; if the turn STILL died, the machine sat
       // through a real network outage (e.g. a Wi-Fi roam taking 30–90s to
-      // settle). Resume the same DSH session once — full history is preserved
-      // and no tool side effects replay — instead of failing the whole task.
-      // A second consecutive transient failure falls through to the error
-      // settlement below; non-transient codes never enter this path.
-      if (outcome.kind === 'error' && !activeSession.abortController.signal.aborted && isTransientDshTurnError(outcome)) {
+      // settle, or a provider cutting a long stream). Resume the same DSH
+      // session up to DSH_TRANSIENT_TURN_MAX_RESUMES times — full history is
+      // preserved and no tool side effects replay — instead of failing the
+      // whole task. A transient failure past the budget falls through to the
+      // error settlement below; non-transient codes never enter this path.
+      for (let resumeAttempt = 1; resumeAttempt <= DSH_TRANSIENT_TURN_MAX_RESUMES; resumeAttempt += 1) {
+        if (outcome.kind !== 'error' || activeSession.abortController.signal.aborted || !isTransientDshTurnError(outcome)) break;
         coworkLog(
           'WARN',
           'runDshSessionLocal',
-          'Transient DSH turn failure — auto-resuming turn once after provider/network blip',
-          { sessionId, code: outcome.error?.code, message: outcome.error?.message }
+          'Transient DSH turn failure — auto-resuming turn after provider/network blip',
+          { sessionId, code: outcome.error?.code, message: outcome.error?.message, resumeAttempt, maxResumes: DSH_TRANSIENT_TURN_MAX_RESUMES }
         );
         outcome = await runGuardedTurn(TRANSIENT_TURN_RESUME_PROMPT);
       }
