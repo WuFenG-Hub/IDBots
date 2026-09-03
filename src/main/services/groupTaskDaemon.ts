@@ -71,6 +71,7 @@ import {
   copyCheckpointNeedDecision,
   copyLongTurnHeartbeat,
   copyLongTurnInProgress,
+  buildStatusDirectiveNote,
   hasGroupTaskNotice,
   isRollCallPresenceCheck,
 } from '../libs/groupTaskCopy';
@@ -124,43 +125,114 @@ const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
  * A chair plan message routinely quotes *descriptive* tags in its body (the
  * goal/acceptance-criteria text says things like "通过后发 [STATUS:REVIEW]")
  * before the instruction tag the protocol template requires at the message
- * end. The old single-match parse let the descriptive tag win, the resulting
- * illegal planning→review directive was swallowed, and the task stayed pinned
- * in planning forever (task #47). Directive semantics: the LAST tag in the
- * message is the chair's instruction.
+ * end. GT-04 (task #56) replaced the old "last end-line tag wins" rule with
+ * legality-aware adjudication — see adjudicateStatusDirectives below.
  */
 const STATUS_TAG_ALL = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
-/**
- * G-03 (task #47) + task #52: the instruction lives in the message-END FIELD —
- * the last non-empty line. G-03 first required the tag to be the absolute last
- * thing in the message, which real chair verdicts break: task #52's final
- * verdict ended `[STATUS:REVIEW] — 本任务全部完成，现等待 Sunny 在 Tasks UI 验收。`
- * and the strict form read the instruction as a descriptive body tag, pinning
- * the task in executing forever (stall nudges, zombie worker re-dispatch).
- * The end field is now LINE-granular: any [STATUS:*] tag on the last non-empty
- * line is the instruction (the LAST one when the line carries several). Tags on
- * earlier lines stay descriptive prose quoted from the goal/acceptance criteria
- * (task #47 protection unchanged) — the criteria block always precedes the
- * instruction footer. Detection stays regex-only over an ASCII protocol label;
- * no natural-language intent is inferred here.
- */
-const STATUS_TAG_END_LINE = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
 
 /**
- * Extract the chair's status instruction from a message body: the LAST tag on
- * the last non-empty line. Returns [] when the end field carries no tag —
- * tags on earlier lines are deliberately ignored (see STATUS_TAG_END_LINE).
+ * GT-04 (task #56): quote stripping — [STATUS:*] tags inside fenced code
+ * blocks or inline `code` spans are CITATIONS, never instructions. This is the
+ * escape mechanism the protocol previously lacked (and what host notices use
+ * when they must talk ABOUT tag syntax). Applies to status-directive parsing
+ * only; other tag families keep their own rules.
  */
-function extractStatusDirectives(content: string): Array<'executing' | 'review'> {
-  const lines = String(content ?? '').trim().split(/\r?\n/);
+function stripStatusQuotedCode(content: string): string {
+  return String(content ?? '')
+    .replace(/```[\s\S]*?(?:```|$)/g, '')
+    .replace(/`[^`\n]*`/g, '');
+}
+
+/** Chair-movable transitions (LEGAL_TRANSITIONS minus the owner-only terminal moves). */
+const CHAIR_STATUS_MOVES: Record<string, Array<'executing' | 'review'>> = {
+  planning: ['executing'],
+  executing: ['review'],
+  review: ['executing'],
+};
+
+export interface StatusDirectiveVerdict {
+  /** The instruction to apply: the highest-priority candidate that is legal
+   * from the current status (null when none qualifies). */
+  instruction: 'executing' | 'review' | null;
+  /** Candidate tags rejected as illegal from the current status (deduped). */
+  rejected: Array<'executing' | 'review'>;
+  /** Tags treated as descriptive prose, never instructions (deduped). */
+  descriptive: Array<'executing' | 'review'>;
+  /** Total [STATUS:*] occurrences found after code-quote stripping. */
+  tagCount: number;
+}
+
+/**
+ * GT-04 (task #56): legality-aware status-directive adjudication.
+ *
+ * Candidate tags, in priority order:
+ *  a) the LAST tag on the last non-empty line (the protocol instruction field —
+ *     G-03/task #52 semantics unchanged, mid-line on that line still counts);
+ *  b) STANDALONE tag lines elsewhere in the body (a tag alone on its own line
+ *     is unambiguous protocol formatting — this is what saved task #56, whose
+ *     real [STATUS:EXECUTING] instruction sat on its own line mid-message while
+ *     the final line merely mentioned `[STATUS:REVIEW]` in prose).
+ *
+ * Everything else — prose-embedded tags on earlier lines, non-final tags on the
+ * last line, and anything inside code quotes — is descriptive text.
+ *
+ * The FIRST candidate whose transition is legal from the current status is the
+ * instruction; remaining candidates are rejected (illegal). Previously the
+ * end-line tag always won and an illegal one sank the WHOLE message's intent
+ * (task #56: planning pinned forever because the descriptive end-line REVIEW
+ * was rejected while the legitimate body EXECUTING was ignored).
+ *
+ * Pure + exported for unit tests.
+ */
+export function adjudicateStatusDirectives(
+  content: string,
+  currentStatus: string,
+): StatusDirectiveVerdict {
+  const text = stripStatusQuotedCode(content);
+  const lines = text.split(/\r?\n/);
+  let endLineIndex = -1;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i].trim();
-    if (!line) continue; // trailing blank lines are not the end field
-    const tags = [...line.matchAll(STATUS_TAG_END_LINE)];
-    if (tags.length === 0) return [];
-    return [tags[tags.length - 1][1].toLowerCase() as 'executing' | 'review'];
+    if (lines[i].trim()) {
+      endLineIndex = i;
+      break;
+    }
   }
-  return [];
+  type Occurrence = { tag: 'executing' | 'review'; lineIndex: number; standalone: boolean };
+  const occurrences: Occurrence[] = [];
+  lines.forEach((rawLine, lineIndex) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    for (const match of line.matchAll(STATUS_TAG_ALL)) {
+      const tag = match[1].toLowerCase() as 'executing' | 'review';
+      const prefix = line.slice(0, match.index).trim();
+      const suffix = line.slice(match.index + match[0].length).trim();
+      occurrences.push({ tag, lineIndex, standalone: prefix.length === 0 && suffix.length === 0 });
+    }
+  });
+  // (a) the end-line instruction field: the LAST tag on the last non-empty
+  // line (any position on that line — the task #52 verdict shape).
+  const endLineOccurrences = occurrences.filter((occ) => occ.lineIndex === endLineIndex);
+  const candidates: Occurrence[] = [];
+  if (endLineOccurrences.length > 0) candidates.push(endLineOccurrences[endLineOccurrences.length - 1]);
+  // (b) standalone tag lines elsewhere, in message order.
+  for (const occ of occurrences) {
+    if (occ.standalone && occ.lineIndex !== endLineIndex) candidates.push(occ);
+  }
+  const candidateSet = new Set(candidates);
+  const legal = CHAIR_STATUS_MOVES[currentStatus] ?? [];
+  const instructionOcc = candidates.find((occ) => legal.includes(occ.tag)) ?? null;
+  const rejected = [...new Set(
+    candidates.filter((occ) => occ !== instructionOcc && !legal.includes(occ.tag)).map((occ) => occ.tag),
+  )];
+  const descriptive = [...new Set(
+    occurrences.filter((occ) => !candidateSet.has(occ)).map((occ) => occ.tag),
+  )];
+  return {
+    instruction: instructionOcc?.tag ?? null,
+    rejected,
+    descriptive,
+    tagCount: occurrences.length,
+  };
 }
 /**
  * HITL checkpoint tags (chair-only, same trust rule as STATUS tags):
@@ -3555,13 +3627,58 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * GT-04 (task #56): post the status-parser explanation INTO the group as a
+   * host notice (never protocol input — hasGroupTaskNotice exempts it from
+   * re-parsing, and the notice's own tag citations are backtick-wrapped).
+   * Posted as the chair and reply-chained to the offending message so the
+   * chair's next turn reads the correction in context. Failures only log —
+   * a notice must never block message processing.
+   */
+  const postStatusDirectiveNote = async (
+    task: GroupTask,
+    chairMember: GroupTaskMember | undefined,
+    message: GroupTaskDaemonMessage,
+    verdict: StatusDirectiveVerdict,
+    appliedTag: 'executing' | 'review' | null,
+    parseStatus: string,
+  ): Promise<void> => {
+    if (!chairMember?.metabotId) return;
+    try {
+      const liveStatus = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
+      const sent = await postGroupMessage(
+        task.id,
+        chairMember.metabotId,
+        buildStatusDirectiveNote({
+          taskId: task.id,
+          taskTitle: task.title,
+          appliedTag,
+          fromStatus: parseStatus,
+          rejected: verdict.rejected.map((tag) => ({ tag, fromStatus: parseStatus })),
+          legalMoves: CHAIR_STATUS_MOVES[liveStatus] ?? [],
+          legalMovesStatus: liveStatus,
+        }),
+        { replyPin: message.pinId ?? undefined },
+      );
+      rememberDaemonChairPin(task.id, sent.pinId);
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: status-parser note post failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  /**
    * Protocol tags on EVERY ingested message (before/independent of reply gating):
    * - [DELIVERABLE]: record one pending deliverable row per valid tag
    *   candidate (deduped by msg_pin_id + uri + kind; corrections supersede in
    *   place) and compute host verification notes for the chair.
-   * - [STATUS:EXECUTING|REVIEW]: honored only from the task chair bot; illegal
-   *   transitions are silently ignored; a real transition fires emitTaskEvent,
-   *   entering review triggers the owner report, re-entering executing clears it.
+   * - [STATUS:EXECUTING|REVIEW]: honored only from the task chair bot, through
+   *   GT-04 legality-aware adjudication (the first candidate legal from the
+   *   live status wins; illegal candidates produce a transition audit row, an
+   *   origin-session anomaly, and an in-group status-parser note — never a
+   *   silent drop); a real transition fires emitTaskEvent, entering review
+   *   triggers the owner report, re-entering executing clears it.
    * Returns the verification notes for this message (empty when none).
    */
   const processMessageTags = async (
@@ -3924,25 +4041,34 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
-    const statusDirectives = extractStatusDirectives(content);
-    if (statusDirectives.length > 0) {
+    // GT-04 (task #56): legality-aware adjudication replaces the old
+    // "last end-line tag wins, everything else ignored" rule. The verdict is
+    // computed against the LIVE task status so a descriptive end-line tag can
+    // no longer sink a legitimate standalone instruction line mid-message.
+    const statusAtParse = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
+    const statusVerdict = adjudicateStatusDirectives(content, statusAtParse);
+    if (statusVerdict.tagCount > 0) {
       const chairMember = members.find((member) => member.role === 'chair');
       const chairGlobalMetaId = (chairMember?.globalmetaid ?? '').trim();
       const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
-      if (chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId) {
-        // G-03: the instruction tag is the one in the message-end field (the
-        // last non-empty line — protocol template). Any other tag in the body
-        // is descriptive text quoted from the goal/acceptance criteria —
-        // logged so the parse is never a silent judgment call, but never applied.
-        const nextStatus = statusDirectives[statusDirectives.length - 1];
-        const bodyTagCount = [...content.matchAll(STATUS_TAG_ALL)].length;
-        if (bodyTagCount > 1) {
+      const isChairSender = Boolean(
+        chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId,
+      );
+      if (isChairSender && statusVerdict.instruction != null) {
+        // G-03/GT-04: the instruction is the first candidate legal from the
+        // live status (message-end field first, then standalone body lines).
+        // Any remaining candidate is an illegal sibling the group must hear
+        // about (below); pure prose citations stay descriptive text.
+        const nextStatus = statusVerdict.instruction;
+        if (statusVerdict.tagCount > 1) {
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: chair message carries ${bodyTagCount} [STATUS:*] tags — ` +
-            `applying the message-end one ([STATUS:${nextStatus.toUpperCase()}]) as the instruction, ` +
-            `earlier tags treated as descriptive text`,
+            `[GroupTaskDaemon] Task ${task.id}: chair message carries ${statusVerdict.tagCount} [STATUS:*] tags — ` +
+            `applying [STATUS:${nextStatus.toUpperCase()}] as the instruction` +
+            `${statusVerdict.rejected.length > 0 ? `, rejected illegal sibling(s): ${statusVerdict.rejected.map((tag) => `[STATUS:${tag.toUpperCase()}]`).join(', ')}` : ''}` +
+            `${statusVerdict.descriptive.length > 0 ? ', remaining tags treated as descriptive text' : ''}`,
           );
         }
+        let appliedStatusDirective = false;
         try {
           const beforeStatus = store.getTaskById(task.id)?.status;
           // Improvement #2 (v1.3): review re-entry debounce — a [STATUS:REVIEW]
@@ -4173,6 +4299,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               }
             }
           }
+          appliedStatusDirective = true;
         } catch (error) {
           if (error instanceof StaleReviewReentryError) {
             emitLog(
@@ -4235,24 +4362,65 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             throw error;
           }
         }
-      }
-    } else {
-      // G-03 observability: a chair message whose BODY cites [STATUS:*] tags
-      // without a message-end instruction tag must not transition silently —
-      // leave a log line so a stuck task is always diagnosable (task #47's
-      // "zero transitions, zero logs" failure mode).
-      const bodyTags = [...content.matchAll(STATUS_TAG_ALL)].map((match) => match[1].toUpperCase());
-      if (bodyTags.length > 0) {
-        const chairMemberForTags = members.find((member) => member.role === 'chair');
-        const chairGmidForTags = (chairMemberForTags?.globalmetaid ?? '').trim();
-        const senderGmidForTags = (message.senderGlobalMetaId ?? '').trim();
-        if (chairGmidForTags && senderGmidForTags && senderGmidForTags === chairGmidForTags) {
+        // GT-04: when the applied instruction had illegal siblings, tell the
+        // GROUP — the rejected part of the chair's intent must be visible
+        // where the chair can read and correct it, not silently dropped
+        // (task #56: the group watched a dispatch land while the end-line
+        // REVIEW mention silently died).
+        if (statusVerdict.rejected.length > 0) {
+          await postStatusDirectiveNote(task, chairMember, message, statusVerdict, nextStatus, statusAtParse);
+        }
+      } else if (isChairSender && statusVerdict.rejected.length > 0) {
+        // GT-04: EVERY candidate was illegal from the live status — the old
+        // code swallowed this entirely (task #56 pinned in planning forever
+        // with zero transitions, zero group feedback). Keep the GT#47 R2
+        // audit row + origin-session anomaly, and add the missing piece: an
+        // in-group explanation the chair (and every participant) can act on.
+        const rejectedTag = statusVerdict.rejected[0];
+        const rejectedFrom = store.getTaskById(task.id)?.status ?? null;
+        const chairActor = chairMember?.name?.trim() || `metabot:${chairMember?.metabotId ?? 'chair'}`;
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: [STATUS:${rejectedTag.toUpperCase()}] directive rejected — illegal transition ${rejectedFrom ?? '?'} -> ${rejectedTag}`,
+        );
+        try {
+          store.addTaskTransition({
+            taskId: task.id,
+            fromStatus: rejectedFrom,
+            toStatus: rejectedTag,
+            actor: chairActor,
+            reason: `illegal_transition: [STATUS:${rejectedTag.toUpperCase()}] rejected (${rejectedFrom ?? '?'} -> ${rejectedTag} is not legal)`,
+          });
+        } catch (auditError) {
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: chair message cites ${bodyTags.length} [STATUS:*] tag(s) ` +
-            `(${bodyTags.join(' -> ')}) with no message-end instruction tag — ` +
-            'descriptive tags ignored, no transition applied',
+            `[GroupTaskDaemon] Task ${task.id}: illegal-transition audit row write failed: ` +
+            `${auditError instanceof Error ? auditError.message : String(auditError)}`,
           );
         }
+        // G-01: an illegal transition is exactly the "state-machine anomaly"
+        // the origin session must hear about — never silent.
+        notifySourceSessionMilestone(
+          task,
+          'anomaly',
+          buildSourceSessionAnomalyNotice({
+            title: task.title,
+            status: rejectedFrom ?? 'unknown',
+            summary: `The chair's [STATUS:${rejectedTag.toUpperCase()}] directive was rejected ` +
+              `(${rejectedFrom ?? '?'} -> ${rejectedTag} is not a legal transition) and was NOT applied. ` +
+              'The task stays in its current state; check the task history for the rejected directive.',
+          }),
+          `illegal_transition:${rejectedTag}`,
+        );
+        await postStatusDirectiveNote(task, chairMember, message, statusVerdict, null, statusAtParse);
+      } else if (isChairSender && statusVerdict.descriptive.length > 0) {
+        // G-03 observability: a chair message whose BODY cites [STATUS:*] tags
+        // without an instruction tag must not transition silently — leave a
+        // log line so a stuck task is always diagnosable (task #47's
+        // "zero transitions, zero logs" failure mode).
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: chair message cites ${statusVerdict.descriptive.length} descriptive [STATUS:*] tag(s) ` +
+          `(${statusVerdict.descriptive.map((tag) => tag.toUpperCase()).join(' -> ')}) with no instruction tag — ` +
+          'descriptive tags ignored, no transition applied',
+        );
       }
     }
 
@@ -4548,18 +4716,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       // G-03 hardening: the planning dispatch is a HOST-owned protocol message
       // (the directive requires ending it with [STATUS:EXECUTING]) and the
-      // state machine now parses instruction tags ONLY at the message end. If
+      // state machine parses instruction tags ONLY at the message end. If
       // the LLM omitted the trailing tag — or buried it mid-body where the
       // parser deliberately ignores it — append the deterministic protocol
       // footer so a posted plan can never leave the task pinned in planning
       // (task #47's failure mode, now impossible from this path).
+      // GT-04: judge via adjudication — a standalone mid-body EXECUTING line
+      // is a legal instruction too and must not earn a redundant footer.
       let postedReply = reply;
-      if (extractStatusDirectives(reply).length === 0) {
+      if (adjudicateStatusDirectives(reply, 'planning').instruction == null) {
         const bodyTags = [...reply.matchAll(STATUS_TAG_ALL)].length;
         postedReply = `${reply.replace(/[ \t]+$/, '')}\n[STATUS:EXECUTING]`;
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: planning reply carried no trailing [STATUS:*] tag` +
-          `${bodyTags > 0 ? ` (${bodyTags} body tag(s) ignored by the strict parser)` : ''} — ` +
+          `[GroupTaskDaemon] Task ${task.id}: planning reply carried no legal [STATUS:*] instruction` +
+          `${bodyTags > 0 ? ` (${bodyTags} descriptive tag(s) ignored by the parser)` : ''} — ` +
           'appended the deterministic [STATUS:EXECUTING] footer',
         );
       }
@@ -6437,17 +6607,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const chairMember = members.find((member) => member.role === 'chair');
     const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
     if (!chairGmid) return;
-    // Newest cursor-passed chair row with a message-end directive (newest-first).
+    // GT-04: newest cursor-passed chair row whose ADJUDICATED instruction
+    // differs from the live status (newest-first). Adjudication is what lets
+    // task #56's shape self-heal — its real EXECUTING instruction sat on a
+    // standalone body line while the descriptive end-line REVIEW was illegal.
+    // Host notices are documentation, never protocol input: they legitimately
+    // cite tag syntax (the status-parser note itself lists legal moves).
+    const liveStatus = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
     const candidate = queryRecentMessages(db, task.groupId, 50)
       .reverse()
       .find((row) => {
         if (row.id > task.lastProcessedMsgId) return false; // normal path owns it
         const senderGmid = (row.sender_global_metaid ?? '').trim().toLowerCase();
-        return senderGmid === chairGmid && !row.sender_suspect
-          && extractStatusDirectives(row.content ?? '').length > 0;
+        if (senderGmid !== chairGmid || row.sender_suspect) return false;
+        const content = row.content ?? '';
+        if (hasGroupTaskNotice(content)) return false;
+        return adjudicateStatusDirectives(content, liveStatus).instruction != null;
       });
     if (!candidate) return;
-    const directive = extractStatusDirectives(candidate.content ?? '')[0];
+    const directive = adjudicateStatusDirectives(candidate.content ?? '', liveStatus).instruction;
+    if (!directive) return;
     const freshStatus = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
     if (directive === freshStatus) return; // already applied (or a later state)
     // Legal chair-directive transitions only (mirrors LEGAL_TRANSITIONS minus

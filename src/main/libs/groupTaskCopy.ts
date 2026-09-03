@@ -43,6 +43,7 @@ export const GROUP_TASK_NOTICE = {
   longTurn: 'long_turn',
   dispatchHeld: 'dispatch_held',
   supervisor: 'supervisor',
+  statusParser: 'status_parser',
 } as const;
 
 export type GroupTaskNoticeKind = (typeof GROUP_TASK_NOTICE)[keyof typeof GROUP_TASK_NOTICE];
@@ -366,6 +367,70 @@ export function buildDispatchHeldLine(input: {
     : `⏸️ ${input.senderName} 刚向 ${names} 派发了工作，但${gateText}：该阶段成员按规则保持沉默，这条派工不会被执行。`
       + resume;
   return withGroupTaskNotice(GROUP_TASK_NOTICE.dispatchHeld, body);
+}
+
+/**
+ * GT-04 (task #56): in-group explanation when the host's status-tag parser
+ * applied and/or rejected [STATUS:*] directives in a chair message. The old
+ * "end-line tag wins" rule rejected task #56's descriptive end-line REVIEW
+ * and silently dropped its legitimate mid-message EXECUTING — the group saw
+ * nothing and the task pinned in planning forever. Now every rejection is
+ * visible where the chair can read and correct it. Rejected tags are wrapped
+ * in backticks so the notice's own citations are never re-read as
+ * instructions (the escape hatch the parser itself honors).
+ */
+export function buildStatusDirectiveNote(input: {
+  taskId: number;
+  taskTitle: string;
+  /** The tag that was applied (null when every candidate was rejected). */
+  appliedTag: 'executing' | 'review' | null;
+  /** Task status when the message was parsed (rejection reasons refer to it). */
+  fromStatus: string;
+  /** Rejected tags with their illegal from-status, in message order. */
+  rejected: Array<{ tag: 'executing' | 'review'; fromStatus: string }>;
+  /** Chair-movable tags from legalMovesStatus (may be empty). */
+  legalMoves: Array<'executing' | 'review'>;
+  /** The status the legal-moves list applies to (post-transition when one applied). */
+  legalMovesStatus: string;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const tagText = (tag: 'executing' | 'review') => `[STATUS:${tag.toUpperCase()}]`;
+  const rejectedText = (tag: 'executing' | 'review', fromStatus: string) =>
+    language === 'en'
+      ? `\`${tagText(tag)}\` (${fromStatus} -> ${tag} is not a legal transition)`
+      : `\`${tagText(tag)}\`（${fromStatus} -> ${tag} 不是合法的状态迁移）`;
+  const legalText = input.legalMoves.length > 0
+    ? input.legalMoves.map(tagText).join(language === 'en' ? ' or ' : ' 或 ')
+    : (language === 'en' ? 'none — only the owner can move this task now' : '无——当前只有主人能推进该任务');
+  const tip = language === 'en'
+    ? 'Tip: put ONE bare [STATUS:*] tag on its own line or at the end of your message; tags wrapped in `backticks` are treated as citations, never instructions.'
+    : '提示：把单个裸 [STATUS:*] 标签独立成行或放在消息末尾；用 `反引号` 包裹的标签只视为引用，不会被执行。';
+  const lines: string[] = [];
+  if (input.appliedTag) {
+    lines.push(
+      language === 'en'
+        ? `⚙️ Status update applied: ${tagText(input.appliedTag)} — task moved ${input.fromStatus} -> ${input.appliedTag}.`
+        : `⚙️ 状态已更新：${tagText(input.appliedTag)}——任务从 ${input.fromStatus} 迁移到 ${input.appliedTag}。`,
+    );
+    if (input.rejected.length > 0) {
+      lines.push(
+        language === 'en'
+          ? `However, ${input.rejected.length === 1 ? 'another tag' : 'other tags'} in the same message ${input.rejected.length === 1 ? 'was' : 'were'} REJECTED: ${input.rejected.map((entry) => rejectedText(entry.tag, entry.fromStatus)).join('; ')}.`
+          : `但同一条消息里的 ${input.rejected.length} 个标签被拒绝：${input.rejected.map((entry) => rejectedText(entry.tag, entry.fromStatus)).join('；')}。`,
+      );
+    }
+  } else {
+    lines.push(
+      language === 'en'
+        ? `⚠️ No status change applied: ${input.rejected.map((entry) => rejectedText(entry.tag, entry.fromStatus)).join('; ')}. The task stays in ${input.fromStatus}.`
+        : `⚠️ 状态未变更：${input.rejected.map((entry) => rejectedText(entry.tag, entry.fromStatus)).join('；')}。任务保持在 ${input.fromStatus}。`,
+    );
+  }
+  lines.push(
+    language === 'en'
+      ? `Legal status moves from ${input.legalMovesStatus}: ${legalText}. ${tip}`
+      : `从 ${input.legalMovesStatus} 出发的合法状态操作：${legalText}。${tip}`,
+  );
+  return withGroupTaskNotice(GROUP_TASK_NOTICE.statusParser, lines.join('\n'));
 }
 
 export function buildAcceptanceGuidanceText(language: AppLanguage = groupTaskLanguage()): string {

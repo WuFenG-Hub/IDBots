@@ -38,6 +38,7 @@ const {
   buildMemberJoinWelcomeText,
   parseGroupTaskStuckReclaimMode,
   hasProseDependencyDeclaration,
+  adjudicateStatusDirectives,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 const { SkillTurnTimeoutError } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
@@ -1354,7 +1355,7 @@ test('task #52 parse keeps GT#47 protection: a descriptive tag on a NON-last lin
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning');
     assert.ok(
-      logs.some((line) => line.includes('no message-end instruction tag')),
+      logs.some((line) => line.includes('descriptive tags ignored, no transition applied')),
       'the ignored descriptive tag is logged, not silent',
     );
   } finally {
@@ -1430,6 +1431,201 @@ test('task #52 self-heal guard: a directive older than the last transition must 
       'an older REVIEW directive never reconciles over a newer transition',
     );
     assert.ok(!logs.some((line) => line.includes('reconciling stuck status directive')), 'no reconcile attempt');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT-04 (task #56): legality-aware status-directive adjudication. The old
+// "last end-line tag wins" rule let task #56's descriptive end-line REVIEW
+// sink the legitimate standalone [STATUS:EXECUTING] line mid-message — the
+// whole message's intent was rejected and the task pinned in planning with
+// zero group-visible feedback. Now the first candidate LEGAL from the live
+// status is the instruction, illegal candidates are rejected with an audit
+// row + origin anomaly + an in-group status-parser note, and backtick-quoted
+// tags are citations, never instructions.
+// ---------------------------------------------------------------------------
+
+test('GT-04 adjudication: pure verdicts across the historical message shapes', () => {
+  // Task #56 (msg 2815): standalone EXECUTING mid-body, descriptive REVIEW on
+  // the end line — the end-line tag no longer sinks the real instruction.
+  const v56 = adjudicateStatusDirectives(
+    '分工如上，请 @Coder Bot 开工。\n[STATUS:EXECUTING]\n交付齐了之后我再 [STATUS:REVIEW]。',
+    'planning',
+  );
+  assert.equal(v56.instruction, 'executing');
+  assert.deepEqual(v56.rejected, ['review']);
+  assert.deepEqual(v56.descriptive, []);
+
+  // Task #52: end-line tag with trailing prose stays the instruction.
+  const v52 = adjudicateStatusDirectives(
+    '✅ 全部交付核验完成。\n[STATUS:REVIEW] — 本任务全部完成，现等待验收。',
+    'executing',
+  );
+  assert.equal(v52.instruction, 'review');
+  assert.deepEqual(v52.rejected, []);
+
+  // GT#47: a descriptive body tag + a real end-line instruction — the body
+  // tag stays descriptive prose (protection unchanged).
+  const v47 = adjudicateStatusDirectives(
+    '目标: 完成技能。验收标准: owner 核验通过后发 [STATUS:REVIEW]。\n分工: @Coder Bot 负责封装。\n[STATUS:EXECUTING]',
+    'planning',
+  );
+  assert.equal(v47.instruction, 'executing');
+  assert.deepEqual(v47.rejected, []);
+  assert.deepEqual(v47.descriptive, ['review']);
+
+  // A standalone mid-body line with NO end-line tag is the instruction.
+  const standalone = adjudicateStatusDirectives('计划如上\n[STATUS:EXECUTING]\n即刻开工', 'planning');
+  assert.equal(standalone.instruction, 'executing');
+
+  // All candidates illegal from the live status: nothing applies.
+  const illegal = adjudicateStatusDirectives('结论如上\n[STATUS:REVIEW]', 'planning');
+  assert.equal(illegal.instruction, null);
+  assert.deepEqual(illegal.rejected, ['review']);
+
+  // Backtick-wrapped and fenced tags are citations, never parsed.
+  assert.equal(adjudicateStatusDirectives('发 `[STATUS:EXECUTING]` 即可推进。', 'planning').tagCount, 0);
+  assert.equal(
+    adjudicateStatusDirectives('示例:\n```\n[STATUS:EXECUTING]\n```\n如上。', 'planning').tagCount,
+    0,
+  );
+
+  // Terminal states: no chair move exists, so even a clean tag is rejected.
+  const terminal = adjudicateStatusDirectives('重启执行\n[STATUS:EXECUTING]', 'done');
+  assert.equal(terminal.instruction, null);
+  assert.deepEqual(terminal.rejected, ['executing']);
+});
+
+test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-line REVIEW, and the group hears why', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2], { activate: false }); // planning, the #56 stuck state
+    // The literal 2815 shape: dispatch body, the real instruction on its own
+    // line, and a closing line that merely MENTIONS [STATUS:REVIEW] in prose.
+    insertGroupMessage(h.db, {
+      pinId: 'msg56-pin-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '定稿派工：@Coder Bot 负责封装，@Tester Bot 负责核验。\n'
+        + '[STATUS:EXECUTING]\n'
+        + '两位开工。交付齐后我再 [STATUS:REVIEW]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'the legitimate standalone instruction applies — #56 never leaves planning again',
+    );
+    const transitions = h.groupTaskStore.listTaskTransitions(task.id);
+    assert.ok(
+      transitions.some((t) => t.toStatus === 'executing' && /\[STATUS:EXECUTING\] tag/.test(t.reason ?? '')),
+      'applied transition is audited',
+    );
+    const note = h.sends.find((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]'));
+    assert.ok(note, 'the in-group status-parser note was posted');
+    assert.equal(note.metabotId, 1, 'the note speaks as the chair');
+    assert.equal(note.replyPin, 'msg56-pin-i0', 'the note reply-chains the offending message');
+    assert.ok(note.content.includes('[STATUS:EXECUTING]'), 'note names the applied tag');
+    assert.ok(note.content.includes('`[STATUS:REVIEW]`'), 'note cites the rejected tag backtick-wrapped');
+    assert.ok(note.content.includes('planning -> review'), 'note explains the rejection reason');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-04: an all-illegal chair directive stays put but is NEVER silent (audit + anomaly + in-group note)', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt04', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'all-illegal-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '验收结论如上。\n[STATUS:REVIEW]',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning', 'no illegal transition applied');
+    assert.ok(
+      h.groupTaskStore.listTaskTransitions(task.id)
+        .some((t) => t.toStatus === 'review' && /illegal_transition/.test(t.reason ?? '')),
+      'the rejected directive leaves an audit row',
+    );
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && m.subject === 'illegal_transition:review'),
+      'the origin session hears the anomaly',
+    );
+    const note = h.sends.find((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]'));
+    assert.ok(note, 'the group hears the rejection where the chair can correct it');
+    assert.equal(note.replyPin, 'all-illegal-i0');
+    assert.ok(note.content.includes('`[STATUS:REVIEW]`'), 'note cites the rejected tag backtick-wrapped');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-04: a backtick-quoted [STATUS:*] citation is never an instruction (escape hatch)', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    insertGroupMessage(h.db, {
+      pinId: 'citation-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '协议提醒：定稿后用 `[STATUS:EXECUTING]` 推进执行，验收用 `[STATUS:REVIEW]`。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning', 'citations move nothing');
+    assert.equal(
+      h.sends.filter((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]')).length,
+      0,
+      'no parser note for pure citations',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-04 self-heal: the cursor-passed #56-shape message reconciles planning -> executing on a fresh daemon run', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    insertGroupMessage(h.db, {
+      pinId: 'stuck-56-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '定稿派工：@Coder Bot 负责封装。\n[STATUS:EXECUTING]\n交付齐后我再 [STATUS:REVIEW]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    // Simulate the stuck state: the cursor already ate the message (the
+    // pre-fix daemon rejected the whole intent), and no transition/status
+    // event exists to satisfy the freshness guard.
+    const stuckId = h.db
+      .exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['stuck-56-i0'])[0].values[0][0];
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = ? WHERE id = ?', [stuckId, task.id]);
+    h.db.run('DELETE FROM group_task_transitions WHERE task_id = ?', [task.id]);
+    h.db.run('DELETE FROM group_task_status_events WHERE task_id = ?', [task.id]);
+
+    const fresh = h.makeLoop();
+    await fresh.runTick();
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'adjudicated reconcile repairs the #56 stuck state',
+    );
+    assert.ok(logs.some((line) => line.includes('reconciling stuck status directive')), 'reconcile logged');
   } finally {
     h.cleanup();
   }
