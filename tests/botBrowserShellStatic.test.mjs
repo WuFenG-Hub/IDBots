@@ -76,9 +76,22 @@ test('App routes Browser conversation opens through the Cowork adapter', () => {
 
 test('App listens for host bot-browser open requests and forwards them to the shell', () => {
   assert.match(shellSource, /const openUri = useCallback\(async \(input: BotBrowserOpenUriInput\)/);
-  assert.match(shellSource, /openUriWhenBrowserReady\(\{ uri, actorId \}\)/);
+  assert.match(shellSource, /openUriWhenBrowserReady\(\{ uri, actorId, newTab \}\)/);
   assert.match(appSource, /window\.electron\.botBrowser\.onOpenUri\(/);
   assert.match(appSource, /botBrowserShell\.openUri\(input\)/);
+});
+
+test('user-initiated URI opens land in a new browser tab, not over the active one', () => {
+  // Every in-renderer dispatcher on the DOM channel is a user click
+  // (MarkdownContent links, group-task deliverables, cowork panel), so App
+  // defaults the channel to newTab and only an explicit false navigates in place.
+  assert.match(appSource, /botBrowserShell\.openUri\(\{ uri: uri\.trim\(\), newTab: detail\?\.newTab !== false \}\)/);
+  // Shell-level UI gestures (avatar bot pages, MetaApp launches) opt in too,
+  // while the host IPC path (agent tools / RPC) forwards the input untouched.
+  assert.match(shellSource, /openUriWhenBrowserReady\(\{ uri, actorId, newTab: true \}\)/);
+  assert.match(shellSource, /openUriWhenBrowserReady\(\{ uri, newTab: true \}\)/);
+  assert.doesNotMatch(shellSource, /openUriWhenBrowserReady\(\{ uri \}\)/);
+  assert.match(shellSource, /const newTab = input\?\.newTab === true;/);
 });
 
 test('sidebar switch puts Bot Browser before Bot Home', () => {

@@ -23,6 +23,27 @@ test('bridge waits for runtime readiness before actor selection and navigation',
   );
 });
 
+test('bridge opens user-clicked URIs in a new tab and keeps agent opens in place', () => {
+  const script = buildBrowserIframeBridgeScript();
+  const openUriBody = script.slice(
+    script.indexOf('async function handleOpenUri(input)'),
+    script.indexOf('async function handleOpenNewTab()'),
+  );
+
+  // newTab opens ride AgentBrowserTabs.openTab(uri, actorId) — the runtime
+  // creates + activates the tab and seeds the actor onto it directly — and
+  // must return before the selectUsingIdentity/navigateTo fallback.
+  assert.match(openUriBody, /var newTab = Boolean\(input && input\.newTab\);/);
+  assert.match(
+    openUriBody,
+    /if \(newTab && typeof globalThis\.AgentBrowserTabs\.openTab === 'function'\) \{[\s\S]*globalThis\.AgentBrowserTabs\.openTab\(uri, actorId \|\| undefined\);[\s\S]*return;\s*\}/,
+  );
+  assert.ok(
+    openUriBody.indexOf('AgentBrowserTabs.openTab(uri') < openUriBody.indexOf('await globalThis.selectUsingIdentity(actorId)'),
+    'the new-tab branch must run before the navigate-in-place fallback',
+  );
+});
+
 test('bridge clears failed runtime readiness state so later intents can retry', () => {
   const script = buildBrowserIframeBridgeScript();
 
