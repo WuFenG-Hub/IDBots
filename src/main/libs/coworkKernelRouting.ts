@@ -10,7 +10,7 @@ import { truncateUtf16Units } from './llmSafeText';
 
 export const DSH_SESSION_PREFIX = 'dsh:'
 
-export type CoworkKernelChoice = 'dsh' | 'unavailable'
+export type CoworkKernelChoice = 'dsh'
 
 export interface KernelRoutingInput {
   /** Resolved provider apiType for this turn ('anthropic' | 'openai' | 'responses'). */
@@ -44,11 +44,6 @@ export function dshApiFormatOf(apiType?: string | null): 'openai' | 'responses' 
  */
 export function isDshEligibleApiType(apiType?: string | null): boolean {
   return apiType === 'openai' || apiType === 'responses' || apiType === 'anthropic';
-}
-
-/** @deprecated Anthropic Messages is served by DSH; always false. */
-export function isAnthropicDirectUnavailable(_apiType?: string | null): boolean {
-  return false;
 }
 
 export function resolveKernelChoice(input: KernelRoutingInput): CoworkKernelChoice {
