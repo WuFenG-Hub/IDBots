@@ -324,6 +324,12 @@ const STREAM_UPDATE_THROTTLE_MS = 90;
 // error (see TRANSIENT_TURN_ERROR_CODES): how many times the runner feeds the
 // resume cue back before settling the turn as failed.
 const DSH_TRANSIENT_TURN_MAX_RESUMES = 3;
+// Fallback-brain resume budget (GT-02): when the primary provider route is
+// STILL failing transiently after DSH_TRANSIENT_TURN_MAX_RESUMES resumes, the
+// provider itself is down (e.g. z.ai unreachable) and every resume re-hit the
+// same dead route. The bot's configured fallback brain (fallback_llm_*) then
+// gets this many resume attempts on its own route before the turn fails.
+const DSH_FALLBACK_TURN_MAX_RESUMES = 2;
 const STREAMING_TEXT_MAX_CHARS = 120_000;
 const STREAMING_THINKING_MAX_CHARS = 60_000;
 const TOOL_RESULT_MAX_CHARS = 120_000;
@@ -6932,6 +6938,39 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Runtime-outage fallback route for a session turn (GT-02): the PRIMARY
+   * route resolved fine but the provider behind it keeps dying transiently
+   * (timeout/5xx — e.g. z.ai down), so the whole transient-resume budget was
+   * burned re-hitting the same dead route. Unlike resolveSessionDshRoute's
+   * config-level fallback (primary brain not resolving to an ENABLED provider
+   * at all), this runs on RUNTIME failure and re-resolves the bot's fallback
+   * brain (fallback_llm_id/provider/effort) exactly the way
+   * resolveSessionDshRoute does. Returns null when there is nothing useful to
+   * switch to: no bot brain, no fallback brain configured, the fallback brain
+   * does not resolve to an enabled provider route, or it resolves to the SAME
+   * upstream route that is already failing (switching would just re-hit the
+   * dead path).
+   */
+  private resolveSessionFallbackDshRoute(
+    sessionId: string,
+    failedRoute: DshProviderRouteInfo,
+  ): DshProviderRouteInfo | null {
+    const brain = this.getSessionAutomationBrain(sessionId)
+    if (!brain?.fallbackModelId) return null
+    const brainContext = { botId: brain.metabotId, botName: brain.botName }
+    const fallbackRoute = resolveDshProviderRoute(brain.fallbackModelId, brain.fallbackProviderKey, brainContext)
+    if (!fallbackRoute?.baseUrl || !fallbackRoute.apiKey) return null
+    if (
+      fallbackRoute.provider === failedRoute.provider
+      && fallbackRoute.baseUrl === failedRoute.baseUrl
+      && fallbackRoute.model === failedRoute.model
+    ) {
+      return null
+    }
+    return fallbackRoute
+  }
+
+  /**
    * Map a resolved provider row onto the hub's turn-route shape. Warmup and
    * the first real turn must produce the same composition fields (key, model
    * limits, vision flag) or the shared runtime restarts and the warmup is wasted.
@@ -7373,7 +7412,35 @@ export class CoworkRunner extends EventEmitter {
         }, this.dshTurnStallTimeoutMs);
         dshStallTimer.unref?.();
       };
-      const runGuardedTurn = async (turnPrompt: string, images?: DshHostToolImagePayload[]) => {
+      const runGuardedTurn = async (turnPrompt: string, images?: DshHostToolImagePayload[], routeOverride?: DshProviderRouteInfo) => {
+        // Route this attempt runs on: the session's primary route, or — once
+        // the primary burned its transient-resume budget on a provider outage
+        // (GT-02) — the bot fallback-brain route handed in as an override.
+        // The hub re-pins the live dsh session when the provider key changes,
+        // so the resumed turn keeps the full JSONL history.
+        let turnRoute = route;
+        let turnModelLimits = modelLimits;
+        let turnOfficialDeepSeekNative = officialDeepSeekNative;
+        let turnReasoningEffort = dshReasoningEffort;
+        if (routeOverride) {
+          turnRoute = routeOverride;
+          turnModelLimits = resolveCurrentModelLimits(routeOverride.model);
+          turnOfficialDeepSeekNative = isNativeDeepSeekChatRoute(routeOverride);
+          // Same effort chain as the primary route above, except the bot-brain
+          // rung reads the FALLBACK brain's effort (that brain's model is the
+          // one now running the turn).
+          const fallbackModelOptions = resolveModelOptions(routeOverride.model);
+          turnReasoningEffort = mapDshReasoningEffort(
+            toLlmEffortLevel(
+              activeSession.effortOverride
+                ?? this.getSessionAutomationBrain(sessionId)?.fallbackEffort
+                ?? getPersistedCoworkEffortLevel()
+                ?? fallbackModelOptions?.reasoningEffort,
+            ),
+            activeSession.thinkingOverride ?? fallbackModelOptions?.thinking,
+            turnOfficialDeepSeekNative ? 'deepseek-native' : 'generic',
+          );
+        }
         // Fresh guarded attempt → clean tool ledger (a cancelled/steered
         // previous attempt may leave calls whose results never settle).
         dshInFlightToolUses.clear();
@@ -7401,12 +7468,12 @@ export class CoworkRunner extends EventEmitter {
           // chats about tasks instead of acting on them.
           { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
         ],
-        provider: this.dshTurnProviderFromRoute(route, {
+        provider: this.dshTurnProviderFromRoute(turnRoute, {
           // Effort rides the native route (adapter-validated off/low/high/max
           // ladder). pi-ai routes get no effort: their models' thinking stays
           // at the provider default, matching the pre-selector behavior for
           // non-deepseek providers.
-          reasoningEffort: officialDeepSeekNative ? dshReasoningEffort : null,
+          reasoningEffort: turnOfficialDeepSeekNative ? turnReasoningEffort : null,
         }),
         callbacks: {
           onMessage: (message, slot) => {
@@ -7448,7 +7515,7 @@ export class CoworkRunner extends EventEmitter {
             // provider-anchored next-request estimate and whose contextWindow
             // is the runtime's own record. The asOfSeq guard keeps an
             // out-of-order fetch from regressing the value.
-            const contextWindow = modelLimits?.contextWindow ?? 64000;
+            const contextWindow = turnModelLimits?.contextWindow ?? 64000;
             const usedTokens = dshPromptSideTokens(usage);
             activeSession.realContextUsage = {
               usedTokens,
@@ -7664,6 +7731,49 @@ export class CoworkRunner extends EventEmitter {
           { sessionId, code: outcome.error?.code, message: outcome.error?.message, resumeAttempt, maxResumes: DSH_TRANSIENT_TURN_MAX_RESUMES }
         );
         outcome = await runGuardedTurn(TRANSIENT_TURN_RESUME_PROMPT);
+      }
+
+      // GT-02 provider-outage fallback: the primary route burned its whole
+      // transient-resume budget and the error is STILL transient — the
+      // provider itself is down (e.g. z.ai unreachable for minutes), so every
+      // resume above re-hit the same dead route while the bot's configured
+      // fallback brain (fallback_llm_*) sat unused. When that fallback brain
+      // resolves to a DIFFERENT route, keep the turn alive by resuming on it:
+      // the hub re-pins the live dsh session to the fallback provider runtime
+      // and the JSONL history carries over (same mechanism as a mid-session
+      // model switch). Non-transient errors (auth 401, context overflow)
+      // never enter this chain; without a usable fallback the behavior is
+      // exactly as before (error settlement below).
+      if (
+        outcome.kind === 'error'
+        && !activeSession.abortController.signal.aborted
+        && isTransientDshTurnError(outcome)
+      ) {
+        const fallbackRoute = this.resolveSessionFallbackDshRoute(sessionId, route);
+        if (fallbackRoute) {
+          coworkLog(
+            'WARN',
+            'runDshSessionLocal',
+            'Primary provider route still failing transiently after the resume budget — switching to the bot fallback brain route',
+            {
+              sessionId,
+              code: outcome.error?.code,
+              fromRoute: { provider: route.provider, model: route.model, baseUrl: route.baseUrl },
+              toRoute: { provider: fallbackRoute.provider, model: fallbackRoute.model, baseUrl: fallbackRoute.baseUrl },
+              maxFallbackResumes: DSH_FALLBACK_TURN_MAX_RESUMES,
+            }
+          );
+          for (let fallbackAttempt = 1; fallbackAttempt <= DSH_FALLBACK_TURN_MAX_RESUMES; fallbackAttempt += 1) {
+            if (outcome.kind !== 'error' || activeSession.abortController.signal.aborted || !isTransientDshTurnError(outcome)) break;
+            coworkLog(
+              'WARN',
+              'runDshSessionLocal',
+              'Transient DSH turn failure — auto-resuming turn on the fallback provider route',
+              { sessionId, code: outcome.error?.code, message: outcome.error?.message, fallbackAttempt, maxResumes: DSH_FALLBACK_TURN_MAX_RESUMES }
+            );
+            outcome = await runGuardedTurn(TRANSIENT_TURN_RESUME_PROMPT, undefined, fallbackRoute);
+          }
+        }
       }
 
       if (activeSession.abortController.signal.aborted) {

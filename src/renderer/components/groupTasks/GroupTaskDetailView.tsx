@@ -1006,7 +1006,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                           ? i18nService.t('groupTasksWorkStatusErrorHint')
                           : member.workStatus === 'timeout'
                             ? i18nService.t('groupTasksWorkStatusTimeoutHint')
-                            : undefined
+                            : member.workStatus === 'waiting'
+                              ? i18nService.t('groupTasksWorkStatusWaitingHint')
+                              : undefined
                       }
                       className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${
                         member.workStatus === 'working'
@@ -1015,9 +1017,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                             ? 'bg-red-500/15 text-red-600 dark:text-red-400'
                             : member.workStatus === 'timeout'
                               ? 'bg-orange-500/15 text-orange-600 dark:text-orange-400'
-                              : member.workStatus === 'done'
-                                ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                                : 'bg-gray-500/10 text-gray-500 dark:text-gray-400'
+                              : member.workStatus === 'waiting'
+                                ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+                                : member.workStatus === 'done'
+                                  ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                  : 'bg-gray-500/10 text-gray-500 dark:text-gray-400'
                       }`}
                     >
                       {i18nService.t(groupTaskWorkStatusLabelKey(member.workStatus))}

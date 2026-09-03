@@ -38,6 +38,7 @@ const {
   buildMemberJoinWelcomeText,
   parseGroupTaskStuckReclaimMode,
   hasProseDependencyDeclaration,
+  adjudicateStatusDirectives,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 const { SkillTurnTimeoutError } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
@@ -873,6 +874,174 @@ test('review fix: a late deliverable is never reclaimed by the delivery-timeout 
   }
 });
 
+test('GT-09: the delivery-deadline escalation honors alert-only mode instead of reclaiming directly', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    // Escalation residue state: deadline blown, reminder sent, member inert.
+    // Default reclaim mode is ALERT-ONLY — the escalation branch used to
+    // reclaim anyway (bypassing the mode entirely).
+    h.store.set('group_task_expected_delivery:1:2', JSON.stringify({ dueAt: startMs - 5 * 60_000 }));
+    h.store.set('group_task_delivery_reminded:1:2', '1');
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+    assert.deepEqual(stoppedSessions, [], 'alert-only mode: the escalation never stops the session');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), undefined, 'no reclaim recorded');
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'an alert is raised instead');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-09: the delivery-deadline escalation skips a member waiting on an undelivered upstream', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const stoppedSessions = [];
+    h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+
+    // The chair's latest assignment for the worker is [DEPENDS_ON]-gated on an
+    // upstream pinid that has NOT landed on the ledger.
+    insertGroupMessage(h.db, {
+      pinId: 'gt09-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: `@Coder Bot 请基于上游结果做二次封装 [DEPENDS_ON: ${'ef'.repeat(32)}i0]`,
+      chainTimestamp: Math.floor(startMs / 1000) - 400,
+    });
+    h.store.set('group_task_expected_delivery:1:2', JSON.stringify({ dueAt: startMs - 5 * 60_000 }));
+    h.store.set('group_task_delivery_reminded:1:2', '1');
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+    assert.deepEqual(stoppedSessions, [], 'a dependency-waiting member is never reclaimed');
+    assert.equal(h.store.get('group_task_stuck_reclaim:1:2'), undefined, 'no reclaim recorded');
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), undefined, 'no stuck alert either — waiting is not stuck');
+    const note = h.store.get(`group_task_dep_wait_exempt:${task.id}:2`);
+    assert.ok(note, 'the dependency-wait exemption note stands');
+    assert.equal(JSON.parse(note).upstreamDelivered, false);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-10: a chair obligation dropped after the re-drive alerts the origin session', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]); // executing
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt10a', task.id]);
+    // The chair already got its ONE automatic re-drive and stayed silent.
+    h.store.set(
+      `group_task_chair_response_pending:${task.id}`,
+      JSON.stringify({ messageId: 42, reason: 'chair_mentioned', atMs: h.state.nowMs - 60 * 60_000, redriven: true }),
+    );
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      undefined,
+      'the twice-missed obligation is dropped',
+    );
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && m.subject === 'chair_response_dropped:42'),
+      'the drop alerts the origin session instead of disappearing quietly',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-10: a member turn that exhausts its retry budget drops with an anomaly (not silently)', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    chatErrorAlways: 'provider down',
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]); // executing
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt10b', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'gt10-mention-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please handle this',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    // Every turn fails; the durable defer queue re-drives until the budget
+    // (5 failures) is exhausted.
+    for (let i = 0; i < 6; i += 1) await h.loop.runTick();
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && /^turn_failed_drop:/.test(m.subject ?? '')),
+      'exhausting the retry budget alerts the origin session',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-10: a message dropped after 5 processing failures alerts the origin session', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      // A permanently failing attribution resolver — every processing attempt
+      // throws (transient shape), burning the MSG_RETRY budget.
+      resolveGlobalMetaId: async () => { throw new Error('indexer down'); },
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]); // executing
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt10c', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'gt10-poison-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: null,
+      senderName: 'Coder Bot', content: '进展同步一下',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    for (let i = 0; i < 6; i += 1) await h.loop.runTick();
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && /^message_dropped:/.test(m.subject ?? '')),
+      'dropping the poison message alerts the origin session',
+    );
+    const rowId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['gt10-poison-i0'])[0].values[0][0];
+    assert.ok(
+      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId >= rowId,
+      'the cursor advanced past the dropped message',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('review fix: a new ETA ACK resets the delivery-reminded flag before re-arming', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
@@ -1354,7 +1523,7 @@ test('task #52 parse keeps GT#47 protection: a descriptive tag on a NON-last lin
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning');
     assert.ok(
-      logs.some((line) => line.includes('no message-end instruction tag')),
+      logs.some((line) => line.includes('descriptive tags ignored, no transition applied')),
       'the ignored descriptive tag is logged, not silent',
     );
   } finally {
@@ -1430,6 +1599,201 @@ test('task #52 self-heal guard: a directive older than the last transition must 
       'an older REVIEW directive never reconciles over a newer transition',
     );
     assert.ok(!logs.some((line) => line.includes('reconciling stuck status directive')), 'no reconcile attempt');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT-04 (task #56): legality-aware status-directive adjudication. The old
+// "last end-line tag wins" rule let task #56's descriptive end-line REVIEW
+// sink the legitimate standalone [STATUS:EXECUTING] line mid-message — the
+// whole message's intent was rejected and the task pinned in planning with
+// zero group-visible feedback. Now the first candidate LEGAL from the live
+// status is the instruction, illegal candidates are rejected with an audit
+// row + origin anomaly + an in-group status-parser note, and backtick-quoted
+// tags are citations, never instructions.
+// ---------------------------------------------------------------------------
+
+test('GT-04 adjudication: pure verdicts across the historical message shapes', () => {
+  // Task #56 (msg 2815): standalone EXECUTING mid-body, descriptive REVIEW on
+  // the end line — the end-line tag no longer sinks the real instruction.
+  const v56 = adjudicateStatusDirectives(
+    '分工如上，请 @Coder Bot 开工。\n[STATUS:EXECUTING]\n交付齐了之后我再 [STATUS:REVIEW]。',
+    'planning',
+  );
+  assert.equal(v56.instruction, 'executing');
+  assert.deepEqual(v56.rejected, ['review']);
+  assert.deepEqual(v56.descriptive, []);
+
+  // Task #52: end-line tag with trailing prose stays the instruction.
+  const v52 = adjudicateStatusDirectives(
+    '✅ 全部交付核验完成。\n[STATUS:REVIEW] — 本任务全部完成，现等待验收。',
+    'executing',
+  );
+  assert.equal(v52.instruction, 'review');
+  assert.deepEqual(v52.rejected, []);
+
+  // GT#47: a descriptive body tag + a real end-line instruction — the body
+  // tag stays descriptive prose (protection unchanged).
+  const v47 = adjudicateStatusDirectives(
+    '目标: 完成技能。验收标准: owner 核验通过后发 [STATUS:REVIEW]。\n分工: @Coder Bot 负责封装。\n[STATUS:EXECUTING]',
+    'planning',
+  );
+  assert.equal(v47.instruction, 'executing');
+  assert.deepEqual(v47.rejected, []);
+  assert.deepEqual(v47.descriptive, ['review']);
+
+  // A standalone mid-body line with NO end-line tag is the instruction.
+  const standalone = adjudicateStatusDirectives('计划如上\n[STATUS:EXECUTING]\n即刻开工', 'planning');
+  assert.equal(standalone.instruction, 'executing');
+
+  // All candidates illegal from the live status: nothing applies.
+  const illegal = adjudicateStatusDirectives('结论如上\n[STATUS:REVIEW]', 'planning');
+  assert.equal(illegal.instruction, null);
+  assert.deepEqual(illegal.rejected, ['review']);
+
+  // Backtick-wrapped and fenced tags are citations, never parsed.
+  assert.equal(adjudicateStatusDirectives('发 `[STATUS:EXECUTING]` 即可推进。', 'planning').tagCount, 0);
+  assert.equal(
+    adjudicateStatusDirectives('示例:\n```\n[STATUS:EXECUTING]\n```\n如上。', 'planning').tagCount,
+    0,
+  );
+
+  // Terminal states: no chair move exists, so even a clean tag is rejected.
+  const terminal = adjudicateStatusDirectives('重启执行\n[STATUS:EXECUTING]', 'done');
+  assert.equal(terminal.instruction, null);
+  assert.deepEqual(terminal.rejected, ['executing']);
+});
+
+test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-line REVIEW, and the group hears why', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2], { activate: false }); // planning, the #56 stuck state
+    // The literal 2815 shape: dispatch body, the real instruction on its own
+    // line, and a closing line that merely MENTIONS [STATUS:REVIEW] in prose.
+    insertGroupMessage(h.db, {
+      pinId: 'msg56-pin-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '定稿派工：@Coder Bot 负责封装，@Tester Bot 负责核验。\n'
+        + '[STATUS:EXECUTING]\n'
+        + '两位开工。交付齐后我再 [STATUS:REVIEW]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'the legitimate standalone instruction applies — #56 never leaves planning again',
+    );
+    const transitions = h.groupTaskStore.listTaskTransitions(task.id);
+    assert.ok(
+      transitions.some((t) => t.toStatus === 'executing' && /\[STATUS:EXECUTING\] tag/.test(t.reason ?? '')),
+      'applied transition is audited',
+    );
+    const note = h.sends.find((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]'));
+    assert.ok(note, 'the in-group status-parser note was posted');
+    assert.equal(note.metabotId, 1, 'the note speaks as the chair');
+    assert.equal(note.replyPin, 'msg56-pin-i0', 'the note reply-chains the offending message');
+    assert.ok(note.content.includes('[STATUS:EXECUTING]'), 'note names the applied tag');
+    assert.ok(note.content.includes('`[STATUS:REVIEW]`'), 'note cites the rejected tag backtick-wrapped');
+    assert.ok(note.content.includes('planning -> review'), 'note explains the rejection reason');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-04: an all-illegal chair directive stays put but is NEVER silent (audit + anomaly + in-group note)', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt04', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'all-illegal-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '验收结论如上。\n[STATUS:REVIEW]',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning', 'no illegal transition applied');
+    assert.ok(
+      h.groupTaskStore.listTaskTransitions(task.id)
+        .some((t) => t.toStatus === 'review' && /illegal_transition/.test(t.reason ?? '')),
+      'the rejected directive leaves an audit row',
+    );
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && m.subject === 'illegal_transition:review'),
+      'the origin session hears the anomaly',
+    );
+    const note = h.sends.find((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]'));
+    assert.ok(note, 'the group hears the rejection where the chair can correct it');
+    assert.equal(note.replyPin, 'all-illegal-i0');
+    assert.ok(note.content.includes('`[STATUS:REVIEW]`'), 'note cites the rejected tag backtick-wrapped');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-04: a backtick-quoted [STATUS:*] citation is never an instruction (escape hatch)', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    insertGroupMessage(h.db, {
+      pinId: 'citation-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '协议提醒：定稿后用 `[STATUS:EXECUTING]` 推进执行，验收用 `[STATUS:REVIEW]`。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning', 'citations move nothing');
+    assert.equal(
+      h.sends.filter((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]')).length,
+      0,
+      'no parser note for pure citations',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-04 self-heal: the cursor-passed #56-shape message reconciles planning -> executing on a fresh daemon run', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    insertGroupMessage(h.db, {
+      pinId: 'stuck-56-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '定稿派工：@Coder Bot 负责封装。\n[STATUS:EXECUTING]\n交付齐后我再 [STATUS:REVIEW]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    // Simulate the stuck state: the cursor already ate the message (the
+    // pre-fix daemon rejected the whole intent), and no transition/status
+    // event exists to satisfy the freshness guard.
+    const stuckId = h.db
+      .exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['stuck-56-i0'])[0].values[0][0];
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = ? WHERE id = ?', [stuckId, task.id]);
+    h.db.run('DELETE FROM group_task_transitions WHERE task_id = ?', [task.id]);
+    h.db.run('DELETE FROM group_task_status_events WHERE task_id = ?', [task.id]);
+
+    const fresh = h.makeLoop();
+    await fresh.runTick();
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'adjudicated reconcile repairs the #56 stuck state',
+    );
+    assert.ok(logs.some((line) => line.includes('reconciling stuck status directive')), 'reconcile logged');
   } finally {
     h.cleanup();
   }
@@ -3547,13 +3911,30 @@ test('GT#26 regression: control tags on a dropped message still land via the tag
   }
 });
 
-test('round-4: lastDrivenAt heartbeat is written every tick', async () => {
+test('GT-01: lastDrivenAt tracks real drive work — idle ticks never fake-heartbeat it', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
     await h.loop.runTick();
-    const row = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
-    assert.equal(row, 1_000_000_000, 'heartbeat = floor(now()/1000)');
+    const first = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
+
+    // An idle tick one hour later must NOT move the timestamp (the #56 fake
+    // heartbeat kept it fresh through hours of zero dispatch → stall stayed
+    // False for the whole outage).
+    h.state.nowMs += 60 * 60_000;
+    await h.loop.runTick();
+    const second = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
+    assert.equal(second, first, 'an idle tick must not refresh lastDrivenAt');
+
+    // Processing a new message IS real drive work.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-drive-activity-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 处理中',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const third = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
+    assert.equal(third, Math.floor(h.state.nowMs / 1000), 'a processed message refreshes lastDrivenAt');
   } finally {
     h.cleanup();
   }
@@ -5602,11 +5983,67 @@ test('task #41: a skill-turn watchdog timeout advances the cursor without burnin
       undefined,
       'watchdog fire is not a transient failure — no retry counter burned',
     );
+    // GT-01: the unanswered trigger is re-queued DURABLY at latch time (the
+    // pre-fix latch dropped it silently, so a provider outage never recovered).
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'watchdog-timed-out trigger re-queued in the durable defer queue');
+    assert.equal(queued[0].messageId, msgId);
+    assert.equal(queued[0].metabotId, 2);
+    assert.equal(queued[0].failures, 1);
 
-    // A later tick must not re-run the same turn (the pre-fix pile-up re-ran
-    // it five times and then dropped the trigger message unanswered).
+    // While the latch is up the in-flight guard still blocks the drain: the
+    // same turn must not re-run (the pre-fix pile-up re-ran it five times and
+    // then dropped the trigger message unanswered).
     await h.loop.runTick();
-    assert.equal(skillTurnAttempts.length, 1, 'timed-out message is not retried on later ticks');
+    assert.equal(skillTurnAttempts.length, 1, 'latched turn is not re-dispatched while latched');
+    const queuedAgain = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queuedAgain.length, 1, 'the trigger stays queued behind the latch');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-01: a wedged turn (await never settles) is force-settled at the hard cap and the trigger recovers', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    workerCooldownMs: 0,
+    chairCooldownMs: 0,
+    deps: { turnHardCapMs: 500, intervalMs: 20 },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // The first group send (the worker auto-ACK) never settles — the wedged
+    // await that used to leak the in-flight guard forever.
+    const realPost = h.deps.postGroupTaskMessage;
+    let postCalls = 0;
+    h.deps.postGroupTaskMessage = async (...args) => {
+      postCalls += 1;
+      if (postCalls === 1) return new Promise(() => {});
+      return realPost(...args);
+    };
+    insertGroupMessage(h.db, {
+      pinId: 'pin-wedged-turn-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the thing',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    h.loop.start();
+    await sleep(3200); // tick 1 dispatches the wedged turn; the 500ms hard cap
+    // force-settles the guard and re-queues the trigger; a later tick
+    // re-dispatches it and the (now healthy) send path lands the reply.
+    h.loop.stop();
+
+    assert.ok(
+      logs.some((line) => line.includes('exceeded the hard in-flight cap')),
+      'the wedged turn is force-settled at the hard cap',
+    );
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2 && !send.content.startsWith('[WORKING]')),
+      'the re-queued trigger is re-driven and the worker answer lands',
+    );
   } finally {
     h.cleanup();
   }
@@ -5917,6 +6354,101 @@ test('G-01: the no-progress stall anomaly fires once per episode', async () => {
   }
 });
 
+test('GT-03: a stalled PLANNING task re-arms one exhausted plan attempt per episode and still reports the stall anomaly', async () => {
+  const logs = [];
+  const milestones = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    deps: {
+      noProgressNudgeMs: 60_000,
+      noProgressStallMs: 300_000,
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning — the #56 blind spot
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt03', task.id]);
+    // The wedged state: all 3 plan attempts burned during the outage, plan
+    // never posted, cursor long past the last observable message.
+    h.store.set(`group_task_chair_plan_attempts:${task.id}`, 3);
+    insertGroupMessage(h.db, {
+      pinId: 'gt03-old-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '收到任务，准备规划。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 400, // 400s old: past both windows
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      Number(h.store.get(`group_task_chair_plan_attempts:${task.id}`)),
+      2,
+      'one planning attempt re-armed for the stalled planning task',
+    );
+    assert.ok(logs.some((line) => line.includes('re-armed one planning attempt')), 're-arm logged');
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'planning tasks never get the executing-task status-report nudge',
+    );
+    assert.ok(
+      milestones.some((entry) => entry.kind === 'anomaly' && entry.subject === 'stall'),
+      'the stall anomaly now covers planning (GT-03 visibility)',
+    );
+
+    // The re-armed attempt lets the next tick actually run the planning turn.
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 1 && send.content.includes('[STATUS:EXECUTING]')),
+      'chair planning turn posted the plan after the re-arm',
+    );
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1', 'plan marked posted');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-05: a daemon restart immediately re-arms a planning task whose attempts died pre-restart', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    // The pre-restart wedged state (task #56 after the outage): attempts
+    // exhausted, plan never posted — and the no-progress windows NOT yet
+    // elapsed (a restart must not have to wait out the 20-minute episode).
+    h.store.set(`group_task_chair_plan_attempts:${task.id}`, 3);
+
+    // A fresh loop instance = the app restarted (once-per-run guards reset).
+    const fresh = h.makeLoop();
+    await fresh.runTick();
+    assert.equal(
+      Number(h.store.get(`group_task_chair_plan_attempts:${task.id}`)),
+      2,
+      'restart reconciliation re-arms one planning attempt immediately',
+    );
+    assert.ok(logs.some((line) => line.includes('restart reconciliation')), 're-arm logged');
+    await fresh.runTick();
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 1 && send.content.includes('[STATUS:EXECUTING]')),
+      'the chair planning turn runs right after the restart, not 20 minutes later',
+    );
+
+    // Once per run: a THIRD tick must not re-arm again after the attempt
+    // burned (simulate the re-armed attempt failing back to the cap).
+    h.store.set(`group_task_chair_plan_attempts:${task.id}`, 3);
+    h.store.delete(`group_task_chair_planned:${task.id}`);
+    await fresh.runTick();
+    assert.equal(
+      Number(h.store.get(`group_task_chair_plan_attempts:${task.id}`)),
+      3,
+      'no second re-arm within the same daemon run',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('gating (G-04): while dispatch is paused the chair answers only the owner; workers unchanged', () => {
   const pausedTask = { id: 1, status: 'executing', dispatchPaused: true };
   const ownerMessage = gateMessage({ senderGlobalMetaId: BOSS_GMID, senderMetaId: 'metaid-human', senderName: 'Owner', content: 'what is the status?' });
@@ -5959,6 +6491,52 @@ test('G-04: a supervisor pause holds the planning turn; nudge drives a chair res
     );
     const pending = h.groupTaskStore.listPendingSupervisorSignals(task.id);
     assert.equal(pending.length, 0, 'the nudge is marked processed with the response pin');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-06: a supervisor nudge runs a TOOL-EQUIPPED skill turn when routing hits', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing
+    h.groupTaskStore.addSupervisorSignal({
+      taskId: task.id,
+      kind: 'nudge',
+      note: 'check whether the worker actually delivered',
+    });
+    // Routing hit: the chair's supervision answer must be able to LOOK at the
+    // group/ledger/chain (task #56: the tool-less plain path answered nudges
+    // blindly while every tool-driven turn was stalled).
+    h.state.routing = { prompt: 'ACTIVE SKILLS: metabot-group-task', activeSkillIds: ['metabot-group-task'] };
+    h.state.skillReply = '核验过了：交付物已齐，链上可查。';
+    await h.loop.runTick();
+
+    const skillTurn = h.skillTurnCalls.find((call) => call.userMessage.includes('[NUDGE]'));
+    assert.ok(skillTurn, 'the supervisor answer went through the skill-turn path');
+    assert.deepEqual(skillTurn.activeSkillIds, ['metabot-group-task'], 'the routed skills ride the turn');
+    assert.ok(
+      skillTurn.systemPrompt.includes('ACTIVE SKILLS: metabot-group-task'),
+      'the routing prompt rides the system prompt',
+    );
+    assert.equal(
+      h.chatCalls.filter((call) => call.userMessage.includes('[NUDGE]')).length,
+      0,
+      'the tool-less plain path did NOT also run',
+    );
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 1 && send.content.includes('核验过了')),
+      'the chair answer was posted to the group',
+    );
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'the nudge is marked processed with the response pin',
+    );
+    assert.ok(
+      h.routingCalls.some((call) => call.metabotId === 1 && call.widened === true),
+      'supervisor turns route with owner-level widening',
+    );
   } finally {
     h.cleanup();
   }

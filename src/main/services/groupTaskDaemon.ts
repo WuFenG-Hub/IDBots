@@ -71,6 +71,7 @@ import {
   copyCheckpointNeedDecision,
   copyLongTurnHeartbeat,
   copyLongTurnInProgress,
+  buildStatusDirectiveNote,
   hasGroupTaskNotice,
   isRollCallPresenceCheck,
 } from '../libs/groupTaskCopy';
@@ -124,43 +125,114 @@ const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
  * A chair plan message routinely quotes *descriptive* tags in its body (the
  * goal/acceptance-criteria text says things like "通过后发 [STATUS:REVIEW]")
  * before the instruction tag the protocol template requires at the message
- * end. The old single-match parse let the descriptive tag win, the resulting
- * illegal planning→review directive was swallowed, and the task stayed pinned
- * in planning forever (task #47). Directive semantics: the LAST tag in the
- * message is the chair's instruction.
+ * end. GT-04 (task #56) replaced the old "last end-line tag wins" rule with
+ * legality-aware adjudication — see adjudicateStatusDirectives below.
  */
 const STATUS_TAG_ALL = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
-/**
- * G-03 (task #47) + task #52: the instruction lives in the message-END FIELD —
- * the last non-empty line. G-03 first required the tag to be the absolute last
- * thing in the message, which real chair verdicts break: task #52's final
- * verdict ended `[STATUS:REVIEW] — 本任务全部完成，现等待 Sunny 在 Tasks UI 验收。`
- * and the strict form read the instruction as a descriptive body tag, pinning
- * the task in executing forever (stall nudges, zombie worker re-dispatch).
- * The end field is now LINE-granular: any [STATUS:*] tag on the last non-empty
- * line is the instruction (the LAST one when the line carries several). Tags on
- * earlier lines stay descriptive prose quoted from the goal/acceptance criteria
- * (task #47 protection unchanged) — the criteria block always precedes the
- * instruction footer. Detection stays regex-only over an ASCII protocol label;
- * no natural-language intent is inferred here.
- */
-const STATUS_TAG_END_LINE = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
 
 /**
- * Extract the chair's status instruction from a message body: the LAST tag on
- * the last non-empty line. Returns [] when the end field carries no tag —
- * tags on earlier lines are deliberately ignored (see STATUS_TAG_END_LINE).
+ * GT-04 (task #56): quote stripping — [STATUS:*] tags inside fenced code
+ * blocks or inline `code` spans are CITATIONS, never instructions. This is the
+ * escape mechanism the protocol previously lacked (and what host notices use
+ * when they must talk ABOUT tag syntax). Applies to status-directive parsing
+ * only; other tag families keep their own rules.
  */
-function extractStatusDirectives(content: string): Array<'executing' | 'review'> {
-  const lines = String(content ?? '').trim().split(/\r?\n/);
+function stripStatusQuotedCode(content: string): string {
+  return String(content ?? '')
+    .replace(/```[\s\S]*?(?:```|$)/g, '')
+    .replace(/`[^`\n]*`/g, '');
+}
+
+/** Chair-movable transitions (LEGAL_TRANSITIONS minus the owner-only terminal moves). */
+const CHAIR_STATUS_MOVES: Record<string, Array<'executing' | 'review'>> = {
+  planning: ['executing'],
+  executing: ['review'],
+  review: ['executing'],
+};
+
+export interface StatusDirectiveVerdict {
+  /** The instruction to apply: the highest-priority candidate that is legal
+   * from the current status (null when none qualifies). */
+  instruction: 'executing' | 'review' | null;
+  /** Candidate tags rejected as illegal from the current status (deduped). */
+  rejected: Array<'executing' | 'review'>;
+  /** Tags treated as descriptive prose, never instructions (deduped). */
+  descriptive: Array<'executing' | 'review'>;
+  /** Total [STATUS:*] occurrences found after code-quote stripping. */
+  tagCount: number;
+}
+
+/**
+ * GT-04 (task #56): legality-aware status-directive adjudication.
+ *
+ * Candidate tags, in priority order:
+ *  a) the LAST tag on the last non-empty line (the protocol instruction field —
+ *     G-03/task #52 semantics unchanged, mid-line on that line still counts);
+ *  b) STANDALONE tag lines elsewhere in the body (a tag alone on its own line
+ *     is unambiguous protocol formatting — this is what saved task #56, whose
+ *     real [STATUS:EXECUTING] instruction sat on its own line mid-message while
+ *     the final line merely mentioned `[STATUS:REVIEW]` in prose).
+ *
+ * Everything else — prose-embedded tags on earlier lines, non-final tags on the
+ * last line, and anything inside code quotes — is descriptive text.
+ *
+ * The FIRST candidate whose transition is legal from the current status is the
+ * instruction; remaining candidates are rejected (illegal). Previously the
+ * end-line tag always won and an illegal one sank the WHOLE message's intent
+ * (task #56: planning pinned forever because the descriptive end-line REVIEW
+ * was rejected while the legitimate body EXECUTING was ignored).
+ *
+ * Pure + exported for unit tests.
+ */
+export function adjudicateStatusDirectives(
+  content: string,
+  currentStatus: string,
+): StatusDirectiveVerdict {
+  const text = stripStatusQuotedCode(content);
+  const lines = text.split(/\r?\n/);
+  let endLineIndex = -1;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i].trim();
-    if (!line) continue; // trailing blank lines are not the end field
-    const tags = [...line.matchAll(STATUS_TAG_END_LINE)];
-    if (tags.length === 0) return [];
-    return [tags[tags.length - 1][1].toLowerCase() as 'executing' | 'review'];
+    if (lines[i].trim()) {
+      endLineIndex = i;
+      break;
+    }
   }
-  return [];
+  type Occurrence = { tag: 'executing' | 'review'; lineIndex: number; standalone: boolean };
+  const occurrences: Occurrence[] = [];
+  lines.forEach((rawLine, lineIndex) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    for (const match of line.matchAll(STATUS_TAG_ALL)) {
+      const tag = match[1].toLowerCase() as 'executing' | 'review';
+      const prefix = line.slice(0, match.index).trim();
+      const suffix = line.slice(match.index + match[0].length).trim();
+      occurrences.push({ tag, lineIndex, standalone: prefix.length === 0 && suffix.length === 0 });
+    }
+  });
+  // (a) the end-line instruction field: the LAST tag on the last non-empty
+  // line (any position on that line — the task #52 verdict shape).
+  const endLineOccurrences = occurrences.filter((occ) => occ.lineIndex === endLineIndex);
+  const candidates: Occurrence[] = [];
+  if (endLineOccurrences.length > 0) candidates.push(endLineOccurrences[endLineOccurrences.length - 1]);
+  // (b) standalone tag lines elsewhere, in message order.
+  for (const occ of occurrences) {
+    if (occ.standalone && occ.lineIndex !== endLineIndex) candidates.push(occ);
+  }
+  const candidateSet = new Set(candidates);
+  const legal = CHAIR_STATUS_MOVES[currentStatus] ?? [];
+  const instructionOcc = candidates.find((occ) => legal.includes(occ.tag)) ?? null;
+  const rejected = [...new Set(
+    candidates.filter((occ) => occ !== instructionOcc && !legal.includes(occ.tag)).map((occ) => occ.tag),
+  )];
+  const descriptive = [...new Set(
+    occurrences.filter((occ) => !candidateSet.has(occ)).map((occ) => occ.tag),
+  )];
+  return {
+    instruction: instructionOcc?.tag ?? null,
+    rejected,
+    descriptive,
+    tagCount: occurrences.length,
+  };
 }
 /**
  * HITL checkpoint tags (chair-only, same trust rule as STATUS tags):
@@ -502,8 +574,10 @@ const GROUP_TASK_TIMEOUT_OWNER_PREFIX = 'group_task_timeout_owner:';
  * [DEPENDS_ON] upstream (`group_task_dep_wait_exempt:<taskId>:<metabotId>`;
  * deleted once the wait lifts). Distinct from DEP_WAIT_KV_PREFIX, which tracks
  * the P2-6 dispatch gate's bounded wait per assignment message.
+ * GT-09: exported — the service reads this same note to project the panel's
+ * 'waiting' work status (single source of truth, no duplicated parsing).
  */
-const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
+export const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
 /**
  * G-04 retry budget: failed chair-answer attempts per supervisor signal
  * (`group_task_sup_sig_attempts:<signalId>` = count). At 3 attempts the signal
@@ -1402,6 +1476,10 @@ export interface GroupTaskDaemonDeps {
   intervalMs?: number;
   /** Tick watchdog window (ms) — see DEFAULT_TICK_WATCHDOG_MS. */
   tickWatchdogMs?: number;
+  /** GT-01: absolute wall-clock cap (ms) for one in-flight turn guard — the
+   * last-resort force-settle for an await that never rejects (default: the
+   * 45-min latch cap). */
+  turnHardCapMs?: number;
   workerCooldownMs?: number;
   chairCooldownMs?: number;
   replyBudget?: number;
@@ -1900,8 +1978,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    */
   const claimDriverOrYield = (taskId: number): boolean => {
     if (driverGraceMs <= 0) return true;
+    // GT-01 observability: a stale-claim TAKEOVER (previous holder wedged or
+    // its app restarted) used to be silent — the only claim log was the yield
+    // branch below. Log it once here so a driver swap is always diagnosable.
+    const priorRaw = deps.getStore().get<string>(`${GROUP_TASK_DRIVER_KV_PREFIX}${taskId}`);
     const result = tryAcquireGroupTaskDriver(deps.getStore(), taskId, driverInstanceId, driverGraceMs, now(), false);
-    if (result.ok) return true;
+    if (result.ok) {
+      if (priorRaw) {
+        const [priorOwner, priorAtText] = priorRaw.split('|');
+        const priorAgeMs = now() - (Number(priorAtText) || 0);
+        if (priorOwner && priorOwner !== driverInstanceId && priorAgeMs >= driverGraceMs) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${taskId}: took over the stale driver claim from ` +
+            `${priorOwner.slice(0, 8)}… (silent for ${Math.round(priorAgeMs / 1000)}s)`,
+          );
+        }
+      }
+      return true;
+    }
     emitLog(
       `[GroupTaskDaemon] Task ${taskId}: another chair session (${(result.driverId ?? 'unknown').slice(0, 8)}…) ` +
       `holds the driver claim (${Math.round(result.claimAgeMs / 1000)}s old); this instance yields this tick`,
@@ -1921,6 +2015,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * GT-01 (task #56): lastDrivenAt is the show/stall signal's primary input —
+   * it must mirror REAL drive work (a dispatched turn, a posted message, a
+   * processed message), not the tick loop's liveness. The old per-tick
+   * heartbeat kept it fresh through hours of zero dispatch ("fake heartbeat"),
+   * so a wedged task read stall=False forever. This is the single writer; every
+   * call site below is a place the daemon observably MOVED the task forward.
+   */
+  const noteDriveActivity = (taskId: number): void => {
+    try {
+      deps.getGroupTaskStore().updateLastDrivenAt(taskId, Math.floor(now() / 1000));
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${taskId}: lastDrivenAt update failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  /**
    * F2 (GT#11): single choke point for every daemon group-message post —
    * refreshes the driver claim on success so the claim freshness mirrors
    * actual driving activity.
@@ -1934,6 +2047,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     try {
       const result = await deps.postGroupTaskMessage(taskId, metabotId, content, opts);
       refreshDriverClaim(taskId);
+      noteDriveActivity(taskId); // a posted message is real drive work
       noteTickProgress(); // a completed send proves the in-flight tick is alive
       return result;
     } catch (sendError) {
@@ -2225,6 +2339,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const turnInFlight = new Map<string, { startedAt: number }>();
   const pendingTurnJobs = new Set<Promise<void>>();
   const latchWatchers = new Set<ReturnType<typeof setInterval>>();
+  /**
+   * GT-01 (task #56): keys whose turn outlived the skill-turn watchdog and are
+   * latched until the session idles. A latched turn is NOT a legitimate
+   * in-flight attempt — it already failed from the daemon's perspective — so
+   * it must not refresh lastDrivenAt nor suppress the no-progress nudge.
+   */
+  const latchedTurnKeys = new Set<string>();
 
   /**
    * Sidebar background-task badge: every turnInFlight mutation broadcasts a
@@ -2247,6 +2368,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * whole repair budget for legacy stuck tasks).
    */
   const statusDirectiveReconciledTasks = new Set<number>();
+  /**
+   * GT-05 (task #56): tasks whose exhausted chair-plan attempts were already
+   * re-armed once this daemon run. One attempt per restart — GT-03's per-episode
+   * re-arm is the steady-state ladder; this only skips the 20-minute wait right
+   * after a restart.
+   */
+  const planningRearmedThisRun = new Set<number>();
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
@@ -3508,13 +3636,58 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * GT-04 (task #56): post the status-parser explanation INTO the group as a
+   * host notice (never protocol input — hasGroupTaskNotice exempts it from
+   * re-parsing, and the notice's own tag citations are backtick-wrapped).
+   * Posted as the chair and reply-chained to the offending message so the
+   * chair's next turn reads the correction in context. Failures only log —
+   * a notice must never block message processing.
+   */
+  const postStatusDirectiveNote = async (
+    task: GroupTask,
+    chairMember: GroupTaskMember | undefined,
+    message: GroupTaskDaemonMessage,
+    verdict: StatusDirectiveVerdict,
+    appliedTag: 'executing' | 'review' | null,
+    parseStatus: string,
+  ): Promise<void> => {
+    if (!chairMember?.metabotId) return;
+    try {
+      const liveStatus = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
+      const sent = await postGroupMessage(
+        task.id,
+        chairMember.metabotId,
+        buildStatusDirectiveNote({
+          taskId: task.id,
+          taskTitle: task.title,
+          appliedTag,
+          fromStatus: parseStatus,
+          rejected: verdict.rejected.map((tag) => ({ tag, fromStatus: parseStatus })),
+          legalMoves: CHAIR_STATUS_MOVES[liveStatus] ?? [],
+          legalMovesStatus: liveStatus,
+        }),
+        { replyPin: message.pinId ?? undefined },
+      );
+      rememberDaemonChairPin(task.id, sent.pinId);
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: status-parser note post failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  /**
    * Protocol tags on EVERY ingested message (before/independent of reply gating):
    * - [DELIVERABLE]: record one pending deliverable row per valid tag
    *   candidate (deduped by msg_pin_id + uri + kind; corrections supersede in
    *   place) and compute host verification notes for the chair.
-   * - [STATUS:EXECUTING|REVIEW]: honored only from the task chair bot; illegal
-   *   transitions are silently ignored; a real transition fires emitTaskEvent,
-   *   entering review triggers the owner report, re-entering executing clears it.
+   * - [STATUS:EXECUTING|REVIEW]: honored only from the task chair bot, through
+   *   GT-04 legality-aware adjudication (the first candidate legal from the
+   *   live status wins; illegal candidates produce a transition audit row, an
+   *   origin-session anomaly, and an in-group status-parser note — never a
+   *   silent drop); a real transition fires emitTaskEvent, entering review
+   *   triggers the owner report, re-entering executing clears it.
    * Returns the verification notes for this message (empty when none).
    */
   const processMessageTags = async (
@@ -3877,25 +4050,34 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
-    const statusDirectives = extractStatusDirectives(content);
-    if (statusDirectives.length > 0) {
+    // GT-04 (task #56): legality-aware adjudication replaces the old
+    // "last end-line tag wins, everything else ignored" rule. The verdict is
+    // computed against the LIVE task status so a descriptive end-line tag can
+    // no longer sink a legitimate standalone instruction line mid-message.
+    const statusAtParse = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
+    const statusVerdict = adjudicateStatusDirectives(content, statusAtParse);
+    if (statusVerdict.tagCount > 0) {
       const chairMember = members.find((member) => member.role === 'chair');
       const chairGlobalMetaId = (chairMember?.globalmetaid ?? '').trim();
       const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
-      if (chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId) {
-        // G-03: the instruction tag is the one in the message-end field (the
-        // last non-empty line — protocol template). Any other tag in the body
-        // is descriptive text quoted from the goal/acceptance criteria —
-        // logged so the parse is never a silent judgment call, but never applied.
-        const nextStatus = statusDirectives[statusDirectives.length - 1];
-        const bodyTagCount = [...content.matchAll(STATUS_TAG_ALL)].length;
-        if (bodyTagCount > 1) {
+      const isChairSender = Boolean(
+        chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId,
+      );
+      if (isChairSender && statusVerdict.instruction != null) {
+        // G-03/GT-04: the instruction is the first candidate legal from the
+        // live status (message-end field first, then standalone body lines).
+        // Any remaining candidate is an illegal sibling the group must hear
+        // about (below); pure prose citations stay descriptive text.
+        const nextStatus = statusVerdict.instruction;
+        if (statusVerdict.tagCount > 1) {
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: chair message carries ${bodyTagCount} [STATUS:*] tags — ` +
-            `applying the message-end one ([STATUS:${nextStatus.toUpperCase()}]) as the instruction, ` +
-            `earlier tags treated as descriptive text`,
+            `[GroupTaskDaemon] Task ${task.id}: chair message carries ${statusVerdict.tagCount} [STATUS:*] tags — ` +
+            `applying [STATUS:${nextStatus.toUpperCase()}] as the instruction` +
+            `${statusVerdict.rejected.length > 0 ? `, rejected illegal sibling(s): ${statusVerdict.rejected.map((tag) => `[STATUS:${tag.toUpperCase()}]`).join(', ')}` : ''}` +
+            `${statusVerdict.descriptive.length > 0 ? ', remaining tags treated as descriptive text' : ''}`,
           );
         }
+        let appliedStatusDirective = false;
         try {
           const beforeStatus = store.getTaskById(task.id)?.status;
           // Improvement #2 (v1.3): review re-entry debounce — a [STATUS:REVIEW]
@@ -4126,6 +4308,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               }
             }
           }
+          appliedStatusDirective = true;
         } catch (error) {
           if (error instanceof StaleReviewReentryError) {
             emitLog(
@@ -4188,24 +4371,65 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             throw error;
           }
         }
-      }
-    } else {
-      // G-03 observability: a chair message whose BODY cites [STATUS:*] tags
-      // without a message-end instruction tag must not transition silently —
-      // leave a log line so a stuck task is always diagnosable (task #47's
-      // "zero transitions, zero logs" failure mode).
-      const bodyTags = [...content.matchAll(STATUS_TAG_ALL)].map((match) => match[1].toUpperCase());
-      if (bodyTags.length > 0) {
-        const chairMemberForTags = members.find((member) => member.role === 'chair');
-        const chairGmidForTags = (chairMemberForTags?.globalmetaid ?? '').trim();
-        const senderGmidForTags = (message.senderGlobalMetaId ?? '').trim();
-        if (chairGmidForTags && senderGmidForTags && senderGmidForTags === chairGmidForTags) {
+        // GT-04: when the applied instruction had illegal siblings, tell the
+        // GROUP — the rejected part of the chair's intent must be visible
+        // where the chair can read and correct it, not silently dropped
+        // (task #56: the group watched a dispatch land while the end-line
+        // REVIEW mention silently died).
+        if (statusVerdict.rejected.length > 0) {
+          await postStatusDirectiveNote(task, chairMember, message, statusVerdict, nextStatus, statusAtParse);
+        }
+      } else if (isChairSender && statusVerdict.rejected.length > 0) {
+        // GT-04: EVERY candidate was illegal from the live status — the old
+        // code swallowed this entirely (task #56 pinned in planning forever
+        // with zero transitions, zero group feedback). Keep the GT#47 R2
+        // audit row + origin-session anomaly, and add the missing piece: an
+        // in-group explanation the chair (and every participant) can act on.
+        const rejectedTag = statusVerdict.rejected[0];
+        const rejectedFrom = store.getTaskById(task.id)?.status ?? null;
+        const chairActor = chairMember?.name?.trim() || `metabot:${chairMember?.metabotId ?? 'chair'}`;
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: [STATUS:${rejectedTag.toUpperCase()}] directive rejected — illegal transition ${rejectedFrom ?? '?'} -> ${rejectedTag}`,
+        );
+        try {
+          store.addTaskTransition({
+            taskId: task.id,
+            fromStatus: rejectedFrom,
+            toStatus: rejectedTag,
+            actor: chairActor,
+            reason: `illegal_transition: [STATUS:${rejectedTag.toUpperCase()}] rejected (${rejectedFrom ?? '?'} -> ${rejectedTag} is not legal)`,
+          });
+        } catch (auditError) {
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: chair message cites ${bodyTags.length} [STATUS:*] tag(s) ` +
-            `(${bodyTags.join(' -> ')}) with no message-end instruction tag — ` +
-            'descriptive tags ignored, no transition applied',
+            `[GroupTaskDaemon] Task ${task.id}: illegal-transition audit row write failed: ` +
+            `${auditError instanceof Error ? auditError.message : String(auditError)}`,
           );
         }
+        // G-01: an illegal transition is exactly the "state-machine anomaly"
+        // the origin session must hear about — never silent.
+        notifySourceSessionMilestone(
+          task,
+          'anomaly',
+          buildSourceSessionAnomalyNotice({
+            title: task.title,
+            status: rejectedFrom ?? 'unknown',
+            summary: `The chair's [STATUS:${rejectedTag.toUpperCase()}] directive was rejected ` +
+              `(${rejectedFrom ?? '?'} -> ${rejectedTag} is not a legal transition) and was NOT applied. ` +
+              'The task stays in its current state; check the task history for the rejected directive.',
+          }),
+          `illegal_transition:${rejectedTag}`,
+        );
+        await postStatusDirectiveNote(task, chairMember, message, statusVerdict, null, statusAtParse);
+      } else if (isChairSender && statusVerdict.descriptive.length > 0) {
+        // G-03 observability: a chair message whose BODY cites [STATUS:*] tags
+        // without an instruction tag must not transition silently — leave a
+        // log line so a stuck task is always diagnosable (task #47's
+        // "zero transitions, zero logs" failure mode).
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: chair message cites ${statusVerdict.descriptive.length} descriptive [STATUS:*] tag(s) ` +
+          `(${statusVerdict.descriptive.map((tag) => tag.toUpperCase()).join(' -> ')}) with no instruction tag — ` +
+          'descriptive tags ignored, no transition applied',
+        );
       }
     }
 
@@ -4501,18 +4725,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       // G-03 hardening: the planning dispatch is a HOST-owned protocol message
       // (the directive requires ending it with [STATUS:EXECUTING]) and the
-      // state machine now parses instruction tags ONLY at the message end. If
+      // state machine parses instruction tags ONLY at the message end. If
       // the LLM omitted the trailing tag — or buried it mid-body where the
       // parser deliberately ignores it — append the deterministic protocol
       // footer so a posted plan can never leave the task pinned in planning
       // (task #47's failure mode, now impossible from this path).
+      // GT-04: judge via adjudication — a standalone mid-body EXECUTING line
+      // is a legal instruction too and must not earn a redundant footer.
       let postedReply = reply;
-      if (extractStatusDirectives(reply).length === 0) {
+      if (adjudicateStatusDirectives(reply, 'planning').instruction == null) {
         const bodyTags = [...reply.matchAll(STATUS_TAG_ALL)].length;
         postedReply = `${reply.replace(/[ \t]+$/, '')}\n[STATUS:EXECUTING]`;
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: planning reply carried no trailing [STATUS:*] tag` +
-          `${bodyTags > 0 ? ` (${bodyTags} body tag(s) ignored by the strict parser)` : ''} — ` +
+          `[GroupTaskDaemon] Task ${task.id}: planning reply carried no legal [STATUS:*] instruction` +
+          `${bodyTags > 0 ? ` (${bodyTags} descriptive tag(s) ignored by the parser)` : ''} — ` +
           'appended the deterministic [STATUS:EXECUTING] footer',
         );
       }
@@ -4645,25 +4871,70 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
       const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
       const brain = metabotBrainOptions(bot);
-      const reply = (await performChatWithTimeout(
-        systemPromptParts.systemPrompt,
-        [systemPromptParts.volatileContext, directive].filter(Boolean).join('\n\n'),
-        brain.llmId ?? undefined,
-        {
-          llmProvider: brain.llmProvider,
-          fallbackLlmId: brain.fallbackLlmId,
-          fallbackLlmProvider: brain.fallbackLlmProvider,
-          effort: brain.effort,
-          fallbackEffort: brain.fallbackEffort,
-          thinking: 'enabled',
-        },
-      )).trim();
+      const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
+      const userTurn = [systemPromptParts.volatileContext, directive].filter(Boolean).join('\n\n');
+      // GT-06 (task #56): the supervisor-signal answer used to be a TOOL-LESS
+      // plain completion. During the outage that plain path kept "working"
+      // (it has its own LLM fallback) while every tool-driven turn stalled —
+      // so the chair answered nudges without any ability to actually CHECK
+      // the group, the ledger, or the chain. Route this turn like a
+      // message-driven one: a routing hit runs ONE skill turn in the chair's
+      // task session (tools available); a miss keeps the plain path below.
+      // The supervisor acts on the owner's behalf — widened routing, same as
+      // an owner message.
+      let routing: { prompt: string | null; activeSkillIds: string[] } = { prompt: null, activeSkillIds: [] };
+      if (deps.getChatSkillsRoutingPrompt && deps.runSkillTurn) {
+        try {
+          routing = await deps.getChatSkillsRoutingPrompt({ metabotId: bot.id, widened: true });
+        } catch (routingError) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: skill routing failed for supervisor turn (bot ${bot.id}): ` +
+            `${routingError instanceof Error ? routingError.message : String(routingError)}`,
+          );
+        }
+      }
+      const canRunSkillTurn = Boolean(
+        routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
+      );
+      coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
+      let reply = '';
+      if (canRunSkillTurn) {
+        const skillSystemPrompt = [
+          systemPromptParts.systemPrompt,
+          '',
+          routing.prompt!,
+          '',
+          'After using Read/Bash to run a skill, reply concisely in the group. Do not paste full skill logs.',
+        ].join('\n');
+        const skillTurnResult = await deps.runSkillTurn!({
+          sessionId: session.id,
+          systemPrompt: skillSystemPrompt,
+          userMessage: userTurn,
+          activeSkillIds: routing.activeSkillIds,
+        });
+        reply = (skillTurnResult.replyText ?? '').trim();
+        // The runner appends the assistant message to the session itself.
+      } else {
+        reply = (await performChatWithTimeout(
+          systemPromptParts.systemPrompt,
+          userTurn,
+          brain.llmId ?? undefined,
+          {
+            llmProvider: brain.llmProvider,
+            fallbackLlmId: brain.fallbackLlmId,
+            fallbackLlmProvider: brain.fallbackLlmProvider,
+            effort: brain.effort,
+            fallbackEffort: brain.fallbackEffort,
+            thinking: 'enabled',
+          },
+        )).trim();
+        if (reply) {
+          coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
+        }
+      }
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
         throw new Error('supervisor signal turn produced no usable reply');
       }
-      const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
-      coworkStore.addMessage(session.id, { type: 'user', content: directive });
-      coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
       const posted = await postGroupMessage(task.id, bot.id, reply);
       // P2-7 r2: the daemon's own reply must not count as "Twin activity".
       rememberDaemonChairPin(task.id, posted.pinId);
@@ -4937,10 +5208,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * fix/group-task-flow: upper bound for the post-timeout in-flight latch. A
    * skill-turn watchdog fire means the turn keeps running inside the session;
    * the guard stays latched until the session leaves 'running' (or this cap).
+   * GT-01 (task #56): the latched key is tracked in latchedTurnKeys for the
+   * whole latch so it stops counting as live drive activity; the retry
+   * obligation was already re-queued durably at latch time (dispatchReplyTurn),
+   * so the deferred-queue drain picks the message up on the first tick after
+   * the release — including after an app restart (the durable queue survives
+   * even though this in-memory latch does not).
    */
   const TURN_LATCH_MAX_MS = 45 * 60_000;
+  /** GT-01: resolved hard cap for one in-flight turn guard (see deps). */
+  const turnHardCapMs = Math.max(1_000, Math.trunc(deps.turnHardCapMs ?? TURN_LATCH_MAX_MS));
   const latchInFlightUntilSessionIdle = (key: string, sessionId: string | null, taskId: number, botId: number): void => {
     if (!sessionId) {
+      latchedTurnKeys.delete(key);
       turnInFlight.delete(key);
       emitTurnActivity();
       return;
@@ -4956,11 +5236,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (status === 'running' && now() - startedAt < TURN_LATCH_MAX_MS) return;
       clearInterval(watcher);
       latchWatchers.delete(watcher);
+      latchedTurnKeys.delete(key);
       turnInFlight.delete(key);
       emitTurnActivity();
       emitLog(
         `[GroupTaskDaemon] Task ${taskId}: in-flight latch for bot ${botId} released ` +
-        `(session status ${status ?? 'unknown'}${status === 'running' ? ', latch cap reached' : ''})`,
+        `(session status ${status ?? 'unknown'}${status === 'running' ? ', latch cap reached' : ''}); ` +
+        'the deferred queue re-drives the unanswered trigger on the next tick',
       );
     }, 15_000);
     watcher.unref?.();
@@ -5065,6 +5347,74 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const sessionId = ensureTaskSession(deps.getCoworkStore(), task, bot.id, bot.name).id;
     turnInFlight.set(key, { startedAt: now() });
     emitTurnActivity();
+    noteDriveActivity(task.id); // a dispatched turn is real drive work
+    // GT-01 (task #56): absolute wall-clock cap on the in-flight guard. Every
+    // production turn is already bounded from inside (10-min plain / 30-min
+    // skill-turn watchdogs, then the 45-min latch), but those all require the
+    // hung await to REJECT — an await that never settles at all (observed in
+    // the wild as a hung on-chain send, task #45) used to leak the guard
+    // forever: the wedged member never took another turn, and the leaked entry
+    // kept lastDrivenAt fresh (a second fake-heartbeat channel). On fire the
+    // trigger re-enters the durable defer queue (bounded by the same failure
+    // budget), the guard releases, and the dangling job is left to rot — the
+    // same contract as the tick watchdog. A job that settles in time clears
+    // this timer in its finally block below.
+    const hardCapTimer = setTimeout(() => {
+      // The latch path (SkillTurnTimeoutError) already owns latched keys — its
+      // watcher re-queues and releases on its own schedule.
+      if (!turnInFlight.has(key) || latchedTurnKeys.has(key)) return;
+      turnInFlight.delete(key);
+      emitTurnActivity();
+      const failures = (args.entry?.failures ?? 0) + 1;
+      if (failures >= MSG_RETRY_MAX_FAILURES) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} dropped ` +
+          `after ${failures} wedged-turn force-settles — giving up`,
+        );
+        notifySourceSessionMilestone(
+          task,
+          'anomaly',
+          buildSourceSessionAnomalyNotice({
+            title: task.title,
+            status: task.status,
+            summary:
+              `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} did not answer ` +
+              `message #${message.id}: ${failures} turns wedged in a row (an in-flight call never settled). ` +
+              'The trigger was dropped — investigate the member bot and re-drive it manually.',
+          }),
+          `wedged_turn_drop:${task.id}:${bot.id}:${message.id}`,
+        );
+        return;
+      }
+      deferReply({
+        taskId: task.id,
+        metabotId: bot.id,
+        messageId: message.id,
+        reason: args.reason,
+        verificationNotes: args.verificationNotes,
+        failures,
+      });
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn exceeded the hard in-flight cap ` +
+        `(message #${message.id}, attempt ${failures}/${MSG_RETRY_MAX_FAILURES}) — guard force-settled, ` +
+        'trigger re-queued; the dangling job is left to rot',
+      );
+      notifySourceSessionMilestone(
+        task,
+        'anomaly',
+        buildSourceSessionAnomalyNotice({
+          title: task.title,
+          status: task.status,
+          summary:
+            `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} had a turn wedged ` +
+            `past the hard in-flight cap while answering message #${message.id} (an in-flight call never ` +
+            'settled). The guard was force-settled and the trigger re-queued — if this repeats, check the ' +
+            'member bot\'s LLM/chain connectivity.',
+        }),
+        `wedged_turn:${task.id}:${bot.id}:${message.id}:${failures}`,
+      );
+    }, turnHardCapMs);
+    hardCapTimer.unref?.();
     // The reply budget is charged at dispatch (committed work — a retry storm
     // must not be free); the cooldown timestamp only moves on SUCCESS (a failed
     // turn posted nothing, so its durable-queue retry must not sit out a
@@ -5113,13 +5463,57 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
       } catch (error) {
         if (error instanceof SkillTurnTimeoutError) {
-          keepLatched = true;
-          latchInFlightUntilSessionIdle(key, sessionId, task.id, bot.id);
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn hit the skill-turn watchdog ` +
-            `(message #${message.id}); the turn keeps running in the session — no retry queued, ` +
-            'guard latched until the session goes idle',
-          );
+          // GT-01 (task #56): the old path latched the guard and queued NO
+          // retry — during a provider outage every member turn burned the
+          // watchdog, latched, and the unanswered trigger was silently lost
+          // (the cursor had already advanced past it), so the task never
+          // recovered on its own after the provider came back. Now the
+          // obligation re-enters the DURABLE defer queue at latch time: the
+          // drain holds it while the latch is up and re-drives it once the
+          // session idles — and it survives an app restart, which the
+          // in-memory latch does not. Bounded by the same MSG_RETRY_MAX_FAILURES
+          // budget as ordinary failures so a multi-hour outage cannot loop
+          // forever; on exhaustion the trigger drops with an anomaly alert
+          // instead of another latch.
+          const failures = (args.entry?.failures ?? 0) + 1;
+          if (failures >= MSG_RETRY_MAX_FAILURES) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} ` +
+              `dropped after ${failures} skill-turn watchdog timeouts: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+            notifySourceSessionMilestone(
+              task,
+              'anomaly',
+              buildSourceSessionAnomalyNotice({
+                title: task.title,
+                status: task.status,
+                summary:
+                  `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} did not answer ` +
+                  `message #${message.id}: ${failures} turns in a row exceeded the skill-turn time budget ` +
+                  '(typically a provider outage). The trigger was dropped — re-drive the member manually ' +
+                  '(a supervisor nudge) once the provider is healthy again.',
+              }),
+              `skill_turn_timeout_drop:${task.id}:${bot.id}:${message.id}`,
+            );
+          } else {
+            keepLatched = true;
+            latchedTurnKeys.add(key);
+            deferReply({
+              taskId: task.id,
+              metabotId: bot.id,
+              messageId: message.id,
+              reason: args.reason,
+              verificationNotes: args.verificationNotes,
+              failures,
+            });
+            latchInFlightUntilSessionIdle(key, sessionId, task.id, bot.id);
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn hit the skill-turn watchdog ` +
+              `(message #${message.id}, attempt ${failures}/${MSG_RETRY_MAX_FAILURES}); the turn keeps ` +
+              'running in the session — trigger re-queued durably, guard latched until the session goes idle',
+            );
+          }
         } else {
           const failures = (args.entry?.failures ?? 0) + 1;
           if (failures >= MSG_RETRY_MAX_FAILURES) {
@@ -5127,6 +5521,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} ` +
               `dropped after ${failures} failures: ` +
               `${error instanceof Error ? error.message : String(error)}`,
+            );
+            // GT-10: exhausting the retry budget is an anomaly the origin
+            // session must hear about — the trigger is lost for good here.
+            notifySourceSessionMilestone(
+              task,
+              'anomaly',
+              buildSourceSessionAnomalyNotice({
+                title: task.title,
+                status: task.status,
+                summary:
+                  `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} did not answer ` +
+                  `message #${message.id}: ${failures} turns failed in a row ` +
+                  `(${error instanceof Error ? error.message : String(error)}). ` +
+                  'The trigger was dropped — check the member bot and re-drive it manually.',
+              }),
+              `turn_failed_drop:${task.id}:${bot.id}:${message.id}`,
             );
           } else {
             emitLog(
@@ -5145,6 +5555,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           }
         }
       } finally {
+        clearTimeout(hardCapTimer);
         for (const timer of livenessTimers) clearTimeout(timer);
         livenessTimers.length = 0;
         if (!keepLatched) {
@@ -5179,6 +5590,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
     turnInFlight.set(guardKey, { startedAt: now() });
     emitTurnActivity();
+    if (liveness) noteDriveActivity(liveness.taskId); // a dispatched turn is real drive work
+    // GT-01: same hard cap as dispatchReplyTurn — a task-level chair turn whose
+    // await never settles must not leak the guard (and with it the chair's
+    // whole turn budget) forever. On fire the guard releases so later ticks
+    // re-drive the work; the dangling job is left to rot.
+    const hardCapTimer = setTimeout(() => {
+      if (!turnInFlight.has(guardKey)) return;
+      turnInFlight.delete(guardKey);
+      emitTurnActivity();
+      emitLog(
+        `[GroupTaskDaemon] ${label}: exceeded the hard in-flight cap — guard force-settled; ` +
+        'the dangling job is left to rot',
+      );
+    }, turnHardCapMs);
+    hardCapTimer.unref?.();
     const livenessTimers: Array<ReturnType<typeof setTimeout>> = [];
     const job: Promise<void> = (async () => {
       try {
@@ -5189,6 +5615,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `${error instanceof Error ? error.message : String(error)}`,
         );
       } finally {
+        clearTimeout(hardCapTimer);
         for (const timer of livenessTimers) clearTimeout(timer);
         livenessTimers.length = 0;
         turnInFlight.delete(guardKey);
@@ -5739,11 +6166,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (depWait) {
         sqlite.delete(`${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`);
       }
+      // GT-09 honesty: only pinid/txid tokens are ledger-verified — free-text
+      // tokens are advisory (always "satisfied") and must never read as
+      // "delivered" in the chair-facing annotation.
       const depContext = depWait == null
         ? null
         : depWait.tokens.length === 0
           ? 'no upstream dependency declared in the dispatch'
-          : `upstream ${depWait.tokens.join(', ')} delivered`;
+          : (() => {
+              const verified = depWait.tokens.filter((token) => PINID_FORMAT.test(token) || TXID_FORMAT.test(token));
+              const advisoryCount = depWait.tokens.length - verified.length;
+              const parts: string[] = [];
+              if (verified.length > 0) parts.push(`upstream ${verified.join(', ')} delivered`);
+              if (advisoryCount > 0) {
+                parts.push(`${advisoryCount} advisory free-text upstream token(s) not ledger-verifiable`);
+              }
+              return parts.join('; ');
+            })();
 
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
       // once per (task, member) streak. Anti-flap (fix/group-member-status,
@@ -6104,11 +6543,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   /**
    * G-01: no-progress stall monitor — one anomaly notice to the origin session
-   * when an executing task shows zero observable progress (no group message,
-   * no deliverable) for the window. The stamp resets when progress resumes so
-   * each stall episode reports at most once; the paired milestone guard lives
-   * in the SAME kv store the service reads (production wires both to the app
-   * sqlite kv), so clearing it here re-arms the service-side once-guard.
+   * when an executing/planning task shows zero observable progress (no group
+   * message, no deliverable) for the window. The stamp resets when progress
+   * resumes so each stall episode reports at most once; the paired milestone
+   * guard lives in the SAME kv store the service reads (production wires both
+   * to the app sqlite kv), so clearing it here re-arms the service-side
+   * once-guard. GT-03 (task #56): planning coverage — a planning task whose
+   * chair plan attempts are exhausted gets ONE re-armed attempt per stall
+   * episode instead of the executing-task status nudge.
    */
   const monitorNoProgressStall = (task: GroupTask): void => {
     const sqlite = deps.getStore();
@@ -6153,7 +6595,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // silent until the stall anomaly. The supervisor-signal channel drives
     // the chair turn on the next tick.
     if (sqlite.get<string>(nudgeKey) == null) {
-      const anyTurnInFlight = [...turnInFlight.keys()].some((key) => key.startsWith(`${task.id}:`));
+      // GT-01: a watchdog-LATCHED turn is not a legitimate in-flight attempt —
+      // it already failed from the daemon's perspective and only waits for the
+      // session to idle. Excluding it lets the nudge fire during a provider
+      // outage instead of waiting out the 45-min latch cap in silence.
+      const anyTurnInFlight = [...turnInFlight.keys()].some(
+        (key) => key.startsWith(`${task.id}:`) && !latchedTurnKeys.has(key),
+      );
       // fix-v2 (B2): group silence is not idleness — a local member whose
       // cowork session worked within the window is making progress that has
       // not surfaced as a message yet (long renders, tool chains). Nudging
@@ -6171,24 +6619,46 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
       })();
       if (!anyTurnInFlight && !anyLocalSessionActive) {
-        try {
-          deps.getGroupTaskStore().addSupervisorSignal({
-            taskId: task.id,
-            kind: 'nudge',
-            note:
-              `No progress for ${Math.round(idleMs / 60_000)} min and no turn is running — ` +
-              'post a brief status update to the group: what is done, what is blocked, what happens next.',
-          });
-          sqlite.set(nudgeKey, '1');
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: no progress for ${Math.round(idleMs / 60_000)} min ` +
-            'with no turn in flight — nudged the chair for a status update',
-          );
-        } catch (error) {
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: no-progress nudge failed: ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-          );
+        // GT-03 (task #56): a PLANNING task needs its planning turn re-armed,
+        // not a status-report nudge — the chair has nothing to report yet and
+        // the supervisor directive forbids [STATUS:*] anyway. When the plan was
+        // never posted and the bounded attempts are exhausted (the state #56
+        // wedged into during the outage), release ONE more attempt per stall
+        // episode: bounded self-heal that can never spin.
+        if (task.status === 'planning') {
+          const plannedKey = `${CHAIR_PLANNED_KV_PREFIX}${task.id}`;
+          const attemptsKey = `${CHAIR_PLAN_ATTEMPTS_KV_PREFIX}${task.id}`;
+          const attempts = Number(sqlite.get<number>(attemptsKey) ?? 0) || 0;
+          if (sqlite.get<string>(plannedKey) !== '1' && attempts >= MAX_CHAIR_PLAN_ATTEMPTS) {
+            sqlite.set(attemptsKey, MAX_CHAIR_PLAN_ATTEMPTS - 1);
+            sqlite.set(nudgeKey, '1');
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: planning stalled for ${Math.round(idleMs / 60_000)} min ` +
+              'with the chair plan attempts exhausted — re-armed one planning attempt (one per stall episode)',
+            );
+          }
+          // Planning tasks never take the status-report nudge below; the stall
+          // anomaly further down still applies to them (GT-03 visibility).
+        } else {
+          try {
+            deps.getGroupTaskStore().addSupervisorSignal({
+              taskId: task.id,
+              kind: 'nudge',
+              note:
+                `No progress for ${Math.round(idleMs / 60_000)} min and no turn is running — ` +
+                'post a brief status update to the group: what is done, what is blocked, what happens next.',
+            });
+            sqlite.set(nudgeKey, '1');
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: no progress for ${Math.round(idleMs / 60_000)} min ` +
+              'with no turn in flight — nudged the chair for a status update',
+            );
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: no-progress nudge failed: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
       }
     }
@@ -6244,17 +6714,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const chairMember = members.find((member) => member.role === 'chair');
     const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
     if (!chairGmid) return;
-    // Newest cursor-passed chair row with a message-end directive (newest-first).
+    // GT-04: newest cursor-passed chair row whose ADJUDICATED instruction
+    // differs from the live status (newest-first). Adjudication is what lets
+    // task #56's shape self-heal — its real EXECUTING instruction sat on a
+    // standalone body line while the descriptive end-line REVIEW was illegal.
+    // Host notices are documentation, never protocol input: they legitimately
+    // cite tag syntax (the status-parser note itself lists legal moves).
+    const liveStatus = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
     const candidate = queryRecentMessages(db, task.groupId, 50)
       .reverse()
       .find((row) => {
         if (row.id > task.lastProcessedMsgId) return false; // normal path owns it
         const senderGmid = (row.sender_global_metaid ?? '').trim().toLowerCase();
-        return senderGmid === chairGmid && !row.sender_suspect
-          && extractStatusDirectives(row.content ?? '').length > 0;
+        if (senderGmid !== chairGmid || row.sender_suspect) return false;
+        const content = row.content ?? '';
+        if (hasGroupTaskNotice(content)) return false;
+        return adjudicateStatusDirectives(content, liveStatus).instruction != null;
       });
     if (!candidate) return;
-    const directive = extractStatusDirectives(candidate.content ?? '')[0];
+    const directive = adjudicateStatusDirectives(candidate.content ?? '', liveStatus).instruction;
+    if (!directive) return;
     const freshStatus = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
     if (directive === freshStatus) return; // already applied (or a later state)
     // Legal chair-directive transitions only (mirrors LEGAL_TRANSITIONS minus
@@ -6762,12 +7241,36 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           thresholdMs: memberTimeoutAfterMinutes * 60_000,
         });
         if (liveness === 'alive') continue;
-        const note = reclaimStuckWorkerSession(
-          task,
-          member,
-          `estimated delivery missed past the grace window with no [DELIVERABLE] and zero cowork-session activity`,
-        );
-        if (note) reclaimNotes.push(note);
+        // GT-09: the escalation branch must honor the SAME two gates as the
+        // timeout monitor — it used to reclaim directly, killing the session
+        // of a member who was correctly WAITING on an undelivered upstream
+        // (and ignoring the alert-only reclaim mode entirely).
+        const chairForDepWait = members.find((candidate) => candidate.role === 'chair');
+        const depWait = checkMemberDependencyWait(task, member, chairForDepWait);
+        if (depWait && depWait.pendingTokens.length > 0) {
+          sqlite.set(
+            `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
+            JSON.stringify({
+              upstreamTokens: depWait.pendingTokens,
+              upstreamDelivered: false,
+              checkedAt: nowMs,
+            }),
+          );
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: delivery-deadline escalation skipped for ${member.name ?? member.metabotId} ` +
+            `— waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
+          );
+          continue;
+        }
+        const deadlineReclaimReason =
+          'estimated delivery missed past the grace window with no [DELIVERABLE] and zero cowork-session activity';
+        if (parseGroupTaskStuckReclaimMode(sqlite.get<string>('groupTaskStuckReclaim')) === 'auto') {
+          const note = reclaimStuckWorkerSession(task, member, deadlineReclaimReason);
+          if (note) reclaimNotes.push(note);
+        } else {
+          const note = alertStuckWorkerSession(task, member, deadlineReclaimReason);
+          if (note) reclaimNotes.push(note);
+        }
         continue;
       }
       const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
@@ -7005,16 +7508,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       );
     }
 
-    // Round-4: per-tick heartbeat — lastDrivenAt (epoch seconds) is the host's
-    // last drive timestamp, the primary input for the show stall signal.
-    try {
-      store.updateLastDrivenAt(task.id, Math.floor(now() / 1000));
-    } catch (error) {
-      emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: lastDrivenAt heartbeat failed: ` +
-        `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    // GT-01 (task #56): lastDrivenAt (epoch seconds) is the show stall
+    // signal's primary input, so it must track REAL drive work — a posted
+    // message, a dispatched turn, or a processed message (see noteDriveActivity
+    // call sites). The old per-tick heartbeat refreshed it even while the
+    // daemon dispatched nothing for hours ("fake heartbeat": stall stayed
+    // False through the whole #56 outage). The one legitimate per-tick refresh
+    // that remains: a LIVE (non-latched) turn in flight for this task — a long
+    // skill turn that stopped posting heartbeats is still genuine drive
+    // activity, while a watchdog-latched turn (latchedTurnKeys) is not.
+    const hasLiveTurn = [...turnInFlight.keys()].some(
+      (key) => key.startsWith(`${task.id}:`) && !latchedTurnKeys.has(key),
+    );
+    if (hasLiveTurn) noteDriveActivity(task.id);
 
     // HITL: while a human checkpoint is open the group is paused waiting for
     // the owner's decision — skip member nudging (unreachable marking, ACK and
@@ -7058,10 +7564,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
-    // G-01: no-progress stall — an executing task with no new group message and
-    // no new deliverable for the window looks stuck; tell the origin session
-    // once per re-arm window instead of sitting silent.
-    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick && task.groupId) {
+    // G-01: no-progress stall — a task with no new group message and no new
+    // deliverable for the window looks stuck; tell the origin session once
+    // per re-arm window instead of sitting silent.
+    // GT-03 (task #56): PLANNING tasks are covered too — the old executing-only
+    // gate left a task pinned in planning (chair plan attempts exhausted during
+    // the outage) completely blind: no nudge, no stall anomaly, stall=False
+    // forever in the detail view.
+    if ((task.status === 'executing' || task.status === 'planning') && !checkpointOpenAtTick && !dispatchPausedAtTick && task.groupId) {
       monitorNoProgressStall(task);
     }
 
@@ -7154,10 +7664,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           if (pending.redriven) {
             // One re-drive already happened and the chair is still silent —
             // stop here; the no-progress stall monitor reports the episode.
+            // GT-10: the drop itself is an anomaly too — "the chair never
+            // answered, twice" must reach the origin session explicitly, not
+            // only via the slower indirect stall signal.
             sqlite.delete(`${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`);
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: chair response for message ${pending.messageId} ` +
               'still missing after one re-drive; dropping the obligation',
+            );
+            notifySourceSessionMilestone(
+              task,
+              'anomaly',
+              buildSourceSessionAnomalyNotice({
+                title: task.title,
+                status: task.status,
+                summary:
+                  `The chair never answered message #${pending.messageId} — not on the first dispatch, ` +
+                  'not on the automatic re-drive. The obligation was dropped so the task cannot wedge ' +
+                  'behind it; nudge the chair (supervisor channel) or check its LLM/session health.',
+              }),
+              `chair_response_dropped:${pending.messageId}`,
             );
           } else if (!turnInFlight.has(keyOf(task.id, chairMemberId))) {
             sqlite.set(
@@ -7281,6 +7807,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: status directive reconcile failed: ` +
           `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // GT-05 (task #56): restart reconciliation — a planning task whose bounded
+    // plan attempts were exhausted BEFORE the restart (e.g. burned during a
+    // provider outage) would otherwise sit silent until GT-03's 20-minute stall
+    // episode re-arms it. Once per daemon run, release one attempt immediately
+    // so a restart puts a wedged planning task back into motion on the first
+    // ticks.
+    if (task.status === 'planning' && !planningRearmedThisRun.has(task.id)) {
+      planningRearmedThisRun.add(task.id);
+      const plannedKey = `${CHAIR_PLANNED_KV_PREFIX}${task.id}`;
+      const attemptsKey = `${CHAIR_PLAN_ATTEMPTS_KV_PREFIX}${task.id}`;
+      const attempts = Number(sqlite.get<number>(attemptsKey) ?? 0) || 0;
+      if (sqlite.get<string>(plannedKey) !== '1' && attempts >= MAX_CHAIR_PLAN_ATTEMPTS) {
+        sqlite.set(attemptsKey, MAX_CHAIR_PLAN_ATTEMPTS - 1);
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: restart reconciliation — chair plan attempts were exhausted ` +
+          'with no plan posted; re-armed one planning attempt for this daemon run',
         );
       }
     }
@@ -7556,6 +8102,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
         // Round-4: cursor advances only on SUCCESSFUL processing.
         store.updateLastProcessedMsgId(task.id, message.id);
+        noteDriveActivity(task.id); // a processed message is real drive work
         noteTickProgress(); // a processed message proves the in-flight tick is alive
         const retryKey = `${MSG_RETRY_PREFIX}${task.id}:${message.id}`;
         if (sqlite.get<number>(retryKey) != null) {
@@ -7607,10 +8154,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
           }
           store.updateLastProcessedMsgId(task.id, row.id);
+          noteDriveActivity(task.id); // a settled (dropped) message is real drive work
           noteTickProgress();
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: message ${row.id} dropped after ` +
             `${failures} consecutive failures (cursor advanced past it)`,
+          );
+          // GT-10: a dropped message is permanent information loss — the origin
+          // session must hear about it, not just the log file.
+          notifySourceSessionMilestone(
+            task,
+            'anomaly',
+            buildSourceSessionAnomalyNotice({
+              title: task.title,
+              status: task.status,
+              summary:
+                `Group message #${row.id} was dropped after ${failures} consecutive processing failures ` +
+                '(its control tags were given one final best-effort reprocess). The pipeline continues, ' +
+                'but that message\'s content is lost — check the daemon logs for the underlying error.',
+            }),
+            `message_dropped:${task.id}:${row.id}`,
           );
           // The poison message is out of the way: later messages may proceed.
           continue;
