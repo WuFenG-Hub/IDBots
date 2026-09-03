@@ -44,12 +44,12 @@ export default {
           accentHover: 'var(--color-primary)',
           accentLight: 'var(--color-accent)',
           accentMuted: 'rgba(234, 179, 8, 0.12)',
-          // Deep-orange ink for text/icons sitting ON the yellow accent fill
-          // (white-on-yellow is illegible; the old near-black #303133 was
-          // retired as too harsh). #9A3412 keeps a 5.4:1 contrast on #FFDC51.
-          // Matches .btn-idchat-primary-filled's color; fixed (not a var)
-          // because the yellow fill is mode-invariant.
-          accentInk: '#9A3412',
+          // Near-black ink for text/icons sitting ON the yellow accent fill
+          // (white-on-yellow is illegible). Matches .btn-idchat-primary-filled's
+          // #303133; fixed (not a var) because the yellow fill is mode-invariant.
+          // Exception: the composer send/stop button uses deep-orange
+          // #9A3412 (see CoworkPromptInput) — do not blanket-change this token.
+          accentInk: '#303133',
         },
         primary: {
           DEFAULT: 'var(--color-primary)',

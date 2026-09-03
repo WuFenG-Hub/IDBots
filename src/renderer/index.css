@@ -366,12 +366,10 @@ select::-ms-expand {
   transform: translateX(var(--btn-move-range)) translateY(var(--btn-move-range));
 }
 
-/* Filled primary button (IDChat .main-border.primary): yellow background + border + shadow + lift/press.
-   Ink on yellow is the deep-orange accentInk (tailwind accentInk, #9A3412) — near-black was retired
-   as too harsh on the eyes. */
+/* Filled primary button (IDChat .main-border.primary): yellow background + border + shadow + lift/press */
 .btn-idchat-primary-filled {
   background-color: var(--color-primary);
-  color: #9A3412;
+  color: #303133;
   border: var(--btn-border-width) solid var(--btn-primary-edge);
   box-shadow: var(--btn-shadow-offset) var(--btn-shadow-offset) 0 var(--btn-primary-edge);
   border-radius: var(--rounded);
