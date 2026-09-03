@@ -1592,8 +1592,11 @@ export async function getGroupTask(
       try {
         const raw = getKvStore().get<string>(`${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${id}:${member.metabotId}`);
         if (!raw) return false;
-        const parsed = JSON.parse(raw) as { upstreamDelivered?: boolean } | null;
-        return parsed?.upstreamDelivered === false;
+        // Release-review P1: a prose exemption that exhausted its time cap is
+        // stamped proseExemptionExpired by the daemon — it must not read as
+        // 'waiting' anymore, the member is back under normal monitoring.
+        const parsed = JSON.parse(raw) as { upstreamDelivered?: boolean; proseExemptionExpired?: boolean } | null;
+        return parsed?.upstreamDelivered === false && parsed?.proseExemptionExpired !== true;
       } catch {
         return false;
       }
