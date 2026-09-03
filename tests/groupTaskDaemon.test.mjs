@@ -6241,6 +6241,46 @@ test('GT-03: a stalled PLANNING task re-arms one exhausted plan attempt per epis
   }
 });
 
+test('GT-05: a daemon restart immediately re-arms a planning task whose attempts died pre-restart', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    // The pre-restart wedged state (task #56 after the outage): attempts
+    // exhausted, plan never posted — and the no-progress windows NOT yet
+    // elapsed (a restart must not have to wait out the 20-minute episode).
+    h.store.set(`group_task_chair_plan_attempts:${task.id}`, 3);
+
+    // A fresh loop instance = the app restarted (once-per-run guards reset).
+    const fresh = h.makeLoop();
+    await fresh.runTick();
+    assert.equal(
+      Number(h.store.get(`group_task_chair_plan_attempts:${task.id}`)),
+      2,
+      'restart reconciliation re-arms one planning attempt immediately',
+    );
+    assert.ok(logs.some((line) => line.includes('restart reconciliation')), 're-arm logged');
+    await fresh.runTick();
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 1 && send.content.includes('[STATUS:EXECUTING]')),
+      'the chair planning turn runs right after the restart, not 20 minutes later',
+    );
+
+    // Once per run: a THIRD tick must not re-arm again after the attempt
+    // burned (simulate the re-armed attempt failing back to the cap).
+    h.store.set(`group_task_chair_plan_attempts:${task.id}`, 3);
+    h.store.delete(`group_task_chair_planned:${task.id}`);
+    await fresh.runTick();
+    assert.equal(
+      Number(h.store.get(`group_task_chair_plan_attempts:${task.id}`)),
+      3,
+      'no second re-arm within the same daemon run',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('gating (G-04): while dispatch is paused the chair answers only the owner; workers unchanged', () => {
   const pausedTask = { id: 1, status: 'executing', dispatchPaused: true };
   const ownerMessage = gateMessage({ senderGlobalMetaId: BOSS_GMID, senderMetaId: 'metaid-human', senderName: 'Owner', content: 'what is the status?' });

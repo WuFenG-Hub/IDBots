@@ -2366,6 +2366,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * whole repair budget for legacy stuck tasks).
    */
   const statusDirectiveReconciledTasks = new Set<number>();
+  /**
+   * GT-05 (task #56): tasks whose exhausted chair-plan attempts were already
+   * re-armed once this daemon run. One attempt per restart — GT-03's per-episode
+   * re-arm is the steady-state ladder; this only skips the 20-minute wait right
+   * after a restart.
+   */
+  const planningRearmedThisRun = new Set<number>();
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
@@ -7685,6 +7692,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: status directive reconcile failed: ` +
           `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // GT-05 (task #56): restart reconciliation — a planning task whose bounded
+    // plan attempts were exhausted BEFORE the restart (e.g. burned during a
+    // provider outage) would otherwise sit silent until GT-03's 20-minute stall
+    // episode re-arms it. Once per daemon run, release one attempt immediately
+    // so a restart puts a wedged planning task back into motion on the first
+    // ticks.
+    if (task.status === 'planning' && !planningRearmedThisRun.has(task.id)) {
+      planningRearmedThisRun.add(task.id);
+      const plannedKey = `${CHAIR_PLANNED_KV_PREFIX}${task.id}`;
+      const attemptsKey = `${CHAIR_PLAN_ATTEMPTS_KV_PREFIX}${task.id}`;
+      const attempts = Number(sqlite.get<number>(attemptsKey) ?? 0) || 0;
+      if (sqlite.get<string>(plannedKey) !== '1' && attempts >= MAX_CHAIR_PLAN_ATTEMPTS) {
+        sqlite.set(attemptsKey, MAX_CHAIR_PLAN_ATTEMPTS - 1);
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: restart reconciliation — chair plan attempts were exhausted ` +
+          'with no plan posted; re-armed one planning attempt for this daemon run',
         );
       }
     }
