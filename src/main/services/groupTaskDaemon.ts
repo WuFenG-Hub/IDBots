@@ -6102,6 +6102,42 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * release-review P2: both dep-wait monitors (unreachable watch + delivery
+   * deadline escalation) re-run every tick and used to rewrite the exemption
+   * note unconditionally — one kv write per ~5s per waiting member (a full
+   * export+rewrite flush on the sql.js fallback backend). Write only when the
+   * note is first armed or the pending-token set changed; `checkedAt` alone
+   * never justifies a rewrite. Returns whether the note changed, so callers
+   * can gate their per-tick log line on it too.
+   */
+  const writeDepWaitExemptionNote = (
+    taskId: number,
+    metabotId: number,
+    pendingTokens: string[],
+  ): boolean => {
+    const sqlite = deps.getStore();
+    const key = `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${taskId}:${metabotId}`;
+    let changed = true;
+    const priorRaw = sqlite.get<string>(key);
+    if (priorRaw != null) {
+      try {
+        const prior = JSON.parse(priorRaw) as { upstreamTokens?: string[] };
+        changed = JSON.stringify(prior.upstreamTokens ?? []) !== JSON.stringify(pendingTokens);
+      } catch {
+        changed = true;
+      }
+    }
+    if (changed) {
+      sqlite.set(key, JSON.stringify({
+        upstreamTokens: pendingTokens,
+        upstreamDelivered: false,
+        checkedAt: now(),
+      }));
+    }
+    return changed;
+  };
+
+  /**
    * fix/group-task-dep-wait: the [DEPENDS_ON] state of the member's LATEST
    * chair assignment (chair-sent, @mentioning the member, skipping host
    * notices / roll calls — the same gates the ACK-watch arming path applies).
@@ -6249,18 +6285,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // every tick, so the exemption lifts on its own once the upstream lands.
       const depWait = checkMemberDependencyWait(task, member, chairMember);
       if (depWait && depWait.pendingTokens.length > 0) {
-        sqlite.set(
-          `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
-          JSON.stringify({
-            upstreamTokens: depWait.pendingTokens,
-            upstreamDelivered: false,
-            checkedAt: now(),
-          }),
-        );
-        emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: dependency-wait exemption: member ${name} ` +
-          `waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
-        );
+        if (writeDepWaitExemptionNote(task.id, member.metabotId, depWait.pendingTokens)) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: dependency-wait exemption: member ${name} ` +
+            `waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
+          );
+        }
         continue;
       }
       // Not waiting (no [DEPENDS_ON] tag, or the upstream has delivered since):
@@ -7350,19 +7380,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const chairForDepWait = members.find((candidate) => candidate.role === 'chair');
         const depWait = checkMemberDependencyWait(task, member, chairForDepWait);
         if (depWait && depWait.pendingTokens.length > 0) {
-          sqlite.set(
-            `${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`,
-            JSON.stringify({
-              upstreamTokens: depWait.pendingTokens,
-              upstreamDelivered: false,
-              checkedAt: nowMs,
-            }),
-          );
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: delivery-deadline escalation skipped for ${member.name ?? member.metabotId} ` +
-            `— waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
-          );
+          if (writeDepWaitExemptionNote(task.id, member.metabotId, depWait.pendingTokens)) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: delivery-deadline escalation skipped for ${member.name ?? member.metabotId} ` +
+              `— waiting on upstream ${depWait.pendingTokens.join(', ')} (not delivered)`,
+            );
+          }
           continue;
+        }
+        if (depWait) {
+          // Symmetry with the timeout monitor above: the wait lifted on this
+          // path too — clear the stale exemption note so the audit trail
+          // reflects the lift instead of relying on the other monitor's run.
+          sqlite.delete(`${GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX}${task.id}:${member.metabotId}`);
         }
         const deadlineReclaimReason =
           'estimated delivery missed past the grace window with no [DELIVERABLE] and zero cowork-session activity';
