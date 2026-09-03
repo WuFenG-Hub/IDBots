@@ -5522,6 +5522,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               `dropped after ${failures} failures: ` +
               `${error instanceof Error ? error.message : String(error)}`,
             );
+            // GT-10: exhausting the retry budget is an anomaly the origin
+            // session must hear about — the trigger is lost for good here.
+            notifySourceSessionMilestone(
+              task,
+              'anomaly',
+              buildSourceSessionAnomalyNotice({
+                title: task.title,
+                status: task.status,
+                summary:
+                  `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} did not answer ` +
+                  `message #${message.id}: ${failures} turns failed in a row ` +
+                  `(${error instanceof Error ? error.message : String(error)}). ` +
+                  'The trigger was dropped — check the member bot and re-drive it manually.',
+              }),
+              `turn_failed_drop:${task.id}:${bot.id}:${message.id}`,
+            );
           } else {
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} ` +
@@ -7648,10 +7664,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           if (pending.redriven) {
             // One re-drive already happened and the chair is still silent —
             // stop here; the no-progress stall monitor reports the episode.
+            // GT-10: the drop itself is an anomaly too — "the chair never
+            // answered, twice" must reach the origin session explicitly, not
+            // only via the slower indirect stall signal.
             sqlite.delete(`${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`);
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: chair response for message ${pending.messageId} ` +
               'still missing after one re-drive; dropping the obligation',
+            );
+            notifySourceSessionMilestone(
+              task,
+              'anomaly',
+              buildSourceSessionAnomalyNotice({
+                title: task.title,
+                status: task.status,
+                summary:
+                  `The chair never answered message #${pending.messageId} — not on the first dispatch, ` +
+                  'not on the automatic re-drive. The obligation was dropped so the task cannot wedge ' +
+                  'behind it; nudge the chair (supervisor channel) or check its LLM/session health.',
+              }),
+              `chair_response_dropped:${pending.messageId}`,
             );
           } else if (!turnInFlight.has(keyOf(task.id, chairMemberId))) {
             sqlite.set(
@@ -8127,6 +8159,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: message ${row.id} dropped after ` +
             `${failures} consecutive failures (cursor advanced past it)`,
+          );
+          // GT-10: a dropped message is permanent information loss — the origin
+          // session must hear about it, not just the log file.
+          notifySourceSessionMilestone(
+            task,
+            'anomaly',
+            buildSourceSessionAnomalyNotice({
+              title: task.title,
+              status: task.status,
+              summary:
+                `Group message #${row.id} was dropped after ${failures} consecutive processing failures ` +
+                '(its control tags were given one final best-effort reprocess). The pipeline continues, ' +
+                'but that message\'s content is lost — check the daemon logs for the underlying error.',
+            }),
+            `message_dropped:${task.id}:${row.id}`,
           );
           // The poison message is out of the way: later messages may proceed.
           continue;

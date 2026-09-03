@@ -942,6 +942,106 @@ test('GT-09: the delivery-deadline escalation skips a member waiting on an undel
   }
 });
 
+test('GT-10: a chair obligation dropped after the re-drive alerts the origin session', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]); // executing
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt10a', task.id]);
+    // The chair already got its ONE automatic re-drive and stayed silent.
+    h.store.set(
+      `group_task_chair_response_pending:${task.id}`,
+      JSON.stringify({ messageId: 42, reason: 'chair_mentioned', atMs: h.state.nowMs - 60 * 60_000, redriven: true }),
+    );
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      undefined,
+      'the twice-missed obligation is dropped',
+    );
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && m.subject === 'chair_response_dropped:42'),
+      'the drop alerts the origin session instead of disappearing quietly',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-10: a member turn that exhausts its retry budget drops with an anomaly (not silently)', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    chatErrorAlways: 'provider down',
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]); // executing
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt10b', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'gt10-mention-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please handle this',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    // Every turn fails; the durable defer queue re-drives until the budget
+    // (5 failures) is exhausted.
+    for (let i = 0; i < 6; i += 1) await h.loop.runTick();
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && /^turn_failed_drop:/.test(m.subject ?? '')),
+      'exhausting the retry budget alerts the origin session',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT-10: a message dropped after 5 processing failures alerts the origin session', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      // A permanently failing attribution resolver — every processing attempt
+      // throws (transient shape), burning the MSG_RETRY budget.
+      resolveGlobalMetaId: async () => { throw new Error('indexer down'); },
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]); // executing
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-gt10c', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'gt10-poison-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: null,
+      senderName: 'Coder Bot', content: '进展同步一下',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    for (let i = 0; i < 6; i += 1) await h.loop.runTick();
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && /^message_dropped:/.test(m.subject ?? '')),
+      'dropping the poison message alerts the origin session',
+    );
+    const rowId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['gt10-poison-i0'])[0].values[0][0];
+    assert.ok(
+      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId >= rowId,
+      'the cursor advanced past the dropped message',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('review fix: a new ETA ACK resets the delivery-reminded flag before re-arming', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
