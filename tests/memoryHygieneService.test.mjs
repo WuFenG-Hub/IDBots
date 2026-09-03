@@ -711,6 +711,63 @@ test('deep consolidation reports why the output was unparseable', async () => {
   }
 });
 
+test('deep consolidation rides the bot brain pair and names the brain on request failure', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  for (let index = 0; index < 8; index += 1) {
+    coworkStore.createUserMemory({
+      metabotId: 9,
+      text: `boundary rule ${index}`,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+      forceNew: true,
+    });
+  }
+  // The 2026-09-03 live failure: the bot's brain model was rejected by the
+  // endpoint (400 stale catalog entry). The call must ride the bot's full
+  // brain pair — provider hint + fallback brain — like every other per-bot
+  // automation path, and the surfaced error must name the rejected brain.
+  const seen = [];
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: {
+      listMetabots: () => [{
+        id: 9,
+        name: 'Twin',
+        llm_id: 'glm-5.3-flash',
+        llm_provider: 'zhipu',
+        fallback_llm_id: 'deepseek-v4-flash',
+        fallback_llm_provider: 'deepseek',
+        globalmetaid: 'metaid://stub-owner',
+      }],
+    },
+    performChat: async (_system, _user, llmId, options) => {
+      seen.push({ llmId, options });
+      throw new Error('LLM request failed: 400 {"type":"error","error":{"type":"api_error","message":"invalid_request_error: you passed glm-5.3-flash."}}');
+    },
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].llmId, 'glm-5.3-flash');
+    assert.equal(seen[0].options?.llmProvider, 'zhipu');
+    assert.equal(seen[0].options?.fallbackLlmId, 'deepseek-v4-flash');
+    assert.equal(seen[0].options?.fallbackLlmProvider, 'deepseek');
+    assert.ok(
+      stats.errors.some((line) =>
+        line.startsWith('deep-consolidation bot 9 (brain zhipu/glm-5.3-flash): LLM request failed: 400')),
+      `brain attribution missing from errors: ${JSON.stringify(stats.errors)}`
+    );
+    assert.equal(coworkStore.getDeepConsolidationLastRunAt(9), null, 'failed request never stamps the cadence');
+  } finally {
+    cleanup();
+  }
+});
+
 test('deep consolidation refuses retire lists that exceed the guardrail and skips disabled bots', async () => {
   const { db, cleanup } = await createSqliteStore();
   insertMetabot(db, 9, 'metaid://stub-owner');

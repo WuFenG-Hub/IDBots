@@ -18,6 +18,7 @@ import {
   shouldRunDeepConsolidation,
   type DeepConsolidationInventoryItem,
 } from '../libs/deepConsolidationPrompt';
+import { metabotBrainOptions } from './llmFallback';
 
 /**
  * Memory hygiene service — the nightly deterministic "compression stroke".
@@ -49,6 +50,11 @@ export interface MemoryHygieneMetabotLike {
   id: number;
   name?: string | null;
   llm_id?: string | null;
+  /** Provider key the brain model was picked from (id-collision disambiguation). */
+  llm_provider?: string | null;
+  /** Secondary brain retried once when the primary brain errors mid-call. */
+  fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
   globalmetaid?: string | null;
   enabled?: boolean;
 }
@@ -94,6 +100,11 @@ export type MemoryHygienePerformChat = (
     thinking?: 'enabled' | 'disabled';
     /** Pass false: a stray built-in web search derails the JSON contract. */
     webSearch?: boolean;
+    /** Provider key the brain model was picked from (id-collision disambiguation). */
+    llmProvider?: string | null;
+    /** Secondary brain retried once when the primary brain errors mid-call. */
+    fallbackLlmId?: string | null;
+    fallbackLlmProvider?: string | null;
   }
 ) => Promise<string>;
 
@@ -291,11 +302,20 @@ export class MemoryHygieneService {
           botsConsidered += 1;
 
           let raw: string;
+          // The bot's full brain pair (provider hint + fallback brain), same
+          // as every other per-bot automation path (dreams, A2A, group tasks).
+          // A bare llm_id misresolves on cross-provider model-id collisions,
+          // and without the fallback brain a single dead/unreachable primary
+          // brain fails the bot's consolidation every pass.
+          const brain = metabotBrainOptions(bot);
+          const brainLabel = brain.llmId
+            ? ` (brain ${brain.llmProvider ? `${brain.llmProvider}/` : ''}${brain.llmId})`
+            : '';
           try {
             raw = await this.deps.performChat(
               'You are a memory consolidation assistant. Respond only with the requested JSON object.',
               buildDeepConsolidationPrompt({ botName: bot.name ?? `MetaBot ${bot.id}`, items }),
-              bot.llm_id ?? undefined,
+              brain.llmId,
               {
                 thinking: 'disabled',
                 signal: AbortSignal.timeout(DEEP_CONSOLIDATION_LLM_TIMEOUT_MS),
@@ -303,10 +323,16 @@ export class MemoryHygieneService {
                 // The Responses-path default web_search injection turns this
                 // into a search-plus-prose answer that blows the JSON budget.
                 webSearch: false,
+                llmProvider: brain.llmProvider,
+                fallbackLlmId: brain.fallbackLlmId,
+                fallbackLlmProvider: brain.fallbackLlmProvider,
               },
             );
           } catch (error) {
-            errors.push(`deep-consolidation bot ${bot.id}: ${error instanceof Error ? error.message : String(error)}`);
+            // Name the brain in the surfaced error: a stale/removed model id
+            // (upstream 400) is only actionable when the settings page shows
+            // WHICH configured brain the endpoint rejected.
+            errors.push(`deep-consolidation bot ${bot.id}${brainLabel}: ${error instanceof Error ? error.message : String(error)}`);
             continue;
           }
           const output = parseDeepConsolidationOutput(raw);

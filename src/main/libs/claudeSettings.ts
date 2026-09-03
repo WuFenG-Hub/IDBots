@@ -452,10 +452,20 @@ function buildApiConfigFromMatched(
     return { config: null, error: 'OpenAI compatibility proxy base URL is unavailable.' };
   }
 
+  // A pinned session gets the session-scoped route (/s/<key>/v1/messages) so
+  // handleRequest resolves the per-session upstream registered above instead of
+  // the shared singleton. The singleton is republished on EVERY configure call,
+  // so unscoped one-shot callers (dreams, memory hygiene, summaries running in
+  // the same window) can forward a request to the wrong provider mid-flight.
+  const pinKey = sessionKey?.trim();
+  const scopedProxyBaseURL = pinKey
+    ? `${proxyBaseURL}/s/${encodeURIComponent(pinKey)}`
+    : proxyBaseURL;
+
   return {
     config: {
       apiKey: resolvedApiKey || 'idbots-openai-compat',
-      baseURL: proxyBaseURL,
+      baseURL: scopedProxyBaseURL,
       model: matched.modelId,
       apiType: 'anthropic', // proxy speaks Anthropic /v1/messages format
       provider: matched.providerName,

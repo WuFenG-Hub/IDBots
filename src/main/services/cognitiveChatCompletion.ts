@@ -7,8 +7,26 @@
  */
 
 import { resolveApiConfigForModel } from '../libs/claudeSettings';
+import { clearCoworkSessionUpstream } from '../libs/coworkOpenAICompatProxy';
 import { effortForAnthropicWire, effortForOpenAiWire, type LlmEffortLevel } from '../libs/llmEffort';
 import { runWithLlmFallback } from './llmFallback';
+
+let oneShotPinCounter = 0;
+
+/**
+ * Throwaway upstream-pin key for one cognitive attempt. One-shot calls have no
+ * cowork session, so without a pin they share the proxy's singleton upstream —
+ * which ANY concurrent proxy-routed caller (dreams, memory hygiene, content
+ * summaries in the same nightly window, another bot's consolidation) republishes
+ * on its own configure step, forwarding this attempt to the WRONG provider
+ * mid-flight (the 2026-09-03 deep-consolidation 400: a bot's request carrying
+ * its glm-* brain model landed on a deepseek-only gateway). Each attempt pins
+ * its upstream under this key and clears the pin when done.
+ */
+function nextOneShotPinKey(): string {
+  oneShotPinCounter = (oneShotPinCounter + 1) % Number.MAX_SAFE_INTEGER;
+  return `oneshot-${Date.now().toString(36)}-${oneShotPinCounter}`;
+}
 
 /** OpenAI-style tool definition for function calling. */
 export interface OpenAITool {
@@ -205,97 +223,104 @@ async function chatCompletionSingleAttempt(
   messages: ChatMessage[],
   options: ChatCompletionOptions
 ): Promise<ChatCompletionResult> {
-  const { config, error } = resolveApiConfigForModel(
-    options.llmId ?? undefined,
-    'local',
-    undefined,
-    options.llmProvider ?? undefined,
-  );
-  if (error || !config) {
-    throw new Error(error ?? 'LLM config not available');
-  }
-
-  const baseURL = config.baseURL?.trim();
-  if (!baseURL) {
-    throw new Error('LLM base URL not available');
-  }
-
-  const model = config.model || 'gpt-4o';
-  const apiType = config.apiType ?? 'openai';
-  // An explicit effort overrides the binary thinking toggle: off disables
-  // thinking entirely, any other step enables it (the wire mappers below
-  // translate the ladder into budget/effort parameters).
-  const thinkingToggle: 'enabled' | 'disabled' | undefined = options.effort
-    ? (options.effort === 'off' ? 'disabled' : 'enabled')
-    : options.thinking;
-  const thinking = resolveThinkingForModel(model, thinkingToggle);
-  const effort = options.effort ?? null;
-  const hasTools = Array.isArray(options.tools) && options.tools.length > 0;
-  // DeepSeek flash models support the Responses API (with built-in web_search).
-  // Route them there when we have the real upstream base URL; fall back to the
-  // chat/completions or Anthropic path otherwise. Pro and non-flash stay on
-  // chat/completions until DeepSeek enables Responses for them.
-  const useDeepSeekResponses = shouldUseDeepSeekResponses(config.provider, model);
-  if (process.env.NODE_ENV === 'development' || hasTools) {
-    console.log(
-      `[Orchestrator] LLM call: apiType=${apiType} baseURL=${maskBaseURL(baseURL)} model=${model} tools=${hasTools ? options.tools!.length : 0} responses=${useDeepSeekResponses}`
-    );
-  }
-
+  // Pin this attempt's upstream in the proxy's per-session registry; the
+  // resolved baseURL then carries the /s/<key> route (see claudeSettings).
+  const pinKey = nextOneShotPinKey();
   try {
-    let result: ChatCompletionResult;
-    if (useDeepSeekResponses && config.upstreamBaseURL) {
-      result = await callDeepSeekResponsesStyle(
-        config.upstreamBaseURL,
-        model,
-        config.apiKey ?? '',
-        messages,
-        options.tools,
-        options.signal,
-        options.maxTokens,
-        options.temperature,
-        thinking,
-        effort,
-        options.webSearch
-      );
-    } else if (apiType === 'anthropic') {
-      result = await callAnthropicStyleWithTools(
-        baseURL,
-        model,
-        config.apiKey ?? '',
-        messages,
-        options.tools,
-        options.signal,
-        options.maxTokens,
-        options.temperature,
-        thinking,
-        effort
-      );
-    } else {
-      result = await callOpenAIStyleWithTools(
-        baseURL,
-        model,
-        config.apiKey ?? '',
-        messages,
-        options.tools,
-        options.signal,
-        options.maxTokens,
-        options.temperature,
-        thinking,
-        effort
+    const { config, error } = resolveApiConfigForModel(
+      options.llmId ?? undefined,
+      'local',
+      pinKey,
+      options.llmProvider ?? undefined,
+    );
+    if (error || !config) {
+      throw new Error(error ?? 'LLM config not available');
+    }
+
+    const baseURL = config.baseURL?.trim();
+    if (!baseURL) {
+      throw new Error('LLM base URL not available');
+    }
+
+    const model = config.model || 'gpt-4o';
+    const apiType = config.apiType ?? 'openai';
+    // An explicit effort overrides the binary thinking toggle: off disables
+    // thinking entirely, any other step enables it (the wire mappers below
+    // translate the ladder into budget/effort parameters).
+    const thinkingToggle: 'enabled' | 'disabled' | undefined = options.effort
+      ? (options.effort === 'off' ? 'disabled' : 'enabled')
+      : options.thinking;
+    const thinking = resolveThinkingForModel(model, thinkingToggle);
+    const effort = options.effort ?? null;
+    const hasTools = Array.isArray(options.tools) && options.tools.length > 0;
+    // DeepSeek flash models support the Responses API (with built-in web_search).
+    // Route them there when we have the real upstream base URL; fall back to the
+    // chat/completions or Anthropic path otherwise. Pro and non-flash stay on
+    // chat/completions until DeepSeek enables Responses for them.
+    const useDeepSeekResponses = shouldUseDeepSeekResponses(config.provider, model);
+    if (process.env.NODE_ENV === 'development' || hasTools) {
+      console.log(
+        `[Orchestrator] LLM call: apiType=${apiType} baseURL=${maskBaseURL(baseURL)} model=${model} tools=${hasTools ? options.tools!.length : 0} responses=${useDeepSeekResponses}`
       );
     }
-    if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
-      const emptyError = new Error(formatEmptyCompletionError(result.responseMetadata));
-      // 让上层（botBrowserBridgeService.completeLlm）能把「空回复」从 llm_unavailable 里区分出来。
-      emptyError.name = 'EmptyCompletion';
-      throw emptyError;
+
+    try {
+      let result: ChatCompletionResult;
+      if (useDeepSeekResponses && config.upstreamBaseURL) {
+        result = await callDeepSeekResponsesStyle(
+          config.upstreamBaseURL,
+          model,
+          config.apiKey ?? '',
+          messages,
+          options.tools,
+          options.signal,
+          options.maxTokens,
+          options.temperature,
+          thinking,
+          effort,
+          options.webSearch
+        );
+      } else if (apiType === 'anthropic') {
+        result = await callAnthropicStyleWithTools(
+          baseURL,
+          model,
+          config.apiKey ?? '',
+          messages,
+          options.tools,
+          options.signal,
+          options.maxTokens,
+          options.temperature,
+          thinking,
+          effort
+        );
+      } else {
+        result = await callOpenAIStyleWithTools(
+          baseURL,
+          model,
+          config.apiKey ?? '',
+          messages,
+          options.tools,
+          options.signal,
+          options.maxTokens,
+          options.temperature,
+          thinking,
+          effort
+        );
+      }
+      if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
+        const emptyError = new Error(formatEmptyCompletionError(result.responseMetadata));
+        // 让上层（botBrowserBridgeService.completeLlm）能把「空回复」从 llm_unavailable 里区分出来。
+        emptyError.name = 'EmptyCompletion';
+        throw emptyError;
+      }
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[Orchestrator] chatCompletionWithTools failed:', msg);
+      throw err;
     }
-    return result;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error('[Orchestrator] chatCompletionWithTools failed:', msg);
-    throw err;
+  } finally {
+    clearCoworkSessionUpstream(pinKey);
   }
 }
 
