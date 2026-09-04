@@ -7331,7 +7331,7 @@ export class CoworkRunner extends EventEmitter {
 
     try {
       await this.syncDshSkillSessionEnv(dshSessionId, sessionId, cwd);
-      const hostTools = this.buildDshHostTools(sessionId, modelLimits?.supportsVision)
+      const hostTools = this.buildDshHostTools(sessionId)
       // Per-session registry: a concurrent turn of ANOTHER session must not
       // clobber this session's tool set (Twin-only tools would intermittently
       // go missing while a worker turn ran, and vice versa).
@@ -7930,7 +7930,7 @@ export class CoworkRunner extends EventEmitter {
    * passthrough factory — schemas travel to the runtime, execution
    * round-trips back to the host bridge.
    */
-  private buildDshHostTools(sessionId: string, modelSupportsVision?: boolean): Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> {
+  private buildDshHostTools(sessionId: string): Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> {
     const isZodValue = (value: unknown): boolean =>
       Boolean(value) && typeof value === 'object'
       && (Object.hasOwn(value as object, '_def') || Object.hasOwn(value as object, 'def')
@@ -7969,7 +7969,7 @@ export class CoworkRunner extends EventEmitter {
       parameters: Record<string, unknown>,
       execute: (args: any) => Promise<unknown>
     ) => ({ name, description, parameters: normalizeToolSchema(parameters), execute })
-    return this.buildSessionInlineTools(sessionId, passthrough, undefined, modelSupportsVision)
+    return this.buildSessionInlineTools(sessionId, passthrough, undefined)
   }
 
   /**
@@ -8189,13 +8189,11 @@ export class CoworkRunner extends EventEmitter {
    * twin orchestration, upload, search, browser, metabot manage). Shared by
    * both kernels: the Claude path passes the SDK tool() factory, the DSH path
    * passes a passthrough that also normalizes zod schemas to JSON schema.
-   *
-   * `modelSupportsVision` (resolved by the caller from the SAME model-limits
-   * source the Read-image guard uses) gates describe_image: vision routes
-   * omit it so the model uses native image blocks instead of burning the
-   * quota-metered relay; undefined keeps it (safe fallback).
+   * The catalog is route-independent: tools that need model capability
+   * resolution (e.g. the Read-image guard) decide at call time, not at
+   * registration time.
    */
-  private buildSessionInlineTools(sessionId: string, tool: any, activeSession?: ActiveSession, modelSupportsVision?: boolean): any[] {
+  private buildSessionInlineTools(sessionId: string, tool: any, activeSession?: ActiveSession): any[] {
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
     const memoryTools: any[] = [
       tool(
@@ -8991,18 +8989,17 @@ export class CoworkRunner extends EventEmitter {
       );
     }
     // Image understanding: the relay VLM turns a local image file into a
-    // text description + OCR, which is the ONLY read-image path for
-    // non-vision models (the Read-image guard denies their raw file reads).
-    // Vision routes omit describe_image so the model uses native image
-    // blocks (read_image / prompt attachments) — better quality, one less
-    // hop, and no relay quota spend. describe_video stays on every route:
-    // native vision cannot watch video.
+    // text description + OCR. describe_image registers on EVERY route — the
+    // relay does the seeing, so the tool does not depend on the session
+    // model's multimodality (or on the model-limits table being correct;
+    // the 2026-09-04 glm-5.3-flash regression hid it behind a misresolved
+    // supportsVision=true). describe_video likewise: native vision cannot
+    // watch video on any route.
     if (this.visionRelay) {
       memoryTools.push(
         ...buildVisionRelayAgentTools({
           tool,
           visionRelay: this.visionRelay,
-          includeDescribeImage: modelSupportsVision !== true,
         })
       );
     }
