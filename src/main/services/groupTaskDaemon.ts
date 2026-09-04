@@ -1550,6 +1550,15 @@ export interface GroupTaskDaemonDeps {
    */
   stopWorkerSession?: (sessionId: string) => void;
   /**
+   * Task #60: true while the cowork runner still holds a live turn handle for
+   * the session (wired to CoworkRunner.isSessionActive in main.ts). The
+   * skill-turn watchdog latch uses it to distinguish a genuinely terminated
+   * turn from a transient 'error' status read (the bridge stamps 'error' at
+   * the watchdog fire while the runner keeps executing the turn). Unwired =
+   * the latch falls back to status-only release.
+   */
+  isCoworkSessionActive?: (sessionId: string) => boolean;
+  /**
    * P4 (v1.2): inject the review-stage owner report (same body the A2A
    * private chat receives) into the task's origin CoWork session under the
    * [GROUP_TASK_REVIEW] prefix. Best-effort; kv-guarded per review-entry.
@@ -5567,6 +5576,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       return;
     }
     const startedAt = now();
+    // Task #60: throttle the "still running" suppression log — the watcher
+    // fires every 15s and a long turn can hold the latch for tens of minutes.
+    let lastSuppressLogAt = 0;
     const watcher = setInterval(() => {
       let status: string | null = null;
       try {
@@ -5574,7 +5586,33 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       } catch {
         status = null;
       }
-      if (status === 'running' && now() - startedAt < TURN_LATCH_MAX_MS) return;
+      const capReached = now() - startedAt >= TURN_LATCH_MAX_MS;
+      if (status === 'running' && !capReached) return;
+      // Task #60: a non-'running' status read is NOT proof the turn ended. The
+      // skill-turn bridge stamps the session 'error' at the watchdog fire
+      // while the runner keeps executing the original turn; releasing the
+      // latch on that transient read re-dispatched the SAME trigger into a
+      // session that was still busy (message #3247 re-driven at 06:29 and
+      // 06:59 while Lucy's first turn ran on). Verify termination through the
+      // runner: only release when no live turn handle remains for the session
+      // (or the latch cap forces it). Unwired probe = status-only fallback.
+      let sessionActive = false;
+      try {
+        sessionActive = deps.isCoworkSessionActive?.(sessionId) === true;
+      } catch {
+        sessionActive = false;
+      }
+      if (sessionActive && !capReached) {
+        if (now() - lastSuppressLogAt >= 5 * 60_000) {
+          lastSuppressLogAt = now();
+          emitLog(
+            `[GroupTaskDaemon] Task ${taskId}: in-flight latch for bot ${botId} held — session status reads ` +
+            `'${status ?? 'unknown'}' but the original turn is still running in the session; ` +
+            'the deferred re-drive of its trigger stays suppressed',
+          );
+        }
+        return;
+      }
       clearInterval(watcher);
       latchWatchers.delete(watcher);
       latchedTurnKeys.delete(key);
@@ -5582,7 +5620,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       emitTurnActivity();
       emitLog(
         `[GroupTaskDaemon] Task ${taskId}: in-flight latch for bot ${botId} released ` +
-        `(session status ${status ?? 'unknown'}${status === 'running' ? ', latch cap reached' : ''}); ` +
+        `(session status ${status ?? 'unknown'}${sessionActive ? ', runner turn still active' : ''}${capReached ? ', latch cap reached' : ''}); ` +
         'the deferred queue re-drives the unanswered trigger on the next tick',
       );
     }, 15_000);
@@ -5701,7 +5739,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       } catch {
         sessionStatus = null;
       }
-      if (sessionStatus === 'running') {
+      // Task #60: the runner's live turn handle is the ground truth — a
+      // transient 'error' status stamp (the skill-turn bridge marks the
+      // session 'error' at the watchdog fire while the turn keeps running)
+      // must not let the same trigger start a second concurrent turn here.
+      let sessionActive = false;
+      try {
+        sessionActive = deps.isCoworkSessionActive?.(sessionId) === true;
+      } catch {
+        sessionActive = false;
+      }
+      if (sessionStatus === 'running' || sessionActive) {
         const holdKey = `${SESSION_BUSY_HOLD_PREFIX}${task.id}:${bot.id}:${message.id}`;
         const priorHeldSince = Number(deps.getStore().get<number>(holdKey) ?? 0);
         const heldSince = priorHeldSince || now();

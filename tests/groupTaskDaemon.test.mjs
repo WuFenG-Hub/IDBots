@@ -6213,6 +6213,56 @@ test('task #41: a skill-turn watchdog timeout advances the cursor without burnin
   }
 });
 
+test('task #60: a transient error session status never re-dispatches while the runner turn is still active', async () => {
+  const skillTurnAttempts = [];
+  const logs = [];
+  let runnerActive = true;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      // The runner still holds the live turn handle for the session.
+      isCoworkSessionActive: () => runnerActive,
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        return { replyText: 'done', assistantMessageId: null };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // The worker's task session transiently reads 'error' — the skill-turn
+    // bridge stamps 'error' at the watchdog fire while the runner keeps
+    // executing the original turn (the task #60 re-dispatch incident).
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.coworkStore.updateSession(session.id, { status: 'error' });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-t60-redrive-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot search for MetaID docs',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 0, 'no second turn while the runner reports the session active');
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'the trigger is held in the durable queue, not dispatched');
+    assert.ok(
+      logs.some((line) => line.includes('still running a prior turn')),
+      'the session-busy hold is logged',
+    );
+
+    // Once the runner turn actually terminates, the next tick re-drives the
+    // held trigger normally.
+    runnerActive = false;
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'trigger re-dispatched after the original turn terminated');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT-01: a wedged turn (await never settles) is force-settled at the hard cap and the trigger recovers', async () => {
   const logs = [];
   const h = await createHarness({
