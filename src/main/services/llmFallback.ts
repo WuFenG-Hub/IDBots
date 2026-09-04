@@ -90,6 +90,30 @@ export interface LlmFallbackCallOptions {
   effort?: LlmEffortLevel | null;
   /** Effort riding the fallback brain; null = model default. */
   fallbackEffort?: LlmEffortLevel | null;
+  /**
+   * Per-attempt timeout in ms. When set, EACH attempt (primary and fallback)
+   * gets its own fresh AbortSignal.timeout, still linked to the caller's
+   * signal for real cancellation — a primary that burns its whole window no
+   * longer leaves the fallback retry a dead shared signal (the 2026-09-03
+   * dream/dream-diary failures: GLM primary timed out and the fallback never
+   * actually ran).
+   */
+  attemptTimeoutMs?: number;
+}
+
+/**
+ * Derive the options for one attempt: when attemptTimeoutMs is set, swap the
+ * caller's signal for a fresh per-attempt timeout linked to it, so each
+ * attempt gets the full window while caller cancellation still propagates.
+ */
+function withPerAttemptSignal<TOptions extends LlmFallbackCallOptions>(options: TOptions): TOptions {
+  const timeoutMs = options.attemptTimeoutMs;
+  if (!timeoutMs || timeoutMs <= 0) return options;
+  const callerSignal = (options as { signal?: AbortSignal }).signal;
+  const attemptSignal = callerSignal
+    ? AbortSignal.any([callerSignal, AbortSignal.timeout(timeoutMs)])
+    : AbortSignal.timeout(timeoutMs);
+  return { ...options, signal: attemptSignal };
 }
 
 /**
@@ -97,7 +121,9 @@ export interface LlmFallbackCallOptions {
  * failure or API call failure), retry exactly once with the fallback llm id
  * when one is configured and differs from the primary. The retry swaps BOTH
  * the model and the effort to the fallback brain's pair. Rethrows the primary
- * error when no fallback is available or the fallback attempt also fails.
+ * error when no fallback is available; when the fallback attempt also fails,
+ * throws a combined error naming both failures so callers (dream diary,
+ * memory-hygiene stats) can tell the fallback DID run and why it failed.
  */
 export async function runWithLlmFallback<TResult, TOptions extends LlmFallbackCallOptions>(
   options: TOptions,
@@ -105,16 +131,18 @@ export async function runWithLlmFallback<TResult, TOptions extends LlmFallbackCa
   log: (message: string) => void = console.log
 ): Promise<TResult> {
   try {
-    return await attempt(options);
+    return await attempt(withPerAttemptSignal(options));
   } catch (primaryError) {
     const fallbackId = resolveFallbackLlmId(options.llmId, options.fallbackLlmId);
     if (!fallbackId) {
       throw primaryError;
     }
-    // Callers pass ONE shared abort signal (e.g. AbortSignal.timeout) through
-    // options; when the primary attempt consumed it, the fallback attempt
-    // would fail instantly with the same abort/timeout — skip the dead retry
-    // and surface the primary error directly.
+    // Callers may pass ONE shared abort signal (e.g. AbortSignal.timeout)
+    // through options; when the primary attempt consumed it, the fallback
+    // attempt would fail instantly with the same abort/timeout — skip the
+    // dead retry and surface the primary error directly. (Per-attempt
+    // timeouts via attemptTimeoutMs keep the caller's signal live, so a
+    // primary timeout no longer trips this guard.)
     const sharedSignal = (options as { signal?: AbortSignal }).signal;
     if (sharedSignal?.aborted) {
       throw primaryError;
@@ -123,18 +151,22 @@ export async function runWithLlmFallback<TResult, TOptions extends LlmFallbackCa
     const primaryLabel = normalizeMetabotLlmId(options.llmId) ?? 'default';
     log(`[LLM Fallback] Primary LLM '${primaryLabel}' failed (${primaryMessage}); retrying once with fallback '${fallbackId}'.`);
     try {
-      return await attempt({
+      return await attempt(withPerAttemptSignal({
         ...options,
         llmId: fallbackId,
         llmProvider: options.fallbackLlmProvider ?? null,
         fallbackLlmId: null,
         fallbackLlmProvider: null,
         effort: options.fallbackEffort ?? null,
-      });
+      }));
     } catch (fallbackError) {
       const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
       console.error(`[LLM Fallback] Fallback LLM '${fallbackId}' also failed: ${fallbackMessage}`);
-      throw primaryError;
+      const combined = new Error(`${primaryMessage} (fallback '${fallbackId}' also failed: ${fallbackMessage})`);
+      if (primaryError instanceof Error && primaryError.name && primaryError.name !== 'Error') {
+        combined.name = primaryError.name;
+      }
+      throw combined;
     }
   }
 }

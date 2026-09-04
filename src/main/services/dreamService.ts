@@ -26,7 +26,7 @@ import {
 import { formatBotWorkspaceDate } from '../libs/botWorkspace';
 import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../libs/claudeSettings';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
-import { normalizeMetabotLlmId } from './llmFallback';
+import { metabotBrainOptions } from './llmFallback';
 import {
   applyMetaIDDreamImpressionUpdates,
   buildMetaIDDreamImpressionContext,
@@ -71,9 +71,20 @@ export interface DreamMetabotLike {
   role?: string | null;
   soul?: string | null;
   llm_id?: string | null;
+  llm_provider?: string | null;
   fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
   globalmetaid?: string | null;
   enabled?: boolean;
+}
+
+/** The resolved brain pair for one dream run (global dreamLlmId override already applied). */
+interface DreamBrainPair {
+  llmId: string | null;
+  /** Provider key the primary brain model was picked from (id-collision disambiguation). */
+  llmProvider: string | null;
+  fallbackLlmId: string | null;
+  fallbackLlmProvider: string | null;
 }
 
 export interface DreamMetabotStoreLike {
@@ -88,6 +99,10 @@ export type DreamPerformChat = (
     signal?: AbortSignal;
     maxTokens?: number;
     fallbackLlmId?: string | null;
+    fallbackLlmProvider?: string | null;
+    llmProvider?: string | null;
+    /** Per-attempt timeout: primary and fallback each get a fresh window. */
+    attemptTimeoutMs?: number;
     throwOnEmptyContent?: boolean;
     thinking?: 'enabled' | 'disabled';
     webSearch?: boolean;
@@ -283,19 +298,26 @@ export class DreamService {
     }
   }
 
-  /** Global override via cowork_config.dreamLlmId → the bot's own llm_id → app default (null). */
-  private resolveDreamLlmId(metabot: DreamMetabotLike): string | null {
-    const override = this.deps.dreamStore.getCoworkConfigValue('dreamLlmId');
-    if (override?.trim()) return override.trim();
-    const own = typeof metabot.llm_id === 'string' ? metabot.llm_id.trim() : '';
-    return own || null;
-  }
-
-  /** The bot's fallback llm_id; skipped when the global dreamLlmId override is in effect. */
-  private resolveDreamFallbackLlmId(metabot: DreamMetabotLike): string | null {
-    const override = this.deps.dreamStore.getCoworkConfigValue('dreamLlmId');
-    if (override?.trim()) return null;
-    return normalizeMetabotLlmId(metabot.fallback_llm_id);
+  /**
+   * Resolve the brain pair for this run: global override via
+   * cowork_config.dreamLlmId → the bot's own brain pair (model + provider
+   * hint + fallback pair). The provider hint matters on cross-provider
+   * model-id collisions: a bare glm-* id can otherwise resolve onto the
+   * wrong provider's gateway. When the global override is in effect the
+   * bot's own fallback pair must not silently backstop the override.
+   */
+  private resolveDreamBrain(metabot: DreamMetabotLike): DreamBrainPair {
+    const override = this.deps.dreamStore.getCoworkConfigValue('dreamLlmId')?.trim();
+    if (override) {
+      return { llmId: override, llmProvider: null, fallbackLlmId: null, fallbackLlmProvider: null };
+    }
+    const brain = metabotBrainOptions(metabot);
+    return {
+      llmId: brain.llmId,
+      llmProvider: brain.llmProvider,
+      fallbackLlmId: brain.fallbackLlmId,
+      fallbackLlmProvider: brain.fallbackLlmProvider,
+    };
   }
 
   private buildDreamImpressionSubjects(
@@ -346,31 +368,29 @@ export class DreamService {
   private async callDreamLlm(
     systemPrompt: string,
     userMessage: string,
-    llmId: string | null,
-    fallbackLlmId: string | null = null,
+    brain: DreamBrainPair,
     maxTokens?: number,
   ): Promise<string> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.deps.llmTimeoutMs ?? DREAM_LLM_TIMEOUT_MS);
-    try {
-      return await this.performChat(systemPrompt, userMessage, llmId, {
-        signal: controller.signal,
-        maxTokens: maxTokens ?? this.resolveDreamBudgets(llmId).maxOutputTokens,
-        fallbackLlmId,
-        // DeepSeek automation models default to reasoning mode. Dream prompts
-        // need the output budget for the final JSON, not hidden reasoning.
-        thinking: 'disabled',
-        // Dream prompts summarize the bot's own day — a stray built-in
-        // web search both wastes the fragment budget and drags outside
-        // noise into the diary JSON.
-        webSearch: false,
-        // Empty content must fail inside runWithLlmFallback so a configured
-        // secondary provider gets a chance before the dream attempt fails.
-        throwOnEmptyContent: true,
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
+    return await this.performChat(systemPrompt, userMessage, brain.llmId, {
+      // Each attempt (primary, then fallback) gets its own fresh timeout
+      // window — a primary that burns the full budget must not leave the
+      // fallback retry a dead shared signal.
+      attemptTimeoutMs: this.deps.llmTimeoutMs ?? DREAM_LLM_TIMEOUT_MS,
+      maxTokens: maxTokens ?? this.resolveDreamBudgets(brain.llmId).maxOutputTokens,
+      llmProvider: brain.llmProvider,
+      fallbackLlmId: brain.fallbackLlmId,
+      fallbackLlmProvider: brain.fallbackLlmProvider,
+      // DeepSeek automation models default to reasoning mode. Dream prompts
+      // need the output budget for the final JSON, not hidden reasoning.
+      thinking: 'disabled',
+      // Dream prompts summarize the bot's own day — a stray built-in
+      // web search both wastes the fragment budget and drags outside
+      // noise into the diary JSON.
+      webSearch: false,
+      // Empty content must fail inside runWithLlmFallback so a configured
+      // secondary provider gets a chance before the dream attempt fails.
+      throwOnEmptyContent: true,
+    });
   }
 
   private resolveDreamBudgets(llmId: string | null): {
@@ -395,8 +415,7 @@ export class DreamService {
     metabot: DreamMetabotLike,
     date: string,
     chunk: DreamActivityChunk,
-    llmId: string | null,
-    fallbackLlmId: string | null,
+    brain: DreamBrainPair,
     fragmentOutputTokens: number,
   ): Promise<DreamFragmentSummary> {
     const contentHash = createHash('sha256')
@@ -407,7 +426,7 @@ export class DreamService {
       existing?.status === 'completed' &&
       existing.contentHash === contentHash &&
       existing.dreamVersion === DREAM_VERSION &&
-      existing.llmId === llmId &&
+      existing.llmId === brain.llmId &&
       existing.summaryJson
     ) {
       let cachedOutput: DreamOutput | null = null;
@@ -444,7 +463,7 @@ export class DreamService {
       sourceMessageCount: chunk.sourceMessageCount,
       sourceCharCount: chunk.sourceCharCount,
       estimatedInputTokens: chunk.estimatedInputTokens,
-      llmId,
+      llmId: brain.llmId,
       dreamVersion: DREAM_VERSION,
     });
     try {
@@ -458,8 +477,7 @@ export class DreamService {
       const output = await this.generateAndParse(
         prompt.system,
         prompt.user,
-        llmId,
-        fallbackLlmId,
+        brain,
         fragmentOutputTokens,
       );
       this.deps.dreamStore.finishDreamFragment(
@@ -495,12 +513,11 @@ export class DreamService {
     metabot: DreamMetabotLike,
     date: string,
     activity: DreamDayActivity,
-    llmId: string | null,
-    fallbackLlmId: string | null,
+    brain: DreamBrainPair,
     impressionSubjects: ReturnType<DreamService['buildDreamImpressionSubjects']>,
     existingKnowledge: DreamKnowledgeExisting[],
   ): Promise<{ prompt: { system: string; user: string }; output: DreamOutput }> {
-    const budgets = this.resolveDreamBudgets(llmId);
+    const budgets = this.resolveDreamBudgets(brain.llmId);
     const estimatedTokens = estimateDreamActivityTokens(activity);
     if (estimatedTokens <= budgets.fastPathInputTokens) {
       const prompt = buildDreamPrompt({
@@ -516,8 +533,7 @@ export class DreamService {
       const output = await this.generateAndParse(
         prompt.system,
         prompt.user,
-        llmId,
-        fallbackLlmId,
+        brain,
         budgets.maxOutputTokens,
       );
       return { prompt, output };
@@ -535,7 +551,7 @@ export class DreamService {
         impressionSubjects,
         existingKnowledge,
       });
-      const output = await this.generateAndParse(prompt.system, prompt.user, llmId, fallbackLlmId, budgets.maxOutputTokens);
+      const output = await this.generateAndParse(prompt.system, prompt.user, brain, budgets.maxOutputTokens);
       return { prompt, output };
     }
 
@@ -545,8 +561,7 @@ export class DreamService {
         metabot,
         date,
         chunk,
-        llmId,
-        fallbackLlmId,
+        brain,
         budgets.fragmentOutputTokens,
       ));
     }
@@ -573,8 +588,7 @@ export class DreamService {
     const output = await this.generateAndParse(
       prompt.system,
       prompt.user,
-      llmId,
-      fallbackLlmId,
+      brain,
       budgets.maxOutputTokens,
     );
     return { prompt, output };
@@ -590,9 +604,8 @@ export class DreamService {
 
     this.dreamingBots.add(metabotId);
     this.emitDreaming(metabotId, true);
-    const llmId = this.resolveDreamLlmId(metabot);
-    const fallbackLlmId = this.resolveDreamFallbackLlmId(metabot);
-    this.deps.dreamStore.beginRun(metabotId, date, llmId, DREAM_VERSION);
+    const brain = this.resolveDreamBrain(metabot);
+    this.deps.dreamStore.beginRun(metabotId, date, brain.llmId, DREAM_VERSION);
     try {
       const { startMs, endMs } = getDayBoundsMs(date);
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
@@ -616,8 +629,7 @@ export class DreamService {
         metabot,
         date,
         activity,
-        llmId,
-        fallbackLlmId,
+        brain,
         impressionSubjects,
         existingKnowledge,
       );
@@ -629,12 +641,11 @@ export class DreamService {
           output,
           prepared.prompt.system,
           prepared.prompt.user,
-          llmId,
-          fallbackLlmId,
-          this.resolveDreamBudgets(llmId).maxOutputTokens,
+          brain,
+          this.resolveDreamBudgets(brain.llmId).maxOutputTokens,
         );
       }
-      this.writeDreamResults(metabotId, date, output, activity, llmId, isRepair, impressionSubjects, metabot.globalmetaid);
+      this.writeDreamResults(metabotId, date, output, activity, brain.llmId, isRepair, impressionSubjects, metabot.globalmetaid);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
     } catch (error) {
@@ -651,11 +662,10 @@ export class DreamService {
   private async generateAndParse(
     system: string,
     user: string,
-    llmId: string | null,
-    fallbackLlmId: string | null = null,
+    brain: DreamBrainPair,
     maxTokens?: number,
   ): Promise<DreamOutput> {
-    const firstRaw = await this.callDreamLlm(system, user, llmId, fallbackLlmId, maxTokens);
+    const firstRaw = await this.callDreamLlm(system, user, brain, maxTokens);
     const first = parseDreamOutput(firstRaw);
     if (first.ok) return first.output;
     const firstError = (first as { ok: false; error: string }).error;
@@ -663,8 +673,7 @@ export class DreamService {
     const retryRaw = await this.callDreamLlm(
       system,
       `${user}\n\n(上一次输出无法解析:${firstError}。请严格只输出一个 JSON 对象,不要输出任何其他文字。)`,
-      llmId,
-      fallbackLlmId,
+      brain,
       maxTokens,
     );
     const retry = parseDreamOutput(retryRaw);
@@ -677,8 +686,7 @@ export class DreamService {
     output: DreamOutput,
     system: string,
     user: string,
-    llmId: string | null,
-    fallbackLlmId: string | null = null,
+    brain: DreamBrainPair,
     maxTokens?: number,
   ): Promise<DreamOutput> {
     const validation = validateSelfIdentity(output.selfIdentity);
@@ -687,8 +695,7 @@ export class DreamService {
     const retryRaw = await this.callDreamLlm(
       system,
       `${user}\n\n(上一次的 self_identity ${output.selfIdentity ? `只有 ${validation.charCount} 个非空白字符` : '缺失'}。请重新输出完整 JSON,其中 self_identity 不少于 200 个非空白字符,认真写一段「我是谁」。)`,
-      llmId,
-      fallbackLlmId,
+      brain,
       maxTokens,
     );
     const retry = parseDreamOutput(retryRaw);

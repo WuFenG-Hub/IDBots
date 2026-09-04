@@ -143,6 +143,8 @@ export type CultureDistillationPerformChat = (
     /** Secondary brain retried once when the primary brain errors mid-call. */
     fallbackLlmId?: string | null;
     fallbackLlmProvider?: string | null;
+    /** Per-attempt timeout: primary and fallback each get a fresh window. */
+    attemptTimeoutMs?: number;
   },
 ) => Promise<string>;
 
@@ -191,7 +193,9 @@ export async function runCultureDistillation(input: {
       input.brain?.llmId ?? undefined,
       {
         thinking: 'disabled',
-        signal: AbortSignal.timeout(DISTILLATION_LLM_TIMEOUT_MS),
+        // Per-attempt window: the fallback brain gets its own fresh timeout
+        // instead of inheriting the primary's spent signal.
+        attemptTimeoutMs: DISTILLATION_LLM_TIMEOUT_MS,
         // Same JSON contract as deep-consolidation: a stray built-in web
         // search derails the output into prose the parser must drop.
         webSearch: false,

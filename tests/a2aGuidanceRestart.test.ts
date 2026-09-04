@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  A2A_GUIDANCE_RESTART_LLM_TIMEOUT_MS,
   A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS,
   A2A_GUIDANCE_RESTART_MAX_TOKENS,
   buildA2AGuidanceRestartPrompt,
@@ -127,20 +128,22 @@ test('buildA2AGuidanceRestartPrompt routes guidance through the shared operator-
 });
 
 test('generateA2AGuidanceRestartMessage retries empty replies and returns the first non-empty reply', async () => {
-  const calls: Array<{ signal?: AbortSignal }> = [];
+  const calls: Array<{ attemptTimeoutMs?: number }> = [];
   const reply = await generateA2AGuidanceRestartMessage({
     systemPrompt: 'sys',
     userPrompt: 'user',
     llmId: 'llm-1',
     performChat: async (_system, _user, _llmId, options) => {
-      calls.push({ signal: options?.signal });
+      calls.push({ attemptTimeoutMs: options?.attemptTimeoutMs });
       return calls.length === 1 ? '   ' : '  重新打个招呼。  ';
     },
   });
 
   assert.equal(reply, '重新打个招呼。');
   assert.equal(calls.length, 2);
-  assert.equal(calls.every((call) => call.signal instanceof AbortSignal), true);
+  // Per-attempt timeout windows (not a shared abort signal), so a primary
+  // timeout leaves the in-call fallback brain a fresh budget.
+  assert.equal(calls.every((call) => call.attemptTimeoutMs === A2A_GUIDANCE_RESTART_LLM_TIMEOUT_MS), true);
 });
 
 test('generateA2AGuidanceRestartMessage returns empty string after all attempts return empty', async () => {

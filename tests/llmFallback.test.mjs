@@ -55,3 +55,77 @@ test('fallback is skipped when the shared abort signal already fired', async () 
   );
   assert.deepEqual(attempts, ['primary-model']);
 });
+
+test('attemptTimeoutMs gives the fallback attempt a fresh live signal after a primary timeout', async () => {
+  // 2026-09-03 dream failures: the GLM primary burned the whole shared
+  // timeout and the fallback retry inherited the dead signal, so it never
+  // actually ran. With attemptTimeoutMs each attempt derives its own
+  // AbortSignal.timeout linked to the (still live) caller signal.
+  const caller = new AbortController();
+  const seenSignals = [];
+  const result = await runWithLlmFallback(
+    {
+      llmId: 'primary-model',
+      fallbackLlmId: 'fallback-model',
+      signal: caller.signal,
+      attemptTimeoutMs: 40,
+    },
+    async (options) => {
+      seenSignals.push(options.signal);
+      assert.equal(options.signal.aborted, false, `${options.llmId} attempt must start with a live signal`);
+      if (options.llmId === 'primary-model') {
+        // Hang until the per-attempt timeout fires, like a slow thinking model.
+        await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }));
+        throw new Error('The operation was aborted due to timeout');
+      }
+      return 'ok';
+    },
+    () => {},
+  );
+  assert.equal(result, 'ok');
+  assert.equal(seenSignals.length, 2);
+  assert.notEqual(seenSignals[0], caller.signal, 'attempts must not ride the raw caller signal');
+  assert.notEqual(seenSignals[0], seenSignals[1], 'each attempt must get its own derived signal');
+  assert.equal(caller.signal.aborted, false, 'per-attempt timeout must not abort the caller signal');
+});
+
+test('caller cancellation still skips the fallback retry when attemptTimeoutMs is set', async () => {
+  const caller = new AbortController();
+  const attempts = [];
+  const primaryError = new Error('cancelled by user');
+  await assert.rejects(
+    runWithLlmFallback(
+      {
+        llmId: 'primary-model',
+        fallbackLlmId: 'fallback-model',
+        signal: caller.signal,
+        attemptTimeoutMs: 60_000,
+      },
+      async (options) => {
+        attempts.push(options.llmId);
+        caller.abort();
+        throw primaryError;
+      },
+      () => {},
+    ),
+    (error) => error === primaryError,
+  );
+  assert.deepEqual(attempts, ['primary-model']);
+});
+
+test('a failed fallback attempt throws a combined error naming both brains', async () => {
+  await assert.rejects(
+    runWithLlmFallback(
+      { llmId: 'primary-model', fallbackLlmId: 'fallback-model' },
+      async (options) => {
+        throw new Error(options.llmId === 'primary-model' ? 'primary 502' : 'fallback 429');
+      },
+      () => {},
+    ),
+    (error) => {
+      assert.ok(error.message.includes('primary 502'), 'message keeps the primary failure');
+      assert.ok(error.message.includes("fallback 'fallback-model' also failed: fallback 429"), 'message names the fallback failure');
+      return true;
+    },
+  );
+});

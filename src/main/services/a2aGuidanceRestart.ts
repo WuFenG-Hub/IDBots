@@ -109,7 +109,7 @@ export type PerformA2AGuidanceRestartChatFn = (
   systemPrompt: string,
   userPrompt: string,
   llmId?: string,
-  options?: { signal?: AbortSignal; maxTokens?: number }
+  options?: { signal?: AbortSignal; maxTokens?: number; attemptTimeoutMs?: number }
 ) => Promise<string>;
 
 /**
@@ -137,7 +137,9 @@ export const generateA2AGuidanceRestartMessage = async (input: {
     try {
       const reply = toSafeString(
         await input.performChat(input.systemPrompt, input.userPrompt, input.llmId, {
-          signal: AbortSignal.timeout(timeoutMs),
+          // Per-attempt window: the fallback brain retried inside the call
+          // gets its own fresh timeout instead of a shared spent signal.
+          attemptTimeoutMs: timeoutMs,
           maxTokens,
         })
       ).trim();
