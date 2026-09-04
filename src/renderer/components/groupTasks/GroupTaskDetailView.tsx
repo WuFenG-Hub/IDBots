@@ -686,7 +686,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   type="button"
                   onClick={() => void handleReopen()}
                   disabled={reopening}
-                  className="px-2.5 py-1 text-xs font-medium rounded-lg text-amber-600 dark:text-amber-400 border border-amber-300 dark:border-amber-500/40 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors disabled:opacity-50"
+                  className="px-2.5 py-1 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 text-amber-600 dark:text-amber-400 border border-amber-300 dark:border-amber-500/40 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors disabled:opacity-50"
                 >
                   {reopening ? i18nService.t('groupTasksReopening') : i18nService.t('groupTasksBackToWork')}
                 </button>
@@ -695,7 +695,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setConfirmAction('done')}
-                  className="px-2.5 py-1 text-xs font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
+                  className="px-2.5 py-1 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
                 >
                   {i18nService.t('groupTasksAcceptClose')}
                 </button>
@@ -703,7 +703,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               <button
                 type="button"
                 onClick={() => setConfirmAction('cancelled')}
-                className="px-2.5 py-1 text-xs font-medium rounded-lg text-red-500 border border-red-300 dark:border-red-500/40 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                className="px-2.5 py-1 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 text-red-500 border border-red-300 dark:border-red-500/40 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
               >
                 {i18nService.t('groupTasksCancelTask')}
               </button>
