@@ -1370,6 +1370,8 @@ export type GroupTaskDaemonPerformChatFn = (
     thinking?: 'enabled' | 'disabled';
     /** fix/group-task-flow: abort the request when a plain-LLM turn wedges. */
     signal?: AbortSignal;
+    /** Per-attempt timeout: primary and fallback each get a fresh window. */
+    attemptTimeoutMs?: number;
   },
 ) => Promise<string>;
 
@@ -2037,16 +2039,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     Math.trunc(deps.longTurnHeartbeatMax ?? DEFAULT_LONG_TURN_HEARTBEAT_MAX),
   );
   const performChatWithTimeout: GroupTaskDaemonPerformChatFn = (systemPrompt, userMessage, llmId, options) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      controller.abort(
-        new Error(`plain LLM turn timed out after ${Math.round(plainTurnTimeoutMs / 60_000)} min`),
-      );
-    }, plainTurnTimeoutMs);
-    timer.unref?.();
-    const merged = { ...(options ?? {}), signal: controller.signal };
-    return deps.performChat(systemPrompt, userMessage, llmId, merged)
-      .finally(() => clearTimeout(timer));
+    // Per-attempt window (attemptTimeoutMs): the primary and the fallback
+    // brain each get their own fresh timeout — a wedged primary no longer
+    // leaves the fallback retry a dead shared signal.
+    const merged = { ...(options ?? {}), attemptTimeoutMs: plainTurnTimeoutMs };
+    return deps.performChat(systemPrompt, userMessage, llmId, merged);
   };
 
   // Loop prevention state (in-memory, per loop instance; no new DB columns).

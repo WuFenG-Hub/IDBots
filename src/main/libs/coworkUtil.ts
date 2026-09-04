@@ -1256,7 +1256,9 @@ export async function generateSessionTitle(userIntent: string | null): Promise<s
         maxTokens: 64,
         temperature: 0.2,
         throwOnEmptyContent: true,
-        signal: AbortSignal.timeout(12_000),
+        // Per-attempt window: the fallback brain gets its own fresh 12s
+        // instead of inheriting the primary's spent signal.
+        attemptTimeoutMs: 12_000,
       }
     );
     return sanitizeGeneratedSessionTitle(result.content ?? '', fallback);
