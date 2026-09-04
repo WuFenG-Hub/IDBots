@@ -14,6 +14,8 @@
 
 /** Mirrors idbots-attachment-store.mjs LIMITS.maxImageDimension. */
 export const BOT_BROWSER_CAPTURE_MAX_SIDE_PX = 8192;
+/** Mirrors idbots-attachment-store.mjs LIMITS.maxImagePixels. */
+export const BOT_BROWSER_CAPTURE_MAX_PIXELS = 33_400_000;
 /** Mirrors idbots-attachment-store.mjs LIMITS.maxImageBytes. */
 export const BOT_BROWSER_CAPTURE_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -32,21 +34,41 @@ export function readPngSize(png: Buffer): { width: number; height: number } | nu
 }
 
 /**
- * The size a capture must be scaled to so both sides fit `maxSide`, aspect
- * ratio preserved (the long side lands exactly on the bound, the short side
- * rounds and never re-exceeds it). Returns null when the capture already fits.
+ * The size a capture must be scaled to so it fits both `maxSide` per side and
+ * the `maxPixels` total budget, aspect ratio preserved (the side fit pins the
+ * long side exactly on the bound; the pixel fit floors so the rounded product
+ * can never re-exceed the budget). Returns null when the capture already fits.
  */
 export function computeCaptureFitSize(
   width: number,
   height: number,
   maxSide: number = BOT_BROWSER_CAPTURE_MAX_SIDE_PX,
+  maxPixels: number = BOT_BROWSER_CAPTURE_MAX_PIXELS,
 ): { width: number; height: number } | null {
   const largest = Math.max(width, height);
-  if (!(largest > maxSide)) return null; // also covers NaN / non-positive input
-  // Pin the long side to exactly maxSide (integer division, no float fuzz from
-  // largest * (maxSide / largest)) and scale only the short side.
-  if (width >= height) {
-    return { width: maxSide, height: Math.max(1, Math.round((height * maxSide) / width)) };
+  const overSide = largest > maxSide; // false also covers NaN / non-positive input
+  const overPixels = width * height > maxPixels;
+  if (!overSide && !overPixels) return null;
+  let fittedWidth = width;
+  let fittedHeight = height;
+  if (overSide) {
+    // Pin the long side to exactly maxSide (integer division, no float fuzz
+    // from largest * (maxSide / largest)) and scale only the short side.
+    if (width >= height) {
+      fittedWidth = maxSide;
+      fittedHeight = Math.max(1, Math.round((height * maxSide) / width));
+    } else {
+      fittedWidth = Math.max(1, Math.round((width * maxSide) / height));
+      fittedHeight = maxSide;
+    }
   }
-  return { width: Math.max(1, Math.round((width * maxSide) / height)), height: maxSide };
+  if (fittedWidth * fittedHeight > maxPixels) {
+    // Near-square captures can clear the side cap yet still blow the store's
+    // total-pixel budget (e.g. a 2x Retina clip fitted to 8192x4194), which
+    // re-opens the admission rejection this pre-fit exists to prevent.
+    const scale = Math.sqrt(maxPixels / (fittedWidth * fittedHeight));
+    fittedWidth = Math.max(1, Math.floor(fittedWidth * scale));
+    fittedHeight = Math.max(1, Math.floor(fittedHeight * scale));
+  }
+  return { width: fittedWidth, height: fittedHeight };
 }
