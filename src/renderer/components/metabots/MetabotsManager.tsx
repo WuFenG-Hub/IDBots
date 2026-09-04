@@ -703,18 +703,31 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
     const deletedId = deleteTarget.id;
-    const result = await window.electron.idbots.deleteMetaBot(deletedId);
-    if (result.success) {
-      setList((prev) => prev.filter((m) => m.id !== deletedId));
-      setDeleteTarget(null);
-      // If the deleted bot was open in the edit view, fall back to the list.
-      if (editId === deletedId) {
-        setEditId(null);
-        setViewMode('list');
+    try {
+      const result = await window.electron.idbots.deleteMetaBot(deletedId);
+      if (result.success) {
+        setList((prev) => prev.filter((m) => m.id !== deletedId));
+        setDeleteTarget(null);
+        // If the deleted bot was open in the edit view, fall back to the list.
+        if (editId === deletedId) {
+          setEditId(null);
+          setViewMode('list');
+        }
+        window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotDeleteSuccess') }));
+      } else {
+        // Close the modal and surface the real error via toast. Previously the
+        // failure was only written to actionError behind the modal overlay, which
+        // made a failed delete look like it "did nothing".
+        setDeleteTarget(null);
+        window.dispatchEvent(new CustomEvent('app:showToast', { detail: result.error || i18nService.t('metabotUpdateFailed') }));
       }
-      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotDeleteSuccess') }));
-    } else {
-      setActionError(result.error || i18nService.t('metabotUpdateFailed'));
+    } catch (error) {
+      setDeleteTarget(null);
+      window.dispatchEvent(
+        new CustomEvent('app:showToast', {
+          detail: error instanceof Error ? error.message : i18nService.t('metabotUpdateFailed'),
+        })
+      );
     }
   };
   const performSyncToChain = async (metabot: Metabot) => {
