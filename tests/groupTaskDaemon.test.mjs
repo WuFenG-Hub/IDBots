@@ -7309,6 +7309,82 @@ test('sponsor-pending: a different error while draining converts to the failure 
   }
 });
 
+test('sponsor-pending: a queued supervisor answer marks signals processed with a null pin, not an empty one', async () => {
+  const h = await createHarness({
+    chatReply: '已复查:交付物完整,见核验记录。',
+    deps: {
+      postGroupTaskMessage: async (taskId, metabotId) => {
+        if (metabotId === 1) {
+          throw new Error('SPONSOR_BROADCAST_PENDING: orderId=cc: broadcast reconciliation in progress');
+        }
+        return { pinId: `pin-${metabotId}` };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    h.groupTaskStore.setTaskDispatchPausedAt(task.id, h.state.nowMs);
+    await h.loop.runTick();
+
+    h.groupTaskStore.setTaskDispatchPausedAt(task.id, null);
+    h.groupTaskStore.addSupervisorSignal({
+      taskId: task.id,
+      kind: 'nudge',
+      note: 'double-check the archive step dedupe',
+      target: 'Coder Bot',
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'the queued chair answer still resolves the signal',
+    );
+    const signals = h.groupTaskStore.listSupervisorSignals(task.id);
+    assert.equal(signals.length, 1);
+    assert.equal(
+      signals[0].chairResponsePinId,
+      null,
+      'a queued chair answer is recorded with a null pin, never an empty string',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('sponsor-pending: a queued acceptance summary post leaves the published pin unset', async () => {
+  const h = await createHarness({
+    deps: {
+      postGroupTaskMessage: async (taskId, metabotId) => {
+        if (metabotId === 1) {
+          throw new Error('SPONSOR_BROADCAST_PENDING: orderId=dd: broadcast reconciliation in progress');
+        }
+        return { pinId: `pin-${metabotId}` };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]); // executing
+    insertGroupMessage(h.db, {
+      pinId: 'review-tag-queued-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: 'goal looks met\n[STATUS:REVIEW]',
+      chainTimestamp: 101,
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
+    assert.ok(summary, 'acceptance summary persisted on review entry');
+    assert.equal(
+      summary.publishedGroupPinId,
+      null,
+      'a queued summary post is not recorded with an empty published pin',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('sponsor-pending: a queued send for a finished task is dropped silently', async () => {
   const sendState = { sponsorPending: true, calls: 0 };
   const h = await createHarness({
