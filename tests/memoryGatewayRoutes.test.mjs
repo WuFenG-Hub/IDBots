@@ -37,6 +37,12 @@ const {
   handleMemoryListRoute,
 } = require(resolveCompiledModulePath('services/memoryGatewayRoutes.js'));
 
+const { getMetaidRpcToken } = require(resolveCompiledModulePath('services/metaidRpcEndpoint.js'));
+const RPC_AUTH_HEADERS = {
+  'Content-Type': 'application/json',
+  Authorization: `Bearer ${getMetaidRpcToken()}`,
+};
+
 const createBody = (overrides = {}) => JSON.stringify({
   metabot_id: 1,
   text: 'The client prefers concise replies',
@@ -342,7 +348,7 @@ test('integration: real gateway routes memory create + list over HTTP', async ()
     const post = (pathname, body) =>
       fetch(`${baseUrl}${pathname}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: RPC_AUTH_HEADERS,
         body: typeof body === 'string' ? body : JSON.stringify(body),
       });
 

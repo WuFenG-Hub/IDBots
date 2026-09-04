@@ -115,7 +115,16 @@ async function startRpcServerForTest() {
     listMetabots: () => [],
   };
 
-  const server = startMetaidRpcServer(() => metabotStore, () => store);
+  // Phase 4: memory routes are not exercised here; a stub satisfies the
+  // MemoryBackend getter argument.
+  const server = startMetaidRpcServer(() => metabotStore, () => store, () => ({
+    listUserMemories() {
+      return [];
+    },
+    createUserMemory() {
+      throw new Error('memory routes are not exercised in this test');
+    },
+  }));
   await new Promise((resolve, reject) => {
     if (server.listening) {
       resolve();
