@@ -7336,3 +7336,56 @@ test('corrupt session log: the member task session is rebuilt from the ledger an
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// fix/group-task-duration: stale-working direct worker wake (task #59)
+// ---------------------------------------------------------------------------
+
+test('stale-working: the stuck worker is woken directly — wake notice + its latest chair mention re-driven', async () => {
+  const h = await createHarness({
+    deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // The chair assigned the worker (with an explicit @), the worker ACKed
+    // [WORKING], then everything went silent well past the timeout window.
+    insertGroupMessage(h.db, {
+      pinId: 'wake-assignment-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please render the final video',
+      chainTimestamp: Math.floor((startMs - 300_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'wake-working-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，正在渲染',
+      chainTimestamp: Math.floor((startMs - 240_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    const messages = h.coworkStore.getSession(mapping.coworkSessionId).messages;
+    assert.ok(
+      messages.some((message) => /SYSTEM stale-working wake/.test(message.content ?? '')),
+      'a host wake notice was injected into the stuck worker session',
+    );
+    assert.ok(
+      messages.some((message) => message.type === 'user' && /please render the final video/.test(message.content ?? '')),
+      'the re-driven chair assignment reached the worker session as a turn trigger',
+    );
+    // The worker answered the wake: its reply was posted (skill/plain turn).
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2),
+      'the woken worker produced a group reply on the same tick',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
