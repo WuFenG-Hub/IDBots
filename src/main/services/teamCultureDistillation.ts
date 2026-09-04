@@ -1,6 +1,8 @@
 import type { TeamCultureStore } from '../teamCultureStore';
 import { normalizeTeamCultureKind, type TeamCultureDistillationOutcome, type TeamCultureKind } from '../teamCultureStore';
 import type { GroupTaskStore } from '../groupTaskStore';
+import { resolveSystemBrainOptions, type MetabotBrainOptions } from './llmFallback';
+import type { Metabot } from '../types/metabot';
 
 /**
  * Task-close culture distillation — the write side of the shared culture
@@ -131,7 +133,17 @@ export type CultureDistillationPerformChat = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { signal?: AbortSignal; maxTokens?: number; thinking?: 'enabled' | 'disabled'; webSearch?: boolean },
+  options?: {
+    signal?: AbortSignal;
+    maxTokens?: number;
+    thinking?: 'enabled' | 'disabled';
+    webSearch?: boolean;
+    /** Provider key the brain model was picked from (id-collision disambiguation). */
+    llmProvider?: string | null;
+    /** Secondary brain retried once when the primary brain errors mid-call. */
+    fallbackLlmId?: string | null;
+    fallbackLlmProvider?: string | null;
+  },
 ) => Promise<string>;
 
 /** Core distillation step: gather → prompt → parse → apply via the store. */
@@ -139,6 +151,14 @@ export async function runCultureDistillation(input: {
   task: CultureDistillationTaskInput;
   cultureStore: TeamCultureStore;
   performChat: CultureDistillationPerformChat;
+  /**
+   * The task chair's brain pair (provider hint + fallback brain). When absent
+   * or unconfigured the call falls back to the app default model — which used
+   * to be the ONLY route: a dead/exhausted default provider (e.g. the
+   * 2026-09-04 metaid-free 429 free_quota_exhausted) silently zeroed the
+   * culture base even though every bot had a working brain.
+   */
+  brain?: MetabotBrainOptions | null;
 }): Promise<CultureDistillationResult> {
   const counts: CultureDistillationCounts = { applied: 0, protectedEntries: 0, capacitySkipped: 0, pendingConventions: 0 };
   if (input.task.status !== 'done' || !input.task.summary) {
@@ -155,6 +175,9 @@ export async function runCultureDistillation(input: {
     .listCulture({ status: 'archived', limit: 200 })
     .map((entry) => entry.topic);
   let raw: string;
+  const brainLabel = input.brain?.llmId
+    ? ` (brain ${input.brain.llmProvider ? `${input.brain.llmProvider}/` : ''}${input.brain.llmId})`
+    : '';
   try {
     raw = await input.performChat(
       'You are a team-culture distillation assistant. Respond only with the requested JSON object.',
@@ -165,19 +188,25 @@ export async function runCultureDistillation(input: {
         existingTopics,
         archivedTopics,
       }),
-      undefined,
+      input.brain?.llmId ?? undefined,
       {
         thinking: 'disabled',
         signal: AbortSignal.timeout(DISTILLATION_LLM_TIMEOUT_MS),
         // Same JSON contract as deep-consolidation: a stray built-in web
         // search derails the output into prose the parser must drop.
         webSearch: false,
+        llmProvider: input.brain?.llmProvider ?? undefined,
+        fallbackLlmId: input.brain?.fallbackLlmId ?? undefined,
+        fallbackLlmProvider: input.brain?.fallbackLlmProvider ?? undefined,
       },
     );
   } catch (error) {
     // LLM failures used to vanish into a console.warn; carry the message so
     // the close-out hook can record it into the visible distillation log.
-    return { ...counts, outcome: 'llm-error', error: error instanceof Error ? error.message : String(error) };
+    // Name the brain (like deep-consolidation does): a quota-exhausted or
+    // removed model is only actionable when the log says WHICH one failed.
+    const message = error instanceof Error ? error.message : String(error);
+    return { ...counts, outcome: 'llm-error', error: `${message}${brainLabel}` };
   }
   const parsed = parseCultureDistillationOutput(raw);
   if (!parsed) {
@@ -236,15 +265,23 @@ export async function runCultureDistillation(input: {
 let cultureStoreProvider: (() => TeamCultureStore) | null = null;
 let performChatProvider: CultureDistillationPerformChat | null = null;
 let groupTaskStoreProvider: (() => GroupTaskStore) | null = null;
+let systemBrainMetabotsProvider: (() => Array<Partial<Pick<Metabot,
+  'metabot_type' | 'llm_id' | 'llm_provider' | 'llm_effort' | 'fallback_llm_id' | 'fallback_llm_provider' | 'fallback_llm_effort'
+>>>) | null = null;
 
 export function setTeamCultureDistillationDeps(deps: {
   getTeamCultureStore: () => TeamCultureStore;
   getGroupTaskStore: () => GroupTaskStore;
   performChat: CultureDistillationPerformChat;
+  /** Metabot lister used to resolve the Twin Bot system brain. */
+  listMetabots?: () => Array<Partial<Pick<Metabot,
+    'metabot_type' | 'llm_id' | 'llm_provider' | 'llm_effort' | 'fallback_llm_id' | 'fallback_llm_provider' | 'fallback_llm_effort'
+  >>>;
 }): void {
   cultureStoreProvider = deps.getTeamCultureStore;
   groupTaskStoreProvider = deps.getGroupTaskStore;
   performChatProvider = deps.performChat;
+  systemBrainMetabotsProvider = deps.listMetabots ?? null;
 }
 
 /**
@@ -306,6 +343,12 @@ export function distillTeamCultureFromTaskClose(
         record('no-summary');
         return;
       }
+      // Ride the Twin Bot system brain (primary + fallback + efforts) —
+      // culture distillation is a fleet-level automation, not one bot's act.
+      // Distilling over the bare app default model meant one exhausted
+      // free-tier provider zeroed the whole culture base while every bot
+      // brain was healthy (2026-09-04 metaid-free 429 outage).
+      const brain = resolveSystemBrainOptions(systemBrainMetabotsProvider?.());
       const result = await runCultureDistillation({
         task: {
           taskId,
@@ -328,6 +371,7 @@ export function distillTeamCultureFromTaskClose(
         },
         cultureStore: cultureStore,
         performChat: performChatProvider,
+        brain,
       });
       if (result.outcome !== 'not-done') {
         record(result.outcome, result, result.error);
