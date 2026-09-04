@@ -13,6 +13,8 @@ release/
 .cursor/
 .env
 .env.local
+.release-runbook.json
+.release-runbook-*.json
 
 # Local logs and TypeScript incremental build cache (regenerated on each build)
 logs/
@@ -254,6 +256,7 @@ man_base_data_pebble/
 !tests/botBrowserCoworkPanel.test.ts
 !tests/botInternetComposerReuse.test.mjs
 !tests/pinnedSkillBackstop.test.mjs
+!tests/releaseRunbook.test.mjs
 !tests/botBrowserSourceLocator.test.mjs
 !tests/metaAppSearchService.test.mjs
 !tests/metaIdSearchService.test.mjs
