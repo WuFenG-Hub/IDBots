@@ -7018,3 +7018,99 @@ test('task #51 no-progress nudge: idle minutes with nothing running drives the c
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// fix/group-task-duration: dependency-wait prefix tolerance (task #58)
+// ---------------------------------------------------------------------------
+
+const {
+  hexTokensSharePrefix,
+} = require('../dist-electron/main/services/groupTaskDaemon.js');
+
+test('hexTokensSharePrefix: truncated pins match their full form, unrelated hashes do not', () => {
+  const full = `${'ab'.repeat(32)}i0`;
+  const truncated = 'ab'.repeat(30); // 60-hex prefix of the 64-hex core
+  assert.equal(hexTokensSharePrefix(`metafile://${truncated}`, full), true);
+  assert.equal(hexTokensSharePrefix(full, `pin://${truncated}`), true);
+  // Message-prose form: the tag line quotes the truncated pin among other text.
+  assert.equal(
+    hexTokensSharePrefix('[deliverable] package on chain metafile://'.concat(truncated), full),
+    true,
+  );
+  // Unrelated hashes never share a 32-hex prefix.
+  assert.equal(hexTokensSharePrefix(`${'cd'.repeat(32)}i0`, full), false);
+  // Short hex runs (<32) never match — ambiguity is refused.
+  assert.equal(hexTokensSharePrefix('abcd'.repeat(8), 'abcd'.repeat(4)), false);
+  assert.equal(hexTokensSharePrefix('', full), false);
+});
+
+test('dependency-wait: a truncated deliverable pin in a worker [DELIVERABLE] line satisfies the gate (no 15-min false hold)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const fullPin = `${'ab'.repeat(32)}i0`;
+    const truncated = 'ab'.repeat(30);
+    // Upstream worker delivered with a TRUNCATED metafile pin (task #58
+    // regression): the ledger row stays kind=text/uri=NULL because the parser
+    // only records full 64-hex+i0 tokens.
+    insertGroupMessage(h.db, {
+      pinId: 'deliverable-truncated-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] 第2步包已上链 metafile://${truncated}`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 300,
+    });
+    // Chair dispatches downstream with the FULL pin it verified via the indexer.
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-dep-full-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: `@Coder Bot 第3步正式派单\n[DEPENDS_ON: ${fullPin}]`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 60,
+    });
+    // Cursor sits just BEFORE the dispatch so the tick ingests both messages.
+    const dispatchId = h.db.exec(
+      "SELECT id FROM group_chat_messages WHERE pin_id = 'dispatch-dep-full-i0'",
+    )[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, dispatchId - 1);
+
+    await h.loop.runTick();
+
+    const depWaitKeys = h.db.exec(
+      "SELECT key FROM kv WHERE key LIKE 'group_task_dep_wait:%'",
+    )[0]?.values ?? [];
+    assert.equal(depWaitKeys.length, 0, 'the dispatch is not held on a truncated-pin upstream');
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2),
+      'the worker turn dispatched and its reply posted in the same tick',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('dependency-wait: an absent upstream still holds the dispatch (gate stays honest)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const missingPin = `${'ef'.repeat(32)}i0`;
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-dep-missing-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: `@Coder Bot 第3步正式派单\n[DEPENDS_ON: ${missingPin}]`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 60,
+    });
+    const dispatchId = h.db.exec(
+      "SELECT id FROM group_chat_messages WHERE pin_id = 'dispatch-dep-missing-i0'",
+    )[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, dispatchId - 1);
+
+    await h.loop.runTick();
+
+    const depWaitKeys = h.db.exec(
+      "SELECT key FROM kv WHERE key LIKE 'group_task_dep_wait:%'",
+    )[0]?.values ?? [];
+    assert.equal(depWaitKeys.length, 1, 'a genuinely missing upstream still arms the bounded wait');
+    assert.ok(
+      !h.sends.some((send) => send.metabotId === 2),
+      'no worker reply is posted while the upstream is unsatisfied',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

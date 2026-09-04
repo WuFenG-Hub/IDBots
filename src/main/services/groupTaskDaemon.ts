@@ -496,6 +496,27 @@ const deliverableTagLines = (content: string): string[] =>
   content.split('\n').filter((line) => DELIVERABLE_TAG.test(line));
 
 /**
+ * True when two strings carry hex runs (pinids/txids, ignoring protocol
+ * prefixes and the `i0` suffix) that share a prefix of at least 32 hex chars
+ * in EITHER direction. LLM participants routinely truncate 64-hex pinids when
+ * quoting them in prose (task #58: a 60-hex `metafile://` prefix); an exact or
+ * contains-only comparison then reads "not delivered" and dispatches stall on
+ * the bounded dependency wait. 32 shared leading hex chars cannot happen by
+ * chance between unrelated hashes.
+ */
+export function hexTokensSharePrefix(a: string, b: string): boolean {
+  const HEX_RUN_RE = /[0-9a-f]{32,}/g;
+  const runsOf = (value: string): string[] => (value.match(HEX_RUN_RE) ?? []);
+  const aRuns = runsOf(String(a ?? '').toLowerCase());
+  const bRuns = runsOf(String(b ?? '').toLowerCase());
+  if (aRuns.length === 0 || bRuns.length === 0) return false;
+  return aRuns.some((aRun) => bRuns.some((bRun) =>
+    (aRun.length >= 32 && bRun.startsWith(aRun))
+    || (bRun.length >= 32 && aRun.startsWith(bRun)),
+  ));
+}
+
+/**
  * HITL: derive the "what the owner must decide" summary from the chair's
  * [CHECKPOINT] message body — the body minus any checkpoint tags themselves.
  * The chair typically posts the draft/decision content in the same message
@@ -2169,10 +2190,33 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (!pinish) return true;
     const lower = token.toLowerCase();
     const deliverables = deps.getGroupTaskStore().listDeliverables(task.id);
-    return deliverables.some((deliverable) =>
+    if (deliverables.some((deliverable) =>
       (deliverable.msgPinId ?? '').toLowerCase() === lower
-      || (deliverable.uri ?? '').toLowerCase().includes(lower),
-    );
+      || (deliverable.uri ?? '').toLowerCase().includes(lower)
+      || hexTokensSharePrefix((deliverable.uri ?? '').toLowerCase(), lower)
+      || hexTokensSharePrefix((deliverable.msgPinId ?? '').toLowerCase(), lower),
+    )) {
+      return true;
+    }
+    // Task #58 regression: the worker's [DELIVERABLE] line carried a TRUNCATED
+    // metafile pin (60 hex of the 64-hex+i0 pinid), so the parser rejected the
+    // candidate and the ledger row stayed kind=text/uri=NULL — while the chair
+    // dispatched with the FULL pin it had verified via the indexer. Exact-match
+    // then failed and the dispatch sat out the whole 15-min bounded wait.
+    // Fallback: scan the task's deliverable tag lines for a long hex-prefix
+    // overlap with the token (LLMs truncate hashes; a ≥32-char shared prefix
+    // is not a coincidence).
+    if (!task.groupId) return false;
+    try {
+      const messages = deps.getGroupTaskStore()
+        .listGroupChatMessages(task.groupId, { limit: 200 });
+      return messages.some((message) =>
+        deliverableTagLines(message.content ?? '')
+          .some((line) => hexTokensSharePrefix(line.toLowerCase(), lower)),
+      );
+    } catch {
+      return false;
+    }
   };
 
   /**
