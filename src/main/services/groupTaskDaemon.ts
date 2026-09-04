@@ -2481,7 +2481,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     chairGlobalMetaId: string,
     baseSystemPrompt: string,
     llmId: string | undefined,
+    llmProvider: string | null,
     fallbackLlmId: string | null,
+    fallbackLlmProvider: string | null,
   ): Promise<void> => {
     if (!autoAckWorkerDispatch) return;
     const content = (message.content ?? '').trim();
@@ -2536,7 +2538,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     } else {
       try {
         ackText = (await performChatWithTimeout(baseSystemPrompt, directive, llmId, {
+          llmProvider,
           fallbackLlmId,
+          fallbackLlmProvider,
           thinking: 'disabled',
         })).trim();
       } catch (error) {
@@ -5444,7 +5448,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // "[WORKING] 已接单" signal instead of a silent gap. P14: only a real
     // chair dispatch qualifies (see the gates inside maybeSendWorkerAck).
     if (member.role === 'worker' && canRunSkillTurn) {
-      await maybeSendWorkerAck(task, bot, message, chairGlobalMetaId, baseSystemPrompt, llmId, fallbackLlmId);
+      await maybeSendWorkerAck(task, bot, message, chairGlobalMetaId, baseSystemPrompt, llmId, brain.llmProvider, fallbackLlmId, brain.fallbackLlmProvider);
     }
     coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
 

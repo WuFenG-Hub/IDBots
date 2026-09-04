@@ -67,11 +67,24 @@ export type SummaryPerformChat = (
     signal?: AbortSignal;
     maxTokens?: number;
     fallbackLlmId?: string | null;
+    /** Provider key the primary/fallback brain model was picked from. */
+    llmProvider?: string | null;
+    fallbackLlmProvider?: string | null;
+    /** Per-attempt timeout: primary and fallback each get a fresh window. */
+    attemptTimeoutMs?: number;
     throwOnEmptyContent?: boolean;
     thinking?: 'enabled' | 'disabled';
     webSearch?: boolean;
   }
 ) => Promise<string>;
+
+/** The bot's brain pair (model ids + provider hints) for summary calls. */
+export interface SummaryBrainPair {
+  llmId: string | null;
+  llmProvider: string | null;
+  fallbackLlmId: string | null;
+  fallbackLlmProvider: string | null;
+}
 
 /**
  * The bot's brain pair for summary calls; null when the bot row is gone.
@@ -79,7 +92,7 @@ export type SummaryPerformChat = (
  */
 export type ResolveBotLlm = (
   metabotId: number,
-) => { llmId: string | null; fallbackLlmId: string | null } | null;
+) => SummaryBrainPair | null;
 
 export interface OrchestratorSummarizerProviderDeps {
   performChat: SummaryPerformChat;
@@ -112,50 +125,43 @@ function buildSummaryPrompt(input: SummarizerInput): { system: string; user: str
 /**
  * Default provider: one bounded orchestrator chat completion per item.
  * LLM selection mirrors the dream pipeline — cowork_config override
- * (`contentSummaryLlmId`) → the bot's own llm_id → app default, with the
- * bot's fallback_llm_id as the retry brain (skipped while the global
- * override is in effect).
+ * (`contentSummaryLlmId`) → the bot's own brain pair (model + provider hint),
+ * with the bot's fallback pair as the retry brain (both suppressed while the
+ * global override is in effect).
  */
 export class OrchestratorSummarizerProvider implements SummarizerProvider {
   constructor(private readonly deps: OrchestratorSummarizerProviderDeps) {}
 
-  private resolveSummaryLlmId(metabotId: number): string | null {
-    const override = this.deps.getConfigValue('contentSummaryLlmId');
-    if (override?.trim()) return override.trim();
-    return this.deps.resolveBotLlm(metabotId)?.llmId ?? null;
-  }
-
-  /** The bot's fallback brain; skipped when the global override is in effect. */
-  private resolveSummaryFallbackLlmId(metabotId: number): string | null {
-    const override = this.deps.getConfigValue('contentSummaryLlmId');
-    if (override?.trim()) return null;
-    return this.deps.resolveBotLlm(metabotId)?.fallbackLlmId ?? null;
+  private resolveSummaryBrain(metabotId: number): SummaryBrainPair {
+    const override = this.deps.getConfigValue('contentSummaryLlmId')?.trim();
+    if (override) {
+      return { llmId: override, llmProvider: null, fallbackLlmId: null, fallbackLlmProvider: null };
+    }
+    return this.deps.resolveBotLlm(metabotId)
+      ?? { llmId: null, llmProvider: null, fallbackLlmId: null, fallbackLlmProvider: null };
   }
 
   private async callSummaryLlm(
     systemPrompt: string,
     userMessage: string,
-    llmId: string | null,
-    fallbackLlmId: string | null,
+    brain: SummaryBrainPair,
   ): Promise<string> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.deps.llmTimeoutMs ?? SUMMARY_LLM_TIMEOUT_MS);
-    try {
-      return await this.deps.performChat(systemPrompt, userMessage, llmId, {
-        signal: controller.signal,
-        maxTokens: SUMMARY_MAX_TOKENS,
-        fallbackLlmId,
-        // Summaries are short plain-text output; reasoning and a stray
-        // built-in web search only burn budget (same posture as dreams).
-        thinking: 'disabled',
-        webSearch: false,
-        // Empty content must fail inside runWithLlmFallback so a configured
-        // fallback brain gets a chance before the attempt fails.
-        throwOnEmptyContent: true,
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
+    return await this.deps.performChat(systemPrompt, userMessage, brain.llmId, {
+      // Per-attempt window: the fallback brain gets its own fresh timeout
+      // instead of inheriting the primary's spent signal.
+      attemptTimeoutMs: this.deps.llmTimeoutMs ?? SUMMARY_LLM_TIMEOUT_MS,
+      maxTokens: SUMMARY_MAX_TOKENS,
+      llmProvider: brain.llmProvider,
+      fallbackLlmId: brain.fallbackLlmId,
+      fallbackLlmProvider: brain.fallbackLlmProvider,
+      // Summaries are short plain-text output; reasoning and a stray
+      // built-in web search only burn budget (same posture as dreams).
+      thinking: 'disabled',
+      webSearch: false,
+      // Empty content must fail inside runWithLlmFallback so a configured
+      // fallback brain gets a chance before the attempt fails.
+      throwOnEmptyContent: true,
+    });
   }
 
   async summarize(input: SummarizerInput): Promise<string> {
@@ -163,8 +169,7 @@ export class OrchestratorSummarizerProvider implements SummarizerProvider {
     const raw = await this.callSummaryLlm(
       system,
       user,
-      this.resolveSummaryLlmId(input.metabotId),
-      this.resolveSummaryFallbackLlmId(input.metabotId),
+      this.resolveSummaryBrain(input.metabotId),
     );
     // Surrogate-safe cap: LLM text can carry lone surrogates that corrupt the
     // sqlite write downstream (see libs/llmSafeText).

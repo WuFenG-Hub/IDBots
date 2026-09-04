@@ -221,7 +221,7 @@ test('OrchestratorSummarizerProvider: llm resolution, call shape, truncation', a
       return 'a'.repeat(600);
     },
     getConfigValue: (key) => (configMap.has(key) ? configMap.get(key) : null),
-    resolveBotLlm: () => ({ llmId: 'bot-llm', fallbackLlmId: 'bot-fallback' }),
+    resolveBotLlm: () => ({ llmId: 'bot-llm', llmProvider: 'bot-provider', fallbackLlmId: 'bot-fallback', fallbackLlmProvider: 'bot-fallback-provider' }),
   });
   const input = { kind: 'write', metabotId: 7, title: null, path: '/p', content: 'body text' };
 
@@ -230,19 +230,25 @@ test('OrchestratorSummarizerProvider: llm resolution, call shape, truncation', a
   const summary = await plain.summarize(input);
   assert.equal(summary.length, 500, 'summary is capped at 500 chars');
   assert.equal(llmCalls[0].llmId, 'bot-llm');
+  assert.equal(llmCalls[0].options.llmProvider, 'bot-provider');
   assert.equal(llmCalls[0].options.fallbackLlmId, 'bot-fallback');
+  assert.equal(llmCalls[0].options.fallbackLlmProvider, 'bot-fallback-provider');
   assert.equal(llmCalls[0].options.maxTokens, 512);
   assert.equal(llmCalls[0].options.thinking, 'disabled');
   assert.equal(llmCalls[0].options.webSearch, false);
   assert.equal(llmCalls[0].options.throwOnEmptyContent, true);
-  assert.ok(llmCalls[0].options.signal instanceof AbortSignal);
+  // Per-attempt timeout window replaces the old shared abort signal, so a
+  // primary timeout leaves the fallback brain a fresh budget.
+  assert.equal(llmCalls[0].options.attemptTimeoutMs, 60_000);
   assert.match(llmCalls[0].user, /You published the following content on-chain/);
 
   // cowork_config.contentSummaryLlmId overrides the bot brain and suppresses its fallback.
   const overridden = makeProvider(new Map([['contentSummaryLlmId', 'official-small-model']]));
   await overridden.summarize({ ...input, kind: 'read', title: 'T' });
   assert.equal(llmCalls[1].llmId, 'official-small-model');
+  assert.equal(llmCalls[1].options.llmProvider, null);
   assert.equal(llmCalls[1].options.fallbackLlmId, null);
+  assert.equal(llmCalls[1].options.fallbackLlmProvider, null);
   assert.match(llmCalls[1].user, /You read the following on-chain content/);
   assert.match(llmCalls[1].user, /title: T/);
 

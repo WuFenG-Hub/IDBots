@@ -3439,7 +3439,11 @@ const startSqliteDaemons = (): void => {
             role: m.role ?? '',
             soul: m.soul ?? '',
             llm_id: m.llm_id ?? null,
+            llm_provider: m.llm_provider ?? null,
+            llm_effort: m.llm_effort ?? null,
             fallback_llm_id: m.fallback_llm_id ?? null,
+            fallback_llm_provider: m.fallback_llm_provider ?? null,
+            fallback_llm_effort: m.fallback_llm_effort ?? null,
             globalmetaid: m.globalmetaid ?? null,
             metaid: m.metaid,
             boss_global_metaid: m.boss_global_metaid ?? null,
@@ -6725,9 +6729,12 @@ const getContentSummaryService = (): ContentSummaryService => {
         resolveBotLlm: (metabotId) => {
           const metabot = getMetabotStore().getMetabotById(metabotId);
           if (!metabot) return null;
+          const brain = metabotBrainOptions(metabot);
           return {
-            llmId: normalizeMetabotLlmId(metabot.llm_id),
-            fallbackLlmId: normalizeMetabotLlmId(metabot.fallback_llm_id),
+            llmId: brain.llmId,
+            llmProvider: brain.llmProvider,
+            fallbackLlmId: brain.fallbackLlmId,
+            fallbackLlmProvider: brain.fallbackLlmProvider,
           };
         },
       }),
