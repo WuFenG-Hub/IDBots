@@ -209,6 +209,12 @@ export interface ChatCompletionOptions {
    * a chance instead of the empty result passing through as success.
    */
   throwOnEmptyContent?: boolean;
+  /**
+   * Per-attempt timeout in ms (see LlmFallbackCallOptions.attemptTimeoutMs):
+   * the primary and the fallback attempt each get their own fresh window
+   * instead of sharing one caller signal.
+   */
+  attemptTimeoutMs?: number;
 }
 
 /**
@@ -350,6 +356,8 @@ export async function performChatCompletionForOrchestrator(
     thinking?: 'enabled' | 'disabled';
     /** See ChatCompletionOptions.webSearch — pass false for structured JSON tasks. */
     webSearch?: boolean;
+    /** Per-attempt timeout in ms; primary and fallback each get a fresh window. */
+    attemptTimeoutMs?: number;
   } = {}
 ): Promise<string> {
   const messages: ChatMessage[] = [
@@ -368,6 +376,7 @@ export async function performChatCompletionForOrchestrator(
     throwOnEmptyContent: options.throwOnEmptyContent,
     thinking: options.thinking,
     webSearch: options.webSearch,
+    attemptTimeoutMs: options.attemptTimeoutMs,
   });
   const content = result.content?.trim() ?? '';
   if (result.tool_calls?.length) {

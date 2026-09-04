@@ -108,6 +108,8 @@ export type MemoryHygienePerformChat = (
     /** Secondary brain retried once when the primary brain errors mid-call. */
     fallbackLlmId?: string | null;
     fallbackLlmProvider?: string | null;
+    /** Per-attempt timeout: primary and fallback each get a fresh window. */
+    attemptTimeoutMs?: number;
   }
 ) => Promise<string>;
 
@@ -321,7 +323,9 @@ export class MemoryHygieneService {
               brain.llmId,
               {
                 thinking: 'disabled',
-                signal: AbortSignal.timeout(DEEP_CONSOLIDATION_LLM_TIMEOUT_MS),
+                // Per-attempt window: the fallback brain gets its own fresh
+                // 180s instead of inheriting the primary's spent signal.
+                attemptTimeoutMs: DEEP_CONSOLIDATION_LLM_TIMEOUT_MS,
                 maxTokens: DEEP_CONSOLIDATION_MAX_OUTPUT_TOKENS,
                 // The Responses-path default web_search injection turns this
                 // into a search-plus-prose answer that blows the JSON budget.
