@@ -30,25 +30,25 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 
 // ---------------------------------------------------------------------------
-// Deterministic probe image: white text "IDBOTS VISION 42" on a dark blue
+// Deterministic probe image: large white text "VISION 42" on a dark blue
 // background, plus a red square and a green rectangle. Re-generated with
-// identical bytes on every run, so the expected description points are fixed:
-//   - OCR reads "IDBOTS VISION 42"
-//   - dark blue background
-//   - red square, green rectangle
+// identical bytes on every run, so the expected description points are fixed.
+// The text is rendered on a 5x7 bitmap font at 4x supersampling and box-
+// downscaled, because the relay's flash-class VLM misreads hard pixel edges;
+// even so, only "VISION" (largest, common word) is a HARD OCR assertion —
+// the digits and shape nouns are soft warns, since small-VLM exact OCR of
+// synthetic text is inherently flaky ("VISION PROBE 42" came back as
+// "VISION ARISE #2" in the 2026-09-04 dry run).
 // ---------------------------------------------------------------------------
 
-const PROBE_TEXT = 'IDBOTS VISION 42';
+const PROBE_TEXT = 'VISION 42';
 
 // 5x7 bitmap font, rows top-to-bottom, bit4 = leftmost pixel.
 const FONT = {
-  I: [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-  D: [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-  B: [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
-  O: [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-  T: [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-  S: [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
   V: [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+  I: [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+  S: [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+  O: [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
   N: [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
   4: [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
   2: [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111],
@@ -83,24 +83,30 @@ function pngChunk(type, data) {
 function buildProbePng() {
   const width = 864;
   const height = 256;
+  const SS = 4; // supersampling factor — downscaled edges fake antialiasing
+  const rw = width * SS;
+  const rh = height * SS;
   const bg = [26, 34, 84];
-  const pixels = new Uint8Array(width * height * 3);
-  for (let i = 0; i < width * height; i += 1) pixels.set(bg, i * 3);
+  const render = new Uint8Array(rw * rh * 3);
+  for (let i = 0; i < rw * rh; i += 1) render.set(bg, i * 3);
 
+  // fillRect takes FINAL-pixel coordinates; the supersample grid does the rest.
   const fillRect = (x, y, w, h, rgb) => {
-    for (let row = y; row < y + h; row += 1) {
-      for (let col = x; col < x + w; col += 1) {
-        if (row < 0 || row >= height || col < 0 || col >= width) continue;
-        pixels.set(rgb, (row * width + col) * 3);
+    for (let row = y * SS; row < (y + h) * SS; row += 1) {
+      for (let col = x * SS; col < (x + w) * SS; col += 1) {
+        if (row < 0 || row >= rh || col < 0 || col >= rw) continue;
+        render.set(rgb, (row * rw + col) * 3);
       }
     }
   };
 
-  // White text, scale 8, one advance column between glyphs.
-  const scale = 8;
+  // White text, scale 13 final px per font pixel (large glyphs OCR far more
+  // reliably on the relay's flash-class VLM), one advance column between
+  // glyphs.
+  const scale = 13;
   const advance = 6 * scale;
   const textX = Math.floor((width - PROBE_TEXT.length * advance) / 2);
-  const textY = 40;
+  const textY = 28;
   [...PROBE_TEXT].forEach((ch, index) => {
     const glyph = FONT[ch] ?? FONT[' '];
     glyph.forEach((bits, row) => {
@@ -112,8 +118,24 @@ function buildProbePng() {
     });
   });
 
-  fillRect(64, 150, 96, 80, [216, 52, 56]); // red square
-  fillRect(680, 150, 128, 64, [56, 168, 82]); // green rectangle
+  fillRect(72, 172, 88, 64, [216, 52, 56]); // red square
+  fillRect(692, 172, 116, 56, [56, 168, 82]); // green rectangle
+
+  // Box-downsample SSxSS blocks back to final resolution (antialiased edges).
+  const pixels = new Uint8Array(width * height * 3);
+  for (let row = 0; row < height; row += 1) {
+    for (let col = 0; col < width; col += 1) {
+      for (let channel = 0; channel < 3; channel += 1) {
+        let sum = 0;
+        for (let dr = 0; dr < SS; dr += 1) {
+          for (let dc = 0; dc < SS; dc += 1) {
+            sum += render[((row * SS + dr) * rw + col * SS + dc) * 3 + channel];
+          }
+        }
+        pixels[(row * width + col) * 3 + channel] = Math.round(sum / (SS * SS));
+      }
+    }
+  }
 
   const raw = Buffer.alloc((width * 3 + 1) * height);
   for (let row = 0; row < height; row += 1) {
@@ -237,10 +259,15 @@ async function main() {
   console.log(text);
   console.log('-----------------------------');
   assert.equal(result.isError, undefined, `describe_image returned an error: ${text}`);
-  assert.match(text, /IDBOTS/i, 'OCR must read the probe text (IDBOTS)');
-  assert.match(text, /42/, 'OCR must read the probe digits (42)');
-  console.log('PASS live relay: probe text OCR matched expected points');
-  for (const soft of [/blue/i, /red/i, /green/i]) {
+  // Hard points that prove the relay actually saw THIS image: the anchor
+  // word (largest text), the background, and both colored shapes.
+  assert.match(text, /VISION/i, 'OCR must read the anchor word (VISION)');
+  assert.match(text, /blue|navy/i, 'must see the dark blue background');
+  assert.match(text, /red/i, 'must see the red square');
+  assert.match(text, /green/i, 'must see the green rectangle');
+  console.log('PASS live relay: anchor OCR + background + both shapes matched');
+  // Soft points: exact digit OCR and shape nouns vary on flash-class VLMs.
+  for (const soft of [/42/, /square/i, /rectangle/i, /white/i]) {
     if (!soft.test(text)) {
       console.log(`WARN: description does not mention ${soft} — check the printed result above`);
     }
