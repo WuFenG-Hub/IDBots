@@ -38,7 +38,10 @@ import { metabotBrainOptions } from './llmFallback';
 
 const HYGIENE_TICK_INTERVAL_MS = 60_000;
 const HYGIENE_STATUS_CHANNEL = 'memoryHygiene:statusChanged';
-const DEEP_CONSOLIDATION_LLM_TIMEOUT_MS = 120_000;
+// Aligned with the dream pass budget (DREAM_LLM_TIMEOUT_MS): consolidation
+// prompts carry up to ~160 belief-layer rows, and a thinking-defaulted brain
+// (or a slow relay) needs more than the old 120s to finish the JSON.
+const DEEP_CONSOLIDATION_LLM_TIMEOUT_MS = 180_000;
 // Explicit output budget for the consolidation JSON. The transport default
 // for thinking-disabled calls (4_096) truncated real inventories mid-JSON
 // (bots with 150+ belief-layer rows hit "unparseable output" on 2026-09-02);

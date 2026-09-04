@@ -44,9 +44,19 @@ test('one-shot completion reads the Anthropic thinking field emitted by the prox
   assert.equal(extractAnthropicThinkingText({ type: 'text', text: 'final answer' }), '');
 });
 
-test('thinking controls are sent only to compatible DeepSeek models', () => {
+test('thinking controls are sent only to compatible DeepSeek/GLM models', () => {
   assert.equal(resolveThinkingForModel('deepseek-v4-flash', 'disabled'), 'disabled');
   assert.equal(resolveThinkingForModel('deepseek-reasoner', 'enabled'), 'enabled');
+  // GLM thinking-capable models default to thinking ON when the field is
+  // absent — the caller's 'disabled' must reach the wire (2026-09-04
+  // deep-consolidation timeout root cause).
+  assert.equal(resolveThinkingForModel('glm-5.3-flash', 'disabled'), 'disabled');
+  assert.equal(resolveThinkingForModel('z-ai/glm-5.3-flash', 'disabled'), 'disabled');
+  assert.equal(resolveThinkingForModel('zai-org/GLM-5.3', 'enabled'), 'enabled');
+  assert.equal(resolveThinkingForModel('glm-4.7-flash', 'disabled'), 'disabled');
+  assert.equal(resolveThinkingForModel('glm-4.5-air', 'disabled'), 'disabled');
+  // Pre-4.5 GLM and non-thinking models keep the toggle off the wire.
+  assert.equal(resolveThinkingForModel('glm-4', 'disabled'), undefined);
   assert.equal(resolveThinkingForModel('claude-sonnet-4-6', 'disabled'), undefined);
   assert.equal(resolveThinkingForModel('gpt-5.6-sol', 'disabled'), undefined);
 });
