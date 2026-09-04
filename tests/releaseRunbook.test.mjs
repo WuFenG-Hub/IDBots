@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
+import { run } from "../scripts/release-runbook.mjs";
+
 const script = resolve(import.meta.dirname, "../scripts/release-runbook.mjs");
 
 function runWithState(dir, args) {
@@ -67,4 +69,14 @@ test("release-runbook next/mark navigate manual phases", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("run() trims piped output and tolerates stdio:inherit returning null", () => {
+  // execFileSync returns null under stdio:"inherit"; the local/download phases
+  // used to crash on .trim() even when the gate command itself succeeded.
+  assert.equal(run(process.execPath, ["-e", "console.log('hello')"]), "hello");
+  assert.equal(
+    run(process.execPath, ["-e", "console.log('hello')"], { stdio: "inherit" }),
+    "",
+  );
 });
