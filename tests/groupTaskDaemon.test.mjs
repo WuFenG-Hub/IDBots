@@ -7275,3 +7275,64 @@ test('sponsor-pending: a queued send for a finished task is dropped silently', a
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// fix/group-task-duration: corrupt session log auto-rebuild (task #57 zombie)
+// ---------------------------------------------------------------------------
+
+test('corrupt session log: the member task session is rebuilt from the ledger and the trigger re-dispatches', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      runSkillTurn: null,
+    },
+  });
+  const corruptSessionIds = new Set();
+  h.deps.runSkillTurn = async (params) => {
+    if (corruptSessionIds.has(params.sessionId)) {
+      throw new Error('corrupt session log: seq gap in committed region at line 9853 (expected 116028, got 116026)');
+    }
+    return { replyText: 'reply-after-rebuild', assistantMessageId: 'asst-2' };
+  };
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'trigger-corrupt-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver step 6',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 60,
+    });
+    const triggerId = h.db.exec(
+      "SELECT id FROM group_chat_messages WHERE pin_id = 'trigger-corrupt-i0'",
+    )[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, triggerId - 1);
+
+    // Prime the original mapping so the first turn lands on the corrupt one.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const original = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    corruptSessionIds.add(original.session.id);
+
+    await h.loop.runTick();
+    // First tick: turn failed on the corrupt log; rebuild happened (or will on
+    // the requeue). Give the deferred retry a tick.
+    await h.loop.runTick();
+
+    const after = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    assert.notEqual(after.coworkSessionId, original.session.id, 'the mapping was repointed to a fresh session');
+    assert.ok(
+      h.sends.some((send) => send.metabotId === 2 && send.content === 'reply-after-rebuild'),
+      'the re-dispatched turn answered on the rebuilt session',
+    );
+    // The rebuilt session is seeded with the group context snapshot.
+    const rebuiltMessages = h.coworkStore.getSession(after.coworkSessionId).messages;
+    assert.ok(
+      rebuiltMessages.some((message) => /SYSTEM group context snapshot/.test(message.content ?? '')),
+      'the rebuilt session is seeded with the ledger context',
+    );
+    // Rebuild stamp recorded — a second corrupt failure within the interval
+    // falls back to the ordinary retry ladder instead of looping rebuilds.
+    assert.ok(h.store.get('group_task_corrupt_session_rebuild:1:2'), 'rebuild stamp recorded');
+  } finally {
+    h.cleanup();
+  }
+});

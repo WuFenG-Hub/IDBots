@@ -79,6 +79,7 @@ import {
   ensureGroupTaskMemberReady,
   ensureGroupTaskSession,
   GROUP_TASK_CONVERSATION_CHANNEL,
+  rebuildGroupTaskSession,
 } from './groupTaskSession';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import { SkillTurnTimeoutError } from './orchestratorCoworkBridge';
@@ -375,6 +376,13 @@ function extractDependsOnTokens(content: string | null | undefined): string[] {
     .filter((token) => token.length > 0);
 }
 const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
+/**
+ * fix/group-task-duration (task #57): kv stamp for the corrupt-session-log
+ * rebuild — one rebuild per (task, bot) per interval so a genuinely broken
+ * runtime cannot loop session rebuilds forever.
+ */
+const CORRUPT_SESSION_REBUILD_PREFIX = 'group_task_corrupt_session_rebuild:';
+const CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS = 60 * 60_000;
 /**
  * release-review P2: bounded hold timestamp for a trigger whose (task, bot)
  * session is still running a prior turn (the post-hard-cap window where the
@@ -5212,6 +5220,39 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `(pin ${posted.pinId})`,
       );
     } catch (error) {
+      // fix/group-task-duration (task #57): a corrupt chair session log fails
+      // every supervisor-signal answer forever — the recovery channel itself
+      // dies. Rebuild the chair's task session from the host ledger and leave
+      // the signals pending; the next tick answers them on the fresh session.
+      {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (/corrupt session log/i.test(errorMessage)) {
+          const rebuildKey = `${CORRUPT_SESSION_REBUILD_PREFIX}${task.id}:${bot.id}`;
+          const lastRebuildAt = Number(deps.getStore().get<number>(rebuildKey) ?? 0) || 0;
+          if (now() - lastRebuildAt > CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS) {
+            try {
+              deps.getStore().set(rebuildKey, now());
+              const rebuilt = rebuildGroupTaskSession({
+                coworkStore: deps.getCoworkStore(),
+                groupTaskStore: deps.getGroupTaskStore(),
+                task,
+                botId: bot.id,
+                botName: bot.name,
+              });
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: corrupt chair session log — session rebuilt from the ` +
+                `host ledger (${rebuilt.sessionId.slice(0, 8)}…); supervisor signals stay pending for the next tick`,
+              );
+              return;
+            } catch (rebuildError) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: corrupt-session rebuild failed for the chair: ` +
+                `${rebuildError instanceof Error ? rebuildError.message : String(rebuildError)}`,
+              );
+            }
+          }
+        }
+      }
       // Retry budget: a failed turn leaves the rows pending for the next tick,
       // but a signal the chair fails to answer 3 times is closed out (null
       // pin) with one anomaly milestone — a broken chair LLM must not wedge
@@ -5830,6 +5871,65 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
           }
         } else {
+          // fix/group-task-duration (task #57): a corrupt DSH session log
+          // ("seq gap in committed region") fails EVERY turn on that session
+          // fast and forever — 5 blind retries against the same corrupt log
+          // all die, the trigger drops, and every later recovery mechanism
+          // (supervisor signals, stall nudges) hits the same wall: the task
+          // becomes a permanent zombie. Rebuild the member's task session
+          // from the host ledger and requeue the trigger UNCHARGED (the
+          // failure is environmental, not the member's). Bounded to one
+          // rebuild per (task, bot) per hour so a genuinely broken runtime
+          // cannot loop rebuilds.
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          if (/corrupt session log/i.test(errorMessage)) {
+            const rebuildKey = `${CORRUPT_SESSION_REBUILD_PREFIX}${task.id}:${bot.id}`;
+            const lastRebuildAt = Number(deps.getStore().get<number>(rebuildKey) ?? 0) || 0;
+            if (now() - lastRebuildAt > CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS) {
+              try {
+                deps.getStore().set(rebuildKey, now());
+                const rebuilt = rebuildGroupTaskSession({
+                  coworkStore: deps.getCoworkStore(),
+                  groupTaskStore: deps.getGroupTaskStore(),
+                  task,
+                  botId: bot.id,
+                  botName: bot.name,
+                });
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: corrupt session log for bot ${bot.id} — task session ` +
+                  `rebuilt from the host ledger (${rebuilt.sessionId.slice(0, 8)}…); trigger requeued`,
+                );
+                notifySourceSessionMilestone(
+                  task,
+                  'anomaly',
+                  buildSourceSessionAnomalyNotice({
+                    title: task.title,
+                    status: task.status,
+                    summary:
+                      `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} hit a corrupt ` +
+                      'session log (seq gap in the committed region) — every turn on it would fail forever. ' +
+                      'The host rebuilt the member\'s task session from the task ledger (goal, status trail, ' +
+                      'deliverables, recent transcript); the member lost its private chat memory of this task only.',
+                  }),
+                  `corrupt_session_rebuild:${task.id}:${bot.id}`,
+                );
+                deferReply({
+                  taskId: task.id,
+                  metabotId: bot.id,
+                  messageId: message.id,
+                  reason: args.reason,
+                  verificationNotes: args.verificationNotes,
+                  failures: args.entry?.failures ?? 0,
+                });
+                return;
+              } catch (rebuildError) {
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: corrupt-session rebuild failed for bot ${bot.id}: ` +
+                  `${rebuildError instanceof Error ? rebuildError.message : String(rebuildError)}`,
+                );
+              }
+            }
+          }
           const failures = (args.entry?.failures ?? 0) + 1;
           if (failures >= MSG_RETRY_MAX_FAILURES) {
             emitLog(
