@@ -7801,8 +7801,9 @@ if (!gotTheLock) {
       const sourcePng = captured.toPNG();
       // capturePage returns PHYSICAL pixels (2x the CSS rect on Retina), while
       // the DSH attachment store measures the encoded bytes and rejects images
-      // over 2000px per side / 20 MiB — fit every capture to those bounds here
-      // so the tool result is always committable (see botBrowserCaptureFit).
+      // over 8192px per side / 33.4 MP total / 20 MiB — fit every capture to
+      // those bounds here so the tool result is always committable (see
+      // botBrowserCaptureFit).
       let pixelSize = readPngSize(sourcePng) ?? { width: captureRect.width, height: captureRect.height };
       let image = captured;
       const fit = computeCaptureFitSize(pixelSize.width, pixelSize.height);

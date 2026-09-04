@@ -5,6 +5,7 @@ import Module from 'node:module';
 const require = Module.createRequire(import.meta.url);
 const {
   BOT_BROWSER_CAPTURE_MAX_BYTES,
+  BOT_BROWSER_CAPTURE_MAX_PIXELS,
   BOT_BROWSER_CAPTURE_MAX_SIDE_PX,
   computeCaptureFitSize,
   readPngSize,
@@ -27,9 +28,10 @@ function makePng(width, height) {
 test('limits mirror the DSH attachment store bounds', () => {
   // dsh-runtime/plugins/idbots-attachment-store.mjs LIMITS: maxImageDimension
   // 8192 (upstream dsh-attachment-local default; request-side normalization
-  // shrinks further per route), maxImageBytes 20 MiB. The capture fit must
-  // never exceed them.
+  // shrinks further per route), maxImagePixels 33.4 MP, maxImageBytes 20 MiB.
+  // The capture fit must never exceed them.
   assert.equal(BOT_BROWSER_CAPTURE_MAX_SIDE_PX, 8192);
+  assert.equal(BOT_BROWSER_CAPTURE_MAX_PIXELS, 33_400_000);
   assert.equal(BOT_BROWSER_CAPTURE_MAX_BYTES, 20 * 1024 * 1024);
 });
 
@@ -46,20 +48,38 @@ test('readPngSize rejects non-PNG or truncated bytes', () => {
 
 test('computeCaptureFitSize returns null when the capture already fits', () => {
   assert.equal(computeCaptureFitSize(1000, 800), null);
-  assert.equal(computeCaptureFitSize(8192, 8192), null);
   // Task #59's rejected figure now passes through unfitted.
   assert.equal(computeCaptureFitSize(2848, 1600), null);
   assert.equal(computeCaptureFitSize(8191, 1), null);
+  // Just under the total-pixel budget is still "fits".
+  assert.equal(computeCaptureFitSize(8192, 4077), null);
 });
 
 test('computeCaptureFitSize fits oversize captures within the side cap, aspect preserved', () => {
-  // A 5x capture of a 1400x900 CSS content area blows the 8192 side cap.
-  assert.deepEqual(computeCaptureFitSize(14000, 9000), { width: 8192, height: 5266 });
-  // Portrait and extreme ratios round instead of re-exceeding the bound.
-  assert.deepEqual(computeCaptureFitSize(9000, 14000), { width: 5266, height: 8192 });
+  // A 5x capture of a 1400x900 CSS content area blows the 8192 side cap; the
+  // side fit lands under the pixel budget only after the extra shrink.
+  assert.deepEqual(computeCaptureFitSize(14000, 9000), { width: 7208, height: 4633 });
+  assert.deepEqual(computeCaptureFitSize(9000, 14000), { width: 4633, height: 7208 });
+  // Extreme ratios stay pinned to the side cap (total pixels stay tiny).
   assert.deepEqual(computeCaptureFitSize(100000, 10), { width: 8192, height: 1 });
-  const fit = computeCaptureFitSize(16384, 10240);
-  assert.deepEqual(fit, { width: 8192, height: 5120 });
+  assert.deepEqual(computeCaptureFitSize(16384, 10240), { width: 7310, height: 4568 });
+});
+
+test('computeCaptureFitSize enforces the total-pixel budget under the side cap', () => {
+  // Near-square captures can clear the 8192 side cap yet exceed 33.4 MP,
+  // which the attachment store still rejects (IMAGE_TOO_MANY_PIXELS).
+  for (const fit of [
+    computeCaptureFitSize(8192, 8192),
+    computeCaptureFitSize(8200, 4200),
+    computeCaptureFitSize(8192, 4078),
+    computeCaptureFitSize(14000, 9000),
+  ]) {
+    assert.ok(fit.width <= 8192 && fit.height <= 8192);
+    assert.ok(fit.width * fit.height <= 33_400_000, `${fit.width}x${fit.height}`);
+  }
+  // Aspect ratio is preserved through the extra shrink.
+  assert.deepEqual(computeCaptureFitSize(8192, 8192), { width: 5779, height: 5779 });
+  assert.deepEqual(computeCaptureFitSize(8200, 4200), { width: 8075, height: 4136 });
 });
 
 test('computeCaptureFitSize tolerates degenerate input', () => {
