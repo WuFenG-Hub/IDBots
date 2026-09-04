@@ -6,7 +6,6 @@
  * use @opcat-labs/scrypt-ts-opcat instead of standard bitcoinjs-lib.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyOpcat = any;
 
 const OPCAT_WALLET_API = 'https://wallet-api.opcatlabs.io';
