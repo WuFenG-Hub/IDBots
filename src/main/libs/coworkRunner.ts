@@ -850,7 +850,7 @@ export function evaluateReadImageGuard(input: EvaluateReadImageGuardInput): Read
     return {
       action: 'deny',
       reason: 'no-vision-image',
-      message: `当前模型不支持读图，图片内容已省略：${input.absolutePath}${sizeLabel}。请改用 describe_image 工具读取该图片的内容描述。`,
+      message: `当前模型路由不支持读图，图片像素未加载：${input.absolutePath}${sizeLabel}。请改用 describe_image 工具读取该图片的内容描述（所有路由均可用）。(The current model route has no image input, so the pixels were NOT loaded. Call the describe_image tool on the same path instead — it is relay-backed and works on every model route.)`,
     };
   }
 
@@ -1216,6 +1216,15 @@ interface ActiveSession {
    * again. Grows only with distinct read files, bounded by session lifetime.
    */
   readFiles?: Map<string, { mtimeMs: number; size: number }>;
+  /**
+   * Model id of the route the CURRENT DSH turn is actually running on. Equals
+   * the session's primary route model except during a GT-02 fallback-brain
+   * resume; the Read-image guard judges against this (not the primary route)
+   * so a mid-turn route switch can neither smuggle image blocks to a
+   * text-only fallback model nor deny image reads on a vision fallback.
+   * Null between turns.
+   */
+  activeTurnModelId?: string | null;
   /**
    * Billing identity resolved from the API config at run start ('deepseek'
    * only when the DeepSeek account is actually billed — provider key
@@ -7502,6 +7511,11 @@ export class CoworkRunner extends EventEmitter {
             turnOfficialDeepSeekNative ? 'deepseek-native' : 'generic',
           );
         }
+        // Publish the route this attempt actually runs on: the Read-image
+        // guard (evaluateDshToolPolicy) judges image reads against THIS
+        // model, so a GT-02 fallback-brain resume onto a text-only model
+        // denies reads explicitly instead of letting pixels die upstream.
+        activeSession.activeTurnModelId = turnRoute.model;
         // Fresh guarded attempt → clean tool ledger (a cancelled/steered
         // previous attempt may leave calls whose results never settle).
         dshInFlightToolUses.clear();
@@ -7752,6 +7766,7 @@ export class CoworkRunner extends EventEmitter {
         });
       } finally {
         clearDshStallWatchdog();
+        activeSession.activeTurnModelId = null;
       }
       };
 
@@ -8012,12 +8027,20 @@ export class CoworkRunner extends EventEmitter {
           const absoluteGuardPath = path.resolve(guardFilePath);
           const guardStat = safeFileStat(absoluteGuardPath);
           const route = this.resolveSessionDshRoute(sessionId);
-          const guardModelLimits = route ? resolveCurrentModelLimits(route.model) : null;
+          // Judge against the model the CURRENT turn actually runs on: a
+          // GT-02 fallback resume re-pins the session to the fallback brain's
+          // route, so the primary route's model is the wrong capability
+          // source mid-fallback. Unresolvable => fail safe (non-vision):
+          // the denial message points at describe_image, which works on
+          // every route, whereas a wrongly-permissive read silently drops
+          // the pixels (2026-09-04 glm-5.3-flash regression).
+          const guardModelId = activeSession?.activeTurnModelId ?? route?.model ?? null;
+          const guardModelLimits = guardModelId ? resolveCurrentModelLimits(guardModelId) : null;
           const guardDecision = evaluateReadImageGuard({
             toolName: 'read',
             absolutePath: absoluteGuardPath,
             fileStat: guardStat,
-            supportsVision: guardModelLimits?.supportsVision ?? true,
+            supportsVision: guardModelLimits?.supportsVision ?? false,
             priorReads: activeSession?.readFiles ?? null,
           });
           if (guardDecision.action === 'deny') {
