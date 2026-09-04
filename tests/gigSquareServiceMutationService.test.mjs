@@ -721,3 +721,41 @@ test('resolveMissingProviderSkills returns only the claims not installed on the 
 
   assert.deepEqual(missing, ['seedance', 'Seedance']);
 });
+
+test('validateGigSquareModifyDraft accepts a mixed _/- claim that runtime resolution would resolve', () => {
+  // Claim-side candidates: my_skill-v2, my-skill-v2, my_skill_v2 — the second
+  // equals the installed id, so SkillManager.resolveSkillById would find it.
+  const result = validateGigSquareModifyDraft({
+    serviceName: 'svc',
+    displayName: 'SVC',
+    description: 'desc',
+    providerSkill: 'my_skill-v2',
+    price: '0',
+    currency: 'SPACE',
+    outputType: 'text',
+  }, {
+    installedSkills: [{ id: 'my-skill-v2', name: 'My Skill' }],
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test('validateGigSquareModifyDraft rejects a claim whose only id-variant hit is installed-side (runtime would not resolve)', () => {
+  // Claim-side candidates of a-b-c-d are a-b-c-d and a_b_c_d — neither equals
+  // the installed id a_b-c_d, so runtime resolution would fail and the claim
+  // must be rejected.
+  const result = validateGigSquareModifyDraft({
+    serviceName: 'svc',
+    displayName: 'SVC',
+    description: 'desc',
+    providerSkill: 'a-b-c-d',
+    price: '0',
+    currency: 'SPACE',
+    outputType: 'text',
+  }, {
+    installedSkills: [{ id: 'a_b-c_d', name: 'Something Else' }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.errorCode, 'provider_skill_not_available');
+});

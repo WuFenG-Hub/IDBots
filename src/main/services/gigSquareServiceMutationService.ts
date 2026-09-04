@@ -355,11 +355,15 @@ export interface GigSquareInstalledSkillDescriptor {
 }
 
 /**
- * Pure cross-check that mirrors the runtime skill resolution semantics used
- * when an order is executed (`SkillManager.resolveSkillById` /
- * `resolveSkillByName`): a claimed provider skill is considered available on
- * this host when it matches an installed skill by id (with `_`/`-` variant
- * normalization) or by case-insensitive name.
+ * Pure cross-check against the host's installed skills, using the same
+ * matching rules as runtime skill resolution (`SkillManager.resolveSkillById`
+ * / `resolveSkillByName`): a claimed provider skill is considered available
+ * on this host when one of its claim-side `_`/`-` id-variant candidates
+ * equals an installed skill id, or when it matches an installed skill by
+ * case-insensitive name. Note this runs over the unfiltered
+ * `SkillManager.listSkills()` result, so an installed-but-disabled (or
+ * prompt-less) skill counts as available here even though order execution
+ * only routes to enabled skills with prompts.
  *
  * Returns the claimed skills that are NOT installed on this host, in the
  * order they were declared. The caller decides whether to reject the
@@ -372,22 +376,20 @@ export const resolveMissingProviderSkills = (
   const claims = normalizeProviderSkillList(providerSkills);
   if (claims.length === 0 || installedSkills.length === 0) return claims;
 
-  const exactMatches = new Set<string>();
-  const idCandidates = new Set<string>();
+  const installedIds = new Set<string>();
   const nameIndex = new Set<string>();
   for (const skill of installedSkills) {
-    exactMatches.add(skill.id);
-    exactMatches.add(skill.name.trim());
-    for (const candidate of [skill.id, skill.id.replace(/_/g, '-'), skill.id.replace(/-/g, '_')]) {
-      if (candidate) idCandidates.add(candidate);
-    }
+    if (skill.id) installedIds.add(skill.id);
     const normalizedName = skill.name.trim().toLowerCase();
     if (normalizedName) nameIndex.add(normalizedName);
   }
 
   return claims.filter((claim) => {
-    if (exactMatches.has(claim)) return false;
-    if (idCandidates.has(claim)) return false;
+    // Claim-side `_`/`-` candidates, mirroring SkillManager.getSkillIdCandidates
+    // (generating variants from installed ids instead would both falsely reject
+    // and falsely accept whenever an id mixes `_` and `-`).
+    const idCandidates = [claim, claim.replace(/_/g, '-'), claim.replace(/-/g, '_')];
+    if (idCandidates.some((candidate) => installedIds.has(candidate))) return false;
     return !nameIndex.has(claim.toLowerCase());
   });
 };
