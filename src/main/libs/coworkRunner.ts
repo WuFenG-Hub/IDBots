@@ -75,7 +75,7 @@ import {
 } from './procedurePromptBlocks';
 import { tApp } from './appLanguage';
 import { isContextWindowExceededError } from './coworkContextBudget';
-import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
+import { tryAutoAnswerLowRiskQuestion, pickRecommendedOptionLabel } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
 import { CHAIN_IDENTIFIER_VERBATIM_RULE } from './chainIdentifierPrompt';
@@ -4795,6 +4795,7 @@ export class CoworkRunner extends EventEmitter {
           '- Never use normal assistant text as the confirmation channel in modal mode.',
           '- Continue only when the question tool returns explicit allow.',
           '- Under bypassPermissions only, low-risk confirmations (e.g. deleting merged branches/worktrees) may mark every question with header "auto-confirm" to auto-approve without a modal; keep high-risk confirmations unmarked so they still ask.',
+          '- If a question goes unanswered for 60s, it auto-answers with the recommended option, so always mark one option "(Recommended)" and put it first; questions without options count as unanswered.',
         ];
 
     return [
@@ -7696,9 +7697,14 @@ export class CoworkRunner extends EventEmitter {
               toolName: 'AskUserQuestion',
               toolInput: { questions: modalQuestions },
             };
+            let askTimeout: ReturnType<typeof setTimeout> | null = null;
             this.pendingPermissions.set(ask.id, {
               sessionId,
               resolve: (result) => {
+                if (askTimeout) {
+                  clearTimeout(askTimeout);
+                  askTimeout = null;
+                }
                 if (result.behavior !== 'allow') {
                   void hub.respondAsk(ask.id, (ask.questions ?? []).map((q) => ({
                     id: q.id,
@@ -7713,8 +7719,35 @@ export class CoworkRunner extends EventEmitter {
                   .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask respond failed', { error: String(error) }));
               },
             });
+            // Same 60s ceiling the approval path enforces
+            // (waitForPermissionResponse): an ask whose prompt never reaches a
+            // human (dropped IPC, unrenderable payload, hidden window) — or
+            // whose human simply never clicks — used to pin the turn in
+            // "running" until the tool-call hard cap, or forever. On expiry,
+            // answer with the recommended option (explicit "(Recommended)"
+            // marker first, schema-mandated first option as the default) so
+            // the bot keeps working; questions without options count as
+            // unanswered.
+            askTimeout = setTimeout(() => {
+              askTimeout = null;
+              if (!this.pendingPermissions.delete(ask.id)) return;
+              if (activeSession.pendingPermission?.requestId === ask.id) {
+                activeSession.pendingPermission = null;
+              }
+              const timeoutAnswers = (ask.questions ?? []).map((q) => {
+                const recommended = pickRecommendedOptionLabel(q.options);
+                return recommended
+                  ? { id: q.id, selected: [recommended], custom: 'Auto-selected the recommended option because the user did not answer within 60s.' }
+                  : { id: q.id, selected: [], custom: 'The user did not answer within 60s.' };
+              });
+              coworkLog('WARN', 'runDshSessionLocal', 'ask_user_question unanswered for 60s; auto-answering with the recommended option where one exists', { sessionId, askId: ask.id, autoPicked: timeoutAnswers.filter((a) => a.selected.length > 0).length, questionCount: timeoutAnswers.length });
+              void hub.respondAsk(ask.id, timeoutAnswers)
+                .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask timeout respond failed', { error: String(error) }));
+            }, PERMISSION_RESPONSE_TIMEOUT_MS);
+            askTimeout.unref?.();
             activeSession.pendingPermission = request;
             this.emit('permissionRequest', sessionId, request);
+            coworkLog('INFO', 'runDshSessionLocal', 'ask_user_question awaiting user answer', { sessionId, askId: ask.id, questionCount: modalQuestions.length });
           },
           onAskCancelled: (askId) => {
             const pending = this.pendingPermissions.get(askId);

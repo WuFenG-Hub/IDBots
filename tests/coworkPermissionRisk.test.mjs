@@ -12,17 +12,24 @@ const readSource = (...segments) => fs.readFileSync(path.join(projectRoot, ...se
 const runnerSource = readSource('src', 'main', 'libs', 'coworkRunner.ts');
 
 test('coworkRunner wires low-risk auto-approval under full trust only', () => {
-  assert.match(runnerSource, /tryAutoAnswerLowRiskQuestion/);
-  assert.match(runnerSource, /permissionMode === 'bypassPermissions' && resolvedName === 'AskUserQuestion'/);
-  assert.match(runnerSource, /updatedInput: \{ \.\.\.resolvedInput, answers: autoAnswers \}/);
-  // The interactive fall-through must stay reachable for unmarked questions.
-  assert.match(runnerSource, /acceptEdits \/ bypassPermissions \+ AskUserQuestion: fall through to the prompt below/);
+  const onAskStart = runnerSource.indexOf('onAskRequest: (ask) => {');
+  assert.notEqual(onAskStart, -1, 'coworkRunner must register onAskRequest');
+  const onAskBody = runnerSource.slice(onAskStart, runnerSource.indexOf('onAskCancelled:', onAskStart));
+  assert.match(onAskBody, /permissionMode === 'bypassPermissions'/);
+  assert.match(onAskBody, /tryAutoAnswerLowRiskQuestion\(\{ questions: modalQuestions \}\)/);
+  assert.match(onAskBody, /hub\.respondAsk\(ask\.id, wireAnswersFromModal\(autoAnswers\)\)/);
+  // Unmarked questions fall through to the interactive modal below.
+  assert.ok(onAskBody.indexOf('tryAutoAnswerLowRiskQuestion') < onAskBody.indexOf("toolName: 'AskUserQuestion'"));
 });
 
 test('safety prompt tells agents about the auto-confirm marker under full trust', () => {
   assert.match(runnerSource, /Under bypassPermissions only, low-risk confirmations/);
   assert.match(runnerSource, /header "auto-confirm" to auto-approve/);
   assert.match(runnerSource, /keep high-risk confirmations unmarked/);
+  // The 60s unanswered-question fallback must be announced so models always
+  // mark a recommended option.
+  assert.match(runnerSource, /auto-answers with the recommended option/);
+  assert.match(runnerSource, /mark one option "\(Recommended\)" and put it first/);
 });
 
 test('low-risk marked questions auto-answer with their first option', async (t) => {
@@ -123,4 +130,53 @@ test('low-risk marked questions auto-answer with their first option', async (t) 
   assert.equal(tryAutoAnswerLowRiskQuestion({}), null);
   assert.equal(tryAutoAnswerLowRiskQuestion(null), null);
   assert.equal(tryAutoAnswerLowRiskQuestion('nope'), null);
+});
+
+test('pickRecommendedOptionLabel prefers the explicit marker, then the first option', async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cowork-risk-'));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const outputFile = path.join(tempDir, 'permission-risk.mjs');
+  await build({
+    absWorkingDir: projectRoot,
+    stdin: {
+      contents: `export { pickRecommendedOptionLabel } from './src/main/libs/coworkPermissionRisk.ts';`,
+      resolveDir: projectRoot,
+      sourcefile: 'permission-risk-entry.ts',
+      loader: 'ts',
+    },
+    outfile: outputFile,
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    logLevel: 'silent',
+  });
+  const { pickRecommendedOptionLabel } = await import(
+    `${pathToFileURL(outputFile).href}?test=${Date.now()}`
+  );
+
+  // Explicit "(Recommended)" marker wins over first position.
+  assert.equal(
+    pickRecommendedOptionLabel([{ label: '手动完整安装到工作区' }, { label: '先装核心版 (Recommended)' }]),
+    '先装核心版 (Recommended)',
+  );
+  // Full-width parens and the Chinese marker count too.
+  assert.equal(
+    pickRecommendedOptionLabel([{ label: '保留' }, { label: '删除（推荐）' }]),
+    '删除（推荐）',
+  );
+  // No marker -> the schema-mandated first option is the default.
+  assert.equal(
+    pickRecommendedOptionLabel([{ label: '第一种' }, { label: '第二种' }]),
+    '第一种',
+  );
+  // Entries without a non-empty string label are skipped.
+  assert.equal(
+    pickRecommendedOptionLabel([{ description: 'no label' }, null, { label: '回退项' }]),
+    '回退项',
+  );
+  // Nothing usable -> null (caller treats the question as unanswered).
+  assert.equal(pickRecommendedOptionLabel([]), null);
+  assert.equal(pickRecommendedOptionLabel([{ description: 'x' }]), null);
+  assert.equal(pickRecommendedOptionLabel(undefined), null);
+  assert.equal(pickRecommendedOptionLabel('nope'), null);
 });

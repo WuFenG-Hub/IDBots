@@ -152,6 +152,7 @@ tests/*
 !tests/coworkContextCompaction.test.mjs
 !tests/coworkProviderErrors.test.mjs
 !tests/coworkPermissionRisk.test.mjs
+!tests/coworkAskQuestionHang.test.mjs
 !tests/coworkTodoList.test.ts
 !tests/coworkTaskControl.test.mjs
 !tests/coworkSdkEvents.test.mjs
