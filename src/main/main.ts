@@ -3684,6 +3684,11 @@ const startSqliteDaemons = (): void => {
     // P1-2: the daemon's stuck-session reclaim stops the inert worker session
     // through the runner (working directory + artifacts preserved).
     stopWorkerSession: (sessionId) => getCoworkRunner().stopSession(sessionId, { finalStatus: 'stopped' }),
+    // Task #60: ground-truth "a turn is still executing on this session" probe
+    // for the skill-turn watchdog latch and the session-busy dispatch hold —
+    // the session status column can transiently read 'error' while the runner
+    // keeps executing the original turn.
+    isCoworkSessionActive: (sessionId) => getCoworkRunner().isSessionActive(sessionId),
     performChat: performChatCompletionForOrchestrator,
     postGroupTaskMessage: (taskId, metabotId, content, opts) => postGroupTaskMessage(taskId, metabotId, content, opts),
     getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
