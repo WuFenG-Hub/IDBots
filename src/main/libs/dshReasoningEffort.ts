@@ -10,9 +10,13 @@
 // canonical values pass through one-to-one. Legacy five-step tokens that are
 // not in the current ladder (minimal, medium, xhigh) still convert here.
 //
-// Everything else stays on the pi-ai route, where effort is NOT passed:
-// pi-ai models' thinking keeps the provider default (the historical behavior
-// for non-deepseek providers).
+// Everything else stays on the pi-ai route, where effort is passed ONLY when
+// the model's reasoning capability is declared for the route
+// (dshModelReasoningDeclaration — model-family dialect, e.g. deepseek-v4
+// behind a catalog-unknown gateway); the canonical off/low/high/max ladder is
+// shared with the native adapter so those declarations speak the same
+// vocabulary. Undeclared pi-ai models keep the provider default (the
+// historical behavior for non-deepseek providers).
 
 const DSH_REASONING_EFFORTS = new Set([
   'off',

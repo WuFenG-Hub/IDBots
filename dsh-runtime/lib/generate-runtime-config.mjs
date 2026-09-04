@@ -224,6 +224,12 @@ export function generateRuntimeConfig(input) {
         // Image-input declaration: routes default to text-only; a vision model
         // declares ['text','image'] so image blocks can enter its history.
         ...Array.isArray(model.input) && model.input.length > 0 ? { input: model.input } : {},
+        // Reasoning capability declaration (model-family dialect, e.g.
+        // deepseek-v4 on a catalog-unknown chat-completions gateway):
+        // forwarded verbatim — dsh-llm-pi-ai validates the shape and without
+        // it materializes such models as reasoning:false (no effort control).
+        ...model.reasoningEfforts ? { reasoningEfforts: model.reasoningEfforts } : {},
+        ...model.compat ? { compat: model.compat } : {},
       })),
     }
   }
