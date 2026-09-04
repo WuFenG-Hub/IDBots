@@ -324,6 +324,32 @@ export function computeWorkingHeartbeatUntil(
 }
 
 /**
+ * Extract a chair-stated step deadline (in minutes) from an assignment
+ * message, e.g. `[DEADLINE: 30m]`, `deadline: 45 minutes`, `deadline 15 min`.
+ * Conservative on purpose: the number must carry an explicit unit and sit in
+ * a sane range, and when one message states two DIFFERENT deadlines the
+ * mention is ambiguous and returns null (the caller falls back to
+ * DEFAULT_STEP_DEADLINE_MS). Pure + exported for unit tests.
+ */
+export function parseChairDeadlineMinutes(content: string | null | undefined): number | null {
+  const text = String(content ?? '');
+  if (!text) return null;
+  const patterns = [
+    /\[DEADLINE:\s*(\d{1,4})\s*(?:minutes?|mins?|m|分钟)\s*\]/gi,
+    /\bdeadline\b\s*[:：]?\s*(?:of\s+)?(\d{1,4})\s*(?:minutes?|mins?|m(?![a-z])|分钟)/gi,
+  ];
+  const values = new Set<number>();
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const minutes = Number(match[1]);
+      if (Number.isFinite(minutes) && minutes > 0 && minutes <= 24 * 60) values.add(minutes);
+    }
+  }
+  if (values.size !== 1) return null;
+  return [...values][0];
+}
+
+/**
  * P1-2/P2-1: member liveness classification shared by the silence watchdogs.
  * The watchdogs used to look at group-chat speech only, so a worker mid
  * long-task (tool calls streaming into its cowork session, or a valid
@@ -605,6 +631,16 @@ const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
 const ACK_SEEN_PREFIX = 'group_task_ack_seen:';
 const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
+/**
+ * Default delivery deadline armed when a worker ACKs [WORKING] without an ETA
+ * and the chair's assignment states no explicit deadline (task #60: a
+ * numberless ACK left the step unwatched for 71+ minutes with no escalation
+ * path). The armed record feeds the SAME P0-4 reminder / P1-3 escalation path
+ * as an ETA-armed deadline, which re-checks deliverables and only reclaims a
+ * genuinely inert member (heartbeat/session-activity gated) — so a worker
+ * legitimately mid-turn is nudged, never reclaimed.
+ */
+const DEFAULT_STEP_DEADLINE_MS = 30 * 60_000;
 /**
  * Task #51: the chair owes a response to the latest chair-triggering message.
  * Armed when the gating produces any chair decision; cleared when the chair
@@ -6974,6 +7010,39 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * Task #60: resolve the chair assignment message a worker ACK refers to —
+   * the pending-ACK watch records the assignment's message id; failing that,
+   * the ACK's replyPin threads under its trigger message. Used to read a
+   * chair-stated step deadline when the ACK itself carries no ETA. Empty when
+   * unresolvable; the caller then falls back to DEFAULT_STEP_DEADLINE_MS.
+   */
+  const resolveAssignmentContent = (
+    task: GroupTask,
+    assignmentMessageId: number | null,
+    replyPin: string | null | undefined,
+  ): string => {
+    try {
+      const db = deps.getStore().getDatabase();
+      if (assignmentMessageId != null && task.groupId) {
+        const row = queryMessageById(db, task.groupId, assignmentMessageId);
+        const content = (row?.content ?? '').trim();
+        if (content) return content;
+      }
+      const pin = (replyPin ?? '').trim();
+      if (pin) {
+        const result = db.exec(
+          'SELECT content FROM group_chat_messages WHERE pin_id = ? LIMIT 1',
+          [pin],
+        );
+        return String(result[0]?.values?.[0]?.[0] ?? '');
+      }
+    } catch {
+      // resolution is best-effort; the caller falls back to the default
+    }
+    return '';
+  };
+
   const handleMemberProtocolMarkers = (
     task: GroupTask,
     message: GroupTaskDaemonMessage,
@@ -7120,6 +7189,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const ack = parseWorkingAck(message.content);
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
+      // Capture the pending assignment's message id BEFORE clearing it — a
+      // numberless ACK arms its delivery deadline from the chair's stated
+      // deadline (task #60), which lives in that assignment message.
+      let assignmentMessageId: number | null = null;
+      const pendingRawForDeadline = sqlite.get<string>(pendingKey);
+      if (pendingRawForDeadline != null) {
+        try {
+          const pendingEntry = JSON.parse(pendingRawForDeadline) as { messageId?: number };
+          if (pendingEntry && typeof pendingEntry.messageId === 'number') {
+            assignmentMessageId = pendingEntry.messageId;
+          }
+        } catch {
+          assignmentMessageId = null;
+        }
+      }
       clearPendingAck();
       // The member is alive again — clear the stuck-reclaim/stuck-alert streak
       // so a future stuck spell reclaims/alerts afresh.
@@ -7145,14 +7229,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // trigger message, so the notice echo is recognizable by its target.
       const acksHostNotice = isNoticeOrRollCallPin(message.replyPin);
       if (!opts?.humanGateActive && !acksHostNotice) {
-        // P0-4 arming: ONLY an explicit numeric ETA arms a delivery deadline.
-        // A numberless ACK (the entropy-P0 template ACK carries no ETA) is
-        // pure liveness — the old fallback invented a memberTimeoutAfterMinutes
-        // deadline out of thin air and then fired fake "estimated delivery"
-        // reminders at workers who were simply mid-turn (the task #51 false
-        // alarms). A worker that goes genuinely silent after a numberless ACK
-        // is still covered by the unreachable / stale-[WORKING] watchdogs,
-        // which key off real inactivity instead of an invented deadline.
+        // P0-4 arming: an explicit numeric ETA arms a delivery deadline; a
+        // numberless ACK (task #60: Lucy's turn ran 71+ min with no escalation
+        // path) arms one too — from the chair's stated deadline when the
+        // assignment carries one, else DEFAULT_STEP_DEADLINE_MS — so an
+        // ETA-less worker never runs unwatched. This does not reproduce the
+        // task #51 false alarms: those paired an invented deadline with an
+        // escalation that never re-checked reality, while the P0-4/P1-3 path
+        // re-verifies the deliverable ledger and reclaims only a genuinely
+        // inert member (heartbeat/session-activity gated) — a worker
+        // legitimately mid-turn gets a reminder, never a reclaim.
         if (ack.estimatedMinutes != null && ack.estimatedMinutes > 0) {
           // Review fix: arming a fresh deadline starts a fresh reminder cycle —
           // a leftover delivery-reminded flag from the previous (missed or
@@ -7172,9 +7258,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             `(est. ${ack.estimatedMinutes} min)`,
           );
         } else {
+          const chairDeadlineMinutes = parseChairDeadlineMinutes(
+            resolveAssignmentContent(task, assignmentMessageId, message.replyPin),
+          );
+          const deadlineMinutes = chairDeadlineMinutes ?? Math.round(DEFAULT_STEP_DEADLINE_MS / 60_000);
+          // Same fresh-reminder-cycle rule as the ETA path above.
+          sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+          sqlite.set(
+            `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+            JSON.stringify({
+              dueAt: now() + deadlineMinutes * 60_000,
+              ackedAt: now(),
+              taskDescription: ack.taskDescription,
+            }),
+          );
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
-            'without an ETA — liveness only, no delivery deadline armed',
+            `without an ETA — armed delivery deadline: ${deadlineMinutes}m ` +
+            `(${chairDeadlineMinutes != null ? 'chair-set' : 'default'})`,
           );
         }
       } else {

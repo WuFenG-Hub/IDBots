@@ -1281,6 +1281,24 @@ test('classifyMemberLiveness: heartbeat lease, speech, and session activity each
   }), 'stale');
 });
 
+test('parseChairDeadlineMinutes: tag/prose forms parse; ambiguity and junk fall back', () => {
+  const { parseChairDeadlineMinutes } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  assert.equal(parseChairDeadlineMinutes('Do the thing. [DEADLINE: 30m]'), 30);
+  assert.equal(parseChairDeadlineMinutes('[DEADLINE: 45 minutes]'), 45);
+  assert.equal(parseChairDeadlineMinutes('deadline: 45 minutes for this step'), 45);
+  assert.equal(parseChairDeadlineMinutes('deadline 15 min'), 15);
+  assert.equal(parseChairDeadlineMinutes('deadline of 20分钟'), 20);
+  // The same value stated twice is still one deadline.
+  assert.equal(parseChairDeadlineMinutes('[DEADLINE: 30m] — deadline: 30 minutes'), 30);
+  // Conservative fallbacks.
+  assert.equal(parseChairDeadlineMinutes('no deadline stated here'), null);
+  assert.equal(parseChairDeadlineMinutes('deadline: 30m and also deadline: 45m'), null);
+  assert.equal(parseChairDeadlineMinutes('deadline: 99999 minutes'), null);
+  assert.equal(parseChairDeadlineMinutes('deadline soon'), null);
+  assert.equal(parseChairDeadlineMinutes(''), null);
+  assert.equal(parseChairDeadlineMinutes(null), null);
+});
+
 test('cursor advances on no-reply messages; a failing turn retries via the durable queue in FIFO order', async () => {
   // Cooldowns off: this test isolates the retry/ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
@@ -5725,11 +5743,12 @@ test('entropy P1 review: chair without a globalMetaID falls back to the full-ros
   }
 });
 
-test('entropy P0 review: a numberless template ACK is liveness only — no invented delivery deadline', async () => {
+test('task #60: a numberless ACK arms the default 30-minute delivery deadline', async () => {
   const h = await createHarness({ ackTimeoutMs: 180_000 });
   try {
     const task = h.createTask([2]);
     h.state.nowMs = Date.now();
+    const startMs = h.state.nowMs;
     insertGroupMessage(h.db, {
       pinId: 'pin-assign-t1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
@@ -5743,24 +5762,28 @@ test('entropy P0 review: a numberless template ACK is liveness only — no inven
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
-    // Task #51: a numberless ACK is pure liveness. The old fallback armed a
-    // memberTimeoutAfterMinutes deadline out of thin air and then fired fake
-    // "estimated delivery" reminders at workers simply mid-turn.
-    assert.equal(
-      h.store.get('group_task_expected_delivery:1:2'),
-      undefined,
-      'no delivery deadline armed without an explicit ETA',
-    );
+    // Task #60: a numberless ACK no longer leaves the step unwatched — the
+    // assignment states no deadline, so the 30-minute default arms.
+    const entry = JSON.parse(h.store.get('group_task_expected_delivery:1:2'));
+    assert.equal(entry.dueAt, startMs + 30 * 60_000, 'default 30-minute deadline armed');
 
-    // Past the old invented window (20 min) with no deliverable: still no
-    // fake reminder. A genuinely dead worker is caught by the stale-[WORKING]
-    // / unreachable watchdogs (real inactivity), not by an invented deadline.
+    // Before the deadline: no reminder.
     h.state.nowMs += 21 * 60_000;
     await h.loop.runTick();
     assert.equal(
       h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
       0,
-      'no fake delivery reminder off a numberless ACK',
+      'no delivery reminder before the armed deadline',
+    );
+
+    // Past the deadline with no deliverable: the existing P0-4 reminder path
+    // fires exactly once — no new escalation mechanism.
+    h.state.nowMs += 10 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      1,
+      'missed default deadline reuses the existing reminder path',
     );
   } finally {
     h.cleanup();
