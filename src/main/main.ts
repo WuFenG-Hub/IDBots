@@ -4021,6 +4021,7 @@ const startSqliteDaemons = (): void => {
     getTeamCultureStore: () => getTeamCultureStore(),
     getGroupTaskStore: () => getGroupTaskStore(),
     performChat: performChatCompletionForOrchestrator,
+    getMetabotById: (id) => getMetabotStore().getMetabotById(id),
   });
 
   // Knowledge bases ("知识库"): per-bot document corpora learned into a local

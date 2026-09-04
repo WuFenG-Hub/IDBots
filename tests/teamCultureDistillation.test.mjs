@@ -357,3 +357,117 @@ test('close hook records every done-close verdict into the store log', async () 
     harness.cleanup();
   }
 });
+
+test('distillation rides the given brain pair and names it on llm-error', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new TeamCultureStore(db, () => {}, () => 1_800_000_000_000);
+    const brain = {
+      llmId: 'glm-5.3-flash',
+      llmProvider: 'custom-zai',
+      effort: null,
+      fallbackLlmId: 'deepseek-v4-flash',
+      fallbackLlmProvider: 'deepseek',
+      fallbackEffort: null,
+    };
+
+    let seenLlmId;
+    let seenOptions;
+    const applied = await runCultureDistillation({
+      task: { taskId: 41, title: 'T', goal: 'G', status: 'done', summary: SUMMARY },
+      cultureStore: store,
+      brain,
+      performChat: async (_system, _user, llmId, options) => {
+        seenLlmId = llmId;
+        seenOptions = options;
+        return '```json\n' + PROPOSAL_JSON + '\n```';
+      },
+    });
+    assert.equal(applied.outcome, 'applied');
+    assert.equal(seenLlmId, 'glm-5.3-flash', 'the chair brain model drives the call');
+    assert.equal(seenOptions.llmProvider, 'custom-zai');
+    assert.equal(seenOptions.fallbackLlmId, 'deepseek-v4-flash');
+    assert.equal(seenOptions.fallbackLlmProvider, 'deepseek');
+
+    const failed = await runCultureDistillation({
+      task: { taskId: 42, title: 'T', goal: 'G', status: 'done', summary: SUMMARY },
+      cultureStore: store,
+      brain,
+      performChat: async () => {
+        throw new Error('LLM request failed: 429 free_quota_exhausted');
+      },
+    });
+    assert.equal(failed.outcome, 'llm-error');
+    assert.match(failed.error, /429/);
+    assert.match(failed.error, /\(brain custom-zai\/glm-5\.3-flash\)/,
+      'the log names the failing brain so quota outages are actionable');
+
+    // No brain configured -> the app default model route (llmId undefined).
+    let defaultLlmId = 'sentinel';
+    await runCultureDistillation({
+      task: { taskId: 43, title: 'T', goal: 'G', status: 'done', summary: SUMMARY },
+      cultureStore: store,
+      performChat: async (_system, _user, llmId) => {
+        defaultLlmId = llmId;
+        return '{"glossary":[],"conventions":[],"lessons":[]}';
+      },
+    });
+    assert.equal(defaultLlmId, undefined);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('close hook resolves the task chair brain via getTaskById/getMetabotById', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const store = new TeamCultureStore(db, () => {}, () => 1_800_000_000_000);
+    let seenLlmId;
+    let seenFallback;
+    setTeamCultureDistillationDeps({
+      getTeamCultureStore: () => store,
+      getGroupTaskStore: () => ({
+        getLatestAcceptanceSummary: (taskId) => (taskId === 51 ? {
+          conclusion: SUMMARY.conclusion,
+          outcome: SUMMARY.outcome,
+          planChanges: SUMMARY.planChanges,
+          deliverables: SUMMARY.deliverables,
+          members: SUMMARY.members,
+        } : null),
+        getTaskById: (taskId) => (taskId === 51 ? { chairMetabotId: 88 } : null),
+      }),
+      getMetabotById: (id) => (id === 88 ? {
+        llm_id: 'glm-5.3-flash',
+        llm_provider: 'custom-zai',
+        fallback_llm_id: 'deepseek-v4-flash',
+        fallback_llm_provider: 'deepseek',
+      } : null),
+      performChat: async (_system, _user, llmId, options) => {
+        seenLlmId = llmId;
+        seenFallback = options?.fallbackLlmId;
+        return '```json\n' + PROPOSAL_JSON + '\n```';
+      },
+    });
+    distillTeamCultureFromTaskClose(51, 'done', 'T51', 'G');
+    for (let i = 0; i < 200 && store.listCultureDistillationLog().length < 1; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const log = store.listCultureDistillationLog();
+    assert.equal(log.length, 1);
+    assert.equal(log[0].outcome, 'applied');
+    assert.equal(seenLlmId, 'glm-5.3-flash', 'the chair brain, not the app default, distilled');
+    assert.equal(seenFallback, 'deepseek-v4-flash', 'the fallback brain rides along');
+  } finally {
+    setTeamCultureDistillationDeps({
+      getTeamCultureStore: () => ({
+        getCultureConfig: () => ({ enabled: false }),
+        recordCultureDistillation: () => {},
+      }),
+      getGroupTaskStore: () => ({ getLatestAcceptanceSummary: () => null }),
+      performChat: async () => '',
+    });
+    harness.cleanup();
+  }
+});
