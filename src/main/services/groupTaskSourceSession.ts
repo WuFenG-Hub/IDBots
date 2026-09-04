@@ -20,6 +20,23 @@ export type GroupTaskSourceSessionExec = (
 
 export const TWIN_SOURCE_SESSION_WINDOW_MS = 15 * 60 * 1000;
 
+/**
+ * R2 hotfix: session types allowed as the group-task source ("where the human
+ * started this"). The original R2 gate accepted only `standard` sessions, but
+ * since the bot-internet composer (2026-08-25) a `browser` session IS a
+ * first-class human conversation surface — users start group tasks there and
+ * expect the lifecycle relays (create/dispatch/checkpoint/acceptance) to land
+ * back in that same room. The relay pipe itself (coworkCrossSession
+ * insertUserMessage) already delivers to browser targets (only a2a is
+ * write-protected), so accepting browser here completes the loop without any
+ * pipe change. a2a/group_task stay rejected: a2a is a read-only remote peer
+ * channel, and a group_task session is not where a human starts a task.
+ */
+export const GROUP_TASK_SOURCE_SESSION_TYPES: ReadonlySet<string> = new Set([
+  'standard',
+  'browser',
+]);
+
 export function resolveTwinSourceSessionFallback(
   exec: GroupTaskSourceSessionExec,
   twinMetabotId: number,

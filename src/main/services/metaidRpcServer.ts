@@ -49,7 +49,7 @@ import {
   listGroupChatMessagesForGateway,
 } from './groupTaskService';
 import { gateChairDrivingSend, gateExternalChairSend, DEFAULT_DRIVER_GRACE_MS } from './groupTaskDaemon';
-import { resolveTwinSourceSessionFallback } from './groupTaskSourceSession';
+import { resolveTwinSourceSessionFallback, GROUP_TASK_SOURCE_SESSION_TYPES } from './groupTaskSourceSession';
 import { GroupTaskStaffingError } from './groupTaskStaffing';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
 import {
@@ -1468,6 +1468,29 @@ export function startMetaidRpcServer(
         res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
         return;
       }
+      // Symmetric R2 gate: the proposal records where owner confirmation
+      // happens, so it must point at a real standard/browser session too.
+      // Without this, a browser source passes propose and then fails create —
+      // the gap that pushed the bot to substitute another session id.
+      if (parsed.source_session_id != null) {
+        const candidate = String(parsed.source_session_id).trim();
+        if (candidate) {
+          const sessionRow = getStore()
+            .getDatabase()
+            .exec('SELECT session_type FROM cowork_sessions WHERE id = ?', [candidate])[0];
+          const sessionType = sessionRow?.values?.[0]?.[0];
+          if (!GROUP_TASK_SOURCE_SESSION_TYPES.has(String(sessionType))) {
+            res.writeHead(400);
+            res.end(JSON.stringify({
+              success: false,
+              error: sessionType == null
+                ? 'source_session_id does not refer to an existing CoWork session'
+                : `source_session_id must be a standard or browser CoWork session (got ${String(sessionType)})`,
+            }));
+            return;
+          }
+        }
+      }
       try {
         const result = proposeGroupTaskStaffing({
           title: String(parsed.title ?? '').trim(),
@@ -1524,8 +1547,11 @@ export function startMetaidRpcServer(
         return;
       }
       // R2: validate the originating CoWork session before recording it as the
-      // relay target. Only a real, non-A2A standard session is acceptable —
-      // a2a/browser/group_task sessions are not "where the human started this".
+      // relay target. Hotfix: browser sessions are also accepted — since the
+      // bot-internet composer they are a first-class human conversation
+      // surface ("where the human started this" includes the Bot Internet
+      // room), and the relay pipe already delivers to browser targets. a2a /
+      // group_task sessions remain rejected.
       let sourceSessionId: string | undefined;
       if (parsed.source_session_id != null) {
         const candidate = String(parsed.source_session_id).trim();
@@ -1534,13 +1560,13 @@ export function startMetaidRpcServer(
             .getDatabase()
             .exec('SELECT session_type FROM cowork_sessions WHERE id = ?', [candidate])[0];
           const sessionType = sessionRow?.values?.[0]?.[0];
-          if (sessionType !== 'standard') {
+          if (!GROUP_TASK_SOURCE_SESSION_TYPES.has(String(sessionType))) {
             res.writeHead(400);
             res.end(JSON.stringify({
               success: false,
               error: sessionType == null
                 ? 'source_session_id does not refer to an existing CoWork session'
-                : `source_session_id must be a standard CoWork session (got ${String(sessionType)})`,
+                : `source_session_id must be a standard or browser CoWork session (got ${String(sessionType)})`,
             }));
             return;
           }
