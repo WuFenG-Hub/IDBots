@@ -4581,7 +4581,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                       buildAcceptanceSummaryMessageText(summarized, task.title),
                     );
                     try {
-                      store.updateAcceptanceSummaryPublishedPin(task.id, sent.pinId);
+                      // A sponsor-pending send returns an empty pinId
+                      // ("queued, delivered later by the drainer") — never
+                      // persist it as the published pin.
+                      if (sent.pinId) {
+                        store.updateAcceptanceSummaryPublishedPin(task.id, sent.pinId);
+                      }
                     } catch (pinError) {
                       emitLog(
                         `[GroupTaskDaemon] Task ${task.id}: acceptance summary published-pin record failed: ` +
@@ -4589,7 +4594,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                       );
                     }
                     emitLog(
-                      `[GroupTaskDaemon] Task ${task.id}: acceptance summary v${saved.version} posted on review entry (pin ${sent.pinId}, ${deliverables.length} deliverable(s)${summarized.conclusion ? ', conclusion captured' : ''})`,
+                      `[GroupTaskDaemon] Task ${task.id}: acceptance summary v${saved.version} posted on review entry (pin ${sent.pinId || 'queued'}, ${deliverables.length} deliverable(s)${summarized.conclusion ? ', conclusion captured' : ''})`,
                     );
                   }
                 } catch (error) {
@@ -5255,14 +5260,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const posted = await postGroupMessage(task.id, bot.id, reply);
       // P2-7 r2: the daemon's own reply must not count as "Twin activity".
       rememberDaemonChairPin(task.id, posted.pinId);
-      store.markSupervisorSignalsProcessed(pendingIds, posted.pinId);
+      // An empty pinId means the answer is queued behind sponsor broadcast
+      // reconciliation, not on-chain yet — record it with a null pin (the same
+      // shape as a host-applied answer) instead of a fake empty pin.
+      store.markSupervisorSignalsProcessed(pendingIds, posted.pinId || null);
       // Answered — the per-signal failed-attempt counters are obsolete.
       for (const id of pendingIds) {
         sqlite.delete(`${GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX}${id}`);
       }
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: chair answered ${pending.length} supervisor signal(s) ` +
-        `(pin ${posted.pinId})`,
+        `(pin ${posted.pinId || 'queued'})`,
       );
     } catch (error) {
       // fix/group-task-duration (task #57): a corrupt chair session log fails
