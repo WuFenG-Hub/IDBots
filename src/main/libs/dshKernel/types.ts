@@ -128,6 +128,16 @@ export interface DshProviderRoute {
     maxOutputTokens?: number
     /** Input modalities the route declares (['text','image'] for vision models); pi-ai gates image blocks on it. */
     input?: string[]
+    /**
+     * Reasoning capability declaration (see dshModelReasoningDeclaration):
+     * forwarded verbatim to dsh-llm-pi-ai, which otherwise derives the
+     * capability from its installed catalog — catalog-unknown models
+     * (custom gateways) materialize `reasoning: false` and lose all effort
+     * control. Never set for native routes (the first-party adapter owns
+     * its own ladder).
+     */
+    reasoningEfforts?: Record<string, string | null>
+    compat?: Record<string, unknown>
   }>
 }
 

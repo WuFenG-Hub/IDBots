@@ -136,3 +136,34 @@ test('every route carries the outage-tuned retry policy', () => {
   assert.deepEqual(native.config.retryPolicy, expectedPolicy, 'native route')
   assert.deepEqual(piAiProviders(config).mockgw.retryPolicy, expectedPolicy, 'pi-ai route')
 })
+
+// Reasoning capability declarations ride the model family, not the provider
+// (see dshModelReasoning.ts): a catalog-unknown gateway serving deepseek-v4
+// must reach dsh-llm-pi-ai with reasoningEfforts + compat verbatim, or the
+// model materializes reasoning:false and the effort selector's "off" sends
+// nothing upstream (thinking stays on at the gateway default).
+test('model reasoning declarations pass through to the pi-ai route verbatim', () => {
+  const config = generateRuntimeConfig(baseInput([
+    {
+      key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48790/v1', apiKeyEnv: 'K',
+      models: [{
+        id: 'deepseek/deepseek-v4-flash',
+        contextWindow: 1_000_000,
+        reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' },
+        compat: { thinkingFormat: 'deepseek', supportsReasoningEffort: true },
+      }],
+    },
+  ]))
+  const route = piAiProviders(config).mockgw
+  assert.deepEqual(route.models[0].reasoningEfforts, { off: null, low: 'low', high: 'high', max: 'max' })
+  assert.deepEqual(route.models[0].compat, { thinkingFormat: 'deepseek', supportsReasoningEffort: true })
+})
+
+test('models without a reasoning declaration emit no reasoning fields', () => {
+  const config = generateRuntimeConfig(baseInput([
+    { key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48790/v1', apiKeyEnv: 'K', models: [{ id: 'mock-1', contextWindow: 32_768 }] },
+  ]))
+  const route = piAiProviders(config).mockgw
+  assert.equal(route.models[0].reasoningEfforts, undefined)
+  assert.equal(route.models[0].compat, undefined)
+})

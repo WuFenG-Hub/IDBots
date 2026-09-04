@@ -27,6 +27,7 @@ import {
 } from '../services/metaidRpcEndpoint'
 import { DshKernel, isSessionEncodingMismatchError } from './dshKernel/dshKernel'
 import type { DshKernelOptions } from './dshKernel/dshKernel'
+import { dshModelReasoningDeclaration } from './dshModelReasoning'
 import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
@@ -1108,6 +1109,13 @@ export class DshTurnHub {
 }
 
 function providerRouteOf(provider: DshTurnProviderRoute): DshProviderRoute {
+  // Reasoning declaration rides the MODEL (its family's wire dialect), not the
+  // provider: a catalog-unknown gateway serving a reasoning-capable model
+  // would otherwise materialize reasoning:false and lose all effort control.
+  // The native route is exempt — the first-party adapter owns its own ladder.
+  const reasoning = provider.key === 'deepseek-official'
+    ? null
+    : dshModelReasoningDeclaration(provider.model, provider.apiFormat);
   return {
     key: provider.key,
     apiFormat: provider.apiFormat,
@@ -1125,6 +1133,9 @@ function providerRouteOf(provider: DshTurnProviderRoute): DshProviderRoute {
       ...Number.isFinite(provider.maxOutputTokens) ? { maxOutputTokens: provider.maxOutputTokens } : {},
       ...(Array.isArray(provider.inputModalities) && provider.inputModalities.length > 0
         ? { input: provider.inputModalities }
+        : {}),
+      ...(reasoning
+        ? { reasoningEfforts: reasoning.reasoningEfforts, compat: reasoning.compat }
         : {}),
     }],
   }

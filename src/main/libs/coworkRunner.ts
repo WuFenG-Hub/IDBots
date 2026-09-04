@@ -26,6 +26,7 @@ import {
   writeDshSkillSessionEnvFile,
 } from './dshSkillSessionEnv';
 import { mapDshReasoningEffort } from './dshReasoningEffort';
+import { dshModelReasoningDeclaration } from './dshModelReasoning';
 import { toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
 import {
   CoworkDshSteerWindowClosedError,
@@ -7058,6 +7059,14 @@ export class CoworkRunner extends EventEmitter {
     // pi-ai route (see isNativeDeepSeekChatRoute for the 400 failure mode).
     const officialDeepSeekNative = isNativeDeepSeekChatRoute(route);
     const reasoningEffort = extras?.reasoningEffort;
+    // Effort rides a route only when the model's thinking is actually
+    // controllable on it: the native adapter (own off/low/high/max ladder) or
+    // a family-declared pi-ai model (dshModelReasoningDeclaration — e.g.
+    // deepseek-v4 behind a catalog-unknown gateway). Everything else keeps the
+    // provider default: an undeclared model materializes reasoning:false, and
+    // any non-off effort would fail the turn outright.
+    const effortRidesRoute = officialDeepSeekNative
+      || dshModelReasoningDeclaration(route.model, apiFormat) !== null;
     return {
       key: officialDeepSeekNative ? 'deepseek-official' : route.provider,
       apiFormat,
@@ -7066,7 +7075,7 @@ export class CoworkRunner extends EventEmitter {
       model: route.model,
       contextWindow: modelLimits?.contextWindow,
       maxOutputTokens: modelLimits?.maxOutputTokens,
-      ...(officialDeepSeekNative && reasoningEffort != null && reasoningEffort !== ''
+      ...(effortRidesRoute && reasoningEffort != null && reasoningEffort !== ''
         ? { reasoningEffort }
         : {}),
       ...(modelLimits?.supportsVision ? { inputModalities: ['text', 'image'] } : {}),
@@ -7545,11 +7554,11 @@ export class CoworkRunner extends EventEmitter {
           { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
         ],
         provider: this.dshTurnProviderFromRoute(turnRoute, {
-          // Effort rides the native route (adapter-validated off/low/high/max
-          // ladder). pi-ai routes get no effort: their models' thinking stays
-          // at the provider default, matching the pre-selector behavior for
-          // non-deepseek providers.
-          reasoningEffort: turnOfficialDeepSeekNative ? turnReasoningEffort : null,
+          // Effort rides whatever route can actually honor it — the native
+          // adapter (own ladder) or a family-declared pi-ai model; everything
+          // else keeps the provider default. The gate lives inside
+          // dshTurnProviderFromRoute.
+          reasoningEffort: turnReasoningEffort ?? null,
         }),
         callbacks: {
           onMessage: (message, slot) => {
