@@ -78,6 +78,7 @@ import { isContextWindowExceededError } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
+import { CHAIN_IDENTIFIER_VERBATIM_RULE } from './chainIdentifierPrompt';
 import { hasEmbeddedSkillCatalog } from './skillPromptMarkers';
 import { buildMetabotPersonaPrompt } from './metabotPersonaPrompt';
 import { readBootstrapDoc } from './welcomeBootstrap';
@@ -5156,6 +5157,14 @@ export class CoworkRunner extends EventEmitter {
         name: 'idbots:metaweb-learning-loop',
         order: PROMPT_SECTION_ORDER.METAWEB_LEARNING_LOOP,
         text: this.buildMetawebLearningLoopPrompt(),
+      },
+      // Chain-identifier output discipline: quoting pinids/txids verbatim is
+      // load-bearing for host matching (deliverables, dependency gates,
+      // verification). Static rule prose, cacheable head.
+      {
+        name: 'idbots:chain-ids',
+        order: PROMPT_SECTION_ORDER.CHAIN_IDS,
+        text: CHAIN_IDENTIFIER_VERBATIM_RULE,
       },
       // Skill routing rules WITHOUT the live catalog (that rides the volatile
       // user-message tail). Null/empty for legacy prompts that still carry
