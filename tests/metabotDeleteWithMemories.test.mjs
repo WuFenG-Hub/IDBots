@@ -56,9 +56,10 @@ const insertMemory = (db, { id, metabotId, text }) => {
   );
 };
 
-// metaid_knowledge_entries is SDK-managed and not created by SqliteStore, so a
-// test that exercises the deleteMetabot cleanup must create the table itself,
-// mirroring the runtime schema (NOT NULL metabot_id, FK NO ACTION on metabots).
+// metaid_knowledge_entries is created by SqliteStore itself (via
+// ensureMetaIDKnowledgeSchema); this IF NOT EXISTS mirror of the runtime
+// schema (NOT NULL metabot_id, FK NO ACTION on metabots) only stays as a
+// fallback for older schema-init paths and is normally a no-op.
 const ensureKnowledgeTable = (db) => {
   db.run(`
     CREATE TABLE IF NOT EXISTS metaid_knowledge_entries (
@@ -88,6 +89,18 @@ const insertKnowledge = (db, { id, metabotId, topic }) => {
       (id, metabot_id, topic, topic_fingerprint, summary, kind, tags_json, confidence, status, origin, version, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, metabotId, topic, `fp-${id}`, `summary-${id}`, 'know_how', '[]', 0.5, 'active', 'agent', 1, 1700000000000 + id, 1700000000000 + id]
+  );
+};
+
+// metaid_knowledge_procedures is created by SqliteStore itself (via
+// ensureMetaIDKnowledgeSchema), so the test inserts into the real table,
+// providing every NOT NULL column from the runtime schema.
+const insertProcedure = (db, { id, metabotId, title }) => {
+  db.run(
+    `INSERT INTO metaid_knowledge_procedures
+      (id, metabot_id, title, title_fingerprint, trigger_text, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [id, metabotId, title, `fp-${id}`, `trigger-${id}`, 1700000000000, 1700000000000]
   );
 };
 
@@ -183,6 +196,30 @@ test('deleteMetabot also removes the bot metaid_knowledge_entries rows (NOT NULL
     // The knowledge table survives with no orphaned references.
     const orphans = db.exec("SELECT COUNT(*) FROM pragma_foreign_key_check WHERE parent = 'metabots'");
     assert.equal(Number(orphans[0].values[0][0]), 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('deleteMetabot also removes the bot metaid_knowledge_procedures rows (NOT NULL metabot_id)', async () => {
+  const tempDir = makeTempDir();
+  const { store, metabotStore, db } = await openStores(tempDir);
+  try {
+    assert.equal(foreignKeysEnabled(db), 1);
+
+    insertWallet(db, 1);
+    insertMetabot(db, { id: 7, walletId: 1, name: 'Procedural Bot', createdAt: 1000 });
+    insertProcedure(db, { id: 'p-1', metabotId: 7, title: 'nightly reindex' });
+
+    const before = db.exec('SELECT COUNT(*) FROM metaid_knowledge_procedures WHERE metabot_id = 7');
+    assert.equal(Number(before[0].values[0][0]), 1);
+    // Without the cleanup this delete is refused by the NO ACTION constraint.
+    assert.throws(() => db.run('DELETE FROM metabots WHERE id = ?', [7]), /FOREIGN KEY constraint failed/);
+
+    assert.equal(metabotStore.deleteMetabot(7), true);
+    assert.equal(metabotStore.getMetabotById(7), null);
+    const after = db.exec('SELECT COUNT(*) FROM metaid_knowledge_procedures WHERE metabot_id = 7');
+    assert.equal(Number(after[0].values[0][0]), 0);
   } finally {
     store.close();
   }
