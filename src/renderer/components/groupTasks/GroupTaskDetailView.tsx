@@ -7,6 +7,7 @@ import type {
 } from '../../types/groupTask';
 import GroupTaskMessageItem from './GroupTaskMessageItem';
 import AcceptanceSummaryCard from './AcceptanceSummaryCard';
+import { GroupTaskTinyAvatar } from './GroupTaskListMeta';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import GroupTaskRatingStars from './GroupTaskRatingStars';
 import GroupTaskKickConfirmModal from './GroupTaskKickConfirmModal';
@@ -19,6 +20,7 @@ import {
   formatGroupTaskRelativeTime,
   formatGroupTaskTime,
   isBotBrowserUri,
+  isDigitalDeliverable,
   openGroupTaskUri,
   groupTaskMemberStatusBadgeClass,
   groupTaskMemberStatusLabel,
@@ -570,7 +572,10 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   // Nested collections can be missing on a stale/partial close payload.
   // Always coerce to arrays so Accept & Close cannot white-screen the view.
   const members = Array.isArray(detail.members) ? detail.members : [];
-  const deliverables = Array.isArray(detail.deliverables) ? detail.deliverables : [];
+  // Text rows (kind=text, no uri) are process notes, not deliverables — the
+  // rail lists digital outcomes only, mirroring the acceptance checklist.
+  const deliverables = (Array.isArray(detail.deliverables) ? detail.deliverables : [])
+    .filter((deliverable) => isDigitalDeliverable(deliverable));
   // HITL: the currently open human checkpoint, if any (drives the pause banner).
   const openCheckpoint = detail.checkpoints?.find((checkpoint) => checkpoint.status === 'open') ?? null;
   // HITL: what the owner must decide, shown under the banner topic — the
@@ -986,6 +991,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               {members.map((member) => (
                 <>
                 <div key={member.id} className="group flex items-center gap-2">
+                  <GroupTaskTinyAvatar
+                    src={member.avatar}
+                    name={memberDisplayName(member)}
+                    size="hover"
+                    browserGlobalMetaId={member.globalmetaid ?? null}
+                  />
                   <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
                     {memberDisplayName(member)}
                   </span>
