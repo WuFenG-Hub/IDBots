@@ -74,6 +74,15 @@ export class Scheduler {
     console.log('[Scheduler] Stopped');
   }
 
+  /**
+   * Ids of scheduled tasks currently executing (abort controllers live for the
+   * whole run). Used by the sleep guard to keep the device awake while a
+   * scheduled task is running.
+   */
+  getActiveTaskIds(): string[] {
+    return Array.from(this.activeTasks.keys());
+  }
+
   reschedule(): void {
     if (!this.running) return;
     if (this.timer) {

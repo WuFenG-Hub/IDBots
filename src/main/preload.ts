@@ -23,6 +23,17 @@ contextBridge.exposeInMainWorld('electron', {
       };
     },
   },
+  powerGuard: {
+    getStatus: () => ipcRenderer.invoke('powerGuard:status'),
+    onChanged: (callback: (state: { active: boolean; sources: string[]; engaged: boolean }) => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        state: { active: boolean; sources: string[]; engaged: boolean },
+      ) => callback(state);
+      ipcRenderer.on('powerGuard:changed', handler);
+      return () => ipcRenderer.removeListener('powerGuard:changed', handler);
+    },
+  },
   skills: {
     list: () => ipcRenderer.invoke('skills:list'),
     setEnabled: (options: { id: string; enabled: boolean }) => ipcRenderer.invoke('skills:setEnabled', options),

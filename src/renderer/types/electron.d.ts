@@ -790,6 +790,10 @@ interface IElectronAPI {
     remove: (key: string) => Promise<void>;
     onChanged: (callback: (payload: { key: string }) => void) => () => void;
   };
+  powerGuard: {
+    getStatus: () => Promise<{ active: boolean; sources: string[]; engaged: boolean }>;
+    onChanged: (callback: (state: { active: boolean; sources: string[]; engaged: boolean }) => void) => () => void;
+  };
   skills: {
     list: () => Promise<{ success: boolean; skills?: Skill[]; error?: string }>;
     setEnabled: (options: { id: string; enabled: boolean }) => Promise<{ success: boolean; skills?: Skill[]; error?: string }>;

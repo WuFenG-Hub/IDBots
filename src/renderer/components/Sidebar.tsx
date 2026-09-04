@@ -24,6 +24,7 @@ import SidebarToggleIcon from './icons/SidebarToggleIcon';
 import { P2PStatusBadge } from './p2p/P2PStatusBadge';
 import BackgroundTasksBadge from './cowork/BackgroundTasksBadge';
 import { getSidebarInternetNavModel, getSidebarPrimaryNavModel } from './sidebar/sidebarNavigation.js';
+import { SleepGuardBadge } from './SleepGuardBadge';
 import BotBrowserModeSwitch from '../features/botBrowser/BotBrowserModeSwitch';
 import BotBrowserCoworkPanel from '../features/botBrowser/BotBrowserCoworkPanel';
 import { defaultSidebarWidth } from '../utils/sidebarWidth';
@@ -748,6 +749,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           </button>
           <BackgroundTasksBadge onShowGroupTasks={onShowGroupTasks} />
           <P2PStatusBadge />
+          <SleepGuardBadge />
         </div>
       </div>
     </aside>

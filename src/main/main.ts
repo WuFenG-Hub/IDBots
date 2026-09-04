@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session, nativeTheme, dialog, shell, nativeImage, systemPreferences, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, session, nativeTheme, dialog, shell, nativeImage, systemPreferences, Menu, powerSaveBlocker } from 'electron';
 import type { FileFilter, MessageBoxOptions, OpenDialogOptions, Session, WebContents } from 'electron';
 import path from 'path';
 import fs from 'fs';
@@ -258,6 +258,7 @@ import {
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
+import { SleepGuard, evaluateSleepGuardWork, type SleepGuardWorkInput, type SleepGuardState } from './sleepGuard';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
@@ -2629,6 +2630,8 @@ let mcpStore: McpStore | null = null;
 let projectStore: ProjectStore | null = null;
 let coworkRunner: CoworkRunner | null = null;
 let coworkTurnSubmissionController: CoworkTurnSubmissionController | null = null;
+let sleepGuard: SleepGuard | null = null;
+let sleepGuardRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let skillManager: SkillManager | null = null;
 let metaAppManager: MetaAppManager | null = null;
 let botBrowserMetaAppCacheService: BotBrowserMetaAppCacheService | null = null;
@@ -5896,6 +5899,9 @@ const getCoworkRunner = () => {
     });
 
     coworkRunner.on('complete', (sessionId: string, claudeSessionId: string | null) => {
+      // A session finished: recompute the sleep guard so the blocker is
+      // released as soon as no other work source is active.
+      recomputeSleepGuard();
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
@@ -5908,6 +5914,7 @@ const getCoworkRunner = () => {
     });
 
     coworkRunner.on('error', (sessionId: string, error: string) => {
+      recomputeSleepGuard();
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
@@ -7372,8 +7379,77 @@ const getScheduler = () => {
   return scheduler;
 };
 
+// --- Sleep Guard: keep the host device awake while IDBots is working ---------
+// Engages Electron's `powerSaveBlocker` only while at least one work source
+// (active cowork session / running scheduled task / nightly dream) is active,
+// and releases it as soon as everything is idle. Pure policy lives in
+// src/main/sleepGuard.ts; this block wires it to the live work sources.
+const getSleepGuard = (): SleepGuard => {
+  if (!sleepGuard) {
+    sleepGuard = new SleepGuard({
+      powerSaveBlocker,
+      onChanged: (state) => broadcastSleepGuardStatus(state),
+    });
+    broadcastSleepGuardStatus(sleepGuard.getState());
+  }
+  return sleepGuard;
+};
+
+const collectSleepGuardWork = (): SleepGuardWorkInput => {
+  let coworkSessionIds: string[] = [];
+  try {
+    coworkSessionIds = getCoworkRunner().getActiveSessionIds();
+  } catch (error) {
+    console.warn('[SleepGuard] collect cowork sessions failed:', error);
+  }
+  let scheduledTaskIds: string[] = [];
+  try {
+    scheduledTaskIds = getScheduler().getActiveTaskIds();
+  } catch (error) {
+    console.warn('[SleepGuard] collect scheduled tasks failed:', error);
+  }
+  let dreamingMetabotIds: number[] = [];
+  try {
+    dreamingMetabotIds = getDreamService()?.getDreamingBotIds() ?? [];
+  } catch (error) {
+    console.warn('[SleepGuard] collect dreaming bots failed:', error);
+  }
+  return { coworkSessionIds, scheduledTaskIds, dreamingMetabotIds };
+};
+
+const recomputeSleepGuard = (): void => {
+  try {
+    getSleepGuard().apply(evaluateSleepGuardWork(collectSleepGuardWork()));
+  } catch (error) {
+    console.warn('[SleepGuard] recompute failed:', error);
+  }
+};
+
+const broadcastSleepGuardStatus = (state: SleepGuardState): void => {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send('powerGuard:changed', state);
+  }
+};
+
+const startSleepGuardRefresh = (): void => {
+  if (sleepGuardRefreshTimer) return;
+  // Periodic safety refresh: self-heals even if an event-driven update was
+  // missed (e.g. a session ended without its completion event firing).
+  sleepGuardRefreshTimer = setInterval(recomputeSleepGuard, 20_000);
+  recomputeSleepGuard();
+};
+
+const stopSleepGuardRefresh = (): void => {
+  if (sleepGuardRefreshTimer) {
+    clearInterval(sleepGuardRefreshTimer);
+    sleepGuardRefreshTimer = null;
+  }
+  sleepGuard?.dispose();
+  sleepGuard = null;
+};
+
 // 获取正确的预加载脚本路径
-const PRELOAD_PATH = app.isPackaged 
+const PRELOAD_PATH = app.isPackaged
   ? path.join(__dirname, 'preload.js')
   : path.join(__dirname, '../dist-electron/preload.js');
 
@@ -7548,6 +7624,10 @@ if (!gotTheLock) {
       }
     });
   };
+  // Sleep guard status for the harness frontend (badge).
+  ipcMain.handle('powerGuard:status', () => {
+    return getSleepGuard().getState();
+  });
 
   ipcMain.handle('store:set', (_event, key, value) => {
     getStore().set(key, value);
@@ -8357,6 +8437,9 @@ if (!gotTheLock) {
     /** Session goal set from the new-task composer's /goal command (objective text). */
     goal?: string;
   }) => {
+    // A session is starting: engage the sleep guard immediately so the device
+    // does not sleep while the harness is working.
+    recomputeSleepGuard();
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
       const coworkStoreInstance = getCoworkStore();
@@ -8576,6 +8659,7 @@ if (!gotTheLock) {
     try {
       const runner = getCoworkRunner();
       runner.stopSession(sessionId, { reason: 'user requested stop' });
+      recomputeSleepGuard();
       return { success: true };
     } catch (error) {
       return {
@@ -14657,6 +14741,14 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       if (!isAutoLaunched() || !isPrimaryWindow) {
         win.show();
       }
+      // 窗口就绪后创建系统托盘
+      createTray(() => mainWindow, getStore());
+
+      // Start the scheduler
+      getScheduler().start();
+
+      // Start the sleep guard: keep the host device awake while IDBots is working
+      startSleepGuardRefresh();
     });
 
     return win;
@@ -14740,6 +14832,9 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   let isCleanupInProgress = false;
 
   const runAppCleanup = async (): Promise<void> => {
+    // Release the sleep guard first so the device may sleep normally during
+    // shutdown even if a later cleanup step stalls.
+    stopSleepGuardRefresh();
     await stopMetaAppServer().catch((error) => {
       console.error('[metaapps] Failed to stop local server during cleanup:', error);
     });
