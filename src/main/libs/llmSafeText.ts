@@ -21,7 +21,6 @@
  * recombined halves vanishing.
  */
 export function stripLoneSurrogates(text: string): string {
-  // eslint-disable-next-line no-misleading-character-class
   return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
 }
 
