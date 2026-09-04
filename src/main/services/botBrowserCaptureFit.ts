@@ -4,17 +4,16 @@
  * Tool-result images ride the DSH host-tool bridge and are committed through
  * the runtime's attachment store
  * (dsh-runtime/plugins/idbots-attachment-store.mjs), which rejects images over
- * 2000px per side, 33.4 MP total, or 20 MiB. A store rejection used to wedge
+ * 8192px per side, 33.4 MP total, or 20 MiB. A store rejection used to wedge
  * the bridge for good (the pending tool call never settled, killing the
  * session), so captures are fitted to these bounds BEFORE they leave the main
- * process. Retina capturePage output is 2x the CSS rect, so even modest
- * windows blow past the per-side limit without fitting.
+ * process.
  *
  * The constants mirror the attachment store's LIMITS; keep them in sync.
  */
 
 /** Mirrors idbots-attachment-store.mjs LIMITS.maxImageDimension. */
-export const BOT_BROWSER_CAPTURE_MAX_SIDE_PX = 2000;
+export const BOT_BROWSER_CAPTURE_MAX_SIDE_PX = 8192;
 /** Mirrors idbots-attachment-store.mjs LIMITS.maxImageBytes. */
 export const BOT_BROWSER_CAPTURE_MAX_BYTES = 20 * 1024 * 1024;
 

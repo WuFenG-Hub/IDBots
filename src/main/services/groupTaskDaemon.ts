@@ -79,6 +79,7 @@ import {
   ensureGroupTaskMemberReady,
   ensureGroupTaskSession,
   GROUP_TASK_CONVERSATION_CHANNEL,
+  rebuildGroupTaskSession,
 } from './groupTaskSession';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import { SkillTurnTimeoutError } from './orchestratorCoworkBridge';
@@ -376,6 +377,13 @@ function extractDependsOnTokens(content: string | null | undefined): string[] {
 }
 const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
 /**
+ * fix/group-task-duration (task #57): kv stamp for the corrupt-session-log
+ * rebuild — one rebuild per (task, bot) per interval so a genuinely broken
+ * runtime cannot loop session rebuilds forever.
+ */
+const CORRUPT_SESSION_REBUILD_PREFIX = 'group_task_corrupt_session_rebuild:';
+const CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS = 60 * 60_000;
+/**
  * release-review P2: bounded hold timestamp for a trigger whose (task, bot)
  * session is still running a prior turn (the post-hard-cap window where the
  * guard is gone but the dangling job's runner turn is still active). Same
@@ -494,6 +502,27 @@ function readTaskSessionActivityMessages(
  */
 const deliverableTagLines = (content: string): string[] =>
   content.split('\n').filter((line) => DELIVERABLE_TAG.test(line));
+
+/**
+ * True when two strings carry hex runs (pinids/txids, ignoring protocol
+ * prefixes and the `i0` suffix) that share a prefix of at least 32 hex chars
+ * in EITHER direction. LLM participants routinely truncate 64-hex pinids when
+ * quoting them in prose (task #58: a 60-hex `metafile://` prefix); an exact or
+ * contains-only comparison then reads "not delivered" and dispatches stall on
+ * the bounded dependency wait. 32 shared leading hex chars cannot happen by
+ * chance between unrelated hashes.
+ */
+export function hexTokensSharePrefix(a: string, b: string): boolean {
+  const HEX_RUN_RE = /[0-9a-f]{32,}/g;
+  const runsOf = (value: string): string[] => (value.match(HEX_RUN_RE) ?? []);
+  const aRuns = runsOf(String(a ?? '').toLowerCase());
+  const bRuns = runsOf(String(b ?? '').toLowerCase());
+  if (aRuns.length === 0 || bRuns.length === 0) return false;
+  return aRuns.some((aRun) => bRuns.some((bRun) =>
+    (aRun.length >= 32 && bRun.startsWith(aRun))
+    || (bRun.length >= 32 && aRun.startsWith(bRun)),
+  ));
+}
 
 /**
  * HITL: derive the "what the owner must decide" summary from the chair's
@@ -1986,6 +2015,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   // would self-throttle in fully autonomous groups. Bounded per task.
   const daemonChairSentPins = new Map<number, string[]>();
   const rememberDaemonChairPin = (taskId: number, pinId: string): void => {
+    // fix/group-task-duration: an empty pinId means the send was QUEUED behind
+    // a sponsor reconciliation — it is not a real on-chain pin and must never
+    // enter the Twin-suppression set.
+    if (!pinId) return;
     const pins = daemonChairSentPins.get(taskId) ?? [];
     pins.push(pinId);
     if (pins.length > 8) pins.shift();
@@ -2090,6 +2123,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * F2 (GT#11): single choke point for every daemon group-message post —
    * refreshes the driver claim on success so the claim freshness mirrors
    * actual driving activity.
+   *
+   * fix/group-task-duration: a sponsor broadcast-reconciliation rejection is
+   * NOT a delivery failure — the order was refused, nothing went on-chain, and
+   * the outage can last tens of minutes. The message is parked in the pending
+   * queue and `{ pinId: '' }` is returned; callers must treat an empty pinId
+   * as "queued, delivered later by the drainer" and skip persisting it.
    */
   const postGroupMessage = async (
     taskId: number,
@@ -2104,6 +2143,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       noteTickProgress(); // a completed send proves the in-flight tick is alive
       return result;
     } catch (sendError) {
+      if (isSponsorBroadcastPendingError(sendError)) {
+        enqueuePendingGroupSend(taskId, metabotId, content, opts);
+        await notifySenderOfQueuedDelivery(taskId, metabotId, content);
+        return { pinId: '' };
+      }
       // R7: the sender's reply was already written to its own task session
       // BEFORE the on-chain send (the daemon adds the assistant message first),
       // so on failure the bot would wrongly believe it had spoken and the group
@@ -2158,6 +2202,139 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  // -------------------------------------------------------------------------
+  // fix/group-task-duration: sponsor-broadcast-pending send queue (RC-2).
+  //
+  // The MVC fee-sponsor backend rejects a new sponsored order while a previous
+  // order for the same address is still reconciling ("SPONSOR_BROADCAST_PENDING:
+  // orderId=…: broadcast reconciliation in progress"). Observed outages ran
+  // 25–90 MINUTES (task #58: eleven's on-time delivery never landed 19:39→20:04;
+  // task #59: three consecutive send failures at 00:03–00:05 left the worker
+  // with finished work and no trigger — the 9-hour stall). Burning a full LLM
+  // turn retry (and the R7 failure notice, which teaches the bot to re-send)
+  // on every attempt amplified the outage. Instead: park the composed message
+  // in this queue, tell the sender it is QUEUED (not failed), and let the tick
+  // drainer deliver it once reconciliation clears.
+  // -------------------------------------------------------------------------
+  const isSponsorBroadcastPendingError = (error: unknown): boolean =>
+    /SPONSOR_BROADCAST_PENDING|broadcast reconciliation/i
+      .test(error instanceof Error ? error.message : String(error));
+
+  interface PendingGroupSendEntry {
+    taskId: number;
+    metabotId: number;
+    content: string;
+    opts?: { replyPin?: string; mention?: string[] };
+    dedupeKey: string;
+    firstTriedAt: number;
+    lastTriedAt: number;
+    attempts: number;
+  }
+
+  const pendingGroupSends: PendingGroupSendEntry[] = [];
+  const PENDING_SEND_RETRY_MS = 2 * 60_000;
+  const PENDING_SEND_MAX_AGE_MS = 90 * 60_000;
+
+  const notifySenderOfQueuedDelivery = async (
+    taskId: number,
+    metabotId: number,
+    content: string,
+  ): Promise<void> => {
+    try {
+      const task = deps.getGroupTaskStore().getTaskById(taskId);
+      if (!task) return;
+      const botName = deps.getMetabotStore().getMetabotById(metabotId)?.name?.trim() || `bot-${metabotId}`;
+      const preview = content.length > 120 ? `${content.slice(0, 120)}…` : content;
+      const coworkStore = deps.getCoworkStore();
+      const session = ensureTaskSession(coworkStore, task, metabotId, botName);
+      coworkStore.addMessage(session.id, {
+        type: 'user',
+        content: [
+          '[SYSTEM delivery-queued notice — generated by the host, not a group participant]',
+          '⏳ Your last group message could not be posted yet: the fee-sponsor service is still reconciling a previous broadcast (SPONSOR_BROADCAST_PENDING).',
+          'The host has QUEUED your message and will deliver it automatically. DO NOT re-send it yourself and do not treat the work as lost — continue only when you see the message appear in the group transcript.',
+          `Your queued message was:\n${preview}`,
+        ].join('\n'),
+      });
+    } catch (noticeError) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${taskId}: failed to inject delivery-queued notice for bot ${metabotId}: ` +
+        `${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
+      );
+    }
+  };
+
+  const enqueuePendingGroupSend = (
+    taskId: number,
+    metabotId: number,
+    content: string,
+    opts?: { replyPin?: string; mention?: string[] },
+  ): void => {
+    const dedupeKey = `${taskId}|${metabotId}|${(opts?.replyPin ?? '').length}|${content.length}|${content.slice(0, 64)}`;
+    if (pendingGroupSends.some((entry) => entry.dedupeKey === dedupeKey)) return;
+    const t = now();
+    pendingGroupSends.push({
+      taskId, metabotId, content, opts, dedupeKey,
+      firstTriedAt: t, lastTriedAt: t, attempts: 1,
+    });
+    emitLog(
+      `[GroupTaskDaemon] Task ${taskId}: group send for bot ${metabotId} queued ` +
+      `(sponsor broadcast reconciliation pending; ${pendingGroupSends.length} queued)`,
+    );
+  };
+
+  /**
+   * Deliver queued group messages whose sponsor reconciliation may have
+   * cleared. Runs at the top of every tick; entries retry at most once per
+   * PENDING_SEND_RETRY_MS and fall back to the ordinary failure notice when
+   * the error changes, the entry ages out, or the task went terminal.
+   */
+  const drainPendingGroupSends = async (): Promise<void> => {
+    for (const entry of [...pendingGroupSends]) {
+      const t = now();
+      if (t - entry.lastTriedAt < PENDING_SEND_RETRY_MS) continue;
+      entry.lastTriedAt = t;
+      entry.attempts += 1;
+      const drop = async () => {
+        pendingGroupSends.splice(pendingGroupSends.indexOf(entry), 1);
+      };
+      try {
+        const task = deps.getGroupTaskStore().getTaskById(entry.taskId);
+        if (!task || task.status === 'done' || task.status === 'cancelled') {
+          await drop();
+          emitLog(
+            `[GroupTaskDaemon] Task ${entry.taskId}: dropped a queued send for bot ${entry.metabotId} — task is no longer active`,
+          );
+          continue;
+        }
+        await deps.postGroupTaskMessage(entry.taskId, entry.metabotId, entry.content, entry.opts);
+        await drop();
+        refreshDriverClaim(entry.taskId);
+        noteDriveActivity(entry.taskId);
+        emitLog(
+          `[GroupTaskDaemon] Task ${entry.taskId}: queued group send for bot ${entry.metabotId} delivered ` +
+          `after ${Math.round((t - entry.firstTriedAt) / 1000)}s (${entry.attempts} attempts)`,
+        );
+      } catch (error) {
+        if (!isSponsorBroadcastPendingError(error)) {
+          await drop();
+          await notifySenderOfDeliveryFailure(entry.taskId, entry.metabotId, entry.content, error);
+          emitLog(
+            `[GroupTaskDaemon] Task ${entry.taskId}: queued send for bot ${entry.metabotId} failed with a ` +
+            `different error — failure notice injected: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        } else if (t - entry.firstTriedAt > PENDING_SEND_MAX_AGE_MS) {
+          await drop();
+          await notifySenderOfDeliveryFailure(entry.taskId, entry.metabotId, entry.content, error);
+          emitLog(
+            `[GroupTaskDaemon] Task ${entry.taskId}: queued send for bot ${entry.metabotId} aged out after ` +
+            `${Math.round(PENDING_SEND_MAX_AGE_MS / 60_000)} min of sponsor reconciliation — failure notice injected`,
+          );
+        }
+      }
+    }
+  };
+
   /**
    * P2-6 ledger check for one [DEPENDS_ON] token: pinid/txid-shaped tokens are
    * enforced against the task's recorded deliverables; free-text descriptions
@@ -2169,10 +2346,33 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (!pinish) return true;
     const lower = token.toLowerCase();
     const deliverables = deps.getGroupTaskStore().listDeliverables(task.id);
-    return deliverables.some((deliverable) =>
+    if (deliverables.some((deliverable) =>
       (deliverable.msgPinId ?? '').toLowerCase() === lower
-      || (deliverable.uri ?? '').toLowerCase().includes(lower),
-    );
+      || (deliverable.uri ?? '').toLowerCase().includes(lower)
+      || hexTokensSharePrefix((deliverable.uri ?? '').toLowerCase(), lower)
+      || hexTokensSharePrefix((deliverable.msgPinId ?? '').toLowerCase(), lower),
+    )) {
+      return true;
+    }
+    // Task #58 regression: the worker's [DELIVERABLE] line carried a TRUNCATED
+    // metafile pin (60 hex of the 64-hex+i0 pinid), so the parser rejected the
+    // candidate and the ledger row stayed kind=text/uri=NULL — while the chair
+    // dispatched with the FULL pin it had verified via the indexer. Exact-match
+    // then failed and the dispatch sat out the whole 15-min bounded wait.
+    // Fallback: scan the task's deliverable tag lines for a long hex-prefix
+    // overlap with the token (LLMs truncate hashes; a ≥32-char shared prefix
+    // is not a coincidence).
+    if (!task.groupId) return false;
+    try {
+      const messages = deps.getGroupTaskStore()
+        .listGroupChatMessages(task.groupId, { limit: 200 });
+      return messages.some((message) =>
+        deliverableTagLines(message.content ?? '')
+          .some((line) => hexTokensSharePrefix(line.toLowerCase(), lower)),
+      );
+    } catch {
+      return false;
+    }
   };
 
   /**
@@ -5020,6 +5220,39 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `(pin ${posted.pinId})`,
       );
     } catch (error) {
+      // fix/group-task-duration (task #57): a corrupt chair session log fails
+      // every supervisor-signal answer forever — the recovery channel itself
+      // dies. Rebuild the chair's task session from the host ledger and leave
+      // the signals pending; the next tick answers them on the fresh session.
+      {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (/corrupt session log/i.test(errorMessage)) {
+          const rebuildKey = `${CORRUPT_SESSION_REBUILD_PREFIX}${task.id}:${bot.id}`;
+          const lastRebuildAt = Number(deps.getStore().get<number>(rebuildKey) ?? 0) || 0;
+          if (now() - lastRebuildAt > CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS) {
+            try {
+              deps.getStore().set(rebuildKey, now());
+              const rebuilt = rebuildGroupTaskSession({
+                coworkStore: deps.getCoworkStore(),
+                groupTaskStore: deps.getGroupTaskStore(),
+                task,
+                botId: bot.id,
+                botName: bot.name,
+              });
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: corrupt chair session log — session rebuilt from the ` +
+                `host ledger (${rebuilt.sessionId.slice(0, 8)}…); supervisor signals stay pending for the next tick`,
+              );
+              return;
+            } catch (rebuildError) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: corrupt-session rebuild failed for the chair: ` +
+                `${rebuildError instanceof Error ? rebuildError.message : String(rebuildError)}`,
+              );
+            }
+          }
+        }
+      }
       // Retry budget: a failed turn leaves the rows pending for the next tick,
       // but a signal the chair fails to answer 3 times is closed out (null
       // pin) with one anomaly milestone — a broken chair LLM must not wedge
@@ -5638,6 +5871,65 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
           }
         } else {
+          // fix/group-task-duration (task #57): a corrupt DSH session log
+          // ("seq gap in committed region") fails EVERY turn on that session
+          // fast and forever — 5 blind retries against the same corrupt log
+          // all die, the trigger drops, and every later recovery mechanism
+          // (supervisor signals, stall nudges) hits the same wall: the task
+          // becomes a permanent zombie. Rebuild the member's task session
+          // from the host ledger and requeue the trigger UNCHARGED (the
+          // failure is environmental, not the member's). Bounded to one
+          // rebuild per (task, bot) per hour so a genuinely broken runtime
+          // cannot loop rebuilds.
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          if (/corrupt session log/i.test(errorMessage)) {
+            const rebuildKey = `${CORRUPT_SESSION_REBUILD_PREFIX}${task.id}:${bot.id}`;
+            const lastRebuildAt = Number(deps.getStore().get<number>(rebuildKey) ?? 0) || 0;
+            if (now() - lastRebuildAt > CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS) {
+              try {
+                deps.getStore().set(rebuildKey, now());
+                const rebuilt = rebuildGroupTaskSession({
+                  coworkStore: deps.getCoworkStore(),
+                  groupTaskStore: deps.getGroupTaskStore(),
+                  task,
+                  botId: bot.id,
+                  botName: bot.name,
+                });
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: corrupt session log for bot ${bot.id} — task session ` +
+                  `rebuilt from the host ledger (${rebuilt.sessionId.slice(0, 8)}…); trigger requeued`,
+                );
+                notifySourceSessionMilestone(
+                  task,
+                  'anomaly',
+                  buildSourceSessionAnomalyNotice({
+                    title: task.title,
+                    status: task.status,
+                    summary:
+                      `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} hit a corrupt ` +
+                      'session log (seq gap in the committed region) — every turn on it would fail forever. ' +
+                      'The host rebuilt the member\'s task session from the task ledger (goal, status trail, ' +
+                      'deliverables, recent transcript); the member lost its private chat memory of this task only.',
+                  }),
+                  `corrupt_session_rebuild:${task.id}:${bot.id}`,
+                );
+                deferReply({
+                  taskId: task.id,
+                  metabotId: bot.id,
+                  messageId: message.id,
+                  reason: args.reason,
+                  verificationNotes: args.verificationNotes,
+                  failures: args.entry?.failures ?? 0,
+                });
+                return;
+              } catch (rebuildError) {
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: corrupt-session rebuild failed for bot ${bot.id}: ` +
+                  `${rebuildError instanceof Error ? rebuildError.message : String(rebuildError)}`,
+                );
+              }
+            }
+          }
           const failures = (args.entry?.failures ?? 0) + 1;
           if (failures >= MSG_RETRY_MAX_FAILURES) {
             emitLog(
@@ -6527,6 +6819,68 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `[GroupTaskDaemon] Task ${task.id}: ${name} [WORKING] signal stale (${memberTimeoutAfterMinutes}+ min); ` +
           'injecting chair re-assign hint',
         );
+        // fix/group-task-duration (task #59, the 9-hour stall): nudging the
+        // CHAIR alone never wakes the stuck worker — the chair's status
+        // broadcasts do not @-mention it, so nothing ever re-triggers the
+        // member's session. Re-drive the member directly: requeue its most
+        // recent chair @-mention as a deferred trigger and inject a host wake
+        // notice so the turn knows why it was woken. The notice is ONLY
+        // injected when a trigger exists — writing into a session we cannot
+        // re-drive would (via the async memory pipeline) refresh the session's
+        // activity timestamp and falsely "recover" the member.
+        try {
+          const bot = deps.getMetabotStore().getMetabotById(member.metabotId!);
+          if (bot && task.groupId) {
+            const recentRows = store.listGroupChatMessages(task.groupId, { limit: 30 });
+            const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
+            let wakeMessageId: number | null = null;
+            for (const row of recentRows.reverse()) {
+              const rowGmid = (row.senderGlobalMetaId ?? '').trim().toLowerCase();
+              if (!chairGmid || rowGmid !== chairGmid) continue;
+              if (isMentioned({ content: row.content ?? '', mention: (row as { mention?: string | null }).mention ?? null }, bot)) {
+                wakeMessageId = row.id;
+                break;
+              }
+            }
+            if (wakeMessageId != null) {
+              const coworkStore = deps.getCoworkStore();
+              const session = ensureTaskSession(coworkStore, task, member.metabotId!, bot.name ?? name);
+              // The wake notice is HOST activity — pin updated_at back so the
+              // liveness classifier never reads it as the member being alive.
+              const activityBeforeWake = getLocalMemberSessionInfo(task.id, member.metabotId!)?.lastActivityMs ?? 0;
+              coworkStore.addMessage(session.id, {
+                type: 'user',
+                content: [
+                  '[SYSTEM stale-working wake — generated by the host, not a group participant]',
+                  `Your [WORKING] signal went stale ${Math.round(staleMs / 60_000)} min ago with zero session activity while the task waited on you.`,
+                  'Check whether your last assignment was fully delivered — especially the final on-chain post; a send that failed or was queued does not count as delivered. If the last step failed, redo just that step and deliver. If the work is genuinely complete, say so in the group.',
+                ].join('\n'),
+              });
+              coworkStore.setSessionUpdatedAt(session.id, activityBeforeWake);
+              deferReply({
+                taskId: task.id,
+                metabotId: member.metabotId!,
+                messageId: wakeMessageId,
+                reason: 'worker_mentioned',
+                verificationNotes: [],
+              });
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: stale-working wake for ${name} — re-driving ` +
+                `its latest chair mention (message #${wakeMessageId})`,
+              );
+            } else {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: stale-working wake skipped for ${name} ` +
+                '(no recent chair mention to re-drive; the chair hint remains the recovery path)',
+              );
+            }
+          }
+        } catch (wakeError) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: stale-working wake for ${name} failed: ` +
+            `${wakeError instanceof Error ? wakeError.message : String(wakeError)}`,
+          );
+        }
       }
 
       // P1-2/P1-3 + fix-v2 (B2): the member reads inert (no speech, no
@@ -8572,6 +8926,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   const runTick = async (): Promise<void> => {
+    // fix/group-task-duration: deliver group messages queued behind a sponsor
+    // broadcast reconciliation BEFORE processing tasks — a recovered send can
+    // unblock a stalled task on this very tick.
+    try {
+      await drainPendingGroupSends();
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Pending-send drain failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     const store = deps.getGroupTaskStore();
     const activeTasks = store
       .listTasks()

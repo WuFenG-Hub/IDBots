@@ -291,23 +291,91 @@ export function ensureGroupTaskMemberReady(input: {
     input.botName,
   );
   if (created) {
-    const members = input.groupTaskStore.listMembers(input.task.id);
-    const recentMessages = input.task.groupId
-      ? input.groupTaskStore.listGroupChatMessages(input.task.groupId, { limit: input.recentCount ?? 20 })
-      : [];
-    injectGroupTaskContext({
-      coworkStore: input.coworkStore,
-      sessionId: session.id,
-      task: {
-        title: input.task.title,
-        goal: input.task.goal,
-        acceptanceCriteria: input.task.acceptanceCriteria,
-      },
-      members: members.map((member) => ({ name: member.name, role: member.role })),
-      recentMessages,
-      recentCount: input.recentCount,
-      ledgerLines: buildGroupTaskLedgerLines(input.groupTaskStore, input.task),
-    });
+    seedGroupTaskSessionContext({ ...input, sessionId: session.id });
   }
   return { sessionId: session.id, created };
+}
+
+/**
+ * Seed a freshly created (task, bot) session with the group context snapshot
+ * (roster + ledger + recent transcript). Shared by the eager-join path and the
+ * corrupt-log rebuild below so both produce the same starting context.
+ */
+function seedGroupTaskSessionContext(input: {
+  coworkStore: CoworkStore;
+  groupTaskStore: GroupTaskStore;
+  task: GroupTask;
+  botId: number;
+  sessionId: string;
+  recentCount?: number;
+}): void {
+  const members = input.groupTaskStore.listMembers(input.task.id);
+  const recentMessages = input.task.groupId
+    ? input.groupTaskStore.listGroupChatMessages(input.task.groupId, { limit: input.recentCount ?? 20 })
+    : [];
+  injectGroupTaskContext({
+    coworkStore: input.coworkStore,
+    sessionId: input.sessionId,
+    task: {
+      title: input.task.title,
+      goal: input.task.goal,
+      acceptanceCriteria: input.task.acceptanceCriteria,
+    },
+    members: members.map((member) => ({ name: member.name, role: member.role })),
+    recentMessages,
+    recentCount: input.recentCount,
+    ledgerLines: buildGroupTaskLedgerLines(input.groupTaskStore, input.task),
+  });
+}
+
+/**
+ * fix/group-task-duration (task #57): force-replace the (task, bot) cowork
+ * session with a FRESH one seeded from the host ledger, repointing the
+ * conversation mapping. Used when the underlying DSH session log is corrupt
+ * ("seq gap in committed region") — every turn on that session fails fast
+ * forever, so without a rebuild the task turns into a permanent zombie. The
+ * old session row stays in place for post-mortem; the new session resolves
+ * the SAME per-task workspace, so mid-task artifacts survive the rebuild.
+ */
+export function rebuildGroupTaskSession(input: {
+  coworkStore: CoworkStore;
+  groupTaskStore: GroupTaskStore;
+  task: GroupTask;
+  botId: number;
+  botName: string;
+  recentCount?: number;
+}): { sessionId: string } {
+  const channel = GROUP_TASK_CONVERSATION_CHANNEL;
+  const externalConversationId = `group-task:${input.task.id}`;
+  const config = input.coworkStore.getConfig();
+  const botWorkspaceCwd = resolveSessionWorkingDirectory(
+    (config.workingDirectory ?? '').trim() || process.cwd(),
+    input.botId,
+  );
+  const workspaceRoot = resolveGroupTaskSessionWorkspace(botWorkspaceCwd, externalConversationId);
+  const session = input.coworkStore.createSession(
+    `Group Task #${input.task.id} (${input.botName}) [rebuilt]`,
+    workspaceRoot,
+    '',
+    config.executionMode || 'local',
+    [],
+    input.botId,
+    'group_task',
+    null,
+    null,
+    null,
+  );
+  input.coworkStore.upsertConversationMapping({
+    channel,
+    externalConversationId,
+    metabotId: input.botId,
+    coworkSessionId: session.id,
+    metadataJson: JSON.stringify({
+      taskId: input.task.id,
+      groupId: input.task.groupId,
+      rebuiltFromCorruptLog: true,
+    }),
+  });
+  seedGroupTaskSessionContext({ ...input, sessionId: session.id });
+  return { sessionId: session.id };
 }

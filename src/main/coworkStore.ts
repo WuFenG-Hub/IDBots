@@ -4210,6 +4210,18 @@ export class CoworkStore implements MemoryBackend {
     return this.addMessageWithId(sessionId, uuidv4(), message);
   }
 
+  /**
+   * fix/group-task-duration: pin a session's updated_at back to a prior value
+   * after a HOST-generated system notice (e.g. the stale-working wake).
+   * addMessage refreshes updated_at, and the group-task daemon classifies
+   * member liveness from that timestamp — a host notice must never read as
+   * member activity (it would mask the unreachable stamp and flap the badge).
+   */
+  setSessionUpdatedAt(sessionId: string, updatedAtMs: number): void {
+    this.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [updatedAtMs, sessionId]);
+    this.saveDb();
+  }
+
   addMessageWithId(
     sessionId: string,
     id: string,
