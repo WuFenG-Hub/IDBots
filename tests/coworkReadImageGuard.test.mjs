@@ -226,3 +226,49 @@ test('N2: first read of a large file registers without denying', () => {
   assert.equal(decision.action, 'allow');
   assert.deepEqual(decision.register, { path: '/tmp/first.log', mtimeMs: 3000, size: 60000 });
 });
+
+// ---------------------------------------------------------------------------
+// 2026-09-04 vision regression: the guard composes with
+// resolveCoworkModelLimits. A vision route reads pixels; a non-vision or
+// uncatalogued route must deny LOUDLY — the message names describe_image,
+// the relay-backed alternative that works on every route — instead of the
+// silent metadata-only read the glm-5.3-flash incident produced.
+// ---------------------------------------------------------------------------
+
+test('regression: guard composed with model limits — vision route allows, non-vision and unknown routes deny explicitly', async () => {
+  const { resolveCoworkModelLimits } = await import('../dist-electron/main/libs/coworkModelLimits.js');
+  const appConfig = { model: { defaultModel: '', availableModels: [] }, providers: {} };
+  const limitsFor = (modelId) => resolveCoworkModelLimits(appConfig, modelId);
+
+  // Vision route: image read allowed — the kernel returns the image block.
+  const vision = evaluateReadImageGuard({
+    toolName: 'read',
+    absolutePath: PNG_PATH,
+    fileStat: stat(1000, 120000),
+    supportsVision: limitsFor('kimi-k2.6').supportsVision,
+  });
+  assert.equal(vision.action, 'allow');
+
+  // The incident model: glm-5.3-flash must deny with an explicit, actionable
+  // message instead of a silent metadata-only result.
+  const incident = evaluateReadImageGuard({
+    toolName: 'read',
+    absolutePath: PNG_PATH,
+    fileStat: stat(1000, 120000),
+    supportsVision: limitsFor('glm-5.3-flash').supportsVision,
+  });
+  assert.equal(incident.action, 'deny');
+  assert.equal(incident.reason, 'no-vision-image');
+  assert.match(incident.message, /describe_image/);
+  assert.match(incident.message, /NOT loaded/);
+
+  // Uncatalogued models fail safe the same way.
+  const unknown = evaluateReadImageGuard({
+    toolName: 'read',
+    absolutePath: PNG_PATH,
+    fileStat: stat(1000, 120000),
+    supportsVision: limitsFor('some-future-uncatalogued-model').supportsVision,
+  });
+  assert.equal(unknown.action, 'deny');
+  assert.equal(unknown.reason, 'no-vision-image');
+});

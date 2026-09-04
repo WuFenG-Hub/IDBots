@@ -55,9 +55,11 @@ test('resolveCoworkModelLimits falls back conservatively for unknown models', as
     modelId: 'custom-model',
     contextWindow: DEFAULT_COWORK_CONTEXT_WINDOW,
     maxOutputTokens: DEFAULT_COWORK_MAX_OUTPUT_TOKENS,
-    // Safe default: models we have not catalogued are treated as vision-capable
-    // so the image guard never blocks a model we simply do not know about.
-    supportsVision: true,
+    // Fail-safe default: models we have not catalogued are treated as
+    // text-only. The Read-image guard then denies with an explicit pointer
+    // to describe_image instead of silently dropping pixels on a model that
+    // cannot read them (2026-09-04 glm-5.3-flash regression).
+    supportsVision: false,
     source: 'fallback',
   });
   assert.equal(DEFAULT_COWORK_CONTEXT_WINDOW, 128_000);
@@ -134,11 +136,21 @@ const PRESET_MODEL_IDS = [
   // Moonshot
   'kimi-k2.6',
   'kimi-k2.5',
-  // Zhipu
+  // Zhipu (text-only family; vision ships under separate SKU ids)
+  'glm-5.3-flash',
+  'glm-5.3',
+  'glm-5.2',
+  'glm-5.2-fast',
   'glm-5.1',
   'glm-5',
   'glm-4.7',
   'glm-4.7-flash',
+  'z-ai/glm-5.3-flash',
+  'zai-org/GLM-5.3',
+  'zai-org/GLM-5.2',
+  'zai-org/GLM-5.2-Fast',
+  'zai-org/GLM-5.1',
+  'zai-org/GLM-5',
   // MiniMax
   'MiniMax-M3',
   'MiniMax-M2.7',
@@ -175,10 +187,20 @@ const EXPECTED_CONTEXT_WINDOWS = {
   'claude-sonnet-4-6': 1_048_576,
   'kimi-k2.6': 262_144,
   'kimi-k2.5': 262_144,
+  'glm-5.3-flash': 1_048_576,
+  'glm-5.3': 1_000_000,
+  'glm-5.2': 1_000_000,
+  'glm-5.2-fast': 1_000_000,
   'glm-5.1': 202_800,
   'glm-5': 202_800,
   'glm-4.7': 204_800,
   'glm-4.7-flash': 204_800,
+  'z-ai/glm-5.3-flash': 1_048_576,
+  'zai-org/GLM-5.3': 1_000_000,
+  'zai-org/GLM-5.2': 1_000_000,
+  'zai-org/GLM-5.2-Fast': 1_000_000,
+  'zai-org/GLM-5.1': 202_800,
+  'zai-org/GLM-5': 202_800,
   'MiniMax-M3': 1_000_000,
   'MiniMax-M2.7': 204_800,
   'MiniMax-M2.5': 204_800,
@@ -243,23 +265,64 @@ test('deepseek-v4-flash — the automation model behind cowork/A2A — resolves 
 });
 
 // ---------------------------------------------------------------------------
-// GT#12 N1: supportsVision capability — DeepSeek V4 Flash / Pro have no vision,
-// flash-vision-exp and every other catalogued preset do, and unknown models
-// default to true so the Read/View image guard never blocks a model we have
-// not catalogued.
+// GT#12 N1: supportsVision capability — DeepSeek V4 Flash / Pro and the GLM
+// text families have no vision; catalogued vision presets do. Unknown models
+// default to FALSE (fail-safe): the Read-image guard then denies loudly and
+// points at describe_image instead of silently dropping image pixels on a
+// model that cannot read them (2026-09-04 glm-5.3-flash regression).
 // ---------------------------------------------------------------------------
 
-const NON_VISION_MODELS = ['deepseek-v4-pro', 'deepseek-v4-flash'];
+const NON_VISION_MODELS = [
+  'deepseek-v4-pro',
+  'deepseek-v4-flash',
+  // GLM text families — the 2026-09-04 incident model and its siblings,
+  // aligned with the curated renderer presets (supportsImage:false).
+  'glm-5.3-flash',
+  'glm-5.3',
+  'glm-5.2',
+  'glm-5.2-fast',
+  'glm-5.1',
+  'glm-5',
+  'glm-4.7',
+  'glm-4.7-flash',
+  'z-ai/glm-5.3-flash',
+  'zai-org/GLM-5.3',
+  'zai-org/GLM-5.2',
+  'zai-org/GLM-5.2-Fast',
+  'zai-org/GLM-5.1',
+  'zai-org/GLM-5',
+];
 
-test('deepseek V4 Flash and Pro resolve supportsVision=false via known-model limits', async () => {
+test('non-vision models resolve supportsVision=false via known-model limits', async () => {
   const { resolveCoworkModelLimits } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   for (const modelId of NON_VISION_MODELS) {
     const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
     assert.equal(limits.supportsVision, false, `${modelId} must be marked non-vision`);
-    assert.equal(limits.source, 'known-model');
+    assert.equal(limits.source, 'known-model', `${modelId} must resolve via KNOWN_MODEL_LIMITS`);
   }
+});
+
+test('glm-5.3-flash — the 2026-09-04 regression model — resolves non-vision even with a flagless catalog entry', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  // The incident shape: a bot brain pointing at glm-5.3-flash while the
+  // provider catalog entry (relay-provisioned or a stale preset) carries no
+  // capability flags — resolution must fall through to KNOWN_MODEL_LIMITS,
+  // never to the fallback default.
+  const limits = resolveCoworkModelLimits({
+    model: { defaultModel: 'glm-5.3-flash', availableModels: [] },
+    providers: {
+      'metaid-free': {
+        enabled: true,
+        models: [{ id: 'glm-5.3-flash', contextWindow: 1_048_576 }],
+      },
+    },
+  });
+  assert.equal(limits.supportsVision, false);
+  assert.notEqual(limits.source, 'fallback');
 });
 
 test('every catalogued vision-capable preset resolves supportsVision=true', async () => {
@@ -284,7 +347,7 @@ test('every catalogued vision-capable preset resolves supportsVision=true', asyn
   );
 });
 
-test('unknown models default to supportsVision=true (safe default, no false block)', async () => {
+test('unknown models default to supportsVision=false (fail-safe, explicit denial over silent pixel loss)', async () => {
   const { resolveCoworkModelLimits, modelSupportsVision } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
@@ -292,14 +355,16 @@ test('unknown models default to supportsVision=true (safe default, no false bloc
     model: { defaultModel: 'totally-unknown-model', availableModels: [] },
     providers: {},
   });
-  assert.equal(limits.supportsVision, true);
+  assert.equal(limits.supportsVision, false);
   assert.equal(limits.source, 'fallback');
 
   // Direct query API used by the proxy scheme-B fallback.
-  assert.equal(modelSupportsVision('totally-unknown-model'), true);
-  assert.equal(modelSupportsVision(''), true);
-  assert.equal(modelSupportsVision(null), true);
-  assert.equal(modelSupportsVision(undefined), true);
+  assert.equal(modelSupportsVision('totally-unknown-model'), false);
+  assert.equal(modelSupportsVision(''), false);
+  assert.equal(modelSupportsVision(null), false);
+  assert.equal(modelSupportsVision(undefined), false);
+  // Catalogued vision models still answer true.
+  assert.equal(modelSupportsVision('kimi-k2.6'), true);
 });
 
 test('provider metadata can explicitly override supportsVision', async () => {

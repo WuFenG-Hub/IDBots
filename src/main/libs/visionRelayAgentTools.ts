@@ -100,18 +100,20 @@ export function formatVisionRelayError(message: string): string {
  * tool returns plain text, so non-vision models (e.g. the DeepSeek V4 family)
  * gain media understanding without base64 ever entering the session.
  *
- * `includeDescribeImage` (default true) gates describe_image: vision-capable
- * sessions omit it so the model always reaches for native image blocks
- * (read_image / prompt attachments) — a strictly better path that keeps the
- * quota-metered relay out of the loop. describe_video always registers:
- * native vision cannot watch video on any route.
+ * Both tools register on EVERY model route. describe_image was briefly gated
+ * off for vision-capable sessions ("native image blocks are better"), which
+ * made the whole vision capability hinge on the model-limits table being
+ * right: when an uncatalogued text-only model (glm-5.3-flash, 2026-09-04)
+ * defaulted to supportsVision=true, the catalog lost describe_image while
+ * the route could not actually carry images. The relay path is the
+ * route-independent guarantee; native image blocks remain available as an
+ * additional path on vision routes.
  */
 export function buildVisionRelayAgentTools(deps: {
   tool: SdkToolFactory;
   visionRelay: VisionRelayControl;
-  includeDescribeImage?: boolean;
 }): unknown[] {
-  const { tool, visionRelay, includeDescribeImage = true } = deps;
+  const { tool, visionRelay } = deps;
 
   const describeImage = tool(
     'describe_image',
@@ -216,5 +218,5 @@ export function buildVisionRelayAgentTools(deps: {
     }
   );
 
-  return includeDescribeImage ? [describeImage, describeVideo] : [describeVideo];
+  return [describeImage, describeVideo];
 }

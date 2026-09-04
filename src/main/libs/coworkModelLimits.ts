@@ -24,9 +24,11 @@ export interface CoworkModelLimits {
   maxOutputTokens: number;
   /**
    * Whether the model can consume image content blocks (vision). Unknown /
-   * unlisted models default to `true` so the guard never blocks image input
-   * for a model we simply have not catalogued; only models KNOWN to lack
-   * vision (e.g. DeepSeek V4 Flash / Pro) are marked false.
+   * unlisted models default to `false` (fail-safe): the Read-image guard then
+   * denies image reads with an explicit pointer to the relay-backed
+   * describe_image instead of silently dropping pixels on a model that
+   * cannot read them (the 2026-09-04 glm-5.3-flash regression). Only models
+   * KNOWN to support vision are marked true.
    */
   supportsVision: boolean;
   source: CoworkModelLimitSource;
@@ -94,10 +96,27 @@ const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contex
   'gemini-3.1-flash-lite': { contextWindow: 2_000_000, supportsVision: true },
   'kimi-k2.6': { contextWindow: 262_144, supportsVision: true },
   'kimi-k2.5': { contextWindow: 262_144, supportsVision: true },
-  'glm-5.1': { contextWindow: 202_800, supportsVision: true },
-  'glm-5': { contextWindow: 202_800, supportsVision: true },
-  'glm-4.7': { contextWindow: 204_800, supportsVision: true },
-  'glm-4.7-flash': { contextWindow: 204_800, supportsVision: true },
+  // GLM text models have no image input — aligned with the curated renderer
+  // presets (src/renderer/config.ts: zhipu glm-5.1/5/4.7 and commandcode
+  // z-ai/glm-5.3-flash + zai-org/GLM-5.x all declare supportsImage:false;
+  // Zhipu ships vision under separate SKU ids). The glm-5.3 family is what
+  // group-task bots were re-routed to on 2026-09-03: uncatalogued at the
+  // time, it inherited the old default-true and lost describe_image while
+  // read_image silently dropped pixels (2026-09-04 regression).
+  'glm-5.3-flash': { contextWindow: 1_048_576, supportsVision: false },
+  'glm-5.3': { contextWindow: 1_000_000, supportsVision: false },
+  'glm-5.2': { contextWindow: 1_000_000, supportsVision: false },
+  'glm-5.2-fast': { contextWindow: 1_000_000, supportsVision: false },
+  'z-ai/glm-5.3-flash': { contextWindow: 1_048_576, supportsVision: false },
+  'zai-org/GLM-5.3': { contextWindow: 1_000_000, supportsVision: false },
+  'zai-org/GLM-5.2': { contextWindow: 1_000_000, supportsVision: false },
+  'zai-org/GLM-5.2-Fast': { contextWindow: 1_000_000, supportsVision: false },
+  'zai-org/GLM-5.1': { contextWindow: 202_800, supportsVision: false },
+  'zai-org/GLM-5': { contextWindow: 202_800, supportsVision: false },
+  'glm-5.1': { contextWindow: 202_800, supportsVision: false },
+  'glm-5': { contextWindow: 202_800, supportsVision: false },
+  'glm-4.7': { contextWindow: 204_800, supportsVision: false },
+  'glm-4.7-flash': { contextWindow: 204_800, supportsVision: false },
   'MiniMax-M3': { contextWindow: 1_000_000, supportsVision: true },
   'MiniMax-M2.7': { contextWindow: 204_800, supportsVision: true },
   'MiniMax-M2.5': { contextWindow: 204_800, supportsVision: true },
@@ -203,25 +222,29 @@ function buildLimits(
     modelId,
     contextWindow: explicit?.contextWindow ?? known?.contextWindow ?? DEFAULT_COWORK_CONTEXT_WINDOW,
     maxOutputTokens: explicit?.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_COWORK_MAX_OUTPUT_TOKENS,
-    // Safe default: unknown models are treated as vision-capable so the image
-    // guard never blocks a model we simply have not catalogued.
-    supportsVision: explicit?.supportsVision ?? known?.supportsVision ?? true,
+    // Fail-safe default: uncatalogued models are treated as text-only. A
+    // wrong "true" silently drops image pixels on a model that cannot read
+    // them (and, while describe_image was gated by this flag, removed the
+    // relay fallback from the catalog too — 2026-09-04 glm-5.3-flash). A
+    // wrong "false" is loud: the Read-image guard denies with an explicit
+    // pointer to describe_image, which works on every route.
+    supportsVision: explicit?.supportsVision ?? known?.supportsVision ?? false,
     source,
   };
 }
 
 /**
  * Query whether a model id can consume image content blocks, without needing
- * a full app config. Mirrors buildLimits' safe default (unknown => true).
- * Used by the OpenAI-compat proxy to degrade image blocks for non-vision
- * models when replaying history.
+ * a full app config. Mirrors buildLimits' fail-safe default (unknown =>
+ * false). Used by the OpenAI-compat proxy to degrade image blocks for
+ * non-vision models when replaying history.
  */
 export function modelSupportsVision(modelId: string | null | undefined): boolean {
   const normalized = normalizeModelId(modelId);
   if (!normalized) {
-    return true;
+    return false;
   }
-  return KNOWN_MODEL_LIMITS[normalized]?.supportsVision ?? true;
+  return KNOWN_MODEL_LIMITS[normalized]?.supportsVision ?? false;
 }
 
 export function resolveCoworkModelLimits(

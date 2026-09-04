@@ -850,7 +850,7 @@ export function evaluateReadImageGuard(input: EvaluateReadImageGuardInput): Read
     return {
       action: 'deny',
       reason: 'no-vision-image',
-      message: `当前模型不支持读图，图片内容已省略：${input.absolutePath}${sizeLabel}。请改用 describe_image 工具读取该图片的内容描述。`,
+      message: `当前模型路由不支持读图，图片像素未加载：${input.absolutePath}${sizeLabel}。请改用 describe_image 工具读取该图片的内容描述（所有路由均可用）。(The current model route has no image input, so the pixels were NOT loaded. Call the describe_image tool on the same path instead — it is relay-backed and works on every model route.)`,
     };
   }
 
@@ -1216,6 +1216,15 @@ interface ActiveSession {
    * again. Grows only with distinct read files, bounded by session lifetime.
    */
   readFiles?: Map<string, { mtimeMs: number; size: number }>;
+  /**
+   * Model id of the route the CURRENT DSH turn is actually running on. Equals
+   * the session's primary route model except during a GT-02 fallback-brain
+   * resume; the Read-image guard judges against this (not the primary route)
+   * so a mid-turn route switch can neither smuggle image blocks to a
+   * text-only fallback model nor deny image reads on a vision fallback.
+   * Null between turns.
+   */
+  activeTurnModelId?: string | null;
   /**
    * Billing identity resolved from the API config at run start ('deepseek'
    * only when the DeepSeek account is actually billed — provider key
@@ -7331,7 +7340,7 @@ export class CoworkRunner extends EventEmitter {
 
     try {
       await this.syncDshSkillSessionEnv(dshSessionId, sessionId, cwd);
-      const hostTools = this.buildDshHostTools(sessionId, modelLimits?.supportsVision)
+      const hostTools = this.buildDshHostTools(sessionId)
       // Per-session registry: a concurrent turn of ANOTHER session must not
       // clobber this session's tool set (Twin-only tools would intermittently
       // go missing while a worker turn ran, and vice versa).
@@ -7502,6 +7511,11 @@ export class CoworkRunner extends EventEmitter {
             turnOfficialDeepSeekNative ? 'deepseek-native' : 'generic',
           );
         }
+        // Publish the route this attempt actually runs on: the Read-image
+        // guard (evaluateDshToolPolicy) judges image reads against THIS
+        // model, so a GT-02 fallback-brain resume onto a text-only model
+        // denies reads explicitly instead of letting pixels die upstream.
+        activeSession.activeTurnModelId = turnRoute.model;
         // Fresh guarded attempt → clean tool ledger (a cancelled/steered
         // previous attempt may leave calls whose results never settle).
         dshInFlightToolUses.clear();
@@ -7752,6 +7766,7 @@ export class CoworkRunner extends EventEmitter {
         });
       } finally {
         clearDshStallWatchdog();
+        activeSession.activeTurnModelId = null;
       }
       };
 
@@ -7930,7 +7945,7 @@ export class CoworkRunner extends EventEmitter {
    * passthrough factory — schemas travel to the runtime, execution
    * round-trips back to the host bridge.
    */
-  private buildDshHostTools(sessionId: string, modelSupportsVision?: boolean): Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> {
+  private buildDshHostTools(sessionId: string): Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> {
     const isZodValue = (value: unknown): boolean =>
       Boolean(value) && typeof value === 'object'
       && (Object.hasOwn(value as object, '_def') || Object.hasOwn(value as object, 'def')
@@ -7969,7 +7984,7 @@ export class CoworkRunner extends EventEmitter {
       parameters: Record<string, unknown>,
       execute: (args: any) => Promise<unknown>
     ) => ({ name, description, parameters: normalizeToolSchema(parameters), execute })
-    return this.buildSessionInlineTools(sessionId, passthrough, undefined, modelSupportsVision)
+    return this.buildSessionInlineTools(sessionId, passthrough, undefined)
   }
 
   /**
@@ -8012,12 +8027,20 @@ export class CoworkRunner extends EventEmitter {
           const absoluteGuardPath = path.resolve(guardFilePath);
           const guardStat = safeFileStat(absoluteGuardPath);
           const route = this.resolveSessionDshRoute(sessionId);
-          const guardModelLimits = route ? resolveCurrentModelLimits(route.model) : null;
+          // Judge against the model the CURRENT turn actually runs on: a
+          // GT-02 fallback resume re-pins the session to the fallback brain's
+          // route, so the primary route's model is the wrong capability
+          // source mid-fallback. Unresolvable => fail safe (non-vision):
+          // the denial message points at describe_image, which works on
+          // every route, whereas a wrongly-permissive read silently drops
+          // the pixels (2026-09-04 glm-5.3-flash regression).
+          const guardModelId = activeSession?.activeTurnModelId ?? route?.model ?? null;
+          const guardModelLimits = guardModelId ? resolveCurrentModelLimits(guardModelId) : null;
           const guardDecision = evaluateReadImageGuard({
             toolName: 'read',
             absolutePath: absoluteGuardPath,
             fileStat: guardStat,
-            supportsVision: guardModelLimits?.supportsVision ?? true,
+            supportsVision: guardModelLimits?.supportsVision ?? false,
             priorReads: activeSession?.readFiles ?? null,
           });
           if (guardDecision.action === 'deny') {
@@ -8189,13 +8212,11 @@ export class CoworkRunner extends EventEmitter {
    * twin orchestration, upload, search, browser, metabot manage). Shared by
    * both kernels: the Claude path passes the SDK tool() factory, the DSH path
    * passes a passthrough that also normalizes zod schemas to JSON schema.
-   *
-   * `modelSupportsVision` (resolved by the caller from the SAME model-limits
-   * source the Read-image guard uses) gates describe_image: vision routes
-   * omit it so the model uses native image blocks instead of burning the
-   * quota-metered relay; undefined keeps it (safe fallback).
+   * The catalog is route-independent: tools that need model capability
+   * resolution (e.g. the Read-image guard) decide at call time, not at
+   * registration time.
    */
-  private buildSessionInlineTools(sessionId: string, tool: any, activeSession?: ActiveSession, modelSupportsVision?: boolean): any[] {
+  private buildSessionInlineTools(sessionId: string, tool: any, activeSession?: ActiveSession): any[] {
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
     const memoryTools: any[] = [
       tool(
@@ -8991,18 +9012,17 @@ export class CoworkRunner extends EventEmitter {
       );
     }
     // Image understanding: the relay VLM turns a local image file into a
-    // text description + OCR, which is the ONLY read-image path for
-    // non-vision models (the Read-image guard denies their raw file reads).
-    // Vision routes omit describe_image so the model uses native image
-    // blocks (read_image / prompt attachments) — better quality, one less
-    // hop, and no relay quota spend. describe_video stays on every route:
-    // native vision cannot watch video.
+    // text description + OCR. describe_image registers on EVERY route — the
+    // relay does the seeing, so the tool does not depend on the session
+    // model's multimodality (or on the model-limits table being correct;
+    // the 2026-09-04 glm-5.3-flash regression hid it behind a misresolved
+    // supportsVision=true). describe_video likewise: native vision cannot
+    // watch video on any route.
     if (this.visionRelay) {
       memoryTools.push(
         ...buildVisionRelayAgentTools({
           tool,
           visionRelay: this.visionRelay,
-          includeDescribeImage: modelSupportsVision !== true,
         })
       );
     }
