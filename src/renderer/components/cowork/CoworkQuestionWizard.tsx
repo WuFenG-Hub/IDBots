@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { CoworkPermissionRequest, CoworkPermissionResult } from '../../types/cowork';
-import { ChevronLeftIcon, ChevronRightIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { ChevronLeftIcon, ChevronRightIcon, ExclamationTriangleIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 
 interface CoworkQuestionWizardProps {
@@ -86,7 +86,36 @@ const CoworkQuestionWizard: React.FC<CoworkQuestionWizardProps> = ({
   }, [permission.requestId, toolInput]);
 
   if (questions.length === 0) {
-    return null;
+    // Never render nothing for a queued question: App only shows
+    // pendingPermissions[0], so an invisible wizard would block the queue and
+    // wedge the asking session with no way to answer. Offer an explicit
+    // dismiss that declines the question instead.
+    console.warn('[CoworkQuestionWizard] question payload could not be rendered; offering dismiss fallback', permission.toolInput);
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center modal-backdrop">
+        <div className="modal-content w-full max-w-md mx-4 dark:bg-claude-darkSurface bg-claude-surface rounded-2xl shadow-modal overflow-hidden">
+          <div className="flex items-center gap-3 px-6 py-4 border-b dark:border-claude-darkBorder border-claude-border">
+            <ExclamationTriangleIcon className="h-6 w-6 text-yellow-500 flex-shrink-0" />
+            <h2 className="flex-1 text-lg font-semibold dark:text-claude-darkText text-claude-text">
+              {i18nService.t('coworkQuestionWizardUnavailable')}
+            </h2>
+          </div>
+          <div className="px-6 py-4">
+            <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('coworkQuestionWizardUnavailableBody')}
+            </p>
+          </div>
+          <div className="flex justify-end gap-3 px-6 py-4 border-t dark:border-claude-darkBorder border-claude-border">
+            <button
+              onClick={() => onRespond({ behavior: 'deny', message: 'Question payload could not be displayed' })}
+              className="px-4 py-2 text-sm font-medium rounded-lg dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkText text-claude-text transition-colors"
+            >
+              {i18nService.t('coworkQuestionWizardDismiss')}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   const currentQuestion = questions[currentStep];

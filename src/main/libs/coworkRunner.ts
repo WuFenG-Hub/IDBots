@@ -7696,9 +7696,14 @@ export class CoworkRunner extends EventEmitter {
               toolName: 'AskUserQuestion',
               toolInput: { questions: modalQuestions },
             };
+            let askTimeout: ReturnType<typeof setTimeout> | null = null;
             this.pendingPermissions.set(ask.id, {
               sessionId,
               resolve: (result) => {
+                if (askTimeout) {
+                  clearTimeout(askTimeout);
+                  askTimeout = null;
+                }
                 if (result.behavior !== 'allow') {
                   void hub.respondAsk(ask.id, (ask.questions ?? []).map((q) => ({
                     id: q.id,
@@ -7713,8 +7718,21 @@ export class CoworkRunner extends EventEmitter {
                   .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask respond failed', { error: String(error) }));
               },
             });
+            // Same 60s ceiling the approval path enforces
+            // (waitForPermissionResponse): an ask whose prompt never reaches a
+            // human (dropped IPC, unrenderable payload, hidden window) used to
+            // pin the turn in "running" until the tool-call hard cap — or
+            // forever. Auto-decline so the model gets an explicit answer.
+            askTimeout = setTimeout(() => {
+              askTimeout = null;
+              if (!this.pendingPermissions.has(ask.id)) return;
+              coworkLog('WARN', 'runDshSessionLocal', 'ask_user_question unanswered for 60s; auto-declining so the turn cannot hang', { sessionId, askId: ask.id });
+              this.respondToPermission(ask.id, { behavior: 'deny', message: 'Question request timed out after 60s' });
+            }, PERMISSION_RESPONSE_TIMEOUT_MS);
+            askTimeout.unref?.();
             activeSession.pendingPermission = request;
             this.emit('permissionRequest', sessionId, request);
+            coworkLog('INFO', 'runDshSessionLocal', 'ask_user_question awaiting user answer', { sessionId, askId: ask.id, questionCount: modalQuestions.length });
           },
           onAskCancelled: (askId) => {
             const pending = this.pendingPermissions.get(askId);

@@ -12,11 +12,14 @@ const readSource = (...segments) => fs.readFileSync(path.join(projectRoot, ...se
 const runnerSource = readSource('src', 'main', 'libs', 'coworkRunner.ts');
 
 test('coworkRunner wires low-risk auto-approval under full trust only', () => {
-  assert.match(runnerSource, /tryAutoAnswerLowRiskQuestion/);
-  assert.match(runnerSource, /permissionMode === 'bypassPermissions' && resolvedName === 'AskUserQuestion'/);
-  assert.match(runnerSource, /updatedInput: \{ \.\.\.resolvedInput, answers: autoAnswers \}/);
-  // The interactive fall-through must stay reachable for unmarked questions.
-  assert.match(runnerSource, /acceptEdits \/ bypassPermissions \+ AskUserQuestion: fall through to the prompt below/);
+  const onAskStart = runnerSource.indexOf('onAskRequest: (ask) => {');
+  assert.notEqual(onAskStart, -1, 'coworkRunner must register onAskRequest');
+  const onAskBody = runnerSource.slice(onAskStart, runnerSource.indexOf('onAskCancelled:', onAskStart));
+  assert.match(onAskBody, /permissionMode === 'bypassPermissions'/);
+  assert.match(onAskBody, /tryAutoAnswerLowRiskQuestion\(\{ questions: modalQuestions \}\)/);
+  assert.match(onAskBody, /hub\.respondAsk\(ask\.id, wireAnswersFromModal\(autoAnswers\)\)/);
+  // Unmarked questions fall through to the interactive modal below.
+  assert.ok(onAskBody.indexOf('tryAutoAnswerLowRiskQuestion') < onAskBody.indexOf("toolName: 'AskUserQuestion'"));
 });
 
 test('safety prompt tells agents about the auto-confirm marker under full trust', () => {
