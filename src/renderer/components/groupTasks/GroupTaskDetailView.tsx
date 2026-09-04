@@ -7,6 +7,7 @@ import type {
 } from '../../types/groupTask';
 import GroupTaskMessageItem from './GroupTaskMessageItem';
 import AcceptanceSummaryCard from './AcceptanceSummaryCard';
+import { GroupTaskTinyAvatar } from './GroupTaskListMeta';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import GroupTaskRatingStars from './GroupTaskRatingStars';
 import GroupTaskKickConfirmModal from './GroupTaskKickConfirmModal';
@@ -19,6 +20,7 @@ import {
   formatGroupTaskRelativeTime,
   formatGroupTaskTime,
   isBotBrowserUri,
+  isDigitalDeliverable,
   openGroupTaskUri,
   groupTaskMemberStatusBadgeClass,
   groupTaskMemberStatusLabel,
@@ -570,7 +572,10 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   // Nested collections can be missing on a stale/partial close payload.
   // Always coerce to arrays so Accept & Close cannot white-screen the view.
   const members = Array.isArray(detail.members) ? detail.members : [];
-  const deliverables = Array.isArray(detail.deliverables) ? detail.deliverables : [];
+  // Text rows (kind=text, no uri) are process notes, not deliverables — the
+  // rail lists digital outcomes only, mirroring the acceptance checklist.
+  const deliverables = (Array.isArray(detail.deliverables) ? detail.deliverables : [])
+    .filter((deliverable) => isDigitalDeliverable(deliverable));
   // HITL: the currently open human checkpoint, if any (drives the pause banner).
   const openCheckpoint = detail.checkpoints?.find((checkpoint) => checkpoint.status === 'open') ?? null;
   // HITL: what the owner must decide, shown under the banner topic — the
@@ -686,7 +691,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   type="button"
                   onClick={() => void handleReopen()}
                   disabled={reopening}
-                  className="px-3 py-1.5 text-sm font-medium rounded-lg text-amber-600 dark:text-amber-400 border border-amber-300 dark:border-amber-500/40 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors disabled:opacity-50"
+                  className="px-2.5 py-1 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 text-amber-600 dark:text-amber-400 border border-amber-300 dark:border-amber-500/40 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors disabled:opacity-50"
                 >
                   {reopening ? i18nService.t('groupTasksReopening') : i18nService.t('groupTasksBackToWork')}
                 </button>
@@ -695,7 +700,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setConfirmAction('done')}
-                  className="px-3 py-1.5 text-sm font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
+                  className="px-2.5 py-1 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
                 >
                   {i18nService.t('groupTasksAcceptClose')}
                 </button>
@@ -703,7 +708,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               <button
                 type="button"
                 onClick={() => setConfirmAction('cancelled')}
-                className="px-3 py-1.5 text-sm font-medium rounded-lg text-red-500 border border-red-300 dark:border-red-500/40 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                className="px-2.5 py-1 text-xs font-medium rounded-lg whitespace-nowrap shrink-0 text-red-500 border border-red-300 dark:border-red-500/40 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
               >
                 {i18nService.t('groupTasksCancelTask')}
               </button>
@@ -986,6 +991,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               {members.map((member) => (
                 <>
                 <div key={member.id} className="group flex items-center gap-2">
+                  <GroupTaskTinyAvatar
+                    src={member.avatar}
+                    name={memberDisplayName(member)}
+                    size="hover"
+                    browserGlobalMetaId={member.globalmetaid ?? null}
+                  />
                   <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
                     {memberDisplayName(member)}
                   </span>

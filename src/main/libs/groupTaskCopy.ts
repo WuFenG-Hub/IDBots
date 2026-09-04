@@ -441,13 +441,13 @@ export function buildAcceptanceGuidanceText(language: AppLanguage = groupTaskLan
     ? [
       'You can:',
       '1. On the Tasks panel acceptance card, tap Accept & Close and rate (1–5 stars + optional comment) — the task closes;',
-      '2. On the card, tap Back to work / Rework — execution resumes and the chair will assign follow-up work;',
+      '2. On the card, tap Request Changes — execution resumes and the chair will assign follow-up work;',
       '3. Reply in the group — the chair will act on your feedback.',
     ].join('\n')
     : [
       '你可以：',
       '① 在 Tasks 面板的验收卡点「Accept & Close」并评分（1-5 星 + 可选评语）——任务关闭；',
-      '② 在验收卡点「Back to work / Rework」——返回执行，chair 会补派工作；',
+      '② 在验收卡点「验收不通过」——返回执行，chair 会补派工作；',
       '③ 在群内直接回复意见——chair 会按你的意见处理。',
     ].join('\n');
 }
