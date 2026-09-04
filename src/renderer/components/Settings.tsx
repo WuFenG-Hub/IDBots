@@ -24,6 +24,7 @@ import type {
 } from '../types/cowork';
 import type { GroupTaskSummary } from '../types/groupTask';
 import { groupTaskService } from '../services/groupTaskService';
+import { formatContextWindowSize, parseContextWindowSizeInput } from '../utils/contextWindowSize';
 import { groupTaskStatusBadgeClass } from './groupTasks/groupTaskUtils';
 import { groupTaskStatusLabelKey } from './groupTasks/GroupTasksView';
 import IMSettings from './im/IMSettings';
@@ -539,6 +540,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
   const [newModelName, setNewModelName] = useState('');
   const [newModelId, setNewModelId] = useState('');
+  // Raw input for the optional per-model context window (empty = inherit the
+  // default 128K / known-model catalog instead of persisting an explicit value).
+  const [newModelContextWindow, setNewModelContextWindow] = useState('');
   const [newModelSupportsImage, setNewModelSupportsImage] = useState(false);
   const [modelFormError, setModelFormError] = useState<string | null>(null);
 
@@ -555,6 +559,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   const [customProviderModels, setCustomProviderModels] = useState<Model[]>([]);
   const [customModelName, setCustomModelName] = useState('');
   const [customModelId, setCustomModelId] = useState('');
+  // Raw input for the draft model's optional context window (empty = default 128K).
+  const [customModelContextWindow, setCustomModelContextWindow] = useState('');
   const [customProviderError, setCustomProviderError] = useState<string | null>(null);
 
   const coworkConfig = useSelector((state: RootState) => state.cowork.config);
@@ -863,6 +869,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setEditingModelId(null);
     setNewModelName('');
     setNewModelId('');
+    setNewModelContextWindow('');
     setNewModelSupportsImage(false);
     setModelFormError(null);
     setActiveProvider(provider);
@@ -1289,6 +1296,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       setEditingModelId(null);
       setNewModelName('');
       setNewModelId('');
+      setNewModelContextWindow('');
       setNewModelSupportsImage(false);
       setModelFormError(null);
       handleCancelCustomProvider();
@@ -1319,16 +1327,20 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setEditingModelId(null);
     setNewModelName('');
     setNewModelId('');
+    setNewModelContextWindow('');
     setNewModelSupportsImage(false);
     setModelFormError(null);
   };
 
-  const handleEditModel = (modelId: string, modelName: string, supportsImage?: boolean) => {
+  const handleEditModel = (modelId: string, modelName: string, supportsImage?: boolean, contextWindow?: number) => {
     setIsAddingModel(false);
     setIsEditingModel(true);
     setEditingModelId(modelId);
     setNewModelName(modelName);
     setNewModelId(modelId);
+    // Prefill the stored explicit window (if any) so the user can see and
+    // change it; an empty field means "no explicit value persisted".
+    setNewModelContextWindow(contextWindow ? String(contextWindow) : '');
     setNewModelSupportsImage(!!supportsImage);
     setModelFormError(null);
   };
@@ -1357,6 +1369,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       return;
     }
 
+    const parsedContextWindow = parseContextWindowSizeInput(newModelContextWindow);
+    if (parsedContextWindow === null) {
+      setModelFormError(i18nService.t('contextWindowSizeInvalid'));
+      return;
+    }
+
     const currentModels = providers[activeProvider].models ?? [];
     const duplicateModel = currentModels.find(
       model => model.id === modelId && (!isEditingModel || model.id !== editingModelId)
@@ -1374,6 +1392,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       id: modelId,
       name: modelName,
       supportsImage: newModelSupportsImage,
+      // Empty input clears an explicitly stored window (JSON drops the
+      // undefined key) so resolution falls back to the known-model catalog.
+      contextWindow: parsedContextWindow,
     };
     const updatedModels = isEditingModel && editingModelId
       ? currentModels.map(model => (model.id === editingModelId ? nextModel : model))
@@ -1392,6 +1413,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setEditingModelId(null);
     setNewModelName('');
     setNewModelId('');
+    setNewModelContextWindow('');
     setNewModelSupportsImage(false);
     setModelFormError(null);
   };
@@ -1402,6 +1424,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setEditingModelId(null);
     setNewModelName('');
     setNewModelId('');
+    setNewModelContextWindow('');
     setNewModelSupportsImage(false);
     setModelFormError(null);
   };
@@ -1427,6 +1450,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setCustomProviderModels([]);
     setCustomModelName('');
     setCustomModelId('');
+    setCustomModelContextWindow('');
     setCustomProviderError(null);
     setIsAddingCustomProvider(true);
   };
@@ -1447,12 +1471,25 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       setCustomProviderError(i18nService.t('modelIdExists'));
       return;
     }
+    const parsedContextWindow = parseContextWindowSizeInput(customModelContextWindow);
+    if (parsedContextWindow === null) {
+      setCustomProviderError(i18nService.t('contextWindowSizeInvalid'));
+      return;
+    }
     setCustomProviderModels(prev => [
       ...prev,
-      { id: modelId, name: modelName, supportsImage: false },
+      {
+        id: modelId,
+        name: modelName,
+        supportsImage: false,
+        // Omitted when left empty so resolution keeps the known-model catalog
+        // / 128K default instead of pinning an explicit value.
+        ...(parsedContextWindow !== undefined ? { contextWindow: parsedContextWindow } : {}),
+      },
     ]);
     setCustomModelName('');
     setCustomModelId('');
+    setCustomModelContextWindow('');
     setCustomProviderError(null);
   };
 
@@ -2890,6 +2927,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                           <span className="text-[10px] px-1.5 py-0.5 bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary">
                             {isBuiltInFreeProvider(activeProvider) ? getFreeProviderModelDisplayName(model.id) : model.id}
                           </span>
+                          {model.contextWindow && formatContextWindowSize(model.contextWindow) && (
+                            <span className="text-[10px] px-1.5 py-0.5 bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                              {formatContextWindowSize(model.contextWindow)}
+                            </span>
+                          )}
                           {model.supportsImage && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-claude-accent/10 text-claude-accent">
                               {i18nService.t('imageInput')}
@@ -2897,7 +2939,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                           )}
                           <button
                             type="button"
-                            onClick={() => handleEditModel(model.id, model.name, model.supportsImage)}
+                            onClick={() => handleEditModel(model.id, model.name, model.supportsImage, model.contextWindow)}
                             className="p-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-accent opacity-0 group-hover:opacity-100 transition-opacity"
                           >
                             <PencilIcon className="h-3 w-3" />
@@ -3241,6 +3283,26 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                       placeholder="gpt-4"
                     />
                   </div>
+                  <div>
+                    <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+                      {i18nService.t('contextWindowSize')}
+                    </label>
+                    <input
+                      type="text"
+                      value={newModelContextWindow}
+                      onChange={(e) => {
+                        setNewModelContextWindow(e.target.value);
+                        if (modelFormError) {
+                          setModelFormError(null);
+                        }
+                      }}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                      placeholder="128000"
+                    />
+                    <p className="mt-1 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {i18nService.t('contextWindowSizeHint')}
+                    </p>
+                  </div>
                   <div className="flex items-center space-x-2">
                     <input
                       id={`${activeProvider}-supportsImage`}
@@ -3399,7 +3461,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                         {i18nService.t('addModel')}
                       </button>
                     </div>
-                    <div className="flex items-center space-x-2 mb-2">
+                    <div className="flex items-center space-x-2 mb-1.5">
                       <input
                         type="text"
                         value={customModelName}
@@ -3421,6 +3483,29 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                         placeholder={i18nService.t('modelId')}
                       />
                     </div>
+                    <div className="mb-2">
+                      <input
+                        type="text"
+                        value={customModelContextWindow}
+                        onChange={(e) => {
+                          setCustomModelContextWindow(e.target.value);
+                          if (customProviderError) {
+                            setCustomProviderError(null);
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddCustomModelDraft();
+                          }
+                        }}
+                        className="block w-full rounded-lg bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-2.5 py-1.5 text-xs"
+                        placeholder={i18nService.t('contextWindowSizePlaceholder')}
+                      />
+                      <p className="mt-1 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('contextWindowSizeHint')}
+                      </p>
+                    </div>
                     <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
                       {customProviderModels.map(model => (
                         <div
@@ -3431,6 +3516,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                             <div className="flex items-center space-x-1.5 min-w-0">
                               <span className="dark:text-claude-darkText text-claude-text font-medium text-[11px] truncate">{model.name}</span>
                               <span className="text-[10px] px-1.5 py-0.5 bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">{model.id}</span>
+                              {model.contextWindow && formatContextWindowSize(model.contextWindow) && (
+                                <span className="text-[10px] px-1.5 py-0.5 bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                                  {formatContextWindowSize(model.contextWindow)}
+                                </span>
+                              )}
                             </div>
                             <button
                               type="button"
