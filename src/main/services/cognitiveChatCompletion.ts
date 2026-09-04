@@ -92,7 +92,13 @@ function resolveThinkingForModel(
   const normalized = model.trim().toLowerCase();
   const isDeepSeekThinkingModel = normalized.includes('deepseek')
     || /(?:^|[-_/])(?:v4-(?:pro|flash)|reasoner|r1)(?:$|[-_/])/.test(normalized);
-  return isDeepSeekThinkingModel ? thinking : undefined;
+  // GLM thinking-capable models (4.5+ and the 5.x line, incl. air/flash
+  // variants) default to thinking ON when the field is absent. Honor the
+  // caller's toggle so 'disabled' actually reaches the z.ai upstream instead
+  // of silently burning the output budget — and the call timeout — on hidden
+  // reasoning (the 2026-09-04 deep-consolidation timeout root cause).
+  const isGlmThinkingModel = /glm-(?:4\.[5-9]|[5-9]\d*|\d{2,})(?:[.\-/]|$)/.test(normalized);
+  return isDeepSeekThinkingModel || isGlmThinkingModel ? thinking : undefined;
 }
 
 /**

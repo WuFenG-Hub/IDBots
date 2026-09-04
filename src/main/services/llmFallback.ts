@@ -91,6 +91,14 @@ export async function runWithLlmFallback<TResult, TOptions extends LlmFallbackCa
     if (!fallbackId) {
       throw primaryError;
     }
+    // Callers pass ONE shared abort signal (e.g. AbortSignal.timeout) through
+    // options; when the primary attempt consumed it, the fallback attempt
+    // would fail instantly with the same abort/timeout — skip the dead retry
+    // and surface the primary error directly.
+    const sharedSignal = (options as { signal?: AbortSignal }).signal;
+    if (sharedSignal?.aborted) {
+      throw primaryError;
+    }
     const primaryMessage = primaryError instanceof Error ? primaryError.message : String(primaryError);
     const primaryLabel = normalizeMetabotLlmId(options.llmId) ?? 'default';
     log(`[LLM Fallback] Primary LLM '${primaryLabel}' failed (${primaryMessage}); retrying once with fallback '${fallbackId}'.`);
