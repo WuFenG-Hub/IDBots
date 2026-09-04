@@ -144,6 +144,32 @@ export class GroupTaskOrchestrationBridge {
       if (!existingStep || existingStep.taskId !== task.id) {
         throw new Error(`Orchestration evidence is inconsistent for attempt ${existingAttempt.id}`);
       }
+      // Terminal attempt behind a re-driven trigger message: restart recovery
+      // settles crashed attempts to failed and parks their step as ready with a
+      // severed active-attempt link. Reusing that dead attempt left the step
+      // stuck in ready forever — the worker could reply and deliver real work
+      // while the ledger never advanced, and the orphan step then blocked owner
+      // acceptance with no in-app remedy. Re-arm the step and open a fresh
+      // attempt under a derived key (idempotency_key is UNIQUE).
+      if (
+        (existingAttempt.status === 'failed' || existingAttempt.status === 'cancelled')
+        && existingStep.status === 'ready'
+      ) {
+        this.deps.orchestrationStore.updateStepStatus(existingStep.id, 'queued');
+        let retryOrdinal = this.deps.orchestrationStore.listAttempts(existingStep.id).length;
+        let retryKey = `${idempotencyKey}:retry:${retryOrdinal}`;
+        while (this.deps.orchestrationStore.getAttemptByIdempotencyKey(retryKey)) {
+          retryOrdinal += 1;
+          retryKey = `${idempotencyKey}:retry:${retryOrdinal}`;
+        }
+        const attempt = this.deps.orchestrationStore.createAttempt({
+          stepId: existingStep.id,
+          idempotencyKey: retryKey,
+          workerMetabotId: worker.id,
+          prompt: objective,
+        });
+        return { task, step: this.deps.orchestrationStore.getStep(existingStep.id)!, attempt, reused: false };
+      }
       return { task, step: existingStep, attempt: existingAttempt, reused: true };
     }
 
@@ -400,6 +426,26 @@ export class GroupTaskOrchestrationBridge {
     let canonical = this.ensureCanonicalTask(groupTask);
     if (canonical.status === 'cancelled') {
       throw new Error(`Orchestration task ${canonical.id} is cancelled`);
+    }
+    // Orphan 'ready' steps are fossils of restart recovery: the crashed attempt
+    // was settled to failed and the step's active-attempt link severed, so no
+    // code path can ever advance them (a re-driven trigger message now re-arms
+    // them in beginWorkerAttempt instead). Like failed/cancelled noise steps
+    // they carry no live work — cancel them here so existing stuck tasks can
+    // close, instead of trapping the task in review with no remedy. A ready
+    // step that still has a live (queued/running/timed_out) attempt keeps
+    // blocking acceptance below.
+    for (const step of this.deps.orchestrationStore.listSteps(canonical.id)) {
+      if (step.status !== 'ready') continue;
+      const hasLiveAttempt = this.deps.orchestrationStore.listAttempts(step.id)
+        .some((attempt) => ['queued', 'running', 'timed_out'].includes(attempt.status));
+      if (hasLiveAttempt) continue;
+      this.deps.orchestrationStore.updateStepStatus(step.id, 'cancelled', {
+        acceptedResult: {
+          ignored: true,
+          reason: 'orphan ready step auto-cancelled on owner acceptance (attempt lost to restart recovery)',
+        },
+      });
     }
     const steps = this.deps.orchestrationStore.listSteps(canonical.id);
     // Only ACTIVE steps (ready/queued/running/blocked) block acceptance; failed and
