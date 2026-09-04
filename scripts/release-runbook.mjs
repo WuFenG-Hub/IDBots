@@ -33,13 +33,15 @@ const STATE_PATH = process.env.RUNBOOK_STATE
   : join(REPO_ROOT, ".release-runbook.json");
 const KNOWN_PHASES = ["bump", "local", "ci", "check", "download", "oss", "website"];
 
-function run(command, args, options = {}) {
-  return execFileSync(command, args, {
+export function run(command, args, options = {}) {
+  const output = execFileSync(command, args, {
     cwd: options.cwd || REPO_ROOT,
     encoding: "utf8",
     stdio: options.stdio || "pipe",
     ...options.execOptions,
-  }).trim();
+  });
+  // stdio:"inherit" streams child output to the terminal and returns null.
+  return typeof output === "string" ? output.trim() : "";
 }
 
 function nowIso() {
@@ -569,7 +571,10 @@ async function main() {
   process.exitCode = 1;
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+const isDirectRun = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
