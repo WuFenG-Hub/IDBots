@@ -38,9 +38,14 @@ const LIMITS = Object.freeze({
   maxMessageImageBytes: 50 * 1024 * 1024,
   maxImagePixels: 33_400_000,
   // Per-side bound required by ImageAttachmentLimits since dsh-attachment
-  // rc.8; 2000 matches upstream dsh-attachment-local's default, which sits
-  // below the strictest deployed model-route dimension bound.
-  maxImageDimension: 2000,
+  // rc.8. Matches upstream dsh-attachment-local's actual
+  // DEFAULT_MAX_IMAGE_DIMENSION (8192): admission accepts ordinary
+  // retina/4K-ish bot output, and the request-side readImageRequest
+  // normalization (delegated to dsh-attachment-local) shrinks oversized
+  // sources to the route's pixel budget. The previous 2000 cap rejected a
+  // 2848px task figure outright (task #59) — a deterministic admission
+  // error that crashed every recovery turn on the same image.
+  maxImageDimension: 8192,
   mediaTypes: MEDIA_TYPES,
 })
 
