@@ -1346,6 +1346,7 @@ const App: React.FC = () => {
           errorMessage={updateError}
           onCancelDownload={handleCancelDownload}
           onRetry={handleRetryUpdate}
+          onHide={() => setShowUpdateModal(false)}
           installingHint={updatePhase === 'applying' ? i18nService.t('updateInstallingSilentHint') : undefined}
         />
       )}

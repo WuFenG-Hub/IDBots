@@ -1,4 +1,5 @@
 import React from 'react';
+import { XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { AppUpdateInfo, AppUpdateDownloadProgress } from '../../services/appUpdate';
 import { isDownloadComplete } from '../../services/appUpdateUi';
@@ -17,6 +18,8 @@ interface AppUpdateModalProps {
   errorMessage: string | null;
   onCancelDownload: () => void;
   onRetry: () => void;
+  /** Hide the panel only; background download/apply keeps running. */
+  onHide?: () => void;
   /** Override the installing-state hint (silent apply does not auto-relaunch). */
   installingHint?: string;
 }
@@ -31,6 +34,7 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
   errorMessage,
   onCancelDownload,
   onRetry,
+  onHide,
   installingHint,
 }) => {
   const { latestVersion, date, changeLog } = updateInfo;
@@ -38,6 +42,9 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
   const currentLog = changeLog?.[lang] ?? { title: '', content: [] };
   const isDismissible = modalState === 'info' || modalState === 'error' || modalState === 'restart';
   const downloadComplete = isDownloadComplete(downloadProgress);
+  // downloading/installing have no Cancel-style escape (background work must
+  // survive), so they get the hide-only X instead.
+  const showHideButton = Boolean(onHide) && (modalState === 'downloading' || modalState === 'installing');
 
   const handleBackdropClick = () => {
     if (isDismissible) {
@@ -51,9 +58,21 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
       onClick={handleBackdropClick}
     >
       <div
-        className="modal-content w-full max-w-md mx-4 dark:bg-claude-darkSurface bg-claude-surface rounded-2xl shadow-modal overflow-hidden"
+        className="modal-content relative w-full max-w-md mx-4 dark:bg-claude-darkSurface bg-claude-surface rounded-2xl shadow-modal overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
+        {showHideButton && (
+          <button
+            type="button"
+            onClick={onHide}
+            title={i18nService.t('updateHidePanel')}
+            aria-label={i18nService.t('updateHidePanel')}
+            className="absolute top-3 right-3 z-10 dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:text-claude-darkText hover:text-claude-text p-1.5 dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover rounded-lg transition-colors"
+          >
+            <XMarkIcon className="h-4 w-4" />
+          </button>
+        )}
+
         {/* Info state - shows changelog and Update/Cancel buttons */}
         {modalState === 'info' && (
           <>
