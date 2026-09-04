@@ -7114,3 +7114,164 @@ test('dependency-wait: an absent upstream still holds the dispatch (gate stays h
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// fix/group-task-duration: sponsor-broadcast-pending send queue (tasks
+// #58/#59 — a reconciliation outage must queue, not burn turns)
+// ---------------------------------------------------------------------------
+
+test('sponsor-pending: a worker reply send is queued, the turn completes, and the drainer delivers later', async () => {
+  // postGroupTaskMessage fails with SPONSOR_BROADCAST_PENDING until flipped.
+  const sendState = { sponsorPending: true, calls: [] };
+  const h = await createHarness({
+    deps: {
+      postGroupTaskMessage: async (taskId, metabotId, content, opts) => {
+        sendState.calls.push({ taskId, metabotId, content, replyPin: opts?.replyPin });
+        if (sendState.sponsorPending && metabotId === 2) {
+          throw new Error('SPONSOR_BROADCAST_PENDING: orderId=deadbeef: broadcast reconciliation in progress');
+        }
+        return { pinId: `drain-pin-${sendState.calls.length}` };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'trigger-mention-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver step 3',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 60,
+    });
+    const triggerId = h.db.exec(
+      "SELECT id FROM group_chat_messages WHERE pin_id = 'trigger-mention-i0'",
+    )[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, triggerId - 1);
+
+    await h.loop.runTick();
+
+    // The worker turn RAN and completed — its reply send was queued, not failed.
+    const workerSends = sendState.calls.filter((call) => call.metabotId === 2);
+    assert.ok(workerSends.length >= 1, 'the reply send was attempted');
+    // A queued-notice (not a failure notice) landed in the worker session.
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    const messages = h.coworkStore.getSession(mapping.coworkSessionId).messages;
+    assert.ok(
+      messages.some((message) => /delivery-queued notice/.test(message.content ?? '')),
+      'the worker was told the message is queued, not failed',
+    );
+    assert.ok(
+      !messages.some((message) => /delivery-failure notice/.test(message.content ?? '')),
+      'no failure notice for a sponsor-pending rejection',
+    );
+
+    // Reconciliation clears; advance past the retry window and drain.
+    sendState.sponsorPending = false;
+    h.state.nowMs += 3 * 60_000;
+    const before = sendState.calls.filter((call) => call.metabotId === 2).length;
+    await h.loop.runTick();
+    const after = sendState.calls.filter((call) => call.metabotId === 2).length;
+    assert.equal(after, before + 1, 'the drainer re-posted the queued message exactly once');
+    const bot2Calls = sendState.calls.filter((call) => call.metabotId === 2);
+    assert.match(
+      bot2Calls[bot2Calls.length - 1].content,
+      /^(skill-turn-reply|reply-for-llm-2)/,
+      'the drained message is the original composed reply',
+    );
+
+    // Fully drained: another tick after the retry window posts nothing more.
+    h.state.nowMs += 3 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      sendState.calls.filter((call) => call.metabotId === 2).length,
+      after,
+      'no duplicate delivery once the queue is empty',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('sponsor-pending: a different error while draining converts to the failure notice and drops the entry', async () => {
+  const sendState = { error: 'SPONSOR_BROADCAST_PENDING: orderId=aa: broadcast reconciliation in progress' };
+  const h = await createHarness({
+    deps: {
+      postGroupTaskMessage: async (taskId, metabotId) => {
+        if (metabotId !== 2) return { pinId: `pin-${metabotId}` };
+        throw new Error(sendState.error);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'trigger-mention2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver step 4',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 60,
+    });
+    const triggerId = h.db.exec(
+      "SELECT id FROM group_chat_messages WHERE pin_id = 'trigger-mention2-i0'",
+    )[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, triggerId - 1);
+    await h.loop.runTick();
+
+    h.state.nowMs += 3 * 60_000;
+    sendState.error = 'wallet mnemonic is empty';
+    await h.loop.runTick();
+
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    const messages = h.coworkStore.getSession(mapping.coworkSessionId).messages;
+    assert.ok(
+      messages.some((message) => /delivery-failure notice/.test(message.content ?? '')),
+      'a changed error surfaces as the ordinary failure notice',
+    );
+
+    // Entry dropped: later ticks never retry it again.
+    const failNoticeCount = messages.filter((message) => /delivery-failure notice/.test(message.content ?? '')).length;
+    h.state.nowMs += 3 * 60_000;
+    await h.loop.runTick();
+    const messagesAfter = h.coworkStore.getSession(mapping.coworkSessionId).messages;
+    const failNoticeCountAfter = messagesAfter.filter((message) => /delivery-failure notice/.test(message.content ?? '')).length;
+    assert.equal(failNoticeCountAfter, failNoticeCount, 'the dropped entry is not retried');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('sponsor-pending: a queued send for a finished task is dropped silently', async () => {
+  const sendState = { sponsorPending: true, calls: 0 };
+  const h = await createHarness({
+    deps: {
+      postGroupTaskMessage: async (taskId, metabotId) => {
+        if (metabotId === 2) {
+          sendState.calls += 1;
+          if (sendState.sponsorPending) {
+            throw new Error('SPONSOR_BROADCAST_PENDING: orderId=bb: broadcast reconciliation in progress');
+          }
+        }
+        return { pinId: 'pin-x' };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'trigger-mention3-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver step 5',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 60,
+    });
+    const triggerId = h.db.exec(
+      "SELECT id FROM group_chat_messages WHERE pin_id = 'trigger-mention3-i0'",
+    )[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, triggerId - 1);
+    await h.loop.runTick();
+    assert.ok(sendState.calls >= 1, 'send attempted and queued');
+
+    h.groupTaskStore.updateTaskStatus(task.id, 'done');
+    sendState.sponsorPending = false;
+    h.state.nowMs += 3 * 60_000;
+    const callsBefore = sendState.calls;
+    await h.loop.runTick();
+    assert.equal(sendState.calls, callsBefore, 'a terminal task never receives the queued message');
+  } finally {
+    h.cleanup();
+  }
+});
