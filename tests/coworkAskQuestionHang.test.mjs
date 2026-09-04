@@ -26,17 +26,22 @@ const onAskRequestBody = (() => {
   return runnerSource.slice(start, end);
 })();
 
-test('ask_user_question modal path auto-declines after the shared 60s ceiling', () => {
+test('ask_user_question modal path auto-answers with the recommended option after the shared 60s ceiling', () => {
   assert.match(onAskRequestBody, /setTimeout\(\(\) => \{[\s\S]*?PERMISSION_RESPONSE_TIMEOUT_MS\)/);
-  assert.match(onAskRequestBody, /unanswered for 60s; auto-declining so the turn cannot hang/);
-  assert.match(onAskRequestBody, /respondToPermission\(ask\.id, \{ behavior: 'deny', message: 'Question request timed out after 60s' \}\)/);
+  assert.match(onAskRequestBody, /unanswered for 60s; auto-answering with the recommended option where one exists/);
+  assert.match(onAskRequestBody, /pickRecommendedOptionLabel\(q\.options\)/);
+  // The model must be able to tell the pick was automatic, not the user's.
+  assert.match(onAskRequestBody, /Auto-selected the recommended option because the user did not answer within 60s\./);
+  // Questions without options still count as unanswered rather than hanging.
+  assert.match(onAskRequestBody, /The user did not answer within 60s\./);
+  assert.match(onAskRequestBody, /hub\.respondAsk\(ask\.id, timeoutAnswers\)/);
 });
 
 test('ask timeout is cleared when the question settles through any path', () => {
   assert.match(onAskRequestBody, /clearTimeout\(askTimeout\)/);
-  // The timeout fires through respondToPermission, so a question already
-  // answered/cancelled/aborted (entry deleted) is a silent no-op.
-  assert.match(onAskRequestBody, /if \(!this\.pendingPermissions\.has\(ask\.id\)\) return;/);
+  // The timeout settles by deleting the pending entry, so a question already
+  // answered/cancelled/aborted (entry gone) is a silent no-op.
+  assert.match(onAskRequestBody, /if \(!this\.pendingPermissions\.delete\(ask\.id\)\) return;/);
   assert.match(onAskRequestBody, /askTimeout\.unref\?\.\(\)/);
 });
 
