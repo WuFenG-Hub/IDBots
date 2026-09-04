@@ -293,3 +293,122 @@ test('F6: close error names every unfinished step with its status and the remedy
     h.sqliteStore.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// fix/group-task-acceptance: restart-recovery fossil steps (status 'ready' with
+// a severed active-attempt link) must neither wedge the ledger on re-drive nor
+// block owner acceptance forever.
+// ---------------------------------------------------------------------------
+
+test('re-driven trigger after restart recovery re-arms the fossil step with a fresh attempt', async () => {
+  const h = await makeHarness();
+  try {
+    const started = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'Build the MetaApp',
+      sourceMessageKey: 'crash-assignment-i0',
+    });
+    h.bridge.markWorkerAttemptRunning(started.attempt.id, 'session-before-crash');
+
+    // Simulate the app dying mid-turn: recovery settles the attempt to failed
+    // and parks the step as ready with no active attempt.
+    h.orchestrationStore.recoverAfterRestart();
+    const fossil = h.orchestrationStore.getStep(started.step.id);
+    assert.equal(fossil.status, 'ready');
+    assert.equal(fossil.activeAttemptId, null);
+    assert.equal(h.orchestrationStore.getAttempt(started.attempt.id).status, 'failed');
+
+    // The daemon re-drives the SAME unanswered trigger message after restart.
+    const redriven = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'Build the MetaApp',
+      sourceMessageKey: 'crash-assignment-i0',
+    });
+    assert.equal(redriven.reused, false);
+    assert.equal(redriven.step.id, started.step.id, 'same step re-armed, no duplicate step');
+    assert.equal(redriven.step.status, 'queued');
+    assert.notEqual(redriven.attempt.id, started.attempt.id);
+    assert.equal(redriven.attempt.status, 'queued');
+    assert.equal(h.orchestrationStore.getStep(started.step.id).activeAttemptId, redriven.attempt.id);
+
+    // The fresh attempt advances the ledger normally through to acceptance.
+    h.bridge.markWorkerAttemptRunning(redriven.attempt.id, 'session-after-restart');
+    h.bridge.completeWorkerAttempt({
+      attemptId: redriven.attempt.id,
+      replyText: '[DELIVERABLE] metaapp: metaapp://recovered',
+      groupMessagePinId: 'recovered-deliverable-i0',
+    });
+    assert.equal(h.orchestrationStore.getStep(started.step.id).status, 'waiting_input');
+
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'executing');
+    h.bridge.syncStatus(h.groupTask.id);
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'review');
+    h.bridge.syncStatus(h.groupTask.id);
+
+    const accepted = h.bridge.acceptGroupTask(h.groupTask.id);
+    assert.equal(accepted.groupTask.status, 'done');
+    assert.equal(accepted.canonicalTask.status, 'completed');
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('orphan ready steps (restart-recovery fossils) are auto-cancelled and do NOT block owner acceptance', async () => {
+  const h = await makeHarness();
+  try {
+    // Real work that completed and reached waiting_input.
+    const real = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'Build the MetaApp',
+      sourceMessageKey: 'real-assignment-i0',
+    });
+    h.bridge.markWorkerAttemptRunning(real.attempt.id, 'session-real');
+    h.bridge.completeWorkerAttempt({
+      attemptId: real.attempt.id,
+      replyText: '[DELIVERABLE] metaapp: metaapp://realpin',
+      groupMessagePinId: 'real-deliverable-i0',
+    });
+
+    // Two duplicate assignments (like the double "Worker assignment: eleven"
+    // steps) whose attempts were running when the app died — the exact state
+    // that trapped group task acceptance before this fix.
+    for (const key of ['fossil-assignment-i0', 'fossil-assignment-i1']) {
+      const fossil = h.bridge.beginWorkerAttempt({
+        groupTaskId: h.groupTask.id,
+        workerMetabotId: 2,
+        objective: 'duplicate dispatch',
+        sourceMessageKey: key,
+      });
+      h.bridge.markWorkerAttemptRunning(fossil.attempt.id, `session-${key}`);
+    }
+    h.orchestrationStore.recoverAfterRestart();
+    const fossils = h.orchestrationStore.listSteps(real.step.taskId)
+      .filter((step) => step.id !== real.step.id);
+    assert.equal(fossils.length, 2);
+    for (const fossil of fossils) {
+      assert.equal(fossil.status, 'ready');
+      assert.equal(fossil.activeAttemptId, null);
+    }
+
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'executing');
+    h.bridge.syncStatus(h.groupTask.id);
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'review');
+    h.bridge.syncStatus(h.groupTask.id);
+
+    // Acceptance cancels the orphans with an ignored marker and closes.
+    const accepted = h.bridge.acceptGroupTask(h.groupTask.id);
+    assert.equal(accepted.groupTask.status, 'done');
+    assert.equal(accepted.canonicalTask.status, 'completed');
+    assert.equal(h.orchestrationStore.getStep(real.step.id).status, 'completed');
+    for (const fossil of fossils) {
+      const step = h.orchestrationStore.getStep(fossil.id);
+      assert.equal(step.status, 'cancelled');
+      assert.equal(step.acceptedResult.ignored, true);
+    }
+  } finally {
+    h.sqliteStore.close();
+  }
+});
