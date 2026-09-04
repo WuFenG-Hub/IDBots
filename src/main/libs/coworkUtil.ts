@@ -11,6 +11,7 @@ import { resolveElectronExecutablePath } from './runtimePaths';
 import { resolveWritableSkillsRoot } from './skillRoots';
 import { getMetaidRpcBase, getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
 import { chatCompletionWithTools } from '../services/cognitiveChatCompletion';
+import type { MetabotBrainOptions } from '../services/llmFallback';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 import { assignPathValue, collapseWindowsPathKeys, pathValueOf } from './windowsPathEnv';
 import { appendPythonRuntimeToEnv } from './pythonRuntime';
@@ -1213,9 +1214,22 @@ export function sanitizeGeneratedSessionTitle(raw: string, fallback: string, max
  * One-shot title via the configured provider (OpenAI-compatible / Responses).
  * Does not spawn the Claude Agent SDK and does not start a cowork DSH turn.
  */
+let sessionTitleBrainProvider: (() => MetabotBrainOptions | null) | null = null;
+
+/**
+ * Session titling is a system automation: main.ts sets this to the Twin Bot
+ * system brain (primary + fallback) at startup so titles never depend on the
+ * bare app default model (the metaid-free onboarding quota). Unset, or a
+ * brain with no llmId, keeps the previous app-default behavior.
+ */
+export function setSessionTitleBrainProvider(provider: (() => MetabotBrainOptions | null) | null): void {
+  sessionTitleBrainProvider = provider;
+}
+
 export async function generateSessionTitle(userIntent: string | null): Promise<string> {
   if (!userIntent) return 'New Session';
   const fallback = deriveSessionTitle(userIntent);
+  const brain = sessionTitleBrainProvider?.() ?? null;
 
   try {
     const result = await chatCompletionWithTools(
@@ -1231,7 +1245,13 @@ export async function generateSessionTitle(userIntent: string | null): Promise<s
         },
       ],
       {
+        llmId: brain?.llmId ?? undefined,
+        llmProvider: brain?.llmProvider ?? undefined,
+        fallbackLlmId: brain?.fallbackLlmId ?? undefined,
+        fallbackLlmProvider: brain?.fallbackLlmProvider ?? undefined,
         thinking: 'disabled',
+        // Titles stay effort-off regardless of the twin brain's configured
+        // effort — a 64-token title must never wait on reasoning.
         effort: 'off',
         maxTokens: 64,
         temperature: 0.2,

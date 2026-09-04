@@ -1,7 +1,7 @@
 import type { TeamCultureStore } from '../teamCultureStore';
 import { normalizeTeamCultureKind, type TeamCultureDistillationOutcome, type TeamCultureKind } from '../teamCultureStore';
 import type { GroupTaskStore } from '../groupTaskStore';
-import { metabotBrainOptions, type MetabotBrainOptions } from './llmFallback';
+import { resolveSystemBrainOptions, type MetabotBrainOptions } from './llmFallback';
 import type { Metabot } from '../types/metabot';
 
 /**
@@ -265,23 +265,23 @@ export async function runCultureDistillation(input: {
 let cultureStoreProvider: (() => TeamCultureStore) | null = null;
 let performChatProvider: CultureDistillationPerformChat | null = null;
 let groupTaskStoreProvider: (() => GroupTaskStore) | null = null;
-let metabotByIdProvider: ((id: number) => Partial<Pick<Metabot,
-  'llm_id' | 'llm_provider' | 'llm_effort' | 'fallback_llm_id' | 'fallback_llm_provider' | 'fallback_llm_effort'
->> | null) | null = null;
+let systemBrainMetabotsProvider: (() => Array<Partial<Pick<Metabot,
+  'metabot_type' | 'llm_id' | 'llm_provider' | 'llm_effort' | 'fallback_llm_id' | 'fallback_llm_provider' | 'fallback_llm_effort'
+>>>) | null = null;
 
 export function setTeamCultureDistillationDeps(deps: {
   getTeamCultureStore: () => TeamCultureStore;
   getGroupTaskStore: () => GroupTaskStore;
   performChat: CultureDistillationPerformChat;
-  /** Resolves a metabot by local id; used to ride the task chair's brain pair. */
-  getMetabotById?: (id: number) => Partial<Pick<Metabot,
-    'llm_id' | 'llm_provider' | 'llm_effort' | 'fallback_llm_id' | 'fallback_llm_provider' | 'fallback_llm_effort'
-  >> | null;
+  /** Metabot lister used to resolve the Twin Bot system brain. */
+  listMetabots?: () => Array<Partial<Pick<Metabot,
+    'metabot_type' | 'llm_id' | 'llm_provider' | 'llm_effort' | 'fallback_llm_id' | 'fallback_llm_provider' | 'fallback_llm_effort'
+  >>>;
 }): void {
   cultureStoreProvider = deps.getTeamCultureStore;
   groupTaskStoreProvider = deps.getGroupTaskStore;
   performChatProvider = deps.performChat;
-  metabotByIdProvider = deps.getMetabotById ?? null;
+  systemBrainMetabotsProvider = deps.listMetabots ?? null;
 }
 
 /**
@@ -343,14 +343,12 @@ export function distillTeamCultureFromTaskClose(
         record('no-summary');
         return;
       }
-      // Ride the task chair's brain pair (provider hint + fallback brain) —
-      // the same rule as dreams, A2A and deep-consolidation. Distilling over
-      // the bare app default model meant one exhausted free-tier provider
-      // zeroed the whole culture base while every bot brain was healthy.
-      const chairMetabotId = groupTaskStore.getTaskById?.(taskId)?.chairMetabotId ?? null;
-      const brain = metabotBrainOptions(
-        chairMetabotId != null ? metabotByIdProvider?.(chairMetabotId) : null,
-      );
+      // Ride the Twin Bot system brain (primary + fallback + efforts) —
+      // culture distillation is a fleet-level automation, not one bot's act.
+      // Distilling over the bare app default model meant one exhausted
+      // free-tier provider zeroed the whole culture base while every bot
+      // brain was healthy (2026-09-04 metaid-free 429 outage).
+      const brain = resolveSystemBrainOptions(systemBrainMetabotsProvider?.());
       const result = await runCultureDistillation({
         task: {
           taskId,

@@ -39,7 +39,7 @@ import { buildSessionTranscriptMarkdown, transcriptExportFileName } from './libs
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
-import { generateSessionTitle } from './libs/coworkUtil';
+import { generateSessionTitle, setSessionTitleBrainProvider } from './libs/coworkUtil';
 import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
 import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps } from './libs/coworkOpenAICompatProxy';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
@@ -239,9 +239,10 @@ import {
   performChatCompletionForOrchestrator,
   type ChatMessage,
 } from './services/cognitiveChatCompletion';
-import { metabotBrainOptions, normalizeMetabotLlmId } from './services/llmFallback';
+import { metabotBrainOptions, normalizeMetabotLlmId, resolveSystemBrainOptions } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { startMemoryHygieneService, stopMemoryHygieneService, getMemoryHygieneService } from './services/memoryHygieneService';
+import { setMemoryJudgeBrainResolver } from './libs/coworkMemoryJudge';
 import { setTeamCultureDistillationDeps } from './services/teamCultureDistillation';
 import { KnowledgeBaseService } from './services/knowledgeBaseService';
 import { KnowledgeBaseStore } from './knowledgeBaseStore';
@@ -3290,9 +3291,18 @@ const startSqliteDaemons = (): void => {
       'Reply in the owner\'s language matters — classify any language, not just Chinese or English.',
       'Return strict JSON only: {"intents":["<label>",...],"wishSkip":false} with intents aligned to the replies.',
     ].join('\n');
-    const raw = await performChatCompletionForOrchestrator(systemPrompt, 'Classify the owner replies now.', undefined, {
+    // Fleet-level classifier: ride the Twin Bot system brain (with fallback),
+    // never the bare app default model (which may be the metaid-free
+    // onboarding model with an exhausted free quota).
+    const brain = resolveSystemBrainOptions(getMetabotStore().listMetabots());
+    const raw = await performChatCompletionForOrchestrator(systemPrompt, 'Classify the owner replies now.', brain.llmId, {
       maxTokens: 300,
       thinking: 'disabled',
+      llmProvider: brain.llmProvider,
+      fallbackLlmId: brain.fallbackLlmId,
+      fallbackLlmProvider: brain.fallbackLlmProvider,
+      effort: brain.effort,
+      fallbackEffort: brain.fallbackEffort,
     });
     const intents: OwnerStaffingIntent[] = replies.map(() => 'other');
     let wishSkip = false;
@@ -4021,8 +4031,16 @@ const startSqliteDaemons = (): void => {
     getTeamCultureStore: () => getTeamCultureStore(),
     getGroupTaskStore: () => getGroupTaskStore(),
     performChat: performChatCompletionForOrchestrator,
-    getMetabotById: (id) => getMetabotStore().getMetabotById(id),
+    listMetabots: () => getMetabotStore().listMetabots(),
   });
+
+  // Cowork memory judge/extraction: fleet-level automation riding the Twin
+  // Bot system brain (primary + fallback), never the bare app default model.
+  setMemoryJudgeBrainResolver(() => resolveSystemBrainOptions(getMetabotStore().listMetabots()));
+
+  // Session titling (cowork/private-chat/order sessions): same system-brain
+  // rule — the Twin Bot brain pair, app default only during onboarding.
+  setSessionTitleBrainProvider(() => resolveSystemBrainOptions(getMetabotStore().listMetabots()));
 
   // Knowledge bases ("知识库"): per-bot document corpora learned into a local
   // search index. Nightly auto-learn shares the dream window but is LLM-free
@@ -6291,10 +6309,20 @@ const startAgentGameHost = (): void => {
   agentGameHost = createAgentGameHost({
     db: sqliteStore.getDatabase(),
     saveDb: sqliteStore.getSaveFunction(),
-    llmComplete: (messages) =>
-      chatCompletionWithTools(messages, {
+    llmComplete: (messages) => {
+      // Game moves are a system automation: ride the Twin Bot system brain
+      // (with fallback), not the bare app default model.
+      const brain = resolveSystemBrainOptions(getMetabotStore().listMetabots());
+      return chatCompletionWithTools(messages, {
+        llmId: brain.llmId,
+        llmProvider: brain.llmProvider,
+        fallbackLlmId: brain.fallbackLlmId,
+        fallbackLlmProvider: brain.fallbackLlmProvider,
+        effort: brain.effort,
+        fallbackEffort: brain.fallbackEffort,
         throwOnEmptyContent: true,
-      }),
+      });
+    },
     chainWrite: (groupId, plaintext) => sendGroupChatMessageAsIdentity(groupId, { content: plaintext, nickName: owner?.name ?? '' }),
     manifestFetch: resolveAgentGameManifest,
     adapterPathFor: resolveAgentGameAdapterPath,

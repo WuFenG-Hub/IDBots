@@ -419,7 +419,7 @@ test('distillation rides the given brain pair and names it on llm-error', async 
   }
 });
 
-test('close hook resolves the task chair brain via getTaskById/getMetabotById', async () => {
+test('close hook resolves the Twin Bot system brain via listMetabots', async () => {
   const harness = await createSqliteStore();
   try {
     const { db } = harness;
@@ -436,14 +436,17 @@ test('close hook resolves the task chair brain via getTaskById/getMetabotById', 
           deliverables: SUMMARY.deliverables,
           members: SUMMARY.members,
         } : null),
-        getTaskById: (taskId) => (taskId === 51 ? { chairMetabotId: 88 } : null),
       }),
-      getMetabotById: (id) => (id === 88 ? {
-        llm_id: 'glm-5.3-flash',
-        llm_provider: 'custom-zai',
-        fallback_llm_id: 'deepseek-v4-flash',
-        fallback_llm_provider: 'deepseek',
-      } : null),
+      listMetabots: () => ([
+        { metabot_type: 'worker', llm_id: 'worker-model' },
+        {
+          metabot_type: 'twin',
+          llm_id: 'glm-5.3-flash',
+          llm_provider: 'custom-zai',
+          fallback_llm_id: 'deepseek-v4-flash',
+          fallback_llm_provider: 'deepseek',
+        },
+      ]),
       performChat: async (_system, _user, llmId, options) => {
         seenLlmId = llmId;
         seenFallback = options?.fallbackLlmId;
@@ -457,8 +460,8 @@ test('close hook resolves the task chair brain via getTaskById/getMetabotById', 
     const log = store.listCultureDistillationLog();
     assert.equal(log.length, 1);
     assert.equal(log[0].outcome, 'applied');
-    assert.equal(seenLlmId, 'glm-5.3-flash', 'the chair brain, not the app default, distilled');
-    assert.equal(seenFallback, 'deepseek-v4-flash', 'the fallback brain rides along');
+    assert.equal(seenLlmId, 'glm-5.3-flash', 'the twin brain, not the app default, distilled');
+    assert.equal(seenFallback, 'deepseek-v4-flash', 'the twin fallback brain rides along');
   } finally {
     setTeamCultureDistillationDeps({
       getTeamCultureStore: () => ({

@@ -59,6 +59,26 @@ export function metabotBrainOptions(metabot: Partial<Pick<Metabot,
   };
 }
 
+/**
+ * The fleet-level "system brain": the Twin Bot's brain pair (primary +
+ * fallback + efforts). Fleet/system automations that do NOT act for one
+ * specific bot (culture distillation, staffing intent classification, memory
+ * judging, session titling, agent-game moves) must ride this pair instead of
+ * the bare app default model — the default may be the metaid-free onboarding
+ * model, whose exhausted free quota must never zero system features. When no
+ * twin exists or it has no brain configured, every field is null and callers
+ * keep the app-default behavior (new-user onboarding).
+ */
+export function resolveSystemBrainOptions(
+  metabots: Array<Partial<Pick<Metabot,
+    'metabot_type' | 'llm_id' | 'llm_provider' | 'llm_effort'
+    | 'fallback_llm_id' | 'fallback_llm_provider' | 'fallback_llm_effort'
+  >>> | null | undefined,
+): MetabotBrainOptions {
+  const twin = (metabots ?? []).find((bot) => bot?.metabot_type === 'twin') ?? null;
+  return metabotBrainOptions(twin);
+}
+
 export interface LlmFallbackCallOptions {
   llmId?: string | null;
   /** Provider key the primary brain model was picked from. */
