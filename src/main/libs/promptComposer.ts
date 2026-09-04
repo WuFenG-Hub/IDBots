@@ -73,6 +73,12 @@ export const PROMPT_SECTION_ORDER = {
    * are split into their own sections, these slots are already reserved.
    */
   METAAPPS: 44,
+  /**
+   * Chain-identifier output discipline (pinid/txid verbatim rule). Sits with
+   * the MetaWeb family: quoting identifiers correctly is part of citing
+   * chain evidence.
+   */
+  CHAIN_IDS: 45,
   /** Skill routing block (`## Skills`). Rendered after METAAPPS; see METAAPPS. */
   SKILLS: 46,
   /** Caller-provided base prompt (renderer-combined routing + user config). */

@@ -51,6 +51,7 @@ tests/*
 !tests/runtimeDependencyContract.test.mjs
 !tests/dshRuntimeDepsCheck.test.mjs
 !tests/dshKernelEventMapper.test.mjs
+!tests/chainIdentifierPrompt.test.mjs
 !tests/dshKernelRuntime.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/coworkKernelRouting.test.mjs
