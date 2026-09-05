@@ -8,7 +8,7 @@ try {
   claudeSettings = await import('../dist-electron/libs/claudeSettings.js');
 }
 
-const { resolveApiConfigForModel, setStoreGetter } = claudeSettings;
+const { resolveApiConfigForModel, resolveDshProviderRoute, setStoreGetter } = claudeSettings;
 
 function withAppConfig(appConfig, fn) {
   setStoreGetter(() => ({
@@ -302,6 +302,34 @@ test('model id with provider hint resolves to the hinted provider on id collisio
   const staleHint = withAppConfig(config, () =>
     resolveApiConfigForModel('deepseek-v4-pro', 'local', null, 'gone'));
   assert.equal(staleHint.config?.provider, 'custom-relay');
+});
+
+test('DSH refuses an ambiguous model id when the bot has no provider hint', () => {
+  const config = {
+    model: { defaultModel: 'm1', availableModels: [] },
+    providers: {
+      'z-ai': {
+        enabled: true,
+        apiKey: 'z-test',
+        baseUrl: 'https://z.example/v1',
+        apiFormat: 'openai',
+        models: [{ id: 'glm-5.3-flash' }],
+      },
+      relay: {
+        enabled: true,
+        apiKey: 'r-test',
+        baseUrl: 'https://relay.example/v1',
+        apiFormat: 'openai',
+        models: [{ id: 'glm-5.3-flash' }],
+      },
+    },
+  };
+  const route = withAppConfig(config, () => resolveDshProviderRoute(
+    'glm-5.3-flash',
+    null,
+    { botId: 7, requireProviderDisambiguation: true },
+  ));
+  assert.equal(route, null);
 });
 
 test('OpenCode vs DeepSeek colliding model id uses the provider hint', () => {

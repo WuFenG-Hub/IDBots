@@ -113,6 +113,8 @@ type MatchedProvider = {
 export interface LlmResolutionContext {
   botId?: number | string | null;
   botName?: string | null;
+  /** DSH callers must not silently pick among colliding provider model ids. */
+  requireProviderDisambiguation?: boolean;
 }
 
 function getEffectiveProviderApiFormat(providerName: string, apiFormat: unknown): AnthropicApiFormat {
@@ -203,6 +205,18 @@ function resolveMatchedProvider(
   const providerHintKey = requestedOverride && providerHint?.trim()
     ? providerHint.trim().toLowerCase()
     : null;
+  if (context?.requireProviderDisambiguation && requestedOverride && !providerHintKey && !defaultProviderKey) {
+    const matchingProviders = Object.entries(providers).filter(
+      ([, provider]) => provider?.enabled && provider.models?.some((model) => model.id === modelId),
+    );
+    if (matchingProviders.length > 1) {
+      const names = matchingProviders.map(([name]) => name).join(', ');
+      return {
+        matched: null,
+        error: `Model '${modelId}' is provided by multiple enabled providers (${names}); provider selection is required.`,
+      };
+    }
+  }
   if (providerHintKey) {
     providerEntry = Object.entries(providers).find(
       ([name, provider]) =>
