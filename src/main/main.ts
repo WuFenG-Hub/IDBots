@@ -5881,7 +5881,12 @@ const getCoworkRunner = () => {
     });
 
     coworkRunner.on('permissionRequest', (sessionId: string, request: any) => {
-      if (coworkRunner?.getSessionConfirmationMode(sessionId) === 'text') {
+      // Text confirmation is used by private-chat automation, but
+      // AskUserQuestion is still a user-facing interaction and must reach the
+      // renderer. Suppressing it here makes a normal cowork session wait for
+      // the bridge timeout with no visible prompt.
+      if (coworkRunner?.getSessionConfirmationMode(sessionId) === 'text'
+        && request?.toolName !== 'AskUserQuestion') {
         return;
       }
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
