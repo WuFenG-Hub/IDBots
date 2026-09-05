@@ -7538,3 +7538,62 @@ test('stale-working: the stuck worker is woken directly — wake notice + its la
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// group-task speedup REQ v1.1:
+// R-01 execution-phase throttling — an executing member posts NO check-in
+// messages; the liveness lease renews internally; exactly ONE @chair reminder
+// fires when a turn exceeds the long-turn reminder threshold.
+// R-02 deadline semantics — a delivery deadline is armed only for a member
+// with a real, dependency-ready assignment on record.
+// ---------------------------------------------------------------------------
+
+test('speedup R-01: a long turn posts no heartbeat lines; lease renews internally; one @chair reminder', async () => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let releaseTurn;
+  const gate = new Promise((resolve) => { releaseTurn = resolve; });
+  const h = await createHarness({
+    deps: {
+      longTurnLeaseArmMs: 60,
+      longTurnHeartbeatMs: 100,
+      longTurnChairReminderMs: 180,
+      performChat: async () => {
+        await gate;
+        return '[WORKING] done';
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-r01-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    const rawLoop = createGroupTaskDaemonLoop(h.deps);
+    await rawLoop.runTick();
+
+    await sleep(340);
+    const heartbeatPosts = () => h.sends.filter((send) =>
+      send.metabotId === 2 && /仍在执行中|长步骤仍在后台执行|Still on it|still running in the background/.test(send.content));
+    assert.equal(heartbeatPosts().length, 0, 'no placeholder/heartbeat posts while the turn runs (R-01)');
+    const lease = Number(h.store.get(`group_task_working_heartbeat:${task.id}:2`));
+    assert.ok(Number.isFinite(lease) && lease > 0, 'the liveness lease was renewed internally');
+    const reminders = () => h.sends.filter((send) =>
+      send.metabotId === 2 && send.content.includes('[GROUP_TASK_NOTICE:long_turn]'));
+    assert.equal(reminders().length, 1, 'exactly one reminder, posted as the working bot');
+    assert.match(reminders()[0].content, /@chair/, 'the reminder addresses the chair');
+    assert.match(reminders()[0].content, /无需回应|no.*reply|need not reply/i, 'the member is not asked to reply');
+
+    releaseTurn();
+    await rawLoop.whenIdle();
+    await sleep(300);
+    assert.equal(heartbeatPosts().length, 0, 'still no heartbeat posts after settle');
+    assert.equal(reminders().length, 1, 'the reminder fires at most once per turn');
+  } finally {
+    releaseTurn();
+    h.cleanup();
+  }
+});
+

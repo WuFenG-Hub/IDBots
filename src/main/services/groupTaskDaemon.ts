@@ -69,11 +69,14 @@ import {
   copyWorkingAckExample,
   copyWorkingAckFallback,
   copyCheckpointNeedDecision,
+  copyLongTurnChairReminder,
   copyLongTurnHeartbeat,
   copyLongTurnInProgress,
   buildStatusDirectiveNote,
+  GROUP_TASK_NOTICE,
   hasGroupTaskNotice,
   isRollCallPresenceCheck,
+  withGroupTaskNotice,
 } from '../libs/groupTaskCopy';
 import {
   ensureGroupTaskMemberReady,
@@ -864,18 +867,32 @@ const DEFAULT_VERIFICATION_RETRY_MS = 10 * 60_000;
 const DEFAULT_PLAIN_TURN_TIMEOUT_MS = 10 * 60_000;
 /**
  * fix/group-task-flow (task #51 feedback): host-side liveness reporting for
- * long turns. A dispatched turn that is still running after
- * DEFAULT_LONG_TURN_PLACEHOLDER_MS posts a numberless [WORKING] placeholder
- * as the bot (the group sees progress instead of silence), then at most
- * DEFAULT_LONG_TURN_HEARTBEAT_MAX heartbeat lines every
- * DEFAULT_LONG_TURN_HEARTBEAT_MS. Each worker post also renews the
- * [WORKING long-task] heartbeat lease so the watchdogs keep treating the
- * member as alive for the turn's duration. Real timers (not the daemon
- * clock): the fake test clock must not fire them.
+ * long turns. Speedup R-01 rework: an executing member must NOT post
+ * check-in messages — in the EP28 sample 46 of 96 group messages were these
+ * host-posted heartbeat lines, and they were the single largest time cost
+ * (each post also fed back through the protocol parsers). The liveness
+ * lease the watchdogs honor is now renewed INTERNALLY (no group message);
+ * the only visible emission is ONE reminder addressed to the chair when a
+ * turn exceeds DEFAULT_LONG_TURN_CHAIR_REMINDER_MS (the member is not
+ * expected to reply). Setting longTurnPlaceholderMs / longTurnHeartbeatMax
+ * above 0 restores the legacy visible posts (kept for tests and rollout
+ * debugging). Real timers (not the daemon clock): the fake test clock must
+ * not fire them.
  */
-const DEFAULT_LONG_TURN_PLACEHOLDER_MS = 90_000;
+const DEFAULT_LONG_TURN_PLACEHOLDER_MS = 0;
 const DEFAULT_LONG_TURN_HEARTBEAT_MS = 10 * 60_000;
-const DEFAULT_LONG_TURN_HEARTBEAT_MAX = 3;
+const DEFAULT_LONG_TURN_HEARTBEAT_MAX = 0;
+/**
+ * Speedup R-01: turn-runtime threshold for the single @chair reminder
+ * (default 18 min, inside the requirement's 15-20 min band). 0 disables.
+ */
+const DEFAULT_LONG_TURN_CHAIR_REMINDER_MS = 18 * 60_000;
+/**
+ * The internal liveness lease first kicks in once a turn has run this long
+ * (the legacy placeholder threshold) — arming it at dispatch would mask a
+ * genuinely unresponsive member from the no-ACK watch.
+ */
+const LONG_TURN_LEASE_ARM_MS = 90_000;
 
 // ---------------------------------------------------------------------------
 // Pure gating (exported for tests)
@@ -1676,13 +1693,24 @@ export interface GroupTaskDaemonDeps {
   plainTurnTimeoutMs?: number;
   /**
    * fix/group-task-flow: long-turn liveness reporting cadence — placeholder
-   * delay (ms, default 90s), heartbeat interval (ms, default 10 min) and max
-   * heartbeat count per turn (default 3). Tests shrink these to observe the
-   * posts without waiting.
+   * delay (ms), heartbeat interval (ms) and max heartbeat count per turn.
+   * Speedup R-01: ALL THREE default to off (0) — an executing member no longer
+   * posts check-in messages; the liveness lease is renewed internally instead.
+   * Set them above 0 to restore the legacy visible posts (tests do this).
+   * `longTurnChairReminderMs` (default 18 min, 0 disables) is the threshold
+   * for the single @chair reminder post per long turn.
    */
   longTurnPlaceholderMs?: number;
   longTurnHeartbeatMs?: number;
   longTurnHeartbeatMax?: number;
+  longTurnChairReminderMs?: number;
+  /**
+   * Turn-runtime (ms) after which the INTERNAL liveness lease starts renewing
+   * (default 90s — the legacy placeholder threshold). Arming earlier would
+   * mask a genuinely unresponsive member from the no-ACK watch. Tests shrink
+   * this to observe the internal renewal without waiting.
+   */
+  longTurnLeaseArmMs?: number;
   /**
    * Ledger fix (#14→#16): upload a LOCAL file deliverable on-chain as a
    * metafile paid by the author bot's wallet, so a worker's local file path
@@ -2027,7 +2055,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     Math.trunc(deps.plainTurnTimeoutMs ?? DEFAULT_PLAIN_TURN_TIMEOUT_MS),
   );
   const longTurnPlaceholderMs = Math.max(
-    50,
+    0, // Speedup R-01: 0 (the default) disables the visible placeholder post.
     Math.trunc(deps.longTurnPlaceholderMs ?? DEFAULT_LONG_TURN_PLACEHOLDER_MS),
   );
   const longTurnHeartbeatMs = Math.max(
@@ -2037,6 +2065,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const longTurnHeartbeatMax = Math.max(
     0,
     Math.trunc(deps.longTurnHeartbeatMax ?? DEFAULT_LONG_TURN_HEARTBEAT_MAX),
+  );
+  const longTurnChairReminderMs = Math.max(
+    0,
+    Math.trunc(deps.longTurnChairReminderMs ?? DEFAULT_LONG_TURN_CHAIR_REMINDER_MS),
+  );
+  const longTurnLeaseArmMs = Math.max(
+    50,
+    Math.trunc(deps.longTurnLeaseArmMs ?? LONG_TURN_LEASE_ARM_MS),
   );
   const performChatWithTimeout: GroupTaskDaemonPerformChatFn = (systemPrompt, userMessage, llmId, options) => {
     // Per-attempt window (attemptTimeoutMs): the primary and the fallback
@@ -5658,11 +5694,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   /**
    * fix/group-task-flow (task #51 feedback): arm the long-turn liveness
    * timers for one detached turn job; the returned timers must be cleared in
-   * the job's finally. Posts numberless ceremony-shaped [WORKING] lines as
-   * the working bot (chair posts are remembered so they never retrigger the
-   * daemon; worker posts renew the [WORKING long-task] heartbeat lease the
-   * watchdogs honor). Real timers on purpose: the test clock must not fire
-   * them.
+   * the job's finally.
+   *
+   * Speedup R-01 rework: liveness is now INTERNAL by default. While the turn
+   * runs past LONG_TURN_LEASE_ARM_MS, the worker's [WORKING long-task] lease
+   * is renewed straight into kv (no group message) so the silence watchdogs
+   * keep treating the member as alive for the turn's duration. The single
+   * visible emission is one @chair reminder at longTurnChairReminderMs — the
+   * member is not expected to reply. The legacy visible posts (numberless
+   * ceremony-shaped [WORKING] lines as the working bot) only happen when
+   * longTurnPlaceholderMs / longTurnHeartbeatMax are explicitly set above 0.
+   * Real timers on purpose: the test clock must not fire them.
    */
   const armLongTurnLiveness = (args: {
     taskId: number;
@@ -5678,6 +5720,64 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       timer.unref?.();
       return timer;
     };
+    const renewLease = (): void => {
+      if (args.isChair) return;
+      // Re-check inside the timer hop: the job may have settled (its finally
+      // clears these timers) after this timer already fired.
+      if (!pendingTurnJobs.has(args.job)) return;
+      try {
+        deps.getStore().set(
+          `${WORKING_HEARTBEAT_PREFIX}${args.taskId}:${args.metabotId}`,
+          String(computeWorkingHeartbeatUntil(Math.ceil(longTurnHeartbeatMs / 60_000) + 1, now())),
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${args.taskId}: internal liveness lease renewal failed for bot ${args.metabotId}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    if (!args.isChair) {
+      timers.push(armTimer(renewLease, longTurnLeaseArmMs));
+      const renewalInterval = setInterval(
+        renewLease,
+        Math.max(50, Math.floor(longTurnHeartbeatMs / 2)),
+      );
+      renewalInterval.unref?.();
+      timers.push(renewalInterval);
+      if (longTurnChairReminderMs > 0) {
+        timers.push(armTimer(() => {
+          void (async () => {
+            if (!pendingTurnJobs.has(args.job)) return;
+            try {
+              const memberName =
+                deps.getGroupTaskStore().listMembers(args.taskId)
+                  .find((member) => member.metabotId === args.metabotId)?.name?.trim()
+                || deps.getMetabotStore().getMetabotById(args.metabotId)?.name?.trim()
+                || `bot-${args.metabotId}`;
+              const minutes = Math.max(1, Math.round(longTurnChairReminderMs / 60_000));
+              await postGroupMessage(
+                args.taskId,
+                args.metabotId,
+                withGroupTaskNotice(
+                  GROUP_TASK_NOTICE.longTurn,
+                  copyLongTurnChairReminder(memberName, minutes),
+                ),
+              );
+              emitLog(
+                `[GroupTaskDaemon] Task ${args.taskId}: posted the one-shot long-turn chair reminder for bot ${args.metabotId}`,
+              );
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${args.taskId}: long-turn chair reminder post failed for bot ${args.metabotId}: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          })();
+        }, longTurnChairReminderMs));
+      }
+    }
+    // Legacy visible posts (opt-in via deps): placeholder + heartbeats.
     const postLine = (text: string): void => {
       void (async () => {
         // Re-check inside the async hop: the job may have settled (its
@@ -5704,7 +5804,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
       })();
     };
-    timers.push(armTimer(() => postLine(copyLongTurnInProgress()), longTurnPlaceholderMs));
+    if (longTurnPlaceholderMs > 0) {
+      timers.push(armTimer(() => postLine(copyLongTurnInProgress()), longTurnPlaceholderMs));
+    }
     for (let beat = 1; beat <= longTurnHeartbeatMax; beat += 1) {
       timers.push(
         armTimer(

@@ -182,6 +182,25 @@ export function copyLongTurnHeartbeat(
     : '[WORKING] 长步骤仍在后台执行，一切正常，完成后第一时间汇报进展。';
 }
 
+/**
+ * Speedup R-01: the ONE proactive reminder for a turn that has run past the
+ * long-turn reminder threshold. Posted as the working bot, addressed to the
+ * chair; the member is NOT expected to reply (it is mid-turn). Deliberately
+ * carries no protocol tags beyond the host-notice envelope, so it never arms
+ * ACK watches or delivery deadlines when it round-trips through the daemon.
+ */
+export function copyLongTurnChairReminder(
+  memberName: string,
+  minutes: number,
+  language: AppLanguage = groupTaskLanguage(),
+): string {
+  return language === 'en'
+    ? `@chair ℹ️ ${memberName}'s turn has been running for over ${minutes} min with no new group message. ` +
+      'Execution appears normal and the member need not reply before delivering — intervene only if this far exceeds the expected duration.'
+    : `@chair ℹ️ ${memberName} 的回合已执行超过 ${minutes} 分钟，期间无新群消息。` +
+      '执行看似正常，成员交付前无需回应——仅当明显超出预期时长时再介入。';
+}
+
 export function copyStandbyExample(language: AppLanguage = groupTaskLanguage()): string {
   return language === 'en'
     ? '[STANDBY] observing / on standby / can exit'
