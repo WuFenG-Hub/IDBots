@@ -2240,6 +2240,35 @@ export class GroupTaskStore {
   }
 
   /**
+   * Speedup R-03: cross-message idempotency lookup — the EARLIEST non-rejected
+   * deliverable in this task carrying the exact same URI from the SAME author.
+   * The (msg_pin_id, uri) dedupe only catches a retried message; a member
+   * re-delivering the same pin/metafile under a NEW message pin (EP28: the
+   * same video delivered twice 3 minutes apart) is a duplicate, not a new
+   * ledger row — the caller folds it into this survivor. Rejected rows are
+   * excluded so a re-delivery after a rejection still records fresh (the
+   * chair's rework loop stays visible). A null/empty author or URI never
+   * matches (unknown provenance is not proven sameness).
+   */
+  findDeliverableByAuthorAndUri(
+    taskId: number,
+    authorGlobalmetaid: string | null | undefined,
+    uri: string | null | undefined,
+  ): GroupTaskDeliverable | undefined {
+    const authorKey = String(authorGlobalmetaid ?? '').trim().toLowerCase();
+    const uriKey = String(uri ?? '').trim();
+    if (!authorKey || !uriKey) return undefined;
+    const row = this.getOne<GroupTaskDeliverableRow>(
+      `SELECT * FROM group_task_deliverables
+       WHERE task_id = ? AND uri = ? AND status != 'rejected'
+         AND LOWER(TRIM(author_globalmetaid)) = ?
+       ORDER BY id ASC LIMIT 1`,
+      [taskId, uriKey, authorKey],
+    );
+    return row ? rowToGroupTaskDeliverable(row) : undefined;
+  }
+
+  /**
    * P2: same-bytes dedupe lookup — the EARLIEST non-rejected deliverable in
    * this task carrying the given sha256 content hash. Rejected rows are
    * excluded so a re-delivery of already-rejected bytes is never absorbed

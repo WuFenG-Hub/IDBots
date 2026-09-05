@@ -157,6 +157,17 @@ export function stripGroupTaskQuotedCode(content: string): string {
     .replace(/`[^`\n]*`/g, '');
 }
 
+/**
+ * Fence-only variant for PAYLOAD-bearing tags ([DELIVERABLE]): real deliveries
+ * routinely wrap the delivered URI / local file path in inline backticks
+ * (`metafile://…i0`, `/path/to/spec.md`), so inline code spans must stay
+ * intact here; only multi-line fenced blocks are citations.
+ */
+export function stripFencedCodeBlocks(content: string): string {
+  return String(content ?? '')
+    .replace(/```[\s\S]*?(?:```|$)/g, '');
+}
+
 /** Chair-movable transitions (LEGAL_TRANSITIONS minus the owner-only terminal moves). */
 const CHAIR_STATUS_MOVES: Record<string, Array<'executing' | 'review'>> = {
   planning: ['executing'],
@@ -395,6 +406,12 @@ export function classifyMemberLiveness(signals: MemberLivenessSignals): MemberLi
 }
 /** P0-2: kv guard so one dispatch produces at most ONE host ACK. */
 const ACK_KV_PREFIX = 'group_task_ack:';
+/**
+ * Speedup R-03: kv flag per (task, message) — every [DELIVERABLE] candidate
+ * of the message folded into an earlier ledger row (same author + same uri),
+ * so the responder gate must not wake the chair for a fresh verdict.
+ */
+const DELIVERABLE_FOLDED_PREFIX = 'group_task_deliverable_folded:';
 /**
  * P2-6: dependency annotation on a dispatch message, e.g.
  * `[DEPENDS_ON: <64hex pinid>]` — the host holds the worker dispatch until the
@@ -4072,21 +4089,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // Round-4 attribution: deliverables are only collected from messages whose
     // chain-signature GlobalMetaID is a task member. SUSPECT senders (neither
     // member nor owner) are marked on the row but never contribute deliverables.
+    //
+    // Speedup hardening: parsing runs on fence-stripped content — a
+    // [DELIVERABLE] tag inside a fenced code block is a citation (docs,
+    // examples), never a real delivery. Inline backticks survive: real
+    // deliveries wrap URIs / local file paths in them.
+    const parseContent = stripFencedCodeBlocks(content);
     if (message.senderSuspect) {
       // no deliverable collection for non-member speakers
-    } else if (DELIVERABLE_TAG.test(content) && !isChairMessage) {
+    } else if (DELIVERABLE_TAG.test(parseContent) && !isChairMessage) {
       // Round-4: per-candidate ingestion. Every [DELIVERABLE] tag occurrence
       // (its own line or inline) produces one candidate; valid candidates each
       // get their own row — a message with two tag lines records TWO rows.
       // Placeholder/truncated candidates are dropped individually so a junk
       // line can never hide a real URI on a sibling line.
       const msgPinId = message.pinId;
-      const tagLines = deliverableTagLines(content);
-      const candidates = parseDeliverableLines(content);
+      const tagLines = deliverableTagLines(parseContent);
+      const candidates = parseDeliverableLines(parseContent);
       // Index-aligned raw segment text per candidate (ledger fix: text
       // candidates may carry a local file path worth uploading on-chain).
-      const candidateSegments = parseDeliverableSegments(content);
+      const candidateSegments = parseDeliverableSegments(parseContent);
       const recordedDeliverables: ParsedDeliverable[] = [];
+      // Speedup R-03 fold accounting: when EVERY valid candidate of this
+      // message folded into an earlier ledger row, the message must not wake
+      // the chair for a fresh verdict (flag consumed in the responder gate).
+      let foldedDuplicateCount = 0;
+      let recordedNewCount = 0;
       const rejected = candidates.filter((candidate) => !candidate.valid);
       if (rejected.length > 0) {
         emitLog(
@@ -4094,7 +4122,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `(${rejected.map((candidate) => candidate.note ?? 'invalid').join('; ')})`,
         );
       }
-      const isCorrection = isCorrectionText(content);
+      const isCorrection = isCorrectionText(parseContent);
       for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
         const candidate = candidates[candidateIndex];
         if (!candidate.valid) continue; // placeholder/truncated/example → never recorded
@@ -4135,6 +4163,28 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             continue;
           }
         }
+        // Speedup R-03: cross-message idempotency — the same author
+        // re-delivering the SAME uri under a NEW message pin (EP28: the same
+        // video delivered twice 3 minutes apart → two ledger rows + a
+        // correction event) folds into the earliest non-rejected row: an
+        // append-only duplicates[] annotation on the survivor, no new row,
+        // and (when nothing else in the message is new) no chair wake.
+        if (candidate.uri) {
+          const prior = store.findDeliverableByAuthorAndUri(
+            task.id,
+            message.senderGlobalMetaId,
+            candidate.uri,
+          );
+          if (prior) {
+            appendDeliverableDuplicateNote(prior, msgPinId, candidate.uri);
+            foldedDuplicateCount += 1;
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: duplicate [DELIVERABLE] ${candidate.uri.slice(0, 48)}… ` +
+              `by the same author folded into ledger row #${prior.id} (no new record)`,
+            );
+            continue;
+          }
+        }
         const existing = store.findDeliverableByMsgPinAndUri(
           task.id,
           msgPinId,
@@ -4153,6 +4203,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           uri: candidate.uri,
         });
         recordedDeliverables.push(candidate);
+        recordedNewCount += 1;
         // Review fix (delivery-deadline hygiene): the deliverable ARRIVED —
         // retire this member's deadline watch immediately. Leaving the kv
         // armed after a late delivery is exactly what fed the reclaim ladder
@@ -4325,6 +4376,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
           }
         }
+      }
+      // Speedup R-03: every valid candidate folded into an earlier ledger row
+      // → flag the message so the responder gate skips the chair_deliverable
+      // wake (a duplicate needs no fresh verdict).
+      if (foldedDuplicateCount > 0 && recordedNewCount === 0) {
+        deps.getStore().set(`${DELIVERABLE_FOLDED_PREFIX}${task.id}:${message.id}`, '1');
       }
       try {
         const notes = await verifyDeliverableCandidates(tagLines.join('\n'));
@@ -8038,24 +8095,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (!hit) return { outcome: 'none' };
     const survivor = hit.id < deliverable.id ? hit : deliverable;
     const duplicate = hit.id < deliverable.id ? deliverable : hit;
-    // Merge into the survivor's existing verification report (append-only);
-    // a corrupt/missing report degrades to a fresh object, same as the
-    // re-verification pass's parse idiom.
-    let report: Record<string, unknown> = {};
-    try {
-      if (survivor.verification) report = JSON.parse(survivor.verification);
-    } catch {
-      report = {};
-    }
-    const duplicates = Array.isArray(report.duplicates) ? report.duplicates : [];
-    duplicates.push({
-      msgPinId: duplicate.msgPinId ?? null,
-      uri: duplicate.uri ?? null,
-      notedAt: new Date().toISOString(),
-    });
-    report.duplicates = duplicates;
-    const survivorVerification = JSON.stringify(report);
-    store.updateDeliverableVerification(survivor.id, survivorVerification);
+    const survivorVerification = appendDeliverableDuplicateNote(
+      survivor,
+      duplicate.msgPinId ?? null,
+      duplicate.uri ?? null,
+    );
     store.deleteDeliverable(duplicate.id);
     emitLog(
       `[GroupTaskDaemon] Task ${task.id}: deliverable #${duplicate.id} duplicates #${survivor.id} ` +
@@ -8064,6 +8108,37 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     return duplicate.id === deliverable.id
       ? { outcome: 'current-deleted' }
       : { outcome: 'other-deleted', survivorVerification };
+  };
+
+  /**
+   * Speedup R-03: append-only duplicates[] annotation shared by the
+   * content-hash dedupe and the (author, uri) cross-message fold — the
+   * survivor's verification report gains one entry per absorbed duplicate.
+   * Merge into the survivor's existing report; a corrupt/missing report
+   * degrades to a fresh object. Returns the written JSON.
+   */
+  const appendDeliverableDuplicateNote = (
+    survivor: GroupTaskDeliverable,
+    msgPinId: string | null,
+    uri: string | null,
+  ): string => {
+    const store = deps.getGroupTaskStore();
+    let report: Record<string, unknown> = {};
+    try {
+      if (survivor.verification) report = JSON.parse(survivor.verification);
+    } catch {
+      report = {};
+    }
+    const duplicates = Array.isArray(report.duplicates) ? report.duplicates : [];
+    duplicates.push({
+      msgPinId: msgPinId ?? null,
+      uri: uri ?? null,
+      notedAt: new Date().toISOString(),
+    });
+    report.duplicates = duplicates;
+    const survivorVerification = JSON.stringify(report);
+    store.updateDeliverableVerification(survivor.id, survivorVerification);
+    return survivorVerification;
   };
 
   /** P2: hard cap for download-and-hash of metafile deliverables (bytes). */
@@ -9036,6 +9111,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           if (!member || !bot) continue;
           const isChair = member.role === 'chair';
           const key = keyOf(task.id, decision.metabotId);
+
+          // Speedup R-03: a [DELIVERABLE] message whose candidates ALL folded
+          // into earlier ledger rows (same author + same uri re-delivery)
+          // needs no fresh chair verdict — skip the wake entirely.
+          if (decision.reason === 'chair_deliverable'
+              && sqlite.get<string>(`${DELIVERABLE_FOLDED_PREFIX}${task.id}:${message.id}`) === '1') {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: chair wake suppressed for message #${message.id} ` +
+              '— duplicate deliverable folded into the existing ledger row',
+            );
+            continue;
+          }
 
           // P2-7: a chair auto response (deliverable / floor control / owner
           // message) is suppressed when the Twin already replied to this message
