@@ -8061,3 +8061,123 @@ test('fix-v2 P0-2: a genuinely silent chair still gets one re-drive after a full
     h.cleanup();
   }
 });
+
+test('fix-v2 P1-3: the stuck alert cites verifiable evidence and never mislabels an expired prose wait', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      memberTimeoutAfterMinutes: 1,
+      memberUnreachableAfterMinutes: 1,
+      sendMilestoneToSourceSession: (payload) => { milestones.push(payload); return true; },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-v2p13a', task.id]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Same shape as the exemption-expiry test: a prose dependency dispatch,
+    // the worker ACKs, then goes completely silent.
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-prose-evidence-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S5 质检，依赖 S4 的交付，等它上线后开始。',
+      chainTimestamp: Math.floor((startMs - 150_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'working-prose-evidence-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，等 S4', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    // Within the cap: exempt, no alert.
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), undefined, 'no alert inside the prose window');
+
+    // Past the cap: the alert fires — and it must NOT read "no upstream
+    // dependency declared" (task #57's mislabel): a prose wait WAS declared.
+    h.state.nowMs = startMs + 180 * 60_000 + 60_000;
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'the stuck alert fires after the cap');
+    const anomaly = milestones.find((entry) => entry.kind === 'anomaly' && /looks stuck/.test(entry.message));
+    assert.ok(anomaly, 'the stuck alert reached the origin session');
+    assert.match(
+      anomaly.message,
+      /prose-declared upstream wait in the latest dispatch \(time-capped exemption expired\)/,
+      'the dependency state names the expired prose exemption',
+    );
+    assert.doesNotMatch(anomaly.message, /no upstream dependency declared/, 'never the #57 mislabel');
+    // Evidence pointers: ledger state, last speech, session last write, and
+    // the last [WORKING] signal — each with a minutes-ago figure.
+    assert.match(anomaly.message, /evidence: no deliverable on the ledger/);
+    assert.match(anomaly.message, /last group speech at \d{2}:\d{2} UTC, \d+ min ago/);
+    assert.match(anomaly.message, /session log last write at \d{2}:\d{2} UTC, \d+ min ago/);
+    assert.match(anomaly.message, /last \[WORKING\] signal at \d{2}:\d{2} UTC, \d+ min ago/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P1-3: a rejected deliverable still surfaces in the stuck evidence with its pin', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      memberTimeoutAfterMinutes: 1,
+      memberUnreachableAfterMinutes: 1,
+      sendMilestoneToSourceSession: (payload) => { milestones.push(payload); return true; },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-v2p13b', task.id]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // A plain dispatch (no dependency language), the worker ACKs and goes
+    // silent; its only ledger entry is a REJECTED deliverable — the
+    // delivered-then-idle guard must not apply, but the alert must cite it.
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-plain-evidence-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 请处理 S7 图标导出。',
+      chainTimestamp: Math.floor((startMs - 150_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'working-plain-evidence-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const rejectedPin = 'a'.repeat(64);
+    const deliverable = h.groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: `${rejectedPin}i0`,
+      authorGlobalmetaid: 'gmid-w2',
+      kind: 'pinid',
+      uri: `pin://${rejectedPin}i0`,
+    });
+    h.db.run(
+      "UPDATE group_task_deliverables SET status = 'rejected', created_at = ? WHERE id = ?",
+      [new Date(startMs - 30 * 60_000).toISOString().slice(0, 19).replace('T', ' '), deliverable.id],
+    );
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'a rejected deliverable does not shield the member');
+    const anomaly = milestones.find((entry) => entry.kind === 'anomaly' && /looks stuck/.test(entry.message));
+    assert.ok(anomaly, 'the stuck alert reached the origin session');
+    assert.match(
+      anomaly.message,
+      new RegExp(`latest ledger deliverable pin://${rejectedPin}i0 \\(rejected\\) at \\d{2}:\\d{2} UTC, \\d+ min ago`),
+      'the evidence cites the rejected deliverable pin and its time',
+    );
+    assert.match(anomaly.message, /no upstream dependency declared in the dispatch/, 'plain dispatch: the honest label');
+  } finally {
+    h.cleanup();
+  }
+});

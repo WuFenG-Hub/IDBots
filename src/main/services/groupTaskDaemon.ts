@@ -6638,6 +6638,56 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * fix-v2 P1-3: every stuck verdict must cite verifiable pointers — the
+   * member's latest ledger deliverable (pin/uri + time + status), its last
+   * group speech, the session log's last write, and the last [WORKING] signal,
+   * each with a minutes-ago figure. The chair verifies against the ledger and
+   * the session instead of rebutting a bare inference (task #57: 4/4 false
+   * stuck alerts cited nothing and cost clarification rounds).
+   */
+  const buildStuckEvidence = (
+    deliverable: Pick<GroupTaskDeliverable, 'msgPinId' | 'uri' | 'createdAt' | 'status'> | null,
+    signals: {
+      lastWorkingMs: number | null;
+      lastSpeakMs: number | null;
+      lastSessionActivityMs: number | null;
+    },
+  ): string => {
+    const fmtHhMm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
+    const agoMin = (ms: number): number => Math.max(0, Math.round((now() - ms) / 60_000));
+    const parts: string[] = [];
+    if (deliverable) {
+      const ref = deliverable.msgPinId
+        ? `pin://${deliverable.msgPinId}`
+        : (deliverable.uri ?? '(no uri)');
+      const atMs = parseSqliteUtcMs(deliverable.createdAt);
+      parts.push(
+        atMs != null
+          ? `latest ledger deliverable ${ref} (${deliverable.status}) at ${fmtHhMm(atMs)}, ${agoMin(atMs)} min ago`
+          : `latest ledger deliverable ${ref} (${deliverable.status})`,
+      );
+    } else {
+      parts.push('no deliverable on the ledger');
+    }
+    parts.push(
+      signals.lastSpeakMs != null
+        ? `last group speech at ${fmtHhMm(signals.lastSpeakMs)}, ${agoMin(signals.lastSpeakMs)} min ago`
+        : 'no group speech on record',
+    );
+    parts.push(
+      signals.lastSessionActivityMs != null
+        ? `session log last write at ${fmtHhMm(signals.lastSessionActivityMs)}, ${agoMin(signals.lastSessionActivityMs)} min ago`
+        : 'no cowork-session writes on record',
+    );
+    if (signals.lastWorkingMs != null) {
+      parts.push(
+        `last [WORKING] signal at ${fmtHhMm(signals.lastWorkingMs)}, ${agoMin(signals.lastWorkingMs)} min ago`,
+      );
+    }
+    return parts.join('; ');
+  };
+
+  /**
    * P0-2: auto-mark silent assigned/working members as unreachable after
    * memberUnreachableAfterMinutes without any chain speech. Baseline = last
    * speak time (fallback: member join time); never marks chair members, done
@@ -7048,8 +7098,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // chair a re-dispatch directive duplicates finished work. Mirrors the
     // deliveredLate guard in monitorDeliveryDeadlines; delivery does not
     // move the member store status, so the ledger is the source of truth.
+    // fix-v2 P1-3: the same ledger list also feeds the stuck-alert evidence
+    // block below (fetched once per tick, not once per member).
+    const taskDeliverables = store.listDeliverables(task.id);
     const deliveredGmids = new Set(
-      store.listDeliverables(task.id)
+      taskDeliverables
         .filter((deliverable) => deliverable.status !== 'rejected')
         .map((deliverable) => (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase())
         .filter((authorGmid) => authorGmid.length > 0),
@@ -7131,20 +7184,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // GT-09 honesty: only pinid/txid tokens are ledger-verified — free-text
       // tokens are advisory (always "satisfied") and must never read as
       // "delivered" in the chair-facing annotation.
+      // fix-v2 P1-3: when the exemption that just expired was PROSE-declared,
+      // say so — never mislabel it "no upstream dependency declared" (task
+      // #57: the false stuck alerts tagged prose-waiting members with exactly
+      // that, contradicting the dispatch the chair could see).
       const depContext = depWait == null
         ? null
-        : depWait.tokens.length === 0
-          ? 'no upstream dependency declared in the dispatch'
-          : (() => {
-              const verified = depWait.tokens.filter((token) => PINID_FORMAT.test(token) || TXID_FORMAT.test(token));
-              const advisoryCount = depWait.tokens.length - verified.length;
-              const parts: string[] = [];
-              if (verified.length > 0) parts.push(`upstream ${verified.join(', ')} delivered`);
-              if (advisoryCount > 0) {
-                parts.push(`${advisoryCount} advisory free-text upstream token(s) not ledger-verifiable`);
-              }
-              return parts.join('; ');
-            })();
+        : depWait.proseDeclared
+          ? 'prose-declared upstream wait in the latest dispatch (time-capped exemption expired)'
+          : depWait.tokens.length === 0
+            ? 'no upstream dependency declared in the dispatch'
+            : (() => {
+                const verified = depWait.tokens.filter((token) => PINID_FORMAT.test(token) || TXID_FORMAT.test(token));
+                const advisoryCount = depWait.tokens.length - verified.length;
+                const parts: string[] = [];
+                if (verified.length > 0) parts.push(`upstream ${verified.join(', ')} delivered`);
+                if (advisoryCount > 0) {
+                  parts.push(`${advisoryCount} advisory free-text upstream token(s) not ledger-verifiable`);
+                }
+                return parts.join('; ');
+              })();
 
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
       // once per (task, member) streak. Anti-flap (fix/group-member-status,
@@ -7253,9 +7312,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // automatic reclaim kept killing sessions of correctly waiting members
       // (tasks #54/#55, 3 false reclaims). kv `groupTaskStuckReclaim` =
       // {"mode":"auto"} restores the reclaim behavior.
+      // fix-v2 P1-3: the verdict text must carry its own verifiable pointers
+      // (ledger deliverable / speech / session-write / [WORKING] timestamps)
+      // so the chair confirms instead of rebutting.
+      const latestMemberDeliverable = gmid
+        ? taskDeliverables
+            .filter((deliverable) => (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === gmid)
+            .sort((a, b) => (parseSqliteUtcMs(b.createdAt) ?? 0) - (parseSqliteUtcMs(a.createdAt) ?? 0))[0] ?? null
+        : null;
+      const stuckEvidence = buildStuckEvidence(latestMemberDeliverable, {
+        lastWorkingMs: lastWorkingSec * 1000,
+        lastSpeakMs: speakSec != null ? speakSec * 1000 : null,
+        lastSessionActivityMs,
+      });
       const stuckReason =
         `[WORKING] signal stale ${memberTimeoutAfterMinutes}+ min with zero cowork-session activity` +
-        (depContext ? `; ${depContext}` : '');
+        (depContext ? `; ${depContext}` : '') +
+        `; evidence: ${stuckEvidence}`;
       if (parseGroupTaskStuckReclaimMode(sqlite.get<string>('groupTaskStuckReclaim')) === 'auto') {
         const reclaimNote = reclaimStuckWorkerSession(task, member, stuckReason);
         if (reclaimNote) reclaimNotes.push(reclaimNote);
