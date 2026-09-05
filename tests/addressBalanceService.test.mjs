@@ -84,6 +84,7 @@ test('getAddressBalance falls back to mempool when Metalet btc-balance fails', a
       chain: 'btc',
       address: 'test-btc-address',
       satoshis: 7878,
+      unconfirmedSatoshis: 600,
       unit: 'BTC',
       value: 0.00007878,
     });
@@ -97,6 +98,48 @@ test('getAddressBalance falls back to mempool when Metalet btc-balance fails', a
       calls.some((href) => href.includes('/api/address/test-btc-address/utxo')),
       true,
       'mempool utxo summary should be used as the BTC balance fallback',
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('getAddressBalance exposes mempool satoshis for a freshly gas-subsidized MVC wallet', async () => {
+  assert.equal(
+    typeof addressBalanceService?.getAddressBalance,
+    'function',
+    'getAddressBalance() should be exported',
+  );
+
+  const originalFetch = global.fetch;
+
+  global.fetch = async (url) => {
+    const href = String(url);
+    if (href.includes('/wallet-api/v4/mvc/address/balance-info')) {
+      return jsonResponse({
+        code: 0,
+        message: 'success',
+        data: {
+          address: 'fresh-bot-wallet',
+          // Subsidy payouts land and stay 0-conf on MVC while remaining spendable.
+          confirmed: 0,
+          unconfirmed: 501800,
+          utxoCount: 0,
+        },
+      });
+    }
+    throw new Error(`Unexpected fetch URL: ${href}`);
+  };
+
+  try {
+    const balance = await addressBalanceService.getAddressBalance('mvc', 'fresh-bot-wallet');
+
+    assert.equal(balance.satoshis, 0);
+    assert.equal(balance.unconfirmedSatoshis, 501800);
+    assert.equal(
+      balance.satoshis + balance.unconfirmedSatoshis,
+      501800,
+      'spendable balance (confirmed + mempool) must cover the subsidy payout',
     );
   } finally {
     global.fetch = originalFetch;

@@ -531,10 +531,12 @@ export async function createMetaBotOnChainCore(
 
     // 2b. Balance gate: the fresh wallet (plus whatever the subsidy just
     // delivered) must cover the minimal create publish. Fails CLOSED on a
-    // confirmed low balance — with the shortfall reported and nothing written,
-    // the "identity registered, info-pins partial" state never starts. Fails
-    // OPEN when the balance API itself errors (never block creation on an
-    // explorer outage). Skipped when the seam is not wired.
+    // confirmed low spendable balance (MVC subsidy payouts arrive and stay
+    // 0-conf yet spendable, so the seam must count mempool funds too) — with
+    // the shortfall reported and nothing written, the "identity registered,
+    // info-pins partial" state never starts. Fails OPEN when the balance API
+    // itself errors (never block creation on an explorer outage). Skipped
+    // when the seam is not wired.
     if (deps.checkWalletBalance) {
       let balanceSats: number | null = null;
       try {
@@ -543,9 +545,18 @@ export async function createMetaBotOnChainCore(
         balanceSats = null;
       }
       if (balanceSats != null && balanceSats < MIN_CREATE_GAS_SATS) {
+        // The subsidy result was previously swallowed here, leaving the gate
+        // failure undiagnosable (paid-but-unspent vs payout-refused).
+        console.warn(
+          `[metabotManage] balance gate rejected create of "${wantedName}" at ${walletResult.mvc_address}:`,
+          JSON.stringify({ balanceSats, minRequired: MIN_CREATE_GAS_SATS, subsidyResult }),
+        );
+        const subsidyNote = subsidyResult.success
+          ? 'the gas subsidy claimed success but the funds are not spendable yet'
+          : `the gas subsidy failed${subsidyResult.error ? ` (${subsidyResult.error})` : ''}`;
         return {
           success: false,
-          error: `INSUFFICIENT_BALANCE: creating "${wantedName}" needs roughly ${MIN_CREATE_GAS_SATS}+ sats of chain fee, but the fresh wallet holds ${balanceSats} sats (short by ${MIN_CREATE_GAS_SATS - balanceSats} sats). Top up MVC/SPACE gas for the bot wallet (or retry the gas subsidy) and create again — nothing was created.`,
+          error: `INSUFFICIENT_BALANCE: creating "${wantedName}" needs roughly ${MIN_CREATE_GAS_SATS}+ sats of chain fee, but the fresh wallet holds ${balanceSats} sats (short by ${MIN_CREATE_GAS_SATS - balanceSats} sats) — ${subsidyNote}. Top up MVC/SPACE gas for the bot wallet (or retry the gas subsidy) and create again — nothing was created.`,
         };
       }
     }
