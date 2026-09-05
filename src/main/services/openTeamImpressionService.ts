@@ -373,11 +373,16 @@ function appendEventObservation(input: AppendEventObservationInput): { created: 
  * Task close (done/cancelled): the chair records one objective participation
  * observation per remote teammate. Cancelled tasks are recorded too, with the
  * close reason noted when one was given.
+ * fix-v2 P2-6: a cancellation carries an attribution — 'host' when the cancel
+ * was host-side (an explicit caller attribution, a system-actor terminal
+ * event, or supervisor flag/pause fault signals on the task) so candidate
+ * scoring never demotes a member for the host's own failure.
  */
 export function recordTaskCloseImpressions(
   taskId: number,
   outcome: OpenTeamTaskCloseOutcome,
   reason?: string,
+  opts?: { attribution?: 'host' | 'member' | 'mixed' | null },
 ): OpenTeamImpressionRecordResult {
   const result: OpenTeamImpressionRecordResult = { recorded: 0, created: 0, skipped: 0 };
   const deps = resolveDeps();
@@ -392,6 +397,26 @@ export function recordTaskCloseImpressions(
     if (!observer) return result; // twin has no GlobalMetaID — silent skip
     const now = deps.now?.() ?? Date.now();
     const closeReason = text(reason);
+    // fix-v2 P2-6: cancellation attribution. An explicit caller attribution
+    // wins; otherwise derive host-fault from the terminal event's actor
+    // ('system') or host-side fault signals (supervisor flag/pause) recorded
+    // on the task — those cancels were the host's doing, not the member's.
+    let cancelAttribution: 'host' | 'member' | 'mixed' | null = null;
+    if (outcome === 'cancelled') {
+      if (opts?.attribution === 'host' || opts?.attribution === 'member' || opts?.attribution === 'mixed') {
+        cancelAttribution = opts.attribution;
+      } else {
+        try {
+          const systemClosed = deps.groupTaskStore.listStatusEvents(task.id)
+            .some((event) => event.toStatus === 'cancelled' && event.actorKind === 'system');
+          const hostFaultSignaled = deps.groupTaskStore.listSupervisorSignals(task.id)
+            .some((signal) => signal.kind === 'flag' || signal.kind === 'pause');
+          if (systemClosed || hostFaultSignaled) cancelAttribution = 'host';
+        } catch {
+          cancelAttribution = null; // attribution is best-effort — never block the close
+        }
+      }
+    }
     const deliverables = deps.groupTaskStore.listDeliverables(task.id);
 
     for (const subject of listCollaboratorSubjects(deps, task.id)) {
@@ -453,6 +478,7 @@ export function recordTaskCloseImpressions(
               pinIds,
               groupId: text(task.groupId) || undefined,
               at: now,
+              ...(cancelAttribution ? { attribution: cancelAttribution } : {}),
             },
             cooperationContext: subject.metabotId == null ? 'openteam_remote_group_task' : 'local_group_task',
             taskId: task.id,

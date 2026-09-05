@@ -491,6 +491,7 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
   timeBreakdownTitle: string;
   phaseLabel: (key: string) => string;
   breakdownTotals: (messageTotal: number, heartbeatSharePct: number) => string;
+  breakdownAlerts: (alertTotal: number, falsePositives: number) => string;
   phaseLine: (key: string, minutes: number) => string;
   stepLine: (label: string, minutes: number) => string;
   members: (names: string) => string;
@@ -525,6 +526,8 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
       phaseLabel: (key) => phaseLabels[key] ?? key,
       breakdownTotals: (messageTotal, heartbeatSharePct) =>
         `Group messages: ${messageTotal} total; host heartbeat lines: ${heartbeatSharePct}%.`,
+      breakdownAlerts: (alertTotal, falsePositives) =>
+        `Host alerts: ${alertTotal} (false alarms acknowledged in-thread: ${falsePositives}).`,
       phaseLine: (key, minutes) => `- ${phaseLabels[key] ?? key}: ${minutes} min`,
       stepLine: (label, minutes) => `- ${label}: +${minutes} min`,
       members: (names) => `Members: ${names}`,
@@ -559,6 +562,8 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
     phaseLabel: (key) => phaseLabels[key] ?? key,
     breakdownTotals: (messageTotal, heartbeatSharePct) =>
       `群消息共 ${messageTotal} 条，其中宿主心跳占 ${heartbeatSharePct}%。`,
+    breakdownAlerts: (alertTotal, falsePositives) =>
+      `宿主告警共 ${alertTotal} 条，其中被群内确认为误报 ${falsePositives} 条。`,
     phaseLine: (key, minutes) => `- ${phaseLabels[key] ?? key}：${minutes} 分钟`,
     stepLine: (label, minutes) => `- ${label}：+${minutes} 分钟`,
     members: (names) => `成员：${names}`,

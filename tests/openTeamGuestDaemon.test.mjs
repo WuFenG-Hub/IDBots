@@ -1197,3 +1197,124 @@ test('status sync: daemon start backfills legacy memberships from the transcript
     store.close();
   }
 });
+
+test('fix-v2 P1-5: a corrupt guest session log rebuilds the session; the next mention runs on the fresh one', async () => {
+  const logs = [];
+  const skillTurnSessionIds = [];
+  let firstCall = true;
+  const harness = await createHarness({
+    allowChatSkills: ['skill-doc'],
+    deps: ({ coworkStore }) => ({
+      getCoworkStore: () => coworkStore,
+      getChatSkillsRoutingPrompt: async () => ({ prompt: 'SKILL ROUTING PROMPT', activeSkillIds: ['skill-doc'] }),
+      runSkillTurn: async (params) => {
+        skillTurnSessionIds.push(params.sessionId);
+        if (firstCall) {
+          firstCall = false;
+          throw new Error('corrupt session log: seq gap in committed region at line 42 (expected 100, got 98)');
+        }
+        return { replyText: 'recovered skill reply', assistantMessageId: 'asst-recovered', cwd: makeTempDir() };
+      },
+      emitLog: (line) => logs.push(String(line)),
+    }),
+  });
+  const { store, db, membershipStore, coworkStore, loop, calls } = harness;
+  try {
+    joinAndMention(db, membershipStore, `${'b'.repeat(64)}i0`);
+
+    // Tick 1: the skill turn dies on the corrupt log. The mention is still
+    // answered (plain-completion fallback — the guest is never silenced), and
+    // the host rebuilds the guest session so the NEXT skill turn works.
+    await loop.runTick();
+    assert.equal(skillTurnSessionIds.length, 1, 'one skill turn attempted');
+    assert.equal(calls.send.length, 1, 'the mention is answered via the fallback, not dropped');
+    assert.equal(calls.send[0][2].content, 'On it — results soon.', 'fallback reply went on-chain');
+    const mapping = coworkStore.getConversationMapping('openteam_guest', `openteam-guest:${GROUP_ID}`, 7);
+    assert.ok(mapping, 'mapping exists');
+    assert.notEqual(mapping.coworkSessionId, skillTurnSessionIds[0], 'mapping repointed to a fresh session');
+    const rebuilt = coworkStore.getSession(mapping.coworkSessionId);
+    assert.match(rebuilt.title, /\[rebuilt\]/, 'the rebuilt session is marked');
+    assert.ok(
+      logs.some((line) => /corrupt session log/.test(line) && /guest session rebuilt/.test(line)),
+      'the rebuild is announced immediately in the log',
+    );
+
+    // Tick 2: a new mention runs its skill turn on the rebuilt session.
+    insertGroupMessage(db, {
+      pinId: `${'d'.repeat(64)}i0`,
+      senderMetaId: 'metaid-other',
+      senderGlobalMetaId: OTHER_GMID,
+      senderName: 'Other Bot',
+      content: '@Guest Bot one more thing',
+    });
+    await loop.runTick();
+    assert.equal(skillTurnSessionIds.length, 2, 'the next mention runs a skill turn again');
+    assert.equal(skillTurnSessionIds[1], mapping.coworkSessionId, 'the skill turn ran on the rebuilt session');
+    assert.equal(calls.send.length, 2);
+    assert.equal(calls.send[1][2].content, 'recovered skill reply', 'skill-path delivery works post-rebuild');
+  } finally {
+    store.close();
+  }
+});
+
+test('fix-v2 P1-5: a corrupt-log recurrence within the rebuild cooldown logs self-heal guidance once', async () => {
+  const logs = [];
+  const harness = await createHarness({
+    allowChatSkills: ['skill-doc'],
+    deps: ({ coworkStore }) => ({
+      getCoworkStore: () => coworkStore,
+      getChatSkillsRoutingPrompt: async () => ({ prompt: 'SKILL ROUTING PROMPT', activeSkillIds: ['skill-doc'] }),
+      // Every skill turn fails corrupt — even on the rebuilt session (the
+      // dual writer is still live). The append-side signature (not the
+      // 'corrupt session log' prefix) exercises the broadened detector.
+      runSkillTurn: async () => {
+        throw new Error('append seq mismatch for "cw-x": expected 5 at index 0, got 3');
+      },
+      emitLog: (line) => logs.push(String(line)),
+    }),
+  });
+  const { store, db, membershipStore, loop, calls } = harness;
+  try {
+    joinAndMention(db, membershipStore, `${'c'.repeat(64)}i0`);
+    // Tick 1: the append-side mismatch signature triggers the rebuild too.
+    await loop.runTick();
+    assert.ok(
+      logs.some((line) => /guest session rebuilt/.test(line)),
+      'the append-side mismatch signature also triggers the rebuild',
+    );
+    // Tick 2: a new mention hits corruption on the rebuilt session — the
+    // recurrence is rate-capped, so it logs self-heal guidance (once) and
+    // still answers via the fallback.
+    insertGroupMessage(db, {
+      pinId: `${'e'.repeat(64)}i0`,
+      senderMetaId: 'metaid-other',
+      senderGlobalMetaId: OTHER_GMID,
+      senderName: 'Other Bot',
+      content: '@Guest Bot second mention',
+    });
+    await loop.runTick();
+    const guidance = logs.filter((line) => /Self-heal guidance: restart the app/.test(line));
+    assert.equal(guidance.length, 1, 'self-heal guidance logged exactly once (hourly throttle)');
+    assert.equal(calls.send.length, 2, 'both mentions answered via the fallback — never silenced');
+    assert.ok(
+      !logs.some((line) => /giving up on it/.test(line)),
+      'the mention-dropping ladder never engages for corrupt-log failures',
+    );
+    // Tick 3: guidance stays throttled within the hour.
+    insertGroupMessage(db, {
+      pinId: `${'f'.repeat(64)}i0`,
+      senderMetaId: 'metaid-other',
+      senderGlobalMetaId: OTHER_GMID,
+      senderName: 'Other Bot',
+      content: '@Guest Bot third mention',
+    });
+    await loop.runTick();
+    assert.equal(
+      logs.filter((line) => /Self-heal guidance: restart the app/.test(line)).length,
+      1,
+      'guidance does not repeat within the cooldown',
+    );
+  } finally {
+    store.close();
+  }
+});

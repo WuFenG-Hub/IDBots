@@ -82,6 +82,7 @@ import {
   ensureGroupTaskMemberReady,
   ensureGroupTaskSession,
   GROUP_TASK_CONVERSATION_CHANNEL,
+  isCorruptSessionLogError,
   rebuildGroupTaskSession,
 } from './groupTaskSession';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
@@ -505,6 +506,59 @@ const PROSE_DEPENDENCY_RE = new RegExp(
 export function hasProseDependencyDeclaration(content: string | null | undefined): boolean {
   return PROSE_DEPENDENCY_RE.test(content ?? '');
 }
+
+/**
+ * fix-v2 P0-1: a worker's OWN upstream-wait declaration inside its [WORKING]
+ * message ("待 Builder 上链交付后接单", "等 S3 交付后开始", "waiting on the S3
+ * delivery"). A conditional ETA ("…后…预计 2 分钟") is not a delivery
+ * commitment — the clock starts at the upstream's arrival, which the host
+ * cannot derive from text. Arming a deadline from a conditional ETA produced
+ * the task #62 false alert: the member's readiness note ("待 Builder 上链
+ * 交付后接单，回填→发布预计 2 分钟") armed a 2-minute deadline and alerted
+ * two minutes later while the upstream S3 was still undelivered.
+ *
+ * Deliberately narrower than {@link hasProseDependencyDeclaration}: bare
+ * 依赖/前置/上游 words ("依赖已就绪，开工") do NOT count — only an explicit
+ * wait marker (待…/等…/waiting on/after…) does.
+ */
+const WORKER_UPSTREAM_WAIT_RE = new RegExp(
+  '(?:'
+  + `${PROSE_NEGATION_LOOKBEHIND}待[^，。；\\n]{1,32}(?:交付|完成|产出|落地|就绪)|`
+  + `${PROSE_NEGATION_LOOKBEHIND}等[^，。；\\n]{1,32}(?:交付|完成|产出|落地|就绪)|`
+  + '\\bwaiting\\s+(?:for|on)\\s+[^,.;\\n]{1,48}(?:deliver|land|complet|ready|done)|'
+  + '\\bafter\\s+[^,.;\\n]{1,48}(?:delivers|lands|completes|is\\s+done|is\\s+ready)'
+  + ')',
+  'i',
+);
+export function hasWorkerUpstreamWait(content: string | null | undefined): boolean {
+  return WORKER_UPSTREAM_WAIT_RE.test(content ?? '');
+}
+
+/**
+ * fix-v2 P0-1: the member-scoped clause of a multi-member dispatch. Chairs
+ * routinely dispatch several steps in one message ("@A … [DEPENDS_ON: …]
+ * 直接开工。@B 你的发布等 C 落地后派单。"); message-scoped dependency parsing
+ * lets one member's clause mask another's prose wait (the foreign tag's
+ * free-text token reads as satisfied, skipping the prose branch) or taint a
+ * member with a wait that governs someone else's step. The clause runs from
+ * the member's @mention to the next @mention, blank line, or thematic break.
+ * Returns null when the mention is not literal text (mention-array-only
+ * dispatches) — callers then keep whole-message semantics.
+ */
+export function extractMemberDispatchClause(
+  content: string | null | undefined,
+  botName: string | null | undefined,
+): string | null {
+  const text = String(content ?? '');
+  const name = String(botName ?? '').trim();
+  if (!text || !name) return null;
+  const at = text.toLowerCase().indexOf(`@${name.toLowerCase()}`);
+  if (at < 0) return null;
+  const rest = text.slice(at);
+  const tail = rest.slice(1);
+  const end = /(?:\r?\n[ \t]*\r?\n)|(?:\r?\n[ \t]*-{3,}[ \t]*$)|(?:\s@)/m.exec(tail);
+  return end ? rest.slice(0, 1 + end.index) : rest;
+}
 /**
  * P2-8: multi-driver mutex — kv heartbeat claim per task
  * (`group_task_driver:<taskId>` = `<instanceId>|<epochMs>`). Only the most
@@ -681,8 +735,14 @@ const DEFAULT_STEP_DEADLINE_MS = 30 * 60_000;
  * cap, the Twin-suppression window, or a spent reply budget.
  */
 const CHAIR_RESPONSE_PENDING_PREFIX = 'group_task_chair_response_pending:';
-/** Task #51: how long the chair may stay silent on a trigger before one re-drive. */
-const DEFAULT_CHAIR_RESPONSE_REDRIVE_MS = 4 * 60_000;
+/**
+ * Task #51: how long the chair may stay silent on a trigger before one
+ * re-drive. fix-v2 P0-2: raised 4 min → 10 min — a chair quality-gate turn
+ * legitimately runs ~7 minutes (task #62 fired twice inside one), and the
+ * countdown now also slides while the chair is provably responsive (turn in
+ * flight / session writes), so the window measures CONTINUOUS silence only.
+ */
+const DEFAULT_CHAIR_RESPONSE_REDRIVE_MS = 10 * 60_000;
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /**
  * P1-2/P1-3: one stuck-session reclaim per (task, member) streak — the host
@@ -5410,7 +5470,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // the signals pending; the next tick answers them on the fresh session.
       {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        if (/corrupt session log/i.test(errorMessage)) {
+        if (isCorruptSessionLogError(error)) {
           const rebuildKey = `${CORRUPT_SESSION_REBUILD_PREFIX}${task.id}:${bot.id}`;
           const lastRebuildAt = Number(deps.getStore().get<number>(rebuildKey) ?? 0) || 0;
           if (now() - lastRebuildAt > CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS) {
@@ -5427,6 +5487,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 `[GroupTaskDaemon] Task ${task.id}: corrupt chair session log — session rebuilt from the ` +
                 `host ledger (${rebuilt.sessionId.slice(0, 8)}…); supervisor signals stay pending for the next tick`,
               );
+              // fix-v2 P1-5: parity with the member-turn path — the origin
+              // session hears about the rebuild immediately, not via a later
+              // stall signal.
+              notifySourceSessionMilestone(
+                task,
+                'anomaly',
+                buildSourceSessionAnomalyNotice({
+                  title: task.title,
+                  status: task.status,
+                  summary:
+                    'The chair hit a corrupt session log (seq gap in the committed region) while answering ' +
+                    'supervisor signals — every turn on it would fail forever. The host rebuilt the chair\'s ' +
+                    'task session from the task ledger (goal, status trail, deliverables, recent transcript); ' +
+                    'the pending supervisor signals will be answered on the fresh session next tick.',
+                }),
+                `corrupt_session_rebuild:${task.id}:${bot.id}`,
+              );
               return;
             } catch (rebuildError) {
               emitLog(
@@ -5434,6 +5511,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 `${rebuildError instanceof Error ? rebuildError.message : String(rebuildError)}`,
               );
             }
+          } else {
+            // fix-v2 P1-5: recurrence within the rebuild cooldown = the
+            // dual-writer race is likely still live — escalate immediately
+            // with self-heal guidance instead of silently burning attempts.
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: corrupt chair session log recurred within the rebuild ` +
+              'cooldown — escalating immediately instead of only counting attempts',
+            );
+            notifySourceSessionMilestone(
+              task,
+              'anomaly',
+              buildSourceSessionAnomalyNotice({
+                title: task.title,
+                status: task.status,
+                summary:
+                  'The chair hit a corrupt session log AGAIN within an hour of the automatic rebuild — the ' +
+                  'driver-handoff race that corrupts the log is likely still live (two runtime processes ' +
+                  'writing one session log). Self-heal guidance: restart the app so every runtime subprocess ' +
+                  'is reaped and the session resumes under a single writer; if it still recurs, investigate ' +
+                  'the provider re-pin / config-change handoff for the chair bot.',
+              }),
+              `corrupt_session_rebuild_capped:${task.id}:${bot.id}`,
+            );
           }
         }
       }
@@ -6171,7 +6271,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // rebuild per (task, bot) per hour so a genuinely broken runtime
           // cannot loop rebuilds.
           const errorMessage = error instanceof Error ? error.message : String(error);
-          if (/corrupt session log/i.test(errorMessage)) {
+          // fix-v2 P1-5: the shared detector also covers the append-side
+          // cursor mismatch and the unparsable-committed-event signatures —
+          // every corruption variant routes to rebuild, not the blind ladder.
+          if (isCorruptSessionLogError(error)) {
             const rebuildKey = `${CORRUPT_SESSION_REBUILD_PREFIX}${task.id}:${bot.id}`;
             const lastRebuildAt = Number(deps.getStore().get<number>(rebuildKey) ?? 0) || 0;
             if (now() - lastRebuildAt > CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS) {
@@ -6217,6 +6320,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                   `${rebuildError instanceof Error ? rebuildError.message : String(rebuildError)}`,
                 );
               }
+            } else {
+              // fix-v2 P1-5: corruption RECURRED within the rebuild cooldown —
+              // the dual-writer race that produced it is likely still live, so
+              // the fresh log is being re-corrupted. Do not burn the 5-turn
+              // retry ladder in silence first: alert the origin session
+              // immediately with the self-heal guidance, then fall through.
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: corrupt session log for bot ${bot.id} recurred ` +
+                'within the rebuild cooldown — escalating immediately instead of only counting retries',
+              );
+              notifySourceSessionMilestone(
+                task,
+                'anomaly',
+                buildSourceSessionAnomalyNotice({
+                  title: task.title,
+                  status: task.status,
+                  summary:
+                    `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} hit a corrupt ` +
+                    'session log AGAIN within an hour of the automatic rebuild — the driver-handoff race that ' +
+                    'corrupts the log is likely still live (two runtime processes writing one session log). ' +
+                    'Self-heal guidance: restart the app so every runtime subprocess is reaped and the session ' +
+                    'resumes under a single writer; if it still recurs, investigate the provider re-pin / ' +
+                    'config-change handoff for this bot.',
+                }),
+                `corrupt_session_rebuild_capped:${task.id}:${bot.id}`,
+              );
             }
           }
           const failures = (args.entry?.failures ?? 0) + 1;
@@ -6579,6 +6708,56 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * fix-v2 P1-3: every stuck verdict must cite verifiable pointers — the
+   * member's latest ledger deliverable (pin/uri + time + status), its last
+   * group speech, the session log's last write, and the last [WORKING] signal,
+   * each with a minutes-ago figure. The chair verifies against the ledger and
+   * the session instead of rebutting a bare inference (task #57: 4/4 false
+   * stuck alerts cited nothing and cost clarification rounds).
+   */
+  const buildStuckEvidence = (
+    deliverable: Pick<GroupTaskDeliverable, 'msgPinId' | 'uri' | 'createdAt' | 'status'> | null,
+    signals: {
+      lastWorkingMs: number | null;
+      lastSpeakMs: number | null;
+      lastSessionActivityMs: number | null;
+    },
+  ): string => {
+    const fmtHhMm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
+    const agoMin = (ms: number): number => Math.max(0, Math.round((now() - ms) / 60_000));
+    const parts: string[] = [];
+    if (deliverable) {
+      const ref = deliverable.msgPinId
+        ? `pin://${deliverable.msgPinId}`
+        : (deliverable.uri ?? '(no uri)');
+      const atMs = parseSqliteUtcMs(deliverable.createdAt);
+      parts.push(
+        atMs != null
+          ? `latest ledger deliverable ${ref} (${deliverable.status}) at ${fmtHhMm(atMs)}, ${agoMin(atMs)} min ago`
+          : `latest ledger deliverable ${ref} (${deliverable.status})`,
+      );
+    } else {
+      parts.push('no deliverable on the ledger');
+    }
+    parts.push(
+      signals.lastSpeakMs != null
+        ? `last group speech at ${fmtHhMm(signals.lastSpeakMs)}, ${agoMin(signals.lastSpeakMs)} min ago`
+        : 'no group speech on record',
+    );
+    parts.push(
+      signals.lastSessionActivityMs != null
+        ? `session log last write at ${fmtHhMm(signals.lastSessionActivityMs)}, ${agoMin(signals.lastSessionActivityMs)} min ago`
+        : 'no cowork-session writes on record',
+    );
+    if (signals.lastWorkingMs != null) {
+      parts.push(
+        `last [WORKING] signal at ${fmtHhMm(signals.lastWorkingMs)}, ${agoMin(signals.lastWorkingMs)} min ago`,
+      );
+    }
+    return parts.join('; ');
+  };
+
+  /**
    * P0-2: auto-mark silent assigned/working members as unreachable after
    * memberUnreachableAfterMinutes without any chain speech. Baseline = last
    * speak time (fallback: member join time); never marks chair members, done
@@ -6834,7 +7013,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       return null;
     }
     if (!assignment) return null;
-    const tokens = extractDependsOnTokens(assignment.content);
+    // fix-v2 P0-1: dependency signals are scoped to the member's OWN dispatch
+    // clause. A multi-member message (task #62's #3546: "[DEPENDS_ON: eleven
+    // 媒体包…]" governing Builder's S3 clause + "@AI_小新 …等 Builder 的
+    // metaapp:// 落地后我立即派单" governing AI_小新's S4 clause) otherwise
+    // let the foreign tag mask the member's prose wait — the tag's free-text
+    // token read as satisfied, the prose branch below was skipped because
+    // tokens.length > 0, and the prose-waiting member ended up with zero
+    // pending tokens (its conditional ETA then armed a deadline that alerted
+    // two minutes later). Whole-message fallback covers mention-array-only
+    // dispatches.
+    const clause = extractMemberDispatchClause(assignment.content, bot.name) ?? assignment.content;
+    const tokens = extractDependsOnTokens(clause);
+    const pendingStructured = tokens.filter((token) => !dependencyTokenSatisfied(task, token));
     // fix-v2 (B2): chairs routinely declare dependencies in prose instead of
     // the structured [DEPENDS_ON: <pinid>] tag. A prose declaration counts as
     // a pending upstream too — without this, the stale-[WORKING] monitor saw
@@ -6843,7 +7034,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // Release-review P1: prose cannot be ledger-verified, so the exemption it
     // grants is time-capped per assignment message (the monitors gate it
     // through applyProseDependencyExemption).
-    if (tokens.length === 0 && hasProseDependencyDeclaration(assignment.content)) {
+    // fix-v2 P0-1: the prose fallback runs whenever no STRUCTURED token from
+    // the member's own clause is still pending — never masked by a foreign
+    // clause's tag (see above).
+    if (pendingStructured.length === 0 && hasProseDependencyDeclaration(clause)) {
       return {
         tokens,
         pendingTokens: ['(prose-declared upstream)'],
@@ -6853,7 +7047,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
     return {
       tokens,
-      pendingTokens: tokens.filter((token) => !dependencyTokenSatisfied(task, token)),
+      pendingTokens: pendingStructured,
       proseDeclared: false,
       assignmentMsgId: assignment.id,
     };
@@ -6974,8 +7168,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // chair a re-dispatch directive duplicates finished work. Mirrors the
     // deliveredLate guard in monitorDeliveryDeadlines; delivery does not
     // move the member store status, so the ledger is the source of truth.
+    // fix-v2 P1-3: the same ledger list also feeds the stuck-alert evidence
+    // block below (fetched once per tick, not once per member).
+    const taskDeliverables = store.listDeliverables(task.id);
     const deliveredGmids = new Set(
-      store.listDeliverables(task.id)
+      taskDeliverables
         .filter((deliverable) => deliverable.status !== 'rejected')
         .map((deliverable) => (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase())
         .filter((authorGmid) => authorGmid.length > 0),
@@ -7057,20 +7254,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // GT-09 honesty: only pinid/txid tokens are ledger-verified — free-text
       // tokens are advisory (always "satisfied") and must never read as
       // "delivered" in the chair-facing annotation.
+      // fix-v2 P1-3: when the exemption that just expired was PROSE-declared,
+      // say so — never mislabel it "no upstream dependency declared" (task
+      // #57: the false stuck alerts tagged prose-waiting members with exactly
+      // that, contradicting the dispatch the chair could see).
       const depContext = depWait == null
         ? null
-        : depWait.tokens.length === 0
-          ? 'no upstream dependency declared in the dispatch'
-          : (() => {
-              const verified = depWait.tokens.filter((token) => PINID_FORMAT.test(token) || TXID_FORMAT.test(token));
-              const advisoryCount = depWait.tokens.length - verified.length;
-              const parts: string[] = [];
-              if (verified.length > 0) parts.push(`upstream ${verified.join(', ')} delivered`);
-              if (advisoryCount > 0) {
-                parts.push(`${advisoryCount} advisory free-text upstream token(s) not ledger-verifiable`);
-              }
-              return parts.join('; ');
-            })();
+        : depWait.proseDeclared
+          ? 'prose-declared upstream wait in the latest dispatch (time-capped exemption expired)'
+          : depWait.tokens.length === 0
+            ? 'no upstream dependency declared in the dispatch'
+            : (() => {
+                const verified = depWait.tokens.filter((token) => PINID_FORMAT.test(token) || TXID_FORMAT.test(token));
+                const advisoryCount = depWait.tokens.length - verified.length;
+                const parts: string[] = [];
+                if (verified.length > 0) parts.push(`upstream ${verified.join(', ')} delivered`);
+                if (advisoryCount > 0) {
+                  parts.push(`${advisoryCount} advisory free-text upstream token(s) not ledger-verifiable`);
+                }
+                return parts.join('; ');
+              })();
 
       // L2: mark the authoritative state timeout + inject a chair re-assign hint
       // once per (task, member) streak. Anti-flap (fix/group-member-status,
@@ -7179,9 +7382,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // automatic reclaim kept killing sessions of correctly waiting members
       // (tasks #54/#55, 3 false reclaims). kv `groupTaskStuckReclaim` =
       // {"mode":"auto"} restores the reclaim behavior.
+      // fix-v2 P1-3: the verdict text must carry its own verifiable pointers
+      // (ledger deliverable / speech / session-write / [WORKING] timestamps)
+      // so the chair confirms instead of rebutting.
+      const latestMemberDeliverable = gmid
+        ? taskDeliverables
+            .filter((deliverable) => (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === gmid)
+            .sort((a, b) => (parseSqliteUtcMs(b.createdAt) ?? 0) - (parseSqliteUtcMs(a.createdAt) ?? 0))[0] ?? null
+        : null;
+      const stuckEvidence = buildStuckEvidence(latestMemberDeliverable, {
+        lastWorkingMs: lastWorkingSec * 1000,
+        lastSpeakMs: speakSec != null ? speakSec * 1000 : null,
+        lastSessionActivityMs,
+      });
       const stuckReason =
         `[WORKING] signal stale ${memberTimeoutAfterMinutes}+ min with zero cowork-session activity` +
-        (depContext ? `; ${depContext}` : '');
+        (depContext ? `; ${depContext}` : '') +
+        `; evidence: ${stuckEvidence}`;
       if (parseGroupTaskStuckReclaimMode(sqlite.get<string>('groupTaskStuckReclaim')) === 'auto') {
         const reclaimNote = reclaimStuckWorkerSession(task, member, stuckReason);
         if (reclaimNote) reclaimNotes.push(reclaimNote);
@@ -7542,7 +7759,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             checkMemberDependencyWait(task, member, chairMember)?.pendingTokens.length,
           )
         : false;
-      if (!opts?.humanGateActive && !acksHostNotice && assignmentOnRecord && !awaitingUpstream) {
+      // fix-v2 P0-1: the member's own [WORKING] may declare a CONDITIONAL
+      // upstream wait ("待 Builder 上链交付后接单，回填→发布预计 2 分钟"). The
+      // chair-side dependency scan goes blind when the chair's latest mention
+      // omits (or another member's clause carries) the dependency — task #62's
+      // false alert fired exactly through that gap. The worker's own wait
+      // declaration is authoritative liveness: extend the lease, arm nothing.
+      const workerDeclaredWait = hasWorkerUpstreamWait(protocolContent);
+      if (!opts?.humanGateActive && !acksHostNotice && assignmentOnRecord && !awaitingUpstream && !workerDeclaredWait) {
         // P0-4 arming: an explicit numeric ETA arms a delivery deadline; a
         // numberless ACK (task #60: Lucy's turn ran 71+ min with no escalation
         // path) arms one too — from the chair's stated deadline when the
@@ -7601,7 +7825,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               ? 'in reply to a host notice/roll call'
               : awaitingUpstream
                 ? 'while its assignment is still upstream-blocked'
-                : 'with no assignment on record') +
+                : workerDeclaredWait
+                  ? 'declaring a conditional upstream wait (ETA suspended until the upstream lands)'
+                  : 'with no assignment on record') +
           ' — liveness only, no delivery deadline armed',
         );
       }
@@ -8429,18 +8655,46 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         member,
         members.find((candidate) => candidate.role === 'chair'),
       );
-      if (reminderDepWait && reminderDepWait.pendingTokens.length > 0) {
+      // fix-v2 P0-1: a parked (standby) member cannot be late — the chair has
+      // not activated it, so there is nothing to be late ON (task #62's false
+      // alert hit a member the chair had explicitly parked as an observer).
+      if (member.status === 'standby') {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: delivery reminder suspended for ${member.name ?? member.metabotId} ` +
-          `— waiting on upstream ${reminderDepWait.pendingTokens.join(', ')} (not delivered)`,
+          '— member is standby (parked by the chair, no active assignment)',
+        );
+        continue;
+      }
+      // fix-v2 P0-1: suspension keys on STRUCTURED (ledger-verifiable) pending
+      // tokens only. A prose wait never self-lifts, so prose-suspending the
+      // reminder would keep the clock frozen even after the upstream landed.
+      // With the arm-side gates (clause-scoped dispatch scan + the worker's
+      // own conditional-ETA declaration) a waiting member's deadline is never
+      // armed in the first place — an existing kv means the member committed.
+      const reminderPendingStructured = (reminderDepWait?.pendingTokens ?? [])
+        .filter((token) => token !== '(prose-declared upstream)');
+      if (reminderPendingStructured.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: delivery reminder suspended for ${member.name ?? member.metabotId} ` +
+          `— waiting on upstream ${reminderPendingStructured.join(', ')} (not delivered)`,
         );
         continue;
       }
       const chair = members.find((candidate) => candidate.role === 'chair');
       if (!chair?.metabotId) continue;
+      // fix-v2 P0-1: a retained alert must carry the member's dependency state
+      // so the chair and the member can verify it without a clarifying round.
+      const reminderDepState = reminderDepWait == null
+        ? 'no chair assignment on record'
+        : reminderDepWait.proseDeclared
+          ? 'prose-declared upstream in the latest dispatch (not ledger-verifiable)'
+          : reminderDepWait.tokens.length > 0
+            ? `declared upstream(s) delivered or advisory: ${reminderDepWait.tokens.join(', ')}`
+            : 'no upstream dependency declared in the latest dispatch';
       const text =
         `@chair ⚠ @${member.name ?? `bot-${member.metabotId}`} estimated delivery ` +
-        `by ${new Date(entry.dueAt).toISOString()} but no [DELIVERABLE] arrived yet. ` +
+        `by ${new Date(entry.dueAt).toISOString()} but no [DELIVERABLE] arrived yet ` +
+        `(dependency state: ${reminderDepState}). ` +
         `Check status; do not auto-fail.`;
       try {
         await postGroupMessage(task.id, chair.metabotId, text);
@@ -8813,7 +9067,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           && pending.reason
           && now() - pending.atMs >= chairResponseRedriveMs
         ) {
-          if (pending.redriven) {
+          // fix-v2 P0-2: never redrive or drop while the chair is provably
+          // responsive — a turn in flight right now, or cowork-session writes
+          // within the window (covers both the long quality-gate turn and the
+          // chain-sync gap between a completed turn and its observed reply;
+          // task #62 false-fired through both). The countdown slides forward
+          // so it measures CONTINUOUS chair silence; a genuinely dead chair
+          // session (no in-flight turn, no session writes for a full window)
+          // still re-drives once and then alerts the origin session.
+          const chairTurnKey = keyOf(task.id, chairMemberId);
+          const chairSessionActivityMs =
+            getLocalMemberSessionInfo(task.id, chairMemberId)?.lastActivityMs ?? null;
+          const chairResponsive = turnInFlight.has(chairTurnKey)
+            || (chairSessionActivityMs != null && now() - chairSessionActivityMs < chairResponseRedriveMs);
+          if (chairResponsive) {
+            sqlite.set(
+              `${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`,
+              JSON.stringify({ ...pending, atMs: now() }),
+            );
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: chair response watch for message ${pending.messageId} ` +
+              'deferred — chair turn in flight or session active',
+            );
+          } else if (pending.redriven) {
             // One re-drive already happened and the chair is still silent —
             // stop here; the no-progress stall monitor reports the episode.
             // GT-10: the drop itself is an anomaly too — "the chair never
@@ -8837,7 +9113,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               }),
               `chair_response_dropped:${pending.messageId}`,
             );
-          } else if (!turnInFlight.has(keyOf(task.id, chairMemberId))) {
+          } else {
+            // chairResponsive above already covers an in-flight turn — this is
+            // a genuinely silent chair: re-drive once via the durable queue.
             sqlite.set(
               `${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`,
               JSON.stringify({ ...pending, redriven: true }),
@@ -8851,10 +9129,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             });
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: chair never answered message ${pending.messageId} ` +
-              `within ${Math.round(chairResponseRedriveMs / 60_000)} min; re-driven once via the defer queue`,
+              `within ${Math.round(chairResponseRedriveMs / 60_000)} min of continuous silence; re-driven once via the defer queue`,
             );
           }
-          // A chair turn in flight right now gets this tick to land first.
         }
       }
     }

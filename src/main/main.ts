@@ -3329,6 +3329,7 @@ const startSqliteDaemons = (): void => {
   setGroupTaskCandidateSearchDepsGetter(() => buildGroupTaskCandidateSearchDeps({
     metabotStore: getMetabotStore(),
     impressionStore: getMetaIDImpressionStore(),
+    groupTaskStore: getGroupTaskStore(),
   }));
   // OpenTeam M3 kick loop closure: the member-list read feeds the post-kick
   // on-chain removal re-check (R2P1-2); the simplemsg sender (createPin bound

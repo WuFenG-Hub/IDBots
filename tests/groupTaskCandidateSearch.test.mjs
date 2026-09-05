@@ -44,6 +44,7 @@ function wire(overrides = {}) {
     ],
     getTwinObserverGlobalMetaId: () => TWIN,
     getImpressionSnapshot: (observer, subject) => snapshots.get(`${observer}:${subject}`) ?? null,
+    isHostFaultCancelled: overrides.isHostFaultCancelled,
     searchRemote: overrides.searchRemote ?? (async () => [
       {
         globalMetaId: REMOTE,
@@ -401,6 +402,69 @@ test('an invalid staffing preference falls back to the default merge', async () 
     });
     assert.equal(result.staffingPreference, null);
     assert.equal(result.primary?.source, 'local');
+  } finally {
+    setGroupTaskCandidateSearchDepsGetter(null);
+  }
+});
+
+test('fix-v2 P2-6: a host-fault cancellation never demotes the member (attributed + legacy lookup)', () => {
+  // Write-time attribution on the fact: host-cancelled → neutral verdict.
+  const hostAttributed = evaluateImpressionForSeat(impression({
+    collaborationFacts: [{
+      taskId: 10, title: '周报', outcome: 'cancelled', attribution: 'host', pinIds: ['p'],
+    }],
+  }), 'content');
+  assert.equal(hostAttributed.verdict, 'unknown', 'host-attributed cancel is neutral');
+  assert.match(hostAttributed.note, /host-side fault/);
+
+  // Explicit member attribution keeps the penalty.
+  const memberAttributed = evaluateImpressionForSeat(impression({
+    collaborationFacts: [{
+      taskId: 11, title: '周报', outcome: 'cancelled', attribution: 'member', pinIds: ['p'],
+    }],
+  }), 'content');
+  assert.equal(memberAttributed.verdict, 'demote', 'member-attributed cancel still demotes');
+
+  // Legacy fact (no attribution field): the scoring-time task lookup decides.
+  const legacyHost = evaluateImpressionForSeat(
+    impression({
+      collaborationFacts: [{ taskId: 12, title: '周报', outcome: 'cancelled', pinIds: ['p'] }],
+    }),
+    'content',
+    (taskId) => taskId === 12,
+  );
+  assert.equal(legacyHost.verdict, 'unknown', 'legacy host-fault cancel re-derived as neutral');
+  const legacyMember = evaluateImpressionForSeat(
+    impression({
+      collaborationFacts: [{ taskId: 13, title: '周报', outcome: 'cancelled', pinIds: ['p'] }],
+    }),
+    'content',
+    () => false,
+  );
+  assert.equal(legacyMember.verdict, 'demote', 'legacy member-fault cancel keeps the demote');
+  // Unwired lookup: the old mechanical behavior is the default.
+  const legacyUnwired = evaluateImpressionForSeat(impression({
+    collaborationFacts: [{ taskId: 14, title: '周报', outcome: 'cancelled', pinIds: ['p'] }],
+  }), 'content');
+  assert.equal(legacyUnwired.verdict, 'demote', 'no lookup wired → outcome-only default');
+});
+
+test('fix-v2 P2-6: search scoring keeps the raw resume score for a host-fault-cancelled candidate', async () => {
+  const snapshots = new Map([
+    [`${TWIN}:${LOCAL}`, impression({
+      collaborationFacts: [{
+        taskId: 61, title: '技能介绍', seatRole: 'content', outcome: 'cancelled', pinIds: ['p'],
+      }],
+    })],
+  ]);
+  // Legacy fact (no attribution) + the wired task lookup marking #61 host-fault.
+  wire({ snapshots, isHostFaultCancelled: (taskId) => taskId === 61, searchRemote: async () => [] });
+  try {
+    const result = await searchGroupTaskSeatCandidates({ query: '文案', roleHint: 'content', limit: 5 });
+    const local = result.candidates.find((row) => row.source === 'local');
+    assert.ok(local, 'local candidate present');
+    assert.equal(local.impression.verdict, 'unknown', 'no demote for the host-fault cancel');
+    assert.equal(local.score, local.rawScore, 'score keeps the raw resume score (6, not -2)');
   } finally {
     setGroupTaskCandidateSearchDepsGetter(null);
   }

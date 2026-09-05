@@ -49,7 +49,7 @@ import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import { isOpenTeamTaskStatusTerminal, parseOpenTeamTaskStatusTag } from '../libs/openTeamTaskStatus';
 import { buildOpenTeamGuestPrompt } from './openTeamGuestPrompt';
-import { ensureOpenTeamGuestSession } from './groupTaskSession';
+import { ensureOpenTeamGuestSession, isCorruptSessionLogError } from './groupTaskSession';
 import {
   buildGuestMetafileDeliverableLine,
   buildGuestNoteDeliverableLine,
@@ -66,6 +66,8 @@ const DEFAULT_COOLDOWN_MS = 20_000;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 /** Bounded retry: consecutive failures on one message before the cursor gives up and advances past it. */
 const MAX_CONSECUTIVE_MESSAGE_FAILURES = 3;
+/** fix-v2 P1-5: one corrupt-log guest-session rebuild per membership per hour (same cap as the group-task host side). */
+const CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS = 60 * 60_000;
 /**
  * P1-2 self-check fallback: how often each active membership re-verifies on-chain
  * that this bot is still a group member (the KICK simplemsg may never arrive).
@@ -441,17 +443,12 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
    * ensureTaskSession, keyed on the external group id instead of a local
    * group_tasks row).
    */
-  const ensureGuestSession = (
+  const createGuestSession = (
     coworkStore: CoworkStore,
     membership: OpenTeamMembership,
     bot: Metabot,
+    rebuilt: boolean,
   ): CoworkSession => {
-    const externalConversationId = `openteam-guest:${membership.groupId}`;
-    const existing = coworkStore.getConversationMapping(CONVERSATION_CHANNEL, externalConversationId, bot.id);
-    if (existing) {
-      const session = coworkStore.getSession(existing.coworkSessionId);
-      if (session) return session;
-    }
     const config = coworkStore.getConfig();
     const workspaceRoot = resolveSessionWorkingDirectory(
       (config.workingDirectory ?? '').trim() || process.cwd(),
@@ -459,7 +456,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     );
     const taskTitle = (membership.taskTitle ?? '').trim() || '(untitled task)';
     const session = coworkStore.createSession(
-      `OpenTeam Guest "${taskTitle}" (${bot.name})`,
+      `OpenTeam Guest "${taskTitle}" (${bot.name})${rebuilt ? ' [rebuilt]' : ''}`,
       workspaceRoot,
       '',
       config.executionMode || 'local',
@@ -472,12 +469,48 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     );
     coworkStore.upsertConversationMapping({
       channel: CONVERSATION_CHANNEL,
-      externalConversationId,
+      externalConversationId: `openteam-guest:${membership.groupId}`,
       metabotId: bot.id,
       coworkSessionId: session.id,
       metadataJson: JSON.stringify({ groupId: membership.groupId }),
     });
     return session;
+  };
+
+  const ensureGuestSession = (
+    coworkStore: CoworkStore,
+    membership: OpenTeamMembership,
+    bot: Metabot,
+  ): CoworkSession => {
+    const externalConversationId = `openteam-guest:${membership.groupId}`;
+    const existing = coworkStore.getConversationMapping(CONVERSATION_CHANNEL, externalConversationId, bot.id);
+    if (existing) {
+      const session = coworkStore.getSession(existing.coworkSessionId);
+      if (session) return session;
+    }
+    return createGuestSession(coworkStore, membership, bot, false);
+  };
+
+  /**
+   * fix-v2 P1-5: a corrupt DSH session log (driver-handoff race, task #57)
+   * fails every turn on the guest session forever. The guest needs no ledger
+   * seed — its context is rebuilt from the group transcript on every turn —
+   * so recovery is simply a fresh session under the same workspace; the old
+   * session row stays for post-mortem. Returns null when the rebuild was
+   * rate-capped (one per membership per hour).
+   */
+  const lastCorruptRebuildAtByMembership = new Map<number, number>();
+  /** Guidance line rides the same once-per-hour cadence as the rebuild itself. */
+  const lastCorruptGuidanceAtByMembership = new Map<number, number>();
+  const rebuildGuestSession = (
+    coworkStore: CoworkStore,
+    membership: OpenTeamMembership,
+    bot: Metabot,
+  ): CoworkSession | null => {
+    const lastRebuildAt = lastCorruptRebuildAtByMembership.get(membership.id) ?? 0;
+    if (now() - lastRebuildAt <= CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS) return null;
+    lastCorruptRebuildAtByMembership.set(membership.id, now());
+    return createGuestSession(coworkStore, membership, bot, true);
   };
 
   /**
@@ -664,6 +697,36 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
           };
         }
       } catch (error) {
+        // fix-v2 P1-5: a corrupt DSH session log (driver-handoff race, task
+        // #57) fails EVERY skill turn on this guest session fast and forever;
+        // the plain-completion fallback below would mask it and the guest
+        // would silently degrade to skill-less replies for the rest of the
+        // task. Rebuild the guest session (fresh log, same workspace; context
+        // comes from the group transcript each turn anyway) so the next
+        // mention's skill turn works — this turn still falls back.
+        if (isCorruptSessionLogError(error)) {
+          const rebuilt = rebuildGuestSession(coworkStore, membership, bot);
+          if (rebuilt) {
+            emitLog(
+              `[OpenTeamGuestDaemon] Group ${membership.groupId}: corrupt session log for bot ${bot.id} — ` +
+              `guest session rebuilt (${rebuilt.id.slice(0, 8)}…); the next mention's skill turn runs on the ` +
+              'fresh session (this turn fell back to plain completion)',
+            );
+          } else {
+            // Rate-capped recurrence: the dual-writer race is likely still
+            // live. Guidance once per hour, then the fallback still applies.
+            const lastGuidanceAt = lastCorruptGuidanceAtByMembership.get(membership.id) ?? 0;
+            if (now() - lastGuidanceAt > CORRUPT_SESSION_REBUILD_MIN_INTERVAL_MS) {
+              lastCorruptGuidanceAtByMembership.set(membership.id, now());
+              emitLog(
+                `[OpenTeamGuestDaemon] Group ${membership.groupId}: corrupt session log for bot ${bot.id} ` +
+                'recurred within the rebuild cooldown. Self-heal guidance: restart the app so every runtime ' +
+                'subprocess is reaped and the session resumes under a single writer; if it still recurs, ' +
+                'investigate the provider re-pin / config-change handoff for this bot.',
+              );
+            }
+          }
+        }
         // Skill execution failure degrades to the plain completion path — a
         // skill-assembly problem must never silence the guest.
         emitLog(
@@ -921,6 +984,12 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     }
     for (const id of [...membershipAbsenceStreakByMembership.keys()]) {
       if (!activeIds.has(id)) membershipAbsenceStreakByMembership.delete(id);
+    }
+    for (const id of [...lastCorruptRebuildAtByMembership.keys()]) {
+      if (!activeIds.has(id)) lastCorruptRebuildAtByMembership.delete(id);
+    }
+    for (const id of [...lastCorruptGuidanceAtByMembership.keys()]) {
+      if (!activeIds.has(id)) lastCorruptGuidanceAtByMembership.delete(id);
     }
     for (const membership of activeMemberships) {
       try {

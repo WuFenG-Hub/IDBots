@@ -38,6 +38,7 @@ const {
   buildMemberJoinWelcomeText,
   parseGroupTaskStuckReclaimMode,
   hasProseDependencyDeclaration,
+  hasWorkerUpstreamWait,
   adjudicateStatusDirectives,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
@@ -7785,6 +7786,446 @@ test('speedup R-06: review entry stamps the time breakdown onto the record and t
     assert.ok(closing, 'ceremony message posted');
     assert.match(closing.content, /耗时分解：/);
     assert.match(closing.content, /宿主心跳占 \d+%/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// fix-v2 P0-1: deadline false-alarm recurrence — conditional worker ETAs and
+// mixed (tag + prose) dispatches must never arm a delivery deadline while the
+// upstream is undelivered (task #62 post-mortem).
+// ---------------------------------------------------------------------------
+
+test('fix-v2 P0-1: hasWorkerUpstreamWait matches explicit wait markers only', () => {
+  // The exact task-#62 sentence that armed the false 2-minute deadline.
+  assert.ok(hasWorkerUpstreamWait('[WORKING] 待 Builder 上链交付后接单，回填→发布预计 2 分钟。执行期静默。'));
+  assert.ok(hasWorkerUpstreamWait('[WORKING] 等 S3 交付后开始。'));
+  assert.ok(hasWorkerUpstreamWait('[WORKING] waiting on the S3 delivery to land before publishing.'));
+  assert.ok(hasWorkerUpstreamWait('[WORKING] after Builder delivers the metaapp I will publish (est. 2 min).'));
+  // Bare dependency words without a wait marker are NOT a conditional wait.
+  assert.ok(!hasWorkerUpstreamWait('[WORKING] 依赖已就绪，开工，预计 30 分钟。'));
+  assert.ok(!hasWorkerUpstreamWait('[WORKING] 已接单，预计 5 分钟。'));
+  assert.ok(!hasWorkerUpstreamWait('[WORKING] 无需等待，直接开工。'));
+  assert.ok(!hasWorkerUpstreamWait(''));
+  assert.ok(!hasWorkerUpstreamWait(null));
+});
+
+test('fix-v2 P0-1: a conditional-ETA [WORKING] arms no deadline and never alerts; the real start ACK arms', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S4 推广。[DEADLINE: 10m]',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    // The member's readiness note carries a CONDITIONAL ETA — "after Builder's
+    // delivery lands, backfill+publish takes ~2 minutes" (task #62 msg #3548).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-cond', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '草案已备好落盘。[WORKING] 待 Builder 上链交付后接单，回填→发布预计 2 分钟。执行期静默。',
+      chainTimestamp: Math.floor(startMs / 1000) + 30,
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      undefined,
+      'a conditional ETA arms no delivery deadline',
+    );
+    // Well past the spurious 2 minutes: no alert, no reminded flag.
+    h.state.nowMs = startMs + 10 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      0,
+      'no deadline alert while the member waits on the upstream',
+    );
+    assert.equal(h.store.get(`group_task_delivery_reminded:${task.id}:2`), undefined);
+    // Upstream lands; the chair re-dispatches and the member's unconditional
+    // start ACK arms the deadline normally (计时在上游落地后启动).
+    h.groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'pin-v2p0-up', authorGlobalmetaid: 'gmid-w3',
+      kind: 'pinid', uri: `pin://${'f'.repeat(64)}i0`,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-go', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot S4 开工。[DEADLINE: 10m]',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 1,
+    });
+    await h.loop.runTick();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-start', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，回填→发布预计 2 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 2,
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      'the unconditional start ACK after the upstream lands arms the deadline',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P0-1: a mixed dispatch (foreign [DEPENDS_ON] tag + prose wait for this member) arms no deadline', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Task #62 message #3546 shape: Builder's S3 clause carries the structured
+    // tag (free-text, advisory); Coder Bot's clause declares a prose wait.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-mixed', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '【S2 核验通过】@Designer Bot 【S3 · 工程上链】[DEPENDS_ON: eleven 媒体包 + Lucy 素材包（均已核验定版）] [DEADLINE: 15m] 直接开工。\n'
+        + '@Coder Bot 你的发布等 Builder 的 metaapp:// 落地后我立即派单，草案先备好。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    // Even an UNCONDITIONAL ETA ACK must not arm while the member's dispatch
+    // clause declares a prose wait (the advisory foreign tag must not mask it).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-ack', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，预计 5 分钟。',
+      chainTimestamp: Math.floor(startMs / 1000) + 30,
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      undefined,
+      'prose wait in the member\'s own clause suspends the deadline even beside a foreign tag',
+    );
+    h.state.nowMs = startMs + 20 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      0,
+      'no deadline alert for the prose-waiting member',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P0-1: a retained deadline alert carries the member\'s dependency state; standby members never alert', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Member 2: real assignment + unconditional ETA — the alert fires and must
+    // carry the dependency-state suffix (REQ: 告警文案必须带依赖状态).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0d-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S1。[DEADLINE: 10m]',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0d-ack', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，预计 1 分钟。',
+      chainTimestamp: Math.floor(startMs / 1000) + 10,
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get(`group_task_expected_delivery:${task.id}:2`), 'deadline armed');
+    // Member 3: a legacy/stale armed kv while parked — standby members cannot
+    // be late (task #62's false alert hit a chair-parked observer).
+    h.store.set(
+      `group_task_expected_delivery:${task.id}:3`,
+      JSON.stringify({ dueAt: startMs - 60_000, ackedAt: startMs - 120_000, taskDescription: 'S9' }),
+    );
+    h.groupTaskStore.setMemberStatus(task.id, 3, 'standby', 'gmid-w3');
+    h.state.nowMs = startMs + 5 * 60_000;
+    await h.loop.runTick();
+    const alerts = h.sends.filter((send) => /estimated delivery/.test(send.content));
+    assert.equal(alerts.length, 1, 'only the genuinely-overdue member alerts');
+    assert.match(alerts[0].content, /@Coder Bot/);
+    assert.match(alerts[0].content, /dependency state: no upstream dependency declared/);
+    assert.equal(
+      h.store.get(`group_task_delivery_reminded:${task.id}:3`),
+      undefined,
+      'the standby member\'s clock does not advance',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P0-2: the chair-response watchdog defers while a chair turn is in flight (no redrive, no drop)', async () => {
+  let releaseTurn;
+  const gate = new Promise((resolve) => { releaseTurn = resolve; });
+  const h = await createHarness({
+    deps: {
+      chairResponseRedriveMs: 60_000,
+      performChat: async () => {
+        await gate;
+        return '收到，质量门核验中。';
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // A worker question the chair owes an answer to; the chair turn dispatches
+    // and stays in flight (gated) — standing in for a 7-minute quality gate.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p02-q', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot S3 产物齐了，请核验。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    const rawLoop = createGroupTaskDaemonLoop(h.deps);
+    await rawLoop.runTick();
+    assert.ok(
+      rawLoop.getTurnActivity().some((turn) => turn.taskId === task.id && turn.metabotId === 1),
+      'the chair turn is in flight',
+    );
+    assert.ok(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      'the obligation is armed',
+    );
+    // Well past the redrive window with the chair turn STILL running: the
+    // watchdog must slide the countdown — never redrive, never drop, never
+    // alert (task #62 fired twice inside exactly this window).
+    h.state.nowMs = startMs + 30 * 60_000;
+    await rawLoop.runTick();
+    const pending = JSON.parse(h.store.get(`group_task_chair_response_pending:${task.id}`));
+    assert.equal(pending.redriven ?? false, false, 'no re-drive while the chair turn runs');
+    assert.ok(pending.atMs > startMs, 'the silence countdown slid forward');
+    // The turn completes — its reply answers the trigger and clears the
+    // obligation; no watchdog noise afterwards either.
+    releaseTurn();
+    await rawLoop.whenIdle();
+    h.state.nowMs = startMs + 60 * 60_000;
+    await rawLoop.runTick();
+    assert.equal(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      undefined,
+      'the completed chair turn clears the obligation',
+    );
+    assert.equal(
+      h.sends.filter((send) => /never answered/.test(send.content)).length,
+      0,
+      'no "chair never answered" alert at any point',
+    );
+  } finally {
+    releaseTurn();
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P0-2: a genuinely silent chair still gets one re-drive after a full window', async () => {
+  // chatErrorAlways: every chair turn fails — no speech, no session writes, so
+  // the responsiveness gate must NOT hold the watchdog back.
+  const h = await createHarness({
+    deps: { chairResponseRedriveMs: 60_000 },
+    chatErrorAlways: 'chair LLM unreachable',
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p02b-q', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot 这个问题需要 chair 确认。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      'obligation armed (a failed chair turn answers nothing)',
+    );
+    // A full window of continuous silence → exactly one re-drive; the
+    // obligation stays armed for the final-drop escalation.
+    h.state.nowMs = startMs + 30 * 60_000;
+    await h.loop.runTick();
+    const pending = JSON.parse(h.store.get(`group_task_chair_response_pending:${task.id}`));
+    assert.equal(pending.redriven, true, 'a continuously silent chair is re-driven once');
+    // Another full window of silence after the re-drive → the obligation is
+    // dropped (the anomaly escalation covers it from there).
+    h.state.nowMs = startMs + 60 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      undefined,
+      'still silent after the re-drive: the obligation is dropped, not re-driven again',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P1-3: the stuck alert cites verifiable evidence and never mislabels an expired prose wait', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      memberTimeoutAfterMinutes: 1,
+      memberUnreachableAfterMinutes: 1,
+      sendMilestoneToSourceSession: (payload) => { milestones.push(payload); return true; },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-v2p13a', task.id]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Same shape as the exemption-expiry test: a prose dependency dispatch,
+    // the worker ACKs, then goes completely silent.
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-prose-evidence-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S5 质检，依赖 S4 的交付，等它上线后开始。',
+      chainTimestamp: Math.floor((startMs - 150_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'working-prose-evidence-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，等 S4', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    // Within the cap: exempt, no alert.
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), undefined, 'no alert inside the prose window');
+
+    // Past the cap: the alert fires — and it must NOT read "no upstream
+    // dependency declared" (task #57's mislabel): a prose wait WAS declared.
+    h.state.nowMs = startMs + 180 * 60_000 + 60_000;
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'the stuck alert fires after the cap');
+    const anomaly = milestones.find((entry) => entry.kind === 'anomaly' && /looks stuck/.test(entry.message));
+    assert.ok(anomaly, 'the stuck alert reached the origin session');
+    assert.match(
+      anomaly.message,
+      /prose-declared upstream wait in the latest dispatch \(time-capped exemption expired\)/,
+      'the dependency state names the expired prose exemption',
+    );
+    assert.doesNotMatch(anomaly.message, /no upstream dependency declared/, 'never the #57 mislabel');
+    // Evidence pointers: ledger state, last speech, session last write, and
+    // the last [WORKING] signal — each with a minutes-ago figure.
+    assert.match(anomaly.message, /evidence: no deliverable on the ledger/);
+    assert.match(anomaly.message, /last group speech at \d{2}:\d{2} UTC, \d+ min ago/);
+    assert.match(anomaly.message, /session log last write at \d{2}:\d{2} UTC, \d+ min ago/);
+    assert.match(anomaly.message, /last \[WORKING\] signal at \d{2}:\d{2} UTC, \d+ min ago/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P1-3: a rejected deliverable still surfaces in the stuck evidence with its pin', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      memberTimeoutAfterMinutes: 1,
+      memberUnreachableAfterMinutes: 1,
+      sendMilestoneToSourceSession: (payload) => { milestones.push(payload); return true; },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-v2p13b', task.id]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // A plain dispatch (no dependency language), the worker ACKs and goes
+    // silent; its only ledger entry is a REJECTED deliverable — the
+    // delivered-then-idle guard must not apply, but the alert must cite it.
+    insertGroupMessage(h.db, {
+      pinId: 'dispatch-plain-evidence-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 请处理 S7 图标导出。',
+      chainTimestamp: Math.floor((startMs - 150_000) / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'working-plain-evidence-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到', chainTimestamp: Math.floor((startMs - 120_000) / 1000),
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const lastMsgId = h.db.exec('SELECT MAX(id) FROM group_chat_messages')[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, lastMsgId);
+    const rejectedPin = 'a'.repeat(64);
+    const deliverable = h.groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: `${rejectedPin}i0`,
+      authorGlobalmetaid: 'gmid-w2',
+      kind: 'pinid',
+      uri: `pin://${rejectedPin}i0`,
+    });
+    h.db.run(
+      "UPDATE group_task_deliverables SET status = 'rejected', created_at = ? WHERE id = ?",
+      [new Date(startMs - 30 * 60_000).toISOString().slice(0, 19).replace('T', ' '), deliverable.id],
+    );
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'a rejected deliverable does not shield the member');
+    const anomaly = milestones.find((entry) => entry.kind === 'anomaly' && /looks stuck/.test(entry.message));
+    assert.ok(anomaly, 'the stuck alert reached the origin session');
+    assert.match(
+      anomaly.message,
+      new RegExp(`latest ledger deliverable pin://${rejectedPin}i0 \\(rejected\\) at \\d{2}:\\d{2} UTC, \\d+ min ago`),
+      'the evidence cites the rejected deliverable pin and its time',
+    );
+    assert.match(anomaly.message, /no upstream dependency declared in the dispatch/, 'plain dispatch: the honest label');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P1-5: a corrupt-log recurrence within the rebuild cooldown escalates immediately with guidance', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      runSkillTurn: null,
+      sendMilestoneToSourceSession: (payload) => { milestones.push(payload); return true; },
+    },
+  });
+  // Every turn fails corrupt — even on the rebuilt session (the dual writer
+  // is still live, so the fresh log keeps getting clobbered).
+  h.deps.runSkillTurn = async () => {
+    throw new Error('corrupt session log: seq gap in committed region at line 7 (expected 10, got 8)');
+  };
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-v2p15', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'trigger-corrupt-capped-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver step 6',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 60,
+    });
+    const triggerId = h.db.exec(
+      "SELECT id FROM group_chat_messages WHERE pin_id = 'trigger-corrupt-capped-i0'",
+    )[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, triggerId - 1);
+
+    // Tick 1: first corrupt failure → rebuild + requeue (unchanged behavior).
+    await h.loop.runTick();
+    assert.ok(h.store.get('group_task_corrupt_session_rebuild:1:2'), 'rebuild stamp recorded');
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && /^corrupt_session_rebuild:/.test(m.subject ?? '')),
+      'the rebuild itself is reported immediately',
+    );
+
+    // Tick 2: the requeued turn hits corruption AGAIN within the cooldown —
+    // instead of silently burning the 5-turn retry ladder, the origin session
+    // gets an immediate escalation with self-heal guidance.
+    await h.loop.runTick();
+    const capped = milestones.find((m) => /^corrupt_session_rebuild_capped:/.test(m.subject ?? ''));
+    assert.ok(capped, 'recurrence within the cooldown escalates immediately');
+    assert.match(capped.message, /AGAIN within an hour/);
+    assert.match(capped.message, /restart the app/);
   } finally {
     h.cleanup();
   }
