@@ -8181,3 +8181,52 @@ test('fix-v2 P1-3: a rejected deliverable still surfaces in the stuck evidence w
     h.cleanup();
   }
 });
+
+test('fix-v2 P1-5: a corrupt-log recurrence within the rebuild cooldown escalates immediately with guidance', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      runSkillTurn: null,
+      sendMilestoneToSourceSession: (payload) => { milestones.push(payload); return true; },
+    },
+  });
+  // Every turn fails corrupt — even on the rebuilt session (the dual writer
+  // is still live, so the fresh log keeps getting clobbered).
+  h.deps.runSkillTurn = async () => {
+    throw new Error('corrupt session log: seq gap in committed region at line 7 (expected 10, got 8)');
+  };
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-v2p15', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'trigger-corrupt-capped-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver step 6',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 60,
+    });
+    const triggerId = h.db.exec(
+      "SELECT id FROM group_chat_messages WHERE pin_id = 'trigger-corrupt-capped-i0'",
+    )[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, triggerId - 1);
+
+    // Tick 1: first corrupt failure → rebuild + requeue (unchanged behavior).
+    await h.loop.runTick();
+    assert.ok(h.store.get('group_task_corrupt_session_rebuild:1:2'), 'rebuild stamp recorded');
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && /^corrupt_session_rebuild:/.test(m.subject ?? '')),
+      'the rebuild itself is reported immediately',
+    );
+
+    // Tick 2: the requeued turn hits corruption AGAIN within the cooldown —
+    // instead of silently burning the 5-turn retry ladder, the origin session
+    // gets an immediate escalation with self-heal guidance.
+    await h.loop.runTick();
+    const capped = milestones.find((m) => /^corrupt_session_rebuild_capped:/.test(m.subject ?? ''));
+    assert.ok(capped, 'recurrence within the cooldown escalates immediately');
+    assert.match(capped.message, /AGAIN within an hour/);
+    assert.match(capped.message, /restart the app/);
+  } finally {
+    h.cleanup();
+  }
+});

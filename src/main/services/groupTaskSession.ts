@@ -23,6 +23,23 @@ import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 /** Group Task conversation channel (same value the daemon uses). */
 export const GROUP_TASK_CONVERSATION_CHANNEL = 'metaweb_group_task';
 
+/**
+ * fix-v2 P1-5: every DSH session-log corruption signature the runtime can
+ * raise, matched loosely so all drivers route them to session rebuild instead
+ * of the blind retry ladder:
+ * - 'corrupt session log: seq gap in committed region ...' (read-time scanner,
+ *   the two-writer overlap from a driver handoff race, task #57);
+ * - 'append seq mismatch for "<id>": expected ... got ...' (write-time cursor
+ *   check, dsh-session-persistence);
+ * - 'corrupt session log: unparsable committed event ...' (torn tail).
+ * Deliberately NOT matched: SessionFormatUnsupportedError and the
+ * zstd/plaintext encoding-mismatch family — those have their own heal path.
+ */
+export function isCorruptSessionLogError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /corrupt session log|append seq mismatch|seq gap in committed region/i.test(message);
+}
+
 /** Sanitize a conversation id into one safe workspace folder name. */
 function groupTaskWorkspaceSegment(externalConversationId: string): string {
   const segment = externalConversationId
