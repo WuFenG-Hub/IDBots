@@ -139,6 +139,7 @@ import {
   isListenerSocketConnected,
   stopMetaWebListener,
   setGroupMessageInsertedHook,
+  setLocalSenderNameResolver,
   type ListenerConfig,
 } from './services/metaWebListenerService';
 import {
@@ -6368,6 +6369,12 @@ const startAgentGameHost = (): void => {
   });
   // Route group-chat inserts into the runtime (no-op when no session exists).
   setGroupMessageInsertedHook((groupId) => agentGameHost?.onGroupMessage(groupId));
+  // Speedup R-04: local bots' registered names win over the chain-resolved
+  // userInfo.name at group-chat ingest (the indexer flip-flops between a
+  // bot's historical names — the EP28 "claude bot" display bug).
+  setLocalSenderNameResolver(
+    (globalMetaId) => getMetabotStore().getMetabotByGlobalMetaId(globalMetaId)?.name?.trim() || null,
+  );
 };
 
 const getAgentGameHost = (): AgentGameHost | null => agentGameHost;

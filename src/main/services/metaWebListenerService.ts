@@ -45,6 +45,44 @@ export function setGroupMessageInsertedHook(hook: ((groupId: string) => void) | 
   onGroupMessageInserted = hook;
 }
 
+/**
+ * Speedup R-04: canonical sender-name resolver for LOCAL bots. The chain
+ * payload's userInfo.name is whatever name record the indexer resolved for
+ * that pin — it flip-flops between a bot's historical names (EP28 rendered
+ * one Builder阿码 message as "claude bot"). When the sender GlobalMetaID
+ * belongs to a local MetaBot, its current registered name wins at ingest.
+ */
+let localSenderNameResolver: ((globalMetaId: string) => string | null) | null = null;
+
+export function setLocalSenderNameResolver(
+  resolver: ((globalMetaId: string) => string | null) | null,
+): void {
+  localSenderNameResolver = resolver;
+}
+
+/**
+ * Single sender-name rule for group-chat ingest (realtime + backfill): the
+ * local MetaBot registry wins when the GlobalMetaID is ours; otherwise the
+ * chain userInfo name, then the pin-carried nickName. Never fails — a
+ * resolver error degrades to the chain name.
+ */
+export function resolveGroupChatSenderName(
+  globalMetaId: string | null | undefined,
+  chainName: string | null | undefined,
+  nickName: string | null | undefined,
+): string {
+  const gmid = String(globalMetaId ?? '').trim();
+  if (gmid && localSenderNameResolver) {
+    try {
+      const local = localSenderNameResolver(gmid);
+      if (local && local.trim()) return local.trim();
+    } catch {
+      // fall through to the chain name
+    }
+  }
+  return (chainName ?? '').trim() || (nickName ?? '').trim();
+}
+
 /** In-memory map: globalmetaid -> SocketIOClient */
 const activeSockets = new Map<string, SocketIOClient>();
 /** In-memory map: target globalmetaid -> 32-byte private key buffer */
@@ -278,7 +316,11 @@ function routeGroupChat(
   const channel_id = D.channelId ?? null;
   const sender_global_metaid = D.globalMetaId ?? null;
   const sender_address = D.address ?? null;
-  const sender_name = (userInfo as UserInfoShape)?.name ?? D.nickName ?? '';
+  const sender_name = resolveGroupChatSenderName(
+    sender_global_metaid,
+    (userInfo as UserInfoShape)?.name,
+    D.nickName,
+  );
   const sender_avatar = (userInfo as UserInfoShape)?.avatar ?? '';
   const sender_chat_pubkey = (userInfo as UserInfoShape)?.chatPublicKey ?? '';
   const protocol = D.protocol ?? '';

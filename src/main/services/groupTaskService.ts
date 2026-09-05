@@ -1662,18 +1662,37 @@ export async function getGroupTask(
       }),
     };
   });
+  // Speedup R-04: the roster wins over the chain-resolved sender_name — the
+  // indexer's userInfo.name flip-flops between a bot's historical names (the
+  // EP28 "claude bot" display bug), while sender_global_metaid is always the
+  // true identity. Resolve display names by GlobalMetaID for every message
+  // whose sender is (or was) a roster member.
+  const rosterNameByGmid = new Map<string, string>();
+  for (const member of store.listMembers(id, { includeRemoved: true })) {
+    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+    const name = (member.name ?? '').trim() || (member.displayName ?? '').trim();
+    if (gmid && name) rosterNameByGmid.set(gmid, name);
+  }
+  const rawMessages = task.groupId
+    ? store.listGroupChatMessages(task.groupId, {
+      beforeId: opts?.beforeId,
+      limit: opts?.messageLimit ?? (view === 'full' ? 50 : 5),
+    })
+    : [];
+  const messages = rosterNameByGmid.size === 0
+    ? rawMessages
+    : rawMessages.map((message) => {
+      const gmid = (message.senderGlobalMetaId ?? '').trim().toLowerCase();
+      const rosterName = gmid ? rosterNameByGmid.get(gmid) : undefined;
+      return rosterName ? { ...message, senderName: rosterName } : message;
+    });
   return {
     ...task,
     members: membersWithStatus,
     deliverables,
     transitions: store.listTaskTransitions(id),
     integrityEvents: store.listIntegrityEvents(id),
-    messages: task.groupId
-      ? store.listGroupChatMessages(task.groupId, {
-        beforeId: opts?.beforeId,
-        limit: opts?.messageLimit ?? (view === 'full' ? 50 : 5),
-      })
-      : [],
+    messages,
     // 0 mirrors the empty messages page when the task has no group yet.
     messagesTotal: task.groupId ? store.countGroupChatMessages(task.groupId) : 0,
     stall: stall.stall,

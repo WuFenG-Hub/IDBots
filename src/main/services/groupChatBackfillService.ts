@@ -11,6 +11,7 @@
 
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import { decryptGroupMessage } from './metaWebCrypto';
+import { resolveGroupChatSenderName } from './metaWebListenerService';
 
 export interface GroupChatBackfillServiceDeps {
   db: Database;
@@ -261,7 +262,7 @@ function storeGroupChatHistoryMessages(
         message.metaId || message.globalMetaId || message.address || '',
         message.globalMetaId || null,
         message.address || null,
-        toSafeString(userInfo.name) || message.nickName || '',
+        resolveGroupChatSenderName(message.globalMetaId, toSafeString(userInfo.name), message.nickName),
         toSafeString(userInfo.avatar) || '',
         toSafeString(userInfo.chatPublicKey) || '',
         message.protocol || '',
