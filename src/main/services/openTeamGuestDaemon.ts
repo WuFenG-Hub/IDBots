@@ -49,7 +49,7 @@ import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import { isOpenTeamTaskStatusTerminal, parseOpenTeamTaskStatusTag } from '../libs/openTeamTaskStatus';
 import { buildOpenTeamGuestPrompt } from './openTeamGuestPrompt';
-import { ensureOpenTeamGuestSession, isCorruptSessionLogError } from './groupTaskSession';
+import { ensureOpenTeamGuestSession, corruptSessionLogSignature, isCorruptSessionLogError } from './groupTaskSession';
 import {
   buildGuestMetafileDeliverableLine,
   buildGuestNoteDeliverableLine,
@@ -710,7 +710,8 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
             emitLog(
               `[OpenTeamGuestDaemon] Group ${membership.groupId}: corrupt session log for bot ${bot.id} — ` +
               `guest session rebuilt (${rebuilt.id.slice(0, 8)}…); the next mention's skill turn runs on the ` +
-              'fresh session (this turn fell back to plain completion)',
+              'fresh session (this turn fell back to plain completion). ' +
+              `Log signature: ${corruptSessionLogSignature(error)}`,
             );
           } else {
             // Rate-capped recurrence: the dual-writer race is likely still
@@ -720,7 +721,9 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
               lastCorruptGuidanceAtByMembership.set(membership.id, now());
               emitLog(
                 `[OpenTeamGuestDaemon] Group ${membership.groupId}: corrupt session log for bot ${bot.id} ` +
-                'recurred within the rebuild cooldown. Self-heal guidance: restart the app so every runtime ' +
+                'recurred within the rebuild cooldown. ' +
+                `Log signature: ${corruptSessionLogSignature(error)}. ` +
+                'Self-heal guidance: restart the app so every runtime ' +
                 'subprocess is reaped and the session resumes under a single writer; if it still recurs, ' +
                 'investigate the provider re-pin / config-change handoff for this bot.',
               );

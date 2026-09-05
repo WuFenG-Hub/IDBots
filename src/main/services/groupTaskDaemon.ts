@@ -82,6 +82,7 @@ import {
   ensureGroupTaskMemberReady,
   ensureGroupTaskSession,
   GROUP_TASK_CONVERSATION_CHANNEL,
+  corruptSessionLogSignature,
   isCorruptSessionLogError,
   rebuildGroupTaskSession,
 } from './groupTaskSession';
@@ -5485,7 +5486,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               });
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: corrupt chair session log — session rebuilt from the ` +
-                `host ledger (${rebuilt.sessionId.slice(0, 8)}…); supervisor signals stay pending for the next tick`,
+                `host ledger (${rebuilt.sessionId.slice(0, 8)}…); supervisor signals stay pending for the next tick. ` +
+                `Log signature: ${corruptSessionLogSignature(error)}`,
               );
               // fix-v2 P1-5: parity with the member-turn path — the origin
               // session hears about the rebuild immediately, not via a later
@@ -5497,10 +5499,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                   title: task.title,
                   status: task.status,
                   summary:
-                    'The chair hit a corrupt session log (seq gap in the committed region) while answering ' +
-                    'supervisor signals — every turn on it would fail forever. The host rebuilt the chair\'s ' +
-                    'task session from the task ledger (goal, status trail, deliverables, recent transcript); ' +
-                    'the pending supervisor signals will be answered on the fresh session next tick.',
+                    'The chair hit a corrupt session log while answering supervisor signals — every turn on ' +
+                    `it would fail forever. Log signature: ${corruptSessionLogSignature(error)}. The host rebuilt ` +
+                    'the chair\'s task session from the task ledger (goal, status trail, deliverables, recent ' +
+                    'transcript); the pending supervisor signals will be answered on the fresh session next tick.',
                 }),
                 `corrupt_session_rebuild:${task.id}:${bot.id}`,
               );
@@ -5517,7 +5519,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             // with self-heal guidance instead of silently burning attempts.
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: corrupt chair session log recurred within the rebuild ` +
-              'cooldown — escalating immediately instead of only counting attempts',
+              'cooldown — escalating immediately instead of only counting attempts. ' +
+              `Log signature: ${corruptSessionLogSignature(error)}`,
             );
             notifySourceSessionMilestone(
               task,
@@ -5528,7 +5531,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 summary:
                   'The chair hit a corrupt session log AGAIN within an hour of the automatic rebuild — the ' +
                   'driver-handoff race that corrupts the log is likely still live (two runtime processes ' +
-                  'writing one session log). Self-heal guidance: restart the app so every runtime subprocess ' +
+                  'writing one session log). ' +
+                  `Log signature: ${corruptSessionLogSignature(error)}. ` +
+                  'Self-heal guidance: restart the app so every runtime subprocess ' +
                   'is reaped and the session resumes under a single writer; if it still recurs, investigate ' +
                   'the provider re-pin / config-change handoff for the chair bot.',
               }),
@@ -6289,7 +6294,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 });
                 emitLog(
                   `[GroupTaskDaemon] Task ${task.id}: corrupt session log for bot ${bot.id} — task session ` +
-                  `rebuilt from the host ledger (${rebuilt.sessionId.slice(0, 8)}…); trigger requeued`,
+                  `rebuilt from the host ledger (${rebuilt.sessionId.slice(0, 8)}…); trigger requeued. ` +
+                  `Log signature: ${corruptSessionLogSignature(error)}`,
                 );
                 notifySourceSessionMilestone(
                   task,
@@ -6299,7 +6305,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                     status: task.status,
                     summary:
                       `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} hit a corrupt ` +
-                      'session log (seq gap in the committed region) — every turn on it would fail forever. ' +
+                      'session log — every turn on it would fail forever. ' +
+                      `Log signature: ${corruptSessionLogSignature(error)}. ` +
                       'The host rebuilt the member\'s task session from the task ledger (goal, status trail, ' +
                       'deliverables, recent transcript); the member lost its private chat memory of this task only.',
                   }),
@@ -6328,7 +6335,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // immediately with the self-heal guidance, then fall through.
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: corrupt session log for bot ${bot.id} recurred ` +
-                'within the rebuild cooldown — escalating immediately instead of only counting retries',
+                'within the rebuild cooldown — escalating immediately instead of only counting retries. ' +
+                `Log signature: ${corruptSessionLogSignature(error)}`,
               );
               notifySourceSessionMilestone(
                 task,
@@ -6340,6 +6348,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                     `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} hit a corrupt ` +
                     'session log AGAIN within an hour of the automatic rebuild — the driver-handoff race that ' +
                     'corrupts the log is likely still live (two runtime processes writing one session log). ' +
+                    `Log signature: ${corruptSessionLogSignature(error)}. ` +
                     'Self-heal guidance: restart the app so every runtime subprocess is reaped and the session ' +
                     'resumes under a single writer; if it still recurs, investigate the provider re-pin / ' +
                     'config-change handoff for this bot.',

@@ -5072,7 +5072,8 @@ export class CoworkRunner extends EventEmitter {
   /**
    * The MetaBot brain bound to a session's bot: a concrete MODEL id (new
    * semantic) or a legacy provider key that resolveApiConfigForModel still
-   * resolves to a concrete model. Carries the provider hint (id-collision
+   * resolves to a concrete model — null when the bot rides the app-global
+   * default as its primary. Carries the provider hint (id-collision
    * disambiguation), the per-brain reasoning effort, and the fallback brain —
    * used for both the A2A/group-task automation sessions (the brain IS their
    * model+effort) and cowork UI sessions that never picked a session override.
@@ -5080,7 +5081,7 @@ export class CoworkRunner extends EventEmitter {
   private getSessionAutomationBrain(sessionId: string): {
     metabotId: number;
     botName: string | null;
-    modelId: string;
+    modelId: string | null;
     providerKey: string | null;
     effort: LlmEffortLevel | null;
     fallbackModelId: string | null;
@@ -5092,15 +5093,23 @@ export class CoworkRunner extends EventEmitter {
     const metabotId = session?.metabotId;
     if (metabotId == null || typeof metabotId !== 'number') return null;
     const metabot = this.getMetabotById(metabotId);
-    const modelId = metabot?.llm_id?.trim();
-    if (!modelId) return null;
+    const modelId = metabot?.llm_id?.trim() || null;
+    const fallbackModelId = metabot?.fallback_llm_id?.trim() || null;
+    // The brain exists when EITHER half is configured: a bot whose primary is
+    // the app-global default (no llm_id) must still inherit its configured
+    // fallback brain into every session it owns (§9) — gating on llm_id alone
+    // used to drop that fallback on the floor, so such bots never degraded.
+    if (!modelId && !fallbackModelId) return null;
     return {
       metabotId,
       botName: metabot?.name?.trim() || null,
       modelId,
-      providerKey: metabot?.llm_provider?.trim() || null,
+      // The provider hint disambiguates an explicit primary model id only;
+      // without llm_id the primary IS the global default route, and pinning
+      // llm_provider here would silently re-point it.
+      providerKey: modelId ? metabot?.llm_provider?.trim() || null : null,
       effort: toLlmEffortLevel(metabot?.llm_effort),
-      fallbackModelId: metabot?.fallback_llm_id?.trim() || null,
+      fallbackModelId,
       fallbackProviderKey: metabot?.fallback_llm_provider?.trim() || null,
       fallbackEffort: toLlmEffortLevel(metabot?.fallback_llm_effort),
     };
@@ -6971,16 +6980,17 @@ export class CoworkRunner extends EventEmitter {
       requestedProvider,
       brainContext,
     )
-    if (!route && automationModelOverride) {
-      // Primary brain unavailable: the bot's fallback brain (model+effort)
-      // takes over before the global default route.
+    if (!route && (automationModelOverride || brain?.fallbackModelId)) {
+      // Primary brain unavailable — or, for a bot riding the app-global
+      // default, no enabled default route at all: the bot's fallback brain
+      // (model+effort) takes over before the global default route.
       const fallbackRoute = brain?.fallbackModelId
         ? resolveDshProviderRoute(brain.fallbackModelId, brain.fallbackProviderKey, brainContext)
         : null
       if (fallbackRoute) {
         coworkLog('INFO', 'resolveSessionDshRoute', 'Primary brain did not resolve; using the fallback brain', {
           sessionId,
-          primary: automationModelOverride,
+          primary: automationModelOverride ?? '<default>',
           fallback: brain?.fallbackModelId,
         })
         route = fallbackRoute
@@ -7886,6 +7896,23 @@ export class CoworkRunner extends EventEmitter {
               fromRoute: { provider: route.provider, model: route.model, baseUrl: route.baseUrl },
               toRoute: { provider: fallbackRoute.provider, model: fallbackRoute.model, baseUrl: fallbackRoute.baseUrl },
               maxFallbackResumes: DSH_FALLBACK_TURN_MAX_RESUMES,
+            }
+          );
+          // §9 visibility: the degradation must be discoverable where the
+          // session itself is inspected (transcript/UI/session log), not only
+          // in cowork.log — a group-task post-mortem reads the worker session.
+          this.addSystemMessage(
+            sessionId,
+            tApp(
+              `主模型路由持续不可用，本轮已切换到该 Bot 的备用模型 ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`,
+              `The primary model route kept failing; this turn switched to the bot's fallback model ${fallbackRoute.model} (${fallbackRoute.provider}).`
+            ),
+            {
+              dshRouteFallback: true,
+              fromProvider: route.provider,
+              fromModel: route.model,
+              toProvider: fallbackRoute.provider,
+              toModel: fallbackRoute.model,
             }
           );
           for (let fallbackAttempt = 1; fallbackAttempt <= DSH_FALLBACK_TURN_MAX_RESUMES; fallbackAttempt += 1) {

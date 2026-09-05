@@ -40,6 +40,17 @@ export function isCorruptSessionLogError(error: unknown): boolean {
   return /corrupt session log|append seq mismatch|seq gap in committed region/i.test(message);
 }
 
+/**
+ * One-line, length-capped corruption signature for alert text. The runtime
+ * error message carries the forensic detail (gap line, expected/got seq
+ * values); alerts must quote it so post-mortems see WHERE the log broke
+ * without opening the session file.
+ */
+export function corruptSessionLogSignature(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim();
+  return message.length > 240 ? `${message.slice(0, 237)}…` : message;
+}
+
 /** Sanitize a conversation id into one safe workspace folder name. */
 function groupTaskWorkspaceSegment(externalConversationId: string): string {
   const segment = externalConversationId
