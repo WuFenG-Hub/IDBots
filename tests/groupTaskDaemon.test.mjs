@@ -7957,3 +7957,107 @@ test('fix-v2 P0-1: a retained deadline alert carries the member\'s dependency st
     h.cleanup();
   }
 });
+
+test('fix-v2 P0-2: the chair-response watchdog defers while a chair turn is in flight (no redrive, no drop)', async () => {
+  let releaseTurn;
+  const gate = new Promise((resolve) => { releaseTurn = resolve; });
+  const h = await createHarness({
+    deps: {
+      chairResponseRedriveMs: 60_000,
+      performChat: async () => {
+        await gate;
+        return '收到，质量门核验中。';
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // A worker question the chair owes an answer to; the chair turn dispatches
+    // and stays in flight (gated) — standing in for a 7-minute quality gate.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p02-q', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot S3 产物齐了，请核验。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    const rawLoop = createGroupTaskDaemonLoop(h.deps);
+    await rawLoop.runTick();
+    assert.ok(
+      rawLoop.getTurnActivity().some((turn) => turn.taskId === task.id && turn.metabotId === 1),
+      'the chair turn is in flight',
+    );
+    assert.ok(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      'the obligation is armed',
+    );
+    // Well past the redrive window with the chair turn STILL running: the
+    // watchdog must slide the countdown — never redrive, never drop, never
+    // alert (task #62 fired twice inside exactly this window).
+    h.state.nowMs = startMs + 30 * 60_000;
+    await rawLoop.runTick();
+    const pending = JSON.parse(h.store.get(`group_task_chair_response_pending:${task.id}`));
+    assert.equal(pending.redriven ?? false, false, 'no re-drive while the chair turn runs');
+    assert.ok(pending.atMs > startMs, 'the silence countdown slid forward');
+    // The turn completes — its reply answers the trigger and clears the
+    // obligation; no watchdog noise afterwards either.
+    releaseTurn();
+    await rawLoop.whenIdle();
+    h.state.nowMs = startMs + 60 * 60_000;
+    await rawLoop.runTick();
+    assert.equal(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      undefined,
+      'the completed chair turn clears the obligation',
+    );
+    assert.equal(
+      h.sends.filter((send) => /never answered/.test(send.content)).length,
+      0,
+      'no "chair never answered" alert at any point',
+    );
+  } finally {
+    releaseTurn();
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P0-2: a genuinely silent chair still gets one re-drive after a full window', async () => {
+  // chatErrorAlways: every chair turn fails — no speech, no session writes, so
+  // the responsiveness gate must NOT hold the watchdog back.
+  const h = await createHarness({
+    deps: { chairResponseRedriveMs: 60_000 },
+    chatErrorAlways: 'chair LLM unreachable',
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p02b-q', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot 这个问题需要 chair 确认。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      'obligation armed (a failed chair turn answers nothing)',
+    );
+    // A full window of continuous silence → exactly one re-drive; the
+    // obligation stays armed for the final-drop escalation.
+    h.state.nowMs = startMs + 30 * 60_000;
+    await h.loop.runTick();
+    const pending = JSON.parse(h.store.get(`group_task_chair_response_pending:${task.id}`));
+    assert.equal(pending.redriven, true, 'a continuously silent chair is re-driven once');
+    // Another full window of silence after the re-drive → the obligation is
+    // dropped (the anomaly escalation covers it from there).
+    h.state.nowMs = startMs + 60 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_chair_response_pending:${task.id}`),
+      undefined,
+      'still silent after the re-drive: the obligation is dropped, not re-driven again',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

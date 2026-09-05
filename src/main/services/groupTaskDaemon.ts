@@ -734,8 +734,14 @@ const DEFAULT_STEP_DEADLINE_MS = 30 * 60_000;
  * cap, the Twin-suppression window, or a spent reply budget.
  */
 const CHAIR_RESPONSE_PENDING_PREFIX = 'group_task_chair_response_pending:';
-/** Task #51: how long the chair may stay silent on a trigger before one re-drive. */
-const DEFAULT_CHAIR_RESPONSE_REDRIVE_MS = 4 * 60_000;
+/**
+ * Task #51: how long the chair may stay silent on a trigger before one
+ * re-drive. fix-v2 P0-2: raised 4 min → 10 min — a chair quality-gate turn
+ * legitimately runs ~7 minutes (task #62 fired twice inside one), and the
+ * countdown now also slides while the chair is provably responsive (turn in
+ * flight / session writes), so the window measures CONTINUOUS silence only.
+ */
+const DEFAULT_CHAIR_RESPONSE_REDRIVE_MS = 10 * 60_000;
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /**
  * P1-2/P1-3: one stuck-session reclaim per (task, member) streak — the host
@@ -8918,7 +8924,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           && pending.reason
           && now() - pending.atMs >= chairResponseRedriveMs
         ) {
-          if (pending.redriven) {
+          // fix-v2 P0-2: never redrive or drop while the chair is provably
+          // responsive — a turn in flight right now, or cowork-session writes
+          // within the window (covers both the long quality-gate turn and the
+          // chain-sync gap between a completed turn and its observed reply;
+          // task #62 false-fired through both). The countdown slides forward
+          // so it measures CONTINUOUS chair silence; a genuinely dead chair
+          // session (no in-flight turn, no session writes for a full window)
+          // still re-drives once and then alerts the origin session.
+          const chairTurnKey = keyOf(task.id, chairMemberId);
+          const chairSessionActivityMs =
+            getLocalMemberSessionInfo(task.id, chairMemberId)?.lastActivityMs ?? null;
+          const chairResponsive = turnInFlight.has(chairTurnKey)
+            || (chairSessionActivityMs != null && now() - chairSessionActivityMs < chairResponseRedriveMs);
+          if (chairResponsive) {
+            sqlite.set(
+              `${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`,
+              JSON.stringify({ ...pending, atMs: now() }),
+            );
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: chair response watch for message ${pending.messageId} ` +
+              'deferred — chair turn in flight or session active',
+            );
+          } else if (pending.redriven) {
             // One re-drive already happened and the chair is still silent —
             // stop here; the no-progress stall monitor reports the episode.
             // GT-10: the drop itself is an anomaly too — "the chair never
@@ -8942,7 +8970,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               }),
               `chair_response_dropped:${pending.messageId}`,
             );
-          } else if (!turnInFlight.has(keyOf(task.id, chairMemberId))) {
+          } else {
+            // chairResponsive above already covers an in-flight turn — this is
+            // a genuinely silent chair: re-drive once via the durable queue.
             sqlite.set(
               `${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`,
               JSON.stringify({ ...pending, redriven: true }),
@@ -8956,10 +8986,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             });
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: chair never answered message ${pending.messageId} ` +
-              `within ${Math.round(chairResponseRedriveMs / 60_000)} min; re-driven once via the defer queue`,
+              `within ${Math.round(chairResponseRedriveMs / 60_000)} min of continuous silence; re-driven once via the defer queue`,
             );
           }
-          // A chair turn in flight right now gets this tick to land first.
         }
       }
     }
