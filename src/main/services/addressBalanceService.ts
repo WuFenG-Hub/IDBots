@@ -17,9 +17,16 @@ export type BalanceChain = 'mvc' | 'btc' | 'doge';
 export interface AddressBalanceResult {
   chain: BalanceChain;
   address: string;
+  /** Confirmed satoshis only. */
   satoshis: number;
+  /**
+   * Mempool (0-conf) satoshis. On MVC these funds are spendable right away —
+   * the gas-subsidy payouts to fresh bot wallets land and stay unconfirmed,
+   * so spend-availability checks must use satoshis + unconfirmedSatoshis.
+   */
+  unconfirmedSatoshis: number;
   unit: string; // 'SPACE' | 'BTC' | 'DOGE'
-  value: number; // human-readable, e.g. 6.18325658 SPACE
+  value: number; // human-readable, e.g. 6.18325658 SPACE (confirmed only)
 }
 
 export interface AddressBalanceOptions {
@@ -92,7 +99,7 @@ export async function getAddressBalance(
   }
 }
 
-/** MVC: uses confirmed as available balance (satoshi -> SPACE) */
+/** MVC: confirmed satoshis in `satoshis`, mempool satoshis in `unconfirmedSatoshis` (satoshi -> SPACE) */
 async function getMvcBalance(address: string, timeoutMs: number): Promise<AddressBalanceResult> {
   const url = `${METALET_HOST}/wallet-api/v4/mvc/address/balance-info?net=${NET}&address=${encodeURIComponent(address)}`;
   const json = await fetchMetaletJson<{
@@ -105,16 +112,18 @@ async function getMvcBalance(address: string, timeoutMs: number): Promise<Addres
     throw new Error(json.message || 'Failed to fetch MVC balance');
   }
   const satoshis = json.data?.confirmed ?? 0;
+  const unconfirmedSatoshis = json.data?.unconfirmed ?? 0;
   return {
     chain: 'mvc',
     address,
     satoshis,
+    unconfirmedSatoshis,
     unit: 'SPACE',
     value: satoshiToUnit(satoshis),
   };
 }
 
-/** BTC: uses balance as available balance (API returns BTC, convert to satoshis for consistency) */
+/** BTC: total (confirmed + unconfirmed) in `satoshis`, mempool-only in `unconfirmedSatoshis` */
 async function getBtcBalance(address: string, timeoutMs: number): Promise<AddressBalanceResult> {
   const snapshot = await fetchBtcBalance(address, { timeoutMs: Math.min(timeoutMs, 1_500) });
   const satoshis = snapshot.totalSatoshis;
@@ -122,12 +131,13 @@ async function getBtcBalance(address: string, timeoutMs: number): Promise<Addres
     chain: 'btc',
     address,
     satoshis,
+    unconfirmedSatoshis: snapshot.unconfirmedSatoshis,
     unit: 'BTC',
     value: satoshiToUnit(satoshis),
   };
 }
 
-/** DOGE: uses confirmed as available balance (satoshi -> DOGE) */
+/** DOGE: confirmed satoshis in `satoshis`, mempool satoshis in `unconfirmedSatoshis` (satoshi -> DOGE) */
 async function getDogeBalance(address: string, timeoutMs: number): Promise<AddressBalanceResult> {
   const url = `${METALET_HOST}/wallet-api/v4/doge/address/balance-info?net=${NET}&address=${encodeURIComponent(address)}`;
   const json = await fetchMetaletJson<{
@@ -140,10 +150,12 @@ async function getDogeBalance(address: string, timeoutMs: number): Promise<Addre
     throw new Error(json.message || 'Failed to fetch DOGE balance');
   }
   const satoshis = json.data?.confirmed ?? 0;
+  const unconfirmedSatoshis = json.data?.unconfirmed ?? 0;
   return {
     chain: 'doge',
     address,
     satoshis,
+    unconfirmedSatoshis,
     unit: 'DOGE',
     value: satoshiToUnit(satoshis),
   };

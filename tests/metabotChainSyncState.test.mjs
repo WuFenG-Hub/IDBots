@@ -104,7 +104,7 @@ const mockDeps = (store, overrides = {}) => ({
 // create: balance gate
 // ---------------------------------------------------------------------------
 
-test('create: confirmed low balance refuses with the shortfall and nothing persisted', async () => {
+test('create: spendable low balance refuses with the shortfall and nothing persisted', async () => {
   const store = await openStore();
   const deps = mockDeps(store, {
     checkWalletBalance: async () => 120, // far below MIN_CREATE_GAS_SATS
@@ -113,6 +113,20 @@ test('create: confirmed low balance refuses with the shortfall and nothing persi
   assert.equal(res.success, false);
   assert.match(res.error, /INSUFFICIENT_BALANCE/);
   assert.match(res.error, /short by/);
+  assert.match(res.error, /gas subsidy claimed success/, 'subsidy outcome must be surfaced for diagnosis');
+  assert.equal(store.listMetabots().length, 0, 'no DB rows written');
+});
+
+test('create: gate refusal names the subsidy failure reason', async () => {
+  const store = await openStore();
+  const deps = mockDeps(store, {
+    requestSubsidy: async () => ({ success: false, error: 'address-reward failed: 429 Too Many Requests' }),
+    checkWalletBalance: async () => 0, // confirmed-only read of a 0-conf subsidized wallet
+  });
+  const res = await createMetaBotOnChainCore({ name: 'NoGas', llm_id: 'deepseek' }, deps);
+  assert.equal(res.success, false);
+  assert.match(res.error, /INSUFFICIENT_BALANCE/);
+  assert.match(res.error, /gas subsidy failed \(address-reward failed: 429 Too Many Requests\)/);
   assert.equal(store.listMetabots().length, 0, 'no DB rows written');
 });
 
