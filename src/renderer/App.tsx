@@ -11,9 +11,8 @@ import { ScheduledTasksView } from './components/scheduledTasks';
 import { GroupTasksView, NewGroupTaskModal } from './components/groupTasks';
 import MetabotsView from './components/metabots/MetabotsView';
 import GigSquareView from './components/gigSquare/GigSquareView';
-import CoworkPermissionModal from './components/cowork/CoworkPermissionModal';
+import CoworkPermissionPanel from './components/cowork/CoworkPermissionPanel';
 import AgentGameConsentCard from './components/agentGame/AgentGameConsentCard';
-import CoworkQuestionWizard from './components/cowork/CoworkQuestionWizard';
 import { configService } from './services/config';
 import { ensureFreeQuotaProvisioning } from './services/llmFreeQuotaBootstrap';
 import { apiService } from './services/api';
@@ -1049,29 +1048,12 @@ const App: React.FC = () => {
     };
   }, [isInitialized, runUpdateCheck]);
 
-  // 根据场景选择使用哪个权限组件
-  const permissionModal = useMemo(() => {
+  // 统一的轻量权限确认条（底部停靠、不遮屏），覆盖工具权限与 AskUserQuestion（含多问题）
+  const permissionPanel = useMemo(() => {
     if (!pendingPermission) return null;
 
-    // 检查是否为 AskUserQuestion 且有多个问题 -> 使用向导式组件
-    const isQuestionTool = pendingPermission.toolName === 'AskUserQuestion';
-    if (isQuestionTool && pendingPermission.toolInput) {
-      const rawQuestions = (pendingPermission.toolInput as Record<string, unknown>).questions;
-      const hasMultipleQuestions = Array.isArray(rawQuestions) && rawQuestions.length > 1;
-
-      if (hasMultipleQuestions) {
-        return (
-          <CoworkQuestionWizard
-            permission={pendingPermission}
-            onRespond={handlePermissionResponse}
-          />
-        );
-      }
-    }
-
-    // 其他情况使用原有的权限模态框
     return (
-      <CoworkPermissionModal
+      <CoworkPermissionPanel
         permission={pendingPermission}
         onRespond={handlePermissionResponse}
       />
@@ -1350,7 +1332,7 @@ const App: React.FC = () => {
           installingHint={updatePhase === 'applying' ? i18nService.t('updateInstallingSilentHint') : undefined}
         />
       )}
-      {permissionModal}
+      {permissionPanel}
       {pendingConsent && (
         <AgentGameConsentCard info={pendingConsent} onRespond={handleConsentResponse} />
       )}
