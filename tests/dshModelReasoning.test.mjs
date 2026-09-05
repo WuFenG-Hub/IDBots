@@ -42,3 +42,16 @@ test('other families stay undeclared — no capability guessing', () => {
   assert.equal(dshModelReasoningDeclaration('moonshotai/Kimi-K3', 'openai'), null);
   assert.equal(dshModelReasoningDeclaration('', 'openai'), null);
 })
+
+test('GLM models use the Z.AI thinking wire without reasoning_effort', () => {
+  const declaration = dshModelReasoningDeclaration('z-ai/glm-5.3-flash', 'openai');
+  assert.ok(declaration);
+  assert.equal(declaration.compat.thinkingFormat, 'zai');
+  assert.equal(declaration.compat.supportsReasoningEffort, false);
+  assert.deepEqual(declaration.reasoningEfforts, {
+    off: null,
+    low: 'enabled',
+    high: 'enabled',
+    max: 'enabled',
+  });
+});
