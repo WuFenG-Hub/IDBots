@@ -55,7 +55,7 @@ const DELIVERABLE_TAG_SPLIT = /\[DELIVERABLE\]/gi;
  * (placeholders), parens (annotations, incl. full-width), curly brackets,
  * ellipsis (truncation), backticks and markdown emphasis (never part of a URI).
  */
-const URI_TOKEN_EXCLUDES = `\\s\\[\\]<>()（）「」『』【】{}…\`*_`;
+const URI_TOKEN_EXCLUDES = `\\s\\[\\]<>()（）「」『』【】{}…\`*_，。；：！？、`;
 const SCHEME_URI_RE = new RegExp(`(metaapp|metafile|pin)://([^${URI_TOKEN_EXCLUDES}]+)`, 'i');
 const HTTP_URI_RE = new RegExp(`(https?)://([^${URI_TOKEN_EXCLUDES}]+)`, 'i');
 const BARE_PINID_RE = /\b[0-9a-f]{64}i0\b/i;
@@ -183,17 +183,6 @@ interface ScannedTagSegment {
   nextLine: string | null;
 }
 
-/** First non-blank line within the 3 lines after `tagLineIndex`, or null. */
-function firstNonBlankLineAfter(lines: string[], tagLineIndex: number): string | null {
-  const windowEnd = Math.min(tagLineIndex + 3, lines.length - 1);
-  for (let i = tagLineIndex + 1; i <= windowEnd; i += 1) {
-    if (DELIVERABLE_TAG_TEST.test(lines[i])) return null;
-    const candidate = lines[i].trim();
-    if (candidate) return candidate;
-  }
-  return null;
-}
-
 /**
  * Scan a full group message for every [DELIVERABLE] tag occurrence. One entry
  * per tag occurrence (a line with two tags yields two entries); empty
@@ -207,6 +196,10 @@ function scanDeliverableTagSegments(content: string): ScannedTagSegment[] {
   if (!DELIVERABLE_TAG_TEST.test(text)) return [];
   const lines = text.split('\n');
   const entries: ScannedTagSegment[] = [];
+  const capturedUris = new Set<string>();
+  // Lines consumed by the #62 multi-line lookahead (nextLine) — the body sweep
+  // below must not re-record the same URI from them.
+  const lookaheadLines = new Set<number>();
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (!DELIVERABLE_TAG_TEST.test(line)) continue;
@@ -214,10 +207,60 @@ function scanDeliverableTagSegments(content: string): ScannedTagSegment[] {
     for (let p = 1; p < parts.length; p += 1) {
       const segment = parts[p].trim();
       if (!segment) continue;
-      entries.push({
-        segment,
-        nextLine: p === parts.length - 1 ? firstNonBlankLineAfter(lines, i) : null,
-      });
+      let nextLine: string | null = null;
+      if (p === parts.length - 1) {
+        for (let j = i + 1; j <= Math.min(i + 3, lines.length - 1); j += 1) {
+          if (DELIVERABLE_TAG_TEST.test(lines[j])) break;
+          const trimmed = lines[j].trim();
+          if (trimmed) {
+            nextLine = trimmed;
+            lookaheadLines.add(j);
+            break;
+          }
+        }
+      }
+      entries.push({ segment, nextLine });
+      // Track URIs already claimed by tag segments (+ their lookahead lines)
+      // so the EP28 body-line sweep below never duplicates them.
+      const candidate = parseSegment(segment);
+      if (candidate.valid && candidate.uri) capturedUris.add(candidate.uri);
+      if (nextLine) {
+        for (const looked of validSchemeCandidates(nextLine)) {
+          if (looked.uri) capturedUris.add(looked.uri);
+        }
+      }
+    }
+  }
+  // EP28 hardening (round 5): deliverable receipts increasingly put the URIs
+  // on body lines AFTER the tag line (list items, backtick-wrapped install
+  // commands, reply-form receipts). Round-4's tag-line-only sweep recorded
+  // those messages as bare text rows (uri NULL) — 9 of 9 in EP28 — and the
+  // acceptance UI degraded every criterion to "unverifiable" even though every
+  // pin was real and on-chain. Sweep NON-tag lines of a TAGGED message for
+  // scheme URIs carrying a full 64-hex+i0 pinid and append one candidate per
+  // URI (segments stay index-aligned with parseDeliverableLines — each body
+  // hit pushes a synthetic URI-only segment, which parseSegment re-parses to
+  // exactly that candidate; the daemon only reads segments of TEXT candidates
+  // for local-file upload, and body-swept candidates are never text).
+  // Conservative by design:
+  // - only messages that carry the tag are swept — prose in ordinary chatter
+  //   is never recorded;
+  // - scheme URIs only (metaapp/metafile/pin) — bare pinids and http(s) links
+  //   in prose stay unrecorded;
+  // - malformed-shaped tokens (placeholders, ellipsis/truncated pinids) are
+  //   skipped silently: a prose mention can never mint an invalid row;
+  // - URIs already captured on a tag line (or a #62 lookahead line) are not
+  //   duplicated, and lookahead-consumed lines are skipped entirely;
+  // - multiple valid URIs on ONE body line each get their own candidate
+  //   (EP27: `- 附件对账：①封面 … ②演示视频 …` carried two real pins).
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lookaheadLines.has(i) || DELIVERABLE_TAG_TEST.test(lines[i])) continue;
+    const segment = lines[i].trim();
+    if (!segment || !HAS_SCHEME_TOKEN_RE.test(segment)) continue;
+    for (const candidate of validSchemeCandidates(segment)) {
+      if (!candidate.uri || capturedUris.has(candidate.uri)) continue;
+      capturedUris.add(candidate.uri);
+      entries.push({ segment: candidate.uri, nextLine: null });
     }
   }
   return entries;
@@ -245,6 +288,35 @@ export function parseDeliverableLines(content: string): ParsedDeliverable[] {
     const upgraded = parseSegment(`${segment}\n${nextLine}`);
     return upgraded.valid && upgraded.uri ? upgraded : candidate;
   });
+}
+
+/**
+ * EP28 hardening (round 5): body-line sweep helper. Returns one fully VALID
+ * scheme-URI candidate (metaapp/metafile/pin, 64-hex+i0 payload) per URI found
+ * in a single non-tag line. Used by scanDeliverableSegments so prose mentions
+ * of malformed / placeholder tokens can never mint an invalid row.
+ */
+function validSchemeCandidates(line: string): ParsedDeliverable[] {
+  const out: ParsedDeliverable[] = [];
+  const schemeRe = new RegExp(
+    `(metaapp|metafile|pin)://([^${URI_TOKEN_EXCLUDES}]+)`,
+    'gi',
+  );
+  let match: RegExpExecArray | null;
+  while ((match = schemeRe.exec(line)) !== null) {
+    const scheme = match[1].toLowerCase();
+    const payload = stripTrailingPunct(match[2]);
+    const pinidToken = payload.match(PINID_TOKEN_RE)?.[0];
+    if (!pinidToken) continue; // scheme-shaped but no full pinid → skip silently
+    const kind = (scheme === 'pin' ? 'pinid' : scheme) as 'metaapp' | 'metafile' | 'pinid';
+    // Canonical pinids are lowercase hex — normalize like parseSegment (keep
+    // suffixes like `.zip` untouched).
+    const normalizedPayload = pinidToken === pinidToken.toLowerCase()
+      ? payload
+      : payload.replace(pinidToken, pinidToken.toLowerCase());
+    out.push(valid(kind, `${scheme}://${normalizedPayload}`));
+  }
+  return out;
 }
 
 /**

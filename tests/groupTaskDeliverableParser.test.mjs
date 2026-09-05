@@ -110,7 +110,7 @@ test('#7 msg90 (AI_小新): tag line without any URI → valid text deliverable 
   assert.equal(parsed.some((c) => c.uri !== null), false);
 });
 
-test('#7 msg92 (Lucy): tag line without URI + body table of pinids/metafile URIs → text row only, body never scanned', () => {
+test('#7 msg92 (Lucy): tag line without URI + body table of TRUNCATED pinids/metafile URIs → text row only, junk body never mints rows', () => {
   const content = [
     '**[DELIVERABLE] ① 文案 + 配图（已完成，可交付 Builder 组装）**',
     '',
@@ -485,4 +485,149 @@ test('prose tag mention followed by prose stays text (no phantom URI)', () => {
   assert.equal(parsed[0].kind, 'text');
   assert.equal(parsed[0].valid, true);
   assert.equal(parsed[0].uri, null);
+});
+
+// ---------------------------------------------------------------------------
+// EP28 hardening (round 5): body-line sweep of tagged messages.
+// The EP28 (task #61) receipts put real URIs on body lines after the tag line
+// (backtick-wrapped, list items, reply-form) — round 4 recorded all 9 of them
+// as bare text rows (uri NULL) and the acceptance UI degraded to "unverifiable".
+// Fixtures: tests/fixtures/group-task-ep2{7,8}-show.json (full ledgers).
+// ---------------------------------------------------------------------------
+
+const EP28_METAAPP = 'bc26756ec9402be19caa867f081c315a387cc958d3bc6cd95c05545001afc0c6i0';
+const EP28_VIDEO = 'a198f75c540020ac301f3d3253eb3220a2c8701e1e7eda5ffd6d5097ea7ae0b9i0';
+const EP28_COVER = 'dc69d066a4453d6fe3bdf0c6d9e573ef131dfae0e091092c15f4b300b9afbc01i0';
+const EP28_ZIP = '6b91194b368bb1ce69af7b86fe5ae9cde47583dce8e5f0443ed0c386bc25a6a5i0';
+const EP28_PIN = '09aaf041607feaf64e85f3b3b2884d11285de80ff887e5fa5db233f4c5debaaai0';
+
+test('EP28 hardening: reply-form receipt with backticked body URIs → URIs captured from body lines', () => {
+  // Verbatim shape of EP28 msg 0bd184e9 (Builder阿码, replyPin set): the tag
+  // line itself carries no URI; every pin lives on body lines, some in
+  // backticks.
+  const content = [
+    '[DELIVERABLE] S3b MetaApp 组装上链完成 ✅ + 真装闭环验证完成 ✅（耗时约 17 分钟）',
+    '',
+    '✅ **交付物与验证**',
+    '- metaapp://bc26756ec9402be19caa867f081c315a387cc958d3bc6cd95c05545001afc0c6i0',
+    '- Bot Browser 实开渲染正常（resolved renderer: html-iframe）',
+    '- payload 显式携带：icon=Hero metafile://dc69d066a4453d6fe3bdf0c6d9e573ef131dfae0e091092c15f4b300b9afbc01i0，coverImg=同一 Hero',
+    '- `skill_tool install_skill zip=metafile://6b91194b368bb1ce69af7b86fe5ae9cde47583dce8e5f0443ed0c386bc25a6a5i0.zip` → ok:true',
+    '',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  const uris = parsed.filter((candidate) => candidate.valid && candidate.uri).map((candidate) => candidate.uri);
+  assert.ok(uris.includes(`metaapp://${EP28_METAAPP}`), `metaapp missing: ${uris}`);
+  assert.ok(uris.includes(`metafile://${EP28_COVER}`), 'cover missing');
+  assert.ok(uris.includes(`metafile://${EP28_ZIP}.zip`), 'zip missing (suffix kept)');
+  // Backticks never leak into the captured URI.
+  for (const uri of uris) assert.ok(!uri.includes('`'), uri);
+});
+
+test('EP28 hardening: tag line with ONE tag and NO URI + body table with TWO valid URIs → both captured', () => {
+  const content = [
+    '[DELIVERABLE] S2b 演示视频完成 ✅ 上链 + 公网 HTTP 200 实测通过',
+    '',
+    '**交付物**',
+    '- 视频 metafile://a198f75c540020ac301f3d3253eb3220a2c8701e1e7eda5ffd6d5097ea7ae0b9i0.mp4',
+    '- 封面 metafile://dc69d066a4453d6fe3bdf0c6d9e573ef131dfae0e091092c15f4b300b9afbc01i0',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 3); // 1 text (tag) + 2 body URIs
+  const uris = parsed.filter((candidate) => candidate.uri).map((candidate) => candidate.uri);
+  assert.deepEqual(uris, [`metafile://${EP28_VIDEO}.mp4`, `metafile://${EP28_COVER}`]);
+});
+
+test('EP28 hardening: adjacent URI line upgrades via #62 lookahead; alignment holds (1 entry, URI segment)', () => {
+  // Tag line + URI on the NEXT line → the lookahead path upgrades in place
+  // (one entry, not tag-text + body-append); parseDeliverableSegments stays
+  // index-aligned with the upgraded candidate.
+  const content = [
+    '[DELIVERABLE] S4 推广发布完成 ✅ buzz 已上链',
+    `- 封装 pin://${EP28_PIN}`,
+  ].join('\n');
+  const lines = parseDeliverableLines(content);
+  const segments = parseDeliverableSegments(content);
+  assert.equal(lines.length, segments.length);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].kind, 'pinid');
+  assert.equal(lines[0].uri, `pin://${EP28_PIN}`);
+  // main-side contract: segments carry the SAME-LINE tag text (the lookahead
+  // line is not merged into the segment — the daemon reads segments of text
+  // candidates for local-file paths only).
+  assert.equal(segments[0], 'S4 推广发布完成 ✅ buzz 已上链');
+});
+
+test('EP28 hardening: URI beyond the 3-line lookahead window is body-swept (appended, alignment holds)', () => {
+  const content = [
+    '[DELIVERABLE] S4 推广发布完成 ✅ buzz 已上链',
+    '',
+    '',
+    '',
+    `- 远端封装：pin://${EP28_PIN}`,
+  ].join('\n');
+  const lines = parseDeliverableLines(content);
+  const segments = parseDeliverableSegments(content);
+  assert.equal(lines.length, segments.length);
+  assert.equal(lines.length, 2); // text tag row + body-swept URI row
+  assert.equal(lines[0].kind, 'text');
+  assert.equal(lines[1].kind, 'pinid');
+  assert.equal(lines[1].uri, `pin://${EP28_PIN}`);
+  assert.equal(segments[1], `pin://${EP28_PIN}`); // synthetic URI-only segment
+});
+
+test('EP28 hardening: negative — ordinary chatter mentioning a URI without the tag is never recorded', () => {
+  const content = '我上一条 [DELIVERABLE] 消息里的 metaapp://bc26756ec9402be19caa867f081c315a387cc958d3bc6cd95c05545001afc0c6i0 请查收';
+  const parsed = parseDeliverableLines(content);
+  // Tag is inline and the URI sits in the SAME line — one inline-tag segment;
+  // body sweep only runs on NON-tag lines, so the URI is captured once, not twice.
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].uri, `metaapp://${EP28_METAAPP}`);
+});
+
+test('EP28 hardening: negative — prose URI in a NON-tagged message stays unrecorded', () => {
+  const parsed = parseDeliverableLines(`回顾上期：metaapp://${EP28_METAAPP} 已经验收 5/5`);
+  assert.deepEqual(parsed, []);
+});
+
+test('EP28 hardening: negative — body placeholders / truncated tokens never mint rows', () => {
+  const content = [
+    '[DELIVERABLE] 归档完成',
+    '- 参考示例 metaapp://<pinId>（占位符）',
+    '- 另见 metafile://6b91194b368bb1ce69af7b86fe5ae9cde47583dce8e5f0443ed0c386bc25a6a5…（截断）',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 1); // only the text tag row; body junk skipped silently
+  assert.equal(parsed[0].kind, 'text');
+});
+
+test('EP28 hardening: duplicate URI on tag line and body line folds, recorded once', () => {
+  const content = [
+    `[DELIVERABLE] metaapp://${EP28_METAAPP}`,
+    '- 正本：metaapp://bc26756ec9402be19caa867f081c315a387cc958d3bc6cd95c05545001afc0c6i0（链上可解析）',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  const metaappRows = parsed.filter((candidate) => candidate.uri === `metaapp://${EP28_METAAPP}`);
+  assert.equal(metaappRows.length, 1);
+});
+
+test('EP28 hardening: EP28-style body URIs do NOT leak into untagged deliverable validation', () => {
+  // validateDeliverableLines is the send-path warning helper: an untagged
+  // message must produce zero candidates (no false-positive warnings).
+  const { validateDeliverableLines } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const validation = validateDeliverableLines(`普通消息提到 metaapp://${EP28_METAAPP}`);
+  assert.equal(validation.candidates.length, 0);
+  assert.equal(validation.errors.length, 0);
+});
+
+test('EP28 hardening: full-width CJK punctuation terminates a body URI (icon=X metafile://…i0，coverImg=…)', () => {
+  // EP28 msg 0bd184e9 real line: the URI is followed by a full-width comma —
+  // the payload must stop there, never swallow the annotation.
+  const parsed = parseDeliverableLines([
+    '[DELIVERABLE] S3b MetaApp 组装上链完成',
+    'payload 显式携带：icon=Hero metafile://dc69d066a4453d6fe3bdf0c6d9e573ef131dfae0e091092c15f4b300b9afbc01i0，coverImg=同一 Hero',
+  ].join('\n'));
+  const cover = parsed.find((candidate) => candidate.uri?.startsWith('metafile://dc69d066'));
+  assert.ok(cover, 'cover URI missing');
+  assert.equal(cover.uri, 'metafile://dc69d066a4453d6fe3bdf0c6d9e573ef131dfae0e091092c15f4b300b9afbc01i0');
 });
