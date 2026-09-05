@@ -488,10 +488,22 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
   omittedProcess: (count: number) => string;
   planChangesTitle: string;
   omittedPlanChanges: (count: number) => string;
+  timeBreakdownTitle: string;
+  phaseLabel: (key: string) => string;
+  breakdownTotals: (messageTotal: number, heartbeatSharePct: number) => string;
+  phaseLine: (key: string, minutes: number) => string;
+  stepLine: (label: string, minutes: number) => string;
   members: (names: string) => string;
   memberJoin: string;
 } {
   if (language === 'en') {
+    const phaseLabels: Record<string, string> = {
+      planning: 'planning',
+      executing: 'executing',
+      review: 'acceptance review',
+      done: 'done',
+      cancelled: 'cancelled',
+    };
     return {
       header: (title) => `📦 Task "${title}" has entered acceptance. Here is the outcome summary.`,
       conclusion: (text) => `Conclusion: ${text}`,
@@ -509,10 +521,23 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
       omittedProcess: (count) => `(${count} process note(s) omitted; see the in-group report)`,
       planChangesTitle: 'Plan changes:',
       omittedPlanChanges: (count) => `(${count} more change(s); see the in-group log)`,
+      timeBreakdownTitle: 'Time breakdown:',
+      phaseLabel: (key) => phaseLabels[key] ?? key,
+      breakdownTotals: (messageTotal, heartbeatSharePct) =>
+        `Group messages: ${messageTotal} total; host heartbeat lines: ${heartbeatSharePct}%.`,
+      phaseLine: (key, minutes) => `- ${phaseLabels[key] ?? key}: ${minutes} min`,
+      stepLine: (label, minutes) => `- ${label}: +${minutes} min`,
       members: (names) => `Members: ${names}`,
       memberJoin: ', ',
     };
   }
+  const phaseLabels: Record<string, string> = {
+    planning: '筹备派单',
+    executing: '执行',
+    review: '验收评审',
+    done: '已完成',
+    cancelled: '已取消',
+  };
   return {
     header: (title) => `📦 任务「${title}」已进入验收阶段，以下为成果汇总。`,
     conclusion: (text) => `结论：${text}`,
@@ -530,6 +555,12 @@ export function acceptanceSummaryCopy(language: AppLanguage = groupTaskLanguage(
     omittedProcess: (count) => `（另有 ${count} 项过程记录，见群内报告）`,
     planChangesTitle: '方案变更：',
     omittedPlanChanges: (count) => `（另有 ${count} 项变更，见群内记录）`,
+    timeBreakdownTitle: '耗时分解：',
+    phaseLabel: (key) => phaseLabels[key] ?? key,
+    breakdownTotals: (messageTotal, heartbeatSharePct) =>
+      `群消息共 ${messageTotal} 条，其中宿主心跳占 ${heartbeatSharePct}%。`,
+    phaseLine: (key, minutes) => `- ${phaseLabels[key] ?? key}：${minutes} 分钟`,
+    stepLine: (label, minutes) => `- ${label}：+${minutes} 分钟`,
     members: (names) => `成员：${names}`,
     memberJoin: '、',
   };

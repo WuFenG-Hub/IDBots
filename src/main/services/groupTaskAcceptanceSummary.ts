@@ -21,16 +21,21 @@ import {
   acceptanceSummaryCopy,
   buildAcceptanceGuidanceText,
   groupTaskLanguage,
+  hasGroupTaskNotice,
   withGroupTaskNotice,
 } from '../libs/groupTaskCopy';
 import type {
   GroupTask,
   GroupTaskDeliverable,
   GroupTaskMember,
+  GroupTaskStatusEvent,
   GroupTaskAcceptanceSummary,
   GroupTaskAcceptanceSummaryDeliverable,
   GroupTaskAcceptanceSummaryMember,
   GroupTaskAcceptanceCriteriaVerdict,
+  GroupTaskTimeBreakdown,
+  GroupTaskTimeBreakdownPhase,
+  GroupTaskTimeBreakdownStep,
 } from '../groupTaskStore';
 
 /** Human-readable verification label mirroring the renderer badge text. */
@@ -288,7 +293,7 @@ export function buildAcceptanceSummaryMessageText(
   summary: Pick<
     GroupTaskAcceptanceSummary,
     'goal' | 'acceptanceCriteria' | 'deliverables' | 'members' | 'guidance'
-  > & { planChanges?: string[] } & Partial<Pick<GroupTaskAcceptanceSummary, 'conclusion'>> & {
+  > & { planChanges?: string[] } & Partial<Pick<GroupTaskAcceptanceSummary, 'conclusion' | 'timeBreakdown'>> & {
     criteriaVerdicts?: GroupTaskAcceptanceCriteriaVerdict[];
     observations?: string[];
     supervisorSignals?: string[];
@@ -391,6 +396,30 @@ export function buildAcceptanceSummaryMessageText(
       lines.push(copy.omittedPlanChanges(supervisorSignals.length - PLAN_CHANGE_MAX_RENDER_LINES));
     }
   }
+  // Speedup R-06: deterministic per-phase time breakdown — the host computes
+  // it from its own ledger at review entry, so the closing message carries the
+  // numbers instead of the chair hand-reconstructing them afterwards.
+  const timeBreakdown = summary.timeBreakdown;
+  if (timeBreakdown) {
+    const BREAKDOWN_MAX_RENDER_LINES = 6;
+    lines.push('');
+    lines.push(copy.timeBreakdownTitle);
+    lines.push(copy.breakdownTotals(timeBreakdown.messageTotal, timeBreakdown.heartbeatSharePct));
+    const phases = timeBreakdown.phases.filter((phase) => phase.minutes > 0 || phase.key === 'done' || phase.key === 'cancelled');
+    for (const phase of phases.slice(0, BREAKDOWN_MAX_RENDER_LINES)) {
+      lines.push(copy.phaseLine(phase.key, phase.minutes));
+    }
+    if (phases.length > BREAKDOWN_MAX_RENDER_LINES) {
+      lines.push(copy.omittedPlanChanges(phases.length - BREAKDOWN_MAX_RENDER_LINES));
+    }
+    const steps = timeBreakdown.steps;
+    for (const step of steps.slice(0, BREAKDOWN_MAX_RENDER_LINES)) {
+      lines.push(copy.stepLine(step.label, step.minutesSincePrev));
+    }
+    if (steps.length > BREAKDOWN_MAX_RENDER_LINES) {
+      lines.push(copy.omittedPlanChanges(steps.length - BREAKDOWN_MAX_RENDER_LINES));
+    }
+  }
   lines.push('');
   if (summary.members.length > 0) {
     lines.push(copy.members(summary.members.map((member) => member.name ?? 'unknown').join(copy.memberJoin)));
@@ -441,4 +470,176 @@ export function buildAcceptanceSummary(input: {
   };
   const messageText = buildAcceptanceSummaryMessageText(summaryShape, input.task.title, language);
   return { ...summaryShape, messageText };
+}
+
+// ---------------------------------------------------------------------------
+// Speedup R-06: deterministic per-phase time breakdown.
+//
+// Computed from records the host already owns (status events, message
+// timeline, deliverable ledger) — no LLM, no chair hand-reconstruction.
+// Attached to the acceptance summary record at review entry and rendered as a
+// compact block in the review summary message.
+// ---------------------------------------------------------------------------
+
+/** sqlite datetime('now') text (UTC) or ISO 8601 → epoch ms; null when unparsable. */
+function parseTimelineMs(value: string | null | undefined): number | null {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const normalized = text.includes('T') ? text : `${text.replace(' ', 'T')}Z`;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+const roundMinutes = (ms: number): number => Math.round((ms / 60_000) * 10) / 10;
+
+/**
+ * The host-posted liveness lines (copyLongTurnInProgress / copyLongTurnHeartbeat,
+ * both locales). Worker-typed ACKs ("[WORKING] 已接单…") are engagement, not
+ * heartbeat noise, and never match.
+ */
+const HEARTBEAT_LINE_RE =
+  /^\s*\[WORKING(?:\s[^\]]*)?\][^\n]*(仍在执行中|长步骤仍在后台执行|Still on it|still running in the background)/i;
+
+/** Speedup R-06: heartbeat-line classifier, exported for tests. */
+export function isHeartbeatNoiseLine(content: string | null | undefined): boolean {
+  return HEARTBEAT_LINE_RE.test(String(content ?? ''));
+}
+
+const STEP_LABEL_RE = /\bS\d+[a-z]?\b/i;
+
+export function buildGroupTaskTimeBreakdown(input: {
+  task: Pick<GroupTask, 'createdAt' | 'closedAt'>;
+  statusEvents: GroupTaskStatusEvent[];
+  deliverables: GroupTaskDeliverable[];
+  messages: Array<{
+    id: number;
+    content: string | null;
+    senderGlobalMetaId: string | null;
+    chainTimestamp: number | null;
+  }>;
+  members: GroupTaskMember[];
+  /** Authoritative total (e.g. countGroupChatMessages) when the page is capped. */
+  messageTotal?: number;
+  nowMs?: number;
+}): GroupTaskTimeBreakdown {
+  const nowMs = input.nowMs ?? Date.now();
+  const memberByGmid = new Map<string, GroupTaskMember>();
+  for (const member of input.members) {
+    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+    if (gmid) memberByGmid.set(gmid, member);
+  }
+  const nameOf = (gmid: string): string | null => {
+    const member = memberByGmid.get(gmid);
+    return (member?.name ?? member?.displayName ?? '').trim() || null;
+  };
+
+  const messages = input.messages
+    .map((message) => ({
+      id: message.id,
+      content: String(message.content ?? ''),
+      gmid: (message.senderGlobalMetaId ?? '').trim().toLowerCase(),
+      atMs: typeof message.chainTimestamp === 'number' ? message.chainTimestamp * 1000 : null,
+    }))
+    .sort((a, b) => a.id - b.id);
+
+  let heartbeatMessages = 0;
+  let noticeMessages = 0;
+  let chairMessages = 0;
+  let workerMessages = 0;
+  for (const message of messages) {
+    if (isHeartbeatNoiseLine(message.content)) heartbeatMessages += 1;
+    if (hasGroupTaskNotice(message.content)) noticeMessages += 1;
+    const role = message.gmid ? memberByGmid.get(message.gmid)?.role : undefined;
+    if (role === 'chair') chairMessages += 1;
+    else if (role === 'worker') workerMessages += 1;
+  }
+
+  // Heartbeat idle: minutes inside gaps between two substantive messages that
+  // contained at least one heartbeat line (the execution-stretch metric the
+  // REQ's slow-sample diagnosis used).
+  let paddedGapMs = 0;
+  let lastSubstantiveMs: number | null = null;
+  let heartbeatInGap = false;
+  for (const message of messages) {
+    if (message.atMs == null) continue;
+    if (isHeartbeatNoiseLine(message.content)) {
+      heartbeatInGap = true;
+      continue;
+    }
+    if (lastSubstantiveMs != null && heartbeatInGap && message.atMs > lastSubstantiveMs) {
+      paddedGapMs += message.atMs - lastSubstantiveMs;
+    }
+    lastSubstantiveMs = message.atMs;
+    heartbeatInGap = false;
+  }
+
+  // Phase windows from the status-event timeline: creation → each transition,
+  // labeled by the status in effect during the window.
+  const events = input.statusEvents
+    .map((event) => ({ event, atMs: parseTimelineMs(event.createdAt) }))
+    .filter((entry): entry is { event: GroupTaskStatusEvent; atMs: number } => entry.atMs != null)
+    .sort((a, b) => a.atMs - b.atMs);
+  const phases: GroupTaskTimeBreakdownPhase[] = [];
+  let cursorMs = parseTimelineMs(input.task.createdAt) ?? events[0]?.atMs ?? null;
+  let windowKey = events[0]?.event.fromStatus ?? null;
+  for (const { event, atMs } of events) {
+    if (cursorMs != null && windowKey != null && atMs >= cursorMs) {
+      phases.push({
+        key: windowKey,
+        startedAt: new Date(cursorMs).toISOString(),
+        endedAt: new Date(atMs).toISOString(),
+        minutes: roundMinutes(atMs - cursorMs),
+      });
+    }
+    cursorMs = atMs;
+    windowKey = event.toStatus;
+  }
+  if (cursorMs != null && windowKey != null) {
+    const terminal = windowKey === 'done' || windowKey === 'cancelled';
+    const endMs = parseTimelineMs(input.task.closedAt) ?? (terminal ? null : nowMs);
+    phases.push({
+      key: windowKey,
+      startedAt: new Date(cursorMs).toISOString(),
+      endedAt: endMs != null ? new Date(endMs).toISOString() : null,
+      minutes: endMs != null ? roundMinutes(Math.max(0, endMs - cursorMs)) : 0,
+    });
+  }
+
+  // Delivery steps: ledger-anchored segmentation of the executing phase —
+  // each step's minutes run from the previous step (or execution start) to
+  // this deliverable's record time.
+  const executingStartMs =
+    events.find((entry) => entry.event.toStatus === 'executing')?.atMs
+    ?? parseTimelineMs(input.task.createdAt);
+  const steps: GroupTaskTimeBreakdownStep[] = [];
+  let prevMs = executingStartMs;
+  const sortedDeliverables = [...input.deliverables].sort((a, b) =>
+    (parseTimelineMs(a.createdAt) ?? 0) - (parseTimelineMs(b.createdAt) ?? 0));
+  for (const deliverable of sortedDeliverables) {
+    const atMs = parseTimelineMs(deliverable.createdAt);
+    if (atMs == null) continue;
+    const labelMatch = STEP_LABEL_RE.exec(deliverable.sourceContent ?? '');
+    const authorGmid = (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase();
+    steps.push({
+      label: labelMatch ? labelMatch[0].toUpperCase() : (deliverable.kind ?? 'delivery'),
+      authorName: nameOf(authorGmid) ?? deliverable.sourceSenderName ?? deliverable.authorGlobalmetaid ?? null,
+      at: new Date(atMs).toISOString(),
+      minutesSincePrev: prevMs != null ? roundMinutes(Math.max(0, atMs - prevMs)) : 0,
+    });
+    prevMs = atMs;
+  }
+
+  const messageTotal = input.messageTotal ?? messages.length;
+  return {
+    generatedAt: new Date(nowMs).toISOString(),
+    messageTotal,
+    heartbeatMessages,
+    heartbeatSharePct: messageTotal > 0 ? Math.round((heartbeatMessages / messageTotal) * 100) : 0,
+    heartbeatPaddedGapMinutes: roundMinutes(paddedGapMs),
+    chairMessages,
+    workerMessages,
+    noticeMessages,
+    phases,
+    steps,
+  };
 }

@@ -90,6 +90,7 @@ import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
 import {
   buildAcceptanceSummary,
   buildAcceptanceSummaryMessageText,
+  buildGroupTaskTimeBreakdown,
   extractChairConclusion,
   extractCriteriaVerdicts,
 } from './groupTaskAcceptanceSummary';
@@ -4658,6 +4659,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                     emitLog(
                       `[GroupTaskDaemon] Task ${task.id}: supervisor-signal snapshot record failed: ` +
                       `${signalError instanceof Error ? signalError.message : String(signalError)}`,
+                    );
+                  }
+                  // Speedup R-06: attach the deterministic per-phase time
+                  // breakdown to the same record — the closing message then
+                  // carries the numbers and the chair never hand-reconstructs
+                  // them. Computed only from host-owned rows; failure logs and
+                  // never blocks the ceremony.
+                  try {
+                    const timeBreakdown = buildGroupTaskTimeBreakdown({
+                      task,
+                      statusEvents: store.listStatusEvents(task.id),
+                      deliverables,
+                      messages: task.groupId
+                        ? store.listGroupChatMessages(task.groupId, { limit: 200 })
+                        : [],
+                      messageTotal: task.groupId
+                        ? store.countGroupChatMessages(task.groupId)
+                        : 0,
+                      members,
+                      nowMs: now(),
+                    });
+                    store.updateAcceptanceSummaryTimeBreakdown(task.id, timeBreakdown);
+                  } catch (breakdownError) {
+                    emitLog(
+                      `[GroupTaskDaemon] Task ${task.id}: time-breakdown record failed: ` +
+                      `${breakdownError instanceof Error ? breakdownError.message : String(breakdownError)}`,
                     );
                   }
                   // Improvement #1 (single-card acceptance): the owner report runs

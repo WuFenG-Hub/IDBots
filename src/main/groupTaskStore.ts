@@ -323,6 +323,47 @@ export interface GroupTaskAcceptanceCriteriaVerdict {
  * notification — all three render from the same record. version increments on
  * each review-entry regeneration (rework → review yields v2).
  */
+/**
+ * Speedup R-06: one status-window segment of the task timeline (planning /
+ * executing / review / …), derived from group_task_status_events.
+ */
+export interface GroupTaskTimeBreakdownPhase {
+  key: GroupTaskStatus;
+  startedAt: string;
+  endedAt: string | null;
+  minutes: number;
+}
+
+/** Speedup R-06: one delivery step in the executing phase (ledger-anchored). */
+export interface GroupTaskTimeBreakdownStep {
+  label: string;
+  authorName: string | null;
+  at: string;
+  minutesSincePrev: number;
+}
+
+/**
+ * Speedup R-06: deterministic per-phase time breakdown attached to the
+ * acceptance summary at review entry — the owner no longer relies on the
+ * chair hand-rebuilding the timeline from messages. All numbers are computed
+ * from the message/ledger/status-event records (no LLM in the loop).
+ */
+export interface GroupTaskTimeBreakdown {
+  generatedAt: string;
+  messageTotal: number;
+  /** Host liveness/heartbeat lines ([WORKING] 仍在执行中-style posts). */
+  heartbeatMessages: number;
+  /** heartbeatMessages / messageTotal, integer percent. */
+  heartbeatSharePct: number;
+  /** Minutes inside inter-message gaps that contained at least one heartbeat. */
+  heartbeatPaddedGapMinutes: number;
+  chairMessages: number;
+  workerMessages: number;
+  noticeMessages: number;
+  phases: GroupTaskTimeBreakdownPhase[];
+  steps: GroupTaskTimeBreakdownStep[];
+}
+
 export interface GroupTaskAcceptanceSummary {
   id: number;
   taskId: number;
@@ -369,6 +410,12 @@ export interface GroupTaskAcceptanceSummary {
   outcome: GroupTaskStatus | null;
   rating: number | null;
   ratingComment: string | null;
+  /**
+   * Speedup R-06: deterministic per-phase time breakdown computed from the
+   * message timeline at review entry (phase windows, per-step minutes,
+   * heartbeat volume/share). null for summaries recorded before R-06.
+   */
+  timeBreakdown: GroupTaskTimeBreakdown | null;
   generatedBy: string;
   generatedAt: string | null;
   /** Pin of the group message that published this summary (review closing). */
@@ -567,6 +614,7 @@ interface GroupTaskAcceptanceSummaryRow {
   criteria_verdicts_json?: string | null;
   observations_json?: string | null;
   supervisor_signals_json?: string | null;
+  time_breakdown_json?: string | null;
   conclusion: string | null;
   outcome: string | null;
   rating: number | null;
@@ -801,6 +849,21 @@ function rowToGroupTaskAcceptanceSummary(
   } catch {
     // Malformed snapshot JSON degrades to empty.
   }
+  // Speedup R-06: time-breakdown snapshot (degrades to null for legacy rows).
+  let timeBreakdown: GroupTaskTimeBreakdown | null = null;
+  try {
+    const parsed = row.time_breakdown_json ? JSON.parse(row.time_breakdown_json) as unknown : null;
+    if (
+      parsed
+      && typeof parsed === 'object'
+      && Array.isArray((parsed as GroupTaskTimeBreakdown).phases)
+      && typeof (parsed as GroupTaskTimeBreakdown).messageTotal === 'number'
+    ) {
+      timeBreakdown = parsed as GroupTaskTimeBreakdown;
+    }
+  } catch {
+    // Malformed breakdown JSON degrades to "not computed".
+  }
   return {
     id: row.id,
     taskId: row.task_id,
@@ -813,6 +876,7 @@ function rowToGroupTaskAcceptanceSummary(
     criteriaVerdicts,
     observations,
     supervisorSignals,
+    timeBreakdown,
     guidance: row.guidance,
     conclusion: row.conclusion ?? null,
     outcome: isGroupTaskStatusValue(row.outcome) ? row.outcome : null,
@@ -1567,6 +1631,20 @@ export class GroupTaskStore {
        WHERE id = (SELECT id FROM group_task_acceptance_summaries
                    WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
       [clean.length > 0 ? JSON.stringify(clean) : null, taskId],
+    );
+    this.saveDb();
+  }
+
+  /**
+   * Speedup R-06: stamp the latest summary with the deterministic time
+   * breakdown computed from the message timeline at review entry.
+   */
+  updateAcceptanceSummaryTimeBreakdown(taskId: number, breakdown: GroupTaskTimeBreakdown | null): void {
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries SET time_breakdown_json = ?
+       WHERE id = (SELECT id FROM group_task_acceptance_summaries
+                   WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
+      [breakdown ? JSON.stringify(breakdown) : null, taskId],
     );
     this.saveDb();
   }

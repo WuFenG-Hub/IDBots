@@ -7737,3 +7737,55 @@ test('speedup R-02: the delivery reminder stays suspended while the assignment i
     h.cleanup();
   }
 });
+
+test('speedup R-06: review entry stamps the time breakdown onto the record and the closing message renders it', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing
+    const t0 = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责封装与终检。',
+      chainTimestamp: Math.floor(t0 / 1000) - 900,
+    });
+    // A host-style liveness line sits in the log before the chair's verdict.
+    insertGroupMessage(h.db, {
+      pinId: 'hb-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[WORKING] 仍在执行中——本步骤耗时较长，进展正常，完成后会立即汇报。',
+      chainTimestamp: Math.floor(t0 / 1000) - 600,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'review-tag-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: 'goal looks met\n[STATUS:REVIEW]',
+      chainTimestamp: Math.floor(t0 / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
+    assert.ok(summary, 'summary persisted on review entry');
+    assert.ok(summary.timeBreakdown, 'R-06: time breakdown stamped onto the record');
+    assert.ok(summary.timeBreakdown.messageTotal >= 3, 'counts the group messages');
+    assert.equal(
+      summary.timeBreakdown.heartbeatMessages,
+      1,
+      'the [WORKING] liveness line is classified as heartbeat noise',
+    );
+    assert.equal(
+      summary.timeBreakdown.heartbeatPaddedGapMinutes,
+      15,
+      'the heartbeat-padded gap between the assignment and the verdict is measured',
+    );
+    assert.ok(
+      summary.timeBreakdown.phases.some((phase) => phase.key === 'executing'),
+      'the executing window is derived from the status-event ledger',
+    );
+    const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
+    assert.ok(closing, 'ceremony message posted');
+    assert.match(closing.content, /耗时分解：/);
+    assert.match(closing.content, /宿主心跳占 \d+%/);
+  } finally {
+    h.cleanup();
+  }
+});
