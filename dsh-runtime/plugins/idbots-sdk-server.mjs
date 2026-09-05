@@ -53,6 +53,7 @@
 // races the turn's AbortSignal against our answer and discards late replies.
 
 import { isAbsolute, resolve } from 'node:path'
+import { admitPromptContent } from '@deepseek-ai/dsh-attachment'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '@deepseek-ai/dsh-sdk-jsonrpc-server'
 import * as dshToolSubagent from '@deepseek-ai/dsh-tool-subagent'
@@ -433,7 +434,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       const attachments = this.ctx.get('attachments')
       const imageCapable = attachments !== undefined && await this.idbotsRouteAcceptsImages(agent)
       if (imageCapable) {
-        content = await attachments.admitPromptContent([
+        content = await admitPromptContent(attachments, [
           ...content,
           ...imageList.map((image) => ({
             type: 'image',

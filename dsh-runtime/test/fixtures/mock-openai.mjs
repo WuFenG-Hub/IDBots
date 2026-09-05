@@ -9,7 +9,6 @@ import http from 'node:http'
 
 export function startMockServer(port = 48787) {
   const seen = []
-  let parentAgentId
   const server = http.createServer((req, res) => {
     const chunks = []
     req.on('data', (c) => chunks.push(c))
@@ -102,15 +101,16 @@ export function startMockServer(port = 48787) {
       const frame = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
       const base = { id: 'chatcmpl-mock', object: 'chat.completion.chunk', created: Date.now() / 1000 | 0, model: 'mock-1' }
 
-      // Continuable-child orchestration (0.1.3-alpha.1): the child receives
-      // the control tool through the composition and addresses its durable
-      // parent directly. A child request without a delivered send_message
-      // result answers with a send_message tool call reporting
-      // CHILD_REPORT_BG_DONE; after delivery it wraps the turn in plain text.
+      // Continuable-child orchestration (0.1.2-alpha.4): the kernel appends a
+      // reporting instruction naming the parent agent id to the child's first
+      // user message. A child request without a delivered send_message result
+      // answers with a send_message tool call reporting CHILD_REPORT_BG_DONE;
+      // after delivery it wraps the turn in plain text.
       const raw = JSON.stringify(parsed.messages ?? [])
-      const childParentId = parentAgentId
+      // The instruction text quotes the parent id, which JSON.stringify escapes
+      // as \"...\" — match the escaped form.
+      const childParentId = /Your parent agent id is \\"([^"\\]+)\\"/.exec(raw)?.[1]
       const isChildRequest = childParentId !== undefined
-        && lastUserText === 'say SUBAGENT_DONE'
       // send_message's tool result renders as "message delivered to agent X";
       // once visible in history the child has reported and must wrap up.
       const childHasDelivered = raw.includes('message delivered')
@@ -211,9 +211,5 @@ export function startMockServer(port = 48787) {
       res.end()
     })
   })
-  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({
-    server,
-    seen,
-    setParentAgentId: (id) => { parentAgentId = id },
-  })))
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve({ server, seen })))
 }

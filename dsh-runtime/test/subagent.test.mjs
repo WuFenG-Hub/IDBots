@@ -23,7 +23,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const runtimeDir = path.resolve(here, '..')
 
 const main = async () => {
-  const { server, seen, setParentAgentId } = await startMockServer(48800)
+  const { server, seen } = await startMockServer(48800)
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-subagent-'))
   const configJson = JSON.stringify(generateRuntimeConfig({
     sessionRoot,
@@ -48,7 +48,6 @@ const main = async () => {
   client.start()
   await client.initialize({ cwd: runtimeDir, provider: 'mockgw', model: 'mock-1' })
   const sessionId = `subagent-${Date.now().toString(36)}`
-  setParentAgentId(sessionId)
 
   const waiters = new Set()
   const events = []
@@ -83,7 +82,7 @@ const main = async () => {
   await client.prompt(sessionId, [{ type: 'text', text: 'DELEGATE the task please' }])
   await ended
 
-  // Continuable delegation (0.1.3-alpha.1): the tool returns a durable
+  // Continuable delegation (0.1.2-alpha.4): the tool returns a durable
   // subagent id immediately (rendered "started subagent <id>") instead of
   // waiting for the child's answer.
   assert.ok(events.some((r) => r.includes('started subagent')), 'delegation tool result is a continuable background handle')
@@ -93,12 +92,13 @@ const main = async () => {
   const noticeEnded = waitFor((n) => n.method === 'session.event' && n.params.sessionId === sessionId
     && n.params.event.type === 'turn/end' && n.params.event.data?.turn === 2, 40000, 'parent notice turn end')
   await noticeEnded
-  // The child's request exposes the new control tool; the parent id is
-  // carried by the durable parent/child relation rather than prompt text.
-  const childRequestSeen = seen.find((r) => JSON.stringify(r.body?.messages ?? []).includes('say SUBAGENT_DONE')
-    && r.body?.tools?.some((tool) => tool.function?.name === 'send_message'))
-  assert.ok(childRequestSeen, 'child request carries the send_message control tool')
-  const parentSawReport = seen.some((r) => JSON.stringify(r.body?.messages ?? []).includes('CHILD_REPORT_BG_DONE'))
+  // The child's first request carries the kernel-injected send_message
+  // reporting instruction naming the parent agent id (checked after the
+  // notice turn: the background child starts asynchronously).
+  const childRequestSeen = seen.find((r) => JSON.stringify(r.body?.messages ?? []).includes('Your parent agent id is'))
+  assert.ok(childRequestSeen, 'child request carries the send_message reporting instruction')
+  const parentSawReport = seen.some((r) => JSON.stringify(r.body?.messages ?? []).includes('CHILD_REPORT_BG_DONE')
+    && !JSON.stringify(r.body?.messages ?? []).includes('Your parent agent id is'))
   assert.ok(parentSawReport, 'child send_message report reached the parent context')
   console.log('PASS  continuable delegation: background handle + send_message report round-trip')
 
@@ -180,9 +180,8 @@ const main = async () => {
     && JSON.stringify(r.body?.messages ?? []).includes('say SUBAGENT_DONE'), 'mock-2 child')
   assert.ok(childRequest, 'model-selected child request ran on mockgw/mock-2')
   const modelSelChildInjected = await waitSeen((r) => r.body?.model === 'mock-2'
-    && JSON.stringify(r.body?.messages ?? []).includes('say SUBAGENT_DONE')
-    && r.body?.tools?.some((tool) => tool.function?.name === 'send_message'), 'mock-2 child control tool')
-  assert.ok(modelSelChildInjected, 'model-selected child still gets the send_message control tool')
+    && JSON.stringify(r.body?.messages ?? []).includes('Your parent agent id is'), 'mock-2 child injection')
+  assert.ok(modelSelChildInjected, 'model-selected child still gets the send_message reporting instruction')
   console.log('PASS  delegation with provider/model runs the child on the selected route')
 
   // Fail-closed: a route outside the allowlist is rejected with an error tool result.
