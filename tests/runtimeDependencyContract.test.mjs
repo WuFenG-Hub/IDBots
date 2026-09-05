@@ -689,6 +689,21 @@ test('release packaging wires nested DSH runtime install, extraResources, and pa
     /node scripts\/setup-ffmpeg\.js --required/,
     'CI must download gitignored ffmpeg binaries; electron-builder only warns when the extraResource is missing',
   );
+  assert.doesNotMatch(
+    workflow,
+    /echo "CSC_LINK=\$\{SECRET_CSC_LINK\}" >> "\$GITHUB_ENV"/,
+    'macOS packaging must reuse the certificate imported into the workflow keychain instead of making electron-builder create a second keychain',
+  );
+  assert.match(
+    workflow,
+    /security find-identity -v -p codesigning "\$KEYCHAIN_PATH"/,
+    'macOS signing must verify the imported identity before packaging',
+  );
+  assert.match(
+    workflow,
+    /release_tag[\s\S]*?tag_name: \$\{\{ inputs\.release_tag \|\| github\.ref_name \}\}/,
+    'manual release reruns must publish the explicitly selected existing tag',
+  );
   assert.match(hooks, /ensureFfmpeg\(/, 'beforePack must download ffmpeg for the current target if the binary is absent');
   assert.match(hooks, /verifySourceFfmpeg\(context\)/, 'beforePack must fail closed if ffmpeg was not prepared');
   assert.match(hooks, /verifyPackagedFfmpeg\(context\)/, 'afterPack must fail closed if the copied app Resources omit ffmpeg');
