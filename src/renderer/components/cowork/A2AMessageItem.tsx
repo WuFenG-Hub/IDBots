@@ -819,9 +819,12 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
             ))}
           </div>
         )}
-        {txidPreview && (
+        {txidPreview ? (
+          // Meta row: time and txid share one line (two-space gap via gap-1 +
+          // ml-1); formats unchanged, copy button stays beside the txid.
           <div className={messengerTxidRowClassName(isLocal)}>
-            <span className="font-mono">txid: {txidPreview}</span>
+            <span>{formatTime(message.timestamp)}</span>
+            <span className="ml-1 font-mono">txid: {txidPreview}</span>
             <button
               type="button"
               onClick={() => copyTextToClipboard(txid)}
@@ -832,11 +835,12 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
               <DocumentDuplicateIcon className="h-3 w-3" />
             </button>
           </div>
+        ) : (
+          <span className={messengerMetaClassName}>
+            {formatTime(message.timestamp)}
+          </span>
         )}
         {renderResendAction()}
-        <span className={messengerMetaClassName}>
-          {formatTime(message.timestamp)}
-        </span>
       </div>
     </div>
   );
