@@ -14772,12 +14772,14 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     // 等待内容加载完成后再显示窗口
     win.once('ready-to-show', () => {
       startupLog('window ready-to-show');
-      // 进程级单次初始化：重维护任务、系统托盘与调度器只在首个窗口就绪时执行
+      // 进程级单次初始化：重维护任务、系统托盘、调度器与休眠守护只在首个窗口就绪时执行
       if (!didInitAppOnce) {
         didInitAppOnce = true;
         scheduleCoworkStoreHeavyMaintenance();
         createTray(() => mainWindow, getStore());
         getScheduler().start();
+        // Start the sleep guard: keep the host device awake while IDBots is working
+        startSleepGuardRefresh();
       }
       emitWindowState(win);
       // 开机自启时不显示首个窗口，仅显示托盘图标；新窗口始终显示
@@ -14785,14 +14787,6 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       if (!isAutoLaunched() || !isPrimaryWindow) {
         win.show();
       }
-      // 窗口就绪后创建系统托盘
-      createTray(() => mainWindow, getStore());
-
-      // Start the scheduler
-      getScheduler().start();
-
-      // Start the sleep guard: keep the host device awake while IDBots is working
-      startSleepGuardRefresh();
     });
 
     return win;
