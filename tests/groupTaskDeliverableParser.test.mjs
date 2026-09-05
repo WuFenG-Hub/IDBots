@@ -485,6 +485,9 @@ test('prose tag mention followed by prose stays text (no phantom URI)', () => {
   assert.equal(parsed[0].kind, 'text');
   assert.equal(parsed[0].valid, true);
   assert.equal(parsed[0].uri, null);
+});
+
+// ---------------------------------------------------------------------------
 // EP28 hardening (round 5): body-line sweep of tagged messages.
 // The EP28 (task #61) receipts put real URIs on body lines after the tag line
 // (backtick-wrapped, list items, reply-form) — round 4 recorded all 9 of them
@@ -535,14 +538,39 @@ test('EP28 hardening: tag line with ONE tag and NO URI + body table with TWO val
   assert.deepEqual(uris, [`metafile://${EP28_VIDEO}.mp4`, `metafile://${EP28_COVER}`]);
 });
 
-test('EP28 hardening: segments stay index-aligned with parseDeliverableLines (body sweep appends URI-only segments)', () => {
+test('EP28 hardening: adjacent URI line upgrades via #62 lookahead; alignment holds (1 entry, URI segment)', () => {
+  // Tag line + URI on the NEXT line → the lookahead path upgrades in place
+  // (one entry, not tag-text + body-append); parseDeliverableSegments stays
+  // index-aligned with the upgraded candidate.
   const content = [
     '[DELIVERABLE] S4 推广发布完成 ✅ buzz 已上链',
-    '- 封装 pin://09aaf041607feaf64e85f3b3b2884d11285de80ff887e5fa5db233f4c5debaaai0',
+    `- 封装 pin://${EP28_PIN}`,
   ].join('\n');
   const lines = parseDeliverableLines(content);
   const segments = parseDeliverableSegments(content);
   assert.equal(lines.length, segments.length);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].kind, 'pinid');
+  assert.equal(lines[0].uri, `pin://${EP28_PIN}`);
+  // main-side contract: segments carry the SAME-LINE tag text (the lookahead
+  // line is not merged into the segment — the daemon reads segments of text
+  // candidates for local-file paths only).
+  assert.equal(segments[0], 'S4 推广发布完成 ✅ buzz 已上链');
+});
+
+test('EP28 hardening: URI beyond the 3-line lookahead window is body-swept (appended, alignment holds)', () => {
+  const content = [
+    '[DELIVERABLE] S4 推广发布完成 ✅ buzz 已上链',
+    '',
+    '',
+    '',
+    `- 远端封装：pin://${EP28_PIN}`,
+  ].join('\n');
+  const lines = parseDeliverableLines(content);
+  const segments = parseDeliverableSegments(content);
+  assert.equal(lines.length, segments.length);
+  assert.equal(lines.length, 2); // text tag row + body-swept URI row
+  assert.equal(lines[0].kind, 'text');
   assert.equal(lines[1].kind, 'pinid');
   assert.equal(lines[1].uri, `pin://${EP28_PIN}`);
   assert.equal(segments[1], `pin://${EP28_PIN}`); // synthetic URI-only segment
