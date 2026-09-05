@@ -2,9 +2,30 @@
 
 IDBots' DSH agent runtime: a standalone process spawned and supervised by the
 Electron main process, speaking newline-delimited JSON-RPC on stdio through
-`@deepseek-ai/dsh-sdk-client`. Consumes DeepSeek Harness strictly as pinned npm
-packages (`0.1.2-alpha.4` line, npm `alpha` tag — `latest`/`next` dist-tags lag
-behind, see `spikes/dsh-phase0/PHASE0_REPORT.md` F1). No forks.
+`@deepseek-ai/dsh-sdk-client`. Targets the DeepSeek Harness `0.1.3-alpha.1`
+release line. No forks.
+
+## 0.1.3-alpha.1 upgrade notes
+
+- `AttachmentStore.admitPromptContent()` is now the only prompt-admission entry
+  point. The IDBots JSON-RPC server calls the store instance method so encoded
+  images continue to use the kernel's batch, size, and canonical-base64 checks.
+- Session persistence now uses lifecycle-scoped handles, asynchronous agent-loop
+  creation, per-session leases, and the v2 JSONL format. Existing v0/v1 logs are
+  read through the adjacent-generation migration path; IDBots does not reset user
+  session data.
+- Continuable subagents now steer a durable parent or child through the
+  `send_message(agent_id, message)` control tool. The runtime test fixture follows
+  that relationship instead of matching the removed parent-id prompt text.
+- Generic file admission, proxy-aware outbound requests, richer model discovery,
+  and optional session-log uploads are upstream capabilities worth following in
+  the host/UI layer. They are not enabled by this runtime change.
+
+The GitHub tag is available, but as of this upgrade the public npm registry did
+not return `0.1.3-alpha.1` package tarballs. `npm ci --prefix dsh-runtime`
+therefore remains blocked until DeepSeek publishes the matching package set. The
+lockfile and package manifest already target the release so installation can be
+re-run without another code change when those tarballs appear.
 
 ## Layout
 
