@@ -6962,9 +6962,10 @@ export class CoworkRunner extends EventEmitter {
     const automationModelOverride = sessionModel || brain?.modelId || null
     const requestedProvider = sessionModel ? sessionModelProvider : (brain?.providerKey ?? null)
     // Bot context lets the resolution last-resort warning name the offending bot.
-    const brainContext = brain
-      ? { botId: brain.metabotId, botName: brain.botName, requireProviderDisambiguation: true }
-      : undefined
+    const brainContext = {
+      ...(brain ? { botId: brain.metabotId, botName: brain.botName } : {}),
+      requireProviderDisambiguation: true,
+    }
     let route = resolveDshProviderRoute(
       automationModelOverride,
       requestedProvider,

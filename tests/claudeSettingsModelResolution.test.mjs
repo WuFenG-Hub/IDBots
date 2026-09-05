@@ -324,12 +324,16 @@ test('DSH refuses an ambiguous model id when the bot has no provider hint', () =
       },
     },
   };
-  const route = withAppConfig(config, () => resolveDshProviderRoute(
-    'glm-5.3-flash',
-    null,
-    { botId: 7, requireProviderDisambiguation: true },
+  assert.throws(() => withAppConfig(config, () => resolveDshProviderRoute(
+    'glm-5.3-flash', null, { botId: 7, requireProviderDisambiguation: true },
+  )), /provider selection is required/);
+  assert.throws(() => withAppConfig(config, () => resolveDshProviderRoute(
+    'glm-5.3-flash', 'removed-provider', { botId: 7, requireProviderDisambiguation: true },
+  )), /provider selection is required/);
+  const explicit = withAppConfig(config, () => resolveDshProviderRoute(
+    'glm-5.3-flash', 'relay', { botId: 7, requireProviderDisambiguation: true },
   ));
-  assert.equal(route, null);
+  assert.equal(explicit.provider, 'relay');
 });
 
 test('OpenCode vs DeepSeek colliding model id uses the provider hint', () => {

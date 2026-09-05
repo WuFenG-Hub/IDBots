@@ -117,6 +117,13 @@ export interface LlmResolutionContext {
   requireProviderDisambiguation?: boolean;
 }
 
+export class ModelProviderSelectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModelProviderSelectionError';
+  }
+}
+
 function getEffectiveProviderApiFormat(providerName: string, apiFormat: unknown): AnthropicApiFormat {
   if (providerName === 'openai' || providerName === 'gemini') {
     return 'openai';
@@ -224,6 +231,12 @@ function resolveMatchedProvider(
         && provider?.enabled
         && provider.models?.some((model) => model.id === modelId)
     ) as [string, ProviderConfig] | undefined;
+    if (!providerEntry && context?.requireProviderDisambiguation) {
+      return {
+        matched: null,
+        error: `Provider '${providerHint}' does not offer enabled model '${modelId}'; provider selection is required.`,
+      };
+    }
   }
   if (defaultProviderKey) {
     providerEntry = Object.entries(providers).find(
@@ -550,7 +563,10 @@ export function resolveDshProviderRoute(
   const sqliteStore = getStore();
   const appConfig = sqliteStore?.get<AppConfig>('app_config');
   if (!appConfig) return null;
-  const { matched } = resolveMatchedProvider(appConfig, modelId ?? undefined, providerHint ?? undefined, context);
+  const { matched, error } = resolveMatchedProvider(appConfig, modelId ?? undefined, providerHint ?? undefined, context);
+  if (!matched && context?.requireProviderDisambiguation && error?.endsWith('provider selection is required.')) {
+    throw new ModelProviderSelectionError(error);
+  }
   if (!matched) return null;
   return {
     provider: matched.providerName,
