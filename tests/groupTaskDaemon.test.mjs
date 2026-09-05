@@ -1226,6 +1226,13 @@ test('review fix: a new ETA ACK resets the delivery-reminded flag before re-armi
       senderName: 'Coder Bot', content: `[WORKING] doing X，预计${eta}分钟`,
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
+    // Speedup R-02: an ETA ACK only arms a deadline with an assignment on
+    // record — the chair's dispatch must land first (it arms the ACK watch).
+    insertGroupMessage(h.db, {
+      pinId: 'assign-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot do X',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
     ack('ack-eta-1', 2);
     await h.loop.runTick();
     h.state.nowMs += 3 * 60_000; // past the 2-min ETA
@@ -2047,15 +2054,19 @@ test('GT#47 R3: during review, chair mentions arm no ACK watch and worker [WORKI
 
     // Control: back in executing (rework hatch) an ETA-bearing [WORKING] arms
     // the deadline again — the gate is phase-scoped, not a blanket disarm.
-    // (Task #51: only an explicit numeric ETA arms a deadline now, so the
-    // control ACK must carry one.)
+    // Speedup R-02: the arming now also requires an assignment on record, so
+    // the chair re-dispatches before the worker's ACK.
     insertGroupMessage(h.db, {
       pinId: 'rework-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Twin Bot', content: 'rework needed after all\n[STATUS:EXECUTING]', chainTimestamp: 103,
     });
     insertGroupMessage(h.db, {
+      pinId: 'reassign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 重做这一步', chainTimestamp: 104,
+    });
+    insertGroupMessage(h.db, {
       pinId: 'ack2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[WORKING] 重新开工，预计 10 分钟', chainTimestamp: 104,
+      senderName: 'Coder Bot', content: '[WORKING] 重新开工，预计 10 分钟', chainTimestamp: 105,
     });
     await h.loop.runTick();
     assert.ok(
@@ -4743,8 +4754,25 @@ test('P2-2: a [WORKING long-task] heartbeat arms the liveness lease and counts a
     const lease = Number(h.store.get('group_task_working_heartbeat:1:2'));
     assert.ok(Number.isFinite(lease), 'heartbeat lease recorded');
     assert.equal(lease, startMs + 45 * 60_000 + 5 * 60_000, 'ETA + 5-min grace');
-    // the heartbeat also arms the delivery deadline (same as any ETA ACK)
-    assert.ok(h.store.get('group_task_expected_delivery:1:2'));
+    // Speedup R-02: an ETA-bearing heartbeat with NO assignment on record is
+    // liveness only — it must NOT arm a delivery deadline (the EP28 false
+    // "no [DELIVERABLE] arrived" alert came from exactly this arm).
+    assert.equal(h.store.get('group_task_expected_delivery:1:2'), undefined);
+
+    // Control: once the chair has actually dispatched work (ACK watch armed),
+    // the same heartbeat DOES arm the delivery deadline.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-hb-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot synthesize the demo track',
+      chainTimestamp: Math.floor(startMs / 1000) + 1,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-heartbeat-2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING long-task, ETA 45 min] VoxCPM synthesis in background',
+      chainTimestamp: Math.floor(startMs / 1000) + 2,
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'), 'assigned heartbeat arms the deadline');
   } finally {
     h.cleanup();
   }
@@ -6036,6 +6064,13 @@ test('review fix: a new ETA ACK re-arms a fresh delivery-reminder cycle', async 
       senderName: 'Coder Bot', content: `[WORKING] doing X，预计${eta}分钟`,
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
+    // Speedup R-02: the ACK only arms with an assignment on record — the
+    // chair's dispatch (which arms the ACK watch) must land first.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-ack', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot do X',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
     ack('pin-ack-1', 10);
     await h.loop.runTick();
     // Past the first ETA with no deliverable -> reminder fires once.
@@ -6068,6 +6103,11 @@ test('review fix: a delivered (even late) deliverable retires the deadline watch
   try {
     const task = h.createTask([2]);
     h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-late', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot do X',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
     insertGroupMessage(h.db, {
       pinId: 'pin-ack-late', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot', content: '[WORKING] doing X，预计10分钟',
@@ -7597,3 +7637,103 @@ test('speedup R-01: a long turn posts no heartbeat lines; lease renews internall
   }
 });
 
+test('speedup R-02: an unprompted [WORKING] arms no delivery deadline; fenced tokens are citations', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // No assignment exists: a spontaneous progress line is liveness only.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-r02-free', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 正在做X，预计5分钟',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      undefined,
+      'no assignment on record → no deadline armed',
+    );
+    // A [WORKING] quoted inside a fenced code block is a citation, not an ACK.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-r02-fenced', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '示例写法如下：\n```\n[WORKING] 已接单，预计3分钟\n```\n请勿直接照抄。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 1,
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      undefined,
+      'a fenced [WORKING] citation arms nothing',
+    );
+    // Control: a real dispatch (ACK watch armed) followed by the ACK arms it.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-r02-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot do X',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 2,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-r02-ack', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，预计5分钟',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 3,
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      'an ACK to a real assignment still arms the deadline',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('speedup R-02: the delivery reminder stays suspended while the assignment is upstream-blocked', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Derived, [DEPENDS_ON]-gated assignment whose upstream is NOT delivered.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-r02-dep-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: `@Coder Bot 你负责 S4 推广，[DEPENDS_ON: ${'f'.repeat(64)}i0] 等 S3 交付后开始。`,
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    // A deadline kv that predates the fix (or was armed by a stale build) is
+    // past due — the reminder must stay suspended while the upstream is missing.
+    h.store.set(
+      `group_task_expected_delivery:${task.id}:2`,
+      JSON.stringify({ dueAt: startMs - 60_000, ackedAt: startMs - 120_000, taskDescription: 'S4' }),
+    );
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      0,
+      'upstream not delivered → no deadline alert for the downstream member',
+    );
+    assert.equal(
+      h.store.get(`group_task_delivery_reminded:${task.id}:2`),
+      undefined,
+      'the reminded flag stays unset — the clock does not advance while blocked',
+    );
+    // Upstream lands: the very next tick reminds as usual (real overdue work
+    // still alerts).
+    h.groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'pin-r02-upstream',
+      authorGlobalmetaid: 'gmid-w3',
+      kind: 'pinid',
+      uri: `pin://${'f'.repeat(64)}i0`,
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      1,
+      'once the upstream is delivered a genuine overdue still alerts',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

@@ -142,6 +142,16 @@ const STATUS_TAG_ALL = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
  * only; other tag families keep their own rules.
  */
 function stripStatusQuotedCode(content: string): string {
+  return stripGroupTaskQuotedCode(content);
+}
+
+/**
+ * Speedup hardening (group-task-speedup REQ 防坑提示): the same quote stripping
+ * generalized for every lifecycle-token parser. Tokens quoted inside fenced
+ * code blocks or inline `code` spans are descriptive references, never real
+ * protocol input. Exported for unit tests.
+ */
+export function stripGroupTaskQuotedCode(content: string): string {
   return String(content ?? '')
     .replace(/```[\s\S]*?(?:```|$)/g, '')
     .replace(/`[^`\n]*`/g, '');
@@ -7202,6 +7212,40 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     return '';
   };
 
+  /**
+   * Speedup R-02: does this ACK's replyPin thread under a REAL chair
+   * assignment to this member? Used to tell a genuine dispatch response
+   * (deadline-worthy) apart from an unprompted/host-posted [WORKING] line
+   * (liveness only). Notice/roll-call targets never qualify.
+   */
+  const replyPinIsChairAssignment = (
+    member: GroupTaskMember,
+    bot: GroupTaskDaemonBotFull,
+    replyPin: string | null | undefined,
+    chairGmid: string,
+  ): boolean => {
+    const pin = (replyPin ?? '').trim();
+    if (!pin || !chairGmid) return false;
+    try {
+      const result = deps.getStore().getDatabase().exec(
+        'SELECT sender_global_metaid, content, mention FROM group_chat_messages WHERE pin_id = ? LIMIT 1',
+        [pin],
+      );
+      const row = result[0]?.values?.[0];
+      if (!row) return false;
+      if (String(row[0] ?? '').trim().toLowerCase() !== chairGmid) return false;
+      const content = String(row[1] ?? '');
+      if (hasGroupTaskNotice(content) || isRollCallPresenceCheck(content.trim())) return false;
+      const mention = row[2] == null ? null : String(row[2]);
+      return isMentioned(
+        { content, mention } as unknown as GroupTaskDaemonMessage,
+        bot,
+      );
+    } catch {
+      return false;
+    }
+  };
+
   const handleMemberProtocolMarkers = (
     task: GroupTask,
     message: GroupTaskDaemonMessage,
@@ -7345,7 +7389,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       sqlite.delete(pendingKey);
       if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
     };
-    const ack = parseWorkingAck(message.content);
+    // Speedup hardening: tokens quoted inside code fences/backticks are
+    // citations, not protocol input — parse the ACK from stripped content.
+    const protocolContent = stripGroupTaskQuotedCode(message.content);
+    const ack = parseWorkingAck(protocolContent);
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
       // Capture the pending assignment's message id BEFORE clearing it — a
@@ -7387,7 +7434,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // auto-ACKs and organic worker replies both thread replyPin under their
       // trigger message, so the notice echo is recognizable by its target.
       const acksHostNotice = isNoticeOrRollCallPin(message.replyPin);
-      if (!opts?.humanGateActive && !acksHostNotice) {
+      // Speedup R-02: a delivery deadline may only be armed for a member with
+      // a REAL, dependency-ready assignment on record — an unprompted or
+      // host-posted [WORKING] line from a never-dispatched member is liveness
+      // only (EP28: heartbeats armed a 30-min deadline for the undispatched
+      // AI_小新, producing the false "no [DELIVERABLE] arrived" alert).
+      // Qualifying evidence, strongest first: a pending ACK watch (the dispatch
+      // armed one), an already-armed deadline (a progress re-ACK refreshes it),
+      // or a replyPin threading under a genuine chair assignment to this
+      // member (derived assignments never arm the watch). And when the
+      // member's assignment is still upstream-blocked, the deadline stays
+      // suspended — not armed, not ticking.
+      const hasArmedDeadline =
+        sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`) != null;
+      const memberBot = botsById.get(member.metabotId);
+      const repliesToAssignment =
+        assignmentMessageId == null && !hasArmedDeadline && memberBot
+          ? replyPinIsChairAssignment(member, memberBot, message.replyPin, chairGmid)
+          : false;
+      const assignmentOnRecord = assignmentMessageId != null || hasArmedDeadline || repliesToAssignment;
+      const awaitingUpstream = assignmentOnRecord
+        ? Boolean(
+            checkMemberDependencyWait(task, member, chairMember)?.pendingTokens.length,
+          )
+        : false;
+      if (!opts?.humanGateActive && !acksHostNotice && assignmentOnRecord && !awaitingUpstream) {
         // P0-4 arming: an explicit numeric ETA arms a delivery deadline; a
         // numberless ACK (task #60: Lucy's turn ran 71+ min with no escalation
         // path) arms one too — from the chair's stated deadline when the
@@ -7442,13 +7513,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
           (opts?.humanGateActive
             ? 'during a human-gate phase'
-            : 'in reply to a host notice/roll call') +
+            : acksHostNotice
+              ? 'in reply to a host notice/roll call'
+              : awaitingUpstream
+                ? 'while its assignment is still upstream-blocked'
+                : 'with no assignment on record') +
           ' — liveness only, no delivery deadline armed',
         );
       }
       return;
     }
-    if (hasStandbyMarker(message.content)) {
+    if (hasStandbyMarker(protocolContent)) {
       store.setMemberStatus(task.id, member.metabotId, 'standby', member.globalmetaid);
       return;
     }
@@ -8240,6 +8315,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       );
       if (hasDeliverable) {
         sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+        continue;
+      }
+      // Speedup R-02: never deadline-alert a member whose assignment is still
+      // upstream-blocked — the downstream ETA must stay suspended (not armed,
+      // not ticking) until the upstream deliverable lands. Leaving the
+      // reminder unposted AND the reminded flag unset keeps the clock from
+      // advancing while the member legitimately waits.
+      const reminderDepWait = checkMemberDependencyWait(
+        task,
+        member,
+        members.find((candidate) => candidate.role === 'chair'),
+      );
+      if (reminderDepWait && reminderDepWait.pendingTokens.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: delivery reminder suspended for ${member.name ?? member.metabotId} ` +
+          `— waiting on upstream ${reminderDepWait.pendingTokens.join(', ')} (not delivered)`,
+        );
         continue;
       }
       const chair = members.find((candidate) => candidate.role === 'chair');
