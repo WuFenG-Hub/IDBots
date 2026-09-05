@@ -16,7 +16,7 @@ const readSource = (...segments) => fs.readFileSync(path.join(projectRoot, ...se
 const runnerSource = readSource('src', 'main', 'libs', 'coworkRunner.ts');
 const hubSource = readSource('src', 'main', 'libs', 'coworkDshTurn.ts');
 const kernelSource = readSource('src', 'main', 'libs', 'dshKernel', 'dshKernel.ts');
-const wizardSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkQuestionWizard.tsx');
+const panelSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkPermissionPanel.tsx');
 const i18nSource = readSource('src', 'renderer', 'services', 'i18n.ts');
 
 const onAskRequestBody = (() => {
@@ -77,14 +77,19 @@ test('ask bridge assigns ids when the model omits them', () => {
   assert.match(kernelSource, /const rawQuestions = Array\.isArray\(params\.questions\)/);
 });
 
-test('question wizard never renders null while holding the permission queue', () => {
-  assert.doesNotMatch(wizardSource, /if \(questions\.length === 0\) \{\s*return null;\s*\}/);
-  assert.match(wizardSource, /coworkQuestionWizardUnavailable/);
-  assert.match(wizardSource, /coworkQuestionWizardDismiss/);
+test('permission panel never renders null while holding the permission queue', () => {
+  // The bottom-docked panel replaced CoworkQuestionWizard (since removed): a
+  // malformed question payload must degrade to the actionable tool-details
+  // row instead of a null render wedging the pending-permission queue.
+  assert.doesNotMatch(panelSource, /if \(questions\.length === 0\) \{\s*return null;\s*\}/);
+  assert.match(panelSource, /const isQuestionTool = questions\.length > 0;/);
+  // The deny affordance renders unconditionally, so the queue can always drain.
+  assert.match(panelSource, /onClick=\{handleDeny\}/);
+  assert.match(panelSource, /behavior: 'deny'/);
 });
 
-test('wizard fallback copy exists in both locales', () => {
-  for (const key of ['coworkQuestionWizardUnavailable', 'coworkQuestionWizardUnavailableBody', 'coworkQuestionWizardDismiss']) {
+test('panel question-mode copy exists in both locales', () => {
+  for (const key of ['coworkQuestionWizardOther', 'coworkQuestionWizardPrevious', 'coworkQuestionWizardNext', 'coworkQuestionWizardSkip']) {
     const occurrences = i18nSource.split(`${key}:`).length - 1;
     assert.ok(occurrences >= 2, `${key} must be defined in both the zh and en locale tables (found ${occurrences})`);
   }
