@@ -323,6 +323,47 @@ export interface GroupTaskAcceptanceCriteriaVerdict {
  * notification — all three render from the same record. version increments on
  * each review-entry regeneration (rework → review yields v2).
  */
+/**
+ * Speedup R-06: one status-window segment of the task timeline (planning /
+ * executing / review / …), derived from group_task_status_events.
+ */
+export interface GroupTaskTimeBreakdownPhase {
+  key: GroupTaskStatus;
+  startedAt: string;
+  endedAt: string | null;
+  minutes: number;
+}
+
+/** Speedup R-06: one delivery step in the executing phase (ledger-anchored). */
+export interface GroupTaskTimeBreakdownStep {
+  label: string;
+  authorName: string | null;
+  at: string;
+  minutesSincePrev: number;
+}
+
+/**
+ * Speedup R-06: deterministic per-phase time breakdown attached to the
+ * acceptance summary at review entry — the owner no longer relies on the
+ * chair hand-rebuilding the timeline from messages. All numbers are computed
+ * from the message/ledger/status-event records (no LLM in the loop).
+ */
+export interface GroupTaskTimeBreakdown {
+  generatedAt: string;
+  messageTotal: number;
+  /** Host liveness/heartbeat lines ([WORKING] 仍在执行中-style posts). */
+  heartbeatMessages: number;
+  /** heartbeatMessages / messageTotal, integer percent. */
+  heartbeatSharePct: number;
+  /** Minutes inside inter-message gaps that contained at least one heartbeat. */
+  heartbeatPaddedGapMinutes: number;
+  chairMessages: number;
+  workerMessages: number;
+  noticeMessages: number;
+  phases: GroupTaskTimeBreakdownPhase[];
+  steps: GroupTaskTimeBreakdownStep[];
+}
+
 export interface GroupTaskAcceptanceSummary {
   id: number;
   taskId: number;
@@ -369,6 +410,12 @@ export interface GroupTaskAcceptanceSummary {
   outcome: GroupTaskStatus | null;
   rating: number | null;
   ratingComment: string | null;
+  /**
+   * Speedup R-06: deterministic per-phase time breakdown computed from the
+   * message timeline at review entry (phase windows, per-step minutes,
+   * heartbeat volume/share). null for summaries recorded before R-06.
+   */
+  timeBreakdown: GroupTaskTimeBreakdown | null;
   generatedBy: string;
   generatedAt: string | null;
   /** Pin of the group message that published this summary (review closing). */
@@ -567,6 +614,7 @@ interface GroupTaskAcceptanceSummaryRow {
   criteria_verdicts_json?: string | null;
   observations_json?: string | null;
   supervisor_signals_json?: string | null;
+  time_breakdown_json?: string | null;
   conclusion: string | null;
   outcome: string | null;
   rating: number | null;
@@ -801,6 +849,21 @@ function rowToGroupTaskAcceptanceSummary(
   } catch {
     // Malformed snapshot JSON degrades to empty.
   }
+  // Speedup R-06: time-breakdown snapshot (degrades to null for legacy rows).
+  let timeBreakdown: GroupTaskTimeBreakdown | null = null;
+  try {
+    const parsed = row.time_breakdown_json ? JSON.parse(row.time_breakdown_json) as unknown : null;
+    if (
+      parsed
+      && typeof parsed === 'object'
+      && Array.isArray((parsed as GroupTaskTimeBreakdown).phases)
+      && typeof (parsed as GroupTaskTimeBreakdown).messageTotal === 'number'
+    ) {
+      timeBreakdown = parsed as GroupTaskTimeBreakdown;
+    }
+  } catch {
+    // Malformed breakdown JSON degrades to "not computed".
+  }
   return {
     id: row.id,
     taskId: row.task_id,
@@ -813,6 +876,7 @@ function rowToGroupTaskAcceptanceSummary(
     criteriaVerdicts,
     observations,
     supervisorSignals,
+    timeBreakdown,
     guidance: row.guidance,
     conclusion: row.conclusion ?? null,
     outcome: isGroupTaskStatusValue(row.outcome) ? row.outcome : null,
@@ -1572,6 +1636,20 @@ export class GroupTaskStore {
   }
 
   /**
+   * Speedup R-06: stamp the latest summary with the deterministic time
+   * breakdown computed from the message timeline at review entry.
+   */
+  updateAcceptanceSummaryTimeBreakdown(taskId: number, breakdown: GroupTaskTimeBreakdown | null): void {
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries SET time_breakdown_json = ?
+       WHERE id = (SELECT id FROM group_task_acceptance_summaries
+                   WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
+      [breakdown ? JSON.stringify(breakdown) : null, taskId],
+    );
+    this.saveDb();
+  }
+
+  /**
    * T2 finalization: stamp the latest summary with the terminal outcome and the
    * owner's rating. Creates a no-snapshot placeholder row if review was skipped
    * (defensive — the aggregator normally produces the row at T1). Idempotent.
@@ -2235,6 +2313,35 @@ export class GroupTaskStore {
        WHERE task_id = ? AND msg_pin_id = ? AND uri IS ? AND kind = ?
        LIMIT 1`,
       [taskId, msgPinId, uri, kind],
+    );
+    return row ? rowToGroupTaskDeliverable(row) : undefined;
+  }
+
+  /**
+   * Speedup R-03: cross-message idempotency lookup — the EARLIEST non-rejected
+   * deliverable in this task carrying the exact same URI from the SAME author.
+   * The (msg_pin_id, uri) dedupe only catches a retried message; a member
+   * re-delivering the same pin/metafile under a NEW message pin (EP28: the
+   * same video delivered twice 3 minutes apart) is a duplicate, not a new
+   * ledger row — the caller folds it into this survivor. Rejected rows are
+   * excluded so a re-delivery after a rejection still records fresh (the
+   * chair's rework loop stays visible). A null/empty author or URI never
+   * matches (unknown provenance is not proven sameness).
+   */
+  findDeliverableByAuthorAndUri(
+    taskId: number,
+    authorGlobalmetaid: string | null | undefined,
+    uri: string | null | undefined,
+  ): GroupTaskDeliverable | undefined {
+    const authorKey = String(authorGlobalmetaid ?? '').trim().toLowerCase();
+    const uriKey = String(uri ?? '').trim();
+    if (!authorKey || !uriKey) return undefined;
+    const row = this.getOne<GroupTaskDeliverableRow>(
+      `SELECT * FROM group_task_deliverables
+       WHERE task_id = ? AND uri = ? AND status != 'rejected'
+         AND LOWER(TRIM(author_globalmetaid)) = ?
+       ORDER BY id ASC LIMIT 1`,
+      [taskId, uriKey, authorKey],
     );
     return row ? rowToGroupTaskDeliverable(row) : undefined;
   }

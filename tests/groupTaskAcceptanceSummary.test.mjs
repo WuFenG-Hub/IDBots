@@ -8,9 +8,11 @@ const {
   buildAcceptanceSummary,
   buildAcceptanceSummaryMessageText,
   buildAcceptanceGuidance,
+  buildGroupTaskTimeBreakdown,
   deliverableVerificationLabel,
   extractChairConclusion,
   extractCriteriaVerdicts,
+  isHeartbeatNoiseLine,
   selectAcceptanceChecklist,
   textDeliverablePreview,
   CHAIR_CONCLUSION_MAX_CHARS,
@@ -383,4 +385,110 @@ test('G-04: the summary message renders the supervisor intervention trail', () =
   assert.match(text, /监督者干预记录/);
   assert.match(text, /\[NUDGE → Coder Bot\] double-check dedupe/);
   assert.match(text, /\[PAUSE\] owner asked to hold dispatch/);
+});
+
+// ---------------------------------------------------------------------------
+// Speedup R-06: deterministic per-phase time breakdown
+// ---------------------------------------------------------------------------
+
+test('speedup R-06: isHeartbeatNoiseLine matches the host liveness lines only', () => {
+  assert.ok(isHeartbeatNoiseLine('[WORKING] 仍在执行中——本步骤耗时较长，进展正常，完成后会立即汇报。'));
+  assert.ok(isHeartbeatNoiseLine('[WORKING] 长步骤仍在后台执行，一切正常，完成后第一时间汇报进展。'));
+  assert.ok(isHeartbeatNoiseLine('[WORKING] Still on it — this step is taking a while; progress is normal and I will report as soon as it lands.'));
+  assert.ok(isHeartbeatNoiseLine('[WORKING] Long step still running in the background; everything is fine — will report the moment it completes.'));
+  // Worker engagement lines are NOT heartbeat noise.
+  assert.ok(!isHeartbeatNoiseLine('[WORKING] 已接单，正在收尾'));
+  assert.ok(!isHeartbeatNoiseLine('[WORKING] 步骤完成，交付如下'));
+  assert.ok(!isHeartbeatNoiseLine(''));
+  assert.ok(!isHeartbeatNoiseLine(null));
+});
+
+test('speedup R-06: buildGroupTaskTimeBreakdown derives phases, steps, and heartbeat share from host records', () => {
+  const ms = (text) => Date.parse(`${text.replace(' ', 'T')}Z`);
+  const secs = (text) => ms(text) / 1000;
+  const breakdown = buildGroupTaskTimeBreakdown({
+    task: { createdAt: '2026-09-05 02:00:00', closedAt: null },
+    statusEvents: [
+      { id: 1, taskId: 1, fromStatus: 'planning', toStatus: 'executing', createdAt: '2026-09-05 02:10:00' },
+      { id: 2, taskId: 1, fromStatus: 'executing', toStatus: 'review', createdAt: '2026-09-05 03:00:00' },
+    ],
+    deliverables: [
+      mkDeliverable({
+        createdAt: '2026-09-05 02:40:00',
+        sourceContent: '[DELIVERABLE] S1 metafile://abc',
+        authorGlobalmetaid: 'gmid-lucy',
+      }),
+    ],
+    messages: [
+      { id: 1, content: '分工如下\n[STATUS:EXECUTING]', senderGlobalMetaId: 'gmid-twin', chainTimestamp: secs('2026-09-05 02:10:00') },
+      { id: 2, content: '[WORKING] 仍在执行中——本步骤耗时较长，进展正常，完成后会立即汇报。', senderGlobalMetaId: 'gmid-lucy', chainTimestamp: secs('2026-09-05 02:20:00') },
+      { id: 3, content: '[WORKING] Long step still running in the background; everything is fine.', senderGlobalMetaId: 'gmid-lucy', chainTimestamp: secs('2026-09-05 02:30:00') },
+      { id: 4, content: '[DELIVERABLE] S1 metafile://abc', senderGlobalMetaId: 'gmid-lucy', chainTimestamp: secs('2026-09-05 02:40:00') },
+      { id: 5, content: 'goal met\n[STATUS:REVIEW]', senderGlobalMetaId: 'gmid-twin', chainTimestamp: secs('2026-09-05 03:00:00') },
+    ],
+    members: [
+      mkMember({ globalmetaid: 'gmid-twin', role: 'chair', name: 'Twin Bot' }),
+      mkMember({ globalmetaid: 'gmid-lucy', role: 'worker', name: 'Lucy' }),
+    ],
+    messageTotal: 100,
+    nowMs: ms('2026-09-05 03:30:00'),
+  });
+
+  assert.equal(breakdown.messageTotal, 100, 'the authoritative total wins over the page size');
+  assert.equal(breakdown.heartbeatMessages, 2);
+  assert.equal(breakdown.heartbeatSharePct, 2);
+  assert.equal(breakdown.chairMessages, 2);
+  assert.equal(breakdown.workerMessages, 3);
+  // Only the 02:10→02:40 gap carried heartbeat lines: 30 padded minutes.
+  assert.equal(breakdown.heartbeatPaddedGapMinutes, 30);
+
+  const minutesByKey = Object.fromEntries(breakdown.phases.map((phase) => [phase.key, phase.minutes]));
+  assert.equal(minutesByKey.planning, 10);
+  assert.equal(minutesByKey.executing, 50);
+  assert.equal(minutesByKey.review, 30, 'the open review window is closed by nowMs');
+
+  assert.equal(breakdown.steps.length, 1);
+  assert.equal(breakdown.steps[0].label, 'S1', 'step label lifted from the source line');
+  assert.equal(breakdown.steps[0].authorName, 'Lucy');
+  assert.equal(breakdown.steps[0].minutesSincePrev, 30, 'executing start (02:10) → S1 record (02:40)');
+});
+
+test('speedup R-06: the summary message renders the time breakdown block (zh + en)', () => {
+  const timeBreakdown = {
+    generatedAt: '2026-09-05T03:30:00.000Z',
+    messageTotal: 96,
+    heartbeatMessages: 46,
+    heartbeatSharePct: 48,
+    heartbeatPaddedGapMinutes: 80,
+    chairMessages: 20,
+    workerMessages: 76,
+    noticeMessages: 30,
+    phases: [
+      { key: 'planning', startedAt: '2026-09-05T02:00:00.000Z', endedAt: '2026-09-05T02:12:00.000Z', minutes: 12 },
+      { key: 'executing', startedAt: '2026-09-05T02:12:00.000Z', endedAt: '2026-09-05T03:57:30.000Z', minutes: 105.5 },
+      { key: 'review', startedAt: '2026-09-05T03:57:30.000Z', endedAt: null, minutes: 0 },
+    ],
+    steps: [{ label: 'S1', authorName: 'Lucy', at: '2026-09-05T02:40:00.000Z', minutesSincePrev: 40 }],
+  };
+  const shape = {
+    goal: 'g',
+    acceptanceCriteria: null,
+    deliverables: [],
+    members: [],
+    guidance: 'You can:',
+    timeBreakdown,
+  };
+  const zh = buildAcceptanceSummaryMessageText(shape, '耗时任务');
+  assert.match(zh, /耗时分解：/);
+  assert.match(zh, /群消息共 96 条，其中宿主心跳占 48%。/);
+  assert.match(zh, /- 筹备派单：12 分钟/);
+  assert.match(zh, /- 执行：105\.5 分钟/);
+  assert.match(zh, /- S1：\+40 分钟/);
+  assert.ok(!zh.includes('验收评审：0 分钟'), 'the zero-length just-started review window is not rendered');
+
+  const en = buildAcceptanceSummaryMessageText(shape, 'timed task', 'en');
+  assert.match(en, /Time breakdown:/);
+  assert.match(en, /Group messages: 96 total; host heartbeat lines: 48%\./);
+  assert.match(en, /- executing: 105\.5 min/);
+  assert.match(en, /- S1: \+40 min/);
 });

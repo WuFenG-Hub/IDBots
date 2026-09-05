@@ -69,11 +69,14 @@ import {
   copyWorkingAckExample,
   copyWorkingAckFallback,
   copyCheckpointNeedDecision,
+  copyLongTurnChairReminder,
   copyLongTurnHeartbeat,
   copyLongTurnInProgress,
   buildStatusDirectiveNote,
+  GROUP_TASK_NOTICE,
   hasGroupTaskNotice,
   isRollCallPresenceCheck,
+  withGroupTaskNotice,
 } from '../libs/groupTaskCopy';
 import {
   ensureGroupTaskMemberReady,
@@ -87,6 +90,7 @@ import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
 import {
   buildAcceptanceSummary,
   buildAcceptanceSummaryMessageText,
+  buildGroupTaskTimeBreakdown,
   extractChairConclusion,
   extractCriteriaVerdicts,
 } from './groupTaskAcceptanceSummary';
@@ -139,9 +143,30 @@ const STATUS_TAG_ALL = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/gi;
  * only; other tag families keep their own rules.
  */
 function stripStatusQuotedCode(content: string): string {
+  return stripGroupTaskQuotedCode(content);
+}
+
+/**
+ * Speedup hardening (group-task-speedup REQ 防坑提示): the same quote stripping
+ * generalized for every lifecycle-token parser. Tokens quoted inside fenced
+ * code blocks or inline `code` spans are descriptive references, never real
+ * protocol input. Exported for unit tests.
+ */
+export function stripGroupTaskQuotedCode(content: string): string {
   return String(content ?? '')
     .replace(/```[\s\S]*?(?:```|$)/g, '')
     .replace(/`[^`\n]*`/g, '');
+}
+
+/**
+ * Fence-only variant for PAYLOAD-bearing tags ([DELIVERABLE]): real deliveries
+ * routinely wrap the delivered URI / local file path in inline backticks
+ * (`metafile://…i0`, `/path/to/spec.md`), so inline code spans must stay
+ * intact here; only multi-line fenced blocks are citations.
+ */
+export function stripFencedCodeBlocks(content: string): string {
+  return String(content ?? '')
+    .replace(/```[\s\S]*?(?:```|$)/g, '');
 }
 
 /** Chair-movable transitions (LEGAL_TRANSITIONS minus the owner-only terminal moves). */
@@ -382,6 +407,12 @@ export function classifyMemberLiveness(signals: MemberLivenessSignals): MemberLi
 }
 /** P0-2: kv guard so one dispatch produces at most ONE host ACK. */
 const ACK_KV_PREFIX = 'group_task_ack:';
+/**
+ * Speedup R-03: kv flag per (task, message) — every [DELIVERABLE] candidate
+ * of the message folded into an earlier ledger row (same author + same uri),
+ * so the responder gate must not wake the chair for a fresh verdict.
+ */
+const DELIVERABLE_FOLDED_PREFIX = 'group_task_deliverable_folded:';
 /**
  * P2-6: dependency annotation on a dispatch message, e.g.
  * `[DEPENDS_ON: <64hex pinid>]` — the host holds the worker dispatch until the
@@ -864,18 +895,32 @@ const DEFAULT_VERIFICATION_RETRY_MS = 10 * 60_000;
 const DEFAULT_PLAIN_TURN_TIMEOUT_MS = 10 * 60_000;
 /**
  * fix/group-task-flow (task #51 feedback): host-side liveness reporting for
- * long turns. A dispatched turn that is still running after
- * DEFAULT_LONG_TURN_PLACEHOLDER_MS posts a numberless [WORKING] placeholder
- * as the bot (the group sees progress instead of silence), then at most
- * DEFAULT_LONG_TURN_HEARTBEAT_MAX heartbeat lines every
- * DEFAULT_LONG_TURN_HEARTBEAT_MS. Each worker post also renews the
- * [WORKING long-task] heartbeat lease so the watchdogs keep treating the
- * member as alive for the turn's duration. Real timers (not the daemon
- * clock): the fake test clock must not fire them.
+ * long turns. Speedup R-01 rework: an executing member must NOT post
+ * check-in messages — in the EP28 sample 46 of 96 group messages were these
+ * host-posted heartbeat lines, and they were the single largest time cost
+ * (each post also fed back through the protocol parsers). The liveness
+ * lease the watchdogs honor is now renewed INTERNALLY (no group message);
+ * the only visible emission is ONE reminder addressed to the chair when a
+ * turn exceeds DEFAULT_LONG_TURN_CHAIR_REMINDER_MS (the member is not
+ * expected to reply). Setting longTurnPlaceholderMs / longTurnHeartbeatMax
+ * above 0 restores the legacy visible posts (kept for tests and rollout
+ * debugging). Real timers (not the daemon clock): the fake test clock must
+ * not fire them.
  */
-const DEFAULT_LONG_TURN_PLACEHOLDER_MS = 90_000;
+const DEFAULT_LONG_TURN_PLACEHOLDER_MS = 0;
 const DEFAULT_LONG_TURN_HEARTBEAT_MS = 10 * 60_000;
-const DEFAULT_LONG_TURN_HEARTBEAT_MAX = 3;
+const DEFAULT_LONG_TURN_HEARTBEAT_MAX = 0;
+/**
+ * Speedup R-01: turn-runtime threshold for the single @chair reminder
+ * (default 18 min, inside the requirement's 15-20 min band). 0 disables.
+ */
+const DEFAULT_LONG_TURN_CHAIR_REMINDER_MS = 18 * 60_000;
+/**
+ * The internal liveness lease first kicks in once a turn has run this long
+ * (the legacy placeholder threshold) — arming it at dispatch would mask a
+ * genuinely unresponsive member from the no-ACK watch.
+ */
+const LONG_TURN_LEASE_ARM_MS = 90_000;
 
 // ---------------------------------------------------------------------------
 // Pure gating (exported for tests)
@@ -1676,13 +1721,24 @@ export interface GroupTaskDaemonDeps {
   plainTurnTimeoutMs?: number;
   /**
    * fix/group-task-flow: long-turn liveness reporting cadence — placeholder
-   * delay (ms, default 90s), heartbeat interval (ms, default 10 min) and max
-   * heartbeat count per turn (default 3). Tests shrink these to observe the
-   * posts without waiting.
+   * delay (ms), heartbeat interval (ms) and max heartbeat count per turn.
+   * Speedup R-01: ALL THREE default to off (0) — an executing member no longer
+   * posts check-in messages; the liveness lease is renewed internally instead.
+   * Set them above 0 to restore the legacy visible posts (tests do this).
+   * `longTurnChairReminderMs` (default 18 min, 0 disables) is the threshold
+   * for the single @chair reminder post per long turn.
    */
   longTurnPlaceholderMs?: number;
   longTurnHeartbeatMs?: number;
   longTurnHeartbeatMax?: number;
+  longTurnChairReminderMs?: number;
+  /**
+   * Turn-runtime (ms) after which the INTERNAL liveness lease starts renewing
+   * (default 90s — the legacy placeholder threshold). Arming earlier would
+   * mask a genuinely unresponsive member from the no-ACK watch. Tests shrink
+   * this to observe the internal renewal without waiting.
+   */
+  longTurnLeaseArmMs?: number;
   /**
    * Ledger fix (#14→#16): upload a LOCAL file deliverable on-chain as a
    * metafile paid by the author bot's wallet, so a worker's local file path
@@ -2027,7 +2083,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     Math.trunc(deps.plainTurnTimeoutMs ?? DEFAULT_PLAIN_TURN_TIMEOUT_MS),
   );
   const longTurnPlaceholderMs = Math.max(
-    50,
+    0, // Speedup R-01: 0 (the default) disables the visible placeholder post.
     Math.trunc(deps.longTurnPlaceholderMs ?? DEFAULT_LONG_TURN_PLACEHOLDER_MS),
   );
   const longTurnHeartbeatMs = Math.max(
@@ -2037,6 +2093,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const longTurnHeartbeatMax = Math.max(
     0,
     Math.trunc(deps.longTurnHeartbeatMax ?? DEFAULT_LONG_TURN_HEARTBEAT_MAX),
+  );
+  const longTurnChairReminderMs = Math.max(
+    0,
+    Math.trunc(deps.longTurnChairReminderMs ?? DEFAULT_LONG_TURN_CHAIR_REMINDER_MS),
+  );
+  const longTurnLeaseArmMs = Math.max(
+    50,
+    Math.trunc(deps.longTurnLeaseArmMs ?? LONG_TURN_LEASE_ARM_MS),
   );
   const performChatWithTimeout: GroupTaskDaemonPerformChatFn = (systemPrompt, userMessage, llmId, options) => {
     // Per-attempt window (attemptTimeoutMs): the primary and the fallback
@@ -4026,21 +4090,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // Round-4 attribution: deliverables are only collected from messages whose
     // chain-signature GlobalMetaID is a task member. SUSPECT senders (neither
     // member nor owner) are marked on the row but never contribute deliverables.
+    //
+    // Speedup hardening: parsing runs on fence-stripped content — a
+    // [DELIVERABLE] tag inside a fenced code block is a citation (docs,
+    // examples), never a real delivery. Inline backticks survive: real
+    // deliveries wrap URIs / local file paths in them.
+    const parseContent = stripFencedCodeBlocks(content);
     if (message.senderSuspect) {
       // no deliverable collection for non-member speakers
-    } else if (DELIVERABLE_TAG.test(content) && !isChairMessage) {
+    } else if (DELIVERABLE_TAG.test(parseContent) && !isChairMessage) {
       // Round-4: per-candidate ingestion. Every [DELIVERABLE] tag occurrence
       // (its own line or inline) produces one candidate; valid candidates each
       // get their own row — a message with two tag lines records TWO rows.
       // Placeholder/truncated candidates are dropped individually so a junk
       // line can never hide a real URI on a sibling line.
       const msgPinId = message.pinId;
-      const tagLines = deliverableTagLines(content);
-      const candidates = parseDeliverableLines(content);
+      const tagLines = deliverableTagLines(parseContent);
+      const candidates = parseDeliverableLines(parseContent);
       // Index-aligned raw segment text per candidate (ledger fix: text
       // candidates may carry a local file path worth uploading on-chain).
-      const candidateSegments = parseDeliverableSegments(content);
+      const candidateSegments = parseDeliverableSegments(parseContent);
       const recordedDeliverables: ParsedDeliverable[] = [];
+      // Speedup R-03 fold accounting: when EVERY valid candidate of this
+      // message folded into an earlier ledger row, the message must not wake
+      // the chair for a fresh verdict (flag consumed in the responder gate).
+      let foldedDuplicateCount = 0;
+      let recordedNewCount = 0;
       const rejected = candidates.filter((candidate) => !candidate.valid);
       if (rejected.length > 0) {
         emitLog(
@@ -4048,7 +4123,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `(${rejected.map((candidate) => candidate.note ?? 'invalid').join('; ')})`,
         );
       }
-      const isCorrection = isCorrectionText(content);
+      const isCorrection = isCorrectionText(parseContent);
       for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
         const candidate = candidates[candidateIndex];
         if (!candidate.valid) continue; // placeholder/truncated/example → never recorded
@@ -4089,6 +4164,28 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             continue;
           }
         }
+        // Speedup R-03: cross-message idempotency — the same author
+        // re-delivering the SAME uri under a NEW message pin (EP28: the same
+        // video delivered twice 3 minutes apart → two ledger rows + a
+        // correction event) folds into the earliest non-rejected row: an
+        // append-only duplicates[] annotation on the survivor, no new row,
+        // and (when nothing else in the message is new) no chair wake.
+        if (candidate.uri) {
+          const prior = store.findDeliverableByAuthorAndUri(
+            task.id,
+            message.senderGlobalMetaId,
+            candidate.uri,
+          );
+          if (prior) {
+            appendDeliverableDuplicateNote(prior, msgPinId, candidate.uri);
+            foldedDuplicateCount += 1;
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: duplicate [DELIVERABLE] ${candidate.uri.slice(0, 48)}… ` +
+              `by the same author folded into ledger row #${prior.id} (no new record)`,
+            );
+            continue;
+          }
+        }
         const existing = store.findDeliverableByMsgPinAndUri(
           task.id,
           msgPinId,
@@ -4107,6 +4204,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           uri: candidate.uri,
         });
         recordedDeliverables.push(candidate);
+        recordedNewCount += 1;
         // Review fix (delivery-deadline hygiene): the deliverable ARRIVED —
         // retire this member's deadline watch immediately. Leaving the kv
         // armed after a late delivery is exactly what fed the reclaim ladder
@@ -4279,6 +4377,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
           }
         }
+      }
+      // Speedup R-03: every valid candidate folded into an earlier ledger row
+      // → flag the message so the responder gate skips the chair_deliverable
+      // wake (a duplicate needs no fresh verdict).
+      if (foldedDuplicateCount > 0 && recordedNewCount === 0) {
+        deps.getStore().set(`${DELIVERABLE_FOLDED_PREFIX}${task.id}:${message.id}`, '1');
       }
       try {
         const notes = await verifyDeliverableCandidates(tagLines.join('\n'));
@@ -4555,6 +4659,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                     emitLog(
                       `[GroupTaskDaemon] Task ${task.id}: supervisor-signal snapshot record failed: ` +
                       `${signalError instanceof Error ? signalError.message : String(signalError)}`,
+                    );
+                  }
+                  // Speedup R-06: attach the deterministic per-phase time
+                  // breakdown to the same record — the closing message then
+                  // carries the numbers and the chair never hand-reconstructs
+                  // them. Computed only from host-owned rows; failure logs and
+                  // never blocks the ceremony.
+                  try {
+                    const timeBreakdown = buildGroupTaskTimeBreakdown({
+                      task,
+                      statusEvents: store.listStatusEvents(task.id),
+                      deliverables,
+                      messages: task.groupId
+                        ? store.listGroupChatMessages(task.groupId, { limit: 200 })
+                        : [],
+                      messageTotal: task.groupId
+                        ? store.countGroupChatMessages(task.groupId)
+                        : 0,
+                      members,
+                      nowMs: now(),
+                    });
+                    store.updateAcceptanceSummaryTimeBreakdown(task.id, timeBreakdown);
+                  } catch (breakdownError) {
+                    emitLog(
+                      `[GroupTaskDaemon] Task ${task.id}: time-breakdown record failed: ` +
+                      `${breakdownError instanceof Error ? breakdownError.message : String(breakdownError)}`,
                     );
                   }
                   // Improvement #1 (single-card acceptance): the owner report runs
@@ -5658,11 +5788,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   /**
    * fix/group-task-flow (task #51 feedback): arm the long-turn liveness
    * timers for one detached turn job; the returned timers must be cleared in
-   * the job's finally. Posts numberless ceremony-shaped [WORKING] lines as
-   * the working bot (chair posts are remembered so they never retrigger the
-   * daemon; worker posts renew the [WORKING long-task] heartbeat lease the
-   * watchdogs honor). Real timers on purpose: the test clock must not fire
-   * them.
+   * the job's finally.
+   *
+   * Speedup R-01 rework: liveness is now INTERNAL by default. While the turn
+   * runs past LONG_TURN_LEASE_ARM_MS, the worker's [WORKING long-task] lease
+   * is renewed straight into kv (no group message) so the silence watchdogs
+   * keep treating the member as alive for the turn's duration. The single
+   * visible emission is one @chair reminder at longTurnChairReminderMs — the
+   * member is not expected to reply. The legacy visible posts (numberless
+   * ceremony-shaped [WORKING] lines as the working bot) only happen when
+   * longTurnPlaceholderMs / longTurnHeartbeatMax are explicitly set above 0.
+   * Real timers on purpose: the test clock must not fire them.
    */
   const armLongTurnLiveness = (args: {
     taskId: number;
@@ -5678,6 +5814,64 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       timer.unref?.();
       return timer;
     };
+    const renewLease = (): void => {
+      if (args.isChair) return;
+      // Re-check inside the timer hop: the job may have settled (its finally
+      // clears these timers) after this timer already fired.
+      if (!pendingTurnJobs.has(args.job)) return;
+      try {
+        deps.getStore().set(
+          `${WORKING_HEARTBEAT_PREFIX}${args.taskId}:${args.metabotId}`,
+          String(computeWorkingHeartbeatUntil(Math.ceil(longTurnHeartbeatMs / 60_000) + 1, now())),
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${args.taskId}: internal liveness lease renewal failed for bot ${args.metabotId}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    if (!args.isChair) {
+      timers.push(armTimer(renewLease, longTurnLeaseArmMs));
+      const renewalInterval = setInterval(
+        renewLease,
+        Math.max(50, Math.floor(longTurnHeartbeatMs / 2)),
+      );
+      renewalInterval.unref?.();
+      timers.push(renewalInterval);
+      if (longTurnChairReminderMs > 0) {
+        timers.push(armTimer(() => {
+          void (async () => {
+            if (!pendingTurnJobs.has(args.job)) return;
+            try {
+              const memberName =
+                deps.getGroupTaskStore().listMembers(args.taskId)
+                  .find((member) => member.metabotId === args.metabotId)?.name?.trim()
+                || deps.getMetabotStore().getMetabotById(args.metabotId)?.name?.trim()
+                || `bot-${args.metabotId}`;
+              const minutes = Math.max(1, Math.round(longTurnChairReminderMs / 60_000));
+              await postGroupMessage(
+                args.taskId,
+                args.metabotId,
+                withGroupTaskNotice(
+                  GROUP_TASK_NOTICE.longTurn,
+                  copyLongTurnChairReminder(memberName, minutes),
+                ),
+              );
+              emitLog(
+                `[GroupTaskDaemon] Task ${args.taskId}: posted the one-shot long-turn chair reminder for bot ${args.metabotId}`,
+              );
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${args.taskId}: long-turn chair reminder post failed for bot ${args.metabotId}: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          })();
+        }, longTurnChairReminderMs));
+      }
+    }
+    // Legacy visible posts (opt-in via deps): placeholder + heartbeats.
     const postLine = (text: string): void => {
       void (async () => {
         // Re-check inside the async hop: the job may have settled (its
@@ -5704,7 +5898,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
       })();
     };
-    timers.push(armTimer(() => postLine(copyLongTurnInProgress()), longTurnPlaceholderMs));
+    if (longTurnPlaceholderMs > 0) {
+      timers.push(armTimer(() => postLine(copyLongTurnInProgress()), longTurnPlaceholderMs));
+    }
     for (let beat = 1; beat <= longTurnHeartbeatMax; beat += 1) {
       timers.push(
         armTimer(
@@ -7100,6 +7296,40 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     return '';
   };
 
+  /**
+   * Speedup R-02: does this ACK's replyPin thread under a REAL chair
+   * assignment to this member? Used to tell a genuine dispatch response
+   * (deadline-worthy) apart from an unprompted/host-posted [WORKING] line
+   * (liveness only). Notice/roll-call targets never qualify.
+   */
+  const replyPinIsChairAssignment = (
+    member: GroupTaskMember,
+    bot: GroupTaskDaemonBotFull,
+    replyPin: string | null | undefined,
+    chairGmid: string,
+  ): boolean => {
+    const pin = (replyPin ?? '').trim();
+    if (!pin || !chairGmid) return false;
+    try {
+      const result = deps.getStore().getDatabase().exec(
+        'SELECT sender_global_metaid, content, mention FROM group_chat_messages WHERE pin_id = ? LIMIT 1',
+        [pin],
+      );
+      const row = result[0]?.values?.[0];
+      if (!row) return false;
+      if (String(row[0] ?? '').trim().toLowerCase() !== chairGmid) return false;
+      const content = String(row[1] ?? '');
+      if (hasGroupTaskNotice(content) || isRollCallPresenceCheck(content.trim())) return false;
+      const mention = row[2] == null ? null : String(row[2]);
+      return isMentioned(
+        { content, mention } as unknown as GroupTaskDaemonMessage,
+        bot,
+      );
+    } catch {
+      return false;
+    }
+  };
+
   const handleMemberProtocolMarkers = (
     task: GroupTask,
     message: GroupTaskDaemonMessage,
@@ -7243,7 +7473,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       sqlite.delete(pendingKey);
       if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
     };
-    const ack = parseWorkingAck(message.content);
+    // Speedup hardening: tokens quoted inside code fences/backticks are
+    // citations, not protocol input — parse the ACK from stripped content.
+    const protocolContent = stripGroupTaskQuotedCode(message.content);
+    const ack = parseWorkingAck(protocolContent);
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
       // Capture the pending assignment's message id BEFORE clearing it — a
@@ -7285,7 +7518,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // auto-ACKs and organic worker replies both thread replyPin under their
       // trigger message, so the notice echo is recognizable by its target.
       const acksHostNotice = isNoticeOrRollCallPin(message.replyPin);
-      if (!opts?.humanGateActive && !acksHostNotice) {
+      // Speedup R-02: a delivery deadline may only be armed for a member with
+      // a REAL, dependency-ready assignment on record — an unprompted or
+      // host-posted [WORKING] line from a never-dispatched member is liveness
+      // only (EP28: heartbeats armed a 30-min deadline for the undispatched
+      // AI_小新, producing the false "no [DELIVERABLE] arrived" alert).
+      // Qualifying evidence, strongest first: a pending ACK watch (the dispatch
+      // armed one), an already-armed deadline (a progress re-ACK refreshes it),
+      // or a replyPin threading under a genuine chair assignment to this
+      // member (derived assignments never arm the watch). And when the
+      // member's assignment is still upstream-blocked, the deadline stays
+      // suspended — not armed, not ticking.
+      const hasArmedDeadline =
+        sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`) != null;
+      const memberBot = botsById.get(member.metabotId);
+      const repliesToAssignment =
+        assignmentMessageId == null && !hasArmedDeadline && memberBot
+          ? replyPinIsChairAssignment(member, memberBot, message.replyPin, chairGmid)
+          : false;
+      const assignmentOnRecord = assignmentMessageId != null || hasArmedDeadline || repliesToAssignment;
+      const awaitingUpstream = assignmentOnRecord
+        ? Boolean(
+            checkMemberDependencyWait(task, member, chairMember)?.pendingTokens.length,
+          )
+        : false;
+      if (!opts?.humanGateActive && !acksHostNotice && assignmentOnRecord && !awaitingUpstream) {
         // P0-4 arming: an explicit numeric ETA arms a delivery deadline; a
         // numberless ACK (task #60: Lucy's turn ran 71+ min with no escalation
         // path) arms one too — from the chair's stated deadline when the
@@ -7340,13 +7597,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
           (opts?.humanGateActive
             ? 'during a human-gate phase'
-            : 'in reply to a host notice/roll call') +
+            : acksHostNotice
+              ? 'in reply to a host notice/roll call'
+              : awaitingUpstream
+                ? 'while its assignment is still upstream-blocked'
+                : 'with no assignment on record') +
           ' — liveness only, no delivery deadline armed',
         );
       }
       return;
     }
-    if (hasStandbyMarker(message.content)) {
+    if (hasStandbyMarker(protocolContent)) {
       store.setMemberStatus(task.id, member.metabotId, 'standby', member.globalmetaid);
       return;
     }
@@ -7861,24 +8122,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (!hit) return { outcome: 'none' };
     const survivor = hit.id < deliverable.id ? hit : deliverable;
     const duplicate = hit.id < deliverable.id ? deliverable : hit;
-    // Merge into the survivor's existing verification report (append-only);
-    // a corrupt/missing report degrades to a fresh object, same as the
-    // re-verification pass's parse idiom.
-    let report: Record<string, unknown> = {};
-    try {
-      if (survivor.verification) report = JSON.parse(survivor.verification);
-    } catch {
-      report = {};
-    }
-    const duplicates = Array.isArray(report.duplicates) ? report.duplicates : [];
-    duplicates.push({
-      msgPinId: duplicate.msgPinId ?? null,
-      uri: duplicate.uri ?? null,
-      notedAt: new Date().toISOString(),
-    });
-    report.duplicates = duplicates;
-    const survivorVerification = JSON.stringify(report);
-    store.updateDeliverableVerification(survivor.id, survivorVerification);
+    const survivorVerification = appendDeliverableDuplicateNote(
+      survivor,
+      duplicate.msgPinId ?? null,
+      duplicate.uri ?? null,
+    );
     store.deleteDeliverable(duplicate.id);
     emitLog(
       `[GroupTaskDaemon] Task ${task.id}: deliverable #${duplicate.id} duplicates #${survivor.id} ` +
@@ -7887,6 +8135,37 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     return duplicate.id === deliverable.id
       ? { outcome: 'current-deleted' }
       : { outcome: 'other-deleted', survivorVerification };
+  };
+
+  /**
+   * Speedup R-03: append-only duplicates[] annotation shared by the
+   * content-hash dedupe and the (author, uri) cross-message fold — the
+   * survivor's verification report gains one entry per absorbed duplicate.
+   * Merge into the survivor's existing report; a corrupt/missing report
+   * degrades to a fresh object. Returns the written JSON.
+   */
+  const appendDeliverableDuplicateNote = (
+    survivor: GroupTaskDeliverable,
+    msgPinId: string | null,
+    uri: string | null,
+  ): string => {
+    const store = deps.getGroupTaskStore();
+    let report: Record<string, unknown> = {};
+    try {
+      if (survivor.verification) report = JSON.parse(survivor.verification);
+    } catch {
+      report = {};
+    }
+    const duplicates = Array.isArray(report.duplicates) ? report.duplicates : [];
+    duplicates.push({
+      msgPinId: msgPinId ?? null,
+      uri: uri ?? null,
+      notedAt: new Date().toISOString(),
+    });
+    report.duplicates = duplicates;
+    const survivorVerification = JSON.stringify(report);
+    store.updateDeliverableVerification(survivor.id, survivorVerification);
+    return survivorVerification;
   };
 
   /** P2: hard cap for download-and-hash of metafile deliverables (bytes). */
@@ -8138,6 +8417,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       );
       if (hasDeliverable) {
         sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+        continue;
+      }
+      // Speedup R-02: never deadline-alert a member whose assignment is still
+      // upstream-blocked — the downstream ETA must stay suspended (not armed,
+      // not ticking) until the upstream deliverable lands. Leaving the
+      // reminder unposted AND the reminded flag unset keeps the clock from
+      // advancing while the member legitimately waits.
+      const reminderDepWait = checkMemberDependencyWait(
+        task,
+        member,
+        members.find((candidate) => candidate.role === 'chair'),
+      );
+      if (reminderDepWait && reminderDepWait.pendingTokens.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: delivery reminder suspended for ${member.name ?? member.metabotId} ` +
+          `— waiting on upstream ${reminderDepWait.pendingTokens.join(', ')} (not delivered)`,
+        );
         continue;
       }
       const chair = members.find((candidate) => candidate.role === 'chair');
@@ -8842,6 +9138,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           if (!member || !bot) continue;
           const isChair = member.role === 'chair';
           const key = keyOf(task.id, decision.metabotId);
+
+          // Speedup R-03: a [DELIVERABLE] message whose candidates ALL folded
+          // into earlier ledger rows (same author + same uri re-delivery)
+          // needs no fresh chair verdict — skip the wake entirely.
+          if (decision.reason === 'chair_deliverable'
+              && sqlite.get<string>(`${DELIVERABLE_FOLDED_PREFIX}${task.id}:${message.id}`) === '1') {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: chair wake suppressed for message #${message.id} ` +
+              '— duplicate deliverable folded into the existing ledger row',
+            );
+            continue;
+          }
 
           // P2-7: a chair auto response (deliverable / floor control / owner
           // message) is suppressed when the Twin already replied to this message

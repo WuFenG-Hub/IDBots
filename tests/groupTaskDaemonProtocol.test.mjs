@@ -1188,3 +1188,103 @@ test('show/dump consistency: transcript reads stay id-ordered even when chain ti
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// group-task speedup REQ v1.1, R-03: cross-message deliverable idempotency.
+// The same author re-delivering the same uri under a NEW message pin folds
+// into the earliest ledger row (append-only duplicates[] annotation, no new
+// row, no chair wake); different uri / different author stay distinct; a
+// fenced [DELIVERABLE] citation records nothing.
+// ---------------------------------------------------------------------------
+
+test('speedup R-03: same author + same uri re-delivery folds into the first ledger row and skips the chair wake', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const pinid = 'c'.repeat(64) + 'i0';
+    insertGroupMessage(h.db, {
+      pinId: 'dup-deliver-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] S2 视频：\`metafile://${pinid}.mp4\``,
+    });
+    await h.loop.runTick();
+    let deliverables = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(deliverables.length, 1, 'first delivery recorded');
+    const chairCallsAfterFirst = h.chatCalls.length;
+    assert.ok(chairCallsAfterFirst > 0, 'the first delivery woke the chair');
+
+    // Same author, same uri, NEW message pin 3 minutes later.
+    insertGroupMessage(h.db, {
+      pinId: 'dup-deliver-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] S2 视频（重发）：\`metafile://${pinid}.mp4\``,
+    });
+    await h.loop.runTick();
+    deliverables = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(deliverables.length, 1, 'duplicate folded — still one ledger row');
+    const report = JSON.parse(deliverables[0].verification ?? '{}');
+    assert.ok(Array.isArray(report.duplicates), 'fold mark recorded on the survivor');
+    assert.equal(report.duplicates.length, 1);
+    assert.equal(report.duplicates[0].msgPinId, 'dup-deliver-2-i0');
+    assert.equal(h.chatCalls.length, chairCallsAfterFirst, 'folded duplicate does not wake the chair');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('speedup R-03: different uri or different author are NOT folded', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    const pinA = 'd'.repeat(64) + 'i0';
+    const pinB = 'e'.repeat(64) + 'i0';
+    insertGroupMessage(h.db, {
+      pinId: 'distinct-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] A：\`metafile://${pinA}\``,
+    });
+    await h.loop.runTick();
+    // Same author, different uri → a distinct deliverable.
+    insertGroupMessage(h.db, {
+      pinId: 'distinct-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] B：\`metafile://${pinB}\``,
+    });
+    // Different author, same uri → also distinct (shared assets keep credit).
+    insertGroupMessage(h.db, {
+      pinId: 'distinct-3-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: `[DELIVERABLE] A-reuse：\`metafile://${pinA}\``,
+    });
+    await h.loop.runTick();
+    const deliverables = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(deliverables.length, 3, 'distinct uri / distinct author each keep their row');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('speedup R-03: a fenced [DELIVERABLE] citation records nothing', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'fenced-deliverable-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `交付格式示例：\n\`\`\`\n[DELIVERABLE] metaapp: metaapp://${'ab'.repeat(32)}i0\n\`\`\`\n按上面格式发即可。`,
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.groupTaskStore.listDeliverables(task.id).length,
+      0,
+      'a [DELIVERABLE] inside a fenced code block is a citation, not a delivery',
+    );
+    // Inline-backtick URIs still parse (real deliveries wrap uris in backticks).
+    insertGroupMessage(h.db, {
+      pinId: 'inline-deliverable-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] 真交付：\`metafile://${'f'.repeat(64)}i0.mp4\``,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'inline-backtick uri still records');
+  } finally {
+    h.cleanup();
+  }
+});

@@ -1135,6 +1135,9 @@ export class SqliteStore {
     // G-05: criteria-verdict / observation columns for create-time-aligned
     // acceptance — idempotent PRAGMA-guarded, NULL = not captured.
     this.migrateGroupTaskAcceptanceSummariesCriteriaVerdicts();
+    // Speedup R-06: time-breakdown snapshot column — idempotent, NULL = not
+    // computed (summaries recorded before R-06 stay null).
+    this.migrateGroupTaskAcceptanceSummariesTimeBreakdown();
 
     // Improvement #4 (v1.3): plan-change resolutions the chair posts in-group
     // with a [PLAN_CHANGE: ...] tag (original plan -> blocker -> fallback).
@@ -2513,6 +2516,22 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskAcceptanceSummariesCriteriaVerdicts:', error);
+    }
+  }
+
+  /** Speedup R-06: add the time-breakdown snapshot column (idempotent). */
+  private migrateGroupTaskAcceptanceSummariesTimeBreakdown(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_acceptance_summaries)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('time_breakdown_json')) {
+        this.db.run(
+          'ALTER TABLE group_task_acceptance_summaries ADD COLUMN time_breakdown_json TEXT;',
+        );
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskAcceptanceSummariesTimeBreakdown:', error);
     }
   }
 

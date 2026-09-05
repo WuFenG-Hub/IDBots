@@ -2473,3 +2473,68 @@ test('superviseGroupTask: nudge records the signal and posts a supervisor notice
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// group-task speedup REQ v1.1, R-04: sender display names follow the
+// GlobalMetaID identity, never the chain-resolved historical nickname.
+// ---------------------------------------------------------------------------
+
+test('speedup R-04: getGroupTask renders roster names over chain sender_name', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'Naming',
+      goal: 'g',
+      memberMetabotIds: [2],
+      createdBy: 'user',
+    });
+    const insertMsg = (pinId, gmid, senderName) => {
+      h.db.run(
+        `INSERT INTO group_chat_messages (
+          pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+          sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+          reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+        ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', 'hello', 'text/plain', NULL, '', '[]', NULL, 'mvc', '{}', 0, NULL)`,
+        [pinId, pinId, GROUP_ID, `metaid-${pinId}`, gmid, senderName],
+      );
+    };
+    // The EP28 bug shape: a member's message indexed under a stale chain name.
+    insertMsg('wrong-name-pin', 'gmid-coder', 'claude bot');
+    // A non-member sender keeps whatever name the chain carried.
+    insertMsg('stranger-pin', 'gmid-stranger', 'Stranger Chain Name');
+
+    const view = await getGroupTask(detail.id, { view: 'full' });
+    const memberMsg = view.messages.find((m) => m.pinId === 'wrong-name-pin');
+    assert.equal(memberMsg?.senderName, 'Coder Bot', 'roster name wins over the chain nickname');
+    const strangerMsg = view.messages.find((m) => m.pinId === 'stranger-pin');
+    assert.equal(strangerMsg?.senderName, 'Stranger Chain Name', 'non-member senders keep the chain name');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('speedup R-04: ingest-time sender name resolver prefers the local MetaBot registry', async () => {
+  const { setLocalSenderNameResolver, resolveGroupChatSenderName } =
+    require('../dist-electron/main/services/metaWebListenerService.js');
+  try {
+    setLocalSenderNameResolver((gmid) => (gmid === 'gmid-coder' ? 'Coder Bot' : null));
+    assert.equal(
+      resolveGroupChatSenderName('gmid-coder', 'claude bot', ''),
+      'Coder Bot',
+      'local registered name wins over the chain userInfo.name',
+    );
+    assert.equal(
+      resolveGroupChatSenderName('gmid-other', 'Chain Name', 'nick'),
+      'Chain Name',
+      'unknown sender falls back to the chain name',
+    );
+    assert.equal(
+      resolveGroupChatSenderName('gmid-other', '', 'nick'),
+      'nick',
+      'empty chain name falls back to the pin nickName',
+    );
+    assert.equal(resolveGroupChatSenderName(null, null, null), '', 'all-empty stays empty');
+  } finally {
+    setLocalSenderNameResolver(null);
+  }
+});
