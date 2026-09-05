@@ -395,7 +395,14 @@ export class DshKernel {
         } else if (method === 'idbots/policy/request') {
           this.opts.handlers.onPolicyRequest?.(params)
         } else if (method === 'idbots/ask/request') {
-          this.opts.handlers.onAskRequest?.(params as DshUserQuestionAsk)
+          const rawQuestions = Array.isArray(params.questions) ? params.questions : []
+          const questions = rawQuestions.map((question: any, index: number) => ({
+            ...question,
+            id: typeof question?.id === 'string' && question.id.trim()
+              ? question.id
+              : `q-${index + 1}`,
+          }))
+          this.opts.handlers.onAskRequest?.({ ...params, questions } as DshUserQuestionAsk)
         } else if (method === 'idbots/ask/cancelled') {
           this.opts.handlers.onAskCancelled?.(params.id)
         } else if (method === 'idbots/subagent/started') {

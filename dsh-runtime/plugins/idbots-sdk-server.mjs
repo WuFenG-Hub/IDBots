@@ -689,7 +689,16 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
 
   idbotsBridgeAsk(request, next) {
     const id = `ask-${Date.now().toString(36)}-${++this.idbotsAskSeq}`
-    const questions = Array.isArray(request?.questions) ? request.questions : []
+    // Older dsh-tool-ask-user payloads may omit the per-question id even
+    // though the host response contract requires one. Normalize at the
+    // bridge boundary so a malformed model retry cannot wedge the turn
+    // before the host can render the question or apply its timeout fallback.
+    const questions = (Array.isArray(request?.questions) ? request.questions : [])
+      .map((question, index) => {
+        const value = question && typeof question === 'object' ? question : {}
+        const rawId = typeof value.id === 'string' ? value.id.trim() : ''
+        return { ...value, id: rawId || `q-${index + 1}` }
+      })
     const pending = new Promise((resolve, reject) => {
       this.idbotsAsks.set(id, { resolve, reject })
     })

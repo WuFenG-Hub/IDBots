@@ -15,6 +15,7 @@ const readSource = (...segments) => fs.readFileSync(path.join(projectRoot, ...se
 
 const runnerSource = readSource('src', 'main', 'libs', 'coworkRunner.ts');
 const hubSource = readSource('src', 'main', 'libs', 'coworkDshTurn.ts');
+const kernelSource = readSource('src', 'main', 'libs', 'dshKernel', 'dshKernel.ts');
 const wizardSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkQuestionWizard.tsx');
 const i18nSource = readSource('src', 'renderer', 'services', 'i18n.ts');
 
@@ -57,6 +58,13 @@ test('hub declines asks that have no live turn controller instead of dropping th
   assert.match(body, /no live turn controller for its DSH session; auto-declining/);
   assert.match(body, /kernelOf\(\)\.respondAsk\(/);
   assert.match(body, /The user could not be reached for this question\./);
+});
+
+test('ask bridge assigns ids when the model omits them', () => {
+  const pluginSource = readSource('dsh-runtime', 'plugins', 'idbots-sdk-server.mjs');
+  assert.match(pluginSource, /rawId.*typeof value\.id === 'string'/);
+  assert.match(pluginSource, /`q-\$\{index \+ 1\}`/);
+  assert.match(kernelSource, /const rawQuestions = Array\.isArray\(params\.questions\)/);
 });
 
 test('question wizard never renders null while holding the permission queue', () => {
