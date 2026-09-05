@@ -4,7 +4,10 @@
  * Strictly LINE-scoped: ONLY lines carrying the [DELIVERABLE] protocol tag are
  * scanned. The message body (directory paths like `metaapp/`, example tokens,
  * truncated copy, quoted replies) can never influence the recorded URI, kind,
- * or rejection decision (P1-4 r2 heritage).
+ * or rejection decision (P1-4 r2 heritage). One bounded exception (see
+ * parseDeliverableLines): when the tag line's own text has no URI verdict, the
+ * FIRST non-blank line right below it may supply the URI — the "description
+ * line + blank line + URI line" delivery shape.
  *
  * Round-4 fixes over the round-2/3 extractor:
  * - One row PER tag occurrence. A message with two tag lines yields two
@@ -164,36 +167,84 @@ function parseSegment(segment: string): ParsedDeliverable {
 }
 
 /**
- * Scan a full group message for every [DELIVERABLE] tag occurrence and return
- * the trimmed segment text AFTER each tag, in document order. One entry per
- * tag occurrence (a line with two tags yields two entries); empty segments
- * are skipped. Index-aligned with parseDeliverableLines — candidate[i] is the
- * parse of segment[i] — so callers can inspect the raw segment of any
- * candidate (e.g. the daemon's local-file delivery enhancement).
+ * One [DELIVERABLE] tag occurrence in a message.
  */
-function scanDeliverableSegments(content: string): string[] {
+interface ScannedTagSegment {
+  /** Same-line text after the tag, trimmed (never empty — empty parts are skipped). */
+  segment: string;
+  /**
+   * Bounded lookahead for the multi-line delivery format
+   * ("[DELIVERABLE] <description>：\n\n<uri>"): the first non-blank line after
+   * the tag line, within a 3-line window and never past the next
+   * [DELIVERABLE]-carrying line. null when that window holds no candidate.
+   * Only the LAST tag occurrence on a line carries the lookahead — the block
+   * below the line belongs to the trailing tag.
+   */
+  nextLine: string | null;
+}
+
+/** First non-blank line within the 3 lines after `tagLineIndex`, or null. */
+function firstNonBlankLineAfter(lines: string[], tagLineIndex: number): string | null {
+  const windowEnd = Math.min(tagLineIndex + 3, lines.length - 1);
+  for (let i = tagLineIndex + 1; i <= windowEnd; i += 1) {
+    if (DELIVERABLE_TAG_TEST.test(lines[i])) return null;
+    const candidate = lines[i].trim();
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Scan a full group message for every [DELIVERABLE] tag occurrence. One entry
+ * per tag occurrence (a line with two tags yields two entries); empty
+ * same-line segments are skipped. Entries are index-aligned across
+ * parseDeliverableLines / parseDeliverableSegments — candidate[i] is the parse
+ * of segment[i] — so callers can inspect the raw segment of any candidate
+ * (e.g. the daemon's local-file delivery enhancement).
+ */
+function scanDeliverableTagSegments(content: string): ScannedTagSegment[] {
   const text = String(content ?? '');
   if (!DELIVERABLE_TAG_TEST.test(text)) return [];
-  const segments: string[] = [];
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n');
+  const entries: ScannedTagSegment[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
     if (!DELIVERABLE_TAG_TEST.test(line)) continue;
     const parts = line.split(DELIVERABLE_TAG_SPLIT);
-    for (const part of parts.slice(1)) {
-      const segment = part.trim();
+    for (let p = 1; p < parts.length; p += 1) {
+      const segment = parts[p].trim();
       if (!segment) continue;
-      segments.push(segment);
+      entries.push({
+        segment,
+        nextLine: p === parts.length - 1 ? firstNonBlankLineAfter(lines, i) : null,
+      });
     }
   }
-  return segments;
+  return entries;
 }
 
 /**
  * Parse a full group message: every [DELIVERABLE] tag line, one candidate per
  * tag occurrence, in document order. Invalid candidates are returned with
  * valid=false so callers can skip them without losing the valid siblings.
+ *
+ * Bounded multi-line upgrade: a tag line whose description leaves the URI to
+ * the next non-blank line ("[DELIVERABLE] <desc>：\n\n<uri>" — task #62 msg
+ * c48d2eb6 delivered a skill pin, a metafile and a metaapp in that shape, and
+ * the line-scoped round-4 scan dropped all three) is re-parsed over the
+ * segment + lookahead line. Upgrade-ONLY: a clean URI on the lookahead line
+ * replaces a text/invalid same-line verdict; anything ambiguous there
+ * (placeholder, truncated hex) keeps the same-line result, so the strict
+ * P1-4 semantics never gain new invalid rows.
  */
 export function parseDeliverableLines(content: string): ParsedDeliverable[] {
-  return scanDeliverableSegments(content).map(parseSegment);
+  return scanDeliverableTagSegments(content).map(({ segment, nextLine }) => {
+    const candidate = parseSegment(segment);
+    if (candidate.valid && candidate.uri) return candidate;
+    if (!nextLine) return candidate;
+    const upgraded = parseSegment(`${segment}\n${nextLine}`);
+    return upgraded.valid && upgraded.uri ? upgraded : candidate;
+  });
 }
 
 /**
@@ -202,7 +253,7 @@ export function parseDeliverableLines(content: string): ParsedDeliverable[] {
  * when the message carries no [DELIVERABLE] tag.
  */
 export function parseDeliverableSegments(content: string): string[] {
-  return scanDeliverableSegments(content);
+  return scanDeliverableTagSegments(content).map((entry) => entry.segment);
 }
 
 /** Text deliverables (valid, uri null) only — helper for callers that skip them. */

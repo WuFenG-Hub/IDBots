@@ -211,6 +211,7 @@ import {
   type GroupTaskDaemonSendOwnerReportFn,
 } from './services/groupTaskDaemon';
 import { groupTaskLog } from './libs/groupTaskLogger';
+import { backfillMultiLineDeliverables } from './services/groupTaskDeliverableBackfill';
 import {
   startOpenTeamGuestDaemon,
   stopOpenTeamGuestDaemon,
@@ -3871,6 +3872,27 @@ const startSqliteDaemons = (): void => {
       groupTaskLog(msg);
     },
   });
+
+  // One-time ledger repair: the line-scoped [DELIVERABLE] parser dropped URIs
+  // delivered in the "description line + blank line + URI line" shape (task
+  // #62: a skill-pack pin, a zip metafile and a MetaApp, all unrecorded).
+  // Re-scan every task's chat history with the fixed parser and insert the
+  // missing on-chain rows — additive-only, idempotent via the store's
+  // (msgPin,uri)/(author,uri) dedupe, so this is safe on every boot.
+  try {
+    const repaired = backfillMultiLineDeliverables(getGroupTaskStore());
+    if (repaired.inserted > 0) {
+      console.log(
+        `[GroupTask] deliverable backfill inserted ${repaired.inserted} row(s) ` +
+        `(${repaired.messagesScanned} tagged messages across ${repaired.tasksScanned} tasks)`,
+      );
+    }
+  } catch (error) {
+    console.error(
+      '[GroupTask] deliverable backfill failed:',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 
   // OpenTeam (M1): guest-side wiring. The guest service answers OpenTeam
   // invite envelopes intercepted by the private-chat daemon (join the external
