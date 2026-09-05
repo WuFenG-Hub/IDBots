@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
   parseDeliverableLines,
+  parseDeliverableSegments,
   isTextDeliverable,
 } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
 
@@ -392,4 +393,96 @@ test('ledger fix: extractLocalFilePaths returns absolute/~ paths, skips schemes 
   // Multiple distinct paths, deduped, punctuation trimmed.
   const multi = extractLocalFilePaths('`/a/b/f1.md` 与 `/a/b/f2.md`，以及 /a/b/f1.md');
   assert.deepEqual(multi, ['/a/b/f1.md', '/a/b/f2.md']);
+});
+
+// ---------------------------------------------------------------------------
+// Multi-line delivery shape (task #62 msg c48d2eb6, 2026-09-05): description
+// on the tag line, URI on the next non-blank line after a blank. The
+// line-scoped round-4 scan dropped all three real artifacts (the description's
+// sha256 hex even tripped the truncated-pinid invalidation); the bounded
+// lookahead upgrade recovers them.
+// ---------------------------------------------------------------------------
+
+const SHA256_A = 'e8b56972b85a7d4afa725eadc78ca82131655ddbafe79d6b39643878296ba7d2';
+const PIN_SKILL = '4c04e5ee4afca2c91cb4a21d58d609b58912c653f74d462b31ede7558c5aa3dai0';
+const PIN_ZIP = '70cc6df2433ba85898578e7ee8ba9cb7bfa94b17eefe945d14168b33c4aa7a2ai0';
+const PIN_APP = '020098ee0678125af7c2a1222b25d54699b3d52861249f11ff211612b691a8c9i0';
+
+test('#62 c48d2eb6: description line + blank + URI line → three URIs recorded (upgrade, not drop)', () => {
+  const content = [
+    `[DELIVERABLE] metabot-skill 技能封装（vhs v1.0.0，zip 78,303B ≤4MB，sha256 ${SHA256_A}）：`,
+    '',
+    `pin://${PIN_SKILL}`,
+    '',
+    '[DELIVERABLE] 技能包 zip（skill-file，公网 HTTP 200 实测，sha256 与本地逐字节一致）：',
+    '',
+    `metafile://${PIN_ZIP}.zip`,
+    '',
+    '[DELIVERABLE] MetaApp 上链（v1.0.0，7 项质量门自检全过，Bot Browser 打开渲染回读正常）：',
+    '',
+    `metaapp://${PIN_APP}`,
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 3);
+  assert.deepEqual(parsed[0], { kind: 'pinid', uri: `pin://${PIN_SKILL}`, valid: true, note: null });
+  assert.deepEqual(parsed[1], { kind: 'metafile', uri: `metafile://${PIN_ZIP}.zip`, valid: true, note: null });
+  assert.deepEqual(parsed[2], { kind: 'metaapp', uri: `metaapp://${PIN_APP}`, valid: true, note: null });
+  // Segment alignment preserved for the daemon's local-file enhancement.
+  assert.equal(parseDeliverableSegments(content).length, parsed.length);
+});
+
+test('#62 4th tag (install evidence, no URI line): stays dropped — lookahead prose cannot rescue sha256 prose', () => {
+  const content = [
+    `[DELIVERABLE] 闭环真装验证：skill_tool install_skill 真装成功（SKILL.md sha256 ${SHA256_A.slice(0, 64)} 与源一致）:`,
+    '',
+    '@AI_Sunny S3 工程上链交付完毕，证据摘要如下，待你核验：',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].valid, false, 'unchanged: sha256 on the tag line trips truncated-pinid');
+});
+
+test('lookahead never steals the next tag line', () => {
+  const content = [
+    '[DELIVERABLE] first part（本机留证）:',
+    '[DELIVERABLE] second part:',
+    '',
+    `pin://${PIN_SKILL}`,
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 2);
+  // First tag's window ends at the next tag line → stays text.
+  assert.equal(parsed[0].kind, 'text');
+  assert.equal(parsed[0].uri, null);
+  // Second tag's window grabs the pin line.
+  assert.equal(parsed[1].valid, true, parsed[1].note);
+  assert.equal(parsed[1].kind, 'pinid');
+  assert.equal(parsed[1].uri, `pin://${PIN_SKILL}`);
+});
+
+test('ambiguous lookahead line keeps the same-line verdict (local-file bullets stay text)', () => {
+  const content = [
+    '[DELIVERABLE] 真跑产物（本机留证，eleven 直接取用）:',
+    '',
+    `- hello.gif 22KB sha256 ${SHA256_A}`,
+    '- 脚本：smoke.tape / hello.tape',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].kind, 'text');
+  assert.equal(parsed[0].valid, true);
+  assert.equal(parsed[0].uri, null);
+});
+
+test('prose tag mention followed by prose stays text (no phantom URI)', () => {
+  const content = [
+    '状态澄清，非误期：前置条件是 Builder 的 S3 上链产物，尚未落地，故此时不可能有 [DELIVERABLE]。',
+    '',
+    '当前我侧就绪度：buzz 终稿已落盘备好，仅剩 2 个链接回填位。',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].kind, 'text');
+  assert.equal(parsed[0].valid, true);
+  assert.equal(parsed[0].uri, null);
 });

@@ -464,6 +464,12 @@ export interface AddGroupTaskDeliverableInput {
   uri?: string | null;
   /** P2: sha256 hex of the deliverable bytes, when known at record time. */
   contentHash?: string | null;
+  /**
+   * Ledger status at record time. Defaults to 'pending' (the live daemon
+   * path); the one-time backfill inserts 'delivered' — the artifact is
+   * verifiably on-chain, only the row was missing.
+   */
+  status?: GroupTaskDeliverableStatus;
 }
 export interface GroupTaskTransition {
   id: number;
@@ -1756,6 +1762,29 @@ export class GroupTaskStore {
   }
 
   /**
+   * Every chat message in this group's history carrying a [DELIVERABLE] tag
+   * (case-insensitive LIKE — matches the parser's /i), oldest first, with the
+   * raw fields the deliverable backfill needs. Unlike listGroupChatMessages
+   * this is unpaginated: the backfill must see the task's whole history once.
+   */
+  listGroupChatMessagesWithDeliverableTag(groupId: string): Array<{
+    pinId: string;
+    senderGlobalMetaId: string | null;
+    content: string | null;
+  }> {
+    return this.getAll<{ pin_id: string | null; sender_global_metaid: string | null; content: string | null }>(
+      `SELECT pin_id, sender_global_metaid, content FROM group_chat_messages
+       WHERE group_id = ? AND content LIKE '%[DELIVERABLE]%'
+       ORDER BY id ASC`,
+      [groupId],
+    ).map((row) => ({
+      pinId: String(row.pin_id ?? ''),
+      senderGlobalMetaId: row.sender_global_metaid != null ? String(row.sender_global_metaid) : null,
+      content: row.content != null ? String(row.content) : null,
+    }));
+  }
+
+  /**
    * One transcript message by its on-chain pin id (latest row wins when the
    * pin is somehow not unique). HITL: the detail view uses this to fetch the
    * chair's [CHECKPOINT] message body that opened an open checkpoint, so the
@@ -2249,10 +2278,11 @@ export class GroupTaskStore {
     // confirmation is written explicitly ('unconfirmed') even though the
     // schema defaults to it, so the ledger's semantics never depend on the
     // column default; the daemon flips it to 'confirmed' once multi-source
-    // on-chain verification succeeds (Issue #8).
+    // on-chain verification succeeds (Issue #8). status stays explicit for
+    // the same reason (defaults to 'pending' — the live daemon path).
     this.db.run(
-      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, content_hash, confirmation)
-       VALUES (?, ?, ?, ?, ?, ?, 'unconfirmed')`,
+      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, content_hash, status, confirmation)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'unconfirmed')`,
       [
         input.taskId,
         input.msgPinId ?? null,
@@ -2260,6 +2290,7 @@ export class GroupTaskStore {
         input.kind ?? null,
         input.uri ?? null,
         input.contentHash ?? null,
+        input.status ?? 'pending',
       ],
     );
     const id = this.lastInsertId();
