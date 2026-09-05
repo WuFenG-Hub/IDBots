@@ -88,6 +88,9 @@ tests/*
 !tests/groupChatAllowChatSkillsRuntime.test.mjs
 !tests/groupTaskStore.test.mjs
 !tests/groupTasksI18nKeys.test.mjs
+!tests/metabotWalletService.test.mjs
+!tests/mvcSubsidyService.test.mjs
+!tests/imGatewayConnectivity.test.mjs
 !tests/groupTaskService.test.mjs
 !tests/groupChatBackfill.test.mjs
 !tests/groupChatMsgIndexMigration.test.mjs
