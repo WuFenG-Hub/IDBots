@@ -53,6 +53,8 @@ function buildTool(recognize) {
       recognizeVideo: async () => {
         throw new Error('video not under test here');
       },
+      recognizeAudio: async () => ({ content: '', model: '', remainingToday: -1, usage: {} }),
+      recognizeVideoAudio: async () => ({ content: '', model: '', remainingToday: -1, usage: {} }),
     },
   });
   return { captured, tools };
@@ -60,14 +62,17 @@ function buildTool(recognize) {
 
 test('factory registers describe_image and describe_video tools with zod schemas', () => {
   const { captured } = buildTool(async () => ({}));
-  assert.equal(captured.length, 2);
+  assert.equal(captured.length, 3);
   const image = captured.find((t) => t.name === 'describe_image');
   const video = captured.find((t) => t.name === 'describe_video');
   assert.ok(image, 'describe_image registered');
   assert.ok(video, 'describe_video registered');
+  const audio = captured.find((t) => t.name === 'describe_audio');
+  assert.ok(audio, 'describe_audio registered');
   assert.ok(image.description.length > 100, 'description must follow the tool template');
   assert.ok(image.schema.image_path, 'image_path parameter required');
   assert.ok(video.schema.video_path, 'video_path parameter required');
+  assert.ok(audio.schema.audio, 'audio parameter required');
   assert.ok(image.schema.question && video.schema.question, 'question parameter present');
 });
 
@@ -82,9 +87,11 @@ test('describe_image and describe_video register on every route (no capability g
     visionRelay: {
       recognize: async () => ({}),
       recognizeVideo: async () => ({}),
+      recognizeAudio: async () => ({}),
+      recognizeVideoAudio: async () => ({}),
     },
   });
-  assert.deepEqual(tools.map((t) => t.name), ['describe_image', 'describe_video'],
+  assert.deepEqual(tools.map((t) => t.name), ['describe_image', 'describe_video', 'describe_audio'],
     'every route keeps both relay vision tools — the catalog never depends on model vision resolution');
 });
 
@@ -107,6 +114,48 @@ test('happy path returns the description plus the remaining-quota line', async (
   const text = result.content[0].text;
   assert.match(text, /Cactus Needle/);
   assert.match(text, /image reads left today: 42/);
+});
+
+test('describe_audio returns transcription text without usage details', async () => {
+  const seen = [];
+  const { captured } = buildTool(async () => ({}));
+  const audio = captured.find((t) => t.name === 'describe_audio');
+  audio.handler = async (args) => {
+    seen.push(args);
+    return { content: [{ type: 'text', text: 'placeholder' }] };
+  };
+  // The real handler is exercised through a fresh factory so the fake control
+  // can capture the exact input shape.
+  const calls = [];
+  const entries = buildVisionRelayAgentTools({
+    tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
+    visionRelay: {
+      recognize: async () => ({}),
+      recognizeVideo: async () => ({}),
+      recognizeAudio: async (input) => { calls.push(input); return { content: '完整转写', model: 'metaid-free-audio', remainingToday: 1, usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, imageTokens: 0, estimated: true } }; },
+      recognizeVideoAudio: async () => ({}),
+    },
+  });
+  const result = await entries.find((t) => t.name === 'describe_audio').handler({ audio: '/tmp/speech.mp3' });
+  assert.deepEqual(calls, [{ audioPath: '/tmp/speech.mp3', prompt: undefined }]);
+  assert.equal(result.content[0].text, '完整转写');
+  assert.equal(result.content[0].text.includes('usage'), false);
+});
+
+test('describe_audio extracts a video track when the prompt asks for video speech', async () => {
+  const calls = [];
+  const entries = buildVisionRelayAgentTools({
+    tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
+    visionRelay: {
+      recognize: async () => ({}),
+      recognizeVideo: async () => ({}),
+      recognizeAudio: async () => ({}),
+      recognizeVideoAudio: async (input) => { calls.push(input); return { content: '字幕文本', model: '', remainingToday: -1, usage: {} }; },
+    },
+  });
+  const result = await entries.find((t) => t.name === 'describe_audio').handler({ audio: '/tmp/clip.mp4', prompt: '识别视频中的语音并生成字幕' });
+  assert.deepEqual(calls, [{ videoPath: '/tmp/clip.mp4', prompt: '识别视频中的语音并生成字幕' }]);
+  assert.equal(result.content[0].text, '字幕文本');
 });
 
 test('relative paths are rejected before any relay call', async () => {

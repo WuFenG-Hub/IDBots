@@ -188,10 +188,12 @@ test('describe_video tool validates paths and formats results', async () => {
           usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, imageTokens: 0, estimated: false },
         };
       },
+      recognizeAudio: async () => ({ content: '', model: '', remainingToday: -1, usage: {} }),
+      recognizeVideoAudio: async () => ({ content: '', model: '', remainingToday: -1, usage: {} }),
     },
   });
 
-  assert.equal(captured.length, 2, 'factory must register describe_image AND describe_video');
+  assert.equal(captured.length, 3, 'factory must register describe_image, describe_video AND describe_audio');
   const video = captured.find((t) => t.name === 'describe_video');
   assert.ok(video, 'describe_video registered');
 
