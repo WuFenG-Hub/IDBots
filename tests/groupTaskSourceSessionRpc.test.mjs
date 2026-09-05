@@ -200,3 +200,42 @@ test('rpc group-task create: a standard source_session_id passes validation (rea
     h.cleanup();
   }
 });
+
+test('fix-v2 P1-4: rpc group-task show rejects an out-of-range limit with a clear 400', async () => {
+  const h = await startRpcServerForTest();
+  try {
+    const postShow = (body) =>
+      fetch(`${h.baseUrl}/api/idbots/group-task/show`, {
+        method: 'POST',
+        headers: RPC_AUTH_HEADERS,
+        body: JSON.stringify(body),
+      });
+
+    // limit > 200: rejected at the gate with an explicit range error.
+    let res = await postShow({ task_id: 1, limit: 201 });
+    assert.equal(res.status, 400);
+    let body = await res.json();
+    assert.ok(/limit must be an integer between 1 and 200/.test(body.error), `limit=201 rejected: ${body.error}`);
+
+    // limit = 0 / non-integer: same gate.
+    res = await postShow({ task_id: 1, limit: 0 });
+    assert.equal(res.status, 400);
+    res = await postShow({ task_id: 1, limit: 2.5 });
+    assert.equal(res.status, 400);
+
+    // before_id must be a positive integer too.
+    res = await postShow({ task_id: 1, before_id: -3 });
+    assert.equal(res.status, 400);
+    body = await res.json();
+    assert.ok(/before_id must be a positive integer/.test(body.error), `before_id rejected: ${body.error}`);
+
+    // An in-range limit passes validation and reaches the service (no such
+    // task in this bare store → 500 proves the gate let it through).
+    res = await postShow({ task_id: 9999, view: 'summary', limit: 20 });
+    assert.equal(res.status, 500);
+    body = await res.json();
+    assert.ok(!/limit must be/.test(body.error ?? ''), 'in-range limit passed the gate');
+  } finally {
+    h.cleanup();
+  }
+});

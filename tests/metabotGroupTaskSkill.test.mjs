@@ -157,3 +157,32 @@ test('create requires proposal_id and forwards it', async (t) => {
   assert.equal(rpc.requests[0].body.proposal_id, 7);
   assert.equal(rpc.requests[0].body.created_by, 'twinbot');
 });
+
+test('fix-v2 P1-4: show forwards view, limit and before_id to the show endpoint', async (t) => {
+  const rpc = await createRpcServer();
+  t.after(() => rpc.close());
+
+  const ok = await runSkill(JSON.stringify({
+    action: 'show',
+    task_id: 62,
+    view: 'summary',
+    limit: 50,
+    before_id: 3546,
+  }), rpc.url);
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(rpc.requests[0].url, '/api/idbots/group-task/show');
+  assert.deepEqual(rpc.requests[0].body, {
+    task_id: 62,
+    view: 'summary',
+    before_id: 3546,
+    limit: 50,
+  });
+
+  // Out-of-range values fail locally with a clear error, no RPC call.
+  const rpc2 = await createRpcServer();
+  t.after(() => rpc2.close());
+  const bad = await runSkill(JSON.stringify({ action: 'show', task_id: 62, limit: 0 }), rpc2.url);
+  assert.notEqual(bad.code, 0);
+  assert.match(bad.stderr, /limit must be a positive integer for show/);
+  assert.equal(rpc2.requests.length, 0);
+});

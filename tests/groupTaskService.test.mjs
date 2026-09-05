@@ -741,6 +741,48 @@ test('round-4: show view=summary is compact (5 messages, members with lastSpeakA
   }
 });
 
+test('fix-v2 P1-4: summary view honors messageLimit and beforeId paging (with messagesTotal)', async () => {
+  const h = await createHarness();
+  try {
+    const task = await createGroupTask({ title: 'T', goal: 'G', memberMetabotIds: [2], createdBy: 'user' });
+    // 12 transcript rows — beyond both the summary default (5) and a custom
+    // page size, so the limit/paging behavior is distinguishable.
+    for (let i = 1; i <= 12; i += 1) {
+      h.db.run(
+        `INSERT INTO group_chat_messages (
+          pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+          sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+          reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+        ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL,
+          '', '[]', ?, 'mvc', '{}', 0, NULL)`,
+        [
+          `p14-msg-${i}-i0`, `p14-tx-${i}`, task.groupId,
+          'metaid-1', 'gmid-twin', 'Twin Bot', `msg ${i}`, 1_700_000_000 + i,
+        ],
+      );
+    }
+
+    // The v2 defect: summary ignored the limit and always returned 5.
+    const limited = await getGroupTask(task.id, { view: 'summary', messageLimit: 20 });
+    assert.equal(limited.messages.length, 12, 'summary view respects messageLimit=20 (returns all 12)');
+    assert.equal(limited.messages[0].content, 'msg 1', 'the page starts at the oldest message');
+    assert.equal(limited.messagesTotal, 12, 'messagesTotal lets the caller page');
+
+    const page = await getGroupTask(task.id, { view: 'summary', messageLimit: 5 });
+    assert.equal(page.messages.length, 5, 'an explicit small limit wins over the 5-default too');
+    assert.equal(page.messages[4].content, 'msg 12', 'latest page ends at the newest message');
+
+    // Keyset paging: before_id pages backwards, consistent with view=full.
+    const oldestOnPage = page.messages[0];
+    const older = await getGroupTask(task.id, { view: 'summary', messageLimit: 5, beforeId: oldestOnPage.id });
+    assert.equal(older.messages.length, 5, 'the previous page is full too');
+    assert.equal(older.messages[4].content, 'msg 7', 'before_id pages strictly backwards');
+    assert.equal(older.messagesTotal, 12, 'messagesTotal is page-independent');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('C-2: getGroupTaskChairMetabotId resolves the task chair; throws for unknown task', async () => {
   const harness = await createHarness();
   const task = await createGroupTask({
