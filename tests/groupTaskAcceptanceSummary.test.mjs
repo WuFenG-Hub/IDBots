@@ -492,3 +492,75 @@ test('speedup R-06: the summary message renders the time breakdown block (zh + e
   assert.match(en, /- executing: 105\.5 min/);
   assert.match(en, /- S1: \+40 min/);
 });
+
+test('fix-v2 P2-7: buildGroupTaskTimeBreakdown counts host alerts and in-thread false alarms', () => {
+  const ms = (text) => Date.parse(`${text.replace(' ', 'T')}Z`);
+  const secs = (text) => ms(text) / 1000;
+  const breakdown = buildGroupTaskTimeBreakdown({
+    task: { createdAt: '2026-09-05 02:00:00', closedAt: null },
+    statusEvents: [
+      { id: 1, taskId: 1, fromStatus: 'planning', toStatus: 'executing', createdAt: '2026-09-05 02:10:00' },
+    ],
+    deliverables: [],
+    messages: [
+      { id: 1, content: '分工如下', senderGlobalMetaId: 'gmid-twin', chainTimestamp: secs('2026-09-05 02:10:00') },
+      // A genuine ACK-timeout alert (never acknowledged as false).
+      { id: 2, content: '@chair ⚠ Lucy was assigned work but has not sent a [WORKING] ACK within 10 min. Check whether the assignment was received; do not auto-fail.', senderGlobalMetaId: 'gmid-twin', chainTimestamp: secs('2026-09-05 02:20:00') },
+      // A deadline alert that the chair later marks as a false alarm (#62).
+      { id: 3, content: '@chair ⚠ @Lucy estimated delivery by 2026-09-05T02:30:00.000Z but no [DELIVERABLE] arrived yet (dependency state: no upstream dependency declared). Check status; do not auto-fail.', senderGlobalMetaId: 'gmid-twin', chainTimestamp: secs('2026-09-05 02:32:00') },
+      { id: 4, content: '@Lucy 澄清一下', senderGlobalMetaId: 'gmid-twin', chainTimestamp: secs('2026-09-05 02:33:00') },
+      { id: 5, content: '确认是上一条是误触——她在等上游交付。', senderGlobalMetaId: 'gmid-twin', chainTimestamp: secs('2026-09-05 02:34:00') },
+      // A second deadline alert acknowledged in English, further out.
+      { id: 6, content: '@chair ⚠ @Lucy estimated delivery by 2026-09-05T02:50:00.000Z but no [DELIVERABLE] arrived yet (dependency state: prose-declared upstream). Check status; do not auto-fail.', senderGlobalMetaId: 'gmid-twin', chainTimestamp: secs('2026-09-05 02:52:00') },
+      { id: 7, content: 'false alarm — she is waiting on the upstream pin', senderGlobalMetaId: 'gmid-lucy', chainTimestamp: secs('2026-09-05 02:55:00') },
+      // Unrelated ⚠ chatter is NOT a host alert.
+      { id: 8, content: '⚠ remember to attach the pin', senderGlobalMetaId: 'gmid-lucy', chainTimestamp: secs('2026-09-05 03:00:00') },
+    ],
+    members: [
+      mkMember({ globalmetaid: 'gmid-twin', role: 'chair', name: 'Twin Bot' }),
+      mkMember({ globalmetaid: 'gmid-lucy', role: 'worker', name: 'Lucy' }),
+    ],
+    nowMs: ms('2026-09-05 03:30:00'),
+  });
+
+  assert.deepEqual(breakdown.alertCounts, {
+    ackTimeout: 1,
+    deliveryDeadline: 2,
+    total: 3,
+    falsePositives: 2,
+  });
+});
+
+test('fix-v2 P2-7: the summary message renders the alert accounting line (zh + en)', () => {
+  const timeBreakdown = {
+    generatedAt: '2026-09-05T03:30:00.000Z',
+    messageTotal: 32,
+    heartbeatMessages: 0,
+    heartbeatSharePct: 0,
+    heartbeatPaddedGapMinutes: 0,
+    chairMessages: 16,
+    workerMessages: 16,
+    noticeMessages: 8,
+    alertCounts: { ackTimeout: 1, deliveryDeadline: 2, total: 3, falsePositives: 3 },
+    phases: [{ key: 'executing', startedAt: '2026-09-05T02:00:00.000Z', endedAt: null, minutes: 90 }],
+    steps: [],
+  };
+  const shape = {
+    goal: 'g',
+    acceptanceCriteria: null,
+    deliverables: [],
+    members: [],
+    guidance: 'You can:',
+    timeBreakdown,
+  };
+  const zh = buildAcceptanceSummaryMessageText(shape, '告警任务');
+  assert.match(zh, /宿主告警共 3 条，其中被群内确认为误报 3 条。/);
+  const en = buildAcceptanceSummaryMessageText(shape, 'alert task', 'en');
+  assert.match(en, /Host alerts: 3 \(false alarms acknowledged in-thread: 3\)\./);
+  // Records predating the field render no alert line at all.
+  const legacy = buildAcceptanceSummaryMessageText(
+    { ...shape, timeBreakdown: { ...timeBreakdown, alertCounts: undefined } },
+    'legacy task',
+  );
+  assert.ok(!/宿主告警/.test(legacy), 'no alert line when the record predates the field');
+});

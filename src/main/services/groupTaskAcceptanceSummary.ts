@@ -405,6 +405,13 @@ export function buildAcceptanceSummaryMessageText(
     lines.push('');
     lines.push(copy.timeBreakdownTitle);
     lines.push(copy.breakdownTotals(timeBreakdown.messageTotal, timeBreakdown.heartbeatSharePct));
+    // fix-v2 P2-7: alert accounting rides the breakdown — the owner sees how
+    // many host alerts fired and how many were marked false alarms without
+    // hand-counting the transcript (task #62: 3 误告警 reconstructed by hand).
+    const alertCounts = timeBreakdown.alertCounts;
+    if (alertCounts && alertCounts.total > 0) {
+      lines.push(copy.breakdownAlerts(alertCounts.total, alertCounts.falsePositives));
+    }
     const phases = timeBreakdown.phases.filter((phase) => phase.minutes > 0 || phase.key === 'done' || phase.key === 'cancelled');
     for (const phase of phases.slice(0, BREAKDOWN_MAX_RENDER_LINES)) {
       lines.push(copy.phaseLine(phase.key, phase.minutes));
@@ -505,6 +512,35 @@ export function isHeartbeatNoiseLine(content: string | null | undefined): boolea
   return HEARTBEAT_LINE_RE.test(String(content ?? ''));
 }
 
+// ---------------------------------------------------------------------------
+// fix-v2 P2-7: host alert accounting in the breakdown.
+// ---------------------------------------------------------------------------
+
+/**
+ * Host alert lines are the '@chair ⚠ …' posts the daemon sends into the group
+ * (ACK-timeout and delivery-deadline reminders — both end "do not auto-fail").
+ * Stuck/chair-watchdog alerts ride the chair-context and source-session
+ * channels instead, so they never appear in this transcript count.
+ */
+const HOST_ALERT_LINE_RE = /@chair\s+⚠/i;
+const DELIVERY_DEADLINE_ALERT_RE = /estimated delivery[\s\S]*but no \[DELIVERABLE\] arrived yet/i;
+const ACK_TIMEOUT_ALERT_RE = /has not sent a \[WORKING\] ACK within/i;
+/** A chair/member follow-up marking the alert a false alarm (task #62's #3551-style 认定误触). */
+const FALSE_ALARM_ACK_RE = /误报|误触|虚惊|false[\s-]?alarm|false alert|false positive/i;
+/** How many later messages may carry the false-alarm acknowledgment. */
+const FALSE_ALARM_LOOKAHEAD = 10;
+
+/** fix-v2 P2-7: alert kind classifier, exported for tests. */
+export function classifyHostAlertLine(
+  content: string | null | undefined,
+): 'ackTimeout' | 'deliveryDeadline' | null {
+  const text = String(content ?? '');
+  if (!HOST_ALERT_LINE_RE.test(text)) return null;
+  if (DELIVERY_DEADLINE_ALERT_RE.test(text)) return 'deliveryDeadline';
+  if (ACK_TIMEOUT_ALERT_RE.test(text)) return 'ackTimeout';
+  return null;
+}
+
 const STEP_LABEL_RE = /\bS\d+[a-z]?\b/i;
 
 export function buildGroupTaskTimeBreakdown(input: {
@@ -553,6 +589,32 @@ export function buildGroupTaskTimeBreakdown(input: {
     if (role === 'chair') chairMessages += 1;
     else if (role === 'worker') workerMessages += 1;
   }
+
+  // fix-v2 P2-7: alert accounting. Each false-alarm acknowledgment (误报/误触/
+  // false alarm within FALSE_ALARM_LOOKAHEAD messages after an alert) marks
+  // the NEAREST preceding unmarked alert — the way the chair's 误触 line in
+  // task #62 closed out exactly the alert it answered.
+  let ackTimeoutAlerts = 0;
+  let deliveryDeadlineAlerts = 0;
+  const alertIndexes: number[] = [];
+  messages.forEach((message, index) => {
+    const kind = classifyHostAlertLine(message.content);
+    if (kind === 'ackTimeout') ackTimeoutAlerts += 1;
+    if (kind === 'deliveryDeadline') deliveryDeadlineAlerts += 1;
+    if (kind) alertIndexes.push(index);
+  });
+  const markedFalse = new Set<number>();
+  messages.forEach((message, index) => {
+    if (!FALSE_ALARM_ACK_RE.test(message.content)) return;
+    const candidate = [...alertIndexes]
+      .reverse()
+      .find((alertIndex) => alertIndex < index
+        && index - alertIndex <= FALSE_ALARM_LOOKAHEAD
+        && !markedFalse.has(alertIndex));
+    if (candidate != null) markedFalse.add(candidate);
+  });
+  const falsePositiveAlerts = markedFalse.size;
+  const alertTotal = ackTimeoutAlerts + deliveryDeadlineAlerts;
 
   // Heartbeat idle: minutes inside gaps between two substantive messages that
   // contained at least one heartbeat line (the execution-stretch metric the
@@ -639,6 +701,12 @@ export function buildGroupTaskTimeBreakdown(input: {
     chairMessages,
     workerMessages,
     noticeMessages,
+    alertCounts: {
+      ackTimeout: ackTimeoutAlerts,
+      deliveryDeadline: deliveryDeadlineAlerts,
+      total: alertTotal,
+      falsePositives: falsePositiveAlerts,
+    },
     phases,
     steps,
   };

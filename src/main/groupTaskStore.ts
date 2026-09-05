@@ -360,6 +360,17 @@ export interface GroupTaskTimeBreakdown {
   chairMessages: number;
   workerMessages: number;
   noticeMessages: number;
+  /**
+   * fix-v2 P2-7: host alert lines posted into the group ('@chair ⚠ …'),
+   * split by kind, plus how many a later chair/member message marked as a
+   * false alarm. Optional: records predating the field simply lack it.
+   */
+  alertCounts?: {
+    ackTimeout: number;
+    deliveryDeadline: number;
+    total: number;
+    falsePositives: number;
+  };
   phases: GroupTaskTimeBreakdownPhase[];
   steps: GroupTaskTimeBreakdownStep[];
 }
