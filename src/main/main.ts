@@ -111,7 +111,7 @@ import {
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
-import { initVisionRelayService, recognizeImageViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
+import { initVisionRelayService, recognizeAudioViaRelay, recognizeImageViaRelay, recognizeVideoAudioViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
 import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/mediaToolsService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
@@ -5712,6 +5712,8 @@ const getCoworkRunner = () => {
       visionRelay: {
         recognize: (input) => recognizeImageViaRelay(input),
         recognizeVideo: (input) => recognizeVideoViaRelay(input),
+        recognizeAudio: (input) => recognizeAudioViaRelay(input),
+        recognizeVideoAudio: (input) => recognizeVideoAudioViaRelay(input),
       },
       // Local media tools (media_info/convert_media/grab_video_frame) over
       // the bundled ffmpeg; all local-only, no credentials involved.

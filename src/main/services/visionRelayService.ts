@@ -33,6 +33,8 @@ export { parseFfmpegDuration, resolveFfmpegPath } from './mediaToolsService';
 const VISION_RECOGNIZE_TIMEOUT_MS = 120_000;
 /** Cap for the post-codec JPEG payload handed to the relay (base64 excluded). */
 const VISION_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/** Keep the encoded audio body below the relay's suggested 10 MiB ceiling. */
+export const VISION_AUDIO_MAX_BASE64_BYTES = 10 * 1024 * 1024;
 /**
  * Target ceiling for a transcoded video's RAW bytes. The upstream accepts
  * base64 up to 10MB and base64 inflates by ~4/3, so 6.8MB raw encodes to
@@ -81,6 +83,17 @@ export interface VisionRelayRecognizeInput {
   prompt?: string;
 }
 
+export interface VisionAudioRecognizeInput {
+  /** Absolute local audio path. */
+  audioPath?: string;
+  /** Public http(s) URL reachable by the relay backend. */
+  audioUrl?: string;
+  /** Pre-encoded base64 audio (without a data: prefix). */
+  audioBase64?: string;
+  mimeType?: string;
+  prompt?: string;
+}
+
 export interface VisionTranscodeResult {
   /** Base64 of the transcoded mp4 (video/mp4, H.264, no audio). */
   base64: string;
@@ -106,6 +119,7 @@ export interface VisionRelayServiceDeps {
    * Default implementation shells out to the bundled ffmpeg; tests inject.
    */
   transcodeVideoImpl?: (videoPath: string) => Promise<VisionTranscodeResult>;
+  extractAudioImpl?: (videoPath: string) => Promise<{ audioPath: string; mimeType: string; bytes: number }>;
   /** mkdtemp-like temp dir provider; tests inject. */
   tempDirImpl?: () => string;
 }
@@ -327,6 +341,7 @@ async function loadImageBase64(imagePath: string): Promise<{ base64: string; byt
 async function postRecognize(
   credentials: { apiKey: string; baseUrl: string },
   body: Record<string, unknown>,
+  emptyContentMessage = 'vision relay returned no image description',
 ): Promise<VisionRelayRecognizeResult> {
   const fetchImpl = getDeps().fetchImpl ?? fetch;
   const controller = new AbortController();
@@ -364,7 +379,7 @@ async function postRecognize(
   const data = payload.data as Record<string, unknown> | null;
   const content = typeof data?.content === 'string' ? data.content : '';
   if (!content) {
-    throw new VisionRelayError('vision relay returned no image description');
+    throw new VisionRelayError(emptyContentMessage);
   }
   const usageRaw = data?.usage as Record<string, unknown> | null;
   const toCount = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
@@ -448,18 +463,94 @@ export async function recognizeVideoViaRelay(input: {
   return { ...result, truncated, durationSec };
 }
 
-async function postRecognizeWithKeyRetry(body: Record<string, unknown>): Promise<VisionRelayRecognizeResult> {
+async function postRecognizeWithKeyRetry(
+  body: Record<string, unknown>,
+  emptyContentMessage = 'vision relay returned no image description',
+): Promise<VisionRelayRecognizeResult> {
   let credentials = await resolveVisionRelayCredentials();
   try {
-    return await postRecognize(credentials, body);
+    return await postRecognize(credentials, body, emptyContentMessage);
   } catch (error) {
     const relayMessage = error instanceof VisionRelayError ? error.relayMessage : null;
     const keyRejected = relayMessage === 'relay key invalid or revoked';
     if (!keyRejected) throw error;
     invalidateCredentials();
     credentials = await resolveVisionRelayCredentials();
-    return postRecognize(credentials, body);
+    return postRecognize(credentials, body, emptyContentMessage);
   }
+}
+
+const AUDIO_MIME_BY_EXTENSION: Record<string, string> = {
+  '.wav': 'audio/wav',
+  '.wave': 'audio/wav',
+  '.mp3': 'audio/mpeg',
+  '.mpeg': 'audio/mpeg',
+  '.mp4': 'audio/mp4',
+  '.m4a': 'audio/m4a',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.webm': 'audio/webm',
+};
+
+export function inferAudioMimeType(reference: string, explicit?: string): string {
+  const provided = explicit?.trim().toLowerCase();
+  if (provided) return provided;
+  try {
+    const extension = path.extname(new URL(reference).pathname).toLowerCase();
+    if (AUDIO_MIME_BY_EXTENSION[extension]) return AUDIO_MIME_BY_EXTENSION[extension];
+  } catch {
+    // Local paths are handled below.
+  }
+  return AUDIO_MIME_BY_EXTENSION[path.extname(reference).toLowerCase()] ?? 'audio/wav';
+}
+
+const SUPPORTED_AUDIO_MIME_TYPES = new Set([
+  'audio/wav', 'audio/x-wav', 'audio/mpeg', 'audio/mp3', 'audio/mp4',
+  'audio/m4a', 'audio/ogg', 'audio/webm',
+]);
+
+function encodedAudioFitsRelay(base64: string): boolean {
+  return Buffer.byteLength(base64, 'utf8') <= VISION_AUDIO_MAX_BASE64_BYTES;
+}
+
+/** Recognize an audio file, URL, or pre-encoded payload through the same relay. */
+export async function recognizeAudioViaRelay(input: VisionAudioRecognizeInput): Promise<VisionRelayRecognizeResult> {
+  const body: Record<string, unknown> = {};
+  if (input.audioPath) {
+    let buffer: Buffer;
+    try {
+      buffer = await fs.promises.readFile(input.audioPath);
+    } catch {
+      throw new VisionRelayError(`could not read audio file: ${input.audioPath}`);
+    }
+    if (buffer.length === 0) throw new VisionRelayError('audio payload is invalid');
+    const base64 = buffer.toString('base64');
+    if (!encodedAudioFitsRelay(base64)) {
+      throw new VisionRelayError('audio too large; compress or shorten the audio to keep it under 10 MiB encoded');
+    }
+    body.audioBase64 = base64;
+    body.mimeType = inferAudioMimeType(input.audioPath, input.mimeType);
+  } else if (input.audioUrl) {
+    if (!/^https?:\/\//i.test(input.audioUrl.trim())) {
+      throw new VisionRelayError('audio URL must be a public http/https URL');
+    }
+    body.audioUrl = input.audioUrl.trim();
+    body.mimeType = inferAudioMimeType(input.audioUrl, input.mimeType);
+  } else if (input.audioBase64) {
+    const base64 = input.audioBase64.replace(/^data:[^;]+;base64,/, '').trim();
+    if (!base64 || !encodedAudioFitsRelay(base64)) {
+      throw new VisionRelayError('audio payload is invalid or too large; provide valid base64 under 10 MiB');
+    }
+    body.audioBase64 = base64;
+    body.mimeType = inferAudioMimeType('', input.mimeType);
+  } else {
+    throw new VisionRelayError('audioPath, audioUrl, or audioBase64 is required');
+  }
+  if (!SUPPORTED_AUDIO_MIME_TYPES.has(String(body.mimeType))) {
+    throw new VisionRelayError('audio payload is invalid');
+  }
+  body.prompt = (input.prompt || '').trim() || '请完整转写这段音频，保留原语言、标点和说话内容，不要总结。';
+  return postRecognizeWithKeyRetry(body, 'vision relay returned no audio transcription');
 }
 
 // ---------------------------------------------------------------------------
@@ -570,4 +661,63 @@ export async function transcodeVideoForVision(videoPath: string): Promise<Vision
   }
   if (lastResult) return lastResult; // caller rejects oversized payloads
   throw new VisionRelayError('ffmpeg produced no output; the file may not be a valid video');
+}
+
+export function buildAudioExtractArgs(input: { inputPath: string; outputPath: string }): string[] {
+  return [
+    '-y',
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-i', input.inputPath,
+    '-vn',
+    '-ac', '1',
+    '-ar', '16000',
+    '-c:a', 'libmp3lame',
+    '-b:a', '64k',
+    input.outputPath,
+  ];
+}
+
+/** Extract only a video's audio track for the describe_audio relay path. */
+export async function extractAudioFromVideo(videoPath: string): Promise<{
+  audioPath: string;
+  mimeType: string;
+  bytes: number;
+}> {
+  const deps = getDeps();
+  if (deps.extractAudioImpl) return deps.extractAudioImpl(videoPath);
+  const osMod = await import('os');
+  const tempDir = deps.tempDirImpl
+    ? deps.tempDirImpl()
+    : fs.mkdtempSync(path.join(osMod.tmpdir(), 'idbots-audio-'));
+  const outputPath = path.join(tempDir, 'extracted.mp3');
+  const run = await runFfmpegProcess(
+    buildAudioExtractArgs({ inputPath: videoPath, outputPath }),
+    VISION_VIDEO_TRANSCODE_TIMEOUT_MS,
+  );
+  if (run.code !== 0) {
+    throw new VisionRelayError(`ffmpeg audio extraction failed: ${run.stderr.slice(-300)}`);
+  }
+  const stat = await fs.promises.stat(outputPath).catch(() => null);
+  if (!stat || stat.size === 0) {
+    throw new VisionRelayError('ffmpeg produced no audio track; the video may not contain audio');
+  }
+  return { audioPath: outputPath, mimeType: 'audio/mpeg', bytes: stat.size };
+}
+
+export async function recognizeVideoAudioViaRelay(input: { videoPath: string; prompt?: string }): Promise<VisionRelayRecognizeResult> {
+  const extracted = await extractAudioFromVideo(input.videoPath);
+  try {
+    return await recognizeAudioViaRelay({
+      audioPath: extracted.audioPath,
+      mimeType: extracted.mimeType,
+      prompt: input.prompt,
+    });
+  } finally {
+    try {
+      await fs.promises.rm(path.dirname(extracted.audioPath), { recursive: true, force: true });
+    } catch {
+      // best effort cleanup of the temporary extracted track
+    }
+  }
 }

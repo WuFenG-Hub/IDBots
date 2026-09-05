@@ -44,6 +44,19 @@ export type VisionRelayControl = {
       estimated: boolean;
     };
   }>;
+  recognizeAudio(input: {
+    audioPath?: string;
+    audioUrl?: string;
+    audioBase64?: string;
+    mimeType?: string;
+    prompt?: string;
+  }): Promise<{
+    content: string;
+    model: string;
+    remainingToday: number;
+    usage: { promptTokens: number; completionTokens: number; totalTokens: number; imageTokens: number; estimated: boolean };
+  }>;
+  recognizeVideoAudio(input: { videoPath: string; prompt?: string }): ReturnType<VisionRelayControl['recognizeAudio']>;
 };
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
@@ -89,6 +102,21 @@ export function formatVisionRelayError(message: string): string {
       return 'The image-reading credential was rejected and could not be renewed. The image was NOT read.';
     default:
       return `Image reading failed: ${message}`;
+  }
+}
+
+export function formatAudioRelayError(message: string): string {
+  switch (message) {
+    case 'vision daily quota exhausted': return 'Daily audio transcription quota used up. Try again tomorrow.';
+    case 'vision request rate limited': return 'Audio transcription is rate limited. Wait briefly, then retry.';
+    case 'audio payload is invalid':
+    case 'audioBase64 or audioUrl is required': return 'The audio format, base64 payload, or public URL is invalid.';
+    case 'request body too large': return 'The audio is too large. Compress it or shorten it, then retry.';
+    case 'vision relay is disabled':
+    case 'no vision model configured': return 'The audio transcription service is temporarily unavailable.';
+    case 'relay key invalid or revoked': return 'The audio transcription credential was rejected and could not be renewed.';
+    case 'upstream provider failed, please retry later': return 'The audio transcription provider failed. Please retry later.';
+    default: return `Audio transcription failed: ${message}`;
   }
 }
 
@@ -218,5 +246,44 @@ export function buildVisionRelayAgentTools(deps: {
     }
   );
 
-  return [describeImage, describeVideo];
+  const describeAudio = tool(
+    'describe_audio',
+    [
+      'Transcribe ONE audio file or stable public audio URL through the IDBots speech-recognition relay. Returns complete transcription in the original language with punctuation; works for voice messages, recordings, and audio extracted from video.',
+      'Pass `audio` as an absolute local path, a public http/https URL, or a data/base64 audio reference. Do not summarize unless the user asks in `prompt`.',
+      'Supported formats: wav, mp3, m4a, ogg, webm. For an `.mp4` video path, the host extracts its audio track first; no SRT/VTT timestamps are generated.',
+    ].join(' '),
+    {
+      audio: z.string().min(1).describe('Absolute local audio path, public http/https audio URL, or base64/data audio reference.'),
+      prompt: z.string().optional().describe('Optional transcription instruction; default preserves original language, punctuation, and spoken content without summarizing.'),
+    },
+    async (args: { audio: string; prompt?: string }) => {
+      const audio = asString(args.audio);
+      if (!audio) return textResult('describe_audio requires `audio`.', true);
+      try {
+        const isUrl = /^https?:\/\//i.test(audio);
+        const isData = /^data:audio\//i.test(audio);
+        const asksForVideoAudio = /视频|video|subtitle|字幕/i.test(asString(args.prompt));
+        const isVideoPath = path.isAbsolute(audio) && /\.(mp4|mov|mkv|avi|webm)$/i.test(audio) && asksForVideoAudio;
+        const result = isUrl
+          ? await visionRelay.recognizeAudio({ audioUrl: audio, prompt: asString(args.prompt) || undefined })
+          : isData
+            ? await visionRelay.recognizeAudio({ audioBase64: audio, prompt: asString(args.prompt) || undefined })
+            : isVideoPath
+              ? await visionRelay.recognizeVideoAudio({ videoPath: audio, prompt: asString(args.prompt) || undefined })
+              : !path.isAbsolute(audio)
+                ? (() => { throw new Error(`describe_audio requires an ABSOLUTE file path or public URL. Received: "${audio}"`); })()
+                : await visionRelay.recognizeAudio({ audioPath: audio, prompt: asString(args.prompt) || undefined });
+        return textResult(result.content);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const stable = message.startsWith('vision relay error: ')
+          ? message.slice('vision relay error: '.length)
+          : message;
+        return textResult(formatAudioRelayError(stable), true);
+      }
+    },
+  );
+
+  return [describeImage, describeVideo, describeAudio];
 }
