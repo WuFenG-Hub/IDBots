@@ -15,9 +15,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import Module from 'node:module'
+import fs from 'node:fs'
 import path from 'node:path'
 
 const require = Module.createRequire(import.meta.url)
+
+// coworkLog writes <userData>/logs/cowork.log; the electron mock below maps
+// userData here, so degradation events can be asserted on the real log file.
+const coworkLogPath = () =>
+  path.join(process.cwd(), '.cowork-temp', 'dsh-fallback-userData', 'logs', 'cowork.log')
 
 function loadModules() {
   const originalLoad = Module._load
@@ -88,7 +94,7 @@ class RecordingStore {
 // Two enabled providers: gw-a serves the primary brain (mock-a1), gw-b serves
 // the fallback brain (mock-b1) with its own limits — the fallback turn must
 // carry the FALLBACK model's maxOutputTokens, not the primary's.
-function installApiConfig(claudeSettings) {
+function installApiConfig(claudeSettings, overrides = {}) {
   const fakeConfigStore = {
     get: (key) => {
       if (key !== 'app_config') return undefined
@@ -114,6 +120,7 @@ function installApiConfig(claudeSettings) {
             apiFormat: 'openai',
             models: [{ id: 'mock-b1', name: 'mock-b1', contextWindow: 64000, maxOutputTokens: 8192 }],
           },
+          ...overrides.providers,
         },
         dshKernelEnabled: true,
       }
@@ -125,10 +132,10 @@ function installApiConfig(claudeSettings) {
 // Drive one runDshSessionLocal turn with a scripted fake hub. `script(input,
 // callNo)` returns the DshTurnOutcome for each hub.runTurn call (callNo is
 // 1-based). Returns the recorded calls plus the post-turn session row.
-async function driveTurn({ sessionId, metabot, script }) {
+async function driveTurn({ sessionId, metabot, script, sessionRow = {}, configOverrides = {} }) {
   const { runner: runnerModule, claudeSettings, assistantReply } = loadModules()
   const { CoworkRunner } = runnerModule
-  installApiConfig(claudeSettings)
+  installApiConfig(claudeSettings, configOverrides)
 
   const store = new RecordingStore()
   const runner = new CoworkRunner(store, {
@@ -161,7 +168,7 @@ async function driveTurn({ sessionId, metabot, script }) {
     readFiles: new Map(),
   }
   runner.activeSessions.set(sessionId, activeSession)
-  store.sessions.set(sessionId, { id: sessionId, executionMode: 'local', metabotId: metabot?.id ?? null, messages: [] })
+  store.sessions.set(sessionId, { id: sessionId, executionMode: 'local', metabotId: metabot?.id ?? null, ...sessionRow, messages: [] })
   const errors = []
   runner.on('error', (sid, error) => errors.push({ sid, error }))
   runner.on('permissionRequest', () => undefined)
@@ -275,4 +282,98 @@ test('a fallback brain resolving to the SAME route as the failed primary is not 
     assert.equal(call.provider.key, 'gw-a')
   }
   assert.equal(result.sessionRow?.status, 'error')
+})
+
+// §9 (GROUP-TASK-FIX-REQ-v2): the identity-layer fallback must sink into the
+// session runtime layer for EVERY bot that configured one — including a bot
+// whose PRIMARY brain is the app-global default (no llm_id on its metabot
+// row). Before the fix, getSessionAutomationBrain gated on llm_id and such a
+// bot's fallback_llm_* was never consulted: an outage on the default route
+// failed the turn outright instead of degrading.
+test('a bot without a primary llm_id still inherits its configured fallback brain on outage', async () => {
+  const result = await driveTurn({
+    sessionId: 'gt02-fallback-only-bot',
+    metabot: { id: 4, name: 'FallbackOnly Bot', fallback_llm_id: 'mock-b1', fallback_llm_provider: 'gw-b' },
+    // Global default route (mock-a1 via gw-a) dies transiently; the first
+    // FALLBACK attempt succeeds.
+    script: (_input, callNo) => (callNo <= 4 ? transientError() : { kind: 'completed' }),
+  })
+
+  assert.equal(result.runTurnCalls.length, 5, '1 initial + 3 default-route resumes + 1 fallback resume')
+  for (const call of result.runTurnCalls.slice(0, 4)) {
+    assert.equal(call.provider.key, 'gw-a', 'primary attempts ride the app-global default route')
+    assert.equal(call.provider.model, 'mock-a1')
+  }
+  const fallbackCall = result.runTurnCalls[4]
+  assert.equal(fallbackCall.provider.key, 'gw-b', 'the exhausted turn degrades to the configured fallback brain')
+  assert.equal(fallbackCall.provider.model, 'mock-b1')
+  assert.equal(result.sessionRow?.status, 'completed')
+  assert.equal(result.errors.length, 0)
+  await result.completed
+})
+
+// Config-level facet of the same gap: with no llm_id AND no enabled default
+// provider, route resolution used to skip the bot's fallback brain entirely
+// (the branch required a primary override). The turn must START on the
+// fallback route instead of failing with "provider not enabled".
+test('a fallback-only bot starts on its fallback brain when the default provider is disabled', async () => {
+  const result = await driveTurn({
+    sessionId: 'gt02-fallback-only-disabled-default',
+    metabot: { id: 5, name: 'FallbackOnly Bot', fallback_llm_id: 'mock-b1', fallback_llm_provider: 'gw-b' },
+    configOverrides: {
+      providers: {
+        'gw-a': {
+          enabled: false,
+          apiKey: 'sk-a',
+          baseUrl: 'http://primary.example/v1',
+          apiFormat: 'openai',
+          models: [{ id: 'mock-a1', name: 'mock-a1', contextWindow: 32768, maxOutputTokens: 4096 }],
+        },
+      },
+    },
+    script: () => ({ kind: 'completed' }),
+  })
+
+  assert.equal(result.runTurnCalls.length, 1, 'no dead primary attempt — the turn starts on the fallback route')
+  assert.equal(result.runTurnCalls[0].provider.key, 'gw-b')
+  assert.equal(result.runTurnCalls[0].provider.model, 'mock-b1')
+  assert.equal(result.sessionRow?.status, 'completed')
+  assert.equal(result.errors.length, 0)
+  await result.completed
+})
+
+// §9 acceptance, end to end at the runner layer: a GROUP-TASK worker session
+// (sessionType 'group_task', metabotId set — exactly what ensureGroupTaskSession
+// creates) hits a primary-route outage, degrades to the bot's fallback brain,
+// completes the turn (the task is not interrupted), and the degradation event
+// is visible both in the session transcript and in cowork.log.
+test('a group-task worker session degrades to the bot fallback brain and logs the event', async () => {
+  const sessionId = 'gt02-group-task-worker'
+  const result = await driveTurn({
+    sessionId,
+    metabot: BOT_WITH_FALLBACK,
+    sessionRow: { sessionType: 'group_task' },
+    script: (_input, callNo) => (callNo <= 4 ? transientError() : { kind: 'completed' }),
+  })
+
+  assert.equal(result.runTurnCalls.length, 5)
+  assert.equal(result.runTurnCalls[4].provider.key, 'gw-b', 'the worker turn completes on the fallback model')
+  assert.equal(result.runTurnCalls[4].provider.model, 'mock-b1')
+  assert.equal(result.sessionRow?.status, 'completed', 'the turn completes — the group task is not interrupted')
+  assert.equal(result.errors.length, 0)
+
+  const notice = result.store.messages.find(
+    (m) => m.sessionId === sessionId && m.type === 'system' && m.metadata?.dshRouteFallback === true,
+  )
+  assert.ok(notice, 'a dshRouteFallback system message lands in the worker session transcript')
+  assert.match(notice.content, /mock-b1/)
+  assert.match(notice.content, /gw-b/)
+
+  const logText = fs.readFileSync(coworkLogPath(), 'utf-8')
+  assert.ok(
+    logText.includes('switching to the bot fallback brain route'),
+    'the degradation WARN event is written to cowork.log',
+  )
+  assert.ok(logText.includes(sessionId), 'the degradation log line names the worker session')
+  await result.completed
 })
