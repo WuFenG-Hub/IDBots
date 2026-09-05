@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import Tooltip from './ui/Tooltip';
+import { i18nService } from '../services/i18n';
 
 interface SleepGuardState {
   active: boolean;
@@ -7,10 +8,10 @@ interface SleepGuardState {
   engaged: boolean;
 }
 
-const SOURCE_LABELS: Record<string, string> = {
-  cowork: '活跃会话',
-  scheduledTask: '定时任务',
-  dream: '夜间梦境',
+const SOURCE_LABEL_KEYS: Record<string, string> = {
+  cowork: 'sleepGuardSourceCowork',
+  scheduledTask: 'sleepGuardSourceScheduledTask',
+  dream: 'sleepGuardSourceDream',
 };
 
 /**
@@ -30,14 +31,17 @@ export const SleepGuardBadge: React.FC = () => {
     return null;
   }
 
-  const labels = state.sources.map((source) => SOURCE_LABELS[source] ?? source);
-  const tooltip = `IDBots 正在工作，已阻止设备休眠（${labels.join(' / ')}）`;
+  const labels = state.sources.map((source) =>
+    SOURCE_LABEL_KEYS[source] ? i18nService.t(SOURCE_LABEL_KEYS[source]) : source
+  );
+  const separator = i18nService.getLanguage() === 'zh' ? ' / ' : ', ';
+  const tooltip = i18nService.t('sleepGuardBadgeTooltip').replace('{sources}', labels.join(separator));
 
   return (
     <Tooltip content={tooltip} position='top'>
       <span className='inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-300 cursor-default'>
         <span className='w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse' />
-        防休眠中
+        {i18nService.t('sleepGuardBadgeText')}
       </span>
     </Tooltip>
   );
