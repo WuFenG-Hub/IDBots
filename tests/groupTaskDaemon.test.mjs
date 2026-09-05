@@ -38,6 +38,7 @@ const {
   buildMemberJoinWelcomeText,
   parseGroupTaskStuckReclaimMode,
   hasProseDependencyDeclaration,
+  hasWorkerUpstreamWait,
   adjudicateStatusDirectives,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
@@ -7785,6 +7786,173 @@ test('speedup R-06: review entry stamps the time breakdown onto the record and t
     assert.ok(closing, 'ceremony message posted');
     assert.match(closing.content, /耗时分解：/);
     assert.match(closing.content, /宿主心跳占 \d+%/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// fix-v2 P0-1: deadline false-alarm recurrence — conditional worker ETAs and
+// mixed (tag + prose) dispatches must never arm a delivery deadline while the
+// upstream is undelivered (task #62 post-mortem).
+// ---------------------------------------------------------------------------
+
+test('fix-v2 P0-1: hasWorkerUpstreamWait matches explicit wait markers only', () => {
+  // The exact task-#62 sentence that armed the false 2-minute deadline.
+  assert.ok(hasWorkerUpstreamWait('[WORKING] 待 Builder 上链交付后接单，回填→发布预计 2 分钟。执行期静默。'));
+  assert.ok(hasWorkerUpstreamWait('[WORKING] 等 S3 交付后开始。'));
+  assert.ok(hasWorkerUpstreamWait('[WORKING] waiting on the S3 delivery to land before publishing.'));
+  assert.ok(hasWorkerUpstreamWait('[WORKING] after Builder delivers the metaapp I will publish (est. 2 min).'));
+  // Bare dependency words without a wait marker are NOT a conditional wait.
+  assert.ok(!hasWorkerUpstreamWait('[WORKING] 依赖已就绪，开工，预计 30 分钟。'));
+  assert.ok(!hasWorkerUpstreamWait('[WORKING] 已接单，预计 5 分钟。'));
+  assert.ok(!hasWorkerUpstreamWait('[WORKING] 无需等待，直接开工。'));
+  assert.ok(!hasWorkerUpstreamWait(''));
+  assert.ok(!hasWorkerUpstreamWait(null));
+});
+
+test('fix-v2 P0-1: a conditional-ETA [WORKING] arms no deadline and never alerts; the real start ACK arms', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S4 推广。[DEADLINE: 10m]',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    // The member's readiness note carries a CONDITIONAL ETA — "after Builder's
+    // delivery lands, backfill+publish takes ~2 minutes" (task #62 msg #3548).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-cond', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '草案已备好落盘。[WORKING] 待 Builder 上链交付后接单，回填→发布预计 2 分钟。执行期静默。',
+      chainTimestamp: Math.floor(startMs / 1000) + 30,
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      undefined,
+      'a conditional ETA arms no delivery deadline',
+    );
+    // Well past the spurious 2 minutes: no alert, no reminded flag.
+    h.state.nowMs = startMs + 10 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      0,
+      'no deadline alert while the member waits on the upstream',
+    );
+    assert.equal(h.store.get(`group_task_delivery_reminded:${task.id}:2`), undefined);
+    // Upstream lands; the chair re-dispatches and the member's unconditional
+    // start ACK arms the deadline normally (计时在上游落地后启动).
+    h.groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'pin-v2p0-up', authorGlobalmetaid: 'gmid-w3',
+      kind: 'pinid', uri: `pin://${'f'.repeat(64)}i0`,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-go', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot S4 开工。[DEADLINE: 10m]',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 1,
+    });
+    await h.loop.runTick();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-start', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，回填→发布预计 2 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 2,
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      'the unconditional start ACK after the upstream lands arms the deadline',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P0-1: a mixed dispatch (foreign [DEPENDS_ON] tag + prose wait for this member) arms no deadline', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Task #62 message #3546 shape: Builder's S3 clause carries the structured
+    // tag (free-text, advisory); Coder Bot's clause declares a prose wait.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-mixed', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '【S2 核验通过】@Designer Bot 【S3 · 工程上链】[DEPENDS_ON: eleven 媒体包 + Lucy 素材包（均已核验定版）] [DEADLINE: 15m] 直接开工。\n'
+        + '@Coder Bot 你的发布等 Builder 的 metaapp:// 落地后我立即派单，草案先备好。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    // Even an UNCONDITIONAL ETA ACK must not arm while the member's dispatch
+    // clause declares a prose wait (the advisory foreign tag must not mask it).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0-ack', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，预计 5 分钟。',
+      chainTimestamp: Math.floor(startMs / 1000) + 30,
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`),
+      undefined,
+      'prose wait in the member\'s own clause suspends the deadline even beside a foreign tag',
+    );
+    h.state.nowMs = startMs + 20 * 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
+      0,
+      'no deadline alert for the prose-waiting member',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P0-1: a retained deadline alert carries the member\'s dependency state; standby members never alert', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Member 2: real assignment + unconditional ETA — the alert fires and must
+    // carry the dependency-state suffix (REQ: 告警文案必须带依赖状态).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0d-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S1。[DEADLINE: 10m]',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-v2p0d-ack', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，预计 1 分钟。',
+      chainTimestamp: Math.floor(startMs / 1000) + 10,
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get(`group_task_expected_delivery:${task.id}:2`), 'deadline armed');
+    // Member 3: a legacy/stale armed kv while parked — standby members cannot
+    // be late (task #62's false alert hit a chair-parked observer).
+    h.store.set(
+      `group_task_expected_delivery:${task.id}:3`,
+      JSON.stringify({ dueAt: startMs - 60_000, ackedAt: startMs - 120_000, taskDescription: 'S9' }),
+    );
+    h.groupTaskStore.setMemberStatus(task.id, 3, 'standby', 'gmid-w3');
+    h.state.nowMs = startMs + 5 * 60_000;
+    await h.loop.runTick();
+    const alerts = h.sends.filter((send) => /estimated delivery/.test(send.content));
+    assert.equal(alerts.length, 1, 'only the genuinely-overdue member alerts');
+    assert.match(alerts[0].content, /@Coder Bot/);
+    assert.match(alerts[0].content, /dependency state: no upstream dependency declared/);
+    assert.equal(
+      h.store.get(`group_task_delivery_reminded:${task.id}:3`),
+      undefined,
+      'the standby member\'s clock does not advance',
+    );
   } finally {
     h.cleanup();
   }

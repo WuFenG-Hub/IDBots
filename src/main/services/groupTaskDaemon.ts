@@ -505,6 +505,59 @@ const PROSE_DEPENDENCY_RE = new RegExp(
 export function hasProseDependencyDeclaration(content: string | null | undefined): boolean {
   return PROSE_DEPENDENCY_RE.test(content ?? '');
 }
+
+/**
+ * fix-v2 P0-1: a worker's OWN upstream-wait declaration inside its [WORKING]
+ * message ("待 Builder 上链交付后接单", "等 S3 交付后开始", "waiting on the S3
+ * delivery"). A conditional ETA ("…后…预计 2 分钟") is not a delivery
+ * commitment — the clock starts at the upstream's arrival, which the host
+ * cannot derive from text. Arming a deadline from a conditional ETA produced
+ * the task #62 false alert: the member's readiness note ("待 Builder 上链
+ * 交付后接单，回填→发布预计 2 分钟") armed a 2-minute deadline and alerted
+ * two minutes later while the upstream S3 was still undelivered.
+ *
+ * Deliberately narrower than {@link hasProseDependencyDeclaration}: bare
+ * 依赖/前置/上游 words ("依赖已就绪，开工") do NOT count — only an explicit
+ * wait marker (待…/等…/waiting on/after…) does.
+ */
+const WORKER_UPSTREAM_WAIT_RE = new RegExp(
+  '(?:'
+  + `${PROSE_NEGATION_LOOKBEHIND}待[^，。；\\n]{1,32}(?:交付|完成|产出|落地|就绪)|`
+  + `${PROSE_NEGATION_LOOKBEHIND}等[^，。；\\n]{1,32}(?:交付|完成|产出|落地|就绪)|`
+  + '\\bwaiting\\s+(?:for|on)\\s+[^,.;\\n]{1,48}(?:deliver|land|complet|ready|done)|'
+  + '\\bafter\\s+[^,.;\\n]{1,48}(?:delivers|lands|completes|is\\s+done|is\\s+ready)'
+  + ')',
+  'i',
+);
+export function hasWorkerUpstreamWait(content: string | null | undefined): boolean {
+  return WORKER_UPSTREAM_WAIT_RE.test(content ?? '');
+}
+
+/**
+ * fix-v2 P0-1: the member-scoped clause of a multi-member dispatch. Chairs
+ * routinely dispatch several steps in one message ("@A … [DEPENDS_ON: …]
+ * 直接开工。@B 你的发布等 C 落地后派单。"); message-scoped dependency parsing
+ * lets one member's clause mask another's prose wait (the foreign tag's
+ * free-text token reads as satisfied, skipping the prose branch) or taint a
+ * member with a wait that governs someone else's step. The clause runs from
+ * the member's @mention to the next @mention, blank line, or thematic break.
+ * Returns null when the mention is not literal text (mention-array-only
+ * dispatches) — callers then keep whole-message semantics.
+ */
+export function extractMemberDispatchClause(
+  content: string | null | undefined,
+  botName: string | null | undefined,
+): string | null {
+  const text = String(content ?? '');
+  const name = String(botName ?? '').trim();
+  if (!text || !name) return null;
+  const at = text.toLowerCase().indexOf(`@${name.toLowerCase()}`);
+  if (at < 0) return null;
+  const rest = text.slice(at);
+  const tail = rest.slice(1);
+  const end = /(?:\r?\n[ \t]*\r?\n)|(?:\r?\n[ \t]*-{3,}[ \t]*$)|(?:\s@)/m.exec(tail);
+  return end ? rest.slice(0, 1 + end.index) : rest;
+}
 /**
  * P2-8: multi-driver mutex — kv heartbeat claim per task
  * (`group_task_driver:<taskId>` = `<instanceId>|<epochMs>`). Only the most
@@ -6834,7 +6887,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       return null;
     }
     if (!assignment) return null;
-    const tokens = extractDependsOnTokens(assignment.content);
+    // fix-v2 P0-1: dependency signals are scoped to the member's OWN dispatch
+    // clause. A multi-member message (task #62's #3546: "[DEPENDS_ON: eleven
+    // 媒体包…]" governing Builder's S3 clause + "@AI_小新 …等 Builder 的
+    // metaapp:// 落地后我立即派单" governing AI_小新's S4 clause) otherwise
+    // let the foreign tag mask the member's prose wait — the tag's free-text
+    // token read as satisfied, the prose branch below was skipped because
+    // tokens.length > 0, and the prose-waiting member ended up with zero
+    // pending tokens (its conditional ETA then armed a deadline that alerted
+    // two minutes later). Whole-message fallback covers mention-array-only
+    // dispatches.
+    const clause = extractMemberDispatchClause(assignment.content, bot.name) ?? assignment.content;
+    const tokens = extractDependsOnTokens(clause);
+    const pendingStructured = tokens.filter((token) => !dependencyTokenSatisfied(task, token));
     // fix-v2 (B2): chairs routinely declare dependencies in prose instead of
     // the structured [DEPENDS_ON: <pinid>] tag. A prose declaration counts as
     // a pending upstream too — without this, the stale-[WORKING] monitor saw
@@ -6843,7 +6908,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // Release-review P1: prose cannot be ledger-verified, so the exemption it
     // grants is time-capped per assignment message (the monitors gate it
     // through applyProseDependencyExemption).
-    if (tokens.length === 0 && hasProseDependencyDeclaration(assignment.content)) {
+    // fix-v2 P0-1: the prose fallback runs whenever no STRUCTURED token from
+    // the member's own clause is still pending — never masked by a foreign
+    // clause's tag (see above).
+    if (pendingStructured.length === 0 && hasProseDependencyDeclaration(clause)) {
       return {
         tokens,
         pendingTokens: ['(prose-declared upstream)'],
@@ -6853,7 +6921,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
     return {
       tokens,
-      pendingTokens: tokens.filter((token) => !dependencyTokenSatisfied(task, token)),
+      pendingTokens: pendingStructured,
       proseDeclared: false,
       assignmentMsgId: assignment.id,
     };
@@ -7542,7 +7610,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             checkMemberDependencyWait(task, member, chairMember)?.pendingTokens.length,
           )
         : false;
-      if (!opts?.humanGateActive && !acksHostNotice && assignmentOnRecord && !awaitingUpstream) {
+      // fix-v2 P0-1: the member's own [WORKING] may declare a CONDITIONAL
+      // upstream wait ("待 Builder 上链交付后接单，回填→发布预计 2 分钟"). The
+      // chair-side dependency scan goes blind when the chair's latest mention
+      // omits (or another member's clause carries) the dependency — task #62's
+      // false alert fired exactly through that gap. The worker's own wait
+      // declaration is authoritative liveness: extend the lease, arm nothing.
+      const workerDeclaredWait = hasWorkerUpstreamWait(protocolContent);
+      if (!opts?.humanGateActive && !acksHostNotice && assignmentOnRecord && !awaitingUpstream && !workerDeclaredWait) {
         // P0-4 arming: an explicit numeric ETA arms a delivery deadline; a
         // numberless ACK (task #60: Lucy's turn ran 71+ min with no escalation
         // path) arms one too — from the chair's stated deadline when the
@@ -7601,7 +7676,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               ? 'in reply to a host notice/roll call'
               : awaitingUpstream
                 ? 'while its assignment is still upstream-blocked'
-                : 'with no assignment on record') +
+                : workerDeclaredWait
+                  ? 'declaring a conditional upstream wait (ETA suspended until the upstream lands)'
+                  : 'with no assignment on record') +
           ' — liveness only, no delivery deadline armed',
         );
       }
@@ -8429,18 +8506,46 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         member,
         members.find((candidate) => candidate.role === 'chair'),
       );
-      if (reminderDepWait && reminderDepWait.pendingTokens.length > 0) {
+      // fix-v2 P0-1: a parked (standby) member cannot be late — the chair has
+      // not activated it, so there is nothing to be late ON (task #62's false
+      // alert hit a member the chair had explicitly parked as an observer).
+      if (member.status === 'standby') {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: delivery reminder suspended for ${member.name ?? member.metabotId} ` +
-          `— waiting on upstream ${reminderDepWait.pendingTokens.join(', ')} (not delivered)`,
+          '— member is standby (parked by the chair, no active assignment)',
+        );
+        continue;
+      }
+      // fix-v2 P0-1: suspension keys on STRUCTURED (ledger-verifiable) pending
+      // tokens only. A prose wait never self-lifts, so prose-suspending the
+      // reminder would keep the clock frozen even after the upstream landed.
+      // With the arm-side gates (clause-scoped dispatch scan + the worker's
+      // own conditional-ETA declaration) a waiting member's deadline is never
+      // armed in the first place — an existing kv means the member committed.
+      const reminderPendingStructured = (reminderDepWait?.pendingTokens ?? [])
+        .filter((token) => token !== '(prose-declared upstream)');
+      if (reminderPendingStructured.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: delivery reminder suspended for ${member.name ?? member.metabotId} ` +
+          `— waiting on upstream ${reminderPendingStructured.join(', ')} (not delivered)`,
         );
         continue;
       }
       const chair = members.find((candidate) => candidate.role === 'chair');
       if (!chair?.metabotId) continue;
+      // fix-v2 P0-1: a retained alert must carry the member's dependency state
+      // so the chair and the member can verify it without a clarifying round.
+      const reminderDepState = reminderDepWait == null
+        ? 'no chair assignment on record'
+        : reminderDepWait.proseDeclared
+          ? 'prose-declared upstream in the latest dispatch (not ledger-verifiable)'
+          : reminderDepWait.tokens.length > 0
+            ? `declared upstream(s) delivered or advisory: ${reminderDepWait.tokens.join(', ')}`
+            : 'no upstream dependency declared in the latest dispatch';
       const text =
         `@chair ⚠ @${member.name ?? `bot-${member.metabotId}`} estimated delivery ` +
-        `by ${new Date(entry.dueAt).toISOString()} but no [DELIVERABLE] arrived yet. ` +
+        `by ${new Date(entry.dueAt).toISOString()} but no [DELIVERABLE] arrived yet ` +
+        `(dependency state: ${reminderDepState}). ` +
         `Check status; do not auto-fail.`;
       try {
         await postGroupMessage(task.id, chair.metabotId, text);
