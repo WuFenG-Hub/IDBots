@@ -19,6 +19,13 @@ export type MetaIDCollaborationFact = {
   pinIds: string[];
   groupId?: string;
   at: number;
+  /**
+   * fix-v2 P2-6: who caused a 'cancelled' outcome. 'host' = host-side fault
+   * (system-driven close, or a task carrying supervisor flag/pause signals) —
+   * candidate scoring must NOT demote the member for it. Absent on legacy
+   * facts; the scoring side falls back to a task lookup for those.
+   */
+  attribution?: 'host' | 'member' | 'mixed';
 };
 
 export type MetaIDImpressionObservationStatus = 'active' | 'superseded' | 'rejected';
@@ -361,6 +368,11 @@ function parseCollaborationFacts(value: string | null | undefined): MetaIDCollab
         pinIds,
         groupId: typeof row.groupId === 'string' ? row.groupId : undefined,
         at: asInteger(row.at),
+        // fix-v2 P2-6: keep the cancellation-attribution field through the
+        // whitelist round-trip (snapshot rebuild goes through here).
+        attribution: row.attribution === 'host' || row.attribution === 'member' || row.attribution === 'mixed'
+          ? row.attribution
+          : undefined,
       }];
     });
   } catch {

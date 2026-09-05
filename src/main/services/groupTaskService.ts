@@ -2714,6 +2714,13 @@ export async function closeGroupTask(
     /** P1-4: one-line provenance note for the close-out (e.g. "results came
      * from Twin direct delegation"); relayed to the source session notice. */
     closureNote?: string;
+    /**
+     * fix-v2 P2-6: explicit cancellation attribution ('host' = host-side
+     * fault — the member is not demoted for it in later candidate searches).
+     * When omitted, the impression recorder derives it from the terminal
+     * event's actor and the task's supervisor flag/pause signals.
+     */
+    attribution?: 'host' | 'member' | 'mixed' | null;
   },
 ): Promise<GroupTaskDetail> {
   if (opts.status !== 'done' && opts.status !== 'cancelled') {
@@ -2795,7 +2802,7 @@ export async function closeGroupTask(
   // closes too — the early return that used to skip this tail on the rating
   // path silenced impressions, culture distillation and comm stats for every
   // owner-accepted task (34/42 real closes before this fix).
-  recordTaskCloseImpressions(taskId, opts.status, opts.reason);
+  recordTaskCloseImpressions(taskId, opts.status, opts.reason, { attribution: opts.attribution ?? null });
   // P3 culture base: distill team-level glossary/conventions/lessons from the
   // acceptance summary. Fire-and-forget; best-effort, never blocks the close.
   distillTeamCultureFromTaskClose(taskId, opts.status, settled.title, settled.goal);

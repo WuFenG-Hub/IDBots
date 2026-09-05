@@ -277,6 +277,43 @@ test('task close (cancelled): reason recorded; member kicked before close is not
     assert.match(observation.observationText, /had been removed from the task before it closed/);
     assert.equal(observation.dimensions.outcome, 'cancelled');
     assert.equal(observation.dimensions.removedBeforeClose, true);
+    // fix-v2 P2-6: an owner-priority cancel has no host-fault signal — the
+    // fact carries no attribution (scoring treats it as member-attributed).
+    assert.equal(observation.dimensions.collaborationFact.attribution, undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P2-6: task close (cancelled) derives host attribution from supervisor fault signals', async () => {
+  const h = await openHarness();
+  try {
+    const task = h.createTask('Host fault digest');
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: null, globalmetaid: REMOTE_A, role: 'worker', displayName: 'Remote Bot A' });
+    h.groupTaskStore.addSupervisorSignal({ taskId: task.id, kind: 'flag', note: 'host LLM outage stalled the task', createdBy: 'owner' });
+    h.wireDeps();
+    const derived = recordTaskCloseImpressions(task.id, 'cancelled', 'host outage');
+    assert.ok(derived.recorded >= 1);
+    const [obsA] = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A });
+    assert.equal(obsA.dimensions.collaborationFact.attribution, 'host', 'supervisor flag derives host attribution');
+    // The attribution survives the snapshot rebuild (parse whitelist round-trip).
+    const snapshot = h.impressionStore.getSnapshot(CHAIR, REMOTE_A);
+    const fact = snapshot.collaborationFacts.find((row) => row.taskId === task.id);
+    assert.equal(fact?.attribution, 'host', 'attribution survives collectCollaborationFacts');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('fix-v2 P2-6: task close (cancelled) honors an explicit caller attribution', async () => {
+  const h = await openHarness();
+  try {
+    const task = h.createTask('Explicit host cancel');
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: null, globalmetaid: REMOTE_B, role: 'worker', displayName: 'Remote Bot B' });
+    h.wireDeps();
+    recordTaskCloseImpressions(task.id, 'cancelled', 'runtime crash', { attribution: 'host' });
+    const [obsB] = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_B });
+    assert.equal(obsB.dimensions.collaborationFact.attribution, 'host', 'explicit attribution recorded');
   } finally {
     h.cleanup();
   }

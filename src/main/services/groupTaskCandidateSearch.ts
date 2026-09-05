@@ -7,6 +7,7 @@
 
 import type { MetabotStore } from '../metabotStore';
 import type { MetaIDImpressionSnapshot, MetaIDImpressionStore } from '../metaidImpressionStore';
+import type { GroupTaskStore } from '../groupTaskStore';
 import { normalizeGlobalMetaID } from '../shared/globalMetaId';
 import {
   GROUP_TASK_SEAT_ROLES,
@@ -148,6 +149,13 @@ export interface GroupTaskCandidateSearchDeps {
     observerGlobalMetaId: string,
     subjectGlobalMetaId: string,
   ) => MetaIDImpressionSnapshot | null;
+  /**
+   * fix-v2 P2-6: legacy cancelled facts carry no attribution field — this
+   * lookup re-derives host-fault from the task record (system-actor terminal
+   * event or supervisor flag/pause signals) so historical host-fault cancels
+   * stop demoting members too.
+   */
+  isHostFaultCancelled?: (taskId: number) => boolean;
   searchRemote?: (input: SearchGroupTaskRemoteInput) => Promise<GroupTaskRemoteHit[]>;
 }
 
@@ -336,6 +344,7 @@ export function scoreSeatResume(
 export function evaluateImpressionForSeat(
   snapshot: MetaIDImpressionSnapshot | null,
   roleHint: GroupTaskSeatRole | null,
+  isHostFaultCancelled?: (taskId: number) => boolean,
 ): GroupTaskSearchImpression {
   if (!snapshot) {
     return {
@@ -399,6 +408,22 @@ export function evaluateImpressionForSeat(
     };
   }
   if (lastFact?.outcome === 'cancelled') {
+    // fix-v2 P2-6: a host-fault cancellation (attributed at close time, or
+    // re-derived for legacy facts via the task lookup) is NOT the member's
+    // negative record — keep the verdict neutral so the raw resume score
+    // stands (task #61-era regression: a host-cancelled member dropped 6 → -2,
+    // below candidates with no collaboration record at all).
+    const hostFault = lastFact.attribution === 'host'
+      || (lastFact.attribution == null && isHostFaultCancelled?.(lastFact.taskId) === true);
+    if (hostFault) {
+      return {
+        priorCollaboration: true,
+        capabilityTags: tags,
+        lastFact: last,
+        verdict: 'unknown',
+        note: `last collab cancelled under host-side fault (${lastFact.title}) — not counted against the member`,
+      };
+    }
     return {
       priorCollaboration: true,
       capabilityTags: tags,
@@ -466,6 +491,7 @@ function toLocalCandidate(
   tokens: string[],
   roleHint: GroupTaskSeatRole | null,
   snapshot: MetaIDImpressionSnapshot | null,
+  isHostFaultCancelled?: (taskId: number) => boolean,
 ): GroupTaskSeatCandidate | null {
   if (!worker.enabled || worker.type === 'twin') return null;
   const resume = scoreSeatResume({
@@ -476,7 +502,7 @@ function toLocalCandidate(
     goal: worker.goal ?? '',
   }, tokens);
   if (tokens.length > 0 && resume.score <= 0) return null;
-  const impression = evaluateImpressionForSeat(snapshot, roleHint);
+  const impression = evaluateImpressionForSeat(snapshot, roleHint, isHostFaultCancelled);
   return {
     name: worker.name,
     source: 'local',
@@ -500,6 +526,7 @@ function toRemoteCandidate(
   tokens: string[],
   roleHint: GroupTaskSeatRole | null,
   snapshot: MetaIDImpressionSnapshot | null,
+  isHostFaultCancelled?: (taskId: number) => boolean,
 ): GroupTaskSeatCandidate {
   const resume = scoreSeatResume({
     name: remote.name,
@@ -510,7 +537,7 @@ function toRemoteCandidate(
   }, tokens);
   const rawScore = Number.isFinite(remote.score) ? Number(remote.score) : resume.score;
   const matchReasons = remote.matchReasons?.length ? remote.matchReasons : resume.reasons;
-  const impression = evaluateImpressionForSeat(snapshot, roleHint);
+  const impression = evaluateImpressionForSeat(snapshot, roleHint, isHostFaultCancelled);
   return {
     name: remote.name,
     source: 'remote',
@@ -553,7 +580,7 @@ export async function searchGroupTaskSeatCandidates(
   const locals: GroupTaskSeatCandidate[] = [];
   for (const worker of deps.listLocalWorkers()) {
     const snapshot = readSnapshot(deps, observer, worker.globalMetaId);
-    const candidate = toLocalCandidate(worker, tokens, roleHint, snapshot);
+    const candidate = toLocalCandidate(worker, tokens, roleHint, snapshot, deps.isHostFaultCancelled);
     if (candidate) locals.push(candidate);
   }
 
@@ -576,7 +603,7 @@ export async function searchGroupTaskSeatCandidates(
         limit: Math.min(GROUP_TASK_SEARCH_MAX_LIMIT, limit * 2),
       });
       remotes = found.map((remote) =>
-        toRemoteCandidate(remote, tokens, roleHint, readSnapshot(deps, observer, remote.globalMetaId)),
+        toRemoteCandidate(remote, tokens, roleHint, readSnapshot(deps, observer, remote.globalMetaId), deps.isHostFaultCancelled),
       );
       const localIds = new Set(
         locals
@@ -625,6 +652,9 @@ export async function searchGroupTaskSeatCandidates(
 export function buildGroupTaskCandidateSearchDeps(input: {
   metabotStore: MetabotStore;
   impressionStore?: MetaIDImpressionStore | null;
+  /** fix-v2 P2-6: backs the legacy-fact host-fault lookup (attribution field
+   *  predates some recorded cancellations). Unwired = outcome-only scoring. */
+  groupTaskStore?: GroupTaskStore | null;
 }): GroupTaskCandidateSearchDeps {
   return {
     listLocalWorkers: () => input.metabotStore.listMetabots()
@@ -644,6 +674,20 @@ export function buildGroupTaskCandidateSearchDeps(input: {
       input.metabotStore.listMetabots().find((bot) => bot.metabot_type === 'twin')?.globalmetaid ?? null,
     getImpressionSnapshot: input.impressionStore
       ? (observer, subject) => input.impressionStore!.getSnapshot(observer, subject)
+      : undefined,
+    isHostFaultCancelled: input.groupTaskStore
+      ? (taskId) => {
+          try {
+            const store = input.groupTaskStore!;
+            const systemClosed = store.listStatusEvents(taskId)
+              .some((event) => event.toStatus === 'cancelled' && event.actorKind === 'system');
+            if (systemClosed) return true;
+            return store.listSupervisorSignals(taskId)
+              .some((signal) => signal.kind === 'flag' || signal.kind === 'pause');
+          } catch {
+            return false;
+          }
+        }
       : undefined,
     searchRemote: searchRemoteBotsForSeat,
   };
