@@ -1033,12 +1033,17 @@ export class DshTurnHub {
       onAskRequest: (ask) => {
         this.askKernelById.set(ask.id, kernelOf())
         const controller = controllerOf(ask.sessionId)
-        if (!controller) {
+        const onAskRequest = controller?.cb.onAskRequest
+        if (!controller || !onAskRequest) {
           // A silent drop here strands the runtime-side bridge promise
           // forever (the tool contract requires settling). Decline explicitly
-          // so the asking turn unwinds instead of hanging.
+          // so the asking turn unwinds instead of hanging. A controller can
+          // still exist during a handoff/drain while its callback is absent;
+          // that case must settle the same way as a missing controller.
           this.opts.log?.('warn', 'dshTurnHub.onAskRequest', {
-            message: 'ask_user_question has no live turn controller for its DSH session; auto-declining',
+            message: !controller
+              ? 'ask_user_question has no live turn controller for its DSH session; auto-declining'
+              : 'ask_user_question has no host callback for its DSH session; auto-declining',
             askId: ask.id,
             dshSessionId: ask.sessionId,
             runtime: slot.key,
@@ -1053,7 +1058,7 @@ export class DshTurnHub {
           ).catch(() => undefined)
           return
         }
-        controller.cb.onAskRequest?.(ask)
+        onAskRequest(ask)
       },
       onAskCancelled: (askId) => {
         for (const controller of this.controllersByDsh.values()) controller.cb.onAskCancelled?.(askId)

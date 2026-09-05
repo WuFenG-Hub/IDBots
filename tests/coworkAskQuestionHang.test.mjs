@@ -60,6 +60,16 @@ test('hub declines asks that have no live turn controller instead of dropping th
   assert.match(body, /The user could not be reached for this question\./);
 });
 
+test('hub declines asks when a live controller has no host callback', () => {
+  const start = hubSource.indexOf('onAskRequest: (ask) => {');
+  const end = hubSource.indexOf('onAskCancelled:', start);
+  const body = hubSource.slice(start, end);
+  assert.match(body, /const onAskRequest = controller\?\.cb\.onAskRequest/);
+  assert.match(body, /!controller \|\| !onAskRequest/);
+  assert.match(body, /no host callback for its DSH session; auto-declining/);
+  assert.match(body, /kernelOf\(\)\.respondAsk\(/);
+});
+
 test('ask bridge assigns ids when the model omits them', () => {
   const pluginSource = readSource('dsh-runtime', 'plugins', 'idbots-sdk-server.mjs');
   assert.match(pluginSource, /rawId.*typeof value\.id === 'string'/);
