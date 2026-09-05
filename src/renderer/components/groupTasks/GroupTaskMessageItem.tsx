@@ -325,9 +325,12 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
           )}
         </div>
 
-        {txidPreview && txId && (
+        {txidPreview && txId ? (
+          // Meta row: time and txid share one line (two-space gap via gap-1 +
+          // ml-1); formats unchanged, copy button stays beside the txid.
           <div className={messengerTxidRowClassName(isOutgoing)}>
-            <span className="font-mono">txid: {txidPreview}</span>
+            {timestamp && <span>{timestamp}</span>}
+            <span className="ml-1 font-mono">txid: {txidPreview}</span>
             <button
               type="button"
               onClick={() => copyTextToClipboard(txId)}
@@ -338,11 +341,12 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
               <DocumentDuplicateIcon className="h-3 w-3" />
             </button>
           </div>
-        )}
-        {timestamp && (
-          <span className={messengerMetaClassName}>
-            {timestamp}
-          </span>
+        ) : (
+          timestamp && (
+            <span className={messengerMetaClassName}>
+              {timestamp}
+            </span>
+          )
         )}
       </div>
     </div>
