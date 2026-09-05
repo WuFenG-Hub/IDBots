@@ -1238,6 +1238,12 @@ test('fix-v2 P1-5: a corrupt guest session log rebuilds the session; the next me
       logs.some((line) => /corrupt session log/.test(line) && /guest session rebuilt/.test(line)),
       'the rebuild is announced immediately in the log',
     );
+    assert.ok(
+      logs.some(
+        (line) => /guest session rebuilt/.test(line) && /expected 100, got 98/.test(line),
+      ),
+      'the rebuild alert quotes the corruption signature (gap position + expected/got)',
+    );
 
     // Tick 2: a new mention runs its skill turn on the rebuilt session.
     insertGroupMessage(db, {
@@ -1282,6 +1288,10 @@ test('fix-v2 P1-5: a corrupt-log recurrence within the rebuild cooldown logs sel
       logs.some((line) => /guest session rebuilt/.test(line)),
       'the append-side mismatch signature also triggers the rebuild',
     );
+    assert.ok(
+      logs.some((line) => /guest session rebuilt/.test(line) && /expected 5 at index 0, got 3/.test(line)),
+      'the rebuild alert quotes the append-side expected/got signature',
+    );
     // Tick 2: a new mention hits corruption on the rebuilt session — the
     // recurrence is rate-capped, so it logs self-heal guidance (once) and
     // still answers via the fallback.
@@ -1295,6 +1305,7 @@ test('fix-v2 P1-5: a corrupt-log recurrence within the rebuild cooldown logs sel
     await loop.runTick();
     const guidance = logs.filter((line) => /Self-heal guidance: restart the app/.test(line));
     assert.equal(guidance.length, 1, 'self-heal guidance logged exactly once (hourly throttle)');
+    assert.match(guidance[0], /expected 5 at index 0, got 3/, 'the escalation alert quotes the corruption signature');
     assert.equal(calls.send.length, 2, 'both mentions answered via the fallback — never silenced');
     assert.ok(
       !logs.some((line) => /giving up on it/.test(line)),

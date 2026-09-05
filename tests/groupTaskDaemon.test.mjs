@@ -8213,10 +8213,12 @@ test('fix-v2 P1-5: a corrupt-log recurrence within the rebuild cooldown escalate
     // Tick 1: first corrupt failure → rebuild + requeue (unchanged behavior).
     await h.loop.runTick();
     assert.ok(h.store.get('group_task_corrupt_session_rebuild:1:2'), 'rebuild stamp recorded');
-    assert.ok(
-      milestones.some((m) => m.kind === 'anomaly' && /^corrupt_session_rebuild:/.test(m.subject ?? '')),
-      'the rebuild itself is reported immediately',
-    );
+    const rebuilt = milestones.find((m) => /^corrupt_session_rebuild:/.test(m.subject ?? ''));
+    assert.ok(rebuilt, 'the rebuild itself is reported immediately');
+    // fix-v2 follow-up (P1-5 layer 3): the alert quotes the corruption
+    // signature so the gap position and expected/got seq values are visible
+    // without opening the session log.
+    assert.match(rebuilt.message, /expected 10, got 8/);
 
     // Tick 2: the requeued turn hits corruption AGAIN within the cooldown —
     // instead of silently burning the 5-turn retry ladder, the origin session
@@ -8226,6 +8228,7 @@ test('fix-v2 P1-5: a corrupt-log recurrence within the rebuild cooldown escalate
     assert.ok(capped, 'recurrence within the cooldown escalates immediately');
     assert.match(capped.message, /AGAIN within an hour/);
     assert.match(capped.message, /restart the app/);
+    assert.match(capped.message, /expected 10, got 8/);
   } finally {
     h.cleanup();
   }
