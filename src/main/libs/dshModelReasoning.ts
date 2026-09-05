@@ -51,6 +51,23 @@ const DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION: DshModelReasoningDeclaration = {
   },
 };
 
+// GLM-4.5+ / GLM-5.x OpenAI-compatible endpoints use Z.AI's thinking wire:
+// `thinking: { type: 'enabled' | 'disabled', clear_thinking: false }`. They
+// do not use DeepSeek's reasoning_content replay contract and should not be
+// sent a provider-default `reasoning_effort` field. Map every enabled UI rung
+// to the one supported wire state and keep the explicit off state available.
+const GLM_PATTERN = /^glm-(?:4\.[5-9](?:[.\-_].*)?|5(?:[.\-_].*)?|[6-9]\d*(?:[.\-_].*)?)/i;
+const GLM_CHAT_COMPLETIONS_DECLARATION: DshModelReasoningDeclaration = {
+  reasoningEfforts: { off: null, low: 'enabled', high: 'enabled', max: 'enabled' },
+  compat: {
+    thinkingFormat: 'zai',
+    supportsReasoningEffort: false,
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+};
+
 /** Bare model id: drop any vendor prefix ("deepseek/deepseek-v4-flash" → "deepseek-v4-flash"). */
 const bareModelIdOf = (modelId: string): string => {
   const trimmed = modelId.trim();
@@ -71,5 +88,6 @@ export function dshModelReasoningDeclaration(
   if (apiFormat !== 'openai') return null;
   const bare = bareModelIdOf(modelId);
   if (DEEPSEEK_V4_PATTERN.test(bare)) return DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION;
+  if (GLM_PATTERN.test(bare)) return GLM_CHAT_COMPLETIONS_DECLARATION;
   return null;
 }
