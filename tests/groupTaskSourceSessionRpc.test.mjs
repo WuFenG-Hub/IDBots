@@ -156,18 +156,14 @@ const postCreate = (baseUrl, body) =>
     body: JSON.stringify(body),
   });
 
-test('rpc group-task create: rejects a2a / browser / group_task / unknown source_session_id', async () => {
+test('rpc group-task create: rejects a2a / group_task / unknown source_session_id', async () => {
   const h = await startRpcServerForTest();
   try {
     // a2a session: not a valid originator.
     let res = await postCreate(h.baseUrl, { title: 'T', goal: 'G', source_session_id: 'sess-a2a' });
     assert.equal(res.status, 400);
     let body = await res.json();
-    assert.ok(/standard CoWork session/.test(body.error), `a2a rejected: ${body.error}`);
-
-    // browser session.
-    res = await postCreate(h.baseUrl, { title: 'T', goal: 'G', source_session_id: 'sess-browser' });
-    assert.equal(res.status, 400);
+    assert.ok(/standard or browser CoWork session/.test(body.error), `a2a rejected: ${body.error}`);
 
     // group_task session (the chair's own pseudo session namespace).
     res = await postCreate(h.baseUrl, { title: 'T', goal: 'G', source_session_id: 'sess-group-task' });
@@ -178,6 +174,63 @@ test('rpc group-task create: rejects a2a / browser / group_task / unknown source
     assert.equal(res.status, 400);
     body = await res.json();
     assert.ok(/does not refer to an existing/.test(body.error), `unknown rejected: ${body.error}`);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('rpc group-task create: a browser source_session_id passes validation (bot internet room)', async () => {
+  const h = await startRpcServerForTest();
+  try {
+    // Since the bot-internet composer a browser session is a first-class
+    // human conversation surface, so it must pass the source_session_id gate.
+    // With no metabots wired the request then fails inside createGroupTask
+    // (no twin found) — a 500 proves validation PASSED and the request
+    // proceeded past the gate.
+    const res = await postCreate(h.baseUrl, { title: 'T', goal: 'G', source_session_id: 'sess-browser' });
+    assert.equal(res.status, 500);
+    const body = await res.json();
+    assert.equal(body.success, false);
+    // Reached createGroupTask (service boundary), not the source_session_id gate.
+    assert.ok(!/standard or browser CoWork session/.test(body.error));
+    assert.ok(!/does not refer to an existing/.test(body.error));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('rpc group-task propose: rejects a2a / group_task / unknown source_session_id, accepts browser', async () => {
+  const h = await startRpcServerForTest();
+  try {
+    const postPropose = (body) =>
+      fetch(`${h.baseUrl}/api/idbots/group-task/propose-staffing`, {
+        method: 'POST',
+        headers: RPC_AUTH_HEADERS,
+        body: JSON.stringify(body),
+      });
+
+    // a2a source: rejected by the symmetric gate BEFORE the service runs.
+    let res = await postPropose({ title: 'T', goal: 'G', source_session_id: 'sess-a2a' });
+    assert.equal(res.status, 400);
+    let body = await res.json();
+    assert.ok(/standard or browser CoWork session/.test(body.error), `a2a rejected: ${body.error}`);
+
+    // group_task pseudo namespace: rejected as well.
+    res = await postPropose({ title: 'T', goal: 'G', source_session_id: 'sess-group-task' });
+    assert.equal(res.status, 400);
+
+    // unknown session: rejected with the existence error.
+    res = await postPropose({ title: 'T', goal: 'G', source_session_id: 'sess-does-not-exist' });
+    assert.equal(res.status, 400);
+    body = await res.json();
+    assert.ok(/does not refer to an existing/.test(body.error), `unknown rejected: ${body.error}`);
+
+    // browser source: passes the gate (fails later in the service on an empty
+    // staffing session — NOT with the session-type error).
+    res = await postPropose({ title: 'T', goal: 'G', source_session_id: 'sess-browser' });
+    body = await res.json();
+    assert.ok(!/standard or browser CoWork session/.test(body.error ?? ''), `browser passed the gate: ${body.error}`);
+    assert.ok(!/does not refer to an existing/.test(body.error ?? ''));
   } finally {
     h.cleanup();
   }
