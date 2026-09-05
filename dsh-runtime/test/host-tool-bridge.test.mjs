@@ -265,7 +265,7 @@ const main = async () => {
 
   // Turn 7: batch-count cap — idbots/prompt with more images than the
   // attachment store's per-message limit must refuse the whole batch through
-  // the kernel's shared admitPromptContent entry (count and aggregate-byte
+  // the attachment store's admitPromptContent service (count and aggregate-byte
   // limits apply to the batch, never member-by-member). The RPC rejects with
   // the attachment error message and no image block enters the session.
   const batchSessionId = `${sessionId}-attach-batch`

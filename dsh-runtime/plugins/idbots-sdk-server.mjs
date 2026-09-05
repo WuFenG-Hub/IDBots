@@ -53,7 +53,6 @@
 // races the turn's AbortSignal against our answer and discards late replies.
 
 import { isAbsolute, resolve } from 'node:path'
-import { admitPromptContent } from '@deepseek-ai/dsh-attachment'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '@deepseek-ai/dsh-sdk-jsonrpc-server'
 import * as dshToolSubagent from '@deepseek-ai/dsh-tool-subagent'
@@ -106,7 +105,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       Promise.resolve(agent.ctx.plugin(dshToolSubagent, {
         provider: 'spawn',
         toolName: 'subagent',
-        // 0.1.2-alpha.4 continuable delegation: background by default, the
+        // 0.1.3-alpha.1 continuable delegation: background by default, the
         // child stays resident with a durable id, and parent↔child exchange
         // follow-ups through the global send_message / interrupt_agent tools
         // registered by dsh-tool-subagent-control below.
@@ -421,7 +420,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   // gate as tool-result images: a user message is durable history, so a
   // text-only route never receives image blocks — an omission note rides the
   // text instead. Admission goes through the kernel's shared
-  // admitPromptContent entry (DSH 0.1.2-alpha.3+), so the batch count and
+  // attachment store's admitPromptContent service, so the batch count and
   // aggregate-byte limits plus the canonical-base64 check apply exactly as
   // they do to the harness's own browser uploads; a refused batch throws to
   // the RPC caller instead of partially committing.
@@ -434,7 +433,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       const attachments = this.ctx.get('attachments')
       const imageCapable = attachments !== undefined && await this.idbotsRouteAcceptsImages(agent)
       if (imageCapable) {
-        content = await admitPromptContent(attachments, [
+        content = await attachments.admitPromptContent([
           ...content,
           ...imageList.map((image) => ({
             type: 'image',
