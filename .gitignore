@@ -223,6 +223,8 @@ METAAPPs/*
 !METAAPPs/buzz/**
 !METAAPPs/chat/
 !METAAPPs/chat/**
+!METAAPPs/qanda/
+!METAAPPs/qanda/**
 METAAPPs/metaapps.config.json
 METAAPPs/**/.DS_Store
 
@@ -277,6 +279,7 @@ man_base_data_pebble/
 !tests/qaBehaviorPrompt.test.mjs
 !tests/qaRecallAgentTools.test.mjs
 !tests/metawebQaSurfSession.test.mjs
+!tests/qandaMetaAppStatic.test.mjs
 !tests/networkServicesAgentTools.test.mjs
 !tests/onlineBotsAgentTools.test.mjs
 !tests/metaFileUploadAgentTools.test.mjs
