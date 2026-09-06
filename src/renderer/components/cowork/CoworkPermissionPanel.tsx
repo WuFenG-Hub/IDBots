@@ -31,6 +31,11 @@ type QuestionItem = {
  * AskUserQuestion. Replaces the full-screen centered modals (CoworkPermissionModal /
  * CoworkQuestionWizard): it stays small, does not cover the conversation with a
  * backdrop, and lets the user keep scrolling/reading the surrounding context.
+ *
+ * The Details/Collapse toggle grows the bar for both modes: tool permissions
+ * reveal the full JSON input (up to 60vh), and AskUserQuestion switches from
+ * the one-question-at-a-time wizard to a full list of every question with
+ * complete option labels and descriptions, answerable inline.
  */
 const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
   permission,
@@ -193,10 +198,10 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
     });
   };
 
-  const handleOtherInputChange = (value: string) => {
+  const handleOtherInputChange = (value: string, stepIndex: number = currentStep) => {
     setOtherInputs((prev) => ({
       ...prev,
-      [currentStep]: value,
+      [stepIndex]: value,
     }));
   };
 
@@ -298,7 +303,7 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
           <div className="flex-1 min-w-0">
             {isQuestionTool ? (
               <div className="flex items-center gap-2 min-w-0">
-                {totalSteps > 1 && (
+                {totalSteps > 1 && !expanded && (
                   <span className="flex-shrink-0 text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {currentStep + 1}/{totalSteps}
                   </span>
@@ -319,25 +324,23 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
             )}
           </div>
 
-          {!isQuestionTool && (
-            <button
-              type="button"
-              onClick={() => setExpanded((value) => !value)}
-              className="flex-shrink-0 inline-flex items-center gap-0.5 px-2 py-1 text-xs font-medium rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
-            >
-              {expanded ? (
-                <>
-                  {i18nService.t('coworkPermissionCollapse')}
-                  <ChevronUpIcon className="h-3.5 w-3.5" />
-                </>
-              ) : (
-                <>
-                  {i18nService.t('coworkPermissionDetails')}
-                  <ChevronDownIcon className="h-3.5 w-3.5" />
-                </>
-              )}
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="flex-shrink-0 inline-flex items-center gap-0.5 px-2 py-1 text-xs font-medium rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+          >
+            {expanded ? (
+              <>
+                {i18nService.t('coworkPermissionCollapse')}
+                <ChevronUpIcon className="h-3.5 w-3.5" />
+              </>
+            ) : (
+              <>
+                {i18nService.t('coworkPermissionDetails')}
+                <ChevronDownIcon className="h-3.5 w-3.5" />
+              </>
+            )}
+          </button>
 
           <button
             type="button"
@@ -360,8 +363,8 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
           </button>
         </div>
 
-        {/* Question options (AskUserQuestion) */}
-        {isQuestionTool && currentQuestion && (
+        {/* Question options (AskUserQuestion, collapsed wizard) */}
+        {isQuestionTool && !expanded && currentQuestion && (
           <div className="px-3 pb-2.5 space-y-2">
             {currentQuestion.header && (
               <span className="inline-block text-[11px] uppercase tracking-wide px-2 py-0.5 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -430,6 +433,66 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
           </div>
         )}
 
+        {/* Full question list (AskUserQuestion, expanded): every question in
+            full text with all option labels + descriptions visible and
+            answerable inline — the collapsed wizard truncates long questions
+            in the header row, so this is the only view where the whole ask is
+            readable. */}
+        {isQuestionTool && expanded && (
+          <div className="px-3 pb-3 pt-2 space-y-3 border-t dark:border-claude-darkBorder border-claude-border max-h-[70vh] overflow-y-auto">
+            {questions.map((question, questionIndex) => (
+              <div key={question.question} className="space-y-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {totalSteps > 1 && (
+                    <span className="flex-shrink-0 text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      Q{questionIndex + 1}
+                    </span>
+                  )}
+                  {question.header && (
+                    <span className="text-[11px] uppercase tracking-wide px-2 py-0.5 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {question.header}
+                    </span>
+                  )}
+                </div>
+                <p className="text-sm font-medium whitespace-pre-wrap break-words">
+                  {question.question}
+                </p>
+                <div className="space-y-1">
+                  {question.options.map((option) => {
+                    const isSelected = getSelectedValues(question).includes(option.label);
+                    return (
+                      <button
+                        key={option.label}
+                        type="button"
+                        onClick={() => handleSelectOption(question, option.label)}
+                        className={`w-full text-left rounded-lg border px-2.5 py-1.5 transition-colors ${
+                          isSelected
+                            ? 'border-claude-accent bg-claude-accent/10 text-claude-text dark:text-claude-darkText'
+                            : 'border-claude-border dark:border-claude-darkBorder dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
+                        }`}
+                      >
+                        <span className="block text-xs font-medium">{option.label}</span>
+                        {option.description && (
+                          <span className="block text-[11px] mt-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                            {option.description}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                <input
+                  type="text"
+                  value={otherInputs[questionIndex] ?? ''}
+                  onChange={(e) => handleOtherInputChange(e.target.value, questionIndex)}
+                  placeholder={i18nService.t('coworkQuestionWizardOther')}
+                  className="w-full px-2.5 py-1 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg placeholder:text-claude-textSecondary dark:placeholder:text-claude-darkTextSecondary focus:outline-none focus:ring-2 focus:ring-claude-accent/50"
+                />
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Details (tool permission mode, expanded) */}
         {!isQuestionTool && expanded && (
           <div className="px-3 pb-3 space-y-2 border-t dark:border-claude-darkBorder border-claude-border pt-2">
@@ -444,7 +507,7 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
             <label className="block text-[11px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary uppercase tracking-wider">
               {i18nService.t('coworkToolInput')}
             </label>
-            <pre className="px-2.5 py-2 rounded-lg dark:bg-claude-darkBg bg-claude-bg text-xs font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto dark:text-claude-darkText text-claude-text">
+            <pre className="px-2.5 py-2 rounded-lg dark:bg-claude-darkBg bg-claude-bg text-xs font-mono whitespace-pre-wrap break-words max-h-[60vh] overflow-y-auto dark:text-claude-darkText text-claude-text">
               {formatToolInput(permission.toolInput)}
             </pre>
           </div>
