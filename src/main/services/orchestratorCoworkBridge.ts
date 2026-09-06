@@ -69,7 +69,7 @@ export interface RunOrchestratorSkillTurnParams {
    * M4 nightly study session: restricts the inline tool surface to the
    * learning allowlist and hard-caps metaweb-source KB adds at pinBudget.
    */
-  metawebStudySession?: { pinBudget: number };
+  metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
   permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   /** Overrides the skill-turn watchdog timeout (ms). Defaults to 300s. */
   skillTurnTimeoutMs?: number;

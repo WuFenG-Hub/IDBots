@@ -276,6 +276,7 @@ man_base_data_pebble/
 !tests/likePinAgentTools.test.mjs
 !tests/qaBehaviorPrompt.test.mjs
 !tests/qaRecallAgentTools.test.mjs
+!tests/metawebQaSurfSession.test.mjs
 !tests/networkServicesAgentTools.test.mjs
 !tests/onlineBotsAgentTools.test.mjs
 !tests/metaFileUploadAgentTools.test.mjs

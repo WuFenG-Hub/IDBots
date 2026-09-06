@@ -295,6 +295,19 @@ export class MetawebStudyService {
     return { job, created: true };
   }
 
+  /**
+   * Owner-disable path: stop the bot's active Q&A surfing job. Returns true
+   * when an active job was disabled, false when there was nothing to stop.
+   * Re-enabling later simply enqueues a fresh job.
+   */
+  disableQaSurfJob(metabotId: number): boolean {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) return false;
+    return this.store.markActiveQaSurfDone(metabotId, {
+      note: 'Disabled by the owner; nightly Q&A surfing stopped.',
+      nowIso: this.now().toISOString(),
+    }) > 0;
+  }
+
   listStudyJobs(metabotId: number): MetawebStudyJobRecord[] {
     if (!Number.isInteger(metabotId) || metabotId <= 0) return [];
     return this.store.listByMetabot(metabotId);
@@ -376,6 +389,15 @@ export class MetawebStudyService {
       try {
         this.store.markRunning(job.id, this.now().toISOString());
         const result = await this.runStudyJob(this.store.getById(job.id) ?? job);
+        // A qa-surf job disabled while its session was in flight must not be
+        // resurrected by this run's bookkeeping — its answers/saves stand, but
+        // the row keeps the disabled state the owner chose.
+        if (job.kind === 'qa-surf') {
+          const current = this.store.getById(job.id);
+          if (!current || current.status !== 'running') {
+            continue;
+          }
+        }
         const mergedAll = [...new Set([...job.processedPinIds, ...result.newPinIds])];
         // Recurring surf jobs cap the stored handled list (they never end);
         // topic jobs keep the full list for corpus-exhaustion detection.

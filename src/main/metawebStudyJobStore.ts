@@ -243,6 +243,23 @@ export class MetawebStudyJobStore {
     return row ? rowToRecord(row) : null;
   }
 
+  /**
+   * Owner-disable path for the recurring Q&A-surf job: move the bot's active
+   * surf job to 'done' with a note. Returns how many rows were disabled
+   * (0 = nothing active). A run finishing in-flight afterwards must not
+   * resurrect the row — see the service's post-run guard.
+   */
+  markActiveQaSurfDone(metabotId: number, input: { note: string; nowIso: string }): number {
+    this.db.run(
+      `UPDATE metaweb_study_jobs
+       SET status = 'done', last_run_summary = ?, last_error = NULL, updated_at = ?
+       WHERE metabot_id = ? AND kind = 'qa-surf' AND status IN ('pending', 'running')`,
+      [input.note, input.nowIso, metabotId],
+    );
+    this.saveDb();
+    return this.db.getRowsModified?.() ?? 0;
+  }
+
   /** Oldest first across ALL bots — the nightly scheduler drains this queue. */
   listPending(): MetawebStudyJobRecord[] {
     return this.getAll<MetawebStudyJobRow>(

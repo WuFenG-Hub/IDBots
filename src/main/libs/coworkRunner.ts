@@ -1201,8 +1201,10 @@ interface ActiveSession {
    * unattended autoApprove session physically cannot publish or spend fees —
    * and metaweb-source knowledge_base_add_document calls are hard-capped at
    * pinBudget by a counting wrapper (prompt guidance alone is not a budget).
+   * kind 'qa-surf' swaps the allowlist for the Q&A surfing surface (participate:
+   * answer/react) while keeping the same KB budget wrapper.
    */
-  metawebStudySession?: { pinBudget: number };
+  metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
   /** Permission mode controlling tool gating (default/plan/acceptEdits/bypassPermissions). */
   permissionMode: CoworkPermissionMode;
   /** Runtime effort override from the UI picker; a canonical rung, the 'default' sentinel (model default, skipping brain/global), or null = tiered defaults (brain → global → per-model). */
@@ -1850,6 +1852,24 @@ const METAWEB_STUDY_TOOL_ALLOWLIST = new Set([
   'procedure_recall',
   'knowledge_upsert',
   'knowledge_recall',
+]);
+
+/**
+ * The inline-tool allowlist for nightly Q&A surfing sessions
+ * (metawebStudySession kind 'qa-surf'). Learning surface of the study
+ * allowlist PLUS the Q&A participation tools — read the feed, answer,
+ * react. On-chain writes stay deliberately minimal: post_simpleanswer and
+ * like_pin are the feature's purpose; post_simplequestion (asking is for
+ * interactive work), buzz/notes, omni_cast, wallet and file tools are not
+ * registered at all (absence beats a deny rule).
+ */
+const METAWEB_QA_SURF_TOOL_ALLOWLIST = new Set([
+  ...METAWEB_STUDY_TOOL_ALLOWLIST,
+  'search_qa',
+  'list_latest_questions',
+  'get_question_answers',
+  'post_simpleanswer',
+  'like_pin',
 ]);
 
 export class CoworkRunner extends EventEmitter {
@@ -5975,7 +5995,7 @@ export class CoworkRunner extends EventEmitter {
       autoApprove?: boolean;
       disableMemoryUpdates?: boolean;
       /** M4 nightly study session: restrict inline tools to the learning allowlist and cap metaweb-source KB adds at pinBudget. */
-      metawebStudySession?: { pinBudget: number };
+      metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
       disableRemoteServicesPrompt?: boolean;
       workspaceRoot?: string;
       confirmationMode?: 'modal' | 'text';
@@ -9212,9 +9232,15 @@ export class CoworkRunner extends EventEmitter {
     }
     // M4 nightly study sessions run unattended with autoApprove: restrict the
     // tool surface to the learning allowlist so on-chain writes, installs,
-    // social and file tools are not registered at all.
-    if (this.activeSessions.get(sessionId)?.metawebStudySession) {
-      return memoryTools.filter((item) => METAWEB_STUDY_TOOL_ALLOWLIST.has(String(item?.name ?? '')));
+    // social and file tools are not registered at all. Q&A surf sessions
+    // (kind 'qa-surf') swap in the surfing allowlist — learning plus
+    // answering/reacting, still nothing else.
+    const studySession = this.activeSessions.get(sessionId)?.metawebStudySession;
+    if (studySession) {
+      const allowlist = studySession.kind === 'qa-surf'
+        ? METAWEB_QA_SURF_TOOL_ALLOWLIST
+        : METAWEB_STUDY_TOOL_ALLOWLIST;
+      return memoryTools.filter((item) => allowlist.has(String(item?.name ?? '')));
     }
     return memoryTools;
   }

@@ -354,3 +354,32 @@ test('buildQaSurfSessionPrompt teaches the surf loop and keeps the json report c
   const topicJob = service.enqueueStudyJob(7, { topic: 'video' }).job;
   assert.match(buildMetawebStudySessionPrompt(topicJob), /unattended overnight MetaWeb study session/);
 });
+
+test('disableQaSurfJob stops the active surf job; re-enqueue creates a fresh one', () => {
+  const { service, store } = setup();
+  assert.equal(service.disableQaSurfJob(7), false, 'nothing active yet');
+  const job = service.enqueueQaSurfJob(7).job;
+  assert.equal(service.disableQaSurfJob(7), true);
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'done');
+  assert.match(after.lastRunSummary, /Disabled by the owner/);
+  assert.equal(after.lastError, null);
+  const again = service.enqueueQaSurfJob(7);
+  assert.equal(again.created, true);
+  assert.notEqual(again.job.id, job.id);
+});
+
+test('disabling a surf job mid-run does not get resurrected by the finishing run', async () => {
+  const { service, store } = setup({
+    runStudyJob: async (job) => {
+      // The owner disables surfing while tonight's session is still running.
+      service.disableQaSurfJob(job.metabotId);
+      return { newPinIds: ['answered-qi0'], summary: 'answered one before the off switch' };
+    },
+  });
+  const job = service.enqueueQaSurfJob(7).job;
+  await service.runTick();
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'done', 'the run\'s bookkeeping must not flip the disabled row back to pending');
+  assert.match(after.lastRunSummary, /Disabled by the owner/);
+});
