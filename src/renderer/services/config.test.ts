@@ -7,6 +7,7 @@ import {
   mergeProvidersConfig,
   PROVIDER_API_FORMAT_MIGRATION_VERSION,
 } from './config';
+import { FREE_PROVIDER_DISPLAY_NAME } from './llmFreeQuotaGate.js';
 
 /**
  * Build a minimal AppConfig with just enough shape for the api-format migration
@@ -199,4 +200,35 @@ test('mergeProvidersConfig rewrites free-provider model names to display names',
   // A user-configured provider with the same model id keeps its stored name.
   const deepseekModels = merged!.deepseek!.models!;
   assert.equal(deepseekModels[0].name, 'deepseek-chat');
+});
+
+test('mergeProvidersConfig rewrites the legacy free-provider name to the canonical label', () => {
+  // Installs provisioned before the IDBots-Free rename still store
+  // "MetaID Free" as the provider name; normalization must force the
+  // canonical label so every name-reading surface shows one name.
+  const stored = makeConfig({
+    'metaid-free': {
+      enabled: true,
+      apiKey: 'mrk_x',
+      baseUrl: 'https://relay.example',
+      apiFormat: 'openai',
+      name: 'MetaID Free',
+      models: [{ id: 'deepseek-chat', name: 'deepseek-chat', supportsImage: false }],
+    },
+    deepseek: {
+      enabled: true,
+      apiKey: 'sk-ds',
+      baseUrl: 'https://api.deepseek.com',
+      apiFormat: 'openai',
+      name: 'DeepSeek',
+      models: [{ id: 'deepseek-chat', name: 'deepseek-chat', supportsImage: false }],
+    },
+  });
+
+  const merged = mergeProvidersConfig(undefined, stored.providers);
+  assert.equal(merged!['metaid-free']!.name, FREE_PROVIDER_DISPLAY_NAME);
+  // User-configured providers keep their stored names untouched (named
+  // built-in provider types don't declare name; read through the index view).
+  const deepseekEntry = merged!['deepseek'] as { name?: string };
+  assert.equal(deepseekEntry.name, 'DeepSeek');
 });

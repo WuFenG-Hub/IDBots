@@ -21,6 +21,7 @@ import { welcomeBotAvatarUrl } from '../assets/welcomeBotAvatar';
 import {
   LLM_FREE_PROVIDER_KEY,
   LLM_RELAY_WELCOME_BOT_ID_KEY,
+  FREE_PROVIDER_DISPLAY_NAME,
   getFreeProviderModelDisplayName,
   isFreeProviderConfigured,
   planFreeQuotaProvisioning,
@@ -84,7 +85,7 @@ async function provisionProviderConfig(result: LlmRelayBootstrapResult): Promise
         baseUrl: result.baseUrl,
         apiFormat: 'openai',
         models,
-        name: 'IDBots-Free',
+        name: FREE_PROVIDER_DISPLAY_NAME,
       },
     } as AppConfig['providers'],
     model: {
