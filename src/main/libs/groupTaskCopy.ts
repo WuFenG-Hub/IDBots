@@ -455,6 +455,44 @@ export function buildStatusDirectiveNote(input: {
   return withGroupTaskNotice(GROUP_TASK_NOTICE.statusParser, lines.join('\n'));
 }
 
+/**
+ * Task #63: in-group note when a chair message cited a [STATUS:*] tag ONLY as
+ * descriptive prose (mid-sentence / non-standalone line) while at least one of
+ * the cited tags is a legal move from the live status and nothing applied.
+ * Task #63's chair bolded its verdict line in a wrap-up report — the parser
+ * (pre-fix) filed it as descriptive, the task parked in executing for 34 min,
+ * and the chair answered the supervisor nudges with "false alarm" because its
+ * own memory said the verdict was announced. The note makes the miss visible
+ * in the group the moment it happens, so the chair re-sends a bare tag on its
+ * next turn instead of waiting out the 20-min nudge cycle. Cited tags are
+ * backtick-wrapped so the notice itself can never be re-read as an instruction.
+ */
+export function buildDescriptiveStatusNote(input: {
+  taskId: number;
+  taskTitle: string;
+  /** Descriptive tags that would be legal moves from fromStatus. */
+  descriptive: Array<'executing' | 'review'>;
+  fromStatus: string;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const tagText = (tag: 'executing' | 'review') => `\`[STATUS:${tag.toUpperCase()}]\``;
+  const bareTagText = (tag: 'executing' | 'review') => `[STATUS:${tag.toUpperCase()}]`;
+  const cited = input.descriptive.map(tagText).join(language === 'en' ? ' or ' : ' 或 ');
+  const bareCited = input.descriptive.map(bareTagText).join(language === 'en' ? ' or ' : ' 或 ');
+  const body = language === 'en'
+    ? `⚠️ No status change applied: this message cited ${cited} only as descriptive text `
+      + `(embedded in prose, not a bare tag on its own line / at the end). The task stays in ${input.fromStatus} `
+      + `— check the authoritative host state line before assuming your earlier verdict landed. `
+      + `If you intended the transition, post ONE new message containing only the bare tag `
+      + `${bareCited} `
+      + `(no bold, no backticks, no extra text); if this was a citation, no action is needed.`
+    : `⚠️ 状态未变更：这条消息里的 ${cited} 只是描述性文字（嵌在正文中，不是独立成行/末尾的裸标签）。任务仍处于 ${input.fromStatus} `
+      + `——在假设你先前的状态宣告已生效之前，请先核对权威宿主状态行。`
+      + `如果你确实要迁移状态，请另发一条只含裸标签 `
+      + `${bareCited} `
+      + `的新消息（不加粗、不用反引号、不带其他文字）；若只是引用协议，则无需处理。`;
+  return withGroupTaskNotice(GROUP_TASK_NOTICE.statusParser, body);
+}
+
 export function buildAcceptanceGuidanceText(language: AppLanguage = groupTaskLanguage()): string {
   return language === 'en'
     ? [

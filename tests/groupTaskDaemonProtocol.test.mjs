@@ -1232,7 +1232,7 @@ test('speedup R-03: same author + same uri re-delivery folds into the first ledg
   }
 });
 
-test('speedup R-03: different uri or different author are NOT folded', async () => {
+test('speedup R-03 (task #63 revision): distinct artifacts keep their rows; the SAME artifact never gets two authors', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2, 3]);
@@ -1243,19 +1243,28 @@ test('speedup R-03: different uri or different author are NOT folded', async () 
       senderName: 'Coder Bot', content: `[DELIVERABLE] A：\`metafile://${pinA}\``,
     });
     await h.loop.runTick();
-    // Same author, different uri → a distinct deliverable.
+    // Same author, different pinid → a distinct deliverable.
     insertGroupMessage(h.db, {
       pinId: 'distinct-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot', content: `[DELIVERABLE] B：\`metafile://${pinB}\``,
     });
-    // Different author, same uri → also distinct (shared assets keep credit).
+    // Same pinid, DIFFERENT author → task #63: a deliverable URI names ONE
+    // on-chain artifact with ONE author (the publisher); the second member's
+    // tag is a citation and folds — the old R-03 "shared assets keep credit"
+    // behavior is exactly what minted task #63's duplicate rows.
     insertGroupMessage(h.db, {
       pinId: 'distinct-3-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
       senderName: 'Designer Bot', content: `[DELIVERABLE] A-reuse：\`metafile://${pinA}\``,
     });
     await h.loop.runTick();
     const deliverables = h.groupTaskStore.listDeliverables(task.id);
-    assert.equal(deliverables.length, 3, 'distinct uri / distinct author each keep their row');
+    assert.equal(deliverables.length, 2, 'distinct pinids keep their rows; the same pinid folds');
+    const rowA = deliverables.find((deliverable) => (deliverable.uri ?? '').includes(pinA));
+    assert.equal(
+      (rowA?.authorGlobalmetaid ?? '').toLowerCase(),
+      'gmid-w2',
+      'the surviving row keeps the original publisher as its author',
+    );
   } finally {
     h.cleanup();
   }

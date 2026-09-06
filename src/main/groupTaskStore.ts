@@ -2389,6 +2389,31 @@ export class GroupTaskStore {
   }
 
   /**
+   * Task #63: artifact-identity lookup for [DELIVERABLE] ingestion — the
+   * EARLIEST non-rejected deliverable in this task whose uri embeds the same
+   * 64-hex+i0 pinid token, regardless of author or scheme. A deliverable URI
+   * names ONE on-chain artifact with ONE author (the bot that published it);
+   * another member tagging the same URI (a promo citing the product, copy
+   * referencing the package pin) is a citation, not a second deliverable.
+   * Rejected rows are excluded so a re-delivery after rejection still records
+   * fresh, mirroring findDeliverableByAuthorAndUri.
+   */
+  findDeliverableByPinid(
+    taskId: number,
+    pinidToken: string | null | undefined,
+  ): GroupTaskDeliverable | undefined {
+    const key = String(pinidToken ?? '').trim().toLowerCase();
+    if (!/^[0-9a-f]{64}i0$/.test(key)) return undefined;
+    const row = this.getOne<GroupTaskDeliverableRow>(
+      `SELECT * FROM group_task_deliverables
+       WHERE task_id = ? AND status != 'rejected' AND uri LIKE ?
+       ORDER BY id ASC LIMIT 1`,
+      [taskId, `%${key}%`],
+    );
+    return row ? rowToGroupTaskDeliverable(row) : undefined;
+  }
+
+  /**
    * P2: same-bytes dedupe lookup — the EARLIEST non-rejected deliverable in
    * this task carrying the given sha256 content hash. Rejected rows are
    * excluded so a re-delivery of already-rejected bytes is never absorbed

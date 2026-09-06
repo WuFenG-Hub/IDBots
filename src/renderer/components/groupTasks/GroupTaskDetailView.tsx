@@ -14,6 +14,7 @@ import GroupTaskKickConfirmModal from './GroupTaskKickConfirmModal';
 import {
   canAcceptGroupTask,
   canReopenGroupTask,
+  dedupeDeliverablesByPinid,
   deliverableKindBadge,
   deliverableVerificationBadgeClass,
   deliverableVerificationState,
@@ -574,8 +575,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const members = Array.isArray(detail.members) ? detail.members : [];
   // Text rows (kind=text, no uri) are process notes, not deliverables — the
   // rail lists digital outcomes only, mirroring the acceptance checklist.
-  const deliverables = (Array.isArray(detail.deliverables) ? detail.deliverables : [])
-    .filter((deliverable) => isDigitalDeliverable(deliverable));
+  // Task #63: one artifact = one card — pinid-keyed dedupe so legacy ledgers
+  // (same URI recorded under two authors before artifact-identity folding)
+  // never render twice; the earliest row (the publisher's) wins.
+  const deliverables = dedupeDeliverablesByPinid(
+    (Array.isArray(detail.deliverables) ? detail.deliverables : [])
+      .filter((deliverable) => isDigitalDeliverable(deliverable)),
+  );
   // HITL: the currently open human checkpoint, if any (drives the pause banner).
   const openCheckpoint = detail.checkpoints?.find((checkpoint) => checkpoint.status === 'open') ?? null;
   // HITL: what the owner must decide, shown under the banner topic — the

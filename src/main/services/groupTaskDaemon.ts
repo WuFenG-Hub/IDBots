@@ -73,6 +73,7 @@ import {
   copyLongTurnHeartbeat,
   copyLongTurnInProgress,
   buildStatusDirectiveNote,
+  buildDescriptiveStatusNote,
   GROUP_TASK_NOTICE,
   hasGroupTaskNotice,
   isRollCallPresenceCheck,
@@ -103,6 +104,8 @@ import {
 import {
   parseDeliverableLines,
   parseDeliverableSegments,
+  extractPinidToken,
+  hasDeliverableTagLine,
   extractLocalFilePaths,
   parseWorkingAck,
   hasStandbyMarker,
@@ -196,6 +199,15 @@ export interface StatusDirectiveVerdict {
 }
 
 /**
+ * Task #63: markdown emphasis around a standalone tag line — the chair's
+ * wrap-up verdict `**[STATUS:REVIEW]**` on its own line — still reads as an
+ * instruction field: emphasis markers (*, _) and whitespace never carry
+ * sentence meaning. Anything else around the tag (words, `>` quote markers,
+ * strikethrough `~~`, punctuation) keeps the line prose/descriptive.
+ */
+const MD_EMPHASIS_RESIDUE = /^[\s*_]*$/;
+
+/**
  * GT-04 (task #56): legality-aware status-directive adjudication.
  *
  * Candidate tags, in priority order:
@@ -204,7 +216,9 @@ export interface StatusDirectiveVerdict {
  *  b) STANDALONE tag lines elsewhere in the body (a tag alone on its own line
  *     is unambiguous protocol formatting — this is what saved task #56, whose
  *     real [STATUS:EXECUTING] instruction sat on its own line mid-message while
- *     the final line merely mentioned `[STATUS:REVIEW]` in prose).
+ *     the final line merely mentioned `[STATUS:REVIEW]` in prose). Task #63:
+ *     emphasis-wrapped own-line tags (`**[STATUS:REVIEW]**`) count too — a
+ *     chair's wrap-up routinely bolds the verdict line.
  *
  * Everything else — prose-embedded tags on earlier lines, non-final tags on the
  * last line, and anything inside code quotes — is descriptive text.
@@ -239,7 +253,10 @@ export function adjudicateStatusDirectives(
       const tag = match[1].toLowerCase() as 'executing' | 'review';
       const prefix = line.slice(0, match.index).trim();
       const suffix = line.slice(match.index + match[0].length).trim();
-      occurrences.push({ tag, lineIndex, standalone: prefix.length === 0 && suffix.length === 0 });
+      // Task #63: `**[STATUS:REVIEW]**` on its own line counts as standalone —
+      // emphasis residue never carries sentence meaning (see MD_EMPHASIS_RESIDUE).
+      const standalone = MD_EMPHASIS_RESIDUE.test(prefix) && MD_EMPHASIS_RESIDUE.test(suffix);
+      occurrences.push({ tag, lineIndex, standalone });
     }
   });
   // (a) the end-line instruction field: the LAST tag on the last non-empty
@@ -613,7 +630,13 @@ function readTaskSessionActivityMessages(
  * URIs anywhere else in the message body never influence the outcome.
  */
 const deliverableTagLines = (content: string): string[] =>
-  content.split('\n').filter((line) => DELIVERABLE_TAG.test(line));
+  content
+    .split('\n')
+    // Task #63: only lines LED BY the tag (emphasis prefix tolerated, same as
+    // the parser's TAG_LED_LINE_RE) are protocol deliveries — mid-line mentions
+    // are prose citations ("上条 [DELIVERABLE] 即为回应") and must never satisfy
+    // a dependency gate.
+    .filter((line) => /^[\s*_]*\[deliverable\]/i.test(line.trimStart()));
 
 /**
  * True when two strings carry hex runs (pinids/txids, ignoring protocol
@@ -816,6 +839,16 @@ const GROUP_TASK_REVIEW_REASSERT_KV_PREFIX = 'group_task_review_reassert:';
  * rework paths stamp the same marker.
  */
 export const GROUP_TASK_REWORK_AT_KV_PREFIX = 'group_task_rework_at:';
+/**
+ * Task #63: message pins whose REVIEW verdict was deliberately swallowed by
+ * the rework debounce (StaleReviewReentry). JSON array, newest-last, capped.
+ * The reconcile self-heal must never resurrect these — the debounce exists to
+ * keep a rework's executing state authoritative (Improvement #2), and a
+ * reconciler that re-applies them would reintroduce the review<->executing
+ * flip. Cleared when a real review entry lands (same place the rework stamp
+ * is deleted).
+ */
+export const GROUP_TASK_DEBOUNCED_REVIEW_PINS_KV_PREFIX = 'group_task_debounced_review_pins:';
 /** Improvement #2 (v1.3): see GROUP_TASK_REWORK_AT_KV_PREFIX. In-flight chair turns finish well within this bound. */
 export const REVIEW_REENTRY_DEBOUNCE_MS = 30_000;
 /**
@@ -1135,7 +1168,7 @@ export function decideGroupTaskResponders(
       && hits.get(member.metabotId) === true,
   ).length;
   const addressedToSpecificMember = workerHitCount > 0 || chairHit;
-  const hasDeliverable = DELIVERABLE_TAG.test(content);
+  const hasDeliverable = hasDeliverableTagLine(content);
 
   for (const member of members) {
     if (member.metabotId == null) continue;
@@ -2797,7 +2830,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * new directives landing on the normal path, so one attempt per run is the
    * whole repair budget for legacy stuck tasks).
    */
-  const statusDirectiveReconciledTasks = new Set<number>();
+  /**
+   * Task #63: the #52 self-heal used to run ONCE per daemon process lifetime —
+   * a botched verdict that arrived while the app was already running (task
+   * #63: the bolded `**[STATUS:REVIEW]**` wrap-up) never got reconciled until
+   * an app restart. Re-arm the scan whenever the message cursor advances past
+   * the previously reconciled point so mid-run misses heal on the next tick.
+   */
+  const statusDirectiveReconciledCursor = new Map<number, number>();
   /**
    * GT-05 (task #56): tasks whose exhausted chair-plan attempts were already
    * re-armed once this daemon run. One attempt per restart — GT-03's per-episode
@@ -4108,6 +4148,51 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * Task #63: post the descriptive-citation corrective note as the chair.
+   * Rate-limited to one per task per DESCRIPTIVE_NOTE_RATE_LIMIT_MS so a chatty
+   * chair quoting protocol in prose cannot spam the group.
+   */
+  const DESCRIPTIVE_NOTE_RATE_LIMIT_MS = 10 * 60_000;
+  const postDescriptiveStatusNote = async (
+    task: GroupTask,
+    chairMember: GroupTaskMember | undefined,
+    message: GroupTaskDaemonMessage,
+    verdict: StatusDirectiveVerdict,
+    parseStatus: string,
+  ): Promise<void> => {
+    if (!chairMember?.metabotId) return;
+    const sqlite = deps.getStore();
+    const stampKey = `group_task_descriptive_note:${task.id}`;
+    try {
+      const lastMs = Number(sqlite.get<number>(stampKey) ?? 0) || 0;
+      if (lastMs > 0 && now() - lastMs < DESCRIPTIVE_NOTE_RATE_LIMIT_MS) return;
+      sqlite.set(stampKey, now());
+    } catch {
+      // kv unavailable — post unrate-limited rather than silently skip
+    }
+    try {
+      const sent = await postGroupMessage(
+        task.id,
+        chairMember.metabotId,
+        buildDescriptiveStatusNote({
+          taskId: task.id,
+          taskTitle: task.title,
+          descriptive: verdict.descriptive.filter((tag) =>
+            (CHAIR_STATUS_MOVES[parseStatus] ?? []).includes(tag)),
+          fromStatus: parseStatus,
+        }),
+        { replyPin: message.pinId ?? undefined },
+      );
+      rememberDaemonChairPin(task.id, sent.pinId);
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: descriptive-status note post failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  /**
    * Protocol tags on EVERY ingested message (before/independent of reply gating):
    * - [DELIVERABLE]: record one pending deliverable row per valid tag
    *   candidate (deduped by msg_pin_id + uri + kind; corrections supersede in
@@ -4159,7 +4244,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const parseContent = stripFencedCodeBlocks(content);
     if (message.senderSuspect) {
       // no deliverable collection for non-member speakers
-    } else if (DELIVERABLE_TAG.test(parseContent) && !isChairMessage) {
+    } else if (hasDeliverableTagLine(parseContent) && !isChairMessage) {
       // Round-4: per-candidate ingestion. Every [DELIVERABLE] tag occurrence
       // (its own line or inline) produces one candidate; valid candidates each
       // get their own row — a message with two tag lines records TWO rows.
@@ -4243,6 +4328,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: duplicate [DELIVERABLE] ${candidate.uri.slice(0, 48)}… ` +
               `by the same author folded into ledger row #${prior.id} (no new record)`,
+            );
+            continue;
+          }
+          // Task #63: artifact-identity fold — a deliverable URI names ONE
+          // on-chain product with ONE author (the publisher that first
+          // recorded it). Another member tagging the same pinid (a promo
+          // citing the finished MetaApp, copy referencing the package pin) is
+          // a citation, never a second deliverable row with a second author.
+          const priorByPinid = store.findDeliverableByPinid(task.id, extractPinidToken(candidate.uri));
+          if (priorByPinid) {
+            appendDeliverableDuplicateNote(priorByPinid, msgPinId, candidate.uri);
+            foldedDuplicateCount += 1;
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: [DELIVERABLE] ${candidate.uri.slice(0, 48)}… cites ` +
+              `ledger row #${priorByPinid.id}'s artifact (pinid already delivered) — folded, no new record`,
             );
             continue;
           }
@@ -4639,6 +4739,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // review re-entry passed the debounce, so later review tags are
               // never compared against a stale stamp.
               deps.getStore().delete(`${GROUP_TASK_REWORK_AT_KV_PREFIX}${task.id}`);
+              // Task #63: same for the debounced-pin markers — this entry is
+              // the authoritative verdict, older swallowed pins are moot.
+              deps.getStore().delete(`${GROUP_TASK_DEBOUNCED_REVIEW_PINS_KV_PREFIX}${task.id}`);
               // HITL: review entry is itself the final human gate — an open
               // checkpoint still pending at this point is superseded by it.
               try {
@@ -4815,6 +4918,28 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: ${error.message} — stale in-flight verdict ignored; task stays executing`,
             );
+            // Task #63: mark the swallowed pin so the reconcile self-heal
+            // (now re-armed on cursor advances) never resurrects a verdict
+            // the debounce deliberately killed.
+            if (message.pinId) {
+              try {
+                const key = `${GROUP_TASK_DEBOUNCED_REVIEW_PINS_KV_PREFIX}${task.id}`;
+                const raw = deps.getStore().get<string>(key);
+                let pins: string[] = [];
+                try {
+                  const parsed = JSON.parse(String(raw ?? '[]'));
+                  if (Array.isArray(parsed)) pins = parsed.map((pin) => String(pin));
+                } catch {
+                  pins = [];
+                }
+                if (!pins.includes(message.pinId)) {
+                  pins.push(message.pinId);
+                  deps.getStore().set(key, JSON.stringify(pins.slice(-8)));
+                }
+              } catch {
+                // best-effort marker — the freshness guard still bounds reconcile
+              }
+            }
           } else if (error instanceof Error && error.message.startsWith('Illegal group task status transition')) {
             // GT#47 R2: an illegal transition is a chair directive the host
             // REJECTED, not a protocol verdict to swallow whole. Task #47
@@ -4934,6 +5059,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `(${statusVerdict.descriptive.map((tag) => tag.toUpperCase()).join(' -> ')}) with no instruction tag — ` +
           'descriptive tags ignored, no transition applied',
         );
+        // Task #63: reaching here means NOTHING applied, yet the chair cited a
+        // tag. When one of the cited tags is a legal move from the live status,
+        // the task is parked on exactly this formatting miss — the chair's own
+        // memory says the verdict was announced, so it will answer later
+        // nudges with "false alarm" unless the miss is visible in the group.
+        // Post the corrective note NOW (rate-limited) so the chair re-sends a
+        // bare tag on its next turn instead of waiting out the 20-min cycle.
+        const legalFromParse = CHAIR_STATUS_MOVES[statusAtParse] ?? [];
+        if (statusVerdict.descriptive.some((tag) => legalFromParse.includes(tag))) {
+          await postDescriptiveStatusNote(
+            task,
+            members.find((member) => member.role === 'chair'),
+            message,
+            statusVerdict,
+            statusAtParse,
+          );
+        }
       } else if (isChairSender && statusVerdict.noOp.length > 0) {
         // A chair tag re-asserting the live status (e.g. a re-issued verdict
         // duplicating one already applied) is a benign no-op — the old
@@ -7867,6 +8009,47 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * chair plan attempts are exhausted gets ONE re-armed attempt per stall
    * episode instead of the executing-task status nudge.
    */
+  /**
+   * Task #63: the no-progress nudge's prime-suspect scan. Finds the newest
+   * chair message that cites a [STATUS:*] tag ONLY descriptively while that
+   * tag is a legal move from the live status — i.e. the chair TRIED to signal
+   * a transition and the parser never saw an instruction. The generic nudge
+   * ("post a status update") makes such a chair answer "false alarm" (its own
+   * memory says the verdict was announced — task #63 burned two supervisor
+   * cycles on exactly that); naming the miss makes the nudge actionable in
+   * one round. Tags already applied bucket as no-op, not descriptive, so an
+   * applied verdict never re-triggers this.
+   */
+  const findUnappliedChairStatusCitation = (
+    db: Database,
+    task: GroupTask,
+    liveStatus: string,
+  ): { tag: 'executing' | 'review' } | null => {
+    if (!task.groupId) return null;
+    const legal = CHAIR_STATUS_MOVES[liveStatus] ?? [];
+    if (legal.length === 0) return null;
+    try {
+      const members = deps.getGroupTaskStore().listMembers(task.id);
+      const chairGmid = (members.find((member) => member.role === 'chair')?.globalmetaid ?? '')
+        .trim().toLowerCase();
+      if (!chairGmid) return null;
+      const rows = queryRecentMessages(db, task.groupId, 50); // oldest-first
+      for (let i = rows.length - 1; i >= 0; i -= 1) {
+        const row = rows[i];
+        if (row.sender_suspect) continue;
+        if ((row.sender_global_metaid ?? '').trim().toLowerCase() !== chairGmid) continue;
+        if (hasGroupTaskNotice(row.content ?? '')) continue;
+        const verdict = adjudicateStatusDirectives(row.content ?? '', liveStatus);
+        if (verdict.instruction != null) continue;
+        const hit = verdict.descriptive.find((tag) => legal.includes(tag));
+        if (hit) return { tag: hit };
+      }
+    } catch {
+      // best-effort diagnosis — fall back to the generic nudge note
+    }
+    return null;
+  };
+
   const monitorNoProgressStall = (task: GroupTask): void => {
     const sqlite = deps.getStore();
     const stampKey = `${NO_PROGRESS_STALL_STAMP_PREFIX}${task.id}`;
@@ -7956,12 +8139,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // anomaly further down still applies to them (GT-03 visibility).
         } else {
           try {
+            // Task #63: enrich the nudge with the prime-suspect diagnosis when
+            // the chair's verdict tag never parsed as an instruction.
+            const citation = findUnappliedChairStatusCitation(sqlite.getDatabase(), task, task.status);
+            const idleText = `No progress for ${Math.round(idleMs / 60_000)} min and no turn is running`;
+            const note = citation
+              ? `${idleText}. Diagnosis: the host never applied your [STATUS:${citation.tag.toUpperCase()}] ` +
+                `(an earlier chair message cited the tag as descriptive prose, not a bare instruction line) — ` +
+                `the task is still "${task.status}" in the host DB. If you intend that transition, post ONE new ` +
+                `message containing only the bare [STATUS:${citation.tag.toUpperCase()}] tag (own line, no bold, ` +
+                'no backticks, no extra text); otherwise post a brief status update: what is done, what is blocked, what happens next.'
+              : `${idleText} — post a brief status update to the group: what is done, what is blocked, what happens next.`;
             deps.getGroupTaskStore().addSupervisorSignal({
               taskId: task.id,
               kind: 'nudge',
-              note:
-                `No progress for ${Math.round(idleMs / 60_000)} min and no turn is running — ` +
-                'post a brief status update to the group: what is done, what is blocked, what happens next.',
+              note,
             });
             sqlite.set(nudgeKey, '1');
             emitLog(
@@ -8036,10 +8228,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // Host notices are documentation, never protocol input: they legitimately
     // cite tag syntax (the status-parser note itself lists legal moves).
     const liveStatus = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
+    // Task #63: pins the rework debounce deliberately swallowed must stay
+    // swallowed — the reconciler (now re-armed per cursor advance) would
+    // otherwise resurrect them and reintroduce the review<->executing flip.
+    let debouncedReviewPins = new Set<string>();
+    try {
+      const raw = deps.getStore().get<string>(`${GROUP_TASK_DEBOUNCED_REVIEW_PINS_KV_PREFIX}${task.id}`);
+      const parsed = JSON.parse(String(raw ?? '[]'));
+      if (Array.isArray(parsed)) debouncedReviewPins = new Set(parsed.map((pin) => String(pin)));
+    } catch {
+      // unreadable marker — reconcile's freshness guard still applies
+    }
     const candidate = queryRecentMessages(db, task.groupId, 50)
       .reverse()
       .find((row) => {
         if (row.id > task.lastProcessedMsgId) return false; // normal path owns it
+        if (row.pin_id && debouncedReviewPins.has(row.pin_id)) return false;
         const senderGmid = (row.sender_global_metaid ?? '').trim().toLowerCase();
         if (senderGmid !== chairGmid || row.sender_suspect) return false;
         const content = row.content ?? '';
@@ -9234,11 +9438,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
-    // Task #52 self-heal: once per run, reconcile a stuck chair status
-    // directive (a verdict the old parser rejected after the cursor moved on).
+    // Task #52 self-heal: reconcile a stuck chair status directive (a verdict
+    // the old parser rejected after the cursor moved on). Re-armed whenever
+    // the cursor advances (Task #63) so mid-run misses heal without a restart.
     // Best-effort — a failure logs and the task simply keeps its status.
-    if (!statusDirectiveReconciledTasks.has(task.id)) {
-      statusDirectiveReconciledTasks.add(task.id);
+    if (statusDirectiveReconciledCursor.get(task.id) !== task.lastProcessedMsgId) {
+      statusDirectiveReconciledCursor.set(task.id, task.lastProcessedMsgId);
       try {
         await reconcileStatusDirective(task, members, botsById, promptMembers, ownerGlobalMetaId, memberGmids);
       } catch (error) {
