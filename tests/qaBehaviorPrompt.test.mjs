@@ -22,23 +22,21 @@ const MEMBERS = [
   { metabotId: 2, name: 'Coder Bot', role: 'worker', globalMetaId: 'gmid-w2' },
 ];
 
-test('the rule names the three behaviors, both protocols and both tools', () => {
-  assert.match(QA_BEHAVIOR_RULE, /ask when stuck, answer what you know/i);
+test('the rule carries the full search-before-ask loop with every live tool', () => {
+  assert.match(QA_BEHAVIOR_RULE, /search first, ask when stuck, answer what you know/i);
+  assert.match(QA_BEHAVIOR_RULE, /Search BEFORE asking/);
+  assert.match(QA_BEHAVIOR_RULE, /search_qa/);
+  assert.match(QA_BEHAVIOR_RULE, /read_metaweb_pin/);
+  assert.match(QA_BEHAVIOR_RULE, /list_latest_questions/);
+  assert.match(QA_BEHAVIOR_RULE, /max_answers=0/);
+  assert.match(QA_BEHAVIOR_RULE, /get_question_answers/);
   assert.match(QA_BEHAVIOR_RULE, /post_simplequestion/);
   assert.match(QA_BEHAVIOR_RULE, /\/protocols\/simplequestion/);
   assert.match(QA_BEHAVIOR_RULE, /post_simpleanswer/);
   assert.match(QA_BEHAVIOR_RULE, /\/protocols\/simpleanswer/);
   assert.match(QA_BEHAVIOR_RULE, /like_pin/);
   assert.match(QA_BEHAVIOR_RULE, /only required field/);
-});
-
-test('phase 0 wording does not reference the not-yet-existing search_qa tool', () => {
-  // search_qa / list_latest_questions / get_question_answers land with the
-  // MetaSo Q&A APIs in phase 1; the rule must not point bots at tools that do
-  // not exist yet. When phase 1 adds search-before-ask, update this anchor.
-  assert.doesNotMatch(QA_BEHAVIOR_RULE, /search_qa/);
-  assert.doesNotMatch(QA_BEHAVIOR_RULE, /list_latest_questions/);
-  assert.doesNotMatch(QA_BEHAVIOR_RULE, /get_question_answers/);
+  assert.match(QA_BEHAVIOR_RULE, /never re-ask what a search already answered/);
 });
 
 test('group task prompts (chair and worker, plain path) carry the QA rule', () => {
@@ -61,7 +59,7 @@ test('METAWEB_QA_BEHAVIOR slot sorts between the learning loop and MetaApps bloc
   ]);
   const worldviewAt = prompt.indexOf('WORLDVIEW');
   const loopAt = prompt.indexOf('LEARNING_LOOP');
-  const ruleAt = prompt.indexOf('MetaWeb Q&A — ask when stuck');
+  const ruleAt = prompt.indexOf('MetaWeb Q&A — search first, ask when stuck');
   const metaappsAt = prompt.indexOf('METAAPPS');
   assert.ok(worldviewAt >= 0 && loopAt > worldviewAt && ruleAt > loopAt && metaappsAt > ruleAt,
     'QA behavior renders after the learning loop and before METAAPPS');

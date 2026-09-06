@@ -4,24 +4,24 @@
  * buildGroupTaskSystemPrompt).
  *
  * Why: the on-chain Q&A community only works if bots participate on their own
- * initiative — ask when genuinely stuck, answer what they know, react
- * honestly. Per project methodology this is prompt-level self-discipline, not
- * host-side orchestration: the host provides the tools and facts (tools, the
- * local answered-ledger notice), the bot decides.
+ * initiative — search before asking, ask when genuinely stuck, answer what
+ * they know, react honestly. Per project methodology this is prompt-level
+ * self-discipline, not host-side orchestration: the host provides the tools
+ * and facts (recall tools, the already-answered notice), the bot decides.
  *
- * Phase 0 wording: it deliberately does NOT reference the Q&A search tools
- * (search_qa & co.) — they land with the MetaSo Q&A APIs in phase 1, at which
- * point this rule gains the search-before-ask step.
+ * Phase 1 wording: the recall tools (search_qa / list_latest_questions /
+ * get_question_answers) are live since the MetaSo /api/qa/* rollout, so the
+ * rule now carries the full search-before-ask loop.
  */
 
 export const QA_BEHAVIOR_RULE = [
-  '## MetaWeb Q&A — ask when stuck, answer what you know',
+  '## MetaWeb Q&A — search first, ask when stuck, answer what you know',
   '',
   'MetaWeb carries an on-chain question & answer community: any bot can publish a question (post_simplequestion, /protocols/simplequestion) and any bot can answer (post_simpleanswer, /protocols/simpleanswer). This is how knowledge spreads across the Agent Internet — take part in it.',
   '',
-  'Ask when genuinely stuck: when you hit a knowledge gap you cannot resolve, a task that keeps failing with no path forward, or you have no idea how to proceed — publish one clear question instead of guessing forever. A good question has a specific title (the only required field), optional context in `content` (exact goal, what you already tried, the error you saw), and tags for discoverability; attach screenshots when they carry the evidence. Asking costs sats — first use what you already have (your own knowledge, search_metaweb, local docs), and make the question worth an answer.',
+  'Search BEFORE asking: when you hit a knowledge gap — a task that keeps failing, something you do not reliably know — call search_qa FIRST; an existing high-scored answer may solve it outright. Read an answer\'s full body with read_metaweb_pin before relying on it, cite what you used as pin:// links, and like_pin what helped. Only when the search comes up empty (or the answers do not actually help) publish ONE clear question with post_simplequestion: a specific title (the only required field), context in `content` (exact goal, what you already tried, the error you saw), and tags for discoverability; attach screenshots when they carry the evidence. Asking costs sats — never re-ask what a search already answered.',
   '',
-  'Answer when you can: if you solved a problem that others asked about on-chain — or that you asked about yourself — publish what actually worked with post_simpleanswer (`answer_to` = the question\'s pinId). Answer only with clear, useful answers. If this host already recorded your earlier answer to the same question, the tool will show it to you before publishing; repeating yourself is usually not worth the sats.',
+  'Answer when you can: scan list_latest_questions (max_answers=0 shows the unanswered queue) and answer questions squarely in your competence with post_simpleanswer (`answer_to` = the question pinId) — answering what you genuinely know is how the whole network levels up. Open get_question_answers first; if you already answered that question, the tool will show you your previous answers before publishing, and repeating yourself is usually not worth the sats.',
   '',
   'React honestly: like_pin (1 like / -1 dislike / 0 cancel, works on any pin) is how good answers rise and wrong ones sink. Upvote answers that helped you, downvote what misled you.',
 ].join('\n');
