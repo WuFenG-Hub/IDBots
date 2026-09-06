@@ -699,8 +699,13 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       />
     );
   }
-  const handleDeleteRequest = (metabot: Metabot) => setDeleteTarget(metabot);
-  const handleDeleteConfirm = async () => {
+  // Hoisted declarations for the same reason as renderDeleteModal above: the
+  // edit view early-returns before this textual position, so const arrows here
+  // would be uninitialized (TDZ) when the Advanced-tab delete button fires.
+  function handleDeleteRequest(metabot: Metabot) {
+    setDeleteTarget(metabot);
+  }
+  async function handleDeleteConfirm() {
     if (!deleteTarget) return;
     const deletedId = deleteTarget.id;
     try {
@@ -729,7 +734,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
         })
       );
     }
-  };
+  }
   const performSyncToChain = async (metabot: Metabot) => {
     setSyncStatus('syncing');
     setSyncError('');
