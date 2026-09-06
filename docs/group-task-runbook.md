@@ -25,6 +25,12 @@ own nudges, and the chair was made to answer host-written messages addressed to
 itself. Every escalation the host posted was one more voice the system had to
 reconcile.
 
+The chair-facing counterparts of this contract: `SKILLs/metabot-group-task/SKILL.md`
+(the Twin's task operations + in-group protocol reference) and the per-turn
+playbook in `src/main/services/groupTaskPrompts.ts` (SOLE COMMANDER rule). All
+three must stay in sync — a behavior change is done when code, runbook, and
+skill doc agree.
+
 ## 2. Who owns what
 
 | Responsibility | Owner | Notes |
