@@ -43,6 +43,7 @@ docs/*
 !docs/metaweb-learning-roadmap.md
 !docs/metaweb-search-backend-requirements.md
 !docs/metaweb-search-quality-requirements.md
+!docs/metaweb-qa-backend-requirements.md
 !docs/gasfee-flow/
 !docs/gasfee-flow/**
 !docs/analysis/
