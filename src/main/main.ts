@@ -122,9 +122,11 @@ import {
   getMetabotChainSyncState,
   listConfiguredLlmProviders,
   listMetabotsForManagement,
+  readMetabotSubsidyState,
   recordFullSyncOutcome,
   requireMetabotLlmIdForCreate,
   normalizeMetabotLlmEffort,
+  resumeMetabotSetupCore,
   assertCanCreateMetabot,
   updateMetaBotCore,
   type MetabotManageDeps,
@@ -6458,6 +6460,12 @@ function getMetabotManageDeps(): MetabotManageDeps {
     store: getMetabotStore(),
     createWallet: () => createMetaBotWallet({}),
     requestSubsidy: requestMvcGasSubsidy,
+    // Spendable = confirmed + unconfirmed: MVC subsidy payouts stay
+    // unconfirmed forever (see addressBalanceService header note).
+    readSpendableBalance: async (mvcAddress) => {
+      const balance = await getAddressBalance('mvc', mvcAddress);
+      return (balance.satoshis ?? 0) + (balance.unconfirmedSatoshis ?? 0);
+    },
     signOwnerBinding: signOwnerBindingForLocalUser,
     syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
     syncEditChanges: (store, input) => syncMetaBotEditChangesToChain(store, input),
@@ -11093,11 +11101,16 @@ if (!gotTheLock) {
         // Chain-honest sync state for the My Bots partial badge (FR4):
         // derived from the persisted pending plan + confirmed pin ids.
         const chainSync = getMetabotChainSyncState(metabotStore, metabot);
+        // Subsidy outcome for the create-fallback UI ('unknown' for bots
+        // created before this tracking — no banner).
+        const subsidy = readMetabotSubsidyState(metabotStore, metabot.id);
         return {
           ...metabot,
           dreaming: dreamService?.isDreaming(metabot.id) ?? false,
           chain_sync_state: chainSync.state,
           chain_sync_pending_steps: chainSync.pendingSteps,
+          subsidy_state: subsidy.state,
+          subsidy_error: subsidy.error ?? null,
         };
       });
       return { success: true, list };
@@ -12082,6 +12095,28 @@ if (!gotTheLock) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[MetaBot] idbots:syncMetaBot failed:', errMsg);
       return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('idbots:resumeMetabotSetup', async (_event, input: { metabotId: number; mode: 'subsidized' | 'self-funded' }) => {
+    try {
+      console.log('[MetaBot] idbots:resumeMetabotSetup requested', input);
+      const result = await resumeMetabotSetupCore(input ?? { metabotId: 0, mode: 'subsidized' }, getMetabotManageDeps());
+      console.log('[MetaBot] idbots:resumeMetabotSetup result', {
+        metabotId: input?.metabotId,
+        mode: result.mode,
+        success: result.success,
+        alreadySynced: result.alreadySynced ?? false,
+        subsidySuccess: result.subsidy?.success,
+        selfFundedBlocked: result.selfFundedBlocked?.reason,
+        chainSuccess: result.chain?.success,
+        chainError: result.chain?.error,
+      });
+      return result;
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[MetaBot] idbots:resumeMetabotSetup failed:', errMsg);
+      return { success: false, mode: input?.mode ?? 'subsidized', error: errMsg };
     }
   });
 

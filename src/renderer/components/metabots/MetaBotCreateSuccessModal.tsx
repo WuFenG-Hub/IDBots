@@ -1,11 +1,13 @@
 /**
  * MetaBot Create Success Modal
  * Shows celebration UI, subsidy result, identity and addresses after creation.
- * Supports sync-to-chain flow with loading and success states.
+ * Supports sync-to-chain flow with loading and success states, and the
+ * create-fallback setup-pending state (subsidy/chain failed but the bot was
+ * kept locally — retry subsidy or broadcast with the bot's own funds).
  */
 
 import React from 'react';
-import { CpuChipIcon, CheckCircleIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import { CpuChipIcon, CheckCircleIcon, ArrowPathIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { Metabot } from '../../types/metabot';
 
@@ -21,10 +23,14 @@ export interface MetaBotCreateSuccessModalProps {
   mode?: 'create' | 'syncOnly' | 'editSync';
   syncStepKeys?: SyncStepKey[];
   showSubsidyStatus?: boolean;
+  /** Create-fallback: nothing landed on-chain; show retry-subsidy / self-funded actions. */
+  chainSetupPending?: boolean;
   /** Create mode only: jump straight into the edit view to complete the profile. */
   onContinueEditing?: () => void;
   onClose: () => void;
   onSyncToChain: () => void;
+  onRetrySubsidy?: () => void;
+  onSelfFundBroadcast?: () => void;
 }
 
 const FULL_SYNC_STEP_KEYS: SyncStepKey[] = ['name', 'avatar', 'chatpubkey', 'bio', 'persona', 'llm', 'chatSkills', 'homepage'];
@@ -49,9 +55,12 @@ const MetaBotCreateSuccessModal: React.FC<MetaBotCreateSuccessModalProps> = ({
   mode = 'create',
   syncStepKeys,
   showSubsidyStatus = true,
+  chainSetupPending = false,
   onContinueEditing,
   onClose,
   onSyncToChain,
+  onRetrySubsidy,
+  onSelfFundBroadcast,
 }) => {
   const btcAddr = metabot.btc_address ?? '';
   const mvcAddr = metabot.mvc_address ?? '';
@@ -74,7 +83,10 @@ const MetaBotCreateSuccessModal: React.FC<MetaBotCreateSuccessModalProps> = ({
   const isSyncError = syncStatus === 'error';
   const isCreateMode = mode === 'create';
   const isEditSyncMode = mode === 'editSync';
-  const showPrimaryAction = isEditSyncMode ? isSyncError : !isSyncSuccess;
+  // Setup-pending fallback replaces the plain "Sync to chain" action until the
+  // resume lands (or the user closes the modal; the edit-view banner takes over).
+  const showSetupPendingActions = chainSetupPending && !isSyncSuccess;
+  const showPrimaryAction = !showSetupPendingActions && (isEditSyncMode ? isSyncError : !isSyncSuccess);
   const title = isCreateMode
     ? i18nService.t('metabotCreateSuccess')
     : isEditSyncMode
@@ -98,9 +110,13 @@ const MetaBotCreateSuccessModal: React.FC<MetaBotCreateSuccessModalProps> = ({
       <div className="relative w-full max-w-md rounded-2xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg shadow-xl overflow-hidden">
         {/* Celebration header */}
         <div className="px-6 py-6 text-center border-b dark:border-claude-darkBorder border-claude-border">
-          {isCreateMode ? (
+          {isCreateMode && !showSetupPendingActions ? (
             <div className="text-4xl mb-2 animate-bounce" role="img" aria-hidden>
               🎉 🤖 ✨
+            </div>
+          ) : showSetupPendingActions ? (
+            <div className="text-3xl mb-2" role="img" aria-hidden>
+              ⏳
             </div>
           ) : (
             <div className="text-3xl mb-2" role="img" aria-hidden>
@@ -127,6 +143,39 @@ const MetaBotCreateSuccessModal: React.FC<MetaBotCreateSuccessModalProps> = ({
             </div>
           )}
         </div>
+
+        {/* Create-fallback: kept locally, nothing on-chain yet */}
+        {showSetupPendingActions && (
+          <div className="mx-6 mt-4 px-3 py-3 rounded-xl border border-amber-500/40 dark:border-amber-400/40 bg-amber-500/10 dark:bg-amber-400/10 space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-amber-600 dark:text-amber-400">
+              <ExclamationTriangleIcon className="h-4 w-4 shrink-0" aria-hidden />
+              {i18nService.t('metabotSetupPendingTitle')}
+            </div>
+            <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('metabotSetupPendingHint')}
+            </p>
+            {mvcAddr && (
+              <div className="space-y-1">
+                <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('metabotSetupSelfFundHint')}
+                </p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 min-w-0 text-xs break-all dark:text-claude-darkText text-claude-text">
+                    {mvcAddr}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => copyAddress(mvcAddr)}
+                    disabled={isSyncing}
+                    className="shrink-0 px-2 py-1 text-xs rounded-lg dark:bg-claude-darkSurface bg-claude-surface dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50"
+                  >
+                    {i18nService.t('metabotCopyAddress')}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Identity */}
         <div className="px-6 py-4 flex items-center gap-4">
@@ -247,7 +296,7 @@ const MetaBotCreateSuccessModal: React.FC<MetaBotCreateSuccessModalProps> = ({
           >
             {i18nService.t('metabotClose')}
           </button>
-          {isCreateMode && onContinueEditing && (
+          {isCreateMode && onContinueEditing && !showSetupPendingActions && (
             <button
               type="button"
               onClick={onContinueEditing}
@@ -255,6 +304,33 @@ const MetaBotCreateSuccessModal: React.FC<MetaBotCreateSuccessModalProps> = ({
               className="px-4 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {i18nService.t('metabotContinueEditing')}
+            </button>
+          )}
+          {showSetupPendingActions && onSelfFundBroadcast && (
+            <button
+              type="button"
+              onClick={onSelfFundBroadcast}
+              disabled={isSyncing}
+              className="px-4 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {i18nService.t('metabotSetupSelfFund')}
+            </button>
+          )}
+          {showSetupPendingActions && onRetrySubsidy && (
+            <button
+              type="button"
+              onClick={onRetrySubsidy}
+              disabled={isSyncing}
+              className="btn-idchat-primary-filled px-4 py-2 text-sm disabled:opacity-70 disabled:cursor-wait flex items-center gap-2"
+            >
+              {isSyncing ? (
+                <>
+                  <ArrowPathIcon className="h-4 w-4 animate-spin" />
+                  {i18nService.t('metabotSyncSyncing')}
+                </>
+              ) : (
+                i18nService.t('metabotSetupRetrySubsidy')
+              )}
             </button>
           )}
           {showPrimaryAction && (

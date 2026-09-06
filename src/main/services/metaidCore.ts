@@ -1181,7 +1181,7 @@ export async function syncMetaBotToChain(
         const message = `${step.key} pin failed: no txid`;
         if (step.key === 'name') {
           logErr('Name pin: no txid returned');
-          return { success: false, error: message, canSkip: false };
+          return { success: false, error: message, canSkip: false, plannedSteps: plannedSteps.map((s) => s.key), syncedSteps };
         }
         logErr(`${step.key} pin: no txid returned (skipped)`);
         someStepFailed = true;
@@ -1202,7 +1202,7 @@ export async function syncMetaBotToChain(
       const msg = err instanceof Error ? err.message : String(err);
       if (step.key === 'name') {
         logErr('Chain sync failed at name step', { error: msg });
-        return { success: false, error: msg, canSkip: false };
+        return { success: false, error: msg, canSkip: false, plannedSteps: plannedSteps.map((s) => s.key), syncedSteps };
       }
       logErr(`${step.key} pin failed (skipped)`, { error: msg });
       someStepFailed = true;

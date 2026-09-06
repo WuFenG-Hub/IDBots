@@ -56,6 +56,13 @@ export interface Metabot {
   chain_sync_state?: 'synced' | 'partial';
   /** Unpublished step keys behind a 'partial' state (empty for legacy partials). */
   chain_sync_pending_steps?: string[];
+  /**
+   * Runtime flag merged by main: gas-subsidy outcome for this bot's wallet.
+   * 'failed' powers the create-fallback banner (retry subsidy / self-funded
+   * broadcast); 'unknown' = created before this tracking — show no banner.
+   */
+  subsidy_state?: 'unknown' | 'claimed' | 'failed';
+  subsidy_error?: string | null;
   created_at: number;
   updated_at: number;
 }

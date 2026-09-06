@@ -1575,6 +1575,24 @@ interface IElectronAPI {
       txids?: string[];
       syncedSteps?: Array<'name' | 'avatar' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage' | 'owner'>;
     }>;
+    /** Create-fallback resume: retry the gas subsidy, or broadcast with the bot's own funds. */
+    resumeMetabotSetup: (input: { metabotId: number; mode: 'subsidized' | 'self-funded' }) => Promise<{
+      success: boolean;
+      metabot?: Metabot;
+      mode: 'subsidized' | 'self-funded';
+      subsidy?: { success: boolean; error?: string };
+      selfFundedBlocked?: { reason: 'no_balance'; mvcAddress: string; spendableSatoshis: number };
+      chain?: {
+        success: boolean;
+        canSkip?: boolean;
+        error?: string;
+        txids?: string[];
+        plannedSteps?: string[];
+        syncedSteps?: string[];
+      };
+      alreadySynced?: boolean;
+      error?: string;
+    }>;
     createMetaBotOnChain: (input: {
       name: string;
       avatar?: string | null;
@@ -1606,6 +1624,8 @@ interface IElectronAPI {
       subsidy?: { success: boolean; error?: string };
       chainPartial?: boolean;
       chainError?: string;
+      /** Nothing landed on-chain at creation; the bot exists locally and can be resumed. */
+      chainSetupPending?: boolean;
     }>;
     uploadMetabotHomepageFile: (input: {
       metabotId: number;
