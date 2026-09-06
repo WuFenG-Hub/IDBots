@@ -2629,6 +2629,34 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     });
   };
 
+  /**
+   * P14 (v1.1) chair-assignment predicate, shared by the auto-ACK gate and the
+   * deferred-queue coalescer: a trigger counts as a worker assignment only
+   * when it is plain chair prose. Worker chatter that merely mentions this
+   * bot and chair protocol/status messages are not assignments, and host
+   * protocol notices (welcome broadcasts, checkpoint/review notices) and
+   * roll-call presence checks @mention every member but are NOT work
+   * assignments either — an auto-ACK against them posts a bogus "[WORKING]
+   * 已接单" whose invented ETA then arms a delivery deadline (task #41: every
+   * welcome ACK armed a 20-26 min fake deadline).
+   */
+  const isChairDispatchContent = (
+    content: string,
+    senderGmid: string,
+    chairGlobalMetaId: string,
+  ): boolean => {
+    if (!chairGlobalMetaId || !senderGmid || senderGmid !== chairGlobalMetaId) return false;
+    return Boolean(
+      content
+      && !DELIVERABLE_TAG.test(content)
+      && !STATUS_TAG.test(content)
+      && !CHECKPOINT_OPEN_TAG.test(content)
+      && !CHECKPOINT_RESOLVED_TAG.test(content)
+      && !hasGroupTaskNotice(content)
+      && !isRollCallPresenceCheck(content),
+    );
+  };
+
   const maybeSendWorkerAck = async (
     task: GroupTask,
     bot: GroupTaskDaemonBotFull,
@@ -2643,22 +2671,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (!autoAckWorkerDispatch) return;
     const content = (message.content ?? '').trim();
     const senderGmid = (message.senderGlobalMetaId ?? '').trim();
-    if (!chairGlobalMetaId || !senderGmid || senderGmid !== chairGlobalMetaId) return;
-    if (
-      !content
-      || DELIVERABLE_TAG.test(content)
-      || STATUS_TAG.test(content)
-      || CHECKPOINT_OPEN_TAG.test(content)
-      || CHECKPOINT_RESOLVED_TAG.test(content)
-      // Host protocol notices (welcome broadcasts, checkpoint/review notices)
-      // and roll-call presence checks @mention every member but are NOT work
-      // assignments. An auto-ACK here posts a bogus "[WORKING] 已接单" whose
-      // invented ETA then arms a delivery deadline — the false
-      // "estimated delivery by … but no [DELIVERABLE] arrived yet" reminders
-      // (task #41: every welcome ACK armed a 20-26 min fake deadline).
-      || hasGroupTaskNotice(content)
-      || isRollCallPresenceCheck(content)
-    ) {
+    if (!isChairDispatchContent(content, senderGmid, chairGlobalMetaId)) {
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: auto-ACK suppressed for bot ${bot.id} ` +
         `(trigger message #${message.id} is not a chair assignment)`,
@@ -2879,6 +2892,63 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
        LIMIT 1`,
       [groupId, id],
     ))[0] ?? null;
+
+  /**
+   * Task #64 deferred-drain coalescer (see the call site for the why). Input
+   * entries are message-id ascending (deferReply keeps the queue sorted), so
+   * per bot the first resolvable chair assignment is the OLDEST one. An
+   * assignment already marked ACK-seen no longer carries an open obligation
+   * and is skipped for the preference. Purged/unreadable message rows drop
+   * out (the drain loop would drop them anyway).
+   */
+  const coalesceDeferredBacklogPerBot = (
+    db: Database,
+    task: GroupTask,
+    members: GroupTaskMember[],
+    entries: DeferredReplyEntry[],
+  ): DeferredReplyEntry[] => {
+    if (entries.length <= 1 || !task.groupId) return entries;
+    const chair = members.find((member) => member.role === 'chair');
+    const chairGmid = (chair?.globalmetaid ?? '').trim();
+    const sqlite = deps.getStore();
+    const byBot = new Map<number, Array<{ entry: DeferredReplyEntry; row: GroupChatMessageRow | null }>>();
+    for (const entry of entries) {
+      const list = byBot.get(entry.metabotId) ?? [];
+      list.push({ entry, row: queryMessageById(db, task.groupId!, entry.messageId) });
+      byBot.set(entry.metabotId, list);
+    }
+    const picked: DeferredReplyEntry[] = [];
+    for (const [metabotId, list] of byBot) {
+      const member = members.find((candidate) => candidate.metabotId === metabotId);
+      const coalescable = Boolean(member && member.role === 'worker') && list.length > 1;
+      if (!coalescable) {
+        for (const item of list) picked.push(item.entry);
+        continue;
+      }
+      const preferred = list.find((item) => {
+        if (!item.row) return false;
+        if (sqlite.get<string>(`${ACK_SEEN_PREFIX}${task.id}:${item.entry.messageId}`) === '1') return false;
+        return isChairDispatchContent(
+          String(item.row.content ?? '').trim(),
+          String(item.row.sender_global_metaid ?? '').trim(),
+          chairGmid,
+        );
+      }) ?? null;
+      const resolvable = list.filter((item) => item.row != null);
+      const keep = preferred?.entry ?? resolvable[resolvable.length - 1]?.entry ?? list[list.length - 1]!.entry;
+      const dropped = list.filter((item) => item.entry !== keep).map((item) => `#${item.entry.messageId}`);
+      if (dropped.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: coalesced bot ${metabotId}'s queued backlog into ` +
+          `message #${keep.messageId}` +
+          (preferred ? ' (oldest still-open chair assignment)' : ' (newest trigger)') +
+          `; superseded: ${dropped.join(', ')}`,
+        );
+      }
+      picked.push(keep);
+    }
+    return picked;
+  };
 
   /** True when the chair bot already replied to the given message pin (P2-7). */
   const chairAlreadyRepliedTo = (
@@ -5784,8 +5854,28 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
       }
     }
+    // Task #64: the join-welcome trigger asks the bot to greet and confirm
+    // presence — that is one fast LLM line, not tool work. Routing it into a
+    // skill turn let a diligent worker burn its whole 30-min budget doing the
+    // task inside the greeting turn (no greeting, no visible output — the
+    // group saw 30 min of silence while the bot quietly worked). Force the
+    // plain completion path so the greeting lands in seconds; the real work
+    // runs on the chair-assignment turn, which still gets the host auto-ACK.
+    const triggerIsWelcomeNotice = hasGroupTaskNotice(
+      (message.content ?? '').trim(),
+      GROUP_TASK_NOTICE.welcome,
+    );
+    if (triggerIsWelcomeNotice && routing.prompt) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: welcome greeting for bot ${bot.id} runs the plain path ` +
+        '(no skill turn — presence confirmations must not become work turns)',
+      );
+    }
     const canRunSkillTurn = Boolean(
-      routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
+      !triggerIsWelcomeNotice
+      && routing.prompt
+      && routing.activeSkillIds.length > 0
+      && deps.runSkillTurn,
     );
 
     const brain = metabotBrainOptions(bot);
@@ -6097,12 +6187,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 || deps.getMetabotStore().getMetabotById(args.metabotId)?.name?.trim()
                 || `bot-${args.metabotId}`;
               const minutes = Math.max(1, Math.round(longTurnChairReminderMs / 60_000));
+              // Task #64: read the ACK watch LIVE (the reminder fires many
+              // minutes after dispatch) so a member who never ACKed the
+              // assignment gets the honest caveat instead of the blanket
+              // "execution appears normal, no reply needed" line.
+              const ackPending = deps.getStore()
+                .get<string>(`${ACK_PENDING_PREFIX}${args.taskId}:${args.metabotId}`) != null;
               await postGroupMessage(
                 args.taskId,
                 args.metabotId,
                 withGroupTaskNotice(
                   GROUP_TASK_NOTICE.longTurn,
-                  copyLongTurnChairReminder(memberName, minutes),
+                  copyLongTurnChairReminder(memberName, minutes, { ackPending }),
                 ),
               );
               emitLog(
@@ -8359,8 +8455,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const lastSpeakSec = speakMap.get(memberGmid.toLowerCase());
         let latestMsgId: number | null = null;
         try {
+          // Task #64: host-authored notice lines carry the member's own
+          // GlobalMetaID (the long-turn reminder) but are not the member
+          // speaking — excluding the ASCII notice prefix keeps the implicit
+          // ACK honest instead of letting the host's own liveness notice
+          // cancel the no-ACK watch.
           const result = sqlite.getDatabase().exec(
-            'SELECT MAX(id) FROM group_chat_messages WHERE group_id = ? AND sender_global_metaid = ?',
+            "SELECT MAX(id) FROM group_chat_messages WHERE group_id = ? AND sender_global_metaid = ?"
+            + " AND content NOT LIKE '[GROUP_TASK_NOTICE:%'",
             [task.groupId, memberGmid.toLowerCase()],
           );
           const value = Number(result[0]?.values?.[0]?.[0]);
@@ -9358,8 +9460,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const ownerGmidKey = ownerGlobalMetaId.toLowerCase();
     const deferredForTask = loadDeferredQueue(task.id);
     if (deferredForTask.length > 0) {
+      // Task #64: coalesce each worker's queued backlog to ONE trigger before
+      // dispatching. The old one-turn-per-queued-message replay made a bot
+      // re-live history after a long turn — welcome, assignment, stall nudge,
+      // … each spawning its own multi-minute turn long after the messages
+      // went stale. One turn now answers the backlog: the OLDEST still-open
+      // chair assignment when one is queued (real assignments are never
+      // silently dropped, and its auto-ACK gate still fires), otherwise the
+      // NEWEST trigger (older chatter is superseded). The turn prompt carries
+      // the recent group log, so superseded messages stay visible as context.
+      // Chair entries keep their per-message semantics (floor control / owner
+      // obligations) and are never coalesced.
+      const coalescedDeferred = coalesceDeferredBacklogPerBot(db, task, members, deferredForTask);
       saveDeferredQueue(task.id, []); // popped; entries re-defer below as needed
-      for (const entry of deferredForTask) {
+      for (const entry of coalescedDeferred) {
         const member = members.find((candidate) => candidate.metabotId === entry.metabotId);
         const bot = botsById.get(entry.metabotId);
         if (!member || !bot) continue;

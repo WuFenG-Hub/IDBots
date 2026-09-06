@@ -2472,6 +2472,14 @@ export class GroupTaskStore {
    * Round-4 (show summary): last chain speak timestamp (epoch seconds) per
    * sender GlobalMetaID for one group — the summary view's member list shows
    * when each member last spoke. Senders without any timestamp are absent.
+   *
+   * Task #64: host-authored [GROUP_TASK_NOTICE:…] lines are posted under the
+   * member's own GlobalMetaID but are NOT the member speaking (the long-turn
+   * reminder, supervisor nudges). Counting them made a silent member look
+   * alive — the implicit-ACK check cleared the no-ACK watch on the host's own
+   * long-turn notice and the unreachable/timeout monitors kept the member
+   * "fresh". They are excluded here by their ASCII protocol prefix so every
+   * consumer reads genuine member speech.
    */
   getMembersLastSpeakAt(
     groupId: string,
@@ -2490,6 +2498,7 @@ export class GroupTaskStore {
        FROM group_chat_messages
        WHERE group_id = ? AND sender_global_metaid IN (${placeholders})
          AND chain_timestamp IS NOT NULL
+         AND content NOT LIKE '[GROUP_TASK_NOTICE:%'
        GROUP BY sender_global_metaid`,
       [groupId, ...ids],
     );

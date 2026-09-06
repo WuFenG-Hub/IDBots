@@ -1307,11 +1307,11 @@ test('parseChairDeadlineMinutes: tag/prose forms parse; ambiguity and junk fall 
   assert.equal(parseChairDeadlineMinutes(null), null);
 });
 
-test('cursor advances on no-reply messages; a failing turn retries via the durable queue in FIFO order', async () => {
+test('cursor advances on no-reply messages; a failing turn\'s retry coalesces with newer queued triggers (task #64)', async () => {
   // Cooldowns off: this test isolates the retry/ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
   try {
-    const task = h.createTask([2]);
+    const task = h.createTask([2, 3]);
 
     // chair talking (self-skip) -> no replies at all
     insertGroupMessage(h.db, {
@@ -1329,13 +1329,15 @@ test('cursor advances on no-reply messages; a failing turn retries via the durab
     // cursor advances once both triggers are dispatched/queued — reply-level
     // retries never regress the cursor.
     h.state.chatError = 'llm exploded';
+    // Worker-originated mentions (Designer Bot → Coder Bot): not chair
+    // assignments, so the drain's newest-trigger preference governs.
     insertGroupMessage(h.db, {
-      pinId: 'boom-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Human', content: '@Coder Bot first attempt',
+      pinId: 'boom-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '@Coder Bot first attempt',
     });
     insertGroupMessage(h.db, {
-      pinId: 'ok-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Human', content: '@Coder Bot second attempt',
+      pinId: 'ok-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '@Coder Bot second attempt',
     });
     await h.loop.runTick();
 
@@ -1347,17 +1349,19 @@ test('cursor advances on no-reply messages; a failing turn retries via the durab
       'cursor advanced once both triggers were dispatched/queued (turn retry rides the durable queue)',
     );
 
-    // Next tick: the failed turn is retried first (FIFO per bot) and succeeds —
-    // the one-shot error is spent. The queued second message waits its turn.
+    // Next tick: the failed retry and the queued trigger COALESCE into one
+    // turn (task #64): neither is a chair assignment, so the drain answers the
+    // NEWEST obligation — the bot is not made to re-live the stale first
+    // message as its own multi-minute turn. The one-shot error is spent and
+    // the single turn succeeds.
     await h.loop.runTick();
-    assert.equal(h.chatCalls.length, 2, 'failed turn retried from the durable queue');
-    assert.match(h.chatCalls[1].userMessage, />>> Human: @Coder Bot first attempt <<</, 'retry keeps message order');
+    assert.equal(h.chatCalls.length, 2, 'one coalesced turn drains the whole backlog');
+    assert.match(h.chatCalls[1].userMessage, />>> Designer Bot: @Coder Bot second attempt <<</, 'newest trigger answered');
     assert.equal(h.sends.length, 1);
+    assert.equal(h.sends[0].replyPin, 'ok-i0', 'reply threaded under the newest trigger');
 
     await h.loop.runTick();
-    assert.equal(h.chatCalls.length, 3, 'queued second message drains after the retry');
-    assert.match(h.chatCalls[2].userMessage, />>> Human: @Coder Bot second attempt <<</);
-    assert.equal(h.sends.length, 2);
+    assert.equal(h.chatCalls.length, 2, 'nothing left to drain — the superseded trigger is spent');
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId);
   } finally {
     h.cleanup();
@@ -2630,6 +2634,134 @@ test('skill path: no routing hit falls back to the plain completion', async () =
     assert.equal(h.chatCalls.length, 1, 'plain completion used');
     assert.equal(h.sends.length, 1);
     assert.match(h.sends[0].content, /reply-for-llm-2/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #64: a join-welcome trigger runs the plain path even when skill routing hits', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+  });
+  try {
+    h.createTask([2]);
+    // The host welcome broadcast shape (posted as the chair, @mentions the
+    // new member, asks for a presence greeting) — task #64: routing it into a
+    // skill turn let the worker burn its whole 30-min budget doing the task
+    // inside the greeting turn while the group saw only silence.
+    insertGroupMessage(h.db, {
+      pinId: 'welcome-coder-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '[GROUP_TASK_NOTICE:welcome]\n🎉 欢迎 @Coder Bot 加入任务「Build MetaApp」!\n'
+        + 'Coder Bot 受邀参与本任务协作。\n'
+        + '@Coder Bot:请先向群内打个招呼确认就位,再开始工作。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.skillTurnCalls.length, 0, 'welcome greeting must not become a skill/work turn');
+    assert.equal(h.chatCalls.length, 1, 'greeting answered via the fast plain completion');
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.sends[0].metabotId, 2);
+    assert.equal(h.sends[0].replyPin, 'welcome-coder-i0', 'greeting threaded under the welcome');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #64: a host long-turn notice under the member\'s name does NOT count as an implicit ACK', async () => {
+  const h = await createHarness({ ackTimeoutMs: 60_000 });
+  try {
+    h.createTask([2]);
+    const startMs = h.state.nowMs;
+    // Chair assignment in plain prose arms the 3-min (here 60s) no-ACK watch.
+    insertGroupMessage(h.db, {
+      pinId: 'assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the icon set and report back',
+      chainTimestamp: Math.floor(startMs / 1000) - 600,
+    });
+    await h.loop.runTick(); // assignment processed; worker turn runs the plain path
+
+    // The host posts its long-turn liveness notice AS Coder Bot (the task #64
+    // incident shape: posted via postGroupMessage under the member identity).
+    insertGroupMessage(h.db, {
+      pinId: 'longturn-notice-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[GROUP_TASK_NOTICE:long_turn]\n@chair ℹ️ Coder Bot 的回合已执行超过 18 分钟,期间无新群消息。'
+        + '执行看似正常,成员交付前无需回应——仅当明显超出预期时长时再介入。',
+      chainTimestamp: Math.floor(startMs / 1000) - 300,
+    });
+    h.state.nowMs = startMs + 120_000; // past the 60s ACK window
+    await h.loop.runTick();
+
+    const reminder = h.sends.find(
+      (s) => s.metabotId === 1 && /has not sent a \[WORKING\] ACK/.test(s.content),
+    );
+    assert.ok(
+      reminder,
+      'the chair still gets the no-ACK warning — a host notice is not member speech',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #64: the deferred drain coalesces a worker backlog into one turn (oldest open assignment wins)', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]);
+    const msgId = (pinId) =>
+      h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', [pinId])[0].values[0][0];
+
+    insertGroupMessage(h.db, {
+      pinId: 'assign-2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the icon set by 18:00',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 900,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'nudge-2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot any progress on the icon set?',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 600,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'chatter-2-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '@Coder Bot fyi the spec changed, see my notes',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 300,
+    });
+    // Production shape: the whole backlog queued behind a long in-flight turn —
+    // the cursor already advanced past every message.
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = ? WHERE id = ?', [msgId('chatter-2-i0'), task.id]);
+    const entries = ['assign-2-i0', 'nudge-2-i0', 'chatter-2-i0']
+      .map((pinId) => ({
+        taskId: task.id,
+        metabotId: 2,
+        messageId: msgId(pinId),
+        reason: 'worker_mentioned',
+        verificationNotes: [],
+      }))
+      .sort((a, b) => a.messageId - b.messageId);
+    h.store.set(`group_task_deferred:${task.id}`, JSON.stringify(entries));
+
+    await h.loop.runTick();
+
+    assert.equal(h.chatCalls.length, 1, 'one turn answers the whole backlog');
+    assert.equal(h.sends.length, 1);
+    assert.equal(
+      h.sends[0].replyPin,
+      'assign-2-i0',
+      'the turn is threaded under the oldest still-open chair assignment',
+    );
+    assert.equal(
+      h.store.get(`group_task_deferred:${task.id}`),
+      undefined,
+      'nothing re-defers — the coalesced backlog is spent',
+    );
+    assert.ok(
+      logs.some((line) => line.includes("coalesced bot 2's queued backlog into message #")),
+      'the coalescing decision is logged',
+    );
   } finally {
     h.cleanup();
   }
@@ -4937,10 +5069,19 @@ test('tick watchdog: a long but healthy tick is never reset — no double dispat
       'a tick with steady progress is never reset, however long it runs',
     );
     const workerSends = h.sends.filter((send) => send.metabotId === 2);
+    // Task #64 drain coalescing: package 1 got its own turn (dispatched before
+    // the backlog existed), then the queued packages 2+3 coalesce into ONE
+    // turn answering the oldest open assignment (#2). Three sequential
+    // re-lived turns would be the old FIFO-replay behavior.
     assert.equal(
       workerSends.length,
-      3,
-      'each assignment was processed exactly once — no watchdog-induced double dispatch',
+      2,
+      'no watchdog-induced double dispatch; the backlog coalesces into one turn',
+    );
+    assert.equal(
+      workerSends[1].replyPin,
+      'wd-long-assign-2-i0',
+      'the coalesced turn answers the oldest open assignment',
     );
   } finally {
     h.cleanup();
@@ -7869,7 +8010,15 @@ test('speedup R-01: a long turn posts no heartbeat lines; lease renews internall
       send.metabotId === 2 && send.content.includes('[GROUP_TASK_NOTICE:long_turn]'));
     assert.equal(reminders().length, 1, 'exactly one reminder, posted as the working bot');
     assert.match(reminders()[0].content, /@chair/, 'the reminder addresses the chair');
-    assert.match(reminders()[0].content, /无需回应|no.*reply|need not reply/i, 'the member is not asked to reply');
+    // Task #64: this scenario holds an ARMED no-ACK watch (the assignment never
+    // got a [WORKING] ACK), so the reminder must flag the missing ACK instead
+    // of the blanket "need not reply" line that used to cancel the stall
+    // narrative.
+    assert.match(
+      reminders()[0].content,
+      /尚未对派单回过 \[WORKING\] ACK|has NOT sent a \[WORKING\] ACK/,
+      'the missing ACK is called out, not papered over',
+    );
 
     releaseTurn();
     await rawLoop.whenIdle();

@@ -188,12 +188,26 @@ export function copyLongTurnHeartbeat(
  * chair; the member is NOT expected to reply (it is mid-turn). Deliberately
  * carries no protocol tags beyond the host-notice envelope, so it never arms
  * ACK watches or delivery deadlines when it round-trips through the daemon.
+ *
+ * Task #64: when the member never ACKed the assignment (ackPending), the
+ * blanket "execution appears normal, no reply needed" claim gaslights the
+ * chair out of acting on the earlier no-ACK warning — the notice then says
+ * the ACK is still outstanding instead.
  */
 export function copyLongTurnChairReminder(
   memberName: string,
   minutes: number,
-  language: AppLanguage = groupTaskLanguage(),
+  opts?: { ackPending?: boolean; language?: AppLanguage },
 ): string {
+  const language = opts?.language ?? groupTaskLanguage();
+  if (opts?.ackPending) {
+    return language === 'en'
+      ? `@chair ℹ️ ${memberName}'s turn has been running for over ${minutes} min with no new group message. ` +
+        `NOTE: ${memberName} has NOT sent a [WORKING] ACK for the assignment yet — once this turn ends, ` +
+        'verify the assignment was actually received and re-dispatch if it was not.'
+      : `@chair ℹ️ ${memberName} 的回合已执行超过 ${minutes} 分钟，期间无新群消息。` +
+        `注意：${memberName} 尚未对派单回过 [WORKING] ACK——回合结束后请确认派单确实送达，未送达请重新派发。`;
+  }
   return language === 'en'
     ? `@chair ℹ️ ${memberName}'s turn has been running for over ${minutes} min with no new group message. ` +
       'Execution appears normal and the member need not reply before delivering — intervene only if this far exceeds the expected duration.'

@@ -12,6 +12,14 @@ import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 
 const SKILL_TURN_TIMEOUT_MS = 300_000;
 /**
+ * Default late-completion window for existing-session skill turns (see
+ * RunExistingSessionSkillTurnParams.lateCompletionTimeoutMs). 10 min keeps
+ * watchdog + window (30 + 10 min at the group-task binding) inside the
+ * daemon's 45-min hard in-flight cap, so a late success settles before the
+ * guard is force-settled and re-driven.
+ */
+const SKILL_TURN_LATE_COMPLETION_WINDOW_MS = 10 * 60_000;
+/**
  * How long the bridge keeps watching a session after the skill-turn watchdog
  * fires. The watchdog only detaches the caller's promise: the worker session
  * keeps running inside CoworkRunner and may legitimately deliver its result
@@ -96,6 +104,21 @@ export interface RunExistingSessionSkillTurnParams {
    * times before dropping the trigger message unanswered (task #41).
    */
   skillTurnTimeoutMs?: number;
+  /**
+   * Late-completion window (ms) AFTER the watchdog fires. The watchdog only
+   * detaches the caller's promise in the OLD contract; here the promise stays
+   * pending while the turn keeps running inside the runner. A session that
+   * completes within this window resolves the turn NORMALLY (the reply flows
+   * through the caller's standard posting path — task #64: eleven's 31-min
+   * turn finished its full deliverable report 90s after the 30-min watchdog
+   * fired, and the detached-listener contract silently discarded it, forcing
+   * the group to re-live the 32-min-old welcome trigger instead). Only when
+   * the session errors, stops, or stays silent past this window does the
+   * promise reject with SkillTurnTimeoutError (the legacy behavior).
+   * Defaults to 10 min. Keep watchdog + window below the group-task daemon's
+   * 45-min hard in-flight cap so a late success settles inside the guard.
+   */
+  lateCompletionTimeoutMs?: number;
 }
 
 export interface RunExistingSessionSkillTurnResult {
@@ -535,12 +558,26 @@ export function runSkillTurnInExistingSession(
       1_000,
       Math.trunc(params.skillTurnTimeoutMs ?? SKILL_TURN_TIMEOUT_MS),
     );
+    const lateCompletionTimeoutMs = Math.max(
+      0,
+      Math.trunc(params.lateCompletionTimeoutMs ?? SKILL_TURN_LATE_COMPLETION_WINDOW_MS),
+    );
     let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
       timeoutId = null;
-      // SkillTurnTimeoutError (not a plain Error) so callers can distinguish a
-      // watchdog fire — the session keeps running in the runner — from a real
-      // turn failure worth retrying.
-      fail(new SkillTurnTimeoutError(sessionId, skillTurnTimeoutMs));
+      // Watchdog fire: the turn keeps running inside the runner, so the
+      // promise stays PENDING and the listeners stay attached for the
+      // late-completion window (task #64: a 31-min turn delivered its full
+      // report 90s past the watchdog — the old detached-listener contract
+      // silently discarded it). A 'complete' inside the window resolves
+      // normally through onComplete; only a session error/stop or window
+      // expiry settles as the legacy failure below.
+      timeoutId = setTimeout(() => {
+        timeoutId = null;
+        // SkillTurnTimeoutError (not a plain Error) so callers can distinguish
+        // a watchdog fire — the session ran past its whole recovery budget —
+        // from a real turn failure worth retrying.
+        fail(new SkillTurnTimeoutError(sessionId, skillTurnTimeoutMs));
+      }, lateCompletionTimeoutMs);
     }, skillTurnTimeoutMs);
 
     runner.on('complete', onComplete);

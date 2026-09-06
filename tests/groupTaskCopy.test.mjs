@@ -94,3 +94,16 @@ test('group task copy: origin-session notices keep protocol tags in both languag
   assert.match(en, /^\[GROUP_TASK_REVIEW\] Task "T" has entered acceptance \(acceptance summary v1\)\./);
   assert.equal(CJK.test(en), false);
 });
+
+test('group task copy: long-turn chair reminder flags a missing ACK instead of "no reply needed" (task #64)', () => {
+  const calm = copy.copyLongTurnChairReminder('Coder Bot', 18, { language: 'zh' });
+  assert.match(calm, /无需回应/);
+  const ackPending = copy.copyLongTurnChairReminder('Coder Bot', 18, { ackPending: true, language: 'zh' });
+  assert.doesNotMatch(ackPending, /无需回应/);
+  assert.match(ackPending, /尚未对派单回过 \[WORKING\] ACK/);
+  const enCalm = copy.copyLongTurnChairReminder('Coder Bot', 18, { language: 'en' });
+  assert.match(enCalm, /need not reply/i);
+  const enPending = copy.copyLongTurnChairReminder('Coder Bot', 18, { ackPending: true, language: 'en' });
+  assert.doesNotMatch(enPending, /need not reply/i);
+  assert.match(enPending, /has NOT sent a \[WORKING\] ACK/);
+});

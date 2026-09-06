@@ -350,7 +350,9 @@ test('runSkillTurnInExistingSession rejects with SkillTurnTimeoutError when the 
   };
 
   // A real long pipeline: the session never completes inside the watchdog
-  // window (it keeps running in the runner after the caller detaches).
+  // window NOR the late-completion window (task #64: the promise stays pending
+  // while the runner keeps executing, and only the expired recovery budget
+  // settles it as a timeout).
   runner.startSession = async () => {};
 
   const resultPromise = runSkillTurnInExistingSession(runner, store, {
@@ -360,6 +362,7 @@ test('runSkillTurnInExistingSession rejects with SkillTurnTimeoutError when the 
     cwd: session.cwd,
     activeSkillIds: ['video'],
     skillTurnTimeoutMs: 1_500,
+    lateCompletionTimeoutMs: 60_000,
   });
   const rejection = assert.rejects(resultPromise, (error) => {
     assert.ok(error instanceof SkillTurnTimeoutError, 'typed timeout error, not a plain Error');
@@ -370,7 +373,8 @@ test('runSkillTurnInExistingSession rejects with SkillTurnTimeoutError when the 
   });
 
   await Promise.resolve();
-  t.mock.timers.tick(1_500);
+  t.mock.timers.tick(1_500); // watchdog fires — promise stays pending
+  t.mock.timers.tick(60_000); // late-completion window expires with no terminal event
   await rejection;
 });
 
@@ -398,6 +402,7 @@ test('runSkillTurnInExistingSession keeps the 300s watchdog default when no over
     systemPrompt: 'system',
     userMessage: 'summarize this pin',
     cwd: session.cwd,
+    lateCompletionTimeoutMs: 30_000,
   });
   const rejection = assert.rejects(resultPromise, (error) => {
     assert.ok(error instanceof SkillTurnTimeoutError);
@@ -406,6 +411,7 @@ test('runSkillTurnInExistingSession keeps the 300s watchdog default when no over
   });
 
   await Promise.resolve();
-  t.mock.timers.tick(300_000);
+  t.mock.timers.tick(300_000); // default watchdog
+  t.mock.timers.tick(30_000); // late-completion window expiry settles the timeout
   await rejection;
 });
