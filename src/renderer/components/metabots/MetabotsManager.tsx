@@ -735,7 +735,10 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       );
     }
   }
-  const performSyncToChain = async (metabot: Metabot) => {
+  // Hoisted declarations like the delete handlers above: the edit view's
+  // resync button and the sync-modal retry reach these through the early
+  // return, where const arrows would be TDZ-dead.
+  async function performSyncToChain(metabot: Metabot) {
     setSyncStatus('syncing');
     setSyncError('');
     try {
@@ -761,7 +764,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       setSyncStatus('error');
       setSyncError(err instanceof Error ? err.message : 'Sync failed');
     }
-  };
+  }
 
   /**
    * Manual Retry for an edit whose on-chain sync is incomplete. Republishes
@@ -819,7 +822,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     await performSyncToChain(createSuccessModal.metabot);
   }
 
-  const handleSyncUnsyncedMetabot = (metabot: Metabot) => {
+  function handleSyncUnsyncedMetabot(metabot: Metabot) {
     setCreateSuccessModal({
       metabot,
       subsidySuccess: true,
@@ -829,7 +832,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     });
     setEditSyncRemaining(null);
     void performSyncToChain(metabot);
-  };
+  }
 
   /**
    * One-click re-sync for a bot whose chain sync is partial (FR4). When main
@@ -839,7 +842,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
    * step, which the edit plan cannot carry) fall back to the full resync,
    * which itself skips already-pinned chatpubkey.
    */
-  const handleResyncPartial = async (metabot: Metabot) => {
+  async function handleResyncPartial(metabot: Metabot) {
     const steps = metabot.chain_sync_pending_steps ?? [];
     if (steps.length > 0 && !steps.includes('chatpubkey')) {
       setCreateSuccessModal({
@@ -883,7 +886,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       return;
     }
     handleSyncUnsyncedMetabot(metabot);
-  };
+  }
 
   const handleRestoreCompleted = (metabot: Metabot) => {
     setList((prev) => (prev.some((m) => m.id === metabot.id) ? prev : sortMetabotsByCreatedAtAsc([...prev, metabot])));
