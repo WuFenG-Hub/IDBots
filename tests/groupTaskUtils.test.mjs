@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   ACTIVE_GROUP_TASK_STATUSES,
   canAcceptGroupTask,
+  dedupeDeliverablesByPinid,
+  deliverablePinidKey,
   isActiveGroupTaskStatus,
   filterGroupTasksByTab,
   groupTaskStatusBadgeClass,
@@ -16,6 +18,32 @@ import {
 } from '../src/renderer/components/groupTasks/groupTaskUtils.js';
 
 const task = (id, status) => ({ id, status });
+
+test('task #63: deliverablePinidKey treats scheme/suffix variants as one artifact', () => {
+  const pin = 'd6155cf69f078c826e0db128d874673325bb5c6ae07348f75899a3621cdac497i0';
+  assert.equal(deliverablePinidKey(`metaapp://${pin}`), pin);
+  assert.equal(deliverablePinidKey(`metafile://${pin}.zip`), pin);
+  assert.equal(deliverablePinidKey(`pin://${pin.toUpperCase()}`), pin);
+  assert.equal(deliverablePinidKey('https://example.com/a'), null);
+  assert.equal(deliverablePinidKey(null), null);
+  assert.equal(deliverablePinidKey(undefined), null);
+});
+
+test('task #63: dedupeDeliverablesByPinid keeps one card per artifact (earliest row wins)', () => {
+  const pin = 'd6155cf69f078c826e0db128d874673325bb5c6ae07348f75899a3621cdac497i0';
+  const rows = [
+    { id: 1058, uri: `metaapp://${pin}` },          // publisher's row (earliest)
+    { id: 1061, uri: `metaapp://${pin}` },          // later citer's duplicate
+    { id: 1059, uri: 'metafile://057c9b6eb1bae37c9a9df27bcd5623c7d13c01c4931a11843f9d257e530a281ei0.zip' },
+    { id: 1060, uri: 'https://example.com/preview' }, // url rows have no pinid — pass through
+  ];
+  assert.deepEqual(
+    dedupeDeliverablesByPinid(rows).map((row) => row.id),
+    [1058, 1059, 1060],
+  );
+  assert.deepEqual(dedupeDeliverablesByPinid([]), []);
+  assert.deepEqual(dedupeDeliverablesByPinid(null), []);
+});
 
 test('isActiveGroupTaskStatus: planning/executing/review are active, terminal states are not', () => {
   assert.deepEqual(ACTIVE_GROUP_TASK_STATUSES, ['planning', 'executing', 'review']);

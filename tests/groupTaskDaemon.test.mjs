@@ -2079,6 +2079,50 @@ test('Task #63: the no-progress nudge NAMES the unapplied [STATUS:*] citation wh
   }
 });
 
+test('Task #63 deliverables: another member tagging an already-recorded URI folds — one row, one author', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]); // executing
+    const pin = 'd6155cf69f078c826e0db128d874673325bb5c6ae07348f75899a3621cdac497i0';
+    // Worker 2 (gmid-w2) publishes the artifact (task #63 msg 3656 shape:
+    // tag-led description line, URI on the next line).
+    insertGroupMessage(h.db, {
+      pinId: 'gt63-deliver-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] 第29期 MetaApp 已上链\n\nmetaapp://${pin}`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    // Worker 3's promo message tags the SAME metaapp in its own [DELIVERABLE]
+    // line (task #63 msg 3663 shape — the promo-cites-product case that minted
+    // the duplicate row attributed to the wrong member).
+    insertGroupMessage(h.db, {
+      pinId: 'gt63-promo-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot',
+      content: `[DELIVERABLE] 群聊推广位：直开 metaapp://${pin} 看完整第 29 期`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    const rows = h.groupTaskStore.listDeliverables(task.id)
+      .filter((deliverable) => (deliverable.uri ?? '').includes(pin.slice(0, 32)));
+    assert.equal(rows.length, 1, 'one artifact = one ledger row');
+    assert.equal(
+      (rows[0].authorGlobalmetaid ?? '').toLowerCase(),
+      'gmid-w2',
+      'the author stays the original publisher, not the citer',
+    );
+    assert.ok(
+      logs.some((line) => line.includes('cites') && line.includes('folded')),
+      'the cross-member citation fold is logged',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('Task #63: reconcile re-arms on cursor advance — a mid-run parser miss heals on the next tick', async () => {
   const logs = [];
   const h = await createHarness({ emitLog: (message) => logs.push(message) });
@@ -4154,7 +4198,7 @@ test('round-4 correction-first: a 更正 message supersedes the matched delivera
   }
 });
 
-test('round-4: one message with two [DELIVERABLE] tag lines records two rows (msg94 regression)', async () => {
+test('round-4 (task #63 revision): two tag lines, two artifacts → two rows; a viewer URL for the SAME artifact folds', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
@@ -4164,17 +4208,17 @@ test('round-4: one message with two [DELIVERABLE] tag lines records two rows (ms
       content: [
         `**[DELIVERABLE] metaapp: metaapp://${REAL_PINID_1}**`,
         `**[DELIVERABLE] 分享链接: https://openagentinternet.org/browser/metaapp/${REAL_PINID_1}**`,
+        `**[DELIVERABLE] 技能包: metafile://${REAL_PINID_2}.zip**`,
       ].join('\n'),
     });
     await h.loop.runTick();
     const rows = h.groupTaskStore.listDeliverables(task.id);
-    assert.equal(rows.length, 2, 'one row per tag line');
-    assert.deepEqual(rows.map((r) => r.kind).sort(), ['metaapp', 'url']);
+    // Task #63: one artifact = one row. The share link embeds the SAME pinid
+    // in its path (a web viewer for the same on-chain object) and folds into
+    // the metaapp row; the separate skill zip keeps its own row.
+    assert.equal(rows.length, 2, 'two distinct artifacts, one row each');
     assert.ok(rows.some((r) => r.uri === `metaapp://${REAL_PINID_1}`), 'metaapp row kept');
-    assert.ok(
-      rows.some((r) => r.uri === `https://openagentinternet.org/browser/metaapp/${REAL_PINID_1}`),
-      'share-link row kept (previously dropped by the whole-message dedupe)',
-    );
+    assert.ok(rows.some((r) => r.uri === `metafile://${REAL_PINID_2}.zip`), 'distinct zip row kept');
     assert.ok(!rows.some((r) => r.uri?.endsWith('**')), 'no trailing markdown in recorded URIs');
   } finally {
     h.cleanup();

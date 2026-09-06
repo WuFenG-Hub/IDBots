@@ -104,6 +104,8 @@ import {
 import {
   parseDeliverableLines,
   parseDeliverableSegments,
+  extractPinidToken,
+  hasDeliverableTagLine,
   extractLocalFilePaths,
   parseWorkingAck,
   hasStandbyMarker,
@@ -628,7 +630,13 @@ function readTaskSessionActivityMessages(
  * URIs anywhere else in the message body never influence the outcome.
  */
 const deliverableTagLines = (content: string): string[] =>
-  content.split('\n').filter((line) => DELIVERABLE_TAG.test(line));
+  content
+    .split('\n')
+    // Task #63: only lines LED BY the tag (emphasis prefix tolerated, same as
+    // the parser's TAG_LED_LINE_RE) are protocol deliveries — mid-line mentions
+    // are prose citations ("上条 [DELIVERABLE] 即为回应") and must never satisfy
+    // a dependency gate.
+    .filter((line) => /^[\s*_]*\[deliverable\]/i.test(line.trimStart()));
 
 /**
  * True when two strings carry hex runs (pinids/txids, ignoring protocol
@@ -1160,7 +1168,7 @@ export function decideGroupTaskResponders(
       && hits.get(member.metabotId) === true,
   ).length;
   const addressedToSpecificMember = workerHitCount > 0 || chairHit;
-  const hasDeliverable = DELIVERABLE_TAG.test(content);
+  const hasDeliverable = hasDeliverableTagLine(content);
 
   for (const member of members) {
     if (member.metabotId == null) continue;
@@ -4236,7 +4244,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const parseContent = stripFencedCodeBlocks(content);
     if (message.senderSuspect) {
       // no deliverable collection for non-member speakers
-    } else if (DELIVERABLE_TAG.test(parseContent) && !isChairMessage) {
+    } else if (hasDeliverableTagLine(parseContent) && !isChairMessage) {
       // Round-4: per-candidate ingestion. Every [DELIVERABLE] tag occurrence
       // (its own line or inline) produces one candidate; valid candidates each
       // get their own row — a message with two tag lines records TWO rows.
@@ -4320,6 +4328,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: duplicate [DELIVERABLE] ${candidate.uri.slice(0, 48)}… ` +
               `by the same author folded into ledger row #${prior.id} (no new record)`,
+            );
+            continue;
+          }
+          // Task #63: artifact-identity fold — a deliverable URI names ONE
+          // on-chain product with ONE author (the publisher that first
+          // recorded it). Another member tagging the same pinid (a promo
+          // citing the finished MetaApp, copy referencing the package pin) is
+          // a citation, never a second deliverable row with a second author.
+          const priorByPinid = store.findDeliverableByPinid(task.id, extractPinidToken(candidate.uri));
+          if (priorByPinid) {
+            appendDeliverableDuplicateNote(priorByPinid, msgPinId, candidate.uri);
+            foldedDuplicateCount += 1;
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: [DELIVERABLE] ${candidate.uri.slice(0, 48)}… cites ` +
+              `ledger row #${priorByPinid.id}'s artifact (pinid already delivered) — folded, no new record`,
             );
             continue;
           }

@@ -307,6 +307,33 @@ export function groupTaskMemberStatusBadgeClass(status) {
   }
 }
 
+/**
+ * Task #63: a deliverable URI's 64-hex+i0 pinid token IS the on-chain artifact
+ * identity (`pin://X` / `metaapp://X` / `…X.zip` are the same object). Rows
+ * sharing a pinid are the same artifact recorded twice — the panel keeps the
+ * FIRST row (the earliest claim = the publisher) and hides the rest.
+ */
+export function deliverablePinidKey(uri) {
+  const match = /[0-9a-f]{64}i0/i.exec(String(uri ?? ''));
+  return match ? match[0].toLowerCase() : null;
+}
+
+/**
+ * Task #63: display dedupe — one artifact, one card. Legacy ledgers (recorded
+ * before artifact-identity folding landed) may hold the same pinid under two
+ * authors; keep-first by pinid so the panel never shows a duplicate.
+ */
+export function dedupeDeliverablesByPinid(deliverables) {
+  const seen = new Set();
+  return (Array.isArray(deliverables) ? deliverables : []).filter((deliverable) => {
+    const key = deliverablePinidKey(deliverable?.uri);
+    if (!key) return true; // url/text rows have no pinid identity — pass through
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /** P0-2: human label for the member state-machine status. */
 export function groupTaskMemberStatusLabel(status) {
   switch (status) {

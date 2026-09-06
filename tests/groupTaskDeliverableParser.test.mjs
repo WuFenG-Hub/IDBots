@@ -7,6 +7,8 @@ const {
   parseDeliverableLines,
   parseDeliverableSegments,
   isTextDeliverable,
+  hasDeliverableTagLine,
+  extractPinidToken,
 } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
 
 // ---------------------------------------------------------------------------
@@ -162,14 +164,13 @@ test('#6 style: tag line without URI but body contains metaapp/ dir path → tex
   assert.equal(parsed[0].uri, null);
 });
 
-test('one line with TWO [DELIVERABLE] tags → two candidates', () => {
+test('one line with TWO mid-line [DELIVERABLE] tags is prose, never candidates (round 6)', () => {
+  // Round-4 fixture shape (task #7): both tags sit MID-LINE behind prose.
+  // Round 6: the tag must LEAD the line — a mention after other words is a
+  // citation; such a line records nothing. Tag-led lines (one artifact per
+  // line) are the taught standard.
   const content = `任务完成：**[DELIVERABLE] metaapp: metaapp://${PIN_A}** 与 **[DELIVERABLE] 分享: https://openagentinternet.org/browser/metaapp/${PIN_A}**`;
-  const parsed = parseDeliverableLines(content);
-  assert.equal(parsed.length, 2);
-  assert.equal(parsed[0].kind, 'metaapp');
-  assert.equal(parsed[0].uri, `metaapp://${PIN_A}`);
-  assert.equal(parsed[1].kind, 'url');
-  assert.equal(parsed[1].uri, `https://openagentinternet.org/browser/metaapp/${PIN_A}`);
+  assert.deepEqual(parseDeliverableLines(content), []);
 });
 
 test('valid and invalid tag lines in the same message: invalid ones filtered, valid ones kept', () => {
@@ -474,25 +475,26 @@ test('ambiguous lookahead line keeps the same-line verdict (local-file bullets s
   assert.equal(parsed[0].uri, null);
 });
 
-test('prose tag mention followed by prose stays text (no phantom URI)', () => {
+test('prose tag mention (mid-line) is a citation, never a candidate (task #63)', () => {
   const content = [
     '状态澄清，非误期：前置条件是 Builder 的 S3 上链产物，尚未落地，故此时不可能有 [DELIVERABLE]。',
     '',
     '当前我侧就绪度：buzz 终稿已落盘备好，仅剩 2 个链接回填位。',
   ].join('\n');
+  // Round 6: only lines LED BY the tag count; a mid-line mention is prose.
   const parsed = parseDeliverableLines(content);
-  assert.equal(parsed.length, 1);
-  assert.equal(parsed[0].kind, 'text');
-  assert.equal(parsed[0].valid, true);
-  assert.equal(parsed[0].uri, null);
+  assert.deepEqual(parsed, []);
+  assert.equal(hasDeliverableTagLine(content), false);
 });
 
 // ---------------------------------------------------------------------------
-// EP28 hardening (round 5): body-line sweep of tagged messages.
-// The EP28 (task #61) receipts put real URIs on body lines after the tag line
-// (backtick-wrapped, list items, reply-form) — round 4 recorded all 9 of them
-// as bare text rows (uri NULL) and the acceptance UI degraded to "unverifiable".
-// Fixtures: tests/fixtures/group-task-ep2{7,8}-show.json (full ledgers).
+// Round 6 (task #63): the body-line sweep is REMOVED. A deliverable is what
+// the sender created and published on-chain for THIS task, announced with a
+// tag-led line; URIs elsewhere in the message are citations (earlier tasks'
+// products, other members' artifacts) and never mint rows. The EP28 (task
+// #61) receipts that motivated the sweep are now a prompt-standard matter
+// (one artifact per tag-led line) — under-recording a non-compliant receipt
+// is preferred over absorbing foreign references into the ledger.
 // ---------------------------------------------------------------------------
 
 const EP28_METAAPP = 'bc26756ec9402be19caa867f081c315a387cc958d3bc6cd95c05545001afc0c6i0';
@@ -501,10 +503,10 @@ const EP28_COVER = 'dc69d066a4453d6fe3bdf0c6d9e573ef131dfae0e091092c15f4b300b9af
 const EP28_ZIP = '6b91194b368bb1ce69af7b86fe5ae9cde47583dce8e5f0443ed0c386bc25a6a5i0';
 const EP28_PIN = '09aaf041607feaf64e85f3b3b2884d11285de80ff887e5fa5db233f4c5debaaai0';
 
-test('EP28 hardening: reply-form receipt with backticked body URIs → URIs captured from body lines', () => {
-  // Verbatim shape of EP28 msg 0bd184e9 (Builder阿码, replyPin set): the tag
-  // line itself carries no URI; every pin lives on body lines, some in
-  // backticks.
+test('round 6: EP28 reply-form receipt (URIs only on body lines) records the tag as text, body URIs stay citations', () => {
+  // Verbatim shape of EP28 msg 0bd184e9: the tag line carries no URI; every
+  // pin lives on body lines. Round 6 deliberately does NOT sweep them — the
+  // standard is one artifact per tag-led line (taught in the worker prompt).
   const content = [
     '[DELIVERABLE] S3b MetaApp 组装上链完成 ✅ + 真装闭环验证完成 ✅（耗时约 17 分钟）',
     '',
@@ -516,15 +518,12 @@ test('EP28 hardening: reply-form receipt with backticked body URIs → URIs capt
     '',
   ].join('\n');
   const parsed = parseDeliverableLines(content);
-  const uris = parsed.filter((candidate) => candidate.valid && candidate.uri).map((candidate) => candidate.uri);
-  assert.ok(uris.includes(`metaapp://${EP28_METAAPP}`), `metaapp missing: ${uris}`);
-  assert.ok(uris.includes(`metafile://${EP28_COVER}`), 'cover missing');
-  assert.ok(uris.includes(`metafile://${EP28_ZIP}.zip`), 'zip missing (suffix kept)');
-  // Backticks never leak into the captured URI.
-  for (const uri of uris) assert.ok(!uri.includes('`'), uri);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].kind, 'text');
+  assert.equal(parsed[0].uri, null);
 });
 
-test('EP28 hardening: tag line with ONE tag and NO URI + body table with TWO valid URIs → both captured', () => {
+test('round 6: tag line + body table with URIs → text row only (no sweep)', () => {
   const content = [
     '[DELIVERABLE] S2b 演示视频完成 ✅ 上链 + 公网 HTTP 200 实测通过',
     '',
@@ -533,12 +532,12 @@ test('EP28 hardening: tag line with ONE tag and NO URI + body table with TWO val
     '- 封面 metafile://dc69d066a4453d6fe3bdf0c6d9e573ef131dfae0e091092c15f4b300b9afbc01i0',
   ].join('\n');
   const parsed = parseDeliverableLines(content);
-  assert.equal(parsed.length, 3); // 1 text (tag) + 2 body URIs
-  const uris = parsed.filter((candidate) => candidate.uri).map((candidate) => candidate.uri);
-  assert.deepEqual(uris, [`metafile://${EP28_VIDEO}.mp4`, `metafile://${EP28_COVER}`]);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].kind, 'text');
+  assert.equal(parsed[0].uri, null);
 });
 
-test('EP28 hardening: adjacent URI line upgrades via #62 lookahead; alignment holds (1 entry, URI segment)', () => {
+test('round 6: adjacent URI line upgrades via #62 lookahead; alignment holds (1 entry, URI segment)', () => {
   // Tag line + URI on the NEXT line → the lookahead path upgrades in place
   // (one entry, not tag-text + body-append); parseDeliverableSegments stays
   // index-aligned with the upgraded candidate.
@@ -558,7 +557,7 @@ test('EP28 hardening: adjacent URI line upgrades via #62 lookahead; alignment ho
   assert.equal(segments[0], 'S4 推广发布完成 ✅ buzz 已上链');
 });
 
-test('EP28 hardening: URI beyond the 3-line lookahead window is body-swept (appended, alignment holds)', () => {
+test('round 6: URI beyond the 3-line lookahead window stays unrecorded', () => {
   const content = [
     '[DELIVERABLE] S4 推广发布完成 ✅ buzz 已上链',
     '',
@@ -567,30 +566,23 @@ test('EP28 hardening: URI beyond the 3-line lookahead window is body-swept (appe
     `- 远端封装：pin://${EP28_PIN}`,
   ].join('\n');
   const lines = parseDeliverableLines(content);
-  const segments = parseDeliverableSegments(content);
-  assert.equal(lines.length, segments.length);
-  assert.equal(lines.length, 2); // text tag row + body-swept URI row
+  assert.equal(lines.length, 1);
   assert.equal(lines[0].kind, 'text');
-  assert.equal(lines[1].kind, 'pinid');
-  assert.equal(lines[1].uri, `pin://${EP28_PIN}`);
-  assert.equal(segments[1], `pin://${EP28_PIN}`); // synthetic URI-only segment
+  assert.equal(lines[0].uri, null);
 });
 
-test('EP28 hardening: negative — ordinary chatter mentioning a URI without the tag is never recorded', () => {
+test('round 6: negative — mid-line tag citation with a URI is never recorded (task #63 false-alarm shape)', () => {
   const content = '我上一条 [DELIVERABLE] 消息里的 metaapp://bc26756ec9402be19caa867f081c315a387cc958d3bc6cd95c05545001afc0c6i0 请查收';
-  const parsed = parseDeliverableLines(content);
-  // Tag is inline and the URI sits in the SAME line — one inline-tag segment;
-  // body sweep only runs on NON-tag lines, so the URI is captured once, not twice.
-  assert.equal(parsed.length, 1);
-  assert.equal(parsed[0].uri, `metaapp://${EP28_METAAPP}`);
+  assert.deepEqual(parseDeliverableLines(content), []);
+  assert.equal(hasDeliverableTagLine(content), false);
 });
 
-test('EP28 hardening: negative — prose URI in a NON-tagged message stays unrecorded', () => {
+test('round 6: negative — prose URI in a NON-tagged message stays unrecorded', () => {
   const parsed = parseDeliverableLines(`回顾上期：metaapp://${EP28_METAAPP} 已经验收 5/5`);
   assert.deepEqual(parsed, []);
 });
 
-test('EP28 hardening: negative — body placeholders / truncated tokens never mint rows', () => {
+test('round 6: negative — body placeholders / truncated tokens never mint rows', () => {
   const content = [
     '[DELIVERABLE] 归档完成',
     '- 参考示例 metaapp://<pinId>（占位符）',
@@ -601,17 +593,17 @@ test('EP28 hardening: negative — body placeholders / truncated tokens never mi
   assert.equal(parsed[0].kind, 'text');
 });
 
-test('EP28 hardening: duplicate URI on tag line and body line folds, recorded once', () => {
+test('round 6: tag-line URI with a duplicate on a body line records once (body ignored)', () => {
   const content = [
     `[DELIVERABLE] metaapp://${EP28_METAAPP}`,
     '- 正本：metaapp://bc26756ec9402be19caa867f081c315a387cc958d3bc6cd95c05545001afc0c6i0（链上可解析）',
   ].join('\n');
   const parsed = parseDeliverableLines(content);
-  const metaappRows = parsed.filter((candidate) => candidate.uri === `metaapp://${EP28_METAAPP}`);
-  assert.equal(metaappRows.length, 1);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].uri, `metaapp://${EP28_METAAPP}`);
 });
 
-test('EP28 hardening: EP28-style body URIs do NOT leak into untagged deliverable validation', () => {
+test('round 6: EP28-style body URIs do NOT leak into untagged deliverable validation', () => {
   // validateDeliverableLines is the send-path warning helper: an untagged
   // message must produce zero candidates (no false-positive warnings).
   const { validateDeliverableLines } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
@@ -620,9 +612,10 @@ test('EP28 hardening: EP28-style body URIs do NOT leak into untagged deliverable
   assert.equal(validation.errors.length, 0);
 });
 
-test('EP28 hardening: full-width CJK punctuation terminates a body URI (icon=X metafile://…i0，coverImg=…)', () => {
-  // EP28 msg 0bd184e9 real line: the URI is followed by a full-width comma —
-  // the payload must stop there, never swallow the annotation.
+test('round 6: full-width CJK punctuation terminates a lookahead-line URI (icon=X metafile://…i0，coverImg=…)', () => {
+  // The line right below the tag is the #62 lookahead; the URI is followed by
+  // a full-width comma — the payload must stop there, never swallow the
+  // annotation.
   const parsed = parseDeliverableLines([
     '[DELIVERABLE] S3b MetaApp 组装上链完成',
     'payload 显式携带：icon=Hero metafile://dc69d066a4453d6fe3bdf0c6d9e573ef131dfae0e091092c15f4b300b9afbc01i0，coverImg=同一 Hero',
@@ -630,4 +623,52 @@ test('EP28 hardening: full-width CJK punctuation terminates a body URI (icon=X m
   const cover = parsed.find((candidate) => candidate.uri?.startsWith('metafile://dc69d066'));
   assert.ok(cover, 'cover URI missing');
   assert.equal(cover.uri, 'metafile://dc69d066a4453d6fe3bdf0c6d9e573ef131dfae0e091092c15f4b300b9afbc01i0');
+});
+
+// ---------------------------------------------------------------------------
+// Round 6 (task #63 regression): citation vs delivery at the parser level.
+// ---------------------------------------------------------------------------
+
+test('task #63 regression: Lucy\'s copy-delivery message records ONLY her own pin — the EP28 metaapp cited in testing notes stays out', () => {
+  // Verbatim shape of GT#63 msg a6daa4c8: tag-led description line, HER new
+  // pin on the next non-blank line, and yesterday's EP28 metaapp deep in the
+  // 亲测口径 bullets. The round-5 sweep minted BOTH (row 1040 = the EP28
+  // app attributed to Lucy).
+  const lucyPin = '73730a32f39ca2683565c84195186f86b21cf9ca89e02b79b044af1821f1c4e6i0';
+  const ep28App = '020098ee0678125af7c2a1222b25d54699b3d52861249f11ff211612b691a8c9i0';
+  const content = [
+    '[DELIVERABLE] 第29期 MetaApp 亲测文案终稿已上链（含六板块全文、装法段三处占位符、署名五名 metaid:// 齐）',
+    '',
+    `pin://${lucyPin}`,
+    '',
+    '亲测口径（全部一手实测，2026-09-06 07:14-07:22）：',
+    `- 解剖对象为上期已上链应用 metaapp://${ep28App}：payload 读链 → zip 公网 200（26,154 B）`,
+    '- 上期 skill 封装 zip 同样实测公网 200（78,303 B），直装路径可信',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].kind, 'pinid');
+  assert.equal(parsed[0].uri, `pin://${lucyPin}`);
+});
+
+test('task #63: backticked/fenced tag citations are documentation, never deliveries', () => {
+  assert.deepEqual(parseDeliverableLines('用法：`[DELIVERABLE] <uri>` 一行一个成果。'), []);
+  assert.deepEqual(parseDeliverableLines(`示例:\n\`\`\`\n[DELIVERABLE] metaapp://${EP28_METAAPP}\n\`\`\`\n如上。`), []);
+  assert.equal(hasDeliverableTagLine('用法：`[DELIVERABLE] <uri>` 一行一个成果。'), false);
+});
+
+test('task #63: hasDeliverableTagLine agrees with the parser on leading-tag lines', () => {
+  assert.equal(hasDeliverableTagLine('[DELIVERABLE] 第29期文案已上链'), true);
+  assert.equal(hasDeliverableTagLine('  [DELIVERABLE] 缩进行的交付'), true); // trimmed lead
+  assert.equal(hasDeliverableTagLine('上条 [DELIVERABLE] 即为回应'), false);
+  assert.equal(hasDeliverableTagLine('无 [DELIVERABLE] 属正常等待，非超时'), false);
+});
+
+test('task #63: extractPinidToken treats scheme/suffix variants as ONE artifact identity', () => {
+  const pin = 'd6155cf69f078c826e0db128d874673325bb5c6ae07348f75899a3621cdac497';
+  assert.equal(extractPinidToken(`metaapp://${pin}i0`), `${pin}i0`);
+  assert.equal(extractPinidToken(`metafile://${pin}i0.zip`), `${pin}i0`);
+  assert.equal(extractPinidToken(`pin://${pin.toUpperCase()}I0`.toLowerCase()), `${pin}i0`);
+  assert.equal(extractPinidToken('https://example.com/a'), null);
+  assert.equal(extractPinidToken(null), null);
 });
