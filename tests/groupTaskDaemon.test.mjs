@@ -1879,6 +1879,45 @@ test('GT-04 adjudication: pure verdicts across the historical message shapes', (
   assert.deepEqual(mixed.noOp, ['review']);
 });
 
+test('Task #63: markdown-emphasis-wrapped standalone tag lines are instructions; quotes and prose stay descriptive', () => {
+  // The literal task #63 shape (msg 3664): a long wrap-up report with the
+  // verdict BOLDED on its own line mid-message, prose and a table after it —
+  // pre-fix this filed as descriptive and parked the task in executing.
+  const v63 = adjudicateStatusDirectives(
+    '**六项验收全过**：①MetaApp 上链五要素+0 Web2+0 残留。\n\n'
+      + '**[STATUS:REVIEW]**\n\n'
+      + '**第 29 期交付汇总**（全流程 07:08-09:48）：\n\n'
+      + '| 交付物 | 链上 URI |\n|---|---|\n| MetaApp | metaapp://d6155cf6i0 |',
+    'executing',
+  );
+  assert.equal(v63.instruction, 'review', 'bolded own-line verdict is an instruction');
+  assert.deepEqual(v63.rejected, []);
+  assert.deepEqual(v63.descriptive, []);
+
+  // Underscore (italic/bold) wrapping counts too.
+  const vUnder = adjudicateStatusDirectives('汇总如上。\n__[STATUS:EXECUTING]__\n开工。', 'planning');
+  assert.equal(vUnder.instruction, 'executing');
+
+  // A stray unbalanced emphasis marker around the tag is still standalone.
+  const vUnbalanced = adjudicateStatusDirectives('汇总如上。\n* [STATUS:REVIEW] *\n见下表。', 'executing');
+  assert.equal(vUnbalanced.instruction, 'review');
+
+  // Strikethrough negates intent — stays descriptive.
+  const vStrike = adjudicateStatusDirectives('汇总如上。\n~~[STATUS:REVIEW]~~\n见下。', 'executing');
+  assert.equal(vStrike.instruction, null);
+  assert.deepEqual(vStrike.descriptive, ['review']);
+
+  // A blockquote line quotes another speaker — stays descriptive.
+  const vQuote = adjudicateStatusDirectives('如前所述：\n> [STATUS:REVIEW]\n见上。', 'executing');
+  assert.equal(vQuote.instruction, null);
+
+  // Mid-sentence prose citations on non-final lines stay descriptive (the
+  // corrective-note path, not a transition).
+  const vProse = adjudicateStatusDirectives('交付齐后我会发 [STATUS:REVIEW]。\n各位抓紧， deadline 前。', 'executing');
+  assert.equal(vProse.instruction, null);
+  assert.deepEqual(vProse.descriptive, ['review']);
+});
+
 test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-line REVIEW, and the group hears why', async () => {
   const h = await createHarness();
   try {
@@ -1912,6 +1951,167 @@ test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-
     assert.ok(note.content.includes('[STATUS:EXECUTING]'), 'note names the applied tag');
     assert.ok(note.content.includes('`[STATUS:REVIEW]`'), 'note cites the rejected tag backtick-wrapped');
     assert.ok(note.content.includes('planning -> review'), 'note explains the rejection reason');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #63 replay: a bolded own-line [STATUS:REVIEW] wrap-up enters review on the FIRST pass', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing — the #63 stuck state
+    // The literal msg-3664 shape: long wrap-up, the verdict bolded on its own
+    // line mid-message, prose and a table AFTER it (so it is not the end line).
+    insertGroupMessage(h.db, {
+      pinId: 'msg63-wrapup-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '**六项验收全过**：①MetaApp 上链五要素+0 Web2+0 残留。\n\n'
+        + '**[STATUS:REVIEW]**\n\n'
+        + '**第 29 期交付汇总**（全流程 07:08-09:48）：\n\n'
+        + '| 交付物 | 链上 URI |\n|---|---|\n| MetaApp | metaapp://d6155cf6i0 |',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'review',
+      'the bolded own-line verdict applies immediately — #63 never parks in executing',
+    );
+    assert.ok(
+      h.groupTaskStore.listTaskTransitions(task.id)
+        .some((t) => t.toStatus === 'review' && /\[STATUS:REVIEW\] tag/.test(t.reason ?? '')),
+      'applied transition is audited',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #63: a prose-embedded [STATUS:*] citation with no instruction posts the corrective note, rate-limited', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing
+    insertGroupMessage(h.db, {
+      pinId: 'prose-review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '交付齐后我会发 [STATUS:REVIEW]。\n各位抓紧， deadline 前。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing', 'prose citation moves nothing');
+    const notes = h.sends.filter((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]'));
+    assert.equal(notes.length, 1, 'the corrective descriptive note was posted');
+    assert.equal(notes[0].replyPin, 'prose-review-i0', 'the note reply-chains the offending message');
+    assert.ok(notes[0].content.includes('[STATUS:REVIEW]'), 'the note names the legal tag');
+    assert.ok(notes[0].content.includes('executing'), 'the note states the live status');
+
+    // Rate limit: a second prose citation inside the window stays log-only.
+    insertGroupMessage(h.db, {
+      pinId: 'prose-review-2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '再次提醒：完成后发 [STATUS:REVIEW] 才算数。\n别忘。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]')).length,
+      1,
+      'descriptive notes are rate-limited per task',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #63: a descriptive-only citation with no legal move stays silent (plan prose protection)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    // GT#47's documented plan-prose shape: cites REVIEW (illegal from
+    // planning) with no instruction — no note, no transition.
+    insertGroupMessage(h.db, {
+      pinId: 'plan-prose-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '验收标准: owner 核验通过后发 [STATUS:REVIEW]。\n分工见上。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning', 'plan prose moves nothing');
+    assert.equal(
+      h.sends.filter((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]')).length,
+      0,
+      'no corrective note for non-actionable citations',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #63: the no-progress nudge NAMES the unapplied [STATUS:*] citation when one exists', async () => {
+  const h = await createHarness({
+    deps: { noProgressNudgeMs: 60_000, noProgressStallMs: 300_000 },
+  });
+  try {
+    const task = h.createTask([2]); // executing
+    insertGroupMessage(h.db, {
+      pinId: 'stuck-review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '交付齐后我会发 [STATUS:REVIEW]。\n各位抓紧， deadline 前。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 400, // idle past the nudge window
+    });
+    await h.loop.runTick();
+
+    const pending = h.groupTaskStore.listPendingSupervisorSignals(task.id);
+    assert.equal(pending.length, 1, 'the idle-stuck task nudged the chair');
+    assert.ok(
+      pending[0].note.includes('Diagnosis') && pending[0].note.includes('[STATUS:REVIEW]'),
+      'the nudge names the unapplied citation instead of a generic status-update ask',
+    );
+    assert.ok(
+      pending[0].note.includes('still "executing"'),
+      'the nudge states the authoritative host status',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #63: reconcile re-arms on cursor advance — a mid-run parser miss heals on the next tick', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]); // executing
+    await h.loop.runTick(); // tick 1: nothing to reconcile, stamp set
+
+    // Simulate the pre-fix stuck state MID-RUN: a verdict message the parser
+    // of an older build ate (cursor already past it, no transition recorded).
+    // Real-clock chain timestamp (+slack): the reconcile freshness guard
+    // compares it against status_events' sqlite datetime('now'), which the
+    // harness's fake nowMs clock does not track.
+    insertGroupMessage(h.db, {
+      pinId: 'midrun-miss-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '全部交付核验完成。\n**[STATUS:REVIEW]**\n汇总如上。',
+      chainTimestamp: Math.floor(Date.now() / 1000) + 5,
+    });
+    const missId = h.db
+      .exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['midrun-miss-i0'])[0].values[0][0];
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = ? WHERE id = ?', [missId, task.id]);
+
+    await h.loop.runTick(); // tick 2: cursor advanced → reconcile re-armed
+
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'review',
+      'the mid-run miss reconciles without an app restart (the once-per-run guard is gone)',
+    );
+    assert.ok(
+      logs.some((line) => line.includes('reconciling stuck status directive')),
+      'the reconcile pass is logged',
+    );
   } finally {
     h.cleanup();
   }
