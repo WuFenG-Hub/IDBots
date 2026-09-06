@@ -1211,7 +1211,7 @@ test('GT-10: a message dropped after 5 processing failures alerts the origin ses
   }
 });
 
-test('review fix: a new ETA ACK resets the delivery-reminded flag before re-arming', async () => {
+test('review fix (single-commander): a fresh chair-stated deadline resets the delivery-reminded flag before re-arming', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
   });
@@ -1221,39 +1221,43 @@ test('review fix: a new ETA ACK resets the delivery-reminded flag before re-armi
     h.state.nowMs = startMs;
     const stoppedSessions = [];
     h.deps.stopWorkerSession = (sessionId) => { stoppedSessions.push(sessionId); };
+    const deadlineNotes = () => Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'deadline'",
+      [task.id],
+    )[0].values[0][0]);
 
-    const ack = (pin, eta) => insertGroupMessage(h.db, {
+    const ack = (pin) => insertGroupMessage(h.db, {
       pinId: pin, senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: `[WORKING] doing X，预计${eta}分钟`,
+      senderName: 'Coder Bot', content: '[WORKING] doing X，预计2分钟',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
-    // Speedup R-02: an ETA ACK only arms a deadline with an assignment on
-    // record — the chair's dispatch must land first (it arms the ACK watch).
+    // Single-track deadlines: the chair's [DEADLINE] tag is the only clock.
     insertGroupMessage(h.db, {
       pinId: 'assign-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot do X',
+      senderName: 'Twin Bot', content: '@Coder Bot do X [DEADLINE: 2m]',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
-    ack('ack-eta-1', 2);
+    ack('ack-eta-1');
     await h.loop.runTick();
-    h.state.nowMs += 3 * 60_000; // past the 2-min ETA
+    h.state.nowMs += 3 * 60_000; // past the 2-min deadline
     await h.loop.runTick();
-    assert.equal(h.sends.filter((s) => /estimated delivery/.test(s.content)).length, 1, 'first reminder fired');
+    assert.equal(deadlineNotes(), 1, 'first deadline bell recorded as an environment note');
     assert.equal(h.store.get('group_task_delivery_reminded:1:2'), '1');
 
-    // New assignment, new ETA: the flag must reset or this cycle skips the
-    // reminder and drops straight onto the reclaim ladder.
-    ack('ack-eta-2', 1);
+    // New assignment with a fresh chair deadline: the flag must reset or this
+    // cycle skips the bell and drops straight onto the reclaim ladder.
+    insertGroupMessage(h.db, {
+      pinId: 'assign-2', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot do Y [DEADLINE: 1m]',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    ack('ack-eta-2');
     await h.loop.runTick();
     assert.equal(h.store.get('group_task_delivery_reminded:1:2'), undefined, 'flag reset on re-arm');
 
-    h.state.nowMs += 90_000; // past the new ETA, before the grace window ends
+    h.state.nowMs += 90_000; // past the new deadline, before the grace window ends
     await h.loop.runTick();
-    assert.equal(
-      h.sends.filter((s) => /estimated delivery/.test(s.content)).length,
-      2,
-      'second deadline miss gets its own reminder',
-    );
+    assert.equal(deadlineNotes(), 2, 'second deadline miss gets its own bell');
     assert.deepEqual(stoppedSessions, [], 'no reclaim during the fresh cycle');
   } finally {
     h.cleanup();
@@ -1307,11 +1311,11 @@ test('parseChairDeadlineMinutes: tag/prose forms parse; ambiguity and junk fall 
   assert.equal(parseChairDeadlineMinutes(null), null);
 });
 
-test('cursor advances on no-reply messages; a failing turn retries via the durable queue in FIFO order', async () => {
+test('cursor advances on no-reply messages; a failing turn\'s retry coalesces with newer queued triggers (task #64)', async () => {
   // Cooldowns off: this test isolates the retry/ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
   try {
-    const task = h.createTask([2]);
+    const task = h.createTask([2, 3]);
 
     // chair talking (self-skip) -> no replies at all
     insertGroupMessage(h.db, {
@@ -1329,13 +1333,15 @@ test('cursor advances on no-reply messages; a failing turn retries via the durab
     // cursor advances once both triggers are dispatched/queued — reply-level
     // retries never regress the cursor.
     h.state.chatError = 'llm exploded';
+    // Worker-originated mentions (Designer Bot → Coder Bot): not chair
+    // assignments, so the drain's newest-trigger preference governs.
     insertGroupMessage(h.db, {
-      pinId: 'boom-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Human', content: '@Coder Bot first attempt',
+      pinId: 'boom-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '@Coder Bot first attempt',
     });
     insertGroupMessage(h.db, {
-      pinId: 'ok-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Human', content: '@Coder Bot second attempt',
+      pinId: 'ok-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '@Coder Bot second attempt',
     });
     await h.loop.runTick();
 
@@ -1347,17 +1353,19 @@ test('cursor advances on no-reply messages; a failing turn retries via the durab
       'cursor advanced once both triggers were dispatched/queued (turn retry rides the durable queue)',
     );
 
-    // Next tick: the failed turn is retried first (FIFO per bot) and succeeds —
-    // the one-shot error is spent. The queued second message waits its turn.
+    // Next tick: the failed retry and the queued trigger COALESCE into one
+    // turn (task #64): neither is a chair assignment, so the drain answers the
+    // NEWEST obligation — the bot is not made to re-live the stale first
+    // message as its own multi-minute turn. The one-shot error is spent and
+    // the single turn succeeds.
     await h.loop.runTick();
-    assert.equal(h.chatCalls.length, 2, 'failed turn retried from the durable queue');
-    assert.match(h.chatCalls[1].userMessage, />>> Human: @Coder Bot first attempt <<</, 'retry keeps message order');
+    assert.equal(h.chatCalls.length, 2, 'one coalesced turn drains the whole backlog');
+    assert.match(h.chatCalls[1].userMessage, />>> Designer Bot: @Coder Bot second attempt <<</, 'newest trigger answered');
     assert.equal(h.sends.length, 1);
+    assert.equal(h.sends[0].replyPin, 'ok-i0', 'reply threaded under the newest trigger');
 
     await h.loop.runTick();
-    assert.equal(h.chatCalls.length, 3, 'queued second message drains after the retry');
-    assert.match(h.chatCalls[2].userMessage, />>> Human: @Coder Bot second attempt <<</);
-    assert.equal(h.sends.length, 2);
+    assert.equal(h.chatCalls.length, 2, 'nothing left to drain — the superseded trigger is spent');
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId);
   } finally {
     h.cleanup();
@@ -1944,13 +1952,13 @@ test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-
       transitions.some((t) => t.toStatus === 'executing' && /\[STATUS:EXECUTING\] tag/.test(t.reason ?? '')),
       'applied transition is audited',
     );
-    const note = h.sends.find((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]'));
-    assert.ok(note, 'the in-group status-parser note was posted');
-    assert.equal(note.metabotId, 1, 'the note speaks as the chair');
-    assert.equal(note.replyPin, 'msg56-pin-i0', 'the note reply-chains the offending message');
-    assert.ok(note.content.includes('[STATUS:EXECUTING]'), 'note names the applied tag');
-    assert.ok(note.content.includes('`[STATUS:REVIEW]`'), 'note cites the rejected tag backtick-wrapped');
-    assert.ok(note.content.includes('planning -> review'), 'note explains the rejection reason');
+    // Single-commander: the parse verdict is a host environment note for the
+    // chair (never an in-group post wearing the chair identity).
+    const parseNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'parse' && note.body.includes('message #'));
+    assert.equal(parseNotes.length, 1, 'the parse verdict was recorded for the chair');
+    assert.ok(parseNotes[0].body.includes('applied [STATUS:EXECUTING]'), 'note names the applied tag');
+    assert.ok(parseNotes[0].body.toLowerCase().includes('review'), 'note cites the rejected tag');
   } finally {
     h.cleanup();
   }
@@ -2001,11 +2009,11 @@ test('Task #63: a prose-embedded [STATUS:*] citation with no instruction posts t
     await h.loop.runTick();
 
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing', 'prose citation moves nothing');
-    const notes = h.sends.filter((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]'));
-    assert.equal(notes.length, 1, 'the corrective descriptive note was posted');
-    assert.equal(notes[0].replyPin, 'prose-review-i0', 'the note reply-chains the offending message');
-    assert.ok(notes[0].content.includes('[STATUS:REVIEW]'), 'the note names the legal tag');
-    assert.ok(notes[0].content.includes('executing'), 'the note states the live status');
+    const notes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'parse' && note.body.includes('descriptive only'));
+    assert.equal(notes.length, 1, 'the descriptive citation was recorded as an environment note');
+    assert.ok(notes[0].body.includes('REVIEW'), 'the note names the cited tag');
+    assert.ok(notes[0].body.includes('executing'), 'the note states the live status');
 
     // Rate limit: a second prose citation inside the window stays log-only.
     insertGroupMessage(h.db, {
@@ -2015,11 +2023,11 @@ test('Task #63: a prose-embedded [STATUS:*] citation with no instruction posts t
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
-    assert.equal(
-      h.sends.filter((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]')).length,
-      1,
-      'descriptive notes are rate-limited per task',
-    );
+    const descriptiveRows = Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'parse' AND body LIKE '%descriptive only%'",
+      [task.id],
+    )[0].values[0][0]);
+    assert.equal(descriptiveRows, 1, 'descriptive notes are rate-limited per task');
   } finally {
     h.cleanup();
   }
@@ -2191,10 +2199,9 @@ test('GT-04: an all-illegal chair directive stays put but is NEVER silent (audit
       milestones.some((m) => m.kind === 'anomaly' && m.subject === 'illegal_transition:review'),
       'the origin session hears the anomaly',
     );
-    const note = h.sends.find((send) => send.content.startsWith('[GROUP_TASK_NOTICE:status_parser]'));
-    assert.ok(note, 'the group hears the rejection where the chair can correct it');
-    assert.equal(note.replyPin, 'all-illegal-i0');
-    assert.ok(note.content.includes('`[STATUS:REVIEW]`'), 'note cites the rejected tag backtick-wrapped');
+    const parseNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'parse' && note.body.includes('rejected as illegal'));
+    assert.ok(parseNotes.length >= 1, 'the rejection is recorded for the chair to correct');
   } finally {
     h.cleanup();
   }
@@ -2307,7 +2314,7 @@ test('GT#47 R3: during review, chair mentions arm no ACK watch and worker [WORKI
     });
     insertGroupMessage(h.db, {
       pinId: 'reassign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot 重做这一步', chainTimestamp: 104,
+      senderName: 'Twin Bot', content: '@Coder Bot 重做这一步 [DEADLINE: 10m]', chainTimestamp: 104,
     });
     insertGroupMessage(h.db, {
       pinId: 'ack2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
@@ -2327,16 +2334,16 @@ test('GT#47 R3: during review, chair mentions arm no ACK watch and worker [WORKI
 // #13 join-welcome handshake + #14 closing ceremony
 // ---------------------------------------------------------------------------
 
-test('#13 welcome: remote member joining mid-task triggers ONE welcome broadcast (who + why + handshake @s)', async () => {
+test('#13 welcome (single-commander): a mid-task join records ONE environment note and the chair greets in its own voice', async () => {
   const h = await createHarness();
   const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
   h.deps.getOpenTeamMembershipStore = () => membershipStore;
   try {
     const task = h.createTask([2, 3]);
     // First tick snapshots the create-time roster (chair has a join pin here;
-    // local workers carry none in this harness) — no welcome for it.
+    // local workers carry none in this harness) — no note for it.
     await h.loop.runTick();
-    assert.equal(h.sends.length, 0, 'create-time roster produces no welcome');
+    assert.equal(h.sends.length, 0, 'create-time roster produces no join note');
 
     // The invite row records WHY the remote member was invited; then the join
     // lands (member row with joined_pin_id appears — P1-2 watcher behavior).
@@ -2357,27 +2364,33 @@ test('#13 welcome: remote member joining mid-task triggers ONE welcome broadcast
       joinedPinId: 'pin-join-fortune',
     });
 
+    // Join tick: the join FACT is recorded for the chair (no host broadcast).
     await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'the host posts no welcome broadcast');
+    const joinNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'join');
+    assert.equal(joinNotes.length, 1, 'exactly one join note recorded');
+    assert.match(joinNotes[0].body, /Fortune Teller Master just joined/);
+    assert.match(joinNotes[0].body, /Invited for: 占卜, 塔罗/, 'invite required-skills explain why');
+    assert.match(joinNotes[0].body, /Greet them/);
 
-    const welcome = h.sends.find((s) => s.metabotId === 1);
-    assert.ok(welcome, 'welcome posted as the chair');
-    assert.match(welcome.content, /欢迎 @Fortune Teller Master/);
-    assert.match(welcome.content, /受邀参与:占卜, 塔罗/, 'invite required-skills explain why');
-    assert.match(welcome.content, /先向群内打个招呼确认就位/);
-    assert.match(welcome.content, /@Coder Bot/);
-    assert.match(welcome.content, /@Designer Bot/);
-    assert.match(welcome.content, /确认在线/);
+    // Next tick delivers the note: the chair greets in its OWN voice (a real
+    // chair turn, not a host line wearing the chair identity).
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listPendingHostNotes(task.id).length, 0, 'note consumed');
+    const chairGreets = h.sends.filter((s) => s.metabotId === 1);
+    assert.equal(chairGreets.length, 1, 'the chair greeted once, itself');
 
-    // Second tick: no duplicate welcome (kv-guarded), no new sends at all.
+    // A later tick fires nothing more (kv-guarded).
     const sendCount = h.sends.length;
     await h.loop.runTick();
-    assert.equal(h.sends.length, sendCount, 'welcome fires exactly once');
+    assert.equal(h.sends.length, sendCount, 'join handled exactly once');
   } finally {
     h.cleanup();
   }
 });
 
-test('#13 welcome: existing members reply once to the handshake and nothing replies back', async () => {
+test('#13 welcome (single-commander): members reply once to the CHAIR-written greeting and nothing replies back', async () => {
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
   const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
   h.deps.getOpenTeamMembershipStore = () => membershipStore;
@@ -2392,16 +2405,19 @@ test('#13 welcome: existing members reply once to the handshake and nothing repl
       role: 'worker',
       joinedPinId: 'pin-join-fortune',
     });
-    await h.loop.runTick(); // welcome posted, @s Coder Bot + Designer Bot
+    await h.loop.runTick(); // join note recorded
+    await h.loop.runTick(); // note turn: the chair greets in its own voice
 
-    const welcome = h.sends.find((s) => s.metabotId === 1);
-    assert.ok(welcome, 'welcome posted');
-    assert.equal(h.sends.length, 1, 'welcome tick posts only the welcome');
+    const greeting = h.sends.find((s) => s.metabotId === 1);
+    assert.ok(greeting, 'the chair greeted');
+    assert.equal(h.groupTaskStore.listPendingHostNotes(task.id).length, 0, 'note consumed');
 
-    // Simulate the on-chain round-trip: the welcome enters the group log.
+    // Simulate the on-chain round-trip: the chair's greeting enters the log
+    // and @s the seated members (a real roll-call written by the chair).
     insertGroupMessage(h.db, {
       pinId: 'welcome-pin-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: welcome.content,
+      senderName: 'Twin Bot',
+      content: '欢迎 @Fortune Teller Master 加入! @Coder Bot @Designer Bot 请确认在线。',
     });
     await h.loop.runTick();
 
@@ -2409,7 +2425,7 @@ test('#13 welcome: existing members reply once to the handshake and nothing repl
     assert.deepEqual(
       replies.map((s) => s.metabotId).sort(),
       [2, 3],
-      'existing members confirmed once (mention-gated reply to the welcome)',
+      'existing members confirmed once (mention-gated reply to the greeting)',
     );
 
     // Their confirmations carry no mentions: no further replies, no loop.
@@ -2421,7 +2437,7 @@ test('#13 welcome: existing members reply once to the handshake and nothing repl
   }
 });
 
-test('#14 closing ceremony: review entry posts a system closing line as chair (never ends on worker [WORKING])', async () => {
+test('#14 closing (single-commander): review entry records the acceptance summary — the host posts NOTHING in the group', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]); // executing (planning->review is illegal by the state machine)
@@ -2439,24 +2455,19 @@ test('#14 closing ceremony: review entry posts a system closing line as chair (n
     await h.loop.runTick();
 
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
-    const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
-    assert.ok(closing, 'review entry posts the system closing line as the chair');
-    assert.match(closing.content, /任务「Build MetaApp」/);
-    assert.doesNotMatch(closing.content, /#\d+/, 'R5: the ceremony refers to the task by title, not #id');
-    // R1: the closing is now the host's deterministic acceptance summary — it
-    // restates the goal and carries the deliverable list + 3-action guidance
-    // ("把菜端上桌"), not the old fixed "所有步骤已完成 / 等待人类评审" string.
-    assert.match(closing.content, /目标：Build and publish the intro MetaApp/);
-    assert.match(closing.content, /成果清单：/);
-    assert.match(closing.content, /无已核验交付物/);
-    assert.match(closing.content, /①[\s\S]*②[\s\S]*③/);
-    // R1: the summary is persisted as the single source of truth (version 1).
+    // The chair's own [STATUS:REVIEW] message is the group-facing wrap-up; the
+    // host never posts a closing line or summary wearing the chair identity.
+    assert.equal(
+      h.sends.filter((s) => /进入验收阶段|进入验收/.test(s.content)).length,
+      0,
+      'no host closing line in the group',
+    );
+    // R1: the summary is still persisted as the single source of truth for
+    // the Tasks acceptance card (version 1), it just never posts to the group.
     const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
     assert.ok(summary, 'acceptance summary persisted on review entry');
     assert.equal(summary.version, 1);
     assert.equal(summary.goal, 'Build and publish the intro MetaApp');
-    // The closing (chair identity) is the LAST posted message — never a worker [WORKING].
-    assert.equal(h.sends[h.sends.length - 1].metabotId, 1);
   } finally {
     h.cleanup();
   }
@@ -2478,10 +2489,13 @@ test('Improvement #1: review entry captures the chair 【结论】 into the reco
     const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
     assert.ok(summary, 'summary persisted on review entry');
     assert.equal(summary.conclusion, '验收通过并结项');
-    // The group 📦 message leads with the SAME string (no divergent copy).
-    const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
-    assert.ok(closing, 'ceremony message posted');
-    assert.match(closing.content, /^结论：验收通过并结项$/m);
+    // Single-commander: the record is the single authoritative copy (the
+    // acceptance card renders it); the host posts no ceremony message.
+    assert.equal(
+      h.sends.filter((s) => /进入验收阶段|进入验收/.test(s.content)).length,
+      0,
+      'no host ceremony message in the group',
+    );
   } finally {
     h.cleanup();
   }
@@ -2501,18 +2515,20 @@ test('Improvement #1: a failed owner report degrades to a conclusion-less ceremo
     const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
     assert.ok(summary);
     assert.equal(summary.conclusion, null, 'no fabricated conclusion without the report');
-    const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
-    assert.ok(closing, 'ceremony still posted despite the report failure');
-    assert.ok(!closing.content.includes('结论：'), 'no conclusion line when none was captured');
+    assert.equal(
+      h.sends.filter((s) => /进入验收阶段|进入验收/.test(s.content)).length,
+      0,
+      'no host ceremony message; the record is conclusion-less but review still landed',
+    );
   } finally {
     h.cleanup();
   }
 });
 
-test('#14 closing re-assert: a worker straggler landing after review entry is followed by the chair closing line again', async () => {  const h = await createHarness();
+test('#14 closing re-assert (single-commander): a straggler after review entry triggers NO host re-assert', async () => {
+  const h = await createHarness();
   try {
     const task = h.createTask([2]); // executing (planning->review is illegal)
-    // Worker [WORKING] then chair [STATUS:REVIEW] -> review + closing ceremony.
     insertGroupMessage(h.db, {
       pinId: 'working-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot', content: '[WORKING] finishing up', chainTimestamp: 100,
@@ -2523,42 +2539,22 @@ test('#14 closing re-assert: a worker straggler landing after review entry is fo
     });
     await h.loop.runTick();
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
-    const firstClosingCount = h.sends.filter(
-      (s) => s.metabotId === 1 && /进入验收阶段/.test(s.content),
-    ).length;
-    assert.ok(firstClosingCount >= 1, 'closing ceremony posted on review entry');
+    assert.equal(h.sends.length, 0, 'review entry itself posts nothing');
 
-    // The chair closing line lands on-chain, then a worker turn that was in
-    // flight when review began finishes AFTER it — the group would now rest on
-    // a worker's message instead of the host's.
-    insertGroupMessage(h.db, {
-      pinId: 'closing-landed-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: 'chair closing landed on chain', chainTimestamp: 102,
-    });
+    // A worker turn that was in flight when review began finishes AFTER the
+    // verdict — the transcript simply ends on the straggler now; the Tasks
+    // acceptance card is the authoritative closing view.
     insertGroupMessage(h.db, {
       pinId: 'straggler-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot', content: 'final build passed, uploading', chainTimestamp: 103,
     });
     await h.loop.runTick();
-
-    const closings = h.sends.filter((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
-    assert.ok(
-      closings.length > firstClosingCount,
-      'chair re-asserted the closing line after the straggler',
+    assert.equal(
+      h.sends.filter((s) => s.metabotId === 1).length,
+      0,
+      'no host re-assert line after the straggler — the host is never a speaker',
     );
-    assert.equal(h.sends[h.sends.length - 1].metabotId, 1, 'the chair, not the worker, is last');
-    assert.match(h.sends[h.sends.length - 1].content, /进入验收阶段/);
-    // P12 (v1.1): the re-assert is the COMPACT closing line only — the full
-    // acceptance summary must never be re-posted per straggler (task #22 got
-    // two identical >2000-char summaries this way).
-    assert.doesNotMatch(h.sends[h.sends.length - 1].content, /成果清单：/);
-    const summaryPosts = h.sends.filter((s) => s.metabotId === 1 && /成果清单：/.test(s.content)).length;
-    assert.equal(summaryPosts, 1, 'exactly one full acceptance summary in the transcript');
-
-    // Idempotent: a second tick with no NEW straggler does not re-assert again.
-    const countAfter = h.sends.length;
-    await h.loop.runTick();
-    assert.equal(h.sends.length, countAfter, 're-assert fires once per straggler (kv-guarded)');
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
   } finally {
     h.cleanup();
   }
@@ -2630,6 +2626,137 @@ test('skill path: no routing hit falls back to the plain completion', async () =
     assert.equal(h.chatCalls.length, 1, 'plain completion used');
     assert.equal(h.sends.length, 1);
     assert.match(h.sends[0].content, /reply-for-llm-2/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #64: a join-welcome trigger runs the plain path even when skill routing hits', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+  });
+  try {
+    h.createTask([2]);
+    // The host welcome broadcast shape (posted as the chair, @mentions the
+    // new member, asks for a presence greeting) — task #64: routing it into a
+    // skill turn let the worker burn its whole 30-min budget doing the task
+    // inside the greeting turn while the group saw only silence.
+    insertGroupMessage(h.db, {
+      pinId: 'welcome-coder-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '[GROUP_TASK_NOTICE:welcome]\n🎉 欢迎 @Coder Bot 加入任务「Build MetaApp」!\n'
+        + 'Coder Bot 受邀参与本任务协作。\n'
+        + '@Coder Bot:请先向群内打个招呼确认就位,再开始工作。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.skillTurnCalls.length, 0, 'welcome greeting must not become a skill/work turn');
+    assert.equal(h.chatCalls.length, 1, 'greeting answered via the fast plain completion');
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.sends[0].metabotId, 2);
+    assert.equal(h.sends[0].replyPin, 'welcome-coder-i0', 'greeting threaded under the welcome');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #64: a host long-turn notice under the member\'s name does NOT count as an implicit ACK', async () => {
+  const h = await createHarness({ ackTimeoutMs: 60_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = h.state.nowMs;
+    // Chair assignment in plain prose arms the 3-min (here 60s) no-ACK watch.
+    insertGroupMessage(h.db, {
+      pinId: 'assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the icon set and report back',
+      chainTimestamp: Math.floor(startMs / 1000) - 600,
+    });
+    await h.loop.runTick(); // assignment processed; worker turn runs the plain path
+
+    // The host posts its long-turn liveness notice AS Coder Bot (the task #64
+    // incident shape: posted via postGroupMessage under the member identity).
+    insertGroupMessage(h.db, {
+      pinId: 'longturn-notice-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[GROUP_TASK_NOTICE:long_turn]\n@chair ℹ️ Coder Bot 的回合已执行超过 18 分钟,期间无新群消息。'
+        + '执行看似正常,成员交付前无需回应——仅当明显超出预期时长时再介入。',
+      chainTimestamp: Math.floor(startMs / 1000) - 300,
+    });
+    h.state.nowMs = startMs + 120_000; // past the 60s ACK window
+    await h.loop.runTick();
+
+    // Single-commander: the no-ACK fact reaches the chair as an environment
+    // NOTE (delivered by the next host-note turn), never as a host ⚠ post.
+    const noAckNotes = Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'no_ack'",
+      [task.id],
+    )[0].values[0][0]);
+    assert.equal(noAckNotes, 1, 'a host notice under the member name is not member speech — the no-ACK note still fires');
+    await h.loop.runTick(); // delivery tick
+    const chairReply = h.sends.find((s) => s.metabotId === 1);
+    assert.ok(chairReply, 'the chair itself speaks after reading the note');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #64: the deferred drain coalesces a worker backlog into one turn (oldest open assignment wins)', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]);
+    const msgId = (pinId) =>
+      h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', [pinId])[0].values[0][0];
+
+    insertGroupMessage(h.db, {
+      pinId: 'assign-2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the icon set by 18:00',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 900,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'nudge-2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot any progress on the icon set?',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 600,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'chatter-2-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '@Coder Bot fyi the spec changed, see my notes',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 300,
+    });
+    // Production shape: the whole backlog queued behind a long in-flight turn —
+    // the cursor already advanced past every message.
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = ? WHERE id = ?', [msgId('chatter-2-i0'), task.id]);
+    const entries = ['assign-2-i0', 'nudge-2-i0', 'chatter-2-i0']
+      .map((pinId) => ({
+        taskId: task.id,
+        metabotId: 2,
+        messageId: msgId(pinId),
+        reason: 'worker_mentioned',
+        verificationNotes: [],
+      }))
+      .sort((a, b) => a.messageId - b.messageId);
+    h.store.set(`group_task_deferred:${task.id}`, JSON.stringify(entries));
+
+    await h.loop.runTick();
+
+    assert.equal(h.chatCalls.length, 1, 'one turn answers the whole backlog');
+    assert.equal(h.sends.length, 1);
+    assert.equal(
+      h.sends[0].replyPin,
+      'assign-2-i0',
+      'the turn is threaded under the oldest still-open chair assignment',
+    );
+    assert.equal(
+      h.store.get(`group_task_deferred:${task.id}`),
+      undefined,
+      'nothing re-defers — the coalesced backlog is spent',
+    );
+    assert.ok(
+      logs.some((line) => line.includes("coalesced bot 2's queued backlog into message #")),
+      'the coalescing decision is logged',
+    );
   } finally {
     h.cleanup();
   }
@@ -2729,12 +2856,12 @@ test('mid-batch [STATUS:REVIEW] flip gates subsequent messages with the new stat
       [[2, 'reply-for-llm-2']],
       'worker answered the pre-flip mention only; the post-flip mention is gated silent',
     );
-    assert.equal(sends[1][0], 1, 'closing posted as the chair');
-    assert.match(sends[1][1], /进入验收阶段/, 'closing line content');
-    // P1-2: the swallowed post-flip dispatch now produces a host dispatch-held
-    // notice (as the chair) instead of vanishing silently.
-    assert.equal(sends.length, 3, 'closing line + dispatch-held notice for the gated mention');
-    assert.match(sends[2][1], /\[GROUP_TASK_NOTICE:dispatch_held\]/, 'dispatch-held notice');
+    // Single-commander: no closing line and no dispatch-held notice in the
+    // group — the held-dispatch fact lands as a host environment note instead.
+    assert.equal(sends.length, 1, 'only the pre-flip worker reply hits the group');
+    const heldNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'dispatch_held');
+    assert.equal(heldNotes.length, 1, 'dispatch-held fact recorded for the chair');
     assert.equal(
       h.chatCalls.filter((c) => c.llmId === 'llm-2').length, 1,
       'no LLM call for the post-flip message (the other call is the owner-report turn)',
@@ -2861,12 +2988,10 @@ test('[NO_REPLY] also applies on the skill-turn path', async () => {
     await h.loop.runTick();
 
     assert.equal(h.skillTurnCalls.length, 1, 'skill turn ran');
-    // Entropy P0: the host auto-ACK is templated by default — the
-    // "[WORKING] 已接单" signal still posts (the group must not see a silent
-    // worker) but costs zero LLM calls; the phrased ACK is an opt-in knob.
-    assert.equal(h.chatCalls.length, 0, 'ACK is templated — no chat call');
-    assert.equal(h.sends.length, 1, 'ACK posted; the [NO_REPLY] turn reply suppressed on-chain');
-    assert.match(h.sends[0].content, /^\[WORKING\]/, 'the only send is the ACK status line');
+    // Single-commander: no host auto-ACK exists anymore — a [NO_REPLY] turn
+    // means the worker chose silence, and nothing posts on its behalf.
+    assert.equal(h.chatCalls.length, 0, 'no chat call');
+    assert.equal(h.sends.length, 0, 'nothing posted — no auto-ACK, reply suppressed on-chain');
   } finally {
     h.cleanup();
   }
@@ -3522,14 +3647,14 @@ test('owner report: review transition sends exactly one private report to the bo
     await h.loop.runTick();
     assert.equal(h.ownerReportCalls.length, 1, 'no duplicate on the next tick');
 
-    // the report never goes through the group send fn; only the chair
-    // deliverable ack and the #14 review-entry closing line hit the group
+    // the report never goes through the group send fn; single-commander: the
+    // only chair-identity send is the chair's own deliverable-ack turn — the
+    // host posts no review-entry closing line anymore
     assert.deepEqual(
       h.sends.map((s) => s.metabotId),
-      [1, 1],
-      'only chair-identity sends (deliverable ack + review closing) hit the group',
+      [1],
+      'only the chair deliverable ack hits the group; no host closing line',
     );
-    assert.match(h.sends[1].content, /进入验收阶段/, 'second chair send is the closing line');
     const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 1);
     const sessionText = h.coworkStore.getSessionMessages(mapping.coworkSessionId).map((m) => m.content).join('\n');
     assert.match(sessionText, /\[Private report sent to the owner/);
@@ -4937,10 +5062,19 @@ test('tick watchdog: a long but healthy tick is never reset — no double dispat
       'a tick with steady progress is never reset, however long it runs',
     );
     const workerSends = h.sends.filter((send) => send.metabotId === 2);
+    // Task #64 drain coalescing: package 1 got its own turn (dispatched before
+    // the backlog existed), then the queued packages 2+3 coalesce into ONE
+    // turn answering the oldest open assignment (#2). Three sequential
+    // re-lived turns would be the old FIFO-replay behavior.
     assert.equal(
       workerSends.length,
-      3,
-      'each assignment was processed exactly once — no watchdog-induced double dispatch',
+      2,
+      'no watchdog-induced double dispatch; the backlog coalesces into one turn',
+    );
+    assert.equal(
+      workerSends[1].replyPin,
+      'wd-long-assign-2-i0',
+      'the coalesced turn answers the oldest open assignment',
     );
   } finally {
     h.cleanup();
@@ -4957,10 +5091,11 @@ test('P0-3: chair assignment records pending ACK; worker [WORKING] ACK clears it
     const task = h.createTask([2, 3]);
     h.state.nowMs = Date.now();
 
-    // Chair assigns worker 2.
+    // Chair assigns worker 2 — single-track deadlines: only a chair-stated
+    // [DEADLINE] arms the clock, so this assignment carries one.
     insertGroupMessage(h.db, {
       pinId: 'pin-assign-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp [DEADLINE: 5m]',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
@@ -4976,7 +5111,7 @@ test('P0-3: chair assignment records pending ACK; worker [WORKING] ACK clears it
     assert.equal(h.store.get('group_task_ack_pending:1:2'), undefined);
     const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
     assert.equal(member.status, 'working');
-    assert.ok(h.store.get('group_task_expected_delivery:1:2'), 'expected delivery deadline recorded');
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'), 'chair-stated deadline armed on the ACK');
   } finally {
     h.cleanup();
   }
@@ -5004,11 +5139,11 @@ test('P2-2: a [WORKING long-task] heartbeat arms the liveness lease and counts a
     // "no [DELIVERABLE] arrived" alert came from exactly this arm).
     assert.equal(h.store.get('group_task_expected_delivery:1:2'), undefined);
 
-    // Control: once the chair has actually dispatched work (ACK watch armed),
-    // the same heartbeat DOES arm the delivery deadline.
+    // Control: once the chair has actually dispatched work with a stated
+    // [DEADLINE] (single-track clocks), the same heartbeat DOES arm it.
     insertGroupMessage(h.db, {
       pinId: 'pin-hb-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot synthesize the demo track',
+      senderName: 'Twin Bot', content: '@Coder Bot synthesize the demo track [DEADLINE: 45m]',
       chainTimestamp: Math.floor(startMs / 1000) + 1,
     });
     insertGroupMessage(h.db, {
@@ -5017,13 +5152,13 @@ test('P2-2: a [WORKING long-task] heartbeat arms the liveness lease and counts a
       chainTimestamp: Math.floor(startMs / 1000) + 2,
     });
     await h.loop.runTick();
-    assert.ok(h.store.get('group_task_expected_delivery:1:2'), 'assigned heartbeat arms the deadline');
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'), 'chair-stated deadline armed on the assigned heartbeat');
   } finally {
     h.cleanup();
   }
 });
 
-test('P0-3: missing ACK past the timeout posts ONE chair reminder, never auto-fails', async () => {
+test('P0-3 (single-commander): missing ACK past the timeout records ONE host environment note for the chair, never auto-fails', async () => {
   const h = await createHarness({ ackTimeoutMs: 180_000 });
   try {
     const task = h.createTask([2, 3]);
@@ -5037,23 +5172,45 @@ test('P0-3: missing ACK past the timeout posts ONE chair reminder, never auto-fa
     await h.loop.runTick();
     h.sends.length = 0;
 
-    // Before timeout: no reminder.
+    // Before timeout: nothing recorded, nothing posted.
     h.state.nowMs = startMs + 60_000;
     await h.loop.runTick();
-    assert.equal(h.sends.length, 0);
+    assert.equal(h.sends.length, 0, 'the host never posts the reminder itself');
+    assert.equal(h.groupTaskStore.listPendingHostNotes(task.id).length, 0);
     assert.equal(h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2).status, 'assigned');
 
-    // Past timeout: one reminder as the chair.
+    // Past timeout: ONE environment note recorded for the chair (not a group
+    // post). The note-turn trigger already passed within this tick, so the
+    // delivery happens on the NEXT tick.
     h.state.nowMs = startMs + 200_000;
     await h.loop.runTick();
-    assert.equal(h.sends.length, 1);
-    assert.match(h.sends[0].content, /@chair/);
-    assert.match(h.sends[0].content, /has not sent a \[WORKING\] ACK/);
+    const noteCount = (kind) => Number(h.db.exec(
+      'SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = ?',
+      [task.id, kind],
+    )[0].values[0][0]);
+    assert.equal(noteCount('no_ack'), 1, 'exactly one no_ack environment note recorded');
+    assert.equal(h.sends.length, 0, 'the host itself posts nothing');
 
-    // A later tick does not re-remind.
+    // Next tick delivers the note to the chair — the chair speaks in its own
+    // voice, not a host ⚠ @chair line.
+    await h.loop.runTick();
+    assert.equal(
+      h.groupTaskStore.listPendingHostNotes(task.id).length,
+      0,
+      'the note was consumed by the chair turn (harness drains detached jobs)',
+    );
+    assert.equal(h.sends.filter((s) => s.metabotId === 1).length, 1, 'the chair itself spoke once');
+    assert.ok(
+      !h.sends.some((s) => /@chair/.test(s.content) && /has not sent a \[WORKING\] ACK/.test(s.content)),
+      'no host-authored @chair self-talk post',
+    );
+
+    // A later tick does not re-remind (kv-guarded streak).
+    const sendCount = h.sends.length;
     h.state.nowMs = startMs + 400_000;
     await h.loop.runTick();
-    assert.equal(h.sends.length, 1);
+    assert.equal(noteCount('no_ack'), 1, 'no second no_ack note');
+    assert.equal(h.sends.length, sendCount);
   } finally {
     h.cleanup();
   }
@@ -5157,10 +5314,10 @@ test('P0-4: missed delivery deadline posts ONE reminder; delivered members are s
     const task = h.createTask([2, 3]);
     const startMs = Date.now();
     h.state.nowMs = startMs;
-    // Chair assigns worker 2; worker ACKs with a 5-minute estimate.
+    // Chair assigns worker 2 with a 5-minute deadline; worker ACKs.
     insertGroupMessage(h.db, {
       pinId: 'pin-a4-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot please deliver',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver [DEADLINE: 5m]',
       chainTimestamp: Math.floor(startMs / 1000),
     });
     insertGroupMessage(h.db, {
@@ -5177,17 +5334,25 @@ test('P0-4: missed delivery deadline posts ONE reminder; delivered members are s
     await h.loop.runTick();
     assert.equal(h.sends.length, 0);
 
-    // Past deadline: one reminder.
+    // Past deadline: ONE environment note for the chair (single-commander —
+    // the host never posts the ⚠ itself).
     h.state.nowMs = startMs + 6 * 60_000;
     await h.loop.runTick();
-    const reminders = h.sends.filter((s) => /no \[DELIVERABLE\] arrived/.test(s.content));
-    assert.equal(reminders.length, 1);
-    assert.match(reminders[0].content, /@chair/);
+    const deadlineNotes = () => Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'deadline'",
+      [task.id],
+    )[0].values[0][0]);
+    assert.equal(deadlineNotes(), 1, 'missed deadline rang one bell');
+    assert.equal(
+      h.sends.filter((s) => /no \[DELIVERABLE\] arrived/.test(s.content)).length,
+      0,
+      'no host-authored deadline post',
+    );
 
     // No repeat.
     h.state.nowMs = startMs + 12 * 60_000;
     await h.loop.runTick();
-    assert.equal(h.sends.filter((s) => /no \[DELIVERABLE\] arrived/.test(s.content)).length, 1);
+    assert.equal(deadlineNotes(), 1);
   } finally {
     h.cleanup();
   }
@@ -5486,12 +5651,9 @@ test('F6: chair [STATUS:REVIEW] during the Twin-activity suppression window is s
       'review',
       'chair status switch is parsed and applied despite the suppression window',
     );
-    // #14: the review entry posts the deterministic system closing line (a
-    // host guarantee, NOT an LLM auto reply — still posted in the window so
-    // the group never rests on a worker [WORKING]).
-    assert.equal(h.sends.length, 1, 'no chair auto replies, only the system closing line');
-    assert.equal(h.sends[0].metabotId, 1, 'closing posted as the chair');
-    assert.match(h.sends[0].content, /进入验收阶段/, 'closing line content');
+    // Single-commander: no closing line and no auto replies at all — the
+    // deliverable row still records, the status still flips.
+    assert.equal(h.sends.length, 0, 'no chair auto replies and no host closing line');
     assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'deliverable row still recorded');
   } finally {
     h.cleanup();
@@ -6016,7 +6178,7 @@ test('entropy P1 review: chair without a globalMetaID falls back to the full-ros
   }
 });
 
-test('task #60: a numberless ACK arms the default 30-minute delivery deadline', async () => {
+test('task #60 (single-commander): a numberless ACK arms nothing without a chair-stated deadline; a stated one arms from the tag', async () => {
   const h = await createHarness({ ackTimeoutMs: 180_000 });
   try {
     const task = h.createTask([2]);
@@ -6035,28 +6197,43 @@ test('task #60: a numberless ACK arms the default 30-minute delivery deadline', 
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
-    // Task #60: a numberless ACK no longer leaves the step unwatched — the
-    // assignment states no deadline, so the 30-minute default arms.
-    const entry = JSON.parse(h.store.get('group_task_expected_delivery:1:2'));
-    assert.equal(entry.dueAt, startMs + 30 * 60_000, 'default 30-minute deadline armed');
+    // Single-track deadlines: the assignment states no [DEADLINE], so the
+    // host invents no clock — the missing deadline is the chair's sequencing
+    // gap (its playbook requires one on every assignment).
+    assert.equal(
+      h.store.get('group_task_expected_delivery:1:2'),
+      undefined,
+      'no default deadline invented for a deadline-less assignment',
+    );
 
-    // Before the deadline: no reminder.
-    h.state.nowMs += 21 * 60_000;
+    // Control: with a chair-stated deadline the numberless ACK still arms it.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-t2', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot extend it with charts [DEADLINE: 30m]',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 1,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-ack-t2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，继续处理。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 2,
+    });
     await h.loop.runTick();
+    const entry = JSON.parse(h.store.get('group_task_expected_delivery:1:2'));
+    assert.equal(entry.dueAt, h.state.nowMs + 30 * 60_000, 'chair-stated 30-minute deadline armed');
+
+    // Past the stated deadline with no deliverable: ONE environment note
+    // (the bell), never a host group post.
+    h.state.nowMs += 31 * 60_000;
+    await h.loop.runTick();
+    const deadlineNotes = Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'deadline'",
+      [task.id],
+    )[0].values[0][0]);
+    assert.equal(deadlineNotes, 1, 'missed chair-stated deadline rang one bell');
     assert.equal(
       h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
       0,
-      'no delivery reminder before the armed deadline',
-    );
-
-    // Past the deadline with no deliverable: the existing P0-4 reminder path
-    // fires exactly once — no new escalation mechanism.
-    h.state.nowMs += 10 * 60_000;
-    await h.loop.runTick();
-    assert.equal(
-      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
-      1,
-      'missed default deadline reuses the existing reminder path',
+      'the host posts no ⚠ line — the chair speaks for itself',
     );
   } finally {
     h.cleanup();
@@ -6217,24 +6394,22 @@ test('P1-2: a dispatch swallowed by an open checkpoint posts a dispatch_held not
       0,
       'workers stay silent while the checkpoint is open',
     );
-    // The host told the group the dispatch was held, as the chair, once.
-    const held = h.sends.filter((send) =>
-      send.metabotId === 1 && send.content.includes('[GROUP_TASK_NOTICE:dispatch_held]'));
-    assert.equal(held.length, 1, 'exactly one dispatch-held notice');
-    assert.match(held[0].content, /Coder Bot/);
-    assert.match(held[0].content, /CHECKPOINT_RESOLVED/);
-    assert.match(held[0].content, /doubao-seedance-2-0/, 'notice carries the checkpoint topic');
-    // A second idempotent tick must not repost the notice for the same message.
+    // Single-commander: the held-dispatch FACT reaches the chair as an
+    // environment note (once per held message); nothing posts in the group.
+    const heldNotes = () => h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'dispatch_held');
+    assert.equal(heldNotes().length, 1, 'exactly one dispatch-held note recorded');
+    assert.match(heldNotes()[0].body, /Coder Bot/);
+    assert.match(heldNotes()[0].body, /CHECKPOINT_RESOLVED/);
+    assert.match(heldNotes()[0].body, /doubao-seedance-2-0/, 'note carries the checkpoint topic');
+    // A second idempotent tick must not re-record the note for the same message.
     await h.loop.runTick();
-    assert.equal(
-      h.sends.filter((send) => send.content.includes('[GROUP_TASK_NOTICE:dispatch_held]')).length,
-      1,
-      'notice is posted once per held message',
-    );
-    // The checkpoint is still open — the notice's literal tag citation must
-    // not be re-interpreted as a resolution when processed (host-notice tag
-    // exemption).
-    assert.ok(h.groupTaskStore.getOpenCheckpoint(task.id), 'checkpoint still open after the notice');
+    const allHeld = Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'dispatch_held'",
+      [task.id],
+    )[0].values[0][0]);
+    assert.equal(allHeld, 1, 'note recorded once per held message');
+    assert.ok(h.groupTaskStore.getOpenCheckpoint(task.id), 'checkpoint still open');
   } finally {
     h.cleanup();
   }
@@ -6257,10 +6432,11 @@ test('P1-2: a review-phase dispatch posts a dispatch_held notice with the reopen
       0,
       'workers stay silent in review',
     );
-    const held = h.sends.filter((send) =>
-      send.metabotId === 1 && send.content.includes('[GROUP_TASK_NOTICE:dispatch_held]'));
-    assert.equal(held.length, 1);
-    assert.match(held[0].content, /STATUS:EXECUTING/, 'review variant explains the reopen path');
+    const heldNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'dispatch_held');
+    assert.equal(heldNotes.length, 1);
+    assert.match(heldNotes[0].body, /STATUS:EXECUTING/, 'review variant explains the reopen path');
+    assert.equal(h.sends.length, 0, 'nothing posted in the group');
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review', 'task stays in review');
   } finally {
     h.cleanup();
@@ -6299,58 +6475,65 @@ test('P1-2: host notices citing protocol tags are never re-interpreted as those 
   }
 });
 
-test('review fix: a new ETA ACK re-arms a fresh delivery-reminder cycle', async () => {
+test('review fix (single-commander): a fresh chair deadline re-arms a fresh bell cycle', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
     h.state.nowMs = Date.now();
-    const ack = (pin, eta) => insertGroupMessage(h.db, {
+    const deadlineNotes = () => Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'deadline'",
+      [task.id],
+    )[0].values[0][0]);
+    const ack = (pin) => insertGroupMessage(h.db, {
       pinId: pin, senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: `[WORKING] doing X，预计${eta}分钟`,
+      senderName: 'Coder Bot', content: '[WORKING] doing X，预计10分钟',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
-    // Speedup R-02: the ACK only arms with an assignment on record — the
-    // chair's dispatch (which arms the ACK watch) must land first.
+    // Single-track deadlines: the chair states the clock.
     insertGroupMessage(h.db, {
       pinId: 'pin-assign-ack', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot do X',
+      senderName: 'Twin Bot', content: '@Coder Bot do X [DEADLINE: 10m]',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
-    ack('pin-ack-1', 10);
+    ack('pin-ack-1');
     await h.loop.runTick();
-    // Past the first ETA with no deliverable -> reminder fires once.
+    // Past the first deadline with no deliverable -> one bell.
     h.state.nowMs += 11 * 60_000;
     await h.loop.runTick();
-    assert.equal(h.sends.filter((send) => /estimated delivery/.test(send.content)).length, 1);
+    assert.equal(deadlineNotes(), 1);
     assert.equal(h.store.get('group_task_delivery_reminded:1:2'), '1');
 
-    // The worker ACKs a NEW assignment with a new ETA: the reminded flag from
-    // the previous missed deadline must reset, or the next cycle's reminder
-    // is suppressed forever.
-    ack('pin-ack-2', 5);
+    // The chair re-dispatches with a fresh deadline: the reminded flag from
+    // the previous miss must reset, or the next cycle's bell is suppressed.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-ack-2', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot do X again [DEADLINE: 5m]',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    ack('pin-ack-2');
     await h.loop.runTick();
     assert.equal(h.store.get('group_task_delivery_reminded:1:2'), undefined, 'reminded flag reset on re-arm');
 
     h.state.nowMs += 6 * 60_000;
     await h.loop.runTick();
-    assert.equal(
-      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
-      2,
-      'second deadline miss fires its own reminder',
-    );
+    assert.equal(deadlineNotes(), 2, 'second deadline miss fires its own bell');
   } finally {
     h.cleanup();
   }
 });
 
-test('review fix: a delivered (even late) deliverable retires the deadline watch', async () => {
+test('review fix (single-commander): a delivered (even late) deliverable retires the deadline watch', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
     h.state.nowMs = Date.now();
+    const deadlineNotes = () => Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'deadline'",
+      [task.id],
+    )[0].values[0][0]);
     insertGroupMessage(h.db, {
       pinId: 'pin-assign-late', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot do X',
+      senderName: 'Twin Bot', content: '@Coder Bot do X [DEADLINE: 10m]',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     insertGroupMessage(h.db, {
@@ -6360,8 +6543,8 @@ test('review fix: a delivered (even late) deliverable retires the deadline watch
     });
     await h.loop.runTick();
     h.state.nowMs += 11 * 60_000;
-    await h.loop.runTick(); // reminder fired
-    assert.equal(h.sends.filter((send) => /estimated delivery/.test(send.content)).length, 1);
+    await h.loop.runTick(); // bell rang
+    assert.equal(deadlineNotes(), 1);
 
     // LATE deliverable lands: both kv keys retire — later ticks see no
     // outstanding deadline at all.
@@ -6376,11 +6559,7 @@ test('review fix: a delivered (even late) deliverable retires the deadline watch
 
     h.state.nowMs += 30 * 60_000;
     await h.loop.runTick();
-    assert.equal(
-      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
-      1,
-      'no further deadline reminders after the deliverable arrived',
-    );
+    assert.equal(deadlineNotes(), 1, 'no further bells after the deliverable arrived');
   } finally {
     h.cleanup();
   }
@@ -6466,8 +6645,9 @@ test('task #41: a skill-turn watchdog timeout advances the cursor without burnin
     await h.loop.runTick();
 
     assert.equal(skillTurnAttempts.length, 1, 'skill turn attempted once');
-    // The chair-originated trigger still auto-ACKs before the turn runs.
-    assert.ok(h.sends.some((s) => s.content.startsWith('[WORKING]')), 'auto-ACK posted before the turn');
+    // Single-commander: no host auto-ACK exists — nothing posts on the
+    // worker's behalf before the turn runs.
+    assert.equal(h.sends.filter((s) => s.content.startsWith('[WORKING]')).length, 0, 'no auto-ACK');
     const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-skill-timeout-41'])[0].values[0][0];
     assert.equal(
       h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
@@ -6740,14 +6920,14 @@ test('task #41 residue: an ETA [WORKING] replying to a welcome notice arms no de
   }
 });
 
-test('task #41 residue: an ETA [WORKING] replying to a real chair assignment still arms the deadline', async () => {
+test('task #41 residue: an ETA [WORKING] replying to a real chair assignment arms its stated deadline', async () => {
   const h = await createHarness({ ackTimeoutMs: 180_000 });
   try {
     const task = h.createTask([2]);
     h.state.nowMs = Date.now();
     insertGroupMessage(h.db, {
       pinId: 'pin-assign-r3', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp [DEADLINE: 5m]',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
@@ -6764,7 +6944,7 @@ test('task #41 residue: an ETA [WORKING] replying to a real chair assignment sti
     await h.loop.runTick();
     assert.ok(
       h.store.get(`group_task_expected_delivery:${task.id}:2`),
-      'deadline armed for an assignment-threaded ACK',
+      'chair-stated deadline armed for an assignment-threaded ACK',
     );
   } finally {
     h.cleanup();
@@ -7178,15 +7358,14 @@ test('GT-06: a supervisor nudge runs a TOOL-EQUIPPED skill turn when routing hit
 // and renews the worker's [WORKING long-task] lease while it runs.
 // ---------------------------------------------------------------------------
 
-test('long-turn liveness: a still-running turn posts a placeholder + heartbeats; settle clears the timers', async () => {
+test('long-turn liveness (single-commander): a still-running turn posts NOTHING; the lease renews internally; timers clear at settle', async () => {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let releaseTurn;
   const gate = new Promise((resolve) => { releaseTurn = resolve; });
   const h = await createHarness({
     deps: {
-      longTurnPlaceholderMs: 100,
-      longTurnHeartbeatMs: 150,
-      longTurnHeartbeatMax: 3,
+      longTurnLeaseArmMs: 60,
+      longTurnHeartbeatMs: 100,
       performChat: async () => {
         await gate;
         return '[WORKING] done';
@@ -7205,23 +7384,23 @@ test('long-turn liveness: a still-running turn posts a placeholder + heartbeats;
     const rawLoop = createGroupTaskDaemonLoop(h.deps);
     await rawLoop.runTick();
 
-    // Placeholder at ~100ms, heartbeat #1 at ~250ms — the turn is still gated.
     await sleep(320);
-    const placeholderSends = () => h.sends.filter((send) =>
-      send.metabotId === 2 && send.content.startsWith('[WORKING] 仍在执行中'));
-    const heartbeatSends = () => h.sends.filter((send) =>
-      send.metabotId === 2 && send.content.startsWith('[WORKING] 长步骤仍在后台执行'));
-    assert.equal(placeholderSends().length, 1, 'one placeholder line while the turn runs');
-    assert.equal(heartbeatSends().length, 1, 'first heartbeat while the turn runs');
+    // The legacy opt-in placeholder/heartbeat posts are gone with the
+    // single-commander architecture: the host never speaks as the worker.
+    assert.equal(
+      h.sends.filter((send) => send.metabotId === 2).length,
+      0,
+      'no placeholder or heartbeat lines while the turn runs',
+    );
     const lease = Number(h.store.get(`group_task_working_heartbeat:${task.id}:2`));
-    assert.ok(lease > h.state.nowMs, 'each worker post renews the [WORKING long-task] lease');
+    assert.ok(lease > h.state.nowMs, 'the internal renewal keeps the [WORKING long-task] lease fresh');
 
-    // Settle the turn: the remaining beats (~400ms / ~550ms) must never fire.
     releaseTurn();
     await rawLoop.whenIdle();
-    await sleep(420);
-    assert.equal(placeholderSends().length, 1, 'no second placeholder after settle');
-    assert.equal(heartbeatSends().length, 1, 'remaining heartbeats cleared at settle');
+    await sleep(300);
+    const workerSends = h.sends.filter((send) => send.metabotId === 2);
+    assert.equal(workerSends.length, 1, 'after settle the ONLY worker speech is the turn reply itself');
+    assert.equal(workerSends[0].content, '[WORKING] done');
   } finally {
     releaseTurn();
     h.cleanup();
@@ -7443,7 +7622,7 @@ test('dependency-wait: a truncated deliverable pin in a worker [DELIVERABLE] lin
   }
 });
 
-test('dependency-wait: an absent upstream still holds the dispatch (gate stays honest)', async () => {
+test('dependency-wait (single-commander): the host no longer gates dispatches — the worker turn runs and answers', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
@@ -7460,13 +7639,17 @@ test('dependency-wait: an absent upstream still holds the dispatch (gate stays h
 
     await h.loop.runTick();
 
+    // The [DEPENDS_ON] DISPATCH GATE is gone: sequencing is the chair's
+    // judgment, so the worker's turn proceeds and replies normally (it sees
+    // the dependency tag in the trigger and can act on it itself). No
+    // dep-wait hold state is armed.
     const depWaitKeys = h.db.exec(
       "SELECT key FROM kv WHERE key LIKE 'group_task_dep_wait:%'",
     )[0]?.values ?? [];
-    assert.equal(depWaitKeys.length, 1, 'a genuinely missing upstream still arms the bounded wait');
+    assert.equal(depWaitKeys.length, 0, 'no dispatch-hold state armed');
     assert.ok(
-      !h.sends.some((send) => send.metabotId === 2),
-      'no worker reply is posted while the upstream is unsatisfied',
+      h.sends.some((send) => send.metabotId === 2),
+      'the worker turn ran — the host did not sequence it away',
     );
   } finally {
     h.cleanup();
@@ -7865,17 +8048,30 @@ test('speedup R-01: a long turn posts no heartbeat lines; lease renews internall
     assert.equal(heartbeatPosts().length, 0, 'no placeholder/heartbeat posts while the turn runs (R-01)');
     const lease = Number(h.store.get(`group_task_working_heartbeat:${task.id}:2`));
     assert.ok(Number.isFinite(lease) && lease > 0, 'the liveness lease was renewed internally');
-    const reminders = () => h.sends.filter((send) =>
-      send.metabotId === 2 && send.content.includes('[GROUP_TASK_NOTICE:long_turn]'));
-    assert.equal(reminders().length, 1, 'exactly one reminder, posted as the working bot');
-    assert.match(reminders()[0].content, /@chair/, 'the reminder addresses the chair');
-    assert.match(reminders()[0].content, /无需回应|no.*reply|need not reply/i, 'the member is not asked to reply');
+    // Single-commander: the long-turn fact is an environment NOTE for the
+    // chair — the host posts nothing as the worker.
+    assert.equal(h.sends.filter((send) => send.metabotId === 2).length, 0, 'the host never speaks as the worker');
+    const longTurnNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'long_turn');
+    assert.equal(longTurnNotes.length, 1, 'exactly one long-turn note recorded');
+    // Task #64: this scenario holds an ARMED no-ACK watch (the assignment never
+    // got a [WORKING] ACK), so the note body flags the missing ACK instead of
+    // claiming everything looks normal.
+    assert.match(
+      longTurnNotes[0].body,
+      /no \[WORKING\] ACK from Coder Bot is on record/,
+      'the missing ACK is called out in the fact, not papered over',
+    );
 
     releaseTurn();
     await rawLoop.whenIdle();
     await sleep(300);
     assert.equal(heartbeatPosts().length, 0, 'still no heartbeat posts after settle');
-    assert.equal(reminders().length, 1, 'the reminder fires at most once per turn');
+    assert.equal(
+      h.groupTaskStore.listPendingHostNotes(task.id).filter((note) => note.kind === 'long_turn').length,
+      1,
+      'the note fires at most once per turn',
+    );
   } finally {
     releaseTurn();
     h.cleanup();
@@ -7911,10 +8107,11 @@ test('speedup R-02: an unprompted [WORKING] arms no delivery deadline; fenced to
       undefined,
       'a fenced [WORKING] citation arms nothing',
     );
-    // Control: a real dispatch (ACK watch armed) followed by the ACK arms it.
+    // Control: a real dispatch with a chair-stated deadline (ACK watch armed)
+    // followed by the ACK arms that stated clock.
     insertGroupMessage(h.db, {
       pinId: 'pin-r02-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot do X',
+      senderName: 'Twin Bot', content: '@Coder Bot do X [DEADLINE: 5m]',
       chainTimestamp: Math.floor(h.state.nowMs / 1000) + 2,
     });
     insertGroupMessage(h.db, {
@@ -7925,7 +8122,7 @@ test('speedup R-02: an unprompted [WORKING] arms no delivery deadline; fenced to
     await h.loop.runTick();
     assert.ok(
       h.store.get(`group_task_expected_delivery:${task.id}:2`),
-      'an ACK to a real assignment still arms the deadline',
+      'an ACK to a real assignment arms the chair-stated deadline',
     );
   } finally {
     h.cleanup();
@@ -7953,11 +8150,11 @@ test('speedup R-02: the delivery reminder stays suspended while the assignment i
       JSON.stringify({ dueAt: startMs - 60_000, ackedAt: startMs - 120_000, taskDescription: 'S4' }),
     );
     await h.loop.runTick();
-    assert.equal(
-      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
-      0,
-      'upstream not delivered → no deadline alert for the downstream member',
-    );
+    const deadlineNotes = () => Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'deadline'",
+      [task.id],
+    )[0].values[0][0]);
+    assert.equal(deadlineNotes(), 0, 'upstream not delivered → no deadline bell for the downstream member');
     assert.equal(
       h.store.get(`group_task_delivery_reminded:${task.id}:2`),
       undefined,
@@ -7973,11 +8170,7 @@ test('speedup R-02: the delivery reminder stays suspended while the assignment i
       uri: `pin://${'f'.repeat(64)}i0`,
     });
     await h.loop.runTick();
-    assert.equal(
-      h.sends.filter((send) => /estimated delivery/.test(send.content)).length,
-      1,
-      'once the upstream is delivered a genuine overdue still alerts',
-    );
+    assert.equal(deadlineNotes(), 1, 'once the upstream is delivered a genuine overdue still rings the bell');
   } finally {
     h.cleanup();
   }
@@ -8026,10 +8219,14 @@ test('speedup R-06: review entry stamps the time breakdown onto the record and t
       summary.timeBreakdown.phases.some((phase) => phase.key === 'executing'),
       'the executing window is derived from the status-event ledger',
     );
-    const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
-    assert.ok(closing, 'ceremony message posted');
-    assert.match(closing.content, /耗时分解：/);
-    assert.match(closing.content, /宿主心跳占 \d+%/);
+    // Single-commander: the breakdown lives on the record; the host posts
+    // no ceremony message carrying it.
+    assert.equal(
+      h.sends.filter((s) => /进入验收阶段|耗时分解：/.test(s.content)).length,
+      0,
+      'no host ceremony message; the time breakdown stays on the acceptance record',
+    );
+    assert.ok(summary.timeBreakdown != null, 'time breakdown stamped onto the record');
   } finally {
     h.cleanup();
   }
@@ -8168,7 +8365,7 @@ test('fix-v2 P0-1: a retained deadline alert carries the member\'s dependency st
     // carry the dependency-state suffix (REQ: 告警文案必须带依赖状态).
     insertGroupMessage(h.db, {
       pinId: 'pin-v2p0d-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S1。[DEADLINE: 10m]',
+      senderName: 'Twin Bot', content: '@Coder Bot 你负责 S1。[DEADLINE: 1m]',
       chainTimestamp: Math.floor(startMs / 1000),
     });
     await h.loop.runTick();
@@ -8188,10 +8385,12 @@ test('fix-v2 P0-1: a retained deadline alert carries the member\'s dependency st
     h.groupTaskStore.setMemberStatus(task.id, 3, 'standby', 'gmid-w3');
     h.state.nowMs = startMs + 5 * 60_000;
     await h.loop.runTick();
-    const alerts = h.sends.filter((send) => /estimated delivery/.test(send.content));
-    assert.equal(alerts.length, 1, 'only the genuinely-overdue member alerts');
-    assert.match(alerts[0].content, /@Coder Bot/);
-    assert.match(alerts[0].content, /dependency state: no upstream dependency declared/);
+    // Single-commander: the overdue alert is an environment note for the chair.
+    const deadlineNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'deadline');
+    assert.equal(deadlineNotes.length, 1, 'only the genuinely-overdue member rings the bell');
+    assert.match(deadlineNotes[0].body, /Coder Bot/);
+    assert.match(deadlineNotes[0].body, /dependency state: no upstream dependency declared/);
     assert.equal(
       h.store.get(`group_task_delivery_reminded:${task.id}:3`),
       undefined,

@@ -47,6 +47,7 @@ require(coworkUtilPath); // load under the mock so the cache entry exists
 require.cache[coworkUtilPath].exports.generateSessionTitle = async () => 'Test Title';
 const {
   runOrchestratorSkillTurn,
+  runSkillTurnInExistingSession,
   SkillTurnTimeoutError,
 } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
 Module._load = originalLoad;
@@ -577,4 +578,119 @@ test('service: a late [reasoning unavailable] completion settles to WORKER_EMPTY
   } finally {
     sqliteStore.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Bridge-level: existing-session skill turns (group-task / A2A path) — the
+// task #64 late-completion contract. The watchdog no longer detaches the
+// caller: the promise stays pending while the turn keeps running, and a
+// session that completes inside the late window resolves NORMALLY so the
+// reply flows through the caller's standard posting path.
+// ---------------------------------------------------------------------------
+
+// NOTE: the existing-session watchdog clamps skillTurnTimeoutMs to a 1s
+// floor (Math.max(1_000, …)), so these tests budget the watchdog at 1_000ms —
+// a 300ms tick never fires it and the pending promise hangs the runner.
+test('existing-session: watchdog fire keeps the promise pending and a late completion resolves it normally', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { runner, store, session, sessionPatches } = makeBridgeFixtures('session-existing-late-ok');
+  let resolved = false;
+
+  const resultPromise = runSkillTurnInExistingSession(runner, store, {
+    sessionId: 'session-existing-late-ok',
+    systemPrompt: 'system',
+    userMessage: 'build the icon set',
+    cwd: '/tmp/idbots-wt',
+    skillTurnTimeoutMs: 1_000,
+    lateCompletionTimeoutMs: 60_000,
+  }).then((result) => {
+    resolved = true;
+    return result;
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  t.mock.timers.tick(1_000); // watchdog fires — turn keeps running in the runner
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(resolved, false, 'the promise stays pending through the watchdog fire');
+  // No premature error stamp while the turn may still deliver.
+  assert.equal(sessionPatches.some((patch) => patch.status === 'error'), false);
+
+  // 30s past the watchdog, still inside the 60s late window (task #64: the
+  // deliverable report landed here) — the session completes with a real final
+  // assistant reply and the turn resolves NORMALLY.
+  t.mock.timers.tick(30_000);
+  session.messages.push({
+    id: 'assistant-existing-late',
+    type: 'assistant',
+    content: '[WORKING] icon set delivered: metafile://ab',
+    timestamp: Date.now(),
+  });
+  runner.emit('complete', 'session-existing-late-ok');
+
+  const result = await resultPromise;
+  assert.equal(result.replyText, '[WORKING] icon set delivered: metafile://ab');
+  assert.equal(sessionPatches.some((patch) => patch.status === 'error'), false);
+
+  // Settled: a second complete must not double-settle anything.
+  runner.emit('complete', 'session-existing-late-ok');
+  assert.equal(resolved, true);
+});
+
+test('existing-session: a session silent past the late window rejects with SkillTurnTimeoutError', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { runner, store, sessionPatches } = makeBridgeFixtures('session-existing-silent');
+
+  const resultPromise = runSkillTurnInExistingSession(runner, store, {
+    sessionId: 'session-existing-silent',
+    systemPrompt: 'system',
+    userMessage: 'build the icon set',
+    cwd: '/tmp/idbots-wt',
+    skillTurnTimeoutMs: 1_000,
+    lateCompletionTimeoutMs: 60_000,
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  t.mock.timers.tick(1_000); // watchdog
+  t.mock.timers.tick(60_000); // late window expires with no terminal event
+
+  await assert.rejects(resultPromise, (error) => {
+    assert.equal(error.name, 'SkillTurnTimeoutError');
+    assert.equal(error.sessionId, 'session-existing-silent');
+    return true;
+  });
+  assert.equal(
+    sessionPatches.some((patch) => patch.status === 'error'),
+    true,
+    'the error stamp lands only once the recovery budget is spent',
+  );
+});
+
+test('existing-session: a late session error rejects as a plain failure (retryable), not a timeout', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { runner, store, sessionPatches } = makeBridgeFixtures('session-existing-late-error');
+
+  const resultPromise = runSkillTurnInExistingSession(runner, store, {
+    sessionId: 'session-existing-late-error',
+    systemPrompt: 'system',
+    userMessage: 'build the icon set',
+    cwd: '/tmp/idbots-wt',
+    skillTurnTimeoutMs: 1_000,
+    lateCompletionTimeoutMs: 60_000,
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  t.mock.timers.tick(1_000); // watchdog
+  t.mock.timers.tick(30_000); // still inside the late window
+  runner.emit('error', 'session-existing-late-error', 'API quota exceeded');
+
+  await assert.rejects(resultPromise, (error) => {
+    assert.equal(error.name, 'Error');
+    assert.equal(error.message, 'API quota exceeded');
+    return true;
+  });
+  assert.equal(sessionPatches.some((patch) => patch.status === 'error'), true);
 });

@@ -655,6 +655,49 @@ interface GroupTaskSupervisorSignalRow {
   created_at: string | null;
 }
 
+/**
+ * Single-commander architecture: one environment observation queued for the
+ * chair. Kinds are open-ended (recorded as plain strings) — emitters own
+ * their vocabulary; the chair turn renders kind/target/body lines verbatim.
+ */
+export interface GroupTaskHostNote {
+  id: number;
+  taskId: number;
+  kind: string;
+  target: string | null;
+  body: string;
+  dedupeKey: string | null;
+  consumedAt: number | null;
+  chairResponsePinId: string | null;
+  createdAt: string | null;
+}
+
+interface GroupTaskHostNoteRow {
+  id: number;
+  task_id: number;
+  kind: string;
+  target: string | null;
+  body: string;
+  dedupe_key: string | null;
+  consumed_at: number | null;
+  chair_response_pin_id: string | null;
+  created_at: string | null;
+}
+
+function rowToGroupTaskHostNote(row: GroupTaskHostNoteRow): GroupTaskHostNote {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    kind: row.kind,
+    target: row.target ?? null,
+    body: row.body,
+    dedupeKey: row.dedupe_key ?? null,
+    consumedAt: row.consumed_at ?? null,
+    chairResponsePinId: row.chair_response_pin_id ?? null,
+    createdAt: row.created_at ?? null,
+  };
+}
+
 function isSupervisorSignalKind(value: string): value is GroupTaskSupervisorSignalKind {
   return value === 'nudge' || value === 'flag' || value === 'pause' || value === 'resume';
 }
@@ -1622,6 +1665,79 @@ export class GroupTaskStore {
     this.saveDb();
   }
 
+  // --- Single-commander architecture: host→chair environment notes ---
+
+  /**
+   * Record one environment observation for the chair. Dedupes on
+   * (task_id, dedupe_key) while unconsumed — a repeat bell (a monitor firing
+   * every tick) refreshes nothing; the first pending copy is delivered and
+   * the dedupe guard re-arms once consumed.
+   */
+  recordHostNote(input: {
+    taskId: number;
+    kind: string;
+    body: string;
+    target?: string | null;
+    dedupeKey?: string | null;
+  }): GroupTaskHostNote | null {
+    const body = input.body.trim();
+    if (!body) return null;
+    const dedupeKey = input.dedupeKey?.trim() || null;
+    if (dedupeKey) {
+      const existing = this.getOne<GroupTaskHostNoteRow>(
+        `SELECT * FROM group_task_host_notes
+         WHERE task_id = ? AND dedupe_key = ? AND consumed_at IS NULL
+         ORDER BY id DESC LIMIT 1`,
+        [input.taskId, dedupeKey],
+      );
+      if (existing) return rowToGroupTaskHostNote(existing);
+    }
+    this.db.run(
+      `INSERT INTO group_task_host_notes (task_id, kind, target, body, dedupe_key)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        input.taskId,
+        input.kind.trim() || 'info',
+        input.target?.trim() || null,
+        body,
+        dedupeKey,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<GroupTaskHostNoteRow>(
+      'SELECT * FROM group_task_host_notes WHERE id = ?',
+      [id],
+    );
+    return row ? rowToGroupTaskHostNote(row) : null;
+  }
+
+  /** Environment notes not yet delivered to a chair turn, oldest first. */
+  listPendingHostNotes(taskId: number): GroupTaskHostNote[] {
+    const rows = this.getAll<GroupTaskHostNoteRow>(
+      `SELECT * FROM group_task_host_notes
+       WHERE task_id = ? AND consumed_at IS NULL ORDER BY id ASC`,
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskHostNote);
+  }
+
+  /**
+   * Mark notes consumed once a chair turn has carried them (a null pin means
+   * the chair saw them and chose [NO_REPLY] — still a decision, still done).
+   */
+  markHostNotesConsumed(ids: number[], chairResponsePinId: string | null): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(', ');
+    this.db.run(
+      `UPDATE group_task_host_notes
+       SET consumed_at = ?, chair_response_pin_id = ?
+       WHERE id IN (${placeholders})`,
+      [Date.now(), chairResponsePinId, ...ids],
+    );
+    this.saveDb();
+  }
+
   /**
    * G-04: one-line renders of every supervisor signal, for the acceptance
    * summary snapshot at review entry (the review record).
@@ -2472,6 +2588,14 @@ export class GroupTaskStore {
    * Round-4 (show summary): last chain speak timestamp (epoch seconds) per
    * sender GlobalMetaID for one group — the summary view's member list shows
    * when each member last spoke. Senders without any timestamp are absent.
+   *
+   * Task #64: host-authored [GROUP_TASK_NOTICE:…] lines are posted under the
+   * member's own GlobalMetaID but are NOT the member speaking (the long-turn
+   * reminder, supervisor nudges). Counting them made a silent member look
+   * alive — the implicit-ACK check cleared the no-ACK watch on the host's own
+   * long-turn notice and the unreachable/timeout monitors kept the member
+   * "fresh". They are excluded here by their ASCII protocol prefix so every
+   * consumer reads genuine member speech.
    */
   getMembersLastSpeakAt(
     groupId: string,
@@ -2490,6 +2614,7 @@ export class GroupTaskStore {
        FROM group_chat_messages
        WHERE group_id = ? AND sender_global_metaid IN (${placeholders})
          AND chain_timestamp IS NOT NULL
+         AND content NOT LIKE '[GROUP_TASK_NOTICE:%'
        GROUP BY sender_global_metaid`,
       [groupId, ...ids],
     );

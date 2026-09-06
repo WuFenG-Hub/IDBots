@@ -50,12 +50,7 @@ import {
 } from '../libs/coworkSessionActivity';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
 import {
-  buildCheckpointPauseLine,
-  buildCheckpointResumeLine,
-  buildDispatchHeldLine,
-  buildLongTurnStandbyNote,
   buildMemberJoinWelcomeText,
-  buildReviewClosingLine,
   buildSourceSessionAnomalyNotice,
   buildSourceSessionCheckpointNotice,
   buildSourceSessionCreatedNotice,
@@ -66,18 +61,9 @@ import {
   copyLocalDeliverableUploadFailed,
   copyPinidNotSynced,
   copyConclusionTagInstruction,
-  copyWorkingAckExample,
-  copyWorkingAckFallback,
-  copyCheckpointNeedDecision,
-  copyLongTurnChairReminder,
-  copyLongTurnHeartbeat,
-  copyLongTurnInProgress,
-  buildStatusDirectiveNote,
-  buildDescriptiveStatusNote,
   GROUP_TASK_NOTICE,
   hasGroupTaskNotice,
   isRollCallPresenceCheck,
-  withGroupTaskNotice,
 } from '../libs/groupTaskCopy';
 import {
   ensureGroupTaskMemberReady,
@@ -92,7 +78,6 @@ import { SkillTurnTimeoutError } from './orchestratorCoworkBridge';
 import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
 import {
   buildAcceptanceSummary,
-  buildAcceptanceSummaryMessageText,
   buildGroupTaskTimeBreakdown,
   extractChairConclusion,
   extractCriteriaVerdicts,
@@ -425,7 +410,6 @@ export function classifyMemberLiveness(signals: MemberLivenessSignals): MemberLi
   return 'stale';
 }
 /** P0-2: kv guard so one dispatch produces at most ONE host ACK. */
-const ACK_KV_PREFIX = 'group_task_ack:';
 /**
  * Speedup R-03: kv flag per (task, message) — every [DELIVERABLE] candidate
  * of the message folded into an earlier ledger row (same author + same uri),
@@ -818,6 +802,8 @@ export const PROSE_DEPENDENCY_EXEMPTION_MAX_MS = 180 * 60_000;
  * cleared on a successful chair answer.
  */
 const GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX = 'group_task_sup_sig_attempts:';
+/** Single-commander: failed chair-delivery attempts per host environment note. */
+const GROUP_TASK_HOST_NOTE_ATTEMPTS_PREFIX = 'group_task_host_note_attempts:';
 /**
  * #14 follow-up: when a worker turn already in flight lands AFTER the chair's
  * closing ceremony (so the last group message is a worker's, not the host's),
@@ -1781,7 +1767,6 @@ export interface GroupTaskDaemonDeps {
    * turn — posts `[WORKING] 已接单…` BEFORE the (potentially long) turn so the
    * group never sees a silent worker (Eleven-style 11-min silence). Default ON.
    */
-  autoAckWorkerDispatch?: boolean;
   /**
    * P2-6 (round 5): bounded wait for a `[DEPENDS_ON: <pinid>]` upstream
    * deliverable before dispatching the worker (default 15 min).
@@ -2058,7 +2043,6 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     0,
     Math.trunc(deps.chairTwinSuppressWindowMs ?? DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS),
   );
-  const autoAckWorkerDispatch = deps.autoAckWorkerDispatch !== false;
   const dependencyWaitMaxMs = Math.max(
     1_000,
     Math.trunc(deps.dependencyWaitMaxMs ?? DEFAULT_DEPENDENCY_WAIT_MAX_MS),
@@ -2538,8 +2522,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   /**
    * P2-6 ledger check for one [DEPENDS_ON] token: pinid/txid-shaped tokens are
    * enforced against the task's recorded deliverables; free-text descriptions
-   * are advisory only (always satisfied). Shared by dependencyStatus and the
-   * stale-[WORKING] dependency-wait exemption.
+   * are advisory only (always satisfied). Used by the stale-[WORKING] dependency-wait exemption
+   * in the monitors (single-commander: dispatch is no longer gated).
    */
   const dependencyTokenSatisfied = (task: GroupTask, token: string): boolean => {
     const pinish = PINID_FORMAT.test(token) || TXID_FORMAT.test(token);
@@ -2576,152 +2560,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
-   * P2-6: [DEPENDS_ON: <token>] gate. Pinid/txid-shaped tokens are enforced
-   * against the task's recorded deliverables (the worker dispatch is held
-   * until the upstream deliverable lands); free-text descriptions are
-   * advisory only — the prompt protocol carries the "wait for upstream
-   * [DELIVERABLE]" wording for those.
-   */
-  const dependencyStatus = (
-    task: GroupTask,
-    message: GroupTaskDaemonMessage,
-  ): { token: string | null; satisfied: boolean } => {
-    const match = DEPENDS_ON_TAG.exec(message.content ?? '');
-    if (!match) return { token: null, satisfied: true };
-    const token = match[1].trim();
-    return { token, satisfied: dependencyTokenSatisfied(task, token) };
-  };
-
-  /**
-   * P0-2: host auto-ACK — post a `[WORKING] 已接单…` status line BEFORE a
-   * worker's long (skill-turn) dispatch reply, so the group sees the worker
-   * accepted the job instead of a silent gap (the Eleven-style 11-minute
-   * silence case). The ACK text is produced by a fast LLM call; on any
-   * failure a template line is posted instead. kv-guarded per
-   * (task, bot, message) so deferred retries never double-ACK.
+   * P14 (v1.1) chair-assignment predicate, shared by the deferred-queue
+   * coalescer: a trigger counts as a worker assignment only when it is plain
+   * chair prose. Worker chatter that merely mentions this bot and chair
+   * protocol/status messages are not assignments, and roll-call presence
+   * checks @mention every member but are NOT work assignments.
    *
-   * P14 (v1.1) context gates — an auto-ACK that contradicts reality is worse
-   * than no ACK (task #22 logged ~20 template ACKs quoting empty or already
-   * finished work as "assignments"). Before ACKing, the trigger message must
-   * actually be a chair dispatch: worker chatter that merely mentions this bot
-   * (registrations, delivery notes) and chair protocol/status messages are not
-   * assignments, and a worker who already delivered after the assignment must
-   * not claim to be "接单"-ing again.
+   * Single-commander (task #64 follow-up): the P0-2 host auto-ACK that used
+   * this gate is GONE — the host never posts as a worker. The ACK protocol
+   * is the worker's own duty (see the worker playbook); a missing ACK is an
+   * environment fact delivered to the chair instead.
    */
-  const workerDeliveredAfterMessage = (
-    task: GroupTask,
-    bot: GroupTaskDaemonBotFull,
-    message: GroupTaskDaemonMessage,
-  ): boolean => {
-    const chainSec = message.chainTimestamp;
-    if (chainSec == null || !Number.isFinite(chainSec)) return false;
-    const gmid = (bot.globalmetaid ?? '').trim().toLowerCase();
-    if (!gmid) return false;
-    return deps.getGroupTaskStore().listDeliverables(task.id).some((deliverable) => {
-      if ((deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() !== gmid) return false;
-      const created = deliverable.createdAt;
-      if (!created) return false;
-      // createdAt is sqlite datetime('now') → UTC "YYYY-MM-DD HH:MM:SS".
-      const createdSec = Math.floor(
-        Date.parse(`${created.trim().replace(' ', 'T')}Z`) / 1000,
-      );
-      return Number.isFinite(createdSec) && createdSec >= chainSec;
-    });
-  };
-
-  const maybeSendWorkerAck = async (
-    task: GroupTask,
-    bot: GroupTaskDaemonBotFull,
-    message: GroupTaskDaemonMessage,
+  const isChairDispatchContent = (
+    content: string,
+    senderGmid: string,
     chairGlobalMetaId: string,
-    baseSystemPrompt: string,
-    llmId: string | undefined,
-    llmProvider: string | null,
-    fallbackLlmId: string | null,
-    fallbackLlmProvider: string | null,
-  ): Promise<void> => {
-    if (!autoAckWorkerDispatch) return;
-    const content = (message.content ?? '').trim();
-    const senderGmid = (message.senderGlobalMetaId ?? '').trim();
-    if (!chairGlobalMetaId || !senderGmid || senderGmid !== chairGlobalMetaId) return;
-    if (
-      !content
-      || DELIVERABLE_TAG.test(content)
-      || STATUS_TAG.test(content)
-      || CHECKPOINT_OPEN_TAG.test(content)
-      || CHECKPOINT_RESOLVED_TAG.test(content)
-      // Host protocol notices (welcome broadcasts, checkpoint/review notices)
-      // and roll-call presence checks @mention every member but are NOT work
-      // assignments. An auto-ACK here posts a bogus "[WORKING] 已接单" whose
-      // invented ETA then arms a delivery deadline — the false
-      // "estimated delivery by … but no [DELIVERABLE] arrived yet" reminders
-      // (task #41: every welcome ACK armed a 20-26 min fake deadline).
-      || hasGroupTaskNotice(content)
-      || isRollCallPresenceCheck(content)
-    ) {
-      emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: auto-ACK suppressed for bot ${bot.id} ` +
-        `(trigger message #${message.id} is not a chair assignment)`,
-      );
-      return;
-    }
-    if (workerDeliveredAfterMessage(task, bot, message)) {
-      emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: auto-ACK suppressed for bot ${bot.id} ` +
-        `(already delivered after message #${message.id}; no stale 已接单)`,
-      );
-      return;
-    }
-    const sqlite = deps.getStore();
-    const ackKey = `${ACK_KV_PREFIX}${task.id}:${bot.id}:${message.id}`;
-    if (sqlite.get<string>(ackKey) === '1') return;
-    const objective = content.slice(0, 120) || 'assigned work';
-    const directive = [
-      '[SYSTEM ACK directive — generated by the host, not a group participant]',
-      `You were just assigned work in the group task. Reply with EXACTLY ONE line that starts with \`[WORKING]\`, says you have accepted the job, briefly what you are doing and your estimated time, e.g. \`${copyWorkingAckExample()}\` (reply in the owner's app language; do not switch to another language). No other text.`,
-      'The line must describe ONLY the work this assignment actually gives you — never invent tasks, never mention work you already delivered, and never acknowledge on behalf of anyone else.',
-      '',
-      `The assignment: ${objective}`,
-    ].join('\n');
-    let ackText = '';
-    // Entropy P0: the ACK is protocol, not prose — template by default (zero
-    // LLM); the phrased version stays available as an opt-in enhancement via
-    // the groupTaskEntropyP0 kv knob (ackTemplate:false).
-    const ackEntropyP0 = parseGroupTaskEntropyP0Config(sqlite.get<string>('groupTaskEntropyP0'));
-    if (ackEntropyP0.ackTemplate) {
-      ackText = copyWorkingAckFallback(objective);
-    } else {
-      try {
-        ackText = (await performChatWithTimeout(baseSystemPrompt, directive, llmId, {
-          llmProvider,
-          fallbackLlmId,
-          fallbackLlmProvider,
-          thinking: 'disabled',
-        })).trim();
-      } catch (error) {
-        emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: worker ACK chat failed for bot ${bot.id}; using template: ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      if (!ackText || NO_REPLY_PATTERN.test(ackText) || !WORKING_TAG.test(ackText)) {
-        ackText = copyWorkingAckFallback(objective);
-      }
-    }
-    try {
-      const sent = await postGroupMessage(task.id, bot.id, ackText, {
-        // R5: the ACK is a direct response to the chair's assignment message —
-        // thread it under that pin so the group reads as a conversation.
-        replyPin: message.pinId ?? undefined,
-      });
-      sqlite.set(ackKey, '1');
-      emitLog(`[GroupTaskDaemon] Task ${task.id}: worker ${bot.id} ACK posted (pin ${sent.pinId})`);
-    } catch (error) {
-      emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: worker ACK send failed for bot ${bot.id} (retried on next turn): ` +
-        `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+  ): boolean => {
+    if (!chairGlobalMetaId || !senderGmid || senderGmid !== chairGlobalMetaId) return false;
+    return Boolean(
+      content
+      && !DELIVERABLE_TAG.test(content)
+      && !STATUS_TAG.test(content)
+      && !CHECKPOINT_OPEN_TAG.test(content)
+      && !CHECKPOINT_RESOLVED_TAG.test(content)
+      && !hasGroupTaskNotice(content)
+      && !isRollCallPresenceCheck(content),
+    );
   };
 
   /**
@@ -2879,6 +2743,63 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
        LIMIT 1`,
       [groupId, id],
     ))[0] ?? null;
+
+  /**
+   * Task #64 deferred-drain coalescer (see the call site for the why). Input
+   * entries are message-id ascending (deferReply keeps the queue sorted), so
+   * per bot the first resolvable chair assignment is the OLDEST one. An
+   * assignment already marked ACK-seen no longer carries an open obligation
+   * and is skipped for the preference. Purged/unreadable message rows drop
+   * out (the drain loop would drop them anyway).
+   */
+  const coalesceDeferredBacklogPerBot = (
+    db: Database,
+    task: GroupTask,
+    members: GroupTaskMember[],
+    entries: DeferredReplyEntry[],
+  ): DeferredReplyEntry[] => {
+    if (entries.length <= 1 || !task.groupId) return entries;
+    const chair = members.find((member) => member.role === 'chair');
+    const chairGmid = (chair?.globalmetaid ?? '').trim();
+    const sqlite = deps.getStore();
+    const byBot = new Map<number, Array<{ entry: DeferredReplyEntry; row: GroupChatMessageRow | null }>>();
+    for (const entry of entries) {
+      const list = byBot.get(entry.metabotId) ?? [];
+      list.push({ entry, row: queryMessageById(db, task.groupId!, entry.messageId) });
+      byBot.set(entry.metabotId, list);
+    }
+    const picked: DeferredReplyEntry[] = [];
+    for (const [metabotId, list] of byBot) {
+      const member = members.find((candidate) => candidate.metabotId === metabotId);
+      const coalescable = Boolean(member && member.role === 'worker') && list.length > 1;
+      if (!coalescable) {
+        for (const item of list) picked.push(item.entry);
+        continue;
+      }
+      const preferred = list.find((item) => {
+        if (!item.row) return false;
+        if (sqlite.get<string>(`${ACK_SEEN_PREFIX}${task.id}:${item.entry.messageId}`) === '1') return false;
+        return isChairDispatchContent(
+          String(item.row.content ?? '').trim(),
+          String(item.row.sender_global_metaid ?? '').trim(),
+          chairGmid,
+        );
+      }) ?? null;
+      const resolvable = list.filter((item) => item.row != null);
+      const keep = preferred?.entry ?? resolvable[resolvable.length - 1]?.entry ?? list[list.length - 1]!.entry;
+      const dropped = list.filter((item) => item.entry !== keep).map((item) => `#${item.entry.messageId}`);
+      if (dropped.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: coalesced bot ${metabotId}'s queued backlog into ` +
+          `message #${keep.messageId}` +
+          (preferred ? ' (oldest still-open chair assignment)' : ' (newest trigger)') +
+          `; superseded: ${dropped.join(', ')}`,
+        );
+      }
+      picked.push(keep);
+    }
+    return picked;
+  };
 
   /** True when the chair bot already replied to the given message pin (P2-7). */
   const chairAlreadyRepliedTo = (
@@ -4122,26 +4043,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     parseStatus: string,
   ): Promise<void> => {
     if (!chairMember?.metabotId) return;
+    // Single-commander: the parse verdict is an environment FACT for the
+    // chair (the host never posts the correction as the chair). The chair
+    // re-issues the directive itself if the state move was really intended.
     try {
       const liveStatus = deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status;
-      const sent = await postGroupMessage(
-        task.id,
-        chairMember.metabotId,
-        buildStatusDirectiveNote({
-          taskId: task.id,
-          taskTitle: task.title,
-          appliedTag,
-          fromStatus: parseStatus,
-          rejected: verdict.rejected.map((tag) => ({ tag, fromStatus: parseStatus })),
-          legalMoves: CHAIR_STATUS_MOVES[liveStatus] ?? [],
-          legalMovesStatus: liveStatus,
-        }),
-        { replyPin: message.pinId ?? undefined },
-      );
-      rememberDaemonChairPin(task.id, sent.pinId);
+      const parts: string[] = [];
+      if (appliedTag) parts.push(`applied [STATUS:${appliedTag.toUpperCase()}]`);
+      const rejectedList = verdict.rejected.map((verdictTag) => `-> ${verdictTag.toUpperCase()}`).join(', ');
+      if (rejectedList) parts.push(`rejected as illegal from ${parseStatus}: ${rejectedList}`);
+      deps.getGroupTaskStore().recordHostNote({
+        taskId: task.id,
+        kind: 'parse',
+        target: 'status directive',
+        dedupeKey: `parse_status:${task.id}:${message.id}`,
+        body:
+          `A [STATUS:*] directive in message #${message.id} was parsed with outcome: ${parts.join('; ')}. ` +
+          `Current task status: ${liveStatus}. Legal next moves from it: ` +
+          `${(CHAIR_STATUS_MOVES[liveStatus] ?? []).map((tag) => tag.toUpperCase()).join(', ') || '(none)'}. ` +
+          'If a rejected move was genuinely intended, re-issue it from the correct current status.',
+      });
     } catch (error) {
       emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: status-parser note post failed: ` +
+        `[GroupTaskDaemon] Task ${task.id}: status-parser note record failed: ` +
         `${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -4168,25 +4092,28 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (lastMs > 0 && now() - lastMs < DESCRIPTIVE_NOTE_RATE_LIMIT_MS) return;
       sqlite.set(stampKey, now());
     } catch {
-      // kv unavailable — post unrate-limited rather than silently skip
+      // kv unavailable — record unrate-limited rather than silently skip
     }
+    // Single-commander: descriptive citations are an environment fact for the
+    // chair, not a host correction posted in the group.
     try {
-      const sent = await postGroupMessage(
-        task.id,
-        chairMember.metabotId,
-        buildDescriptiveStatusNote({
-          taskId: task.id,
-          taskTitle: task.title,
-          descriptive: verdict.descriptive.filter((tag) =>
-            (CHAIR_STATUS_MOVES[parseStatus] ?? []).includes(tag)),
-          fromStatus: parseStatus,
-        }),
-        { replyPin: message.pinId ?? undefined },
-      );
-      rememberDaemonChairPin(task.id, sent.pinId);
+      const descriptiveList = verdict.descriptive
+        .filter((tag) => (CHAIR_STATUS_MOVES[parseStatus] ?? []).includes(tag))
+        .map((tag) => tag.toUpperCase())
+        .join(', ');
+      if (!descriptiveList) return;
+      deps.getGroupTaskStore().recordHostNote({
+        taskId: task.id,
+        kind: 'parse',
+        target: 'status citation',
+        dedupeKey: `parse_descriptive:${task.id}:${message.id}`,
+        body:
+          `Message #${message.id} cites [STATUS:*] tag(s) ${descriptiveList} as prose (descriptive only, ` +
+          `not applied; task stays ${parseStatus}). Nothing is required unless a real state move was intended.`,
+      });
     } catch (error) {
       emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: descriptive-status note post failed: ` +
+        `[GroupTaskDaemon] Task ${task.id}: descriptive-status note record failed: ` +
         `${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -4851,63 +4778,28 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                       `${breakdownError instanceof Error ? breakdownError.message : String(breakdownError)}`,
                     );
                   }
-                  // Improvement #1 (single-card acceptance): the owner report runs
-                  // BEFORE the group summary is posted. It captures the chair's
-                  // one-line 【结论】 verdict onto the just-saved record (version
-                  // N), so the message posted below, the Tasks acceptance-card
-                  // headline, and the origin-session notice all render the SAME
-                  // authoritative string. maybeSendOwnerReport contains its own
-                  // failures; posting proceeds regardless (without a conclusion
-                  // line when none was captured).
+                  // Improvement #1 (single-card acceptance): the owner report
+                  // captures the chair's one-line 【结论】 verdict onto the
+                  // just-saved record (version N), so the Tasks acceptance
+                  // card and the origin-session notice render the SAME
+                  // authoritative string. maybeSendOwnerReport contains its
+                  // own failures; recording proceeds regardless (without a
+                  // conclusion line when none was captured).
                   await maybeSendOwnerReport(task, members, botsById, promptMembers);
-                  const summarized = store.getLatestAcceptanceSummary(task.id) ?? saved;
-                  // Improvement #2 (v1.3) + #1: the owner-report turn above is
-                  // slow (LLM) — re-validate review freshness before the visible
-                  // group post (the task #24 race window, widened by the report
-                  // duration this reorder introduces).
-                  if (deps.getGroupTaskStore().getTaskById(task.id)?.status !== 'review') {
-                    emitLog(
-                      `[GroupTaskDaemon] Task ${task.id}: review ceremony aborted — the task left review while the owner report was composed`,
-                    );
-                  } else {
-                    const sent = await postGroupMessage(
-                      task.id,
-                      chairMember.metabotId!,
-                      buildAcceptanceSummaryMessageText(summarized, task.title),
-                    );
-                    try {
-                      // A sponsor-pending send returns an empty pinId
-                      // ("queued, delivered later by the drainer") — never
-                      // persist it as the published pin.
-                      if (sent.pinId) {
-                        store.updateAcceptanceSummaryPublishedPin(task.id, sent.pinId);
-                      }
-                    } catch (pinError) {
-                      emitLog(
-                        `[GroupTaskDaemon] Task ${task.id}: acceptance summary published-pin record failed: ` +
-                        `${pinError instanceof Error ? pinError.message : String(pinError)}`,
-                      );
-                    }
-                    emitLog(
-                      `[GroupTaskDaemon] Task ${task.id}: acceptance summary v${saved.version} posted on review entry (pin ${sent.pinId || 'queued'}, ${deliverables.length} deliverable(s)${summarized.conclusion ? ', conclusion captured' : ''})`,
-                    );
-                  }
+                  // Single-commander: the host no longer posts the acceptance
+                  // summary or a closing line into the group — the chair's own
+                  // [STATUS:REVIEW] message IS the group-facing wrap-up, and
+                  // the recorded summary feeds the Tasks acceptance card. The
+                  // published-pin stays null (no host group post exists).
+                  emitLog(
+                    `[GroupTaskDaemon] Task ${task.id}: acceptance summary v${saved.version} recorded on review entry ` +
+                    `(${deliverables.length} deliverable(s)${(store.getLatestAcceptanceSummary(task.id) ?? saved).conclusion ? ', conclusion captured' : ''}; no host group post — chair's review message closes the thread)`,
+                  );
                 } catch (error) {
                   emitLog(
-                    `[GroupTaskDaemon] Task ${task.id}: acceptance summary post failed, falling back to plain closing line: ` +
+                    `[GroupTaskDaemon] Task ${task.id}: acceptance summary recording failed: ` +
                     `${error instanceof Error ? error.message : String(error)}`,
                   );
-                  try {
-                    const sent = await postGroupMessage(task.id, chairMember.metabotId!, buildReviewClosingLine(task.title));
-                    emitLog(
-                      `[GroupTaskDaemon] Task ${task.id}: plain closing line posted as fallback (pin ${sent.pinId})`,
-                    );
-                  } catch (fallbackError) {
-                    emitLog(
-                      `[GroupTaskDaemon] Task ${task.id}: review closing fallback post failed: ` +
-                      `${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
-                    );
-                  }
                 }
               }
             }
@@ -5127,31 +5019,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               `[GroupTaskDaemon] Task ${task.id}: HITL checkpoint #${checkpoint.id} opened ` +
               `(${checkpoint.topic ?? 'no topic'})`,
             );
-            try {
-              // HITL: the pause line carries the decision summary so the owner
-              // sees what to decide at a glance (the chair's tag-free message
-              // body; document links inside it survive). Falls back to the
-              // topic-only form when the body holds nothing but tags.
-              const decisionSummary = extractCheckpointDecisionSummary(message.content);
-              const summaryClause = decisionSummary
-                ? copyCheckpointNeedDecision(truncateCheckpointSummary(decisionSummary))
-                : '';
-              const pauseLine = buildCheckpointPauseLine({
-                taskId: task.id,
-                taskTitle: task.title,
-                topic: checkpoint.topic,
-                summaryClause,
-              });
-              const sent = await postGroupMessage(task.id, chairMember.metabotId!, pauseLine);
-              emitLog(
-                `[GroupTaskDaemon] Task ${task.id}: checkpoint pause line posted (pin ${sent.pinId})`,
-              );
-            } catch (error) {
-              emitLog(
-                `[GroupTaskDaemon] Task ${task.id}: checkpoint pause line post failed: ` +
-                `${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
+            // Single-commander: no host pause line in the group — the chair's
+            // own [CHECKPOINT:] message already carries the question/draft,
+            // the owner is notified privately below, and the pause gate
+            // itself is host-enforced environment state.
             deps.emitTaskEvent?.({
               type: 'groupTask:checkpointChanged',
               taskId: task.id,
@@ -5181,22 +5052,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               `[GroupTaskDaemon] Task ${task.id}: HITL checkpoint #${resolved.id} resolved ` +
               `(${resolved.resolution ?? 'no summary'})`,
             );
-            try {
-              const resumeLine = buildCheckpointResumeLine({
-                taskId: task.id,
-                taskTitle: task.title,
-                resolution: resolved.resolution ?? null,
-              });
-              const sent = await postGroupMessage(task.id, chairMember.metabotId!, resumeLine);
-              emitLog(
-                `[GroupTaskDaemon] Task ${task.id}: checkpoint resume line posted (pin ${sent.pinId})`,
-              );
-            } catch (error) {
-              emitLog(
-                `[GroupTaskDaemon] Task ${task.id}: checkpoint resume line post failed: ` +
-                `${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
+            // Single-commander: no host resume line — the chair's own
+            // [CHECKPOINT_RESOLVED:] message announces the continuation.
             deps.emitTaskEvent?.({
               type: 'groupTask:checkpointChanged',
               taskId: task.id,
@@ -5725,6 +5582,165 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * Single-commander architecture (task #64 follow-up): deliver pending
+   * HOST ENVIRONMENT NOTES to the chair as ONE local system-context turn.
+   * The host is the meeting room, never a speaker — no-ACK watches, deadline
+   * bells, long-turn facts, joins and parser verdicts land here instead of
+   * being posted into the group under some bot's identity. The chair reads
+   * the facts and speaks for itself (or stays silent — [NO_REPLY] consumes
+   * the notes too: seeing the clock and deciding "no action" is a decision).
+   */
+  const processHostNotes = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+    promptMembers: DaemonPromptMember[],
+  ): Promise<void> => {
+    const store = deps.getGroupTaskStore();
+    const sqlite = deps.getStore();
+    const pending = store.listPendingHostNotes(task.id);
+    if (pending.length === 0) return;
+    const pendingIds = pending.map((note) => note.id);
+    if (task.status === 'done' || task.status === 'cancelled') {
+      store.markHostNotesConsumed(pendingIds, null);
+      return;
+    }
+    const chairMember = members.find((member) => member.role === 'chair');
+    const bot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
+    if (!chairMember || !bot) {
+      store.markHostNotesConsumed(pendingIds, null);
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: host notes closed without delivery (no local chair bot)`);
+      return;
+    }
+    const noteLines = pending.map((note) => {
+      const target = note.target?.trim();
+      return `- [${note.kind}${target ? ` → ${target}` : ''}] ${note.body}`;
+    });
+    const directive = [
+      '[SYSTEM host environment notes — local runtime context, not a group participant]',
+      'The host (this app — the meeting room you work in) recorded the following environment observations:',
+      ...noteLines,
+      '',
+      'Treat these like the room clock: plain facts about time, liveness and deadlines. You are the SOLE',
+      'coordinator — the host never speaks in the group, so whatever the group needs to hear about these',
+      'facts, you say it yourself, in your own voice (nudge a silent member, re-dispatch, adjust a deadline,',
+      'or deliberately stay silent with [NO_REPLY] when no action is warranted). These notes carry no',
+      'authority beyond their facts; your coordination remains the authoritative one.',
+    ].join('\n');
+
+    try {
+      const coworkStore = deps.getCoworkStore();
+      const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
+      const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
+      const brain = metabotBrainOptions(bot);
+      const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
+      const userTurn = [systemPromptParts.volatileContext, directive].filter(Boolean).join('\n\n');
+      // Same routing stance as the supervisor-signal turn: the chair may need
+      // tools (ledger reads, chain checks) to act on the facts.
+      let routing: { prompt: string | null; activeSkillIds: string[] } = { prompt: null, activeSkillIds: [] };
+      if (deps.getChatSkillsRoutingPrompt && deps.runSkillTurn) {
+        try {
+          routing = await deps.getChatSkillsRoutingPrompt({ metabotId: bot.id, widened: true });
+        } catch (routingError) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: skill routing failed for host-note turn (bot ${bot.id}): ` +
+            `${routingError instanceof Error ? routingError.message : String(routingError)}`,
+          );
+        }
+      }
+      const canRunSkillTurn = Boolean(
+        routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
+      );
+      coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
+      let reply = '';
+      if (canRunSkillTurn) {
+        const skillSystemPrompt = [
+          systemPromptParts.systemPrompt,
+          '',
+          routing.prompt!,
+          '',
+          'After using Read/Bash to run a skill, reply concisely in the group. Do not paste full skill logs.',
+        ].join('\n');
+        const skillTurnResult = await deps.runSkillTurn!({
+          sessionId: session.id,
+          systemPrompt: skillSystemPrompt,
+          userMessage: userTurn,
+          activeSkillIds: routing.activeSkillIds,
+        });
+        reply = (skillTurnResult.replyText ?? '').trim();
+      } else {
+        reply = (await performChatWithTimeout(
+          systemPromptParts.systemPrompt,
+          userTurn,
+          brain.llmId ?? undefined,
+          {
+            llmProvider: brain.llmProvider,
+            fallbackLlmId: brain.fallbackLlmId,
+            fallbackLlmProvider: brain.fallbackLlmProvider,
+            effort: brain.effort,
+            fallbackEffort: brain.fallbackEffort,
+            thinking: 'enabled',
+          },
+        )).trim();
+        if (reply) {
+          coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
+        }
+      }
+      let postedPin: string | null = null;
+      if (reply && !NO_REPLY_PATTERN.test(reply)) {
+        const posted = await postGroupMessage(task.id, bot.id, reply);
+        rememberDaemonChairPin(task.id, posted.pinId);
+        postedPin = posted.pinId || null;
+      }
+      store.markHostNotesConsumed(pendingIds, postedPin);
+      for (const id of pendingIds) {
+        sqlite.delete(`${GROUP_TASK_HOST_NOTE_ATTEMPTS_PREFIX}${id}`);
+      }
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: chair handled ${pending.length} host environment note(s) ` +
+        `(${postedPin ? `replied, pin ${postedPin}` : 'stayed silent by choice'})`,
+      );
+    } catch (error) {
+      // Retry budget, supervisor-signal style: 3 failed deliveries close the
+      // notes with an origin-session anomaly instead of wedging the channel.
+      const exhaustedIds: number[] = [];
+      for (const id of pendingIds) {
+        const attemptsKey = `${GROUP_TASK_HOST_NOTE_ATTEMPTS_PREFIX}${id}`;
+        const prev = Number(sqlite.get<string>(attemptsKey));
+        const attempts = (Number.isFinite(prev) ? prev : 0) + 1;
+        if (attempts >= 3) {
+          exhaustedIds.push(id);
+          sqlite.delete(attemptsKey);
+        } else {
+          sqlite.set(attemptsKey, String(attempts));
+        }
+      }
+      if (exhaustedIds.length > 0) {
+        store.markHostNotesConsumed(exhaustedIds, null);
+        notifySourceSessionMilestone(
+          task,
+          'anomaly',
+          buildSourceSessionAnomalyNotice({
+            title: task.title,
+            status: task.status,
+            summary:
+              `The chair could not be delivered host environment note(s) #${exhaustedIds.join(', #')} ` +
+              'after 3 attempts; they were closed undelivered. Check the chair bot and its LLM configuration.',
+          }),
+          `host_notes_undelivered:${exhaustedIds.join('-')}`,
+        );
+      }
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: host note turn failed (` +
+        (exhaustedIds.length > 0
+          ? `notes #${exhaustedIds.join(', #')} closed after 3 failed attempts; the rest stay pending`
+          : 'notes stay pending') +
+        `): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
   const generateAndSendReply = async (
     task: GroupTask,
     member: GroupTaskMember,
@@ -5784,8 +5800,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
       }
     }
+    // Task #64: presence confirmations (legacy host welcome notices and the
+    // chair's roll-call greetings) ask the bot for one fast LLM line, not tool
+    // work. Routing them into a skill turn let a diligent worker burn its
+    // whole 30-min budget doing the task inside the greeting turn (no
+    // greeting, no visible output — the group saw 30 min of silence while the
+    // bot quietly worked). Plain path: the greeting lands in seconds; the
+    // real work runs on the chair-assignment turn.
+    const triggerContent = (message.content ?? '').trim();
+    const triggerIsPresenceCheck = hasGroupTaskNotice(triggerContent, GROUP_TASK_NOTICE.welcome)
+      || isRollCallPresenceCheck(triggerContent);
+    if (triggerIsPresenceCheck && routing.prompt) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: presence confirmation for bot ${bot.id} runs the plain path ` +
+        '(no skill turn — greetings must not become work turns)',
+      );
+    }
     const canRunSkillTurn = Boolean(
-      routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
+      !triggerIsPresenceCheck
+      && routing.prompt
+      && routing.activeSkillIds.length > 0
+      && deps.runSkillTurn,
     );
 
     const brain = metabotBrainOptions(bot);
@@ -5817,13 +5852,6 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         error instanceof Error ? error.message : String(error),
       );
     };
-    // P0-2: host auto-ACK BEFORE the (potentially long) worker turn — a skill
-    // turn can run for many minutes, so the group must already see the
-    // "[WORKING] 已接单" signal instead of a silent gap. P14: only a real
-    // chair dispatch qualifies (see the gates inside maybeSendWorkerAck).
-    if (member.role === 'worker' && canRunSkillTurn) {
-      await maybeSendWorkerAck(task, bot, message, chairGlobalMetaId, baseSystemPrompt, llmId, brain.llmProvider, fallbackLlmId, brain.fallbackLlmProvider);
-    }
     coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
 
     let reply = '';
@@ -6088,73 +6116,43 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       timers.push(renewalInterval);
       if (longTurnChairReminderMs > 0) {
         timers.push(armTimer(() => {
-          void (async () => {
-            if (!pendingTurnJobs.has(args.job)) return;
-            try {
-              const memberName =
-                deps.getGroupTaskStore().listMembers(args.taskId)
-                  .find((member) => member.metabotId === args.metabotId)?.name?.trim()
-                || deps.getMetabotStore().getMetabotById(args.metabotId)?.name?.trim()
-                || `bot-${args.metabotId}`;
-              const minutes = Math.max(1, Math.round(longTurnChairReminderMs / 60_000));
-              await postGroupMessage(
-                args.taskId,
-                args.metabotId,
-                withGroupTaskNotice(
-                  GROUP_TASK_NOTICE.longTurn,
-                  copyLongTurnChairReminder(memberName, minutes),
-                ),
-              );
-              emitLog(
-                `[GroupTaskDaemon] Task ${args.taskId}: posted the one-shot long-turn chair reminder for bot ${args.metabotId}`,
-              );
-            } catch (error) {
-              emitLog(
-                `[GroupTaskDaemon] Task ${args.taskId}: long-turn chair reminder post failed for bot ${args.metabotId}: ` +
-                `${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
-          })();
-        }, longTurnChairReminderMs));
-      }
-    }
-    // Legacy visible posts (opt-in via deps): placeholder + heartbeats.
-    const postLine = (text: string): void => {
-      void (async () => {
-        // Re-check inside the async hop: the job may have settled (its
-        // finally clears these timers) after this timer already fired.
-        if (!pendingTurnJobs.has(args.job)) return;
-        try {
-          const posted = await postGroupMessage(args.taskId, args.metabotId, text);
-          if (args.isChair) {
-            rememberDaemonChairPin(args.taskId, posted.pinId);
-          } else {
-            deps.getStore().set(
-              `${WORKING_HEARTBEAT_PREFIX}${args.taskId}:${args.metabotId}`,
-              String(computeWorkingHeartbeatUntil(10, now())),
+          // Single-commander: the long-turn fact goes to the CHAIR as an
+          // environment note (the host never speaks as the member). The
+          // timer fires once per turn, so the note needs no extra one-shot
+          // guard; it is consumed by the next host-note chair turn.
+          if (!pendingTurnJobs.has(args.job)) return;
+          try {
+            const memberName =
+              deps.getGroupTaskStore().listMembers(args.taskId)
+                .find((member) => member.metabotId === args.metabotId)?.name?.trim()
+              || deps.getMetabotStore().getMetabotById(args.metabotId)?.name?.trim()
+              || `bot-${args.metabotId}`;
+            const minutes = Math.max(1, Math.round(longTurnChairReminderMs / 60_000));
+            const ackPending = deps.getStore()
+              .get<string>(`${ACK_PENDING_PREFIX}${args.taskId}:${args.metabotId}`) != null;
+            deps.getGroupTaskStore().recordHostNote({
+              taskId: args.taskId,
+              kind: 'long_turn',
+              target: memberName,
+              dedupeKey: `long_turn:${args.taskId}:${args.metabotId}:${Math.floor(now() / longTurnChairReminderMs)}`,
+              body:
+                `${memberName}'s turn has been running for over ${minutes} min with no group output; ` +
+                'the worker session is still active (liveness lease renewed internally).'
+                + (ackPending
+                  ? ` NOTE: no [WORKING] ACK from ${memberName} is on record for the current assignment yet.`
+                  : ''),
+            });
+            emitLog(
+              `[GroupTaskDaemon] Task ${args.taskId}: recorded the one-shot long-turn environment note for bot ${args.metabotId}`,
+            );
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${args.taskId}: long-turn environment note record failed for bot ${args.metabotId}: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
             );
           }
-          emitLog(
-            `[GroupTaskDaemon] Task ${args.taskId}: posted a long-turn liveness line for bot ${args.metabotId}`,
-          );
-        } catch (error) {
-          emitLog(
-            `[GroupTaskDaemon] Task ${args.taskId}: long-turn liveness post failed for bot ${args.metabotId}: ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      })();
-    };
-    if (longTurnPlaceholderMs > 0) {
-      timers.push(armTimer(() => postLine(copyLongTurnInProgress()), longTurnPlaceholderMs));
-    }
-    for (let beat = 1; beat <= longTurnHeartbeatMax; beat += 1) {
-      timers.push(
-        armTimer(
-          () => postLine(copyLongTurnHeartbeat()),
-          longTurnPlaceholderMs + beat * longTurnHeartbeatMs,
-        ),
-      );
+        }, longTurnChairReminderMs));
+      }
     }
     return timers;
   };
@@ -7918,53 +7916,39 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // declaration is authoritative liveness: extend the lease, arm nothing.
       const workerDeclaredWait = hasWorkerUpstreamWait(protocolContent);
       if (!opts?.humanGateActive && !acksHostNotice && assignmentOnRecord && !awaitingUpstream && !workerDeclaredWait) {
-        // P0-4 arming: an explicit numeric ETA arms a delivery deadline; a
-        // numberless ACK (task #60: Lucy's turn ran 71+ min with no escalation
-        // path) arms one too — from the chair's stated deadline when the
-        // assignment carries one, else DEFAULT_STEP_DEADLINE_MS — so an
-        // ETA-less worker never runs unwatched. This does not reproduce the
-        // task #51 false alarms: those paired an invented deadline with an
-        // escalation that never re-checked reality, while the P0-4/P1-3 path
-        // re-verifies the deliverable ledger and reclaims only a genuinely
-        // inert member (heartbeat/session-activity gated) — a worker
-        // legitimately mid-turn gets a reminder, never a reclaim.
-        if (ack.estimatedMinutes != null && ack.estimatedMinutes > 0) {
-          // Review fix: arming a fresh deadline starts a fresh reminder cycle —
-          // a leftover delivery-reminded flag from the previous (missed or
-          // delivered) deadline would otherwise skip the next reminder and drop
-          // the member straight onto the reclaim ladder after one grace window.
+        // Single-track deadlines (single-commander): the ONLY deadline the
+        // host clocks is the one the CHAIR stated in the assignment
+        // ([DEADLINE: 30m]). The worker's own ETA number is information for
+        // the chair's planning, not a second deadline source — the old
+        // ETA-armed track is what produced the dual-clock escalations.
+        // A numberless ACK against a deadline-less assignment arms nothing:
+        // the chair playbook requires a deadline on every assignment, and a
+        // missing one is the chair's sequencing gap, not the host's to invent.
+        const chairDeadlineMinutes = parseChairDeadlineMinutes(
+          resolveAssignmentContent(task, assignmentMessageId, message.replyPin),
+        );
+        if (chairDeadlineMinutes != null && chairDeadlineMinutes > 0) {
+          // Arming a fresh deadline starts a fresh reminder cycle — a leftover
+          // delivery-reminded flag from the previous (missed or delivered)
+          // deadline would otherwise skip the next reminder and drop the member
+          // straight onto the reclaim ladder after one grace window.
           sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
           sqlite.set(
             `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
             JSON.stringify({
-              dueAt: now() + ack.estimatedMinutes * 60_000,
+              dueAt: now() + chairDeadlineMinutes * 60_000,
               ackedAt: now(),
               taskDescription: ack.taskDescription,
             }),
           );
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING]` +
-            `(est. ${ack.estimatedMinutes} min)`,
+            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] — ` +
+            `armed the chair-stated deadline: ${chairDeadlineMinutes}m`,
           );
         } else {
-          const chairDeadlineMinutes = parseChairDeadlineMinutes(
-            resolveAssignmentContent(task, assignmentMessageId, message.replyPin),
-          );
-          const deadlineMinutes = chairDeadlineMinutes ?? Math.round(DEFAULT_STEP_DEADLINE_MS / 60_000);
-          // Same fresh-reminder-cycle rule as the ETA path above.
-          sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
-          sqlite.set(
-            `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
-            JSON.stringify({
-              dueAt: now() + deadlineMinutes * 60_000,
-              ackedAt: now(),
-              taskDescription: ack.taskDescription,
-            }),
-          );
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
-            `without an ETA — armed delivery deadline: ${deadlineMinutes}m ` +
-            `(${chairDeadlineMinutes != null ? 'chair-set' : 'default'})`,
+            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] — ` +
+            'no chair-stated deadline on the assignment; nothing armed (the worker ETA is the chair\'s information, not a clock)',
           );
         }
       } else {
@@ -8359,8 +8343,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const lastSpeakSec = speakMap.get(memberGmid.toLowerCase());
         let latestMsgId: number | null = null;
         try {
+          // Task #64: host-authored notice lines carry the member's own
+          // GlobalMetaID (the long-turn reminder) but are not the member
+          // speaking — excluding the ASCII notice prefix keeps the implicit
+          // ACK honest instead of letting the host's own liveness notice
+          // cancel the no-ACK watch.
           const result = sqlite.getDatabase().exec(
-            'SELECT MAX(id) FROM group_chat_messages WHERE group_id = ? AND sender_global_metaid = ?',
+            "SELECT MAX(id) FROM group_chat_messages WHERE group_id = ? AND sender_global_metaid = ?"
+            + " AND content NOT LIKE '[GROUP_TASK_NOTICE:%'",
             [task.groupId, memberGmid.toLowerCase()],
           );
           const value = Number(result[0]?.values?.[0]?.[0]);
@@ -8417,11 +8407,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       // P5 (v1.2): ENGAGED worker — recent speech (even before the assignment:
       // mid long skill turn) or a deliverable recorded within the window. The
-      // missed-ACK warning is suppressed; instead ONE neutral long-turn note
-      // tells the chair the assignment will be picked up at turn end, and the
-      // watch is consumed so no per-interval warning chases a working worker.
+      // member is demonstrably active, so the watch is consumed silently —
+      // single-commander: no host speech, not even a standby note.
       const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
-      const engagedNoteKey = `group_task_ack_engaged:${task.id}:${member.metabotId}`;
       const lastActivityMs = (() => {
         if (memberGmid && task.groupId) {
           const speakSec = store.getMembersLastSpeakAt(task.groupId, [memberGmid]).get(memberGmid.toLowerCase());
@@ -8438,42 +8426,36 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         return Number.isFinite(createdSec) && createdSec * 1000 >= now() - ackEngagedRecentMs;
       });
       if (lastActivityMs >= now() - ackEngagedRecentMs || hasRecentDeliverable) {
-        try {
-          await postGroupMessage(
-            task.id,
-            chair.metabotId,
-            buildLongTurnStandbyNote(member.name ?? `bot-${member.metabotId}`),
-          );
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} engaged on a long turn ` +
-            `(assignment #${entry.messageId}); standby note posted, watch consumed`,
-          );
-        } catch (error) {
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: engaged-note post failed for ${member.name ?? member.metabotId}: ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
         sqlite.delete(pendingKey);
         if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
-        sqlite.delete(engagedNoteKey);
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} engaged on a long turn ` +
+          `(assignment #${entry.messageId}); watch consumed silently — no host speech`,
+        );
         continue;
       }
       if (sqlite.get<string>(remindedKey) === '1') continue;
-      const text =
-        `@chair ⚠ ${member.name ?? `bot-${member.metabotId}`} was assigned work ` +
-        `but has not sent a [WORKING] ACK within ` +
-        `${Math.round(ackTimeoutMs / 60_000)} min. Check whether the assignment ` +
-        `was received; do not auto-fail.`;
+      // Single-commander: the missing-ACK fact goes to the chair as an
+      // environment note (the host never posts as the chair). The chair
+      // decides whether to nudge the member itself.
       try {
-        await postGroupMessage(task.id, chair.metabotId, text);
+        store.recordHostNote({
+          taskId: task.id,
+          kind: 'no_ack',
+          target: member.name ?? `bot-${member.metabotId}`,
+          dedupeKey: `no_ack:${task.id}:${member.metabotId}:${entry.messageId}`,
+          body:
+            `${member.name ?? `bot-${member.metabotId}`} was assigned work in message #${entry.messageId} ` +
+            `${Math.round(ackTimeoutMs / 60_000)}+ min ago and has not sent a [WORKING] ACK ` +
+            '(no speech from the member since the assignment).',
+        });
         sqlite.set(remindedKey, '1');
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: reminded chair that ${member.name ?? member.metabotId} has not ACKed`,
+          `[GroupTaskDaemon] Task ${task.id}: recorded no-ACK environment note for ${member.name ?? member.metabotId}`,
         );
       } catch (error) {
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: ACK reminder post failed: ` +
+          `[GroupTaskDaemon] Task ${task.id}: no-ACK environment note record failed: ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -8904,20 +8886,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           : reminderDepWait.tokens.length > 0
             ? `declared upstream(s) delivered or advisory: ${reminderDepWait.tokens.join(', ')}`
             : 'no upstream dependency declared in the latest dispatch';
-      const text =
-        `@chair ⚠ @${member.name ?? `bot-${member.metabotId}`} estimated delivery ` +
-        `by ${new Date(entry.dueAt).toISOString()} but no [DELIVERABLE] arrived yet ` +
-        `(dependency state: ${reminderDepState}). ` +
-        `Check status; do not auto-fail.`;
+      // Single-commander: the missed-deadline fact goes to the chair as an
+      // environment note (the host never posts the ⚠ as the chair). The
+      // chair decides whether to nudge the member, extend, or re-assign.
       try {
-        await postGroupMessage(task.id, chair.metabotId, text);
+        store.recordHostNote({
+          taskId: task.id,
+          kind: 'deadline',
+          target: member.name ?? `bot-${member.metabotId}`,
+          dedupeKey: `deadline:${task.id}:${member.metabotId}:${entry.dueAt}`,
+          body:
+            `${member.name ?? `bot-${member.metabotId}`}'s estimated delivery ` +
+            `(${new Date(entry.dueAt).toISOString()}) has passed with no [DELIVERABLE] on record ` +
+            `(dependency state: ${reminderDepState}).`,
+        });
         sqlite.set(remindedKey, '1');
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: reminded chair+worker ${member.name ?? member.metabotId} about missed delivery deadline`,
+          `[GroupTaskDaemon] Task ${task.id}: recorded missed-deadline environment note for ${member.name ?? member.metabotId}`,
         );
       } catch (error) {
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: delivery reminder post failed: ` +
+          `[GroupTaskDaemon] Task ${task.id}: delivery reminder note record failed: ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -9016,23 +9005,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           return bot?.name?.trim() || candidate.name?.trim() || '';
         })
         .filter(Boolean);
-      const text = buildMemberJoinWelcomeText({
-        taskId: task.id,
-        taskTitle: task.title,
-        joinerName,
-        invitedFor: invitedForByGmid.get((member.globalmetaid ?? '').trim().toLowerCase()),
-        existingMemberNames: existingNames,
-      });
+      // Single-commander: the join is an environment FACT for the chair —
+      // the host does not broadcast a welcome under the chair's identity.
+      // The chair greets the joiner itself (its host-note turn follows
+      // immediately) and may ask the listed members to confirm presence.
+      const invitedFor = invitedForByGmid.get((member.globalmetaid ?? '').trim().toLowerCase());
       try {
-        const sent = await postGroupMessage(task.id, chair.metabotId, text);
+        deps.getGroupTaskStore().recordHostNote({
+          taskId: task.id,
+          kind: 'join',
+          target: joinerName,
+          dedupeKey: `join:${task.id}:${key}`,
+          body:
+            `${joinerName} just joined the task (${isRemote ? 'remote teammate via OpenTeam' : 'local bot'}).`
+            + (invitedFor ? ` Invited for: ${invitedFor}.` : '')
+            + ' Greet them in the group, tell them what is expected, and have them confirm presence '
+            + '(other listed members may confirm too, once each).'
+            + (existingNames.length > 0 ? ` Currently seated: ${existingNames.join(', ')}.` : ''),
+        });
         sqlite.set(doneKey, '1');
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: welcomed new ${isRemote ? 'remote' : 'local'} member ` +
-          `${joinerName} as chair (pin ${sent.pinId})`,
+          `[GroupTaskDaemon] Task ${task.id}: recorded join environment note for new ` +
+          `${isRemote ? 'remote' : 'local'} member ${joinerName} (chair will greet)`,
         );
       } catch (error) {
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: join welcome post failed (retried on next tick): ` +
+          `[GroupTaskDaemon] Task ${task.id}: join environment note record failed (retried on next tick): ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -9178,6 +9176,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           keyOf(task.id, chairMemberId),
           `Task ${task.id} supervisor-signal turn`,
           () => processSupervisorSignals(task, members, botsById, promptMembers),
+          { taskId: task.id, metabotId: chairMemberId, isChair: true },
+        );
+      }
+      // Single-commander: pending environment notes drive ONE chair turn
+      // (facts only — the host itself never speaks in the group). Same
+      // human-gate deferral as supervisor signals.
+      if (
+        chairMemberId != null
+        && !checkpointOpenAtTick
+        && store.listPendingHostNotes(task.id).length > 0
+      ) {
+        runTurnAsync(
+          keyOf(task.id, chairMemberId),
+          `Task ${task.id} host-note turn`,
+          () => processHostNotes(task, members, botsById, promptMembers),
           { taskId: task.id, metabotId: chairMemberId, isChair: true },
         );
       }
@@ -9358,8 +9371,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const ownerGmidKey = ownerGlobalMetaId.toLowerCase();
     const deferredForTask = loadDeferredQueue(task.id);
     if (deferredForTask.length > 0) {
+      // Task #64: coalesce each worker's queued backlog to ONE trigger before
+      // dispatching. The old one-turn-per-queued-message replay made a bot
+      // re-live history after a long turn — welcome, assignment, stall nudge,
+      // … each spawning its own multi-minute turn long after the messages
+      // went stale. One turn now answers the backlog: the OLDEST still-open
+      // chair assignment when one is queued (real assignments are never
+      // silently dropped, and its auto-ACK gate still fires), otherwise the
+      // NEWEST trigger (older chatter is superseded). The turn prompt carries
+      // the recent group log, so superseded messages stay visible as context.
+      // Chair entries keep their per-message semantics (floor control / owner
+      // obligations) and are never coalesced.
+      const coalescedDeferred = coalesceDeferredBacklogPerBot(db, task, members, deferredForTask);
       saveDeferredQueue(task.id, []); // popped; entries re-defer below as needed
-      for (const entry of deferredForTask) {
+      for (const entry of coalescedDeferred) {
         const member = members.find((candidate) => candidate.metabotId === entry.metabotId);
         const bot = botsById.get(entry.metabotId);
         if (!member || !bot) continue;
@@ -9399,23 +9424,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (isChair && entry.reason !== 'chair_mentioned' && twinChairActive(db, task.id, task.groupId, deferredMessage.pinId, chairGlobalMetaId)) {
           continue; // the Twin already spoke about this message (or in the recent window); drop the auto reply
         }
-        // P2-6: deferred entries still respect the [DEPENDS_ON] gate — keep
-        // waiting while the upstream deliverable is absent (bounded).
-        const deferredDep = dependencyStatus(task, deferredMessage);
-        if (deferredDep.token && !deferredDep.satisfied) {
-          const waitKey = `${DEP_WAIT_KV_PREFIX}${task.id}:${bot.id}:${entry.messageId}`;
-          const startedAt = Number(sqlite.get<number>(waitKey) ?? 0) || now();
-          sqlite.set(waitKey, startedAt);
-          if (now() - startedAt < dependencyWaitMaxMs) {
-            deferReply(entry); // keep waiting for the upstream deliverable
-            continue;
-          }
-          sqlite.delete(waitKey);
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: dependency wait for ${deferredDep.token} timed out after ` +
-            `${Math.round(dependencyWaitMaxMs / 60_000)} min; proceeding with the deferred dispatch`,
-          );
-        }
+        // Single-commander: no [DEPENDS_ON] hold on the drain either — see
+        // the message-processing note above. Sequencing is the chair's.
         // fix/group-task-flow: a busy session keeps the entry queued — the
         // in-flight turn finishes first, then this drains on a later tick.
         if (turnInFlight.has(key)) {
@@ -9586,36 +9596,39 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             );
             // P1-2 (task #39): the log line above is invisible to the chair.
             // A dispatch swallowed by a human-gate phase otherwise reads as
-            // "members ignore @mentions" — the chair spent hours on Twin
-            // direct-connect fallbacks for exactly this. Tell the GROUP, once
-            // per held message, what happened and how to resume.
+            // "members ignore @mentions". Single-commander: the held-dispatch
+            // FACT goes to the chair as an environment note (once per held
+            // message) — the host does not explain itself in the group.
             const heldKey = `group_task_dispatch_held:${task.id}:${message.id}`;
             if (sqlite.get<string>(heldKey) !== '1') {
               const chairMemberForNotice = members.find((candidate) => candidate.role === 'chair');
               if (chairMemberForNotice?.metabotId != null) {
                 sqlite.set(heldKey, '1');
                 try {
-                  const heldLine = buildDispatchHeldLine({
+                  const checkpointTopic = freshStatus === 'review'
+                    ? null
+                    : store.getOpenCheckpoint(task.id)?.topic ?? null;
+                  store.recordHostNote({
                     taskId: task.id,
-                    taskTitle: task.title,
-                    senderName: message.senderName?.trim() || 'chair',
-                    memberNames: silencedWorkers
-                      .map((candidate) => candidate.name ?? `bot-${candidate.metabotId}`)
-                      .filter(Boolean),
-                    gate: freshStatus === 'review' ? 'review' : 'checkpoint',
-                    checkpointTopic: freshStatus === 'review'
-                      ? null
-                      : store.getOpenCheckpoint(task.id)?.topic ?? null,
+                    kind: 'dispatch_held',
+                    target: message.senderName?.trim() || 'chair',
+                    dedupeKey: `dispatch_held:${task.id}:${message.id}`,
+                    body:
+                      `Your dispatch in message #${message.id} to ${silencedWorkers
+                        .map((candidate) => candidate.name ?? `bot-${candidate.metabotId}`)
+                        .filter(Boolean)
+                        .join(', ')} was NOT delivered to them: ${gateHint}` +
+                      (checkpointTopic ? ` (open checkpoint topic: ${checkpointTopic})` : '') +
+                      '. The members are gated silent, not ignoring you.',
                   });
-                  const heldSent = await postGroupMessage(task.id, chairMemberForNotice.metabotId, heldLine);
                   emitLog(
-                    `[GroupTaskDaemon] Task ${task.id}: dispatch-held notice posted for message ` +
-                    `${message.id} (pin ${heldSent.pinId})`,
+                    `[GroupTaskDaemon] Task ${task.id}: dispatch-held environment note recorded for message ` +
+                    `${message.id}`,
                   );
                 } catch (error) {
-                  sqlite.delete(heldKey); // transient post failure: retry on a later tick
+                  sqlite.delete(heldKey); // transient record failure: retry on a later tick
                   emitLog(
-                    `[GroupTaskDaemon] Task ${task.id}: dispatch-held notice post failed: ` +
+                    `[GroupTaskDaemon] Task ${task.id}: dispatch-held note record failed: ` +
                     `${error instanceof Error ? error.message : String(error)}`,
                   );
                 }
@@ -9687,36 +9700,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             continue;
           }
 
-          // P2-6: [DEPENDS_ON: <pinid>] gate — hold the worker dispatch until
-          // the referenced upstream deliverable is recorded on this task
-          // (bounded wait, then the dispatch proceeds anyway).
-          if (member.role === 'worker') {
-            const dep = dependencyStatus(task, message);
-            if (dep.token && !dep.satisfied) {
-              const waitKey = `${DEP_WAIT_KV_PREFIX}${task.id}:${bot.id}:${message.id}`;
-              const startedAt = Number(sqlite.get<number>(waitKey) ?? 0) || now();
-              sqlite.set(waitKey, startedAt);
-              if (now() - startedAt < dependencyWaitMaxMs) {
-                deferReply({
-                  taskId: task.id,
-                  metabotId: decision.metabotId,
-                  messageId: message.id,
-                  reason: decision.reason,
-                  verificationNotes: [],
-                });
-                emitLog(
-                  `[GroupTaskDaemon] Task ${task.id}: worker ${bot.id} dispatch waits for upstream deliverable ` +
-                  `${dep.token} (${Math.ceil((dependencyWaitMaxMs - (now() - startedAt)) / 1000)}s left)`,
-                );
-                continue;
-              }
-              sqlite.delete(waitKey);
-              emitLog(
-                `[GroupTaskDaemon] Task ${task.id}: dependency wait for ${dep.token} timed out after ` +
-                `${Math.round(dependencyWaitMaxMs / 60_000)} min; proceeding with the dispatch`,
-              );
-            }
-          }
+          // Single-commander (task #64 follow-up): the [DEPENDS_ON] DISPATCH
+          // GATE is gone — sequencing is solely the chair's judgment (its
+          // playbook: assign a step only when its inputs are ready). The tag
+          // stays declarative: the monitors still use it to exempt a
+          // legitimately-waiting member from timeout flags. The worker turn
+          // proceeds; if the upstream has not landed the worker (and the
+          // chair, via its context) see that in the group log.
 
           // Verification facts travel with the deliverable that triggered the chair.
           const notesForDecision = decision.reason === 'chair_deliverable' ? verificationNotes : [];
@@ -9840,13 +9830,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
-    // #14 follow-up: a worker turn already in flight when the task entered
-    // review can land AFTER the chair's closing ceremony, leaving a worker's
-    // [WORKING]/[DELIVERABLE] as the last group message. While the task awaits
-    // human acceptance the host — not a straggler — must be the last speaker,
-    // so re-assert the closing line. One re-assert per distinct straggler
-    // (kv-guard on the straggler's message id); the chair post then becomes
-    // last and this gate stays quiet until another straggler arrives.
+    // #14 follow-up (single-commander): a straggler landing after review entry
+    // no longer triggers a host closing line — the host is never a speaker.
+    // The transcript ends on whatever the participants last said; the Tasks
+    // acceptance card (from the recorded summary) is the authoritative
+    // closing view. Kept as a log line for diagnosability.
     if (task.status === 'review' && task.groupId) {
       const chair = members.find((member) => member.role === 'chair');
       const chairGlobalMetaId = chair?.globalmetaid?.trim() || null;
@@ -9857,25 +9845,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const reassertKey = `${GROUP_TASK_REVIEW_REASSERT_KV_PREFIX}${task.id}`;
           if (String(sqlite.get(reassertKey) ?? '') !== String(lastRow.id)) {
             sqlite.set(reassertKey, String(lastRow.id));
-            try {
-              // P12 (v1.1): re-assert with the COMPACT closing line only. The full
-              // acceptance summary stays a single chair message per review entry —
-              // re-posting the >2000-char checklist after every straggler buried
-              // the transcript under duplicates (task #22: two identical
-              // summaries, pins 427af681/632a46ad). The summary card in the
-              // detail view and the original transcript message keep carrying
-              // the full checklist, so nothing is lost here.
-              const reassertText = buildReviewClosingLine(task.title);
-              const sent = await postGroupMessage(task.id, chair.metabotId, reassertText);
-              emitLog(
-                `[GroupTaskDaemon] Task ${task.id}: re-asserted chair closing after straggler msg ${lastRow.id} (pin ${sent.pinId})`,
-              );
-            } catch (error) {
-              emitLog(
-                `[GroupTaskDaemon] Task ${task.id}: review closing re-assert failed: ` +
-                `${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: straggler msg ${lastRow.id} landed after review entry — ` +
+              'no host re-assert (single-commander); the acceptance card is the closing view',
+            );
           }
         }
       }

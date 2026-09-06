@@ -953,6 +953,31 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_group_task_supervisor_signals_task
         ON group_task_supervisor_signals(task_id, id);
     `);
+
+    // Single-commander architecture (task #64 follow-up): the host is the
+    // environment, never a speaker. Environment observations (no-ACK watches,
+    // deadline bells, long-turn facts, join events, parser verdicts, stuck
+    // evidence) are recorded here and delivered to the CHAIR ONLY, locally,
+    // in its next turn's system context — the chair decides what to say in
+    // the group, in its own voice. CREATE TABLE IF NOT EXISTS is the
+    // idempotent first-run migration for upgraded users.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_host_notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        target TEXT,
+        body TEXT NOT NULL,
+        dedupe_key TEXT,
+        consumed_at INTEGER,
+        chair_response_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_host_notes_pending
+        ON group_task_host_notes(task_id, consumed_at, id);
+    `);
     this.migrateGroupTasksLocalState();
     this.migrateGroupTasksSourceSessionId();
     this.db.run(`
