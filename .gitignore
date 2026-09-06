@@ -44,6 +44,7 @@ docs/*
 !docs/metaweb-search-backend-requirements.md
 !docs/metaweb-search-quality-requirements.md
 !docs/metaweb-qa-backend-requirements.md
+!docs/metaweb-qa-backend-requirements-v2.md
 !docs/metaweb-qa-frontend-metaapp-guide.md
 !docs/gasfee-flow/
 !docs/gasfee-flow/**
