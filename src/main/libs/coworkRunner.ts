@@ -8900,6 +8900,9 @@ export class CoworkRunner extends EventEmitter {
         );
         // On-chain Q&A (simplequestion/simpleanswer): ask when stuck, answer
         // what you know. Registration posture identical to the tools above.
+        // The repeat notice prefers the Q&A index (cross-machine complete,
+        // via /api/qa/questions/:pinId/answers?publisher=<acting bot>) and
+        // falls back to the local posting ledger when the index is down.
         memoryTools.push(
           ...buildPostSimpleQaAgentTools({
             tool,
@@ -8907,6 +8910,19 @@ export class CoworkRunner extends EventEmitter {
             uploadFile: gatedUpload,
             sessionId,
             resolveMetabotId,
+            ...(this.qaRecall
+              ? {
+                  fetchPriorAnswersRemote: async ({ questionPinId, publisher }) => {
+                    const page = await this.qaRecall!.questionAnswers({ pinId: questionPinId, publisher });
+                    return page.items;
+                  },
+                  resolveActingGlobalMetaId: (sid: string) => {
+                    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sid);
+                    if (metabotId == null) return undefined;
+                    return this.getMetabotById?.(metabotId)?.globalmetaid?.trim() || undefined;
+                  },
+                }
+              : {}),
           })
         );
       }

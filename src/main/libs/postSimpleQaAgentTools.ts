@@ -9,6 +9,7 @@ import {
   recordSimpleQaAnswer,
   type SimpleQaAnswerLedgerEntry,
 } from './simpleQaAnswerLedger';
+import type { QaAnswerItem } from '../services/qaRecallService';
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
 type SdkToolFactory = (
@@ -44,6 +45,15 @@ export function buildPostSimpleQaAgentTools(deps: {
   /** Host/test overrides for the local answer ledger (defaults: kv-backed module ledger). */
   listPriorAnswers?: (metabotId: number, questionPinId: string) => SimpleQaAnswerLedgerEntry[];
   recordAnswer?: (metabotId: number, questionPinId: string, entry: SimpleQaAnswerLedgerEntry) => void;
+  /**
+   * Cross-machine prior-answer lookup against the on-chain Q&A index
+   * (/api/qa/questions/:pinId/answers?publisher=…). When provided together
+   * with resolveActingGlobalMetaId, the already-answered notice prefers index
+   * data (complete across machines) and falls back to the local ledger when
+   * the index is unreachable.
+   */
+  fetchPriorAnswersRemote?: (input: { questionPinId: string; publisher: string }) => Promise<QaAnswerItem[]>;
+  resolveActingGlobalMetaId?: (sessionId: string) => string | undefined;
 }): unknown[] {
   const {
     tool,
@@ -53,6 +63,8 @@ export function buildPostSimpleQaAgentTools(deps: {
     resolveMetabotId,
     listPriorAnswers = listSimpleQaAnswers,
     recordAnswer = recordSimpleQaAnswer,
+    fetchPriorAnswersRemote,
+    resolveActingGlobalMetaId,
   } = deps;
 
   function asString(value: unknown): string {
@@ -102,6 +114,55 @@ export function buildPostSimpleQaAgentTools(deps: {
         error: `${toolName} failed to upload ${field} "${item}": ${error instanceof Error ? error.message : String(error)}`,
       };
     }
+  }
+
+  /**
+   * Collect the acting bot's prior answers to one question. The on-chain Q&A
+   * index is authoritative when reachable (complete across machines); the
+   * local ledger covers indexer outages and pins too fresh to be indexed.
+   * Both are FACTS for the bot's own decision — never a gate.
+   */
+  async function collectPriorAnswers(
+    metabotId: number,
+    questionPinId: string,
+  ): Promise<{ answers: SimpleQaAnswerLedgerEntry[]; source: 'index' | 'local' }> {
+    const local = listPriorAnswers(metabotId, questionPinId);
+    if (fetchPriorAnswersRemote && resolveActingGlobalMetaId) {
+      const publisher = resolveActingGlobalMetaId(sessionId);
+      if (publisher) {
+        try {
+          const remote = await fetchPriorAnswersRemote({ questionPinId, publisher });
+          const seen = new Set<string>();
+          const answers: SimpleQaAnswerLedgerEntry[] = [];
+          for (const item of remote) {
+            if (!item?.pinId || seen.has(item.pinId)) continue;
+            seen.add(item.pinId);
+            answers.push({
+              answerPinId: item.pinId,
+              content: item.summary || '(indexed answer; open it via the view link)',
+              postedAt: item.createdAt ? item.createdAt * 1000 : 0,
+              network: item.chainName || '',
+            });
+          }
+          for (const entry of local) {
+            if (!seen.has(entry.answerPinId)) {
+              seen.add(entry.answerPinId);
+              answers.push(entry);
+            }
+          }
+          return { answers, source: 'index' };
+        } catch (error) {
+          // Unknown question (not indexed) has no indexed answers: keep it as
+          // an empty-but-authoritative result. Other failures fall back to
+          // the local ledger below.
+          if (!(error instanceof Error && error.name === 'QaRecallNotFoundError')) {
+            return { answers: local, source: 'local' };
+          }
+          return { answers: local, source: 'index' };
+        }
+      }
+    }
+    return { answers: local, source: 'local' };
   }
 
   const postSimpleQuestion = tool(
@@ -267,11 +328,11 @@ export function buildPostSimpleQaAgentTools(deps: {
 
       try {
         // Fact-first repeat notice (host bookkeeping only, never a protocol
-        // constraint): surface prior local answers BEFORE spending sats; the
-        // bot decides whether to proceed with allow_repeat=true.
-        const priorAnswers = listPriorAnswers(metabotId, answerTo);
+        // constraint): surface prior answers BEFORE spending sats; the bot
+        // decides whether to proceed with allow_repeat=true.
+        const { answers: priorAnswers, source: priorSource } = await collectPriorAnswers(metabotId, answerTo);
         if (priorAnswers.length && args.allow_repeat !== true) {
-          return textResult(formatAlreadyAnsweredNotice(answerTo, priorAnswers));
+          return textResult(formatAlreadyAnsweredNotice(answerTo, priorAnswers, priorSource));
         }
 
         const attachments: string[] = [];
@@ -383,16 +444,19 @@ export function formatSimpleAnswerResult(input: {
 }
 
 /**
- * Informational (non-error) notice shown when prior local answers exist.
- * States facts and options; the publish/not-publish decision stays with the
- * bot. Exposed for tests.
+ * Informational (non-error) notice shown when prior answers exist. States
+ * facts and options; the publish/not-publish decision stays with the bot.
+ * `source` says where the facts came from: the on-chain Q&A index (complete
+ * across machines) or this host's local records (index unreachable).
+ * Exposed for tests.
  */
 export function formatAlreadyAnsweredNotice(
   questionPinId: string,
   answers: SimpleQaAnswerLedgerEntry[],
+  source: 'index' | 'local' = 'local',
 ): string {
   const lines: string[] = [
-    `Not published yet — this host already recorded ${answers.length === 1 ? '1 previous answer' : `${answers.length} previous answers`} from you to question ${questionPinId}:`,
+    `Not published yet — you already have ${answers.length === 1 ? '1 previous answer' : `${answers.length} previous answers`} to question ${questionPinId}:`,
   ];
   for (const answer of answers) {
     lines.push(`- answer pinId: ${answer.answerPinId}${answer.network ? ` (${answer.network})` : ''}`);
@@ -400,6 +464,11 @@ export function formatAlreadyAnsweredNotice(
     lines.push(`  content: ${excerpt.replace(/\n+/g, ' ')}`);
     lines.push(`  view link: ${markdownSelfLink(`pin://${answer.answerPinId}`)}`);
   }
+  lines.push(
+    source === 'index'
+      ? 'Source: on-chain Q&A index — complete across machines.'
+      : 'Source: this host\'s local posting records only (the on-chain Q&A index was unreachable).',
+  );
   lines.push(
     'The protocol allows multiple answers per bot and nothing here forbids another one — publishing again is your decision. If the new answer substantially improves the old one, call post_simpleanswer again with allow_repeat=true. For small additions, a PayComment on your existing answer (omni_cast with /protocols/paycomment) usually serves better.',
   );

@@ -32,7 +32,7 @@ function makeFixtureFile(name = 'error.png', contents = 'png-bytes') {
 }
 
 function makeHarness(overrides = {}) {
-  const calls = { createPin: [], upload: [], listPrior: [], record: [] };
+  const calls = { createPin: [], upload: [], listPrior: [], record: [], remote: [] };
   const createPin = async (metabotId, metaidData, options) => {
     calls.createPin.push({ metabotId, metaidData, options });
     if (overrides.createPinError) throw overrides.createPinError;
@@ -59,6 +59,18 @@ function makeHarness(overrides = {}) {
     existing.push(entry);
     ledger.set(`${metabotId}:${questionPinId}`, existing);
   };
+  // Remote (Q&A index) prior-answer lookup is opt-in per test, mirroring the
+  // host wiring where it exists only when the qaRecall control is present.
+  const remoteDeps = overrides.withRemote
+    ? {
+        fetchPriorAnswersRemote: async ({ questionPinId, publisher }) => {
+          calls.remote.push({ questionPinId, publisher });
+          if (overrides.remoteError) throw overrides.remoteError;
+          return overrides.remoteAnswers ?? [];
+        },
+        resolveActingGlobalMetaId: (sid) => overrides.actingGlobalMetaId ?? 'gmid-acting',
+      }
+    : {};
   const tools = buildPostSimpleQaAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
     createPin,
@@ -67,6 +79,7 @@ function makeHarness(overrides = {}) {
     resolveMetabotId,
     listPriorAnswers,
     recordAnswer,
+    ...remoteDeps,
   });
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   return { calls, byName, ledger };
@@ -211,6 +224,135 @@ test('prior local answers surface BEFORE publishing — informational, not an er
   assert.match(text, /paycomment/i);
   // The decision stays with the bot — the notice says so explicitly.
   assert.match(text, /your decision/);
+  // No remote deps wired in this harness → local-source line.
+  assert.match(text, /local posting records only/);
+});
+
+test('indexed prior answers (cross-machine) surface with the index-source line', async () => {
+  const { calls, byName } = makeHarness({
+    withRemote: true,
+    remoteAnswers: [
+      {
+        pinId: 'answerfromothermachinei0',
+        questionPinId: QUESTION_PIN_ID,
+        chainName: 'mvc',
+        summary: 'Posted from another host last week.',
+        publisher: { globalMetaId: 'gmid-acting', metaId: '', name: '', avatar: '' },
+        createdAt: 1756000000,
+        isMempool: false,
+        likeCount: 2,
+        dislikeCount: 0,
+        commentCount: 0,
+        score: 2,
+        tags: [],
+        currentPinId: 'answerfromothermachinei0',
+      },
+    ],
+  });
+  const result = await byName.post_simpleanswer.handler({
+    answer_to: QUESTION_PIN_ID,
+    content: 'My new take.',
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.createPin.length, 0);
+  // Remote lookup used the acting bot's globalMetaId as publisher.
+  assert.deepEqual(calls.remote, [{ questionPinId: QUESTION_PIN_ID, publisher: 'gmid-acting' }]);
+  const text = result.content[0].text;
+  assert.match(text, /1 previous answer/);
+  assert.match(text, /answer pinId: answerfromothermachinei0/);
+  assert.match(text, /Posted from another host last week\./);
+  assert.match(text, /Source: on-chain Q&A index — complete across machines\./);
+});
+
+test('index answers and local ledger entries merge, deduped by answer pinId', async () => {
+  const { calls, byName } = makeHarness({
+    withRemote: true,
+    remoteAnswers: [],
+    priorAnswers: [
+      { answerPinId: 'justpostedlocali0', content: 'Fresh local post, maybe not indexed yet.', postedAt: Date.now(), network: 'mvc' },
+    ],
+  });
+  const result = await byName.post_simpleanswer.handler({
+    answer_to: QUESTION_PIN_ID,
+    content: 'Again.',
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.createPin.length, 0);
+  const text = result.content[0].text;
+  assert.match(text, /1 previous answer/);
+  assert.match(text, /justpostedlocali0/);
+  assert.match(text, /Source: on-chain Q&A index/);
+});
+
+test('indexer outage falls back to the local ledger with an honest source line', async () => {
+  const { calls, byName } = makeHarness({
+    withRemote: true,
+    remoteError: new Error('aggregation unavailable'),
+    priorAnswers: [
+      { answerPinId: 'localonly1i0', content: 'Local record.', postedAt: 1, network: 'mvc' },
+    ],
+  });
+  const result = await byName.post_simpleanswer.handler({
+    answer_to: QUESTION_PIN_ID,
+    content: 'Once more.',
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.createPin.length, 0);
+  const text = result.content[0].text;
+  assert.match(text, /localonly1i0/);
+  assert.match(text, /local posting records only \(the on-chain Q&A index was unreachable\)/);
+});
+
+test('question not in the index (40400) keeps local records with the index source', async () => {
+  const notFound = new Error('question not found');
+  notFound.name = 'QaRecallNotFoundError';
+  const { byName } = makeHarness({
+    withRemote: true,
+    remoteError: notFound,
+    priorAnswers: [
+      { answerPinId: 'localonly1i0', content: 'Local record.', postedAt: 1, network: 'mvc' },
+    ],
+  });
+  const result = await byName.post_simpleanswer.handler({
+    answer_to: QUESTION_PIN_ID,
+    content: 'Again.',
+  });
+  assert.equal(result.isError, undefined);
+  assert.match(result.content[0].text, /localonly1i0/);
+  assert.match(result.content[0].text, /Source: on-chain Q&A index/);
+});
+
+test('allow_repeat with indexed prior answers publishes and numbers the answer', async () => {
+  const { calls, byName } = makeHarness({
+    withRemote: true,
+    remoteAnswers: [
+      {
+        pinId: 'oldindexed1i0',
+        questionPinId: QUESTION_PIN_ID,
+        chainName: 'mvc',
+        summary: 'Old indexed answer.',
+        publisher: { globalMetaId: 'gmid-acting', metaId: '', name: '', avatar: '' },
+        createdAt: 1756000000,
+        isMempool: false,
+        likeCount: 1,
+        dislikeCount: 0,
+        commentCount: 0,
+        score: 1,
+        tags: [],
+        currentPinId: 'oldindexed1i0',
+      },
+    ],
+  });
+  const result = await byName.post_simpleanswer.handler({
+    answer_to: QUESTION_PIN_ID,
+    content: 'Substantially better answer.',
+    allow_repeat: true,
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.createPin.length, 1);
+  // Local ledger still records the new post (covers future indexer outages).
+  assert.equal(calls.record.length, 1);
+  assert.match(result.content[0].text, /answer #2 you published to this question from this host/);
 });
 
 test('allow_repeat=true publishes and labels the answer number from local bookkeeping', async () => {
@@ -290,6 +432,9 @@ test('formatAlreadyAnsweredNotice truncates long content and keeps the decision 
   assert.match(notice, /content: x{400}…/);
   assert.match(notice, /view link: \[pin:\/\/ai0\]\(pin:\/\/ai0\)/);
   assert.match(notice, /your decision/);
+  assert.match(notice, /local posting records only/);
+  const indexed = formatAlreadyAnsweredNotice('qi0', [], 'index');
+  assert.match(indexed, /Source: on-chain Q&A index — complete across machines\./);
 });
 
 // ---------------------------------------------------------------------------
