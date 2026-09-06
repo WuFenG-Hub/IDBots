@@ -9,7 +9,25 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { checkDshRuntimeDeps } = require('../scripts/check-dsh-runtime-deps.cjs');
 
-function makeFixture({ deps, installed }) {
+// Builds a consistent lockfile from the declared deps: the top-level block
+// mirrors package.json and every exact pin resolves to itself. Individual
+// tests then corrupt exactly one aspect.
+function writeLock(runtimeDir, deps, { lockTopOverrides = {}, resolvedOverrides = {} } = {}) {
+  const lockTop = { ...deps, ...lockTopOverrides };
+  for (const name of Object.keys(lockTopOverrides)) {
+    if (lockTopOverrides[name] === null) delete lockTop[name];
+  }
+  const packages = { '': { dependencies: lockTop } };
+  for (const [name, spec] of Object.entries(deps)) {
+    packages[`node_modules/${name}`] = { version: resolvedOverrides[name] ?? spec };
+  }
+  fs.writeFileSync(
+    path.join(runtimeDir, 'package-lock.json'),
+    JSON.stringify({ name: 'idbots-dsh-runtime', lockfileVersion: 3, packages }),
+  );
+}
+
+function makeFixture({ deps, installed, lock } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-deps-check-'));
   const runtimeDir = path.join(root, 'dsh-runtime');
   fs.mkdirSync(runtimeDir, { recursive: true });
@@ -17,6 +35,7 @@ function makeFixture({ deps, installed }) {
     path.join(runtimeDir, 'package.json'),
     JSON.stringify({ name: 'idbots-dsh-runtime', dependencies: deps }),
   );
+  writeLock(runtimeDir, deps, lock);
   if (installed) {
     for (const [name, version] of Object.entries(installed)) {
       const pkgDir = path.join(runtimeDir, 'node_modules', name);
@@ -35,6 +54,7 @@ test('ok when every declared dependency is installed at the pinned version', () 
   const result = checkDshRuntimeDeps(root);
   assert.equal(result.ok, true);
   assert.deepEqual(result.problems, []);
+  assert.deepEqual(result.lockProblems, []);
 });
 
 test('fails when node_modules is missing entirely (fresh checkout)', () => {
@@ -80,8 +100,52 @@ test('ranged specs only require presence, not an exact version', () => {
   assert.equal(checkDshRuntimeDeps(root).ok, true);
 });
 
+test('fails when the lockfile top-level block still pins the previous version (2026-09-06 incident shape)', () => {
+  const root = makeFixture({
+    deps: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' },
+    installed: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' },
+    lock: { lockTopOverrides: { '@deepseek-ai/dsh-agent': '0.1.3-alpha.1' } },
+  });
+  const result = checkDshRuntimeDeps(root);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.lockProblems.some((p) =>
+      p.includes('package.json pins 0.1.2-rc.1') && p.includes('top-level block says 0.1.3-alpha.1')),
+  );
+});
+
+test('fails when a declared dependency is absent from the lockfile top-level block', () => {
+  const root = makeFixture({
+    deps: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' },
+    installed: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' },
+    lock: { lockTopOverrides: { '@deepseek-ai/dsh-agent': null } },
+  });
+  const result = checkDshRuntimeDeps(root);
+  assert.equal(result.ok, false);
+  assert.ok(result.lockProblems.some((p) => p.includes('absent from the lockfile top-level block')));
+});
+
+test('fails when the lockfile resolves a version other than the exact pin', () => {
+  const root = makeFixture({
+    deps: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' },
+    installed: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' },
+    lock: { resolvedOverrides: { '@deepseek-ai/dsh-agent': '0.1.3-alpha.1' } },
+  });
+  const result = checkDshRuntimeDeps(root);
+  assert.equal(result.ok, false);
+  assert.ok(result.lockProblems.some((p) => p.includes('pinned 0.1.2-rc.1') && p.includes('resolves 0.1.3-alpha.1')));
+});
+
+test('fails when the lockfile is missing entirely', () => {
+  const root = makeFixture({ deps: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' }, installed: null });
+  fs.rmSync(path.join(root, 'dsh-runtime', 'package-lock.json'));
+  const result = checkDshRuntimeDeps(root);
+  assert.equal(result.ok, false);
+  assert.ok(result.lockProblems.some((p) => p.includes('package-lock.json is missing')));
+});
+
 test('the real repository checkout currently passes the gate', () => {
   const projectRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
   const result = checkDshRuntimeDeps(projectRoot);
-  assert.equal(result.ok, true, result.problems.join('\n'));
+  assert.equal(result.ok, true, [...result.lockProblems, ...result.problems].join('\n'));
 });

@@ -38,7 +38,13 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 - `dsh-runtime/` is a nested npm package with its own `package.json` / lockfile / `node_modules`; the root `npm install` only reinstalls it via `postinstall`, and a plain `git pull` or merge does NOT reinstall it.
 - After pulling, merging, or switching to any commit that touches `dsh-runtime/package.json` or `dsh-runtime/package-lock.json`, immediately run `npm install --prefix dsh-runtime` (or `npm ci --prefix dsh-runtime`). A stale `dsh-runtime/node_modules` crashes the spawned DSH runtime process at plugin-load time (`ERR_MODULE_NOT_FOUND` / "JSON-RPC input closed").
-- `npm run check:dsh-deps` (scripts/check-dsh-runtime-deps.cjs) verifies installed dsh-runtime packages match `package.json`; it is wired as a pre-hook of `electron:dev` / `electron:dev:dsh`. Any commit that bumps dsh-runtime dependencies must keep this gate green.
+- `npm run check:dsh-deps` (scripts/check-dsh-runtime-deps.cjs) verifies installed dsh-runtime packages match `package.json` AND that `dsh-runtime/package-lock.json` is in sync with it (top-level specs both ways + resolved versions for exact pins); it is wired as a pre-hook of `electron:dev` / `electron:dev:dsh`. Any commit that bumps dsh-runtime dependencies must keep this gate green.
+
+### Upgrading the DSH runtime version
+
+- To bump the `@deepseek-ai/*` kernel versions, use the one-command path: `npm run upgrade:dsh -- <version>` (rewrites all pins, regenerates the lockfile via `npm install --prefix dsh-runtime`, re-runs the gate). Do NOT hand-edit `dsh-runtime/package.json` or `dsh-runtime/package-lock.json` — every historical DSH upgrade incident (stale-lock ERESOLVE, the 0.1.3-alpha.1 lockfile left behind by the 0.1.2-rc.1 pin) came from manual partial edits.
+- `dsh-runtime/package.json` and `dsh-runtime/package-lock.json` must be committed together in the SAME commit; never commit one without the other.
+- Before committing a dsh-runtime version change, `npm run check:dsh-deps` must pass (it also validates the lockfile sync, so an inconsistent bump cannot land silently).
 
 ## Database Upgrade Safety
 
