@@ -1,5 +1,10 @@
 # Group Task Orchestration Improvements (2026-08-09)
 
+> **Superseded in part (2026-09-06):** the single-commander refactor removed the
+> host-acting behaviors documented here — item 2 (host auto-ACK) and item 6
+> ([DEPENDS_ON] host dispatch gate) no longer exist. See
+> `group-task-runbook.md` for the current architecture.
+
 > Branch: `feat/group-task-orchestration-improvements` (worktree `.worktrees/group-task-orchestration-improvements`)
 > Base: `main` @ 7c59901 (v0.4.1)
 > Scope: the 8 improvement items from `group-task-improvements-2026-08-09.md` (Group Task #8 retrospective)
