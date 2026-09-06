@@ -32,7 +32,7 @@
     "test:ui-regressions": "node --test tests/accentInkButtonText.test.mjs tests/coworkComposerEffortDefault.test.mjs",
     "test:vision": "npm run compile:electron && node --test tests/visionRelayAgentTools.test.mjs tests/visionRelayService.test.mjs tests/visionVideoRelay.test.mjs tests/visionAudioRelay.test.mjs tests/coworkModelLimits.test.mjs tests/coworkReadImageGuard.test.mjs",
     "test:vision-relay-live": "npm run compile:electron && node scripts/vision-relay-regression.mjs",
-    "test:update": "npx rimraf dist-electron && npm run build && npm run compile:electron && node --test tests/appUpdateResumableDownload.test.mjs tests/appUpdateSilentFlowStatic.test.mjs tests/appUpdateUi.test.mjs",
+    "test:update": "npx rimraf dist-electron && npm run build && npm run compile:electron && node --test tests/appUpdateMountPoint.test.mjs tests/appUpdateResumableDownload.test.mjs tests/appUpdateSilentFlowStatic.test.mjs tests/appUpdateUi.test.mjs",
     "test:cognitive-phase2": "npm run compile:electron && node scripts/test_cognitive_phase2.mjs",
     "test:cognitive-hook": "npm run compile:electron && node scripts/test_cognitive_hook.mjs",
     "test:gig-square": "npm run compile:electron && node scripts/gig-square-self-test.mjs",

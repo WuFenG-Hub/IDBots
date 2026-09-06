@@ -54,6 +54,18 @@ function shellEscape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
+/** Extract the mounted volume path from hdiutil's multi-device output. */
+export function parseHdiutilMountPoint(output: string): string | null {
+  const lines = output.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index]?.match(/\/Volumes\/.+$/);
+    if (match) {
+      return match[0].trimEnd();
+    }
+  }
+  return null;
+}
+
 function execAsync(command: string, timeoutMs = 120_000): Promise<string> {
   return new Promise((resolve, reject) => {
     exec(command, { maxBuffer: 10 * 1024 * 1024, timeout: timeoutMs }, (error, stdout, stderr) => {
@@ -587,14 +599,11 @@ async function installMacDmg(dmgPath: string): Promise<void> {
       60_000,
     );
 
-    // Parse mount point from output (last line, last column)
-    const lines = mountOutput.split('\n').filter((l) => l.trim());
-    const lastLine = lines[lines.length - 1];
-    const mountMatch = lastLine?.match(/\t(\/Volumes\/.+)$/);
-    if (!mountMatch) {
+    const detectedMountPoint = parseHdiutilMountPoint(mountOutput);
+    if (!detectedMountPoint) {
       throw new Error('Failed to determine mount point from hdiutil output');
     }
-    mountPoint = mountMatch[1];
+    mountPoint = detectedMountPoint;
     console.log(`[AppUpdate] Mounted at: ${mountPoint}`);
 
     // Find .app bundle in mount point
@@ -745,13 +754,11 @@ export async function applyMacUpdateSilently(dmgPath: string): Promise<void> {
       `hdiutil attach ${shellEscape(dmgPath)} -nobrowse -noautoopen -noverify`,
       60_000,
     );
-    const lines = mountOutput.split('\n').filter((l) => l.trim());
-    const lastLine = lines[lines.length - 1];
-    const mountMatch = lastLine?.match(/\t(\/Volumes\/.+)$/);
-    if (!mountMatch) {
+    const detectedMountPoint = parseHdiutilMountPoint(mountOutput);
+    if (!detectedMountPoint) {
       throw new Error('Failed to determine mount point from hdiutil output');
     }
-    mountPoint = mountMatch[1];
+    mountPoint = detectedMountPoint;
 
     const entries = await fs.promises.readdir(mountPoint);
     const appBundle = entries.find((e) => e.endsWith('.app'));
