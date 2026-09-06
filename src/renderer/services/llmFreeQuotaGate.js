@@ -7,6 +7,13 @@
  */
 
 export const LLM_FREE_PROVIDER_KEY = 'metaid-free';
+/**
+ * Canonical user-facing label for the built-in free provider. Every surface
+ * (Settings providerMeta, onboarding labels, model picker groups, provisioning
+ * writes, config normalization) must derive the label from here so installs
+ * provisioned before the rename never show the legacy "MetaID Free" name.
+ */
+export const FREE_PROVIDER_DISPLAY_NAME = 'IDBots-Free';
 /** kvStore key holding the provisioned welcome bot's id (deletion-respecting). */
 export const LLM_RELAY_WELCOME_BOT_ID_KEY = 'llmRelay.welcomeBotId';
 

@@ -1,6 +1,6 @@
 import { AppConfig, CONFIG_KEYS, defaultConfig, normalizeDeepSeekAppConfig } from '../config';
 import { localStore } from './store';
-import { getFreeProviderModelDisplayName, LLM_FREE_PROVIDER_KEY } from './llmFreeQuotaGate.js';
+import { getFreeProviderModelDisplayName, FREE_PROVIDER_DISPLAY_NAME, LLM_FREE_PROVIDER_KEY } from './llmFreeQuotaGate.js';
 
 const getFixedProviderApiFormat = (providerKey: string): 'anthropic' | 'openai' | null => {
   if (providerKey === 'openai' || providerKey === 'gemini') {
@@ -97,6 +97,12 @@ const normalizeSingleProviderConfig = (
   providerConfig: NonNullable<AppConfig['providers']>[string],
 ): NonNullable<AppConfig['providers']>[string] => ({
   ...providerConfig,
+  // The free provider's stored name predates the IDBots-Free rename on old
+  // installs ("MetaID Free"); built-ins expose no rename UI, so the canonical
+  // label always wins and name readers see a unified value after migration.
+  name: providerKey === LLM_FREE_PROVIDER_KEY
+    ? FREE_PROVIDER_DISPLAY_NAME
+    : providerConfig.name,
   baseUrl: normalizeProviderBaseUrl(providerKey, providerConfig.baseUrl),
   apiFormat: normalizeProviderApiFormat(providerKey, providerConfig.apiFormat),
   models: providerKey === LLM_FREE_PROVIDER_KEY

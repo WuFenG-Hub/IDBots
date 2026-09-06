@@ -19,6 +19,7 @@ import {
 } from '../../services/llmConnection';
 import { getDefaultOnboardingProvider } from './onboardingDefaults.js';
 import { getOnboardingCloseButtonClassName, shouldShowOnboardingClose } from './onboardingGate.js';
+import { FREE_PROVIDER_DISPLAY_NAME } from '../../services/llmFreeQuotaGate.js';
 
 const AVATAR_MAX_SIZE_BYTES = 100 * 1024;
 
@@ -33,7 +34,7 @@ const STEP_LABELS = [
 
 /** Display labels for provider keys (aligned with Settings provider list). */
 const PROVIDER_LABELS: Record<string, string> = {
-  'metaid-free': 'IDBots-Free',
+  'metaid-free': FREE_PROVIDER_DISPLAY_NAME,
   openai: 'OpenAI',
   gemini: 'Gemini',
   anthropic: 'Anthropic',

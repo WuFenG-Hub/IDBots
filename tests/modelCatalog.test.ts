@@ -69,6 +69,38 @@ test('buildModelGroupsFromConfig falls back to a capitalized key without a provi
   assert.equal(groups.find((g) => g.id === 'deepseek')!.name, 'Deepseek');
 });
 
+test('buildModelGroupsFromConfig shows the canonical free-provider label over the stored legacy name', () => {
+  // Installs provisioned before the rename still store "MetaID Free"; the
+  // picker group must render the canonical IDBots-Free label either way.
+  const legacy = buildModelGroupsFromConfig({
+    providers: {
+      'metaid-free': {
+        enabled: true,
+        apiKey: 'mrk-test',
+        baseUrl: 'https://relay.example/v1',
+        apiFormat: 'openai' as const,
+        name: 'MetaID Free',
+        models: [{ id: 'deepseek-chat', name: 'deepseek-v4-flash' }],
+      },
+    },
+  });
+  assert.equal(legacy[0].name, 'IDBots-Free');
+
+  const fresh = buildModelGroupsFromConfig({
+    providers: {
+      'metaid-free': {
+        enabled: true,
+        apiKey: 'mrk-test',
+        baseUrl: 'https://relay.example/v1',
+        apiFormat: 'openai' as const,
+        name: 'IDBots-Free',
+        models: [{ id: 'deepseek-chat', name: 'deepseek-v4-flash' }],
+      },
+    },
+  });
+  assert.equal(fresh[0].name, 'IDBots-Free');
+});
+
 test('buildModelGroupsFromConfig skips providers without models', () => {
   const groups = buildModelGroupsFromConfig({
     providers: { deepseek: { enabled: true, apiKey: 'k', baseUrl: 'u', models: [] } },

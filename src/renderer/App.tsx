@@ -60,6 +60,7 @@ import { useBotBrowserShell } from './features/botBrowser/useBotBrowserShell';
 import { openBotBrowserConversationInCowork } from './features/botBrowser/conversationNavigationAdapter';
 import type { BotBrowserConversationRequest } from './features/botBrowser/types';
 import SidebarToggleIcon from './components/icons/SidebarToggleIcon';
+import { FREE_PROVIDER_DISPLAY_NAME, LLM_FREE_PROVIDER_KEY } from './services/llmFreeQuotaGate.js';
 
 type FocusedOrderTarget = {
   sessionId: string;
@@ -70,6 +71,15 @@ const normalizeFocusedOrderTxid = (value: unknown): string | null => {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   return /^[0-9a-f]{64}$/.test(normalized) ? normalized : null;
 };
+
+// Provider label for the redux model list: keys are capitalized wire ids,
+// except the built-in free provider, which always shows its canonical label
+// (installs provisioned before the rename still store "MetaID Free").
+const providerDisplayLabel = (providerKey: string): string => (
+  providerKey === LLM_FREE_PROVIDER_KEY
+    ? FREE_PROVIDER_DISPLAY_NAME
+    : providerKey.charAt(0).toUpperCase() + providerKey.slice(1)
+);
 
 // Update phases: idle = none / silent download failed; downloading / applying =
 // silent background work (badge + modal stay in sync); ready = downloaded,
@@ -240,7 +250,7 @@ const App: React.FC = () => {
                 providerModels.push({
                   id: model.id,
                   name: model.name,
-                  provider: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+                  provider: providerDisplayLabel(providerName),
                   providerKey: providerName,
                   supportsImage: model.supportsImage ?? false,
                   options: model.options,
@@ -332,7 +342,7 @@ const App: React.FC = () => {
             allModels.push({
               id: model.id,
               name: model.name,
-              provider: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+              provider: providerDisplayLabel(providerName),
               providerKey: providerName,
               supportsImage: model.supportsImage ?? false,
               options: model.options,
@@ -890,7 +900,7 @@ const App: React.FC = () => {
             allModels.push({
               id: model.id,
               name: model.name,
-              provider: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+              provider: providerDisplayLabel(providerName),
               providerKey: providerName,
               supportsImage: model.supportsImage ?? false,
               options: model.options,

@@ -36,7 +36,7 @@ import P2PConfigPanel from './p2p/P2PConfigPanel';
 import UserSettings from './user/UserSettings';
 import TrafficSettings from './traffic/TrafficSettings';
 import { defaultConfig, type AppConfig, getVisibleProviders } from '../config';
-import { LLM_FREE_PROVIDER_KEY, getFreeProviderModelDisplayName } from '../services/llmFreeQuotaGate.js';
+import { LLM_FREE_PROVIDER_KEY, FREE_PROVIDER_DISPLAY_NAME, getFreeProviderModelDisplayName } from '../services/llmFreeQuotaGate.js';
 
 type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic' | 'p2p';
 
@@ -134,7 +134,7 @@ interface ProvidersImportPayload {
 
 const providerMeta: Record<ProviderType, { label: string; icon: React.ReactNode }> = {
   'metaid-free': {
-    label: 'IDBots-Free',
+    label: FREE_PROVIDER_DISPLAY_NAME,
     icon: (
       <svg height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg" style={{flex: '0 0 auto', lineHeight: 1}}><title>IDBots-Free</title><path fill="currentColor" d="M12 1.5l2.1 6.4 6.4 2.1-6.4 2.1L12 18.5l-2.1-6.4-6.4-2.1 6.4-2.1L12 1.5zM19.2 14.8l.9 2.7 2.7.9-2.7.9-.9 2.7-.9-2.7-2.7-.9 2.7-.9.9-2.7z"></path></svg>
     ),
