@@ -20,6 +20,14 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
 
 export type MetawebStudyJobStatus = 'pending' | 'running' | 'done' | 'failed';
 
+/**
+ * Job kind: 'topic' is the M4 owner-assigned study topic (completes when the
+ * corpus gives nothing new); 'qa-surf' is the recurring on-chain Q&A surfing
+ * job (browse latest questions nightly, answer what fits the bot's role,
+ * save valuable Q&A into knowledge bases — never completes on its own).
+ */
+export type MetawebStudyJobKind = 'topic' | 'qa-surf';
+
 export const DEFAULT_STUDY_PIN_BUDGET_PER_NIGHT = 20;
 /** Safety bound so a topic with an ever-growing corpus cannot run forever. */
 export const MAX_STUDY_RUNS_PER_JOB = 10;
@@ -30,6 +38,7 @@ const MAX_TOPIC_CHARS = 200;
 export interface MetawebStudyJobRecord {
   id: string;
   metabotId: number;
+  kind: MetawebStudyJobKind;
   topic: string;
   topicFingerprint: string;
   status: MetawebStudyJobStatus;
@@ -47,6 +56,7 @@ export interface MetawebStudyJobRecord {
 interface MetawebStudyJobRow {
   id: string;
   metabot_id: number;
+  kind?: string | null;
   topic: string;
   topic_fingerprint: string;
   status: MetawebStudyJobStatus;
@@ -83,6 +93,7 @@ function parsePinIds(raw: string | null): string[] {
 const rowToRecord = (row: MetawebStudyJobRow): MetawebStudyJobRecord => ({
   id: row.id,
   metabotId: row.metabot_id,
+  kind: row.kind === 'qa-surf' ? 'qa-surf' : 'topic',
   topic: row.topic,
   topicFingerprint: row.topic_fingerprint,
   status: row.status,
@@ -103,6 +114,8 @@ export function ensureMetawebStudyJobSchema(db: Database): void {
     CREATE TABLE IF NOT EXISTS metaweb_study_jobs (
       id TEXT PRIMARY KEY,
       metabot_id INTEGER NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'topic'
+        CHECK (kind IN ('topic', 'qa-surf')),
       topic TEXT NOT NULL CHECK (trim(topic) <> ''),
       topic_fingerprint TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending'
@@ -133,6 +146,11 @@ export function ensureMetawebStudyJobSchema(db: Database): void {
   if (!names.includes('consecutive_failures')) {
     db.run('ALTER TABLE metaweb_study_jobs ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0');
   }
+  // Additive migration for databases created before the qa-surf job kind
+  // existed — every existing row is a topic job by definition.
+  if (!names.includes('kind')) {
+    db.run("ALTER TABLE metaweb_study_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'topic'");
+  }
 }
 
 export class MetawebStudyJobStore {
@@ -162,13 +180,14 @@ export class MetawebStudyJobStore {
   insert(record: MetawebStudyJobRecord): void {
     this.db.run(
       `INSERT INTO metaweb_study_jobs
-        (id, metabot_id, topic, topic_fingerprint, status, budget_pins,
+        (id, metabot_id, kind, topic, topic_fingerprint, status, budget_pins,
          processed_pin_ids, run_count, consecutive_failures, last_run_at, last_run_summary, last_error,
          created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         record.id,
         record.metabotId,
+        record.kind,
         record.topic,
         record.topicFingerprint,
         record.status,
@@ -209,6 +228,17 @@ export class MetawebStudyJobStore {
        WHERE metabot_id = ? AND topic_fingerprint = ? AND status IN ('pending', 'running')
        LIMIT 1`,
       [metabotId, topicFingerprint],
+    );
+    return row ? rowToRecord(row) : null;
+  }
+
+  /** The active recurring Q&A-surf job for a bot — one per bot by design. */
+  findActiveQaSurf(metabotId: number): MetawebStudyJobRecord | null {
+    const row = this.getOne<MetawebStudyJobRow>(
+      `SELECT * FROM metaweb_study_jobs
+       WHERE metabot_id = ? AND kind = 'qa-surf' AND status IN ('pending', 'running')
+       LIMIT 1`,
+      [metabotId],
     );
     return row ? rowToRecord(row) : null;
   }

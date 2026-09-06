@@ -22,6 +22,7 @@ const setup = () => {
 const makeJob = (overrides = {}) => ({
   id: 'study-test-1',
   metabotId: 7,
+  kind: 'topic',
   topic: 'game development',
   topicFingerprint: 'game development',
   status: 'pending',
