@@ -331,7 +331,10 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       // bare failure, and the bot stays usable locally.
       chainSetupPending: result.chainSetupPending === true,
     });
-    setSyncStatus('success');
+    // 'success' renders per-step checkmarks — only honest when something was
+    // actually published. A setup-pending create gets NO checkmarks; the
+    // modal shows the amber fallback block + resume actions instead.
+    setSyncStatus(result.chainSetupPending ? 'idle' : 'success');
     setViewMode('list');
   };
 
@@ -957,8 +960,28 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
    * legacy partials without a persisted plan (or with a pending chatpubkey
    * step, which the edit plan cannot carry) fall back to the full resync,
    * which itself skips already-pinned chatpubkey.
+   *
+   * Create-fallback bots (subsidy never claimed) are routed through the
+   * resume flow instead: a plain re-sync on an unfunded wallet can only fail
+   * with "Not enough balance" — the user-visible fix is to re-request the gas
+   * subsidy first (and traffic-mode fee assist then applies per the global
+   * setting once the address holds a UTXO), or to self-fund the address.
    */
   async function handleResyncPartial(metabot: Metabot) {
+    if (metabot.subsidy_state === 'failed') {
+      setCreateSuccessModal({
+        metabot,
+        subsidySuccess: false,
+        subsidyError: metabot.subsidy_error ?? undefined,
+        mode: 'syncOnly',
+        syncStepKeys: undefined,
+        showSubsidyStatus: true,
+        chainSetupPending: true,
+      });
+      setEditSyncRemaining(null);
+      void performResumeSetup(metabot, 'subsidized');
+      return;
+    }
     const steps = metabot.chain_sync_pending_steps ?? [];
     if (steps.length > 0 && !steps.includes('chatpubkey')) {
       setCreateSuccessModal({
