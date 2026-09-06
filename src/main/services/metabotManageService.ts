@@ -161,13 +161,6 @@ export interface MetabotManageDeps {
    * Absent = assignment write skipped (bare-embedding callers).
    */
   applyChatSkillAssignments?: (metabotId: number, skillIdsOrNames: readonly string[]) => string[];
-  /**
-   * Balance pre-check seam (wired to addressBalanceService). Returns the MVC
-   * address balance in satoshis AFTER the gas subsidy settled, or null when
-   * the balance API itself failed (pre-check then fails open). Absent = the
-   * create-time balance gate is skipped entirely (tests, bare-embedding callers).
-   */
-  checkWalletBalance?: (mvcAddress: string) => Promise<number | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -469,20 +462,17 @@ export function applyChainSyncProgress(store: MetabotStore, metabotId: number, s
 // ---------------------------------------------------------------------------
 
 /**
- * Conservative floor for the freshly-subsidized wallet to even start creating:
- * a minimal create publishes name + chatpubkey + llm pins, each costing a few
- * hundred sats. Below this the name pin may land but the rest is doomed to a
- * partial publish, so we refuse up front with the shortfall instead.
- * Calibrate against observed pin fees when chain rates change.
- */
-const MIN_CREATE_GAS_SATS = 1400;
-
-/**
- * Create a MetaBot end-to-end: wallet → gas subsidy → balance gate → DB insert
- * → on-chain publish → P2P refresh. Behavior-preserving lift of the original
+ * Create a MetaBot end-to-end: wallet → gas subsidy → DB insert → on-chain
+ * publish → P2P refresh. Behavior-preserving lift of the original
  * idbots:createMetaBotOnChain IPC handler. Mandatory step (name) failure rolls
  * back the DB records; a partial publish (canSkip) still succeeds locally and
  * its unpublished steps are persisted as the bot's chainSyncPending plan.
+ *
+ * No app-level balance pre-gate: an unfunded wallet is stopped by the chain
+ * itself when the publish broadcast fails (the mandatory-step rollback then
+ * applies). A local gate re-derived that judgment from explorer balance data
+ * and misread MVC's permanently-0-conf subsidy funds as "no money" (the
+ * 2026-09 v0.6.1 creation outage), so it was removed rather than fixed.
  */
 export async function createMetaBotOnChainCore(
   input: CreateMetaBotOnChainInput,
@@ -527,38 +517,6 @@ export async function createMetaBotOnChainCore(
       });
     } catch (e) {
       subsidyResult = { success: false, error: e instanceof Error ? e.message : String(e) };
-    }
-
-    // 2b. Balance gate: the fresh wallet (plus whatever the subsidy just
-    // delivered) must cover the minimal create publish. Fails CLOSED on a
-    // confirmed low spendable balance (MVC subsidy payouts arrive and stay
-    // 0-conf yet spendable, so the seam must count mempool funds too) — with
-    // the shortfall reported and nothing written, the "identity registered,
-    // info-pins partial" state never starts. Fails OPEN when the balance API
-    // itself errors (never block creation on an explorer outage). Skipped
-    // when the seam is not wired.
-    if (deps.checkWalletBalance) {
-      let balanceSats: number | null = null;
-      try {
-        balanceSats = await deps.checkWalletBalance(walletResult.mvc_address);
-      } catch {
-        balanceSats = null;
-      }
-      if (balanceSats != null && balanceSats < MIN_CREATE_GAS_SATS) {
-        // The subsidy result was previously swallowed here, leaving the gate
-        // failure undiagnosable (paid-but-unspent vs payout-refused).
-        console.warn(
-          `[metabotManage] balance gate rejected create of "${wantedName}" at ${walletResult.mvc_address}:`,
-          JSON.stringify({ balanceSats, minRequired: MIN_CREATE_GAS_SATS, subsidyResult }),
-        );
-        const subsidyNote = subsidyResult.success
-          ? 'the gas subsidy claimed success but the funds are not spendable yet'
-          : `the gas subsidy failed${subsidyResult.error ? ` (${subsidyResult.error})` : ''}`;
-        return {
-          success: false,
-          error: `INSUFFICIENT_BALANCE: creating "${wantedName}" needs roughly ${MIN_CREATE_GAS_SATS}+ sats of chain fee, but the fresh wallet holds ${balanceSats} sats (short by ${MIN_CREATE_GAS_SATS - balanceSats} sats) — ${subsidyNote}. Top up MVC/SPACE gas for the bot wallet (or retry the gas subsidy) and create again — nothing was created.`,
-        };
-      }
     }
 
     // 3. Insert wallet + metabot into DB (syncMetaBotToChain reads from DB)

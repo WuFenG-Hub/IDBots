@@ -1,8 +1,8 @@
 /**
  * Chain-sync partial state (FR4, wish-team-builder phase 1).
  *
- * Covers the create/update balance gate, the duplicate-name gate, and the
- * persisted chainSyncPending plan that powers the My Bots partial badge and
+ * Covers the no-balance-pre-gate create contract, the duplicate-name gate, and
+ * the persisted chainSyncPending plan that powers the My Bots partial badge and
  * the one-click re-sync. Runs against the compiled electron output like the
  * other metabot manage tests.
  */
@@ -95,59 +95,25 @@ const mockDeps = (store, overrides = {}) => ({
   onAfterMutation: () => {},
   getOwnerGlobalMetaId: () => 'owner_gmid',
   getLlmProviders: () => undefined,
-  ...(overrides.checkWalletBalance !== undefined
-    ? { checkWalletBalance: overrides.checkWalletBalance }
-    : {}),
 });
 
 // ---------------------------------------------------------------------------
-// create: balance gate
+// create: no balance pre-gate
 // ---------------------------------------------------------------------------
 
-test('create: spendable low balance refuses with the shortfall and nothing persisted', async () => {
+test('create: proceeds with no balance pre-gate — an unfunded wallet is stopped by the chain broadcast, not locally', async () => {
   const store = await openStore();
-  const deps = mockDeps(store, {
-    checkWalletBalance: async () => 120, // far below MIN_CREATE_GAS_SATS
-  });
-  const res = await createMetaBotOnChainCore({ name: 'Broke', llm_id: 'deepseek' }, deps);
-  assert.equal(res.success, false);
-  assert.match(res.error, /INSUFFICIENT_BALANCE/);
-  assert.match(res.error, /short by/);
-  assert.match(res.error, /gas subsidy claimed success/, 'subsidy outcome must be surfaced for diagnosis');
-  assert.equal(store.listMetabots().length, 0, 'no DB rows written');
-});
-
-test('create: gate refusal names the subsidy failure reason', async () => {
-  const store = await openStore();
-  const deps = mockDeps(store, {
-    requestSubsidy: async () => ({ success: false, error: 'address-reward failed: 429 Too Many Requests' }),
-    checkWalletBalance: async () => 0, // confirmed-only read of a 0-conf subsidized wallet
-  });
-  const res = await createMetaBotOnChainCore({ name: 'NoGas', llm_id: 'deepseek' }, deps);
-  assert.equal(res.success, false);
-  assert.match(res.error, /INSUFFICIENT_BALANCE/);
-  assert.match(res.error, /gas subsidy failed \(address-reward failed: 429 Too Many Requests\)/);
-  assert.equal(store.listMetabots().length, 0, 'no DB rows written');
-});
-
-test('create: balance API failure fails open (creation proceeds)', async () => {
-  const store = await openStore();
-  const deps = mockDeps(store, {
-    checkWalletBalance: async () => {
-      throw new Error('explorer down');
-    },
-  });
-  const res = await createMetaBotOnChainCore({ name: 'FailOpen', llm_id: 'deepseek' }, deps);
+  // A stray balance reader on deps must be ignored: the FR4-era local gate
+  // misread MVC's permanently-0-conf subsidy funds as "no money" and rejected
+  // every fresh wallet (the 2026-09 v0.6.1 creation outage). The real guard
+  // is the mandatory name-pin broadcast failing and rolling the DB back.
+  const deps = {
+    ...mockDeps(store),
+    checkWalletBalance: async () => 0,
+  };
+  const res = await createMetaBotOnChainCore({ name: 'ZeroConf', llm_id: 'deepseek' }, deps);
   assert.equal(res.success, true);
   assert.equal(store.listMetabots().length, 1);
-});
-
-test('create: healthy balance passes the gate', async () => {
-  const store = await openStore();
-  const deps = mockDeps(store, { checkWalletBalance: async () => 50000 });
-  const res = await createMetaBotOnChainCore({ name: 'Funded', llm_id: 'deepseek' }, deps);
-  assert.equal(res.success, true);
-  assert.equal(res.chainPartial ?? false, false);
 });
 
 // ---------------------------------------------------------------------------

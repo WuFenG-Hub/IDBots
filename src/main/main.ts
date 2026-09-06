@@ -6458,19 +6458,6 @@ function getMetabotManageDeps(): MetabotManageDeps {
     store: getMetabotStore(),
     createWallet: () => createMetaBotWallet({}),
     requestSubsidy: requestMvcGasSubsidy,
-    // Balance pre-check seam (FR4): spendable satoshis after the subsidy, or
-    // null when the balance API failed (gate then fails open). MVC subsidy
-    // payouts land and stay 0-conf while remaining spendable, so the gate must
-    // count mempool funds too — confirmed-only reads 0 for every fresh
-    // subsidized wallet and rejects creation outright.
-    checkWalletBalance: async (mvcAddress: string): Promise<number | null> => {
-      try {
-        const balance = await getAddressBalance('mvc', mvcAddress);
-        return balance.satoshis + balance.unconfirmedSatoshis;
-      } catch {
-        return null;
-      }
-    },
     signOwnerBinding: signOwnerBindingForLocalUser,
     syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
     syncEditChanges: (store, input) => syncMetaBotEditChangesToChain(store, input),
