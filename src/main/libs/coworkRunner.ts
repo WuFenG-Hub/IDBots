@@ -188,6 +188,7 @@ import {
 } from './postBuzzAgentTools';
 import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
 import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
+import { buildLikePinAgentTools } from './likePinAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
@@ -8898,6 +8899,17 @@ export class CoworkRunner extends EventEmitter {
           sessionId,
           resolveMetabotId,
           gateLocalFile,
+        })
+      );
+      // Reactions on any pin (PayLike): Q&A answers and questions today, buzz
+      // and notes alike. No upload dependency, so it registers whenever the
+      // chain-write control exists.
+      memoryTools.push(
+        ...buildLikePinAgentTools({
+          tool,
+          createPin: this.metabotChainWrite.createPin,
+          sessionId,
+          resolveMetabotId,
         })
       );
     }
