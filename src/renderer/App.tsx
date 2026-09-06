@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from './store';
 import Settings, { type SettingsOpenOptions } from './components/Settings';
@@ -11,7 +11,6 @@ import { ScheduledTasksView } from './components/scheduledTasks';
 import { GroupTasksView, NewGroupTaskModal } from './components/groupTasks';
 import MetabotsView from './components/metabots/MetabotsView';
 import GigSquareView from './components/gigSquare/GigSquareView';
-import CoworkPermissionPanel from './components/cowork/CoworkPermissionPanel';
 import AgentGameConsentCard from './components/agentGame/AgentGameConsentCard';
 import { configService } from './services/config';
 import { ensureFreeQuotaProvisioning } from './services/llmFreeQuotaBootstrap';
@@ -37,7 +36,6 @@ import { clearSelection } from './store/slices/quickActionSlice';
 import { setActiveSkillIds } from './store/slices/skillSlice';
 import { selectTask as selectGroupTask } from './store/slices/groupTasksSlice';
 import type { ApiConfig } from './services/api';
-import type { CoworkPermissionResult } from './types/cowork';
 import type { MetaAppRecord } from './types/metaApp';
 import type { GroupTaskDetail } from './types/groupTask';
 import { ChatBubbleLeftRightIcon } from '@heroicons/react/24/outline';
@@ -118,8 +116,6 @@ const App: React.FC = () => {
   const dispatch = useDispatch();
   const selectedModel = useSelector((state: RootState) => state.model.selectedModel);
   const currentSessionId = useSelector((state: RootState) => state.cowork.currentSessionId);
-  const pendingPermissions = useSelector((state: RootState) => state.cowork.pendingPermissions);
-  const pendingPermission = pendingPermissions[0] ?? null;
   const pendingConsents = useSelector((state: RootState) => state.agentGame.pendingConsents);
   const pendingConsent = pendingConsents[0] ?? null;
   const isWindows = window.electron.platform === 'win32';
@@ -839,11 +835,6 @@ const App: React.FC = () => {
     setDownloadProgress(null);
   }, []);
 
-  const handlePermissionResponse = useCallback(async (result: CoworkPermissionResult) => {
-    if (!pendingPermission) return;
-    await coworkService.respondToPermission(pendingPermission.requestId, result);
-  }, [pendingPermission]);
-
   const handleConsentResponse = useCallback(
     async (approved: boolean, reason?: string) => {
       const current = pendingConsent;
@@ -1048,19 +1039,7 @@ const App: React.FC = () => {
     };
   }, [isInitialized, runUpdateCheck]);
 
-  // 统一的轻量权限确认条（底部停靠、不遮屏），覆盖工具权限与 AskUserQuestion（含多问题）
-  const permissionPanel = useMemo(() => {
-    if (!pendingPermission) return null;
-
-    return (
-      <CoworkPermissionPanel
-        permission={pendingPermission}
-        onRespond={handlePermissionResponse}
-      />
-    );
-  }, [pendingPermission, handlePermissionResponse]);
-
-  const isOverlayActive = showSettings || showUpdateModal || pendingPermissions.length > 0 || pendingConsents.length > 0;
+  const isOverlayActive = showSettings || showUpdateModal || pendingConsents.length > 0;
   // 按当前 UI 语言解析更新说明（该语言无内容时回退到另一种语言），用于悬停徽章时展示
   const isEmptyChangeLog = (log?: ChangeLogEntry): boolean => !log?.title && !(log?.content?.length > 0);
   const updateChangeLog: ChangeLogEntry | null = (() => {
@@ -1332,7 +1311,6 @@ const App: React.FC = () => {
           installingHint={updatePhase === 'applying' ? i18nService.t('updateInstallingSilentHint') : undefined}
         />
       )}
-      {permissionPanel}
       {pendingConsent && (
         <AgentGameConsentCard info={pendingConsent} onRespond={handleConsentResponse} />
       )}
