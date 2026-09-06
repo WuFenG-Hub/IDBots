@@ -370,6 +370,12 @@ import {
 import { searchMetaweb as searchMetawebRemote } from './services/metawebSearchService';
 import { readMetawebPin as readMetawebPinRemote } from './services/metawebPinService';
 import {
+  qaSearch as qaSearchRemote,
+  qaLatestQuestions as qaLatestQuestionsRemote,
+  qaQuestionDetail as qaQuestionDetailRemote,
+  qaQuestionAnswers as qaQuestionAnswersRemote,
+} from './services/qaRecallService';
+import {
   readRendererFromEnvelope,
   resolveMetaAppSourceByRenderUrl,
 } from './services/botBrowserSourceLocator';
@@ -5536,6 +5542,37 @@ const getCoworkRunner = () => {
         readPin: async (pinId) => {
           const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
           return readMetawebPinRemote(pinId, baseUrl ? { baseUrl } : undefined);
+        },
+      },
+      // On-chain Q&A recall tool backends (search_qa / list_latest_questions /
+      // get_question_answers): thin pass-throughs to the metaso-p2p /api/qa/*
+      // family. IDBOTS_METAWEB_API_BASE_URL overrides the default so.metaid.io
+      // base for staging integration ahead of the production rollout.
+      qaRecall: {
+        search: async (input) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          const page = await qaSearchRemote(input, baseUrl ? { baseUrl } : undefined);
+          return { items: page.items, hasMore: page.hasMore, nextCursor: page.nextCursor };
+        },
+        latestQuestions: async (input) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          const page = await qaLatestQuestionsRemote(input, baseUrl ? { baseUrl } : undefined);
+          return { items: page.items, hasMore: page.hasMore, nextCursor: page.nextCursor };
+        },
+        questionDetail: async (pinId) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          const detail = await qaQuestionDetailRemote(pinId, baseUrl ? { baseUrl } : undefined);
+          return {
+            question: detail.question,
+            answers: detail.answers,
+            hasMore: detail.hasMore,
+            nextCursor: detail.nextCursor,
+          };
+        },
+        questionAnswers: async (input) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          const page = await qaQuestionAnswersRemote(input, baseUrl ? { baseUrl } : undefined);
+          return { items: page.items, hasMore: page.hasMore, nextCursor: page.nextCursor };
         },
       },
       // knowledge_base_* tool backends: the built-in per-bot knowledge base

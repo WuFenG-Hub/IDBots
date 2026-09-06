@@ -151,6 +151,10 @@ import {
   type SocialRecallControl,
 } from './socialRecallAgentTools';
 import {
+  buildQaRecallAgentTools,
+  type QaRecallControl,
+} from './qaRecallAgentTools';
+import {
   buildMetawebLearningAgentTools,
   type MetawebLearningControl,
 } from './metawebLearningAgentTools';
@@ -1697,6 +1701,12 @@ export interface CoworkRunnerOptions {
    */
   metawebLearning?: MetawebLearningControl;
   /**
+   * When set, every cowork session gets the on-chain Q&A recall tools
+   * (search_qa / list_latest_questions / get_question_answers) backed by the
+   * metaso-p2p /api/qa/* APIs (main.ts wires the control).
+   */
+  qaRecall?: QaRecallControl;
+  /**
    * When set, every cowork session gets the knowledge base tools
    * (knowledge_base_list / knowledge_base_query / knowledge_base_add_document
    * / knowledge_base_learn) backed by the per-bot KnowledgeBaseService
@@ -1876,6 +1886,7 @@ export class CoworkRunner extends EventEmitter {
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
   private metawebLearning?: MetawebLearningControl;
+  private qaRecall?: QaRecallControl;
   private knowledgeBase?: KnowledgeBaseControl;
   private metawebStudy?: MetawebStudyControl;
   private metaFileUpload?: MetaFileUploadControl;
@@ -1986,6 +1997,7 @@ export class CoworkRunner extends EventEmitter {
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
     this.metawebLearning = options?.metawebLearning;
+    this.qaRecall = options?.qaRecall;
     this.knowledgeBase = options?.knowledgeBase;
     this.metawebStudy = options?.metawebStudy;
     this.metaFileUpload = options?.metaFileUpload;
@@ -9058,6 +9070,18 @@ export class CoworkRunner extends EventEmitter {
           metawebLearning: this.metawebLearning,
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
+        })
+      );
+    }
+    // On-chain Q&A recall (search_qa / list_latest_questions /
+    // get_question_answers) rides with the same always-on posture: it is the
+    // bot's window into the community knowledge base and the search-first
+    // half of the ask-when-stuck loop.
+    if (this.qaRecall) {
+      memoryTools.push(
+        ...buildQaRecallAgentTools({
+          tool,
+          qaRecall: this.qaRecall,
         })
       );
     }
