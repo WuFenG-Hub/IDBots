@@ -17,7 +17,9 @@ const {
   deleteMetaBotCore,
   listMetabotsForManagement,
   listConfiguredLlmProviders,
+  readMetabotSubsidyState,
   requireMetabotLlmIdForCreate,
+  resumeMetabotSetupCore,
   legacyLlmProviderKeyError,
   assertCanCreateMetabot,
   applyChatSkillOp,
@@ -102,6 +104,8 @@ const mockDeps = (store, overrides = {}) => ({
   getOwnerGlobalMetaId: overrides.getOwnerGlobalMetaId ?? (() => 'owner_gmid'),
   // Default: provider catalog unavailable -> the legacy provider-key guard is skipped.
   getLlmProviders: overrides.getLlmProviders ?? (() => undefined),
+  // Optional spendable-balance reader (resumeMetabotSetupCore self-funded mode).
+  ...(overrides.readSpendableBalance ? { readSpendableBalance: overrides.readSpendableBalance } : {}),
   // Assignment seam: absent by default (bare-embedding callers).
   ...(overrides.applyChatSkillAssignments ? { applyChatSkillAssignments: overrides.applyChatSkillAssignments } : {}),
 });
@@ -256,16 +260,61 @@ test('createMetaBotOnChainCore: success persists bot, refreshes P2P, returns sub
   assert.equal(found.metabot_type, 'worker');
 });
 
-test('createMetaBotOnChainCore: mandatory chain failure rolls back the DB row', async () => {
+test('createMetaBotOnChainCore: mandatory chain failure keeps the bot locally with a pending plan (create fallback)', async () => {
   const store = await openStore();
   const deps = mockDeps(store, {
-    syncToChain: async () => ({ success: false, canSkip: false, error: 'name pin failed' }),
+    requestSubsidy: async () => ({ success: false, error: 'address-init failed: 503' }),
+    syncToChain: async () => ({
+      success: false,
+      canSkip: false,
+      error: 'Not enough balance',
+      plannedSteps: ['name', 'chatpubkey', 'llm'],
+      syncedSteps: [],
+    }),
   });
   const res = await createMetaBotOnChainCore({ name: 'Bob', llm_id: 'deepseek' }, deps);
-  assert.equal(res.success, false);
-  assert.equal(res.error, 'name pin failed');
-  // Rolled back: no bots remain.
-  assert.equal(store.listMetabots().length, 0);
+  // The bot is NOT rolled back: the wallet row is append-only anyway (a
+  // rollback would strand any subsidy already paid), and the user must be
+  // able to retry the subsidy or self-fund the address later.
+  assert.equal(res.success, true);
+  assert.equal(res.chainSetupPending, true);
+  assert.equal(res.chainError, 'Not enough balance');
+  assert.equal(res.metabot.name, 'Bob');
+  assert.equal(store.listMetabots().length, 1, 'bot kept locally');
+  // The full plan is persisted so the partial badge + resume entry work.
+  const { readChainSyncPending } = require('../dist-electron/main/services/metabotManageService.js');
+  const pending = readChainSyncPending(store, res.metabot.id);
+  assert.deepEqual(pending.remainingSteps.sort(), ['chatpubkey', 'llm', 'name']);
+  // The subsidy failure is recorded for the UI banner.
+  const subsidy = readMetabotSubsidyState(store, res.metabot.id);
+  assert.equal(subsidy.state, 'failed');
+  assert.match(subsidy.error, /address-init failed/);
+});
+
+test('createMetaBotOnChainCore: mandatory chain failure without a reported plan falls back to the minimal-creation default', async () => {
+  const store = await openStore();
+  const deps = mockDeps(store, {
+    syncToChain: async () => ({ success: false, canSkip: false, error: 'network down' }),
+  });
+  const res = await createMetaBotOnChainCore({ name: 'NoPlan', llm_id: 'deepseek' }, deps);
+  assert.equal(res.success, true);
+  assert.equal(res.chainSetupPending, true);
+  const { readChainSyncPending } = require('../dist-electron/main/services/metabotManageService.js');
+  const pending = readChainSyncPending(store, res.metabot.id);
+  assert.deepEqual(pending.remainingSteps.sort(), ['chatpubkey', 'llm', 'name']);
+});
+
+test('createMetaBotOnChainCore: successful subsidy is recorded as claimed', async () => {
+  const store = await openStore();
+  const res = await createMetaBotOnChainCore({ name: 'Funded', llm_id: 'deepseek' }, mockDeps(store));
+  assert.equal(res.success, true);
+  assert.equal(readMetabotSubsidyState(store, res.metabot.id).state, 'claimed');
+});
+
+test('readMetabotSubsidyState: absent record reads as unknown', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'Legacy' });
+  assert.deepEqual(readMetabotSubsidyState(store, m.id), { state: 'unknown' });
 });
 
 test('createMetaBotOnChainCore: partial publish (canSkip) keeps the bot and surfaces chainError', async () => {
@@ -286,6 +335,149 @@ test('createMetaBotOnChainCore: missing llm_id returns an error without creating
   assert.equal(res.success, false);
   assert.match(res.error, /LLM Brain is required/);
   assert.equal(store.listMetabots().length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// resume setup (create fallback: retry subsidy / self-funded broadcast)
+// ---------------------------------------------------------------------------
+
+test('resumeMetabotSetupCore: subsidized retry with a still-failing subsidy attempts no chain sync', async () => {
+  const store = await openStore();
+  let syncCalls = 0;
+  const deps = mockDeps(store, {
+    requestSubsidy: async () => ({ success: false, error: 'address-init failed: 503' }),
+    syncToChain: async () => { syncCalls += 1; return { success: true }; },
+  });
+  const res = await createMetaBotOnChainCore({ name: 'Stuck', llm_id: 'deepseek' }, {
+    ...deps,
+    syncToChain: async () => ({ success: false, canSkip: false, error: 'Not enough balance', plannedSteps: ['name'], syncedSteps: [] }),
+  });
+  assert.equal(res.chainSetupPending, true);
+  const resume = await resumeMetabotSetupCore({ metabotId: res.metabot.id, mode: 'subsidized' }, deps);
+  assert.equal(resume.success, false);
+  assert.equal(resume.subsidy.success, false);
+  assert.match(resume.error, /address-init failed/);
+  assert.equal(syncCalls, 0, 'no chain attempt without funds');
+  assert.equal(readMetabotSubsidyState(store, res.metabot.id).state, 'failed');
+});
+
+test('resumeMetabotSetupCore: subsidized retry claims the subsidy then syncs', async () => {
+  const store = await openStore();
+  const created = await createMetaBotOnChainCore({ name: 'Healing', llm_id: 'deepseek' }, mockDeps(store, {
+    requestSubsidy: async () => ({ success: false, error: 'flaky' }),
+    syncToChain: async () => ({ success: false, canSkip: false, error: 'Not enough balance', plannedSteps: ['name', 'chatpubkey'], syncedSteps: [] }),
+  }));
+  let subsidyArg = null;
+  let syncCalls = 0;
+  const deps = mockDeps(store, {
+    requestSubsidy: async (p) => { subsidyArg = p; return { success: true }; },
+    syncToChain: async () => {
+      syncCalls += 1;
+      return { success: true, plannedSteps: ['name', 'chatpubkey'], syncedSteps: ['name', 'chatpubkey'] };
+    },
+  });
+  const resume = await resumeMetabotSetupCore({ metabotId: created.metabot.id, mode: 'subsidized' }, deps);
+  assert.equal(resume.success, true);
+  assert.equal(syncCalls, 1);
+  assert.equal(resume.subsidy.success, true);
+  // The subsidy is re-requested against the persisted wallet of THIS bot.
+  assert.equal(subsidyArg.mvcAddress, created.metabot.mvc_address);
+  assert.equal(readMetabotSubsidyState(store, created.metabot.id).state, 'claimed');
+  // A fully landed sync clears the pending plan.
+  const { readChainSyncPending } = require('../dist-electron/main/services/metabotManageService.js');
+  assert.equal(readChainSyncPending(store, created.metabot.id), null);
+});
+
+test('resumeMetabotSetupCore: self-funded with a zero balance is blocked before any chain attempt', async () => {
+  const store = await openStore();
+  const created = await createMetaBotOnChainCore({ name: 'Manual', llm_id: 'deepseek' }, mockDeps(store, {
+    syncToChain: async () => ({ success: false, canSkip: false, error: 'Not enough balance', plannedSteps: ['name'], syncedSteps: [] }),
+  }));
+  let syncCalls = 0;
+  let subsidyCalls = 0;
+  const deps = mockDeps(store, {
+    requestSubsidy: async () => { subsidyCalls += 1; return { success: true }; },
+    readSpendableBalance: async () => 0,
+    syncToChain: async () => { syncCalls += 1; return { success: true }; },
+  });
+  const resume = await resumeMetabotSetupCore({ metabotId: created.metabot.id, mode: 'self-funded' }, deps);
+  assert.equal(resume.success, false);
+  assert.equal(resume.error, 'SELF_FUNDED_NO_BALANCE');
+  assert.deepEqual(
+    resume.selfFundedBlocked,
+    { reason: 'no_balance', mvcAddress: created.metabot.mvc_address, spendableSatoshis: 0 },
+  );
+  assert.equal(syncCalls, 0, 'no guaranteed-futile broadcast');
+  assert.equal(subsidyCalls, 0, 'self-funded mode never touches the subsidy service');
+});
+
+test('resumeMetabotSetupCore: self-funded with balance broadcasts without the subsidy', async () => {
+  const store = await openStore();
+  const created = await createMetaBotOnChainCore({ name: 'SelfPaid', llm_id: 'deepseek' }, mockDeps(store, {
+    syncToChain: async () => ({ success: false, canSkip: false, error: 'Not enough balance', plannedSteps: ['name'], syncedSteps: [] }),
+  }));
+  let subsidyCalls = 0;
+  let syncCalls = 0;
+  const deps = mockDeps(store, {
+    requestSubsidy: async () => { subsidyCalls += 1; return { success: true }; },
+    readSpendableBalance: async () => 502600,
+    syncToChain: async () => {
+      syncCalls += 1;
+      return { success: true, plannedSteps: ['name'], syncedSteps: ['name'] };
+    },
+  });
+  const resume = await resumeMetabotSetupCore({ metabotId: created.metabot.id, mode: 'self-funded' }, deps);
+  assert.equal(resume.success, true);
+  assert.equal(syncCalls, 1);
+  assert.equal(subsidyCalls, 0);
+  assert.equal(resume.subsidy, undefined, 'no subsidy leg in self-funded mode');
+});
+
+test('resumeMetabotSetupCore: an already-synced bot is a no-op', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'Done' });
+  store.updateMetabot(m.id, { metabot_info_pinid: 'pin-done' });
+  let syncCalls = 0;
+  const deps = mockDeps(store, {
+    syncToChain: async () => { syncCalls += 1; return { success: true }; },
+  });
+  const resume = await resumeMetabotSetupCore({ metabotId: m.id, mode: 'subsidized' }, deps);
+  assert.equal(resume.success, true);
+  assert.equal(resume.alreadySynced, true);
+  assert.equal(syncCalls, 0);
+});
+
+test('resumeMetabotSetupCore: re-signs the owner binding when a boss is set but unpublished', async () => {
+  const store = await openStore();
+  const created = await createMetaBotOnChainCore(
+    { name: 'Owned', llm_id: 'deepseek', boss_global_metaid: 'owner_gmid' },
+    mockDeps(store, {
+      syncToChain: async () => ({ success: false, canSkip: false, error: 'Not enough balance', plannedSteps: ['name'], syncedSteps: [] }),
+    }),
+  );
+  let ownerPayload = null;
+  const deps = mockDeps(store, {
+    signOwnerBinding: async (_boss, botGmid) => {
+      ownerPayload = `signed:${botGmid}`;
+      return { payload: ownerPayload };
+    },
+    requestSubsidy: async () => ({ success: true }),
+    syncToChain: async () => ({ success: true, plannedSteps: ['name', 'owner'], syncedSteps: ['name', 'owner'] }),
+  });
+  const resume = await resumeMetabotSetupCore({ metabotId: created.metabot.id, mode: 'subsidized' }, deps);
+  assert.equal(resume.success, true);
+  assert.match(ownerPayload, /signed:gmid-/);
+});
+
+test('resumeMetabotSetupCore: invalid id and missing bot report errors', async () => {
+  const store = await openStore();
+  const deps = mockDeps(store);
+  const bad = await resumeMetabotSetupCore({ metabotId: 0, mode: 'subsidized' }, deps);
+  assert.equal(bad.success, false);
+  assert.match(bad.error, /Invalid metabotId/);
+  const missing = await resumeMetabotSetupCore({ metabotId: 999, mode: 'self-funded' }, deps);
+  assert.equal(missing.success, false);
+  assert.match(missing.error, /not found/);
 });
 
 // ---------------------------------------------------------------------------

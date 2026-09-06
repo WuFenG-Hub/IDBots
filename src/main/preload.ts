@@ -963,6 +963,13 @@ contextBridge.exposeInMainWorld('electron', {
     getMetaBotMnemonic: (metabotId: number) => ipcRenderer.invoke('idbots:getMetaBotMnemonic', metabotId),
     deleteMetaBot: (metabotId: number) => ipcRenderer.invoke('idbots:deleteMetaBot', metabotId),
     syncMetaBot: (metabotId: number) => ipcRenderer.invoke('idbots:syncMetaBot', metabotId),
+    /**
+     * Resume a locally-created bot's on-chain setup: 'subsidized' re-requests
+     * the gas subsidy then publishes missing pins; 'self-funded' publishes
+     * with the bot's own address funds (user transferred MVC manually).
+     */
+    resumeMetabotSetup: (input: { metabotId: number; mode: 'subsidized' | 'self-funded' }) =>
+      ipcRenderer.invoke('idbots:resumeMetabotSetup', input),
     syncMetaBotEditChanges: (input: {
       metabotId: number;
       syncName?: boolean;

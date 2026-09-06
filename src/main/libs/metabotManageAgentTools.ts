@@ -138,8 +138,12 @@ function formatCreateResult(result: CreateMetaBotOnChainResult): string {
   const m = result.metabot;
   const lines = [
     `MetaBot created: ${m.name} (id=${m.id}, type=${m.metabot_type}, llm=${m.llm_id ?? 'n/a'}).`,
-    `Identity registered on-chain (globalMetaID: ${m.globalmetaid ?? 'n/a'}).`,
   ];
+  if (result.chainSetupPending) {
+    lines.push(`Note: NOTHING was published on-chain yet — ${result.chainError ?? 'the chain publish failed'}. The bot exists locally with its wallet address (${m.mvc_address}); the user can retry the gas subsidy or transfer MVC to that address and broadcast with their own funds from My Bots.`);
+  } else {
+    lines.push(`Identity registered on-chain (globalMetaID: ${m.globalmetaid ?? 'n/a'}).`);
+  }
   if (result.chainPartial) {
     lines.push(`Note: on-chain publish was partial — ${result.chainError ?? 'some non-critical pins were not confirmed'}. The bot exists and works locally; the user can re-sync from My Bots if needed.`);
   }

@@ -106,7 +106,8 @@ test('create: proceeds with no balance pre-gate — an unfunded wallet is stoppe
   // A stray balance reader on deps must be ignored: the FR4-era local gate
   // misread MVC's permanently-0-conf subsidy funds as "no money" and rejected
   // every fresh wallet (the 2026-09 v0.6.1 creation outage). The real guard
-  // is the mandatory name-pin broadcast failing and rolling the DB back.
+  // is the mandatory name-pin broadcast failing — which now KEEPS the bot
+  // locally with a pending plan (create fallback) instead of rolling back.
   const deps = {
     ...mockDeps(store),
     checkWalletBalance: async () => 0,

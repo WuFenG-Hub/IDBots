@@ -188,6 +188,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     mode?: 'create' | 'syncOnly' | 'editSync';
     syncStepKeys?: SyncStepKey[];
     showSubsidyStatus?: boolean;
+    chainSetupPending?: boolean;
   } | null>(null);
   const [editSyncRemaining, setEditSyncRemaining] = useState<EditSyncRemaining | null>(null);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
@@ -199,6 +200,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   const [pendingCreateValues, setPendingCreateValues] = useState<MetaBotCreateFormValues | null>(null);
   const [createChainStatus, setCreateChainStatus] = useState<'idle' | 'publishing' | 'error'>('idle');
   const [createChainError, setCreateChainError] = useState<string>('');
+  // Create-fallback resume: in-flight setup resume (retry subsidy / self-funded
+  // broadcast) keyed by the bot id, plus the banner-level result message.
+  const [resumeSetupBusyId, setResumeSetupBusyId] = useState<number | null>(null);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -322,6 +326,10 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       // steps are skipped by the full sync plan).
       syncStepKeys: ['name', 'chatpubkey', 'llm'],
       showSubsidyStatus: true,
+      // Create-fallback: nothing landed on-chain (e.g. subsidy service down);
+      // the modal offers retry-subsidy / self-funded broadcast instead of a
+      // bare failure, and the bot stays usable locally.
+      chainSetupPending: result.chainSetupPending === true,
     });
     setSyncStatus('success');
     setViewMode('list');
@@ -602,7 +610,68 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
             {i18nService.t('metabotEditTitle')}
           </h2>
         </div>
-        {(editMetabot.chain_sync_state ?? (editMetabot.metabot_info_pinid?.trim() ? 'synced' : 'partial')) === 'partial' && (
+        {/* Create-fallback banner: the bot was kept locally because the subsidy
+            (or the funded broadcast) never landed — nothing is on-chain yet.
+            Offer retry-subsidy / self-funded broadcast with the funding address,
+            instead of the plain "profile sync pending" banner that would just
+            fail again on the unfunded wallet. */}
+        {editMetabot.subsidy_state === 'failed'
+          && (editMetabot.chain_sync_state ?? (editMetabot.metabot_info_pinid?.trim() ? 'synced' : 'partial')) === 'partial' && (
+          <div
+            data-slot="metabot-setup-pending-banner"
+            className="space-y-2 rounded-xl border border-amber-500/40 dark:border-amber-400/40 bg-amber-500/10 dark:bg-amber-400/10 px-4 py-3"
+          >
+            <div className="text-xs font-medium text-amber-600 dark:text-amber-400">
+              {i18nService.t('metabotSetupPendingTitle')}
+            </div>
+            <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('metabotSetupPendingHint')}
+            </p>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0">
+                {i18nService.t('metabotSetupSelfFundHint')}
+              </span>
+              <code className="min-w-0 flex-1 break-all dark:text-claude-darkText text-claude-text">
+                {editMetabot.mvc_address}
+              </code>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(editMetabot.mvc_address).then(() => {
+                    window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotAddressCopied') }));
+                  });
+                }}
+                className="shrink-0 px-2 py-1 text-xs rounded-lg dark:bg-claude-darkSurface bg-claude-surface dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover"
+              >
+                {i18nService.t('metabotCopyAddress')}
+              </button>
+            </div>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => void performResumeSetup(editMetabot, 'self-funded')}
+                disabled={resumeSetupBusyId === editMetabot.id}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 hover:underline disabled:opacity-50 disabled:cursor-wait shrink-0"
+                data-slot="metabot-setup-self-fund"
+              >
+                {resumeSetupBusyId === editMetabot.id && <ArrowPathIcon className="h-3.5 w-3.5 animate-spin" aria-hidden />}
+                <span>{i18nService.t('metabotSetupSelfFund')}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void performResumeSetup(editMetabot, 'subsidized')}
+                disabled={resumeSetupBusyId === editMetabot.id}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 hover:underline disabled:opacity-50 disabled:cursor-wait shrink-0"
+                data-slot="metabot-setup-retry-subsidy"
+              >
+                {resumeSetupBusyId === editMetabot.id && <ArrowPathIcon className="h-3.5 w-3.5 animate-spin" aria-hidden />}
+                <span>{i18nService.t('metabotSetupRetrySubsidy')}</span>
+              </button>
+            </div>
+          </div>
+        )}
+        {editMetabot.subsidy_state !== 'failed'
+          && (editMetabot.chain_sync_state ?? (editMetabot.metabot_info_pinid?.trim() ? 'synced' : 'partial')) === 'partial' && (
           <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/40 dark:border-amber-400/40 bg-amber-500/10 dark:bg-amber-400/10 px-4 py-3">
             <span className="inline-flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400 min-w-0">
               <span className="inline-block h-2 w-2 rounded-full bg-amber-500 shrink-0" aria-hidden />
@@ -684,6 +753,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
         }
         onClose={handleCloseSuccessModal}
         onSyncToChain={handleSyncToChain}
+        chainSetupPending={createSuccessModal.chainSetupPending === true}
+        onRetrySubsidy={() => void performResumeSetup(createSuccessModal.metabot, 'subsidized')}
+        onSelfFundBroadcast={() => void performResumeSetup(createSuccessModal.metabot, 'self-funded')}
       />
     );
   }
@@ -738,6 +810,50 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   // Hoisted declarations like the delete handlers above: the edit view's
   // resync button and the sync-modal retry reach these through the early
   // return, where const arrows would be TDZ-dead.
+  /**
+   * Create-fallback resume (retry subsidy / self-funded broadcast). Reached
+   * from the create-success modal and the edit-view setup banner; feedback
+   * goes to the open modal's sync status, else to a toast.
+   */
+  async function performResumeSetup(metabot: Metabot, mode: 'subsidized' | 'self-funded') {
+    setResumeSetupBusyId(metabot.id);
+    const modalOpen = createSuccessModal?.metabot.id === metabot.id;
+    if (modalOpen) {
+      setSyncStatus('syncing');
+      setSyncError('');
+    }
+    try {
+      const result = await window.electron.idbots.resumeMetabotSetup({ metabotId: metabot.id, mode });
+      await loadList();
+      if (result.success) {
+        if (modalOpen) setSyncStatus('success');
+        window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotSetupResumed') }));
+        return;
+      }
+      const message = result.selfFundedBlocked
+        ? i18nService.t('metabotSetupSelfFundNoBalance')
+        : result.subsidy && !result.subsidy.success
+          ? `${i18nService.t('metabotMvcSubsidyFailed')}${result.subsidy.error ? `: ${result.subsidy.error}` : ''}`
+          : (result.chain?.error ?? result.error ?? 'Unknown error');
+      if (modalOpen) {
+        setSyncStatus('error');
+        setSyncError(message);
+      } else {
+        window.dispatchEvent(new CustomEvent('app:showToast', { detail: message }));
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Resume failed';
+      if (modalOpen) {
+        setSyncStatus('error');
+        setSyncError(message);
+      } else {
+        window.dispatchEvent(new CustomEvent('app:showToast', { detail: message }));
+      }
+    } finally {
+      setResumeSetupBusyId(null);
+    }
+  }
+
   async function performSyncToChain(metabot: Metabot) {
     setSyncStatus('syncing');
     setSyncError('');

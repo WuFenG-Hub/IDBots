@@ -153,6 +153,14 @@ export interface MetabotManageDeps {
     models?: Array<{ id?: string }>;
   } | undefined> | undefined;
   /**
+   * Read the spendable (confirmed + unconfirmed) MVC balance in satoshis for
+   * an address. Used by resumeMetabotSetupCore's self-funded mode to tell
+   * "user has not funded the bot address yet" from "chain attempt worth
+   * making" — MVC subsidy funds stay unconfirmed forever, so the sum is the
+   * only honest spendable figure.
+   */
+  readSpendableBalance?: (mvcAddress: string) => Promise<number>;
+  /**
    * Skill-assignment write seam (wired to SkillManager.applyMetabotAssignedSkills).
    * Called whenever an update carries allow_chat_skills / chat_skill_op — the
    * on-chain published whitelist stays the metabots.allow_chat_skills column,
@@ -173,6 +181,13 @@ export interface CreateMetaBotOnChainResult {
   subsidy?: { success: boolean; error?: string };
   chainPartial?: boolean;
   chainError?: string;
+  /**
+   * Nothing landed on-chain at creation (the mandatory name step failed —
+   * typically an unfunded wallet because the subsidy service was down). The
+   * bot exists locally with a full chainSyncPending plan; the UI offers
+   * resumeMetabotSetup (retry subsidy / self-funded broadcast).
+   */
+  chainSetupPending?: boolean;
   error?: string;
 }
 
@@ -335,6 +350,15 @@ export function applyChatSkillOp(
  */
 const CHAIN_SYNC_PENDING_KEY = 'chainSyncPending';
 
+/**
+ * Fallback planned-step list when a failing sync implementation reports no
+ * plan (minimal creation publishes name + chatpubkey + llm; empty profile
+ * steps are skipped by buildFullMetabotInfoSyncPlan). The real
+ * syncMetaBotToChain reports plannedSteps on every failure path; this only
+ * covers third-party syncToChain deps (and the unit-test mocks).
+ */
+const DEFAULT_CREATE_PLANNED_STEPS = ['name', 'chatpubkey', 'llm'];
+
 export interface ChainSyncPending {
   /** Step keys still unpublished (subset of the sync step vocabulary). */
   remainingSteps: string[];
@@ -458,21 +482,89 @@ export function applyChainSyncProgress(store: MetabotStore, metabotId: number, s
 }
 
 // ---------------------------------------------------------------------------
+// Subsidy state (create-fallback persistence)
+// ---------------------------------------------------------------------------
+
+/**
+ * metabot_settings key recording whether the gas subsidy for this bot's wallet
+ * was claimed. Absent = legacy/unknown (created before this tracking, or the
+ * subsidy succeeded and nobody looked back) — the UI treats it as "no banner".
+ * Mirrors user_identity.subsidy_state semantics for bots.
+ */
+const SUBSIDY_STATE_KEY = 'subsidyState';
+
+export type MetabotSubsidyStateLiteral = 'claimed' | 'failed';
+
+export interface MetabotSubsidyStateView {
+  state: 'unknown' | MetabotSubsidyStateLiteral;
+  error?: string;
+}
+
+/** Read the persisted subsidy state; 'unknown' when never recorded. */
+export function readMetabotSubsidyState(store: MetabotStore, metabotId: number): MetabotSubsidyStateView {
+  try {
+    const raw = store.getMetabotSetting(metabotId, SUBSIDY_STATE_KEY);
+    if (!raw) return { state: 'unknown' };
+    const parsed = JSON.parse(raw) as { state?: unknown; error?: unknown };
+    if (parsed.state !== 'claimed' && parsed.state !== 'failed') return { state: 'unknown' };
+    return {
+      state: parsed.state,
+      error: typeof parsed.error === 'string' && parsed.error ? parsed.error : undefined,
+    };
+  } catch {
+    return { state: 'unknown' };
+  }
+}
+
+/** Persist the subsidy outcome for a bot. Best-effort. */
+function writeMetabotSubsidyState(
+  store: MetabotStore,
+  metabotId: number,
+  subsidy: { success: boolean; error?: string },
+): void {
+  try {
+    store.setMetabotSetting(
+      metabotId,
+      SUBSIDY_STATE_KEY,
+      JSON.stringify({
+        state: subsidy.success ? 'claimed' : 'failed',
+        error: subsidy.success ? undefined : (subsidy.error ?? 'MVC gas subsidy request failed.'),
+        updatedAt: Date.now(),
+      }),
+    );
+  } catch (error) {
+    console.warn(
+      `[metabotManage] failed to persist subsidyState for metabot ${metabotId}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Create
 // ---------------------------------------------------------------------------
 
 /**
  * Create a MetaBot end-to-end: wallet → gas subsidy → DB insert → on-chain
  * publish → P2P refresh. Behavior-preserving lift of the original
- * idbots:createMetaBotOnChain IPC handler. Mandatory step (name) failure rolls
- * back the DB records; a partial publish (canSkip) still succeeds locally and
- * its unpublished steps are persisted as the bot's chainSyncPending plan.
+ * idbots:createMetaBotOnChain IPC handler, except that a mandatory step (name)
+ * failure NO LONGER rolls back the DB records: the bot was already created
+ * locally (wallet + row + assignment/binding state) and the subsidy may even
+ * have been paid to its address, so deleting it only strands funds and leaves
+ * the user with nothing (the 2026-09 "subsidy outage = no bots at all" gap).
+ * Instead the unpublished steps are persisted as the bot's chainSyncPending
+ * plan and the result reports chainSetupPending so the UI can offer
+ * retry-subsidy / self-funded-broadcast (resumeMetabotSetupCore).
+ *
+ * Rollback is kept ONLY for deterministic pre-chain local failures
+ * (assignment seeding, owner-binding signature) — a data fork at creation
+ * never self-heals, while a chain outage is exactly the recoverable case.
  *
  * No app-level balance pre-gate: an unfunded wallet is stopped by the chain
- * itself when the publish broadcast fails (the mandatory-step rollback then
- * applies). A local gate re-derived that judgment from explorer balance data
- * and misread MVC's permanently-0-conf subsidy funds as "no money" (the
- * 2026-09 v0.6.1 creation outage), so it was removed rather than fixed.
+ * itself when the publish broadcast fails. A local gate re-derived that
+ * judgment from explorer balance data and misread MVC's permanently-0-conf
+ * subsidy funds as "no money" (the 2026-09 v0.6.1 creation outage), so it was
+ * removed rather than fixed.
  */
 export async function createMetaBotOnChainCore(
   input: CreateMetaBotOnChainInput,
@@ -562,6 +654,11 @@ export async function createMetaBotOnChainCore(
     });
     metabotId = metabot.id;
 
+    // Persist the subsidy outcome next to the bot so the UI (and the resume
+    // entry) can tell "subsidy service down" from "chain write failed" later,
+    // across restarts.
+    writeMetabotSubsidyState(store, metabot.id, subsidyResult);
+
     // Assignment-model backfill: a creation input carrying allow_chat_skills
     // (on-chain projection) must also seed the assignment rows (the local
     // authorization source of truth). Fail-closed with the same rollback the
@@ -599,9 +696,32 @@ export async function createMetaBotOnChainCore(
     const syncResult = await syncToChain(store, metabot.id, { ownerBindingPayload });
 
     if (!syncResult.success && !syncResult.canSkip) {
-      // Mandatory step (name) failed — roll back DB records
-      store.deleteMetabot(metabot.id);
-      return { success: false, error: syncResult.error ?? 'Chain publish failed' };
+      // Mandatory step (name) failed — typically an unfunded wallet (subsidy
+      // service down / network outage). KEEP the bot locally: the wallet row
+      // is append-only anyway (a rollback would strand any subsidy already
+      // paid to the address), and the user must be able to retry the subsidy
+      // or fund the address and self-broadcast later. Persist the full plan
+      // so the partial badge + resume entry have something durable to work
+      // from; the chain itself remains the source of truth via the missing
+      // metabot_info_pinid.
+      console.warn(
+        `[metabotManage] createMetaBotOnChainCore: mandatory chain step failed for metabot ${metabot.id}; keeping local bot, setup pending:`,
+        syncResult.error,
+      );
+      recordFullSyncOutcome(store, metabot.id, {
+        plannedSteps: syncResult.plannedSteps ?? DEFAULT_CREATE_PLANNED_STEPS,
+        syncedSteps: syncResult.syncedSteps ?? [],
+        error: syncResult.error,
+      });
+      const keptMetabot = store.getMetabotById(metabot.id) ?? metabot;
+      await onAfterMutation?.();
+      return {
+        success: true,
+        metabot: keptMetabot,
+        subsidy: subsidyResult,
+        chainSetupPending: true,
+        chainError: syncResult.error ?? 'Chain publish failed',
+      };
     }
 
     // 5b. Chain succeeded (or partial with canSkip) — persist what (if
@@ -636,6 +756,152 @@ export async function createMetaBotOnChainCore(
     console.error('[metabotManage] createMetaBotOnChainCore failed:', errMsg);
     return { success: false, error: errMsg };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Resume setup (create fallback: retry subsidy / self-funded broadcast)
+// ---------------------------------------------------------------------------
+
+export interface ResumeMetabotSetupInput {
+  metabotId: number;
+  /**
+   * 'subsidized' — re-request the gas subsidy, then (when claimed) publish
+   * the missing pins. 'self-funded' — skip the subsidy entirely and publish
+   * with the bot's own address funds (the user transferred MVC manually).
+   */
+  mode: 'subsidized' | 'self-funded';
+}
+
+export interface ResumeMetabotSetupResult {
+  /** True only when the chain sync fully landed (or was already complete). */
+  success: boolean;
+  metabot?: Metabot;
+  mode: ResumeMetabotSetupInput['mode'];
+  /** Present when the subsidy was (re-)requested during this call. */
+  subsidy?: { success: boolean; error?: string };
+  /** Self-funded mode only: the address holds nothing to spend yet. */
+  selfFundedBlocked?: { reason: 'no_balance'; mvcAddress: string; spendableSatoshis: number };
+  chain?: {
+    success: boolean;
+    canSkip?: boolean;
+    error?: string;
+    txids?: string[];
+    plannedSteps?: string[];
+    syncedSteps?: string[];
+  };
+  /** The bot was already fully synced — nothing was attempted. */
+  alreadySynced?: boolean;
+  error?: string;
+}
+
+/**
+ * Resume a locally-created bot's on-chain setup (OAC-style fallback). Both
+ * modes converge on the same full sync, which skips steps whose pin ids are
+ * already recorded; on-chain pins are latest-wins, but we still avoid
+ * republishing confirmed steps. Idempotent — safe to call repeatedly.
+ */
+export async function resumeMetabotSetupCore(
+  input: ResumeMetabotSetupInput,
+  deps: MetabotManageDeps,
+): Promise<ResumeMetabotSetupResult> {
+  const { store, requestSubsidy, signOwnerBinding, syncToChain, onAfterMutation, readSpendableBalance } = deps;
+  const metabotId = Number(input?.metabotId);
+  const mode = input?.mode === 'self-funded' ? 'self-funded' : 'subsidized';
+  if (!Number.isInteger(metabotId) || metabotId <= 0) {
+    return { success: false, mode, error: 'Invalid metabotId' };
+  }
+  const metabot = store.getMetabotById(metabotId);
+  if (!metabot) {
+    return { success: false, mode, error: `MetaBot ${metabotId} not found` };
+  }
+
+  const chainState = getMetabotChainSyncState(store, metabot);
+  if (chainState.state === 'synced' && chainState.pendingSteps.length === 0) {
+    return { success: true, mode, metabot, alreadySynced: true };
+  }
+  // Base plan for outcome bookkeeping when the sync implementation reports
+  // none: keep the bot's existing pending plan so a failed attempt never
+  // shrinks it; minimal-creation default only for plan-less legacy partials.
+  const resumePlannedSteps = chainState.pendingSteps.length > 0
+    ? chainState.pendingSteps
+    : DEFAULT_CREATE_PLANNED_STEPS;
+
+  // Owner binding: mirror the create path — sign when a boss is set and the
+  // binding pin is still missing, so the resumed sync publishes it too.
+  let ownerBindingPayload: string | undefined;
+  const bossGlobalMetaId = (metabot.boss_global_metaid ?? '').trim();
+  if (bossGlobalMetaId && !metabot.owner_binding_pinid) {
+    const signResult = await signOwnerBinding(bossGlobalMetaId, metabot.globalmetaid);
+    if (signResult.error) {
+      return { success: false, mode, metabot, error: signResult.error };
+    }
+    ownerBindingPayload = signResult.payload;
+  }
+
+  if (mode === 'subsidized') {
+    const wallet = store.getMetabotWalletByMetabotId(metabotId);
+    if (!wallet) {
+      return { success: false, mode, metabot, error: `Wallet for MetaBot ${metabotId} not found` };
+    }
+    let subsidy: { success: boolean; error?: string };
+    try {
+      subsidy = await requestSubsidy({
+        mvcAddress: metabot.mvc_address,
+        mnemonic: wallet.mnemonic,
+        path: wallet.path,
+      });
+    } catch (e) {
+      subsidy = { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    writeMetabotSubsidyState(store, metabotId, subsidy);
+    if (!subsidy.success) {
+      return { success: false, mode, metabot, subsidy, error: subsidy.error ?? 'MVC gas subsidy request failed.' };
+    }
+    const chain = await syncToChain(store, metabotId, { ownerBindingPayload });
+    recordFullSyncOutcome(store, metabotId, {
+      plannedSteps: chain.plannedSteps ?? resumePlannedSteps,
+      syncedSteps: chain.syncedSteps ?? [],
+      error: chain.error,
+    });
+    const refreshed = store.getMetabotById(metabotId) ?? metabot;
+    await onAfterMutation?.();
+    return { success: chain.success, mode, metabot: refreshed, subsidy, chain };
+  }
+
+  // Self-funded: no subsidy dependency at all. Only stop up front when the
+  // address provably holds nothing to spend (a guaranteed-futile attempt);
+  // any non-zero balance is left to the chain attempt itself — the app-level
+  // "is this enough" judgment was exactly the 2026-09 gate bug.
+  if (readSpendableBalance) {
+    let spendableSatoshis = 0;
+    try {
+      spendableSatoshis = Math.max(0, Math.floor(await readSpendableBalance(metabot.mvc_address)));
+    } catch (error) {
+      console.warn(
+        `[metabotManage] resumeMetabotSetupCore: spendable balance read failed for ${metabot.mvc_address}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (spendableSatoshis <= 0) {
+      return {
+        success: false,
+        mode,
+        metabot,
+        selfFundedBlocked: { reason: 'no_balance', mvcAddress: metabot.mvc_address, spendableSatoshis: 0 },
+        error: 'SELF_FUNDED_NO_BALANCE',
+      };
+    }
+  }
+
+  const chain = await syncToChain(store, metabotId, { ownerBindingPayload });
+  recordFullSyncOutcome(store, metabotId, {
+    plannedSteps: chain.plannedSteps ?? resumePlannedSteps,
+    syncedSteps: chain.syncedSteps ?? [],
+    error: chain.error,
+  });
+  const refreshed = store.getMetabotById(metabotId) ?? metabot;
+  await onAfterMutation?.();
+  return { success: chain.success, mode, metabot: refreshed, chain };
 }
 
 // ---------------------------------------------------------------------------
