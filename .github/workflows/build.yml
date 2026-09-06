@@ -332,6 +332,11 @@ jobs:
     needs: [build]
 
     steps:
+      - name: Check out repository (for release scripts)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
         with:
@@ -343,6 +348,15 @@ jobs:
         with:
           name: dist-windows-signer
           path: release-assets/windows
+
+      - name: Finalize update manifests from signed artifacts
+        # electron-builder writes latest-mac.yml BEFORE the final DMG sign/staple,
+        # so its size/sha512 never match the shipped DMG (SOP §8). Recompute all
+        # three manifests from the FINAL artifacts so the GitHub Release ships
+        # correct hashes and OSS gets the hyphen-name Windows manifest.
+        run: |
+          VERSION="${{ inputs.release_tag || github.ref_name }}"
+          node scripts/release-finalize-yaml.cjs "${VERSION#v}"
 
       - name: Verify release assets
         run: |
@@ -373,6 +387,18 @@ jobs:
             release-assets/macos/latest-mac.yml
             release-assets/windows/*.exe
             release-assets/windows/*.blockmap
-            release-assets/windows/latest*.yml
+            release-assets/windows/latest.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish artifacts to OSS and warm CDN
+        # Requires the four OSS_* secrets (already configured). Uploads the DMG,
+        # the space-free Windows installer name, and both manifests to OSS with
+        # the correct per-object headers, then pre-warms the CDN and verifies it.
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+        run: |
+          VERSION="${{ inputs.release_tag || github.ref_name }}"
+          node scripts/release-publish-oss-cdn.cjs "${VERSION#v}"
