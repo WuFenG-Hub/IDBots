@@ -17,6 +17,8 @@ const runnerSource = readSource('src', 'main', 'libs', 'coworkRunner.ts');
 const hubSource = readSource('src', 'main', 'libs', 'coworkDshTurn.ts');
 const kernelSource = readSource('src', 'main', 'libs', 'dshKernel', 'dshKernel.ts');
 const panelSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkPermissionPanel.tsx');
+const sessionDetailSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkSessionDetail.tsx');
+const appSource = readSource('src', 'renderer', 'App.tsx');
 const i18nSource = readSource('src', 'renderer', 'services', 'i18n.ts');
 
 const onAskRequestBody = (() => {
@@ -77,19 +79,47 @@ test('ask bridge assigns ids when the model omits them', () => {
   assert.match(kernelSource, /const rawQuestions = Array\.isArray\(params\.questions\)/);
 });
 
-test('permission panel never renders null while holding the permission queue', () => {
-  // The bottom-docked panel replaced CoworkQuestionWizard (since removed): a
-  // malformed question payload must degrade to the actionable tool-details
-  // row instead of a null render wedging the pending-permission queue.
+test('composer takeover never renders null while holding the permission queue', () => {
+  // A malformed question payload must degrade to an actionable denial card
+  // instead of a null render wedging the pending-permission queue.
   assert.doesNotMatch(panelSource, /if \(questions\.length === 0\) \{\s*return null;\s*\}/);
-  assert.match(panelSource, /const isQuestionTool = questions\.length > 0;/);
+  assert.match(panelSource, /const isMalformedQuestion =/);
   // The deny affordance renders unconditionally, so the queue can always drain.
   assert.match(panelSource, /onClick=\{handleDeny\}/);
   assert.match(panelSource, /behavior: 'deny'/);
 });
 
-test('panel question-mode copy exists in both locales', () => {
-  for (const key of ['coworkQuestionWizardOther', 'coworkQuestionWizardPrevious', 'coworkQuestionWizardNext', 'coworkQuestionWizardSkip']) {
+test('approval owns the active session composer slot instead of a viewport overlay', () => {
+  assert.doesNotMatch(panelSource, /fixed\s+inset-x-0\s+bottom-0/);
+  assert.match(panelSource, /data-cowork-composer-takeover/);
+  assert.match(sessionDetailSource, /pendingPermissions\.find\(\(permission\) => permission\.sessionId === currentSession\.id\)/);
+  assert.match(sessionDetailSource, /pendingPermission \? \([\s\S]*?<CoworkPermissionPanel[\s\S]*?: \([\s\S]*?<CoworkPromptInput/);
+  assert.doesNotMatch(appSource, /\{permissionPanel\}/);
+});
+
+test('safety approvals use their structured tool context instead of ordinary question controls', () => {
+  assert.match(panelSource, /parseSafetyContext/);
+  assert.match(panelSource, /context\.requestedToolName/);
+  assert.match(panelSource, /context\.requestedToolInput/);
+  assert.match(panelSource, /isSafetyApproval/);
+  assert.match(panelSource, /coworkApprovalAllowDelete/);
+});
+
+test('single-select choices and custom answers stay mutually exclusive', () => {
+  assert.match(panelSource, /if \(!question\.multiSelect\) \{[\s\S]*?delete next\[currentStep\]/);
+  assert.match(panelSource, /if \(!currentQuestion\.multiSelect && value\.trim\(\)\) \{[\s\S]*?delete next\[currentQuestion\.question\]/);
+});
+
+test('composer takeover copy exists in both locales', () => {
+  for (const key of [
+    'coworkQuestionWizardOther',
+    'coworkQuestionWizardPrevious',
+    'coworkQuestionWizardNext',
+    'coworkQuestionSkipThis',
+    'coworkApprovalWaiting',
+    'coworkApprovalAllowOnce',
+    'coworkApprovalAllowDelete',
+  ]) {
     const occurrences = i18nSource.split(`${key}:`).length - 1;
     assert.ok(occurrences >= 2, `${key} must be defined in both the zh and en locale tables (found ${occurrences})`);
   }

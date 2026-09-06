@@ -9,10 +9,12 @@ import type {
   CoworkMessageMetadata,
   CoworkExecutionMode,
   CoworkServiceOrderSummary,
+  CoworkPermissionResult,
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
 import type { SettingsOpenOptions } from '../Settings';
 import CoworkPromptInput from './CoworkPromptInput';
+import CoworkPermissionPanel from './CoworkPermissionPanel';
 import { buildSessionComposerCommands } from './composerCommandCatalog';
 import PermissionModeSelector from './PermissionModeSelector';
 import SubagentPanel from './SubagentPanel';
@@ -2377,7 +2379,20 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   updateBadge,
 }) => {
   const isMac = window.electron.platform === 'darwin';
-  const { currentSession, isStreaming } = useSelector((state: RootState) => state.cowork);
+  const { currentSession, isStreaming, pendingPermissions } = useSelector((state: RootState) => state.cowork);
+  const pendingPermission = currentSession
+    ? pendingPermissions.find((permission) => permission.sessionId === currentSession.id) ?? null
+    : null;
+  const [isRespondingToPermission, setIsRespondingToPermission] = useState(false);
+  useEffect(() => {
+    setIsRespondingToPermission(false);
+  }, [pendingPermission?.requestId]);
+  const handlePermissionResponse = useCallback(async (result: CoworkPermissionResult) => {
+    if (!pendingPermission || isRespondingToPermission) return;
+    setIsRespondingToPermission(true);
+    const success = await coworkService.respondToPermission(pendingPermission.requestId, result);
+    if (!success) setIsRespondingToPermission(false);
+  }, [pendingPermission, isRespondingToPermission]);
   const isA2ASession = currentSession?.sessionType === 'a2a';
   const isPrivateA2ASession = useMemo(() => (
     currentSession?.sessionType === 'a2a'
@@ -4139,26 +4154,34 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             </div>
           )}
           <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
-            <CoworkPromptInput
-              key={currentSession.id}
-              scopeKey={currentSession.id}
-              onSubmit={onContinue}
-              onStop={onStop}
-              isStreaming={isStreaming}
-              steerDisabled={steerDisabled}
-              placeholder={delegationBlocking ? i18nService.t('delegationInputDisabledPlaceholder') : i18nService.t('coworkContinuePlaceholder')}
-              disabled={delegationBlocking}
-              onManageSkills={onManageSkills}
-              size="large"
-              singleLine
-              showModelSelector={true}
-              modelEffortValue={sessionModelEffortValue}
-              onModelEffortChange={handleSessionModelEffortChange}
-              contextUsage={currentSession.contextUsage}
-              suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
-              commands={buildSessionComposerCommands({ sessionId: currentSession.id, goal: currentSession.goal ?? null })}
-              sessionMetabotId={currentSession.metabotId ?? null}
-            />
+            {pendingPermission ? (
+              <CoworkPermissionPanel
+                permission={pendingPermission}
+                onRespond={handlePermissionResponse}
+                responding={isRespondingToPermission}
+              />
+            ) : (
+              <CoworkPromptInput
+                key={currentSession.id}
+                scopeKey={currentSession.id}
+                onSubmit={onContinue}
+                onStop={onStop}
+                isStreaming={isStreaming}
+                steerDisabled={steerDisabled}
+                placeholder={delegationBlocking ? i18nService.t('delegationInputDisabledPlaceholder') : i18nService.t('coworkContinuePlaceholder')}
+                disabled={delegationBlocking}
+                onManageSkills={onManageSkills}
+                size="large"
+                singleLine
+                showModelSelector={true}
+                modelEffortValue={sessionModelEffortValue}
+                onModelEffortChange={handleSessionModelEffortChange}
+                contextUsage={currentSession.contextUsage}
+                suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
+                commands={buildSessionComposerCommands({ sessionId: currentSession.id, goal: currentSession.goal ?? null })}
+                sessionMetabotId={currentSession.metabotId ?? null}
+              />
+            )}
             {submitError && (
               <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">
                 {submitError}
