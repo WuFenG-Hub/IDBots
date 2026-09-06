@@ -28,6 +28,7 @@ import {
 } from '@openagentinternet/agent-browser-host-contract';
 
 import type { MetaAppRecord } from '../metaAppManager';
+import type { QaQuestionDetail } from './qaRecallService';
 import type { CommunityMetaAppInstallResult } from './metaAppChainService';
 import { normalizeProfileAvatarUrl } from '../utils/avatarSource';
 
@@ -55,6 +56,16 @@ export interface CreateBotBrowserHostServiceInput {
     artifactDir: string;
     indexFile: string;
   }) => Promise<{ previewId: string; localPreviewUrl: string }>;
+  /**
+   * On-chain Q&A (feat/metaweb-qa phase 3): probe whether a pinId is an
+   * indexed simplequestion. Contract: resolves with the question detail for a
+   * question pin, resolves with null ONLY when the pin is definitively not a
+   * question (index says 40400), and THROWS when the answer is indeterminate
+   * (network/API failure) — indeterminate answers must not be cached.
+   */
+  resolveQaQuestion?: (pinId: string) => Promise<QaQuestionDetail | null>;
+  /** Build the Bot Browser run URL of the bundled Q&A app at one question. */
+  resolveQaAppUrl?: (questionPinId: string) => Promise<string>;
   fetch?: typeof fetch;
   env?: Record<string, string | undefined>;
   nameAliasProviders?: BrowserNameAliasProvider[];
@@ -184,6 +195,74 @@ function createInitialBrowserConfig(): BrowserConfigContainer {
       ...createDefaultBrowserConfig(),
       localMode: true,
     },
+  };
+}
+
+/** pin://<pinId> URIs eligible for the Q&A question probe (phase 3 routing). */
+const QA_QUESTION_PIN_URI_RE = /^pin:\/\/([0-9a-f]{20,70}i\d+)$/i;
+/** Bound the "is this pin a question" cache — a forever-growing map is a leak. */
+const QA_QUESTION_CACHE_MAX = 500;
+
+/**
+ * Build the BrowserResource that renders an on-chain Q&A question through the
+ * bundled qanda MetaApp: an html-iframe pointing at the app's question route.
+ * Shape mirrors the core resolvers (pinResolver / buildMetaAppResolveResult)
+ * so the ABC UI chrome (title/proof/actions) renders it natively.
+ */
+function buildQaQuestionResource(input: {
+  uri: string;
+  detail: QaQuestionDetail;
+  runUrl: string;
+}): Record<string, unknown> {
+  const question = input.detail.question;
+  const publisher = question.publisher ?? { globalMetaId: '', metaId: '', name: '', avatar: '' };
+  return {
+    uri: input.uri,
+    normalizedUri: input.uri,
+    resourceType: 'metaapp',
+    title: question.title || question.pinId,
+    owner: {
+      kind: 'qa-question-publisher',
+      globalMetaId: publisher.globalMetaId,
+      name: publisher.name || publisher.globalMetaId || 'Unknown publisher',
+      verificationState: 'partial',
+    },
+    renderer: {
+      type: 'html-iframe',
+      contentType: 'text/html',
+      url: input.runUrl,
+    },
+    status: {
+      state: 'resolved',
+      verificationState: 'partial',
+      message: 'On-chain Q&A question resolved.',
+    },
+    proof: {
+      pinId: question.pinId,
+      publisherGlobalMetaId: publisher.globalMetaId || undefined,
+      protocolPath: '/protocols/simplequestion',
+      verificationState: 'partial',
+      details: {
+        answerCount: question.answerCount,
+        likeCount: question.likeCount,
+        dislikeCount: question.dislikeCount,
+        chainName: question.chainName || undefined,
+      },
+    },
+    source: {
+      resolver: 'idbots-qa-question',
+      url: input.runUrl,
+      fetchedAt: Date.now(),
+    },
+    actions: [
+      {
+        id: 'copy-uri',
+        label: 'Copy URI',
+        kind: 'copy',
+        enabled: true,
+        uri: input.uri,
+      },
+    ],
   };
 }
 
@@ -479,9 +558,57 @@ export function createBotBrowserHostService(
   const env = input.env ?? process.env;
   const fetchImpl = resolveFetch(input.fetch);
   let browserConfig = createInitialBrowserConfig();
+  // pinId → "is an indexed Q&A question". Negative entries spare repeated
+  // generic pin opens from re-probing the Q&A index; a thrown probe
+  // (indeterminate) is never cached.
+  const qaQuestionPinCache = new Map<string, boolean>();
+
+  function rememberQaQuestionPin(pinId: string, isQuestion: boolean): void {
+    qaQuestionPinCache.delete(pinId);
+    qaQuestionPinCache.set(pinId, isQuestion);
+    if (qaQuestionPinCache.size > QA_QUESTION_CACHE_MAX) {
+      const oldest = qaQuestionPinCache.keys().next().value;
+      if (typeof oldest === 'string') qaQuestionPinCache.delete(oldest);
+    }
+  }
+
+  /**
+   * Phase 3 routing: pin://<questionPinId> opens the bundled qanda app's
+   * question page instead of the generic pin inspector. Falls through
+   * silently (null) for non-question pins, non-pin URIs, unwired hosts, and
+   * indeterminate probes — the generic resolver stays authoritative there.
+   */
+  const tryResolveQaQuestionResource = async (
+    uri: string,
+  ): Promise<Record<string, unknown> | null> => {
+    if (!input.resolveQaQuestion || !input.resolveQaAppUrl) return null;
+    const match = QA_QUESTION_PIN_URI_RE.exec(text(uri));
+    if (!match) return null;
+    const pinId = match[1].toLowerCase();
+    const cached = qaQuestionPinCache.get(pinId);
+    if (cached === false) return null;
+    let detail: QaQuestionDetail | null = null;
+    try {
+      detail = await input.resolveQaQuestion(pinId);
+    } catch {
+      // Indeterminate (network/API failure): fall through WITHOUT caching.
+      return null;
+    }
+    if (!detail || !detail.question || !detail.question.pinId) {
+      rememberQaQuestionPin(pinId, false);
+      return null;
+    }
+    rememberQaQuestionPin(pinId, true);
+    const runUrl = await input.resolveQaAppUrl(detail.question.pinId);
+    return buildQaQuestionResource({ uri: text(uri), detail, runUrl });
+  };
 
   return {
     async resolveResource(resolveInput) {
+      const qaResource = await tryResolveQaQuestionResource(resolveInput.uri);
+      if (qaResource) {
+        return toHostResult(browserCommandSuccess(qaResource) as CoreBrowserCommandResult<unknown>);
+      }
       const resolvedConfig = resolveHostBrowserConfig(browserConfig, env);
       const nameAliasProviders = createNameAliasProviders({
         configured: input.nameAliasProviders,

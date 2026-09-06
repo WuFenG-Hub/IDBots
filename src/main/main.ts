@@ -6175,6 +6175,35 @@ const getBotBrowserHostService = () => {
         return result.url;
       },
       createLocalPreviewSession: (input) => getBotBrowserMetaAppCacheService().createLocalPreviewSession(input),
+      // On-chain Q&A question routing (feat/metaweb-qa phase 3): pin://<question
+      // pinId> opens the bundled qanda app's question page instead of the
+      // generic pin inspector. 40400 from the Q&A index means "definitively
+      // not a question" (falls through, negative-cached in the host service);
+      // any other failure is indeterminate and also falls through un-cached.
+      resolveQaQuestion: async (pinId) => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        try {
+          return await qaQuestionDetailRemote(pinId, baseUrl ? { baseUrl } : undefined);
+        } catch (error) {
+          if (error instanceof Error && error.name === 'QaRecallNotFoundError') return null;
+          throw error;
+        }
+      },
+      resolveQaAppUrl: async (questionPinId) => {
+        const apps = await getMetaAppManager().listMetaApps();
+        const app = apps.find((candidate) => candidate.id === 'qanda' || candidate.name === 'qanda-app');
+        if (!app) throw new Error('Bundled qanda MetaApp is not available.');
+        const result = await resolveMetaAppUrl({
+          appId: app.id,
+          targetPath: app.entry,
+          manager: getMetaAppManager(),
+          ensureServerReady: ensureMetaAppServerReady,
+        });
+        if (!result.success || !result.url) {
+          throw new Error(result.error || 'Failed to resolve the qanda MetaApp URL.');
+        }
+        return `${result.url}#q/${encodeURIComponent(questionPinId)}`;
+      },
     });
   }
   return botBrowserHostService;
