@@ -95,6 +95,7 @@ import {
   type TransferChain,
 } from './services/transferService';
 import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, initFeeRateStore, resolveCreatePinFeeRate } from './services/feeRateStore';
+import { setSimpleQaAnswerLedgerStore } from './libs/simpleQaAnswerLedger';
 import {
   getMetabotWalletBalances,
   getWalletBalanceSnapshot,
@@ -15087,6 +15088,8 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('fee rate store init schedule begin');
     initFeeRateStore(getStore()).catch((e: unknown) => console.error('[FeeRateStore] init failed:', e));
     startupLog('fee rate store init scheduled');
+    // Local Q&A answer ledger (post_simpleanswer repeat notice): same kv store.
+    setSimpleQaAnswerLedgerStore(getStore());
 
     startupLog('metaid rpc server start begin');
     metaidRpcServer = startMetaidRpcServer(getMetabotStore, getStore, getCoworkStore, {

@@ -187,6 +187,7 @@ import {
   type ChainWriteCreatePin,
 } from './postBuzzAgentTools';
 import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
+import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
@@ -8869,6 +8870,17 @@ export class CoworkRunner extends EventEmitter {
         );
         memoryTools.push(
           ...buildPostSimpleNoteAgentTools({
+            tool,
+            createPin: this.metabotChainWrite.createPin,
+            uploadFile: gatedUpload,
+            sessionId,
+            resolveMetabotId,
+          })
+        );
+        // On-chain Q&A (simplequestion/simpleanswer): ask when stuck, answer
+        // what you know. Registration posture identical to the tools above.
+        memoryTools.push(
+          ...buildPostSimpleQaAgentTools({
             tool,
             createPin: this.metabotChainWrite.createPin,
             uploadFile: gatedUpload,
