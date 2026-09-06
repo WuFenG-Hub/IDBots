@@ -80,6 +80,7 @@ import { tryAutoAnswerLowRiskQuestion, pickRecommendedOptionLabel } from './cowo
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
 import { CHAIN_IDENTIFIER_VERBATIM_RULE } from './chainIdentifierPrompt';
+import { QA_BEHAVIOR_RULE } from './qaBehaviorPrompt';
 import { hasEmbeddedSkillCatalog } from './skillPromptMarkers';
 import { buildMetabotPersonaPrompt } from './metabotPersonaPrompt';
 import { readBootstrapDoc } from './welcomeBootstrap';
@@ -5180,6 +5181,13 @@ export class CoworkRunner extends EventEmitter {
         order: PROMPT_SECTION_ORDER.METAWEB_LEARNING_LOOP,
         text: this.buildMetawebLearningLoopPrompt(),
       },
+      // On-chain Q&A participation discipline (ask when stuck, answer what
+      // you know, react honestly). Static rule prose, cacheable head.
+      {
+        name: 'idbots:metaweb-qa-behavior',
+        order: PROMPT_SECTION_ORDER.METAWEB_QA_BEHAVIOR,
+        text: QA_BEHAVIOR_RULE,
+      },
       // Chain-identifier output discipline: quoting pinids/txids verbatim is
       // load-bearing for host matching (deliverables, dependency gates,
       // verification). Static rule prose, cacheable head.
@@ -5216,7 +5224,7 @@ export class CoworkRunner extends EventEmitter {
       '',
       'Link with MetaWeb URIs, never Web2 URLs: whenever your reply names on-chain content, make it a clickable MetaWeb URI markdown link — pin://<pinId> for any pin, metaapp://<pinId> for MetaApp packages (/protocols/metaapp), metafile://<pinId> ONLY for on-chain binary files (/file: images, video, audio, PDF, archives), metaid://<globalMetaId> for people/bots. When unsure which scheme applies, pin:// always works. Notes, buzz posts and other readable text pins are ALWAYS cited as pin://, never metafile://. ALWAYS show the URI in FULL — never abbreviate or truncate it with an ellipsis (pin://abc…xyzi0), in the link text or anywhere else: a shortened URI is neither clickable nor copyable, so it is useless to the user. NEVER construct Web2 viewer URLs (metaid.io, openagentinternet.org, …) for on-chain content: the user\'s app opens MetaWeb URIs directly in its built-in Bot Browser, and a Web2 URL sends them out of the app for no reason.',
       '',
-      'Publish with the right protocol: text meant to be read — notes, articles, reports, specs, Markdown deliverables — goes on-chain with post_simplenote (/protocols/simplenote) and is referenced as pin://<pinId>. upload_file (/file, metafile:// URI) is ONLY for binary payloads: images, video, audio, PDFs, archives. Never upload a Markdown/text document as a /file metafile just to share or deliver it, and never cite a text pin as metafile://.',
+      'Publish with the right protocol: text meant to be read — notes, articles, reports, specs, Markdown deliverables — goes on-chain with post_simplenote (/protocols/simplenote) and is referenced as pin://<pinId>. Questions for the community go out with post_simplequestion (/protocols/simplequestion), answers with post_simpleanswer (/protocols/simpleanswer) — see the Q&A section below. upload_file (/file, metafile:// URI) is ONLY for binary payloads: images, video, audio, PDFs, archives. Never upload a Markdown/text document as a /file metafile just to share or deliver it, and never cite a text pin as metafile://.',
       '',
       'Ground and cite: answer from what you actually read and cite the pins you used (as pin:// markdown links) so the user can verify. If MetaWeb genuinely has nothing useful, say so honestly and fall back to your own knowledge — never fabricate pins, titles, publishers, or content.',
       '',
