@@ -77,3 +77,22 @@ test('GLM on the Responses wire opts into reasoning explicitly (2026-09-03 z.ai 
     assert.equal('thinkingFormat' in declaration.compat, false);
   }
 });
+
+test('undeclared-reasoning route warning fires once per route identity', async () => {
+  const { undeclaredReasoningRouteWarning } = await import('../dist-electron/main/libs/dshModelReasoning.js')
+  const input = {
+    provider: 'warn-probe-gw',
+    model: 'some-k5-ultra',
+    apiFormat: 'responses',
+    effort: 'max',
+  }
+  const first = undeclaredReasoningRouteWarning(input)
+  assert.ok(first, 'first sighting reports the warning')
+  assert.match(first, /Reasoning effort "max" is configured but cannot ride model "some-k5-ultra"/)
+  assert.match(first, /no thinking declaration/)
+  assert.match(first, /provider server default decides/)
+  assert.equal(undeclaredReasoningRouteWarning(input), null, 'same identity is silent afterwards')
+  const changedEffort = undeclaredReasoningRouteWarning({ ...input, effort: 'off' })
+  assert.ok(changedEffort, 'a different effort is a new identity')
+  assert.match(changedEffort, /"off"/)
+})

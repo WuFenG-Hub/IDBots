@@ -123,3 +123,31 @@ export function dshModelReasoningDeclaration(
   }
   return null;
 }
+
+const undeclaredEffortWarnedRoutes = new Set<string>();
+
+/**
+ * Warn-once text for a route whose configured reasoning effort cannot ride
+ * the wire (the family is undeclared on this apiFormat), or null once the
+ * route identity has already been reported this process. Without a
+ * declaration the effort is silently ignored and the provider's server-side
+ * default decides whether the model thinks — exactly the silence that let
+ * the 2026-09-03 z.ai default flip leak deliberation on-chain for days. One
+ * log line per route identity makes the next flip visible in cowork.log.
+ */
+export function undeclaredReasoningRouteWarning(input: {
+  provider: string;
+  model: string;
+  apiFormat: 'openai' | 'responses' | 'anthropic';
+  effort: string;
+}): string | null {
+  const key = `${input.provider}|${input.model}|${input.apiFormat}|${input.effort}`;
+  if (undeclaredEffortWarnedRoutes.has(key)) return null;
+  undeclaredEffortWarnedRoutes.add(key);
+  return (
+    `Reasoning effort "${input.effort}" is configured but cannot ride model "${input.model}" ` +
+    `on the ${input.apiFormat} wire (provider "${input.provider}"): the family has no thinking ` +
+    'declaration, so the effort is ignored and the provider server default decides whether the ' +
+    'model thinks. Add a declaration in dshModelReasoning.ts if this model supports reasoning.'
+  );
+}
