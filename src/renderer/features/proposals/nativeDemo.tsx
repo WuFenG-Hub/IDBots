@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import '../../index.css';
@@ -44,9 +44,11 @@ function Demo() {
   const [confirmation, setConfirmation] = useState(loadConfirmation);
   const [receipt, setReceipt] = useState(loadReceipt);
   const [generation, setGeneration] = useState(0);
+  const actionEpoch = useRef(0);
   const [notice, setNotice] = useState('隔离交互演示 · 使用真实 IDBots 组件 · 不调用模型、钱包或网络');
   const unavailable = () => setNotice('当前只演示 Bot 操作闭环，其他按钮尚未接入。');
   const reset = () => {
+    actionEpoch.current += 1;
     localStorage.removeItem(confirmationKey); localStorage.removeItem(receiptKey);
     setConfirmation(null); setReceipt(null); setGeneration(n => n + 1);
   };
@@ -67,7 +69,12 @@ function Demo() {
             onConfirm={async next => {
               const accepted = acceptConfirmation(exampleBotAction, loadConfirmation(), next);
               localStorage.setItem(confirmationKey, JSON.stringify(accepted)); setConfirmation(accepted);
+              return null;
+            }}
+            onApprovalResolved={async () => {
+              const epoch = actionEpoch.current;
               await new Promise(resolve => window.setTimeout(resolve, 650));
+              if (actionEpoch.current !== epoch) throw new Error('操作已被重置');
               const result: BotActionReceipt = { requestId: exampleBotAction.id, version: exampleBotAction.version,
                 status: 'succeeded', summary: 'MetaApp 预览已生成，可以开始审阅',
                 outputUri: 'preview-metaapp://fixture/homepage-gallery', completedAt: new Date().toISOString() };
