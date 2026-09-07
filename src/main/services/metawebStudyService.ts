@@ -7,8 +7,7 @@ import {
   studyTopicFingerprintOf,
   type MetawebStudyJobRecord,
   type MetawebStudyJobStatus,
-} from '../metawebStudyJobStore';
-import { KNOWLEDGE_BASE_AUTO_LEARN_WINDOW } from './knowledgeBaseService';
+} from '../metawebStudyJobStore';import { KNOWLEDGE_BASE_AUTO_LEARN_WINDOW } from './knowledgeBaseService';
 import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 
 /**
@@ -29,12 +28,28 @@ import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
  * report — the bot answers from metaweb_study_status and the UI lists jobs
  * next to the knowledge-base panel; default budget 20 pins per topic per
  * night.
+ *
+ * Job kind 'qa-surf' (on-chain Q&A surfing, feat/metaweb-qa): a recurring
+ * per-bot job the owner enables once — every night the bot browses the
+ * latest questions, answers what fits its persona, saves valuable Q&A into
+ * its knowledge bases, and reacts honestly. Recurring by design: successful
+ * runs always return it to 'pending'; only repeated failures mark it failed.
  */
 
 const TICK_MS = 30 * 60 * 1000;
 const MAX_BUDGET_PINS = 50;
 /** Cap the already-processed pinId list injected into a study prompt. */
 const PROMPT_PROCESSED_PIN_CAP = 80;
+/** Default nightly budget for a recurring Q&A-surf job (pins handled: answered or saved). */
+export const DEFAULT_QA_SURF_BUDGET_PER_NIGHT = 10;
+/**
+ * Stored processed-pin history cap for recurring jobs — a qa-surf job never
+ * completes, so without a cap its handled list would grow forever (the prompt
+ * only ever shows the most recent slice anyway).
+ */
+const MAX_STORED_PROCESSED_PINS = 400;
+/** Fixed topic label / fingerprint for the per-bot Q&A-surf job. */
+const QA_SURF_TOPIC_LABEL = 'On-chain Q&A surfing';
 
 export interface MetawebStudyRunResult {
   /** PinIds the run actually saved into a knowledge base (new this run). */
@@ -83,6 +98,7 @@ function truncateMiddle(value: string, max: number): string {
  * contract best-effort; everything else the session says is ignored.
  */
 export function buildMetawebStudySessionPrompt(job: MetawebStudyJobRecord): string {
+  if (job.kind === 'qa-surf') return buildQaSurfSessionPrompt(job);
   const alreadyProcessed = job.processedPinIds.slice(-PROMPT_PROCESSED_PIN_CAP);
   const processedNote = alreadyProcessed.length
     ? [
@@ -109,6 +125,41 @@ export function buildMetawebStudySessionPrompt(job: MetawebStudyJobRecord): stri
     '7. End your run with EXACTLY one final message: a single ```json code fence and nothing else, shaped as',
     '   {"processedPinIds": ["<pinId>", ...], "summary": "<2-3 sentences: what you studied, what you saved, notable gaps>"}',
     '   processedPinIds lists ONLY the pins you actually saved this run.',
+  ].join('\n');
+}
+
+/**
+ * The unattended nightly Q&A surfing prompt (job kind 'qa-surf'): browse the
+ * on-chain Q&A, answer what fits the bot's persona, save what its role should
+ * keep, react honestly. Same ```json run-report contract as topic study.
+ */
+export function buildQaSurfSessionPrompt(job: MetawebStudyJobRecord): string {
+  const alreadyProcessed = job.processedPinIds.slice(-PROMPT_PROCESSED_PIN_CAP);
+  const processedNote = alreadyProcessed.length
+    ? [
+        `Already handled in earlier surf runs (${job.processedPinIds.length} total${job.processedPinIds.length > alreadyProcessed.length ? `, showing the ${alreadyProcessed.length} most recent` : ''}) — skip these again:`,
+        ...alreadyProcessed.map((pinId) => `- ${pinId}`),
+        '',
+      ].join('\n')
+    : 'This is the first surf run for this bot — nothing handled yet.';
+  return [
+    `You are running an unattended overnight Q&A surfing session on MetaWeb. No user is watching: never ask questions, never wait for confirmation, and do not install any skills or packages during this session.`,
+    '',
+    `Your persona decides everything tonight: only questions squarely inside your role and competence deserve your attention — skip the rest without guilt.`,
+    `Budget: handle AT MOST ${job.budgetPins} NEW pins this run (questions you answer plus pins you save). Answer at most ~3 questions — every answer is an on-chain write that costs sats, and quality beats volume.`,
+    '',
+    processedNote,
+    '',
+    'Procedure:',
+    '1. list_latest_questions with max_answers=0 — the unanswered queue, newest first. Page through 1–2 pages.',
+    '2. Judge each question against YOUR role (your identity block). Skip anything outside your competence; do not answer to seem busy.',
+    '3. When you can answer one really well: get_question_answers first — if a good answer already exists, do NOT repeat it, like_pin it instead. Otherwise post_simpleanswer (`answer_to` = the question pinId), concise and concrete.',
+    '4. Also browse one page of ANSWERED questions in your domain (list_latest_questions default sort) and react honestly: like_pin +1 for genuinely good answers, -1 for wrong ones. A few reactions, not dozens.',
+    '5. Save what your role should keep long-term: read_metaweb_pin the full body of a valuable question or answer, then knowledge_base_add_document (sourceType \'metaweb\', the pinId, its title, the full body) into a topical knowledge base from your <knowledge_bases> list (default one otherwise). Run knowledge_base_learn once at the end. A repeatable workflow the Q&A taught you (not a single fact) is worth procedure_save with the source pinIds.',
+    '6. Do NOT post_simplequestion in this session — asking is for interactive work when you are stuck; tonight you browse, answer, and learn. Do NOT publish buzz or notes.',
+    '7. End your run with EXACTLY one final message: a single ```json code fence and nothing else, shaped as',
+    '   {"processedPinIds": ["<pinId>", ...], "summary": "<2-3 sentences: what you answered, saved, reacted to; notable gaps>"}',
+    '   processedPinIds lists the question pinIds you ANSWERED plus the pins you SAVED — tonight\'s handled set, so future surf runs skip them.',
   ].join('\n');
 }
 
@@ -185,6 +236,7 @@ export class MetawebStudyService {
     const job: MetawebStudyJobRecord = {
       id: `study-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       metabotId,
+      kind: 'topic',
       topic,
       topicFingerprint: fingerprint,
       status: 'pending',
@@ -200,6 +252,60 @@ export class MetawebStudyService {
     };
     this.store.insert(job);
     return { job, created: true };
+  }
+
+  /**
+   * Enable the recurring nightly Q&A surfing job for one bot (one active
+   * surf job per bot). Unlike a topic job it never completes on its own —
+   * every successful run returns it to 'pending' for the next night; only
+   * repeated failures mark it 'failed' (re-enqueue then creates a fresh row).
+   */
+  enqueueQaSurfJob(
+    metabotId: number,
+    input: { budgetPins?: number } = {},
+  ): { job: MetawebStudyJobRecord; created: boolean } {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) {
+      throw new Error(`Invalid metabotId: ${String(metabotId)}`);
+    }
+    const existing = this.store.findActiveQaSurf(metabotId);
+    if (existing) return { job: existing, created: false };
+    const nowIso = this.now().toISOString();
+    const budgetPins = Math.max(
+      1,
+      Math.min(MAX_BUDGET_PINS, Math.floor(input.budgetPins ?? DEFAULT_QA_SURF_BUDGET_PER_NIGHT)),
+    );
+    const job: MetawebStudyJobRecord = {
+      id: `qa-surf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      metabotId,
+      kind: 'qa-surf',
+      topic: QA_SURF_TOPIC_LABEL,
+      topicFingerprint: 'qa-surf',
+      status: 'pending',
+      budgetPins,
+      processedPinIds: [],
+      runCount: 0,
+      consecutiveFailures: 0,
+      lastRunAt: null,
+      lastRunSummary: null,
+      lastError: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    this.store.insert(job);
+    return { job, created: true };
+  }
+
+  /**
+   * Owner-disable path: stop the bot's active Q&A surfing job. Returns true
+   * when an active job was disabled, false when there was nothing to stop.
+   * Re-enabling later simply enqueues a fresh job.
+   */
+  disableQaSurfJob(metabotId: number): boolean {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) return false;
+    return this.store.markActiveQaSurfDone(metabotId, {
+      note: 'Disabled by the owner; nightly Q&A surfing stopped.',
+      nowIso: this.now().toISOString(),
+    }) > 0;
   }
 
   listStudyJobs(metabotId: number): MetawebStudyJobRecord[] {
@@ -283,13 +389,30 @@ export class MetawebStudyService {
       try {
         this.store.markRunning(job.id, this.now().toISOString());
         const result = await this.runStudyJob(this.store.getById(job.id) ?? job);
-        const merged = [...new Set([...job.processedPinIds, ...result.newPinIds])];
-        const newCount = merged.length - job.processedPinIds.length;
+        // A qa-surf job disabled while its session was in flight must not be
+        // resurrected by this run's bookkeeping — its answers/saves stand, but
+        // the row keeps the disabled state the owner chose.
+        if (job.kind === 'qa-surf') {
+          const current = this.store.getById(job.id);
+          if (!current || current.status !== 'running') {
+            continue;
+          }
+        }
+        const mergedAll = [...new Set([...job.processedPinIds, ...result.newPinIds])];
+        // Recurring surf jobs cap the stored handled list (they never end);
+        // topic jobs keep the full list for corpus-exhaustion detection.
+        const merged = job.kind === 'qa-surf'
+          ? mergedAll.slice(-MAX_STORED_PROCESSED_PINS)
+          : mergedAll;
+        const newCount = mergedAll.length - job.processedPinIds.length;
         const runCount = job.runCount + 1;
-        const nextStatus: MetawebStudyJobStatus =
-          newCount === 0 || runCount >= MAX_STUDY_RUNS_PER_JOB ? 'done' : 'pending';
+        // qa-surf is recurring by design: a quiet night (nothing new) or a
+        // high run count never completes it — only failures (below) can.
+        const nextStatus: MetawebStudyJobStatus = job.kind === 'qa-surf'
+          ? 'pending'
+          : newCount === 0 || runCount >= MAX_STUDY_RUNS_PER_JOB ? 'done' : 'pending';
         const summary =
-          nextStatus === 'done' && runCount >= MAX_STUDY_RUNS_PER_JOB && newCount > 0
+          job.kind !== 'qa-surf' && nextStatus === 'done' && runCount >= MAX_STUDY_RUNS_PER_JOB && newCount > 0
             ? `${truncateMiddle(result.summary, 500)} (completed: reached the ${MAX_STUDY_RUNS_PER_JOB}-run safety cap)`
             : truncateMiddle(result.summary, 500);
         this.store.recordRun(job.id, {

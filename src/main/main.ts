@@ -95,6 +95,7 @@ import {
   type TransferChain,
 } from './services/transferService';
 import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, initFeeRateStore, resolveCreatePinFeeRate } from './services/feeRateStore';
+import { setSimpleQaAnswerLedgerStore } from './libs/simpleQaAnswerLedger';
 import {
   getMetabotWalletBalances,
   getWalletBalanceSnapshot,
@@ -368,6 +369,12 @@ import {
 } from './services/socialRecallService';
 import { searchMetaweb as searchMetawebRemote } from './services/metawebSearchService';
 import { readMetawebPin as readMetawebPinRemote } from './services/metawebPinService';
+import {
+  qaSearch as qaSearchRemote,
+  qaLatestQuestions as qaLatestQuestionsRemote,
+  qaQuestionDetail as qaQuestionDetailRemote,
+  qaQuestionAnswers as qaQuestionAnswersRemote,
+} from './services/qaRecallService';
 import {
   readRendererFromEnvelope,
   resolveMetaAppSourceByRenderUrl,
@@ -5537,6 +5544,37 @@ const getCoworkRunner = () => {
           return readMetawebPinRemote(pinId, baseUrl ? { baseUrl } : undefined);
         },
       },
+      // On-chain Q&A recall tool backends (search_qa / list_latest_questions /
+      // get_question_answers): thin pass-throughs to the metaso-p2p /api/qa/*
+      // family. IDBOTS_METAWEB_API_BASE_URL overrides the default so.metaid.io
+      // base for staging integration ahead of the production rollout.
+      qaRecall: {
+        search: async (input) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          const page = await qaSearchRemote(input, baseUrl ? { baseUrl } : undefined);
+          return { items: page.items, hasMore: page.hasMore, nextCursor: page.nextCursor };
+        },
+        latestQuestions: async (input) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          const page = await qaLatestQuestionsRemote(input, baseUrl ? { baseUrl } : undefined);
+          return { items: page.items, hasMore: page.hasMore, nextCursor: page.nextCursor };
+        },
+        questionDetail: async (pinId) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          const detail = await qaQuestionDetailRemote(pinId, baseUrl ? { baseUrl } : undefined);
+          return {
+            question: detail.question,
+            answers: detail.answers,
+            hasMore: detail.hasMore,
+            nextCursor: detail.nextCursor,
+          };
+        },
+        questionAnswers: async (input) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          const page = await qaQuestionAnswersRemote(input, baseUrl ? { baseUrl } : undefined);
+          return { items: page.items, hasMore: page.hasMore, nextCursor: page.nextCursor };
+        },
+      },
       // knowledge_base_* tool backends: the built-in per-bot knowledge base
       // service (registry + incremental learn + citation query + document
       // inbox). The service instance matches the KnowledgeBaseControl shape
@@ -6137,6 +6175,35 @@ const getBotBrowserHostService = () => {
         return result.url;
       },
       createLocalPreviewSession: (input) => getBotBrowserMetaAppCacheService().createLocalPreviewSession(input),
+      // On-chain Q&A question routing (feat/metaweb-qa phase 3): pin://<question
+      // pinId> opens the bundled qanda app's question page instead of the
+      // generic pin inspector. 40400 from the Q&A index means "definitively
+      // not a question" (falls through, negative-cached in the host service);
+      // any other failure is indeterminate and also falls through un-cached.
+      resolveQaQuestion: async (pinId) => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        try {
+          return await qaQuestionDetailRemote(pinId, baseUrl ? { baseUrl } : undefined);
+        } catch (error) {
+          if (error instanceof Error && error.name === 'QaRecallNotFoundError') return null;
+          throw error;
+        }
+      },
+      resolveQaAppUrl: async (questionPinId) => {
+        const apps = await getMetaAppManager().listMetaApps();
+        const app = apps.find((candidate) => candidate.id === 'qanda' || candidate.name === 'qanda-app');
+        if (!app) throw new Error('Bundled qanda MetaApp is not available.');
+        const result = await resolveMetaAppUrl({
+          appId: app.id,
+          targetPath: app.entry,
+          manager: getMetaAppManager(),
+          ensureServerReady: ensureMetaAppServerReady,
+        });
+        if (!result.success || !result.url) {
+          throw new Error(result.error || 'Failed to resolve the qanda MetaApp URL.');
+        }
+        return `${result.url}#q/${encodeURIComponent(questionPinId)}`;
+      },
     });
   }
   return botBrowserHostService;
@@ -6747,12 +6814,13 @@ const getMetawebStudyService = (): MetawebStudyService => {
           // 60s). Memory updates stay ENABLED on purpose — disableMemoryUpdates
           // would strip procedure_save from the session's tools.
           // metawebStudySession restricts the tool surface to the learning
-          // allowlist (no on-chain writes / installs / social / file tools are
-          // registered at all) and hard-caps metaweb-source KB adds at budget.
+          // allowlist (qa-surf jobs: the Q&A surfing allowlist) — no installs,
+          // social or file tools are registered at all — and hard-caps
+          // metaweb-source KB adds at budget.
           autoApprove: true,
           permissionMode: 'acceptEdits',
           disableMemoryUpdates: false,
-          metawebStudySession: { pinBudget: job.budgetPins },
+          metawebStudySession: { pinBudget: job.budgetPins, kind: job.kind },
           // Study runs read up to ~20 pins; the 300s delegation default is far
           // too small. On timeout the job records failed while the session may
           // still finish in the background — its KB saves are never lost.
@@ -15087,6 +15155,8 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('fee rate store init schedule begin');
     initFeeRateStore(getStore()).catch((e: unknown) => console.error('[FeeRateStore] init failed:', e));
     startupLog('fee rate store init scheduled');
+    // Local Q&A answer ledger (post_simpleanswer repeat notice): same kv store.
+    setSimpleQaAnswerLedgerStore(getStore());
 
     startupLog('metaid rpc server start begin');
     metaidRpcServer = startMetaidRpcServer(getMetabotStore, getStore, getCoworkStore, {

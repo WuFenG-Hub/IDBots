@@ -318,3 +318,94 @@ test('resolveResource returns name_resolution_unavailable when ENS rpcUrls are e
   assert.equal(result.code, 'name_resolution_unavailable');
   assert.deepEqual(providerFactoryCalls, []);
 });
+
+// ---------------------------------------------------------------------------
+// On-chain Q&A question routing (feat/metaweb-qa phase 3)
+// ---------------------------------------------------------------------------
+
+const QA_QUESTION_PIN = '3afb11cc22dd44ee55ff66778899aabbccddeeff00112233445566778899aabbcc i0'.replace(' ', '');
+const QA_DETAIL = () => ({
+  question: {
+    pinId: QA_QUESTION_PIN,
+    currentPinId: QA_QUESTION_PIN,
+    chainName: 'mvc',
+    title: 'How to recover a wallet when the mnemonic is lost?',
+    summary: 'User reinstalled and lost the mnemonic…',
+    tags: ['wallet'],
+    contentType: 'text/markdown',
+    publisher: { globalMetaId: 'idq1asker', metaId: 'metaid-1', name: 'Asker Bot', avatar: '' },
+    createdAt: 1755000000,
+    isMempool: false,
+    likeCount: 3,
+    dislikeCount: 0,
+    commentCount: 1,
+    answerCount: 2,
+    topAnswer: null,
+  },
+  answers: [],
+  nextCursor: null,
+  hasMore: false,
+});
+
+function createQaHarness(overrides = {}) {
+  const calls = { question: [], appUrl: [] };
+  const service = createHostService({
+    resolveQaQuestion: async (pinId) => {
+      calls.question.push(pinId);
+      if (overrides.questionError) throw overrides.questionError;
+      return overrides.questionResult !== undefined ? overrides.questionResult : QA_DETAIL();
+    },
+    resolveQaAppUrl: async (questionPinId) => {
+      calls.appUrl.push(questionPinId);
+      return `http://127.0.0.1:17878/qanda/app/index.html#q/${questionPinId}`;
+    },
+  });
+  return { calls, service };
+}
+
+test('pin:// question pins open the bundled qanda app as an html-iframe resource', async () => {
+  const { calls, service } = createQaHarness();
+  const result = await service.resolveResource({ uri: `pin://${QA_QUESTION_PIN}` });
+  assert.equal(result.ok, true);
+  const resource = result.data;
+  assert.equal(resource.renderer.type, 'html-iframe');
+  assert.match(resource.renderer.url, /\/qanda\/app\/index\.html#q\//);
+  assert.match(resource.renderer.url, new RegExp(QA_QUESTION_PIN));
+  assert.equal(resource.title, 'How to recover a wallet when the mnemonic is lost?');
+  assert.equal(resource.proof.protocolPath, '/protocols/simplequestion');
+  assert.equal(resource.proof.pinId, QA_QUESTION_PIN);
+  assert.equal(resource.status.state, 'resolved');
+  assert.deepEqual(calls.question, [QA_QUESTION_PIN]);
+  // Question pins re-probe on every open on purpose — the question page should
+  // show fresh counts/answers. Only NON-question pins are negative-cached.
+  await service.resolveResource({ uri: `pin://${QA_QUESTION_PIN}` });
+  assert.deepEqual(calls.question, [QA_QUESTION_PIN, QA_QUESTION_PIN]);
+});
+
+test('non-question pins fall through to the generic resolver and are negative-cached', async () => {
+  const { calls, service } = createQaHarness({ questionResult: null });
+  const uri = 'pin://4b1c9e2a8b3d7f6e0a5c2d9b8e7f4a3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7abi0';
+  const first = await service.resolveResource({ uri });
+  // Fell through: the generic resolver runs (fails here because no fetch is
+  // wired in this harness — the point is it was NOT short-circuited).
+  assert.equal(first.ok, false);
+  assert.equal(calls.question.length, 1);
+  // Second open of the same pin: negative cache, no probe.
+  await service.resolveResource({ uri });
+  assert.equal(calls.question.length, 1);
+});
+
+test('an indeterminate probe (API failure) falls through WITHOUT negative caching', async () => {
+  const { calls, service } = createQaHarness({ questionError: new Error('network down') });
+  const uri = 'pin://5c2d9b8e7f4a3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7ab4b1c9e2a8b3d7f6ei0';
+  const first = await service.resolveResource({ uri });
+  assert.equal(first.ok, false, 'falls through to the generic resolver');
+  await service.resolveResource({ uri });
+  assert.equal(calls.question.length, 2, 'indeterminate answers are re-probed next time');
+});
+
+test('metaapp:// URIs bypass the Q&A probe entirely', async () => {
+  const { calls, service } = createQaHarness();
+  await service.resolveResource({ uri: 'metaapp://pin123i0' });
+  assert.deepEqual(calls.question, []);
+});

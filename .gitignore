@@ -43,6 +43,9 @@ docs/*
 !docs/metaweb-learning-roadmap.md
 !docs/metaweb-search-backend-requirements.md
 !docs/metaweb-search-quality-requirements.md
+!docs/metaweb-qa-backend-requirements.md
+!docs/metaweb-qa-backend-requirements-v2.md
+!docs/metaweb-qa-frontend-metaapp-guide.md
 !docs/gasfee-flow/
 !docs/gasfee-flow/**
 !docs/analysis/
@@ -222,6 +225,8 @@ METAAPPs/*
 !METAAPPs/buzz/**
 !METAAPPs/chat/
 !METAAPPs/chat/**
+!METAAPPs/qanda/
+!METAAPPs/qanda/**
 METAAPPs/metaapps.config.json
 METAAPPs/**/.DS_Store
 
@@ -271,6 +276,12 @@ man_base_data_pebble/
 !tests/metaIdSearchAgentTools.test.mjs
 !tests/metawebUriLinks.test.mjs
 !tests/postSimpleNoteAgentTools.test.mjs
+!tests/postSimpleQaAgentTools.test.mjs
+!tests/likePinAgentTools.test.mjs
+!tests/qaBehaviorPrompt.test.mjs
+!tests/qaRecallAgentTools.test.mjs
+!tests/metawebQaSurfSession.test.mjs
+!tests/qandaMetaAppStatic.test.mjs
 !tests/networkServicesAgentTools.test.mjs
 !tests/onlineBotsAgentTools.test.mjs
 !tests/metaFileUploadAgentTools.test.mjs

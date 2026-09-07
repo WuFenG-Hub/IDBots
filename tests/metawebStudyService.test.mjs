@@ -245,3 +245,141 @@ test('omitting the memory gate preserves the previous always-run behavior', asyn
   assert.deepEqual(runs, [job.id]);
   assert.equal(store.getById(job.id).status, 'pending');
 });
+
+// ---------------------------------------------------------------------------
+// Q&A surfing jobs (kind 'qa-surf', feat/metaweb-qa) — recurring by design
+// ---------------------------------------------------------------------------
+
+test('enqueueQaSurfJob: one active surf job per bot, default budget 10, re-enable after failure', () => {
+  const { service, store } = setup();
+  const first = service.enqueueQaSurfJob(7);
+  assert.equal(first.created, true);
+  assert.equal(first.job.kind, 'qa-surf');
+  assert.equal(first.job.budgetPins, 10);
+  assert.equal(first.job.topic, 'On-chain Q&A surfing');
+  const dupe = service.enqueueQaSurfJob(7, { budgetPins: 999 });
+  assert.equal(dupe.created, false);
+  assert.equal(dupe.job.id, first.job.id);
+  assert.equal(dupe.job.budgetPins, 10, 'existing job wins, budget not rewritten');
+  // Other bots get their own surf job; budget clamps to 50.
+  const other = service.enqueueQaSurfJob(8, { budgetPins: 999 });
+  assert.equal(other.created, true);
+  assert.equal(other.job.budgetPins, 50);
+  // After the job failed (e.g. repeated failures), re-enqueue creates a fresh row.
+  store.markFailedWithoutRun(first.job.id, { error: 'x', nowIso: NIGHT.toISOString() });
+  const again = service.enqueueQaSurfJob(7);
+  assert.equal(again.created, true);
+  assert.notEqual(again.job.id, first.job.id);
+  assert.throws(() => service.enqueueQaSurfJob(0), /Invalid metabotId/);
+});
+
+test('qa-surf runs recur: a quiet night keeps it pending and the run cap never completes it', async () => {
+  const { service, store } = setup({
+    runStudyJob: async () => ({ newPinIds: [], summary: 'quiet night, nothing worth handling' }),
+  });
+  const job = service.enqueueQaSurfJob(7).job;
+  // Push runCount to the topic-job safety cap, then run once more.
+  for (let index = 0; index < MAX_STUDY_RUNS_PER_JOB; index += 1) {
+    store.recordRun(job.id, {
+      nextStatus: 'pending',
+      processedPinIds: [`old-${index}i0`],
+      consecutiveFailures: 0,
+      summary: 'x',
+      error: null,
+      nowIso: NIGHT.toISOString(),
+    });
+  }
+  await service.runTick();
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'pending', 'recurring job never completes by itself');
+  assert.equal(after.runCount, MAX_STUDY_RUNS_PER_JOB + 1);
+  assert.equal(after.lastRunSummary, 'quiet night, nothing worth handling');
+  assert.doesNotMatch(after.lastRunSummary, /safety cap/);
+});
+
+test('qa-surf failures still count toward the consecutive-failure threshold', async () => {
+  const { service, store } = setup({
+    runStudyJob: async () => { throw new Error('session crashed'); },
+  });
+  const job = service.enqueueQaSurfJob(7).job;
+  for (let index = 0; index < MAX_STUDY_CONSECUTIVE_FAILURES; index += 1) {
+    await service.runTick();
+  }
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'failed');
+  assert.match(after.lastError, /session crashed/);
+});
+
+test('qa-surf stored processed pins are capped at 400 (recurring forever must not grow unbounded)', async () => {
+  const { service, store } = setup({
+    runStudyJob: async () => ({ newPinIds: ['n1i0', 'n2i0', 'n3i0', 'n4i0', 'n5i0'], summary: 'busy night' }),
+  });
+  const job = service.enqueueQaSurfJob(7).job;
+  const seed = Array.from({ length: 398 }, (_, index) => `p${index}i0`);
+  store.recordRun(job.id, {
+    nextStatus: 'pending',
+    processedPinIds: seed,
+    consecutiveFailures: 0,
+    summary: 'seed',
+    error: null,
+    nowIso: NIGHT.toISOString(),
+  });
+  await service.runTick();
+  const after = store.getById(job.id);
+  assert.equal(after.processedPinIds.length, 400);
+  assert.deepEqual(after.processedPinIds.slice(-5), ['n1i0', 'n2i0', 'n3i0', 'n4i0', 'n5i0']);
+  assert.equal(after.processedPinIds[0], 'p3i0', 'oldest entries dropped (p0..p2 fell off)');
+});
+
+test('buildQaSurfSessionPrompt teaches the surf loop and keeps the json report contract', async () => {
+  const { MetawebStudyService: Svc, buildQaSurfSessionPrompt } = await import('../dist-electron/main/services/metawebStudyService.js');
+  const { service } = setup();
+  const job = service.enqueueQaSurfJob(7, { budgetPins: 12 }).job;
+  const prompt = buildQaSurfSessionPrompt(job);
+  assert.match(prompt, /unattended overnight Q&A surfing session/);
+  assert.match(prompt, /AT MOST 12 NEW pins/);
+  assert.match(prompt, /Answer at most ~3 questions/);
+  assert.match(prompt, /list_latest_questions with max_answers=0/);
+  assert.match(prompt, /get_question_answers first/);
+  assert.match(prompt, /post_simpleanswer/);
+  assert.match(prompt, /like_pin \+1/);
+  assert.match(prompt, /knowledge_base_add_document/);
+  assert.match(prompt, /procedure_save/);
+  assert.match(prompt, /Do NOT post_simplequestion/);
+  assert.match(prompt, /"processedPinIds"/);
+  // Dispatch: the generic builder routes qa-surf jobs to the surf prompt.
+  const dispatched = buildMetawebStudySessionPrompt(job);
+  assert.equal(dispatched, prompt);
+  // Topic jobs keep the study prompt.
+  const topicJob = service.enqueueStudyJob(7, { topic: 'video' }).job;
+  assert.match(buildMetawebStudySessionPrompt(topicJob), /unattended overnight MetaWeb study session/);
+});
+
+test('disableQaSurfJob stops the active surf job; re-enqueue creates a fresh one', () => {
+  const { service, store } = setup();
+  assert.equal(service.disableQaSurfJob(7), false, 'nothing active yet');
+  const job = service.enqueueQaSurfJob(7).job;
+  assert.equal(service.disableQaSurfJob(7), true);
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'done');
+  assert.match(after.lastRunSummary, /Disabled by the owner/);
+  assert.equal(after.lastError, null);
+  const again = service.enqueueQaSurfJob(7);
+  assert.equal(again.created, true);
+  assert.notEqual(again.job.id, job.id);
+});
+
+test('disabling a surf job mid-run does not get resurrected by the finishing run', async () => {
+  const { service, store } = setup({
+    runStudyJob: async (job) => {
+      // The owner disables surfing while tonight's session is still running.
+      service.disableQaSurfJob(job.metabotId);
+      return { newPinIds: ['answered-qi0'], summary: 'answered one before the off switch' };
+    },
+  });
+  const job = service.enqueueQaSurfJob(7).job;
+  await service.runTick();
+  const after = store.getById(job.id);
+  assert.equal(after.status, 'done', 'the run\'s bookkeeping must not flip the disabled row back to pending');
+  assert.match(after.lastRunSummary, /Disabled by the owner/);
+});

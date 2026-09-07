@@ -8,6 +8,7 @@
 import { buildMetabotPersonaPrompt } from '../libs/metabotPersonaPrompt';
 import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 import { CHAIN_IDENTIFIER_VERBATIM_RULE } from '../libs/chainIdentifierPrompt';
+import { QA_BEHAVIOR_RULE } from '../libs/qaBehaviorPrompt';
 import {
   copyOwnerLanguageName,
   copyStandbyExample,
@@ -230,11 +231,13 @@ export function buildGroupTaskSystemPrompt(params: {
       currentTimeText: params.currentTimeText,
       language: params.language,
     }),
-    // Plain-path group-task turns bypass the cowork prompt composer, so the
-    // chain-identifier rule is inlined here too — skill-path turns get it from
-    // both places, deduplicated harmlessly by section naming in the composer.
+    // Plain-path group-task turns bypass the cowork prompt composer, so shared
+    // rule prose is inlined here too — skill-path turns get it from both
+    // places, deduplicated harmlessly by section naming in the composer.
     '',
     CHAIN_IDENTIFIER_VERBATIM_RULE,
+    '',
+    QA_BEHAVIOR_RULE,
     ...(params.experienceBlock?.trim() ? ['', params.experienceBlock.trim()] : []),
   ].join('\n');
 }

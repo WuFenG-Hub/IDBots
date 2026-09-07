@@ -18,6 +18,11 @@ export type MetawebStudyControl = {
     metabotId: number,
     input: { topic: string; budgetPins?: number },
   ): { job: MetawebStudyJobRecord; created: boolean };
+  enqueueQaSurfJob(
+    metabotId: number,
+    input?: { budgetPins?: number },
+  ): { job: MetawebStudyJobRecord; created: boolean };
+  disableQaSurfJob(metabotId: number): boolean;
   listStudyJobs(metabotId: number): MetawebStudyJobRecord[];
 };
 
@@ -56,9 +61,10 @@ function formatRunAt(iso: string | null): string {
 export function formatStudyJobList(jobs: MetawebStudyJobRecord[]): string {
   const lines: string[] = [`${jobs.length} study job(s) for this bot:`];
   jobs.forEach((job, index) => {
-    lines.push(`${index + 1}. "${job.topic}" — ${STATUS_LABEL[job.status] ?? job.status}`);
+    const recurring = job.kind === 'qa-surf' ? ' [recurring Q&A surfing]' : '';
+    lines.push(`${index + 1}. "${job.topic}"${recurring} — ${STATUS_LABEL[job.status] ?? job.status}`);
     lines.push(
-      `   runs: ${job.runCount} | pins saved: ${job.processedPinIds.length} | nightly budget: ${job.budgetPins} | last run: ${formatRunAt(job.lastRunAt)}`
+      `   runs: ${job.runCount} | ${job.kind === 'qa-surf' ? 'pins handled' : 'pins saved'}: ${job.processedPinIds.length} | nightly budget: ${job.budgetPins} | last run: ${formatRunAt(job.lastRunAt)}`
     );
     if (job.lastRunSummary) lines.push(`   last result: ${job.lastRunSummary}`);
     if (job.lastError) lines.push(`   last error: ${job.lastError}`);
@@ -161,5 +167,66 @@ export function buildMetawebStudyAgentTools(deps: {
     }
   );
 
-  return [studyEnqueue, studyStatus];
+  const qaSurfEnqueue = tool(
+    'metaweb_qa_surf_enqueue',
+    [
+      'Enable RECURRING nightly on-chain Q&A surfing for yourself — use when the owner asks you to spend your nights on the MetaWeb Q&A (e.g. "晚上去链上问答看看，会的就答", "surf the on-chain Q&A at night and learn from it").',
+      'Every night (00:00–06:00) a background session then: browses the unanswered question queue, answers the ones squarely in your role (a few per night — answers are on-chain writes that cost sats), likes genuinely good answers, and saves Q&A valuable to your role into your knowledge bases.',
+      'It recurs until the owner disables it (metaweb_qa_surf_disable); it never completes on its own. Re-enabling while active is a no-op returning the existing job. nightly_budget caps the NEW pins handled per run (questions answered + pins saved), default 10, max 50.',
+      'Confirm to the owner what was enabled and that progress is visible via metaweb_study_status.',
+    ].join(' '),
+    {
+      nightly_budget: z.number().int().min(1).max(50).optional().describe('New pins handled per night (answered + saved). Default 10.'),
+    },
+    async (args: { nightly_budget?: number }) => {
+      const metabotId = requireMetabotId('metaweb_qa_surf_enqueue');
+      if (typeof metabotId !== 'number') {
+        return textResult(metabotId.text, true);
+      }
+      try {
+        const { job, created } = metawebStudy.enqueueQaSurfJob(metabotId, {
+          budgetPins: args.nightly_budget,
+        });
+        if (!created) {
+          return textResult(
+            `Nightly Q&A surfing is already ${job.status} for this bot (${job.runCount} run(s) so far, ${job.processedPinIds.length} pin(s) handled). It continues every night — no duplicate was created.`
+          );
+        }
+        return textResult(
+          [
+            `Nightly Q&A surfing enabled (nightly budget: ${job.budgetPins} pins/run).`,
+            'Each night (00:00–06:00) a background session browses the unanswered on-chain questions, answers the ones squarely in your role, reacts honestly, and saves valuable Q&A into your knowledge bases.',
+            'Tell the owner it recurs until disabled (metaweb_qa_surf_disable) and that progress shows in metaweb_study_status.',
+          ].join('\n')
+        );
+      } catch (error) {
+        return textResult(`metaweb_qa_surf_enqueue failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    }
+  );
+
+  const qaSurfDisable = tool(
+    'metaweb_qa_surf_disable',
+    'Stop YOUR recurring nightly on-chain Q&A surfing — use when the owner asks to stop/disable the nightly surfing ("别晚上去问答了", "stop the nightly Q&A surfing"). Answers and knowledge already saved stay; only future nightly runs stop. Re-enable anytime with metaweb_qa_surf_enqueue. Bare call, no arguments.',
+    {},
+    async () => {
+      const metabotId = requireMetabotId('metaweb_qa_surf_disable');
+      if (typeof metabotId !== 'number') {
+        return textResult(metabotId.text, true);
+      }
+      try {
+        const disabled = metawebStudy.disableQaSurfJob(metabotId);
+        if (!disabled) {
+          return textResult('Nightly Q&A surfing is not active for this bot — nothing to disable.');
+        }
+        return textResult(
+          'Nightly Q&A surfing disabled. Everything already answered and saved stays with you; future nightly runs are stopped. Re-enable anytime with metaweb_qa_surf_enqueue.'
+        );
+      } catch (error) {
+        return textResult(`metaweb_qa_surf_disable failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    }
+  );
+
+  return [studyEnqueue, qaSurfEnqueue, qaSurfDisable, studyStatus];
 }

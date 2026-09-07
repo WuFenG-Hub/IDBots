@@ -65,6 +65,12 @@ export const PROMPT_SECTION_ORDER = {
    */
   METAWEB_LEARNING_LOOP: 43,
   /**
+   * MetaWeb Q&A behavior: ask when stuck, answer what you know, react
+   * honestly (simplequestion/simpleanswer/like_pin). Static policy prose,
+   * rides right after the learning loop.
+   */
+  METAWEB_QA_BEHAVIOR: 43.5,
+  /**
    * Local-app routing block (`## MetaApps`). Reserved order slot: the
    * MetaApps and Skills blocks are still carried inside the renderer-combined
    * base prompt today, but their relative precedence — MetaApp routing wins

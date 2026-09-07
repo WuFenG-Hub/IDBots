@@ -80,6 +80,7 @@ import { tryAutoAnswerLowRiskQuestion, pickRecommendedOptionLabel } from './cowo
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
 import { CHAIN_IDENTIFIER_VERBATIM_RULE } from './chainIdentifierPrompt';
+import { QA_BEHAVIOR_RULE } from './qaBehaviorPrompt';
 import { hasEmbeddedSkillCatalog } from './skillPromptMarkers';
 import { buildMetabotPersonaPrompt } from './metabotPersonaPrompt';
 import { readBootstrapDoc } from './welcomeBootstrap';
@@ -150,6 +151,10 @@ import {
   type SocialRecallControl,
 } from './socialRecallAgentTools';
 import {
+  buildQaRecallAgentTools,
+  type QaRecallControl,
+} from './qaRecallAgentTools';
+import {
   buildMetawebLearningAgentTools,
   type MetawebLearningControl,
 } from './metawebLearningAgentTools';
@@ -187,6 +192,8 @@ import {
   type ChainWriteCreatePin,
 } from './postBuzzAgentTools';
 import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
+import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
+import { buildLikePinAgentTools } from './likePinAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
@@ -1194,8 +1201,10 @@ interface ActiveSession {
    * unattended autoApprove session physically cannot publish or spend fees —
    * and metaweb-source knowledge_base_add_document calls are hard-capped at
    * pinBudget by a counting wrapper (prompt guidance alone is not a budget).
+   * kind 'qa-surf' swaps the allowlist for the Q&A surfing surface (participate:
+   * answer/react) while keeping the same KB budget wrapper.
    */
-  metawebStudySession?: { pinBudget: number };
+  metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
   /** Permission mode controlling tool gating (default/plan/acceptEdits/bypassPermissions). */
   permissionMode: CoworkPermissionMode;
   /** Runtime effort override from the UI picker; a canonical rung, the 'default' sentinel (model default, skipping brain/global), or null = tiered defaults (brain → global → per-model). */
@@ -1694,6 +1703,12 @@ export interface CoworkRunnerOptions {
    */
   metawebLearning?: MetawebLearningControl;
   /**
+   * When set, every cowork session gets the on-chain Q&A recall tools
+   * (search_qa / list_latest_questions / get_question_answers) backed by the
+   * metaso-p2p /api/qa/* APIs (main.ts wires the control).
+   */
+  qaRecall?: QaRecallControl;
+  /**
    * When set, every cowork session gets the knowledge base tools
    * (knowledge_base_list / knowledge_base_query / knowledge_base_add_document
    * / knowledge_base_learn) backed by the per-bot KnowledgeBaseService
@@ -1839,6 +1854,24 @@ const METAWEB_STUDY_TOOL_ALLOWLIST = new Set([
   'knowledge_recall',
 ]);
 
+/**
+ * The inline-tool allowlist for nightly Q&A surfing sessions
+ * (metawebStudySession kind 'qa-surf'). Learning surface of the study
+ * allowlist PLUS the Q&A participation tools — read the feed, answer,
+ * react. On-chain writes stay deliberately minimal: post_simpleanswer and
+ * like_pin are the feature's purpose; post_simplequestion (asking is for
+ * interactive work), buzz/notes, omni_cast, wallet and file tools are not
+ * registered at all (absence beats a deny rule).
+ */
+const METAWEB_QA_SURF_TOOL_ALLOWLIST = new Set([
+  ...METAWEB_STUDY_TOOL_ALLOWLIST,
+  'search_qa',
+  'list_latest_questions',
+  'get_question_answers',
+  'post_simpleanswer',
+  'like_pin',
+]);
+
 export class CoworkRunner extends EventEmitter {
   private store: CoworkStore;
   private getSkillSessionEnvOverrides?: (sessionId: string) => Promise<Record<string, string>>;
@@ -1873,6 +1906,7 @@ export class CoworkRunner extends EventEmitter {
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
   private metawebLearning?: MetawebLearningControl;
+  private qaRecall?: QaRecallControl;
   private knowledgeBase?: KnowledgeBaseControl;
   private metawebStudy?: MetawebStudyControl;
   private metaFileUpload?: MetaFileUploadControl;
@@ -1983,6 +2017,7 @@ export class CoworkRunner extends EventEmitter {
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
     this.metawebLearning = options?.metawebLearning;
+    this.qaRecall = options?.qaRecall;
     this.knowledgeBase = options?.knowledgeBase;
     this.metawebStudy = options?.metawebStudy;
     this.metaFileUpload = options?.metaFileUpload;
@@ -5178,6 +5213,13 @@ export class CoworkRunner extends EventEmitter {
         order: PROMPT_SECTION_ORDER.METAWEB_LEARNING_LOOP,
         text: this.buildMetawebLearningLoopPrompt(),
       },
+      // On-chain Q&A participation discipline (ask when stuck, answer what
+      // you know, react honestly). Static rule prose, cacheable head.
+      {
+        name: 'idbots:metaweb-qa-behavior',
+        order: PROMPT_SECTION_ORDER.METAWEB_QA_BEHAVIOR,
+        text: QA_BEHAVIOR_RULE,
+      },
       // Chain-identifier output discipline: quoting pinids/txids verbatim is
       // load-bearing for host matching (deliverables, dependency gates,
       // verification). Static rule prose, cacheable head.
@@ -5214,7 +5256,7 @@ export class CoworkRunner extends EventEmitter {
       '',
       'Link with MetaWeb URIs, never Web2 URLs: whenever your reply names on-chain content, make it a clickable MetaWeb URI markdown link — pin://<pinId> for any pin, metaapp://<pinId> for MetaApp packages (/protocols/metaapp), metafile://<pinId> ONLY for on-chain binary files (/file: images, video, audio, PDF, archives), metaid://<globalMetaId> for people/bots. When unsure which scheme applies, pin:// always works. Notes, buzz posts and other readable text pins are ALWAYS cited as pin://, never metafile://. ALWAYS show the URI in FULL — never abbreviate or truncate it with an ellipsis (pin://abc…xyzi0), in the link text or anywhere else: a shortened URI is neither clickable nor copyable, so it is useless to the user. NEVER construct Web2 viewer URLs (metaid.io, openagentinternet.org, …) for on-chain content: the user\'s app opens MetaWeb URIs directly in its built-in Bot Browser, and a Web2 URL sends them out of the app for no reason.',
       '',
-      'Publish with the right protocol: text meant to be read — notes, articles, reports, specs, Markdown deliverables — goes on-chain with post_simplenote (/protocols/simplenote) and is referenced as pin://<pinId>. upload_file (/file, metafile:// URI) is ONLY for binary payloads: images, video, audio, PDFs, archives. Never upload a Markdown/text document as a /file metafile just to share or deliver it, and never cite a text pin as metafile://.',
+      'Publish with the right protocol: text meant to be read — notes, articles, reports, specs, Markdown deliverables — goes on-chain with post_simplenote (/protocols/simplenote) and is referenced as pin://<pinId>. Questions for the community go out with post_simplequestion (/protocols/simplequestion), answers with post_simpleanswer (/protocols/simpleanswer) — see the Q&A section below. upload_file (/file, metafile:// URI) is ONLY for binary payloads: images, video, audio, PDFs, archives. Never upload a Markdown/text document as a /file metafile just to share or deliver it, and never cite a text pin as metafile://.',
       '',
       'Ground and cite: answer from what you actually read and cite the pins you used (as pin:// markdown links) so the user can verify. If MetaWeb genuinely has nothing useful, say so honestly and fall back to your own knowledge — never fabricate pins, titles, publishers, or content.',
       '',
@@ -5953,7 +5995,7 @@ export class CoworkRunner extends EventEmitter {
       autoApprove?: boolean;
       disableMemoryUpdates?: boolean;
       /** M4 nightly study session: restrict inline tools to the learning allowlist and cap metaweb-source KB adds at pinBudget. */
-      metawebStudySession?: { pinBudget: number };
+      metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
       disableRemoteServicesPrompt?: boolean;
       workspaceRoot?: string;
       confirmationMode?: 'modal' | 'text';
@@ -8900,6 +8942,33 @@ export class CoworkRunner extends EventEmitter {
             resolveMetabotId,
           })
         );
+        // On-chain Q&A (simplequestion/simpleanswer): ask when stuck, answer
+        // what you know. Registration posture identical to the tools above.
+        // The repeat notice prefers the Q&A index (cross-machine complete,
+        // via /api/qa/questions/:pinId/answers?publisher=<acting bot>) and
+        // falls back to the local posting ledger when the index is down.
+        memoryTools.push(
+          ...buildPostSimpleQaAgentTools({
+            tool,
+            createPin: this.metabotChainWrite.createPin,
+            uploadFile: gatedUpload,
+            sessionId,
+            resolveMetabotId,
+            ...(this.qaRecall
+              ? {
+                  fetchPriorAnswersRemote: async ({ questionPinId, publisher }) => {
+                    const page = await this.qaRecall!.questionAnswers({ pinId: questionPinId, publisher });
+                    return page.items;
+                  },
+                  resolveActingGlobalMetaId: (sid: string) => {
+                    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sid);
+                    if (metabotId == null) return undefined;
+                    return this.getMetabotById?.(metabotId)?.globalmetaid?.trim() || undefined;
+                  },
+                }
+              : {}),
+          })
+        );
       }
       memoryTools.push(
         ...buildOmniCasterAgentTools({
@@ -8910,6 +8979,17 @@ export class CoworkRunner extends EventEmitter {
           sessionId,
           resolveMetabotId,
           gateLocalFile,
+        })
+      );
+      // Reactions on any pin (PayLike): Q&A answers and questions today, buzz
+      // and notes alike. No upload dependency, so it registers whenever the
+      // chain-write control exists.
+      memoryTools.push(
+        ...buildLikePinAgentTools({
+          tool,
+          createPin: this.metabotChainWrite.createPin,
+          sessionId,
+          resolveMetabotId,
         })
       );
     }
@@ -9053,6 +9133,18 @@ export class CoworkRunner extends EventEmitter {
         })
       );
     }
+    // On-chain Q&A recall (search_qa / list_latest_questions /
+    // get_question_answers) rides with the same always-on posture: it is the
+    // bot's window into the community knowledge base and the search-first
+    // half of the ask-when-stuck loop.
+    if (this.qaRecall) {
+      memoryTools.push(
+        ...buildQaRecallAgentTools({
+          tool,
+          qaRecall: this.qaRecall,
+        })
+      );
+    }
     // Per-bot knowledge bases ("知识库"): the bot's own document corpora,
     // citation-queried at runtime (knowledge_base_query) and fed by
     // knowledge_base_add_document + knowledge_base_learn. The acting bot is
@@ -9164,9 +9256,15 @@ export class CoworkRunner extends EventEmitter {
     }
     // M4 nightly study sessions run unattended with autoApprove: restrict the
     // tool surface to the learning allowlist so on-chain writes, installs,
-    // social and file tools are not registered at all.
-    if (this.activeSessions.get(sessionId)?.metawebStudySession) {
-      return memoryTools.filter((item) => METAWEB_STUDY_TOOL_ALLOWLIST.has(String(item?.name ?? '')));
+    // social and file tools are not registered at all. Q&A surf sessions
+    // (kind 'qa-surf') swap in the surfing allowlist — learning plus
+    // answering/reacting, still nothing else.
+    const studySession = this.activeSessions.get(sessionId)?.metawebStudySession;
+    if (studySession) {
+      const allowlist = studySession.kind === 'qa-surf'
+        ? METAWEB_QA_SURF_TOOL_ALLOWLIST
+        : METAWEB_STUDY_TOOL_ALLOWLIST;
+      return memoryTools.filter((item) => allowlist.has(String(item?.name ?? '')));
     }
     return memoryTools;
   }
