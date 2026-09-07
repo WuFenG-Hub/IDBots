@@ -5969,15 +5969,18 @@ const getCoworkRunner = () => {
       // renderer. Suppressing it here makes a normal cowork session wait for
       // the bridge timeout with no visible prompt.
       if (coworkRunner?.getSessionConfirmationMode(sessionId) === 'text'
-        && request?.toolName !== 'AskUserQuestion') {
+        && request?.toolName !== 'AskUserQuestion'
+        // Suppress only when a text-relay owner exists (IM chats, gig
+        // orders) — those prompts are answered through the chat channel.
+        // Text-mode sessions WITHOUT a relay owner (orchestrator/worker
+        // turns, scheduler) must reach the renderer: the owner still has to
+        // answer them, and dropping them here silently burns the 60s
+        // watchdog into an automatic denial. The renderer's global
+        // permission overlay renders prompts for sessions that have no
+        // inline composer seat.
+        && coworkRunner.hasTextPermissionRelay(sessionId)) {
         return;
       }
-      // Unlike stream events, permission prompts are forwarded regardless of
-      // session-list visibility: the owner still has to answer prompts raised
-      // by hidden or background sessions, and dropping them here silently
-      // burns the 60s watchdog into an automatic denial. The renderer's
-      // global permission overlay renders prompts for sessions that have no
-      // inline composer seat.
       const safeRequest = sanitizePermissionRequestForIpc(request);
       const windows = BrowserWindow.getAllWindows();
       windows.forEach(win => {

@@ -214,6 +214,7 @@ export class IMCoworkHandler extends EventEmitter {
         this.coworkStore.deleteConversationMapping(channel, imConversationId, stale.metabotId);
         this.coworkStore.deleteConversationMapping(legacyChannel, imConversationId, stale.metabotId);
         this.imSessionIds.delete(stale.coworkSessionId);
+        this.coworkRunner.unregisterTextPermissionRelay(stale.coworkSessionId);
         this.sessionConversationMap.delete(stale.coworkSessionId);
         this.clearPendingPermissionsBySessionId(stale.coworkSessionId);
         this.coworkRunner.stopSession(stale.coworkSessionId, { reason: 'stale IM session mapping replaced' });
@@ -242,6 +243,7 @@ export class IMCoworkHandler extends EventEmitter {
           }
           this.coworkStore.touchConversationMapping(channel, imConversationId, targetMetabotId);
           this.imSessionIds.add(centralMapping.coworkSessionId);
+          this.coworkRunner.registerTextPermissionRelay(centralMapping.coworkSessionId);
           this.sessionConversationMap.set(centralMapping.coworkSessionId, {
             conversationId: imConversationId,
             platform,
@@ -265,6 +267,7 @@ export class IMCoworkHandler extends EventEmitter {
         this.coworkStore.deleteConversationMapping(channel, imConversationId, mappingMetabotId);
         this.coworkStore.deleteConversationMapping(legacyChannel, imConversationId, mappingMetabotId);
         this.imSessionIds.delete(existing.coworkSessionId);
+        this.coworkRunner.unregisterTextPermissionRelay(existing.coworkSessionId);
         this.sessionConversationMap.delete(existing.coworkSessionId);
         this.clearPendingPermissionsBySessionId(existing.coworkSessionId);
         this.coworkRunner.stopSession(existing.coworkSessionId, { reason: 'IM session mapping replaced' });
@@ -290,6 +293,7 @@ export class IMCoworkHandler extends EventEmitter {
             coworkSessionId: existing.coworkSessionId,
           });
           this.imSessionIds.add(existing.coworkSessionId);
+          this.coworkRunner.registerTextPermissionRelay(existing.coworkSessionId);
           this.sessionConversationMap.set(existing.coworkSessionId, {
             conversationId: imConversationId,
             platform,
@@ -354,6 +358,7 @@ export class IMCoworkHandler extends EventEmitter {
       coworkSessionId: session.id,
     });
     this.imSessionIds.add(session.id);
+    this.coworkRunner.registerTextPermissionRelay(session.id);
     this.sessionConversationMap.set(session.id, {
       conversationId: imConversationId,
       platform,
@@ -461,6 +466,7 @@ export class IMCoworkHandler extends EventEmitter {
     }
 
     this.imSessionIds.delete(sessionId);
+    this.coworkRunner.unregisterTextPermissionRelay(sessionId);
     this.sessionConversationMap.delete(sessionId);
     this.clearPendingPermissionsBySessionId(sessionId);
 
@@ -833,6 +839,7 @@ export class IMCoworkHandler extends EventEmitter {
   clearPlatformSessions(sessionIds: string[]): void {
     for (const sessionId of sessionIds) {
       this.imSessionIds.delete(sessionId);
+      this.coworkRunner.unregisterTextPermissionRelay(sessionId);
       this.sessionConversationMap.delete(sessionId);
       this.pendingResets.delete(sessionId);
       this.clearPendingPermissionsBySessionId(sessionId);

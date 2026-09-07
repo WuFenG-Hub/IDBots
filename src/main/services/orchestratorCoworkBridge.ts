@@ -9,6 +9,10 @@ import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { buildOrchestratorSessionTitle } from '../libs/orchestratorSessionTitle';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
+import {
+  claimManagedOrchestratorSession,
+  resolveOrchestratorPermissionReply,
+} from './orchestratorPermissionRelay';
 
 const SKILL_TURN_TIMEOUT_MS = 300_000;
 /**
@@ -233,6 +237,7 @@ export async function runOrchestratorSkillTurn(
     metabotId ?? null
   );
   const sessionId = session.id;
+  claimManagedOrchestratorSession(runner, sessionId, store);
 
   try {
     onSessionCreated?.(sessionId);
@@ -441,7 +446,7 @@ export async function runOrchestratorSkillTurn(
  * private chat so tool_use/tool_result/assistant output stays in the current
  * A2A window instead of opening a separate "[Orchestrator] skill-turn" session.
  */
-export function runSkillTurnInExistingSession(
+export async function runSkillTurnInExistingSession(
   runner: CoworkRunner,
   store: CoworkStore,
   params: RunExistingSessionSkillTurnParams
@@ -459,6 +464,16 @@ export function runSkillTurnInExistingSession(
   if (!session) {
     return Promise.reject(new Error(`Skill turn session ${sessionId} not found`));
   }
+
+  // A pending text-mode confirmation for this session is answered by the next
+  // incoming chat message (允许/拒绝), mirroring the IM handler's reply
+  // routing; matched replies resolve without starting a model turn.
+  const relayReply = await resolveOrchestratorPermissionReply(runner, sessionId, userMessage);
+  if (relayReply) return relayReply;
+
+  // From here on the session's permission prompts are relayed into its own
+  // transcript (see orchestratorPermissionRelay) until it terminates.
+  claimManagedOrchestratorSession(runner, sessionId, store);
 
   return new Promise<RunExistingSessionSkillTurnResult>((resolve, reject) => {
     let settled = false;

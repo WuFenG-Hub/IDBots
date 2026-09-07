@@ -6665,6 +6665,32 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  /**
+   * Sessions whose text confirmation mode has a live text-relay owner (IM
+   * chats, gig orders): their permission prompts are answered through the chat
+   * channel, so the main-process bridge suppresses them from the renderer.
+   * Text-mode sessions WITHOUT a relay owner (orchestrator/worker turns,
+   * scheduler) fall through to the renderer's global overlay.
+   */
+  private textPermissionRelaySessions: Set<string> = new Set();
+
+  registerTextPermissionRelay(sessionId: string): void {
+    this.textPermissionRelaySessions.add(sessionId);
+  }
+
+  unregisterTextPermissionRelay(sessionId: string): void {
+    this.textPermissionRelaySessions.delete(sessionId);
+  }
+
+  hasTextPermissionRelay(sessionId: string): boolean {
+    return this.textPermissionRelaySessions.has(sessionId);
+  }
+
+  /** True while the runner still waits on this permission request. */
+  isPermissionPending(requestId: string): boolean {
+    return this.pendingPermissions.has(requestId) || this.sandboxPermissions.has(requestId);
+  }
+
   private isMetabotTypeSession(sessionId: string, metabotType: 'twin' | 'welcome'): boolean {
     if (!this.getMetabotById) return false;
     const metabotId = this.store.getSession(sessionId)?.metabotId;
