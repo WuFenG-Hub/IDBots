@@ -1,6 +1,6 @@
-# Interactive proposal cards preview
+# Bot Action Card preview
 
-This isolated Electron preview mounts the actual IDBots `Sidebar` and `CoworkSessionDetail` components, including the existing composer. `MessageExtensionContext` adds the card beneath the assistant reply and defaults to no extension in production. It does not boot the production main process, access Bot identities, or call a model. Session data and IPC reads are explicit in-memory fixtures, not live application state.
+This isolated Electron preview mounts the actual IDBots `Sidebar` and `CoworkSessionDetail` components, including the existing composer. `MessageExtensionContext` adds a Bot Action Card beneath the assistant reply and defaults to no extension in production. The card exposes actor, action, target, write impact, explicit non-effects, editable instruction, immutable confirmation, execution state, receipt, and the expected BotBrowser output URI. It does not boot the production main process, access Bot identities, or call a model. Session data and IPC reads are explicit in-memory fixtures, not live application state.
 
 ## Run
 
@@ -9,13 +9,13 @@ npx vite build --config vite.proposal-demo.config.ts
 node_modules/.bin/electron scripts/proposal-demo.cjs
 ```
 
-Choose a proposal, edit its headline and accent, add instructions, and submit. Inspect the structured handoff and reload to verify persistence. Reset example clears only this demo decision. The isolated Electron profile is `.proposal-demo-data` in this worktree. Other navigation and composer actions are not connected; the banner explains this boundary. The P2P offline indicator describes the isolated fixture, not the user's live IDBots.
+Review the acting Bot, action target and impact, edit the instruction, and confirm the local preview. The fixture advances through running to a successful execution receipt with a `preview-metaapp://` output. Reset example clears only this demo confirmation and receipt. The isolated Electron profile is `.proposal-demo-data` in this worktree. Other navigation, composer actions and BotBrowser navigation are not connected; the banner explains this boundary. The P2P offline indicator describes the isolated fixture, not the user's live IDBots.
 
 ## Integration boundary
 
-`ProposalCard` accepts a versioned request, an initial decision and an asynchronous host submission callback. Mount a new request with a new React key. The example adapter uses localStorage; production must persist decisions in the session backend and deduplicate by session, request and version before continuing a model turn. Client-side gating alone does not guarantee exactly-once execution across windows or crashes.
+`BotActionCard` accepts a versioned request, initial confirmation/receipt and asynchronous confirmation and output callbacks. Mount a new request with a new React key. The example adapter uses localStorage; production must persist confirmations and receipts in the session backend and deduplicate by session, request and version before continuing a model turn. Client-side gating alone does not guarantee exactly-once execution across windows or crashes.
 
-The production Cowork tool renderer and model tool registration are not connected yet. No fake model completion is displayed. The next implementation step is a validated proposal tool, durable decision IPC, session-bound rendering and turn continuation. The existing permission/question flow remains separate.
+The production Cowork tool renderer, DSH service, BotBrowser router and model tool registration are not connected yet. The successful receipt is explicitly fixture data. The next implementation step is a validated Bot action envelope, durable confirmation/receipt IPC, session-bound rendering, action execution and trusted BotBrowser handoff. The existing permission/question flow remains separate.
 
 ## Verification
 
