@@ -79,7 +79,7 @@ When you spot a problem in a RUNNING task before the chair does (a delivery gap,
 
 | signal | when to use | effect |
 | ------ | ----------- | ------ |
-| `nudge` | ask the chair to check a specific member/deliverable NOW | recorded on the supervisor ledger and delivered to the chair in its OWN turn context (a local directive); the chair answers in-group in its own voice — the host posts NOTHING into the group |
+| `nudge` | ask the chair to check a specific member/deliverable NOW — works in EXECUTING **and in REVIEW** (acceptance findings: the chair verifies and may reopen rework with `[STATUS:EXECUTING]`) | recorded on the supervisor ledger and delivered to the chair in its OWN turn context (a local directive); the chair answers in-group in its own voice — the host posts NOTHING into the group |
 | `flag` | record a suspicion/observation for the acceptance stage | recorded on the ledger; the line rides into the task's review record — no immediate action forced |
 | `pause` | dispatch must stop while the owner decides | host holds the planning turn + chair dispatch replies; recorded on the ledger |
 | `resume` | lift a pause AFTER the owner explicitly confirmed | requires `confirm_owner: true`; the RPC refuses otherwise |

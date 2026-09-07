@@ -175,6 +175,17 @@ fact-gathering stays, decision-making goes.
   With this, NOTHING impersonates the chair in the group — the last borrowed
   identity is gone. The supervisor channel (owner authority) and the host-notes
   channel (no authority) remain deliberately separate.
+- **Review-phase nudges are answered (EP33 P1②)**: the chair may speak in
+  review (it answers the owner there), so a supervisor nudge in review drives a
+  chair turn — the chair verifies and either reopens rework
+  ([STATUS:EXECUTING], a review→executing transition it owns) or answers
+  facts-only. Open CHECKPOINTS still defer (the owner is mid-decision).
+  closeGroupTask closes any still-pending signals so the ledger never dangles.
+- **The planning bootstrap never duplicates an active chair (EP33 P2)**: when
+  chair-authored worker-mentioning speech already exists (e.g. the owner's Twin
+  opened the task manually), the bootstrap runs ONE minimal directive — post
+  only the missing lifecycle transition, repeat nothing — instead of a full
+  opening plan.
 
 - **Mid-turn speech is real and now guarded.** Bots spontaneously use the
   group_chat tool's send_group_message action mid-turn (task #65: the chair used

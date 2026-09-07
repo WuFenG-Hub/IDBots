@@ -2583,3 +2583,28 @@ test('speedup R-04: ingest-time sender name resolver prefers the local MetaBot r
     setLocalSenderNameResolver(null);
   }
 });
+
+test('closeGroupTask: pending supervisor signals are closed out (EP33 P1 — no dead letters)', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await groupTaskService.createGroupTask({
+      title: 'Supervised close',
+      goal: 'G',
+      acceptanceCriteria: '',
+      memberMetabotIds: [2],
+      createdBy: 'user',
+    });
+    const store = h.groupTaskStore;
+    store.addSupervisorSignal({ taskId: detail.id, kind: 'nudge', note: 'check before close', target: 'Coder Bot' });
+    store.addSupervisorSignal({ taskId: detail.id, kind: 'flag', note: 'for the record' });
+    const closed = await groupTaskService.closeGroupTask(detail.id, { status: 'done' });
+    assert.equal(closed.status, 'done');
+    const pending = store.listPendingSupervisorSignals(detail.id);
+    assert.equal(pending.length, 0, 'no supervisor signal dangles after close');
+    const all = store.listSupervisorSignals(detail.id);
+    assert.equal(all.length, 2);
+    assert.ok(all.every((signal) => signal.processedAt != null), 'closed with a null chair-answer pin');
+  } finally {
+    h.cleanup();
+  }
+});
