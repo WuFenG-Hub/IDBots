@@ -13,10 +13,17 @@
 // MODEL's identity — its family's own wire dialect — not the provider that
 // happens to serve it.
 //
-// Scope: chat-completions routes only. The Responses wire has no "disable"
-// parameter — reasoning is opt-in by design, so "off" already means "send
-// nothing" there regardless of the gateway default. Anthropic-format relays
-// speak a different thinking dialect (out of scope here).
+// Scope: chat-completions and responses routes. Chat-completions carries the
+// family's own wire dialect (deepseek thinking, zai thinking). The Responses
+// wire has no "disable" parameter — reasoning is opt-in by design — but for
+// GLM that opt-in must be EXPLICIT: an undeclared model sends nothing and the
+// gateway's server-side default decides whether the model thinks. z.ai
+// flipped that default mid-2026-09-03 with no host change (A2A thread
+// 0f81a549: turns ≤111 returned separate reasoning items, turns ≥112 none),
+// and with no thinking channel GLM narrated its reply-or-skip deliberation
+// into the visible text, which the A2A private-chat path then published
+// on-chain verbatim (fix/a2a-private-chat-thinking-leak). Anthropic-format
+// relays speak a different thinking dialect (out of scope here).
 
 /** Wire declarations dsh-llm-pi-ai accepts on a route model entry. */
 export interface DshModelReasoningDeclaration {
@@ -68,6 +75,23 @@ const GLM_CHAT_COMPLETIONS_DECLARATION: DshModelReasoningDeclaration = {
   },
 };
 
+// GLM behind an OpenAI Responses-compatible gateway (z.ai serves /v1/responses
+// for the GLM line). Enabled rungs send `reasoning: { effort, summary }` plus
+// the reasoning.encrypted_content include — exactly what pi-ai's
+// openai-responses generator emits once the model declares reasoning — which
+// streams the deliberation as separate reasoning_text deltas and keeps the
+// message text clean (verified against api.z.ai 2026-09-07, streaming and
+// non-streaming, with tools and ~200KB payloads). `off` cannot disable
+// thinking on this wire (no disable parameter), so it keeps the send-nothing
+// shape: off → null → absent from the thinkingLevelMap → provider default.
+const GLM_RESPONSES_DECLARATION: DshModelReasoningDeclaration = {
+  reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'high' },
+  compat: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+  },
+};
+
 /** Bare model id: drop any vendor prefix ("deepseek/deepseek-v4-flash" → "deepseek-v4-flash"). */
 const bareModelIdOf = (modelId: string): string => {
   const trimmed = modelId.trim();
@@ -85,9 +109,15 @@ export function dshModelReasoningDeclaration(
   modelId: string,
   apiFormat: 'openai' | 'responses' | 'anthropic',
 ): DshModelReasoningDeclaration | null {
-  if (apiFormat !== 'openai') return null;
   const bare = bareModelIdOf(modelId);
-  if (DEEPSEEK_V4_PATTERN.test(bare)) return DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION;
-  if (GLM_PATTERN.test(bare)) return GLM_CHAT_COMPLETIONS_DECLARATION;
+  if (DEEPSEEK_V4_PATTERN.test(bare)) {
+    if (apiFormat !== 'openai') return null;
+    return DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION;
+  }
+  if (GLM_PATTERN.test(bare)) {
+    if (apiFormat === 'openai') return GLM_CHAT_COMPLETIONS_DECLARATION;
+    if (apiFormat === 'responses') return GLM_RESPONSES_DECLARATION;
+    return null;
+  }
   return null;
 }
