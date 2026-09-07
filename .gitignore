@@ -382,6 +382,8 @@ man_base_data_pebble/
 !tests/commandCodeProvider.test.ts
 !tests/dshModelReasoning.test.mjs
 !tests/groupTaskDeliverableBackfill.test.mjs
+!tests/coworkPermissionForwarding.test.mjs
+!tests/coworkPermissionOverlay.test.tsx
 
 # Local extracted skill packages and tool output artifacts (runtime-generated)
 /.idbots-extract/
