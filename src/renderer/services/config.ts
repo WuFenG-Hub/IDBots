@@ -1,6 +1,6 @@
 import { AppConfig, CONFIG_KEYS, defaultConfig, normalizeDeepSeekAppConfig } from '../config';
 import { localStore } from './store';
-import { getFreeProviderModelDisplayName, FREE_PROVIDER_DISPLAY_NAME, LLM_FREE_PROVIDER_KEY } from './llmFreeQuotaGate.js';
+import { getFreeProviderModelCanonical, getFreeProviderModelDisplayName, FREE_PROVIDER_DISPLAY_NAME, LLM_FREE_PROVIDER_KEY } from './llmFreeQuotaGate.js';
 
 const getFixedProviderApiFormat = (providerKey: string): 'anthropic' | 'openai' | null => {
   if (providerKey === 'openai' || providerKey === 'gemini') {
@@ -83,12 +83,18 @@ const buildProviderSignature = (
 );
 
 // The built-in free-quota provider is managed end to end (relay-provisioned
-// credentials, hidden in the UI), so its model display names are always the
-// canonical product names, never the relay's internal wire ids.
-const normalizeFreeProviderModelNames = (
+// credentials, hidden in the UI), so its models always normalize to the
+// canonical product config: display names instead of the relay's internal
+// wire ids, and — for known ids — the canonical limits/options. The relay
+// still reports deepseek-chat with the legacy 64K/4K DeepSeek V3 wire values
+// while actually serving deepseek-v4-flash (1M context), so installs
+// provisioned before this normalization get their stored entry rewritten on
+// load (ConfigService.init persists the corrected config back).
+const normalizeFreeProviderModels = (
   models: NonNullable<NonNullable<AppConfig['providers']>[string]['models']> | undefined,
 ) => models?.map((model) => ({
   ...model,
+  ...getFreeProviderModelCanonical(model.id),
   name: getFreeProviderModelDisplayName(model.id),
 }));
 
@@ -106,7 +112,7 @@ const normalizeSingleProviderConfig = (
   baseUrl: normalizeProviderBaseUrl(providerKey, providerConfig.baseUrl),
   apiFormat: normalizeProviderApiFormat(providerKey, providerConfig.apiFormat),
   models: providerKey === LLM_FREE_PROVIDER_KEY
-    ? normalizeFreeProviderModelNames(providerConfig.models)
+    ? normalizeFreeProviderModels(providerConfig.models)
     : cloneProviderModels(providerConfig.models),
 });
 

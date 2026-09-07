@@ -33,6 +33,50 @@ export function getFreeProviderModelDisplayName(modelId) {
 }
 
 /**
+ * Canonical client-side limits/options for known free-relay model ids. The
+ * relay's bootstrap payload still reports the legacy DeepSeek V3 wire values
+ * for `deepseek-chat` (contextWindow 64000 / maxOutputTokens 4096) while the
+ * relay actually serves deepseek-v4-flash upstream — so the known id mirrors
+ * the deepseek provider's deepseek-v4-flash preset exactly (keep in sync with
+ * DEEPSEEK_DEFAULT_MODELS in ../config.ts). Ids absent from this table keep
+ * whatever the relay reported.
+ */
+const FREE_PROVIDER_MODEL_CANONICAL = {
+  'deepseek-chat': {
+    contextWindow: 1_000_000,
+    maxOutputTokens: 32_768,
+    supportsImage: false,
+    options: { reasoningEffort: 'max', thinking: { type: 'enabled' } },
+  },
+};
+
+/**
+ * Canonical config overrides for a free-relay model id, or null when the id
+ * is unknown (callers then keep the relay-provided values). Returns a fresh
+ * object per call so stored configs never share references with the table.
+ */
+export function getFreeProviderModelCanonical(modelId) {
+  if (typeof modelId !== 'string') {
+    return null;
+  }
+  const canonical = FREE_PROVIDER_MODEL_CANONICAL[modelId];
+  if (!canonical) {
+    return null;
+  }
+  return {
+    contextWindow: canonical.contextWindow,
+    maxOutputTokens: canonical.maxOutputTokens,
+    supportsImage: canonical.supportsImage,
+    options: canonical.options
+      ? {
+          ...canonical.options,
+          thinking: canonical.options.thinking ? { ...canonical.options.thinking } : undefined,
+        }
+      : undefined,
+  };
+}
+
+/**
  * A provider entry counts as provisioned only when bootstrap has filled in
  * connection credentials AND at least one model.
  */

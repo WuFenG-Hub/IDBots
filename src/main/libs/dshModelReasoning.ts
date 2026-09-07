@@ -46,6 +46,14 @@ export interface DshModelReasoningDeclaration {
 // the first-party dsh-llm-deepseek adapter speaks natively.
 const DEEPSEEK_V4_PATTERN = /deepseek-v4(?:[.\-_]|$)/i;
 
+// `deepseek-chat` is the free-quota relay's (metaid-free) wire id for
+// deepseek-v4-flash — the app's own legacy-model migration already treats it
+// as the v4-flash alias (DEEPSEEK_LEGACY_MODEL_MIGRATION_MAP), and pi-ai's
+// installed catalog only lists the v4 ids, so without this alias a relay
+// route would materialize reasoning:false and the effort selector would be
+// dead on the free model.
+const DEEPSEEK_V4_LEGACY_CHAT_ID = 'deepseek-chat';
+
 const DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION: DshModelReasoningDeclaration = {
   reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' },
   compat: {
@@ -110,7 +118,7 @@ export function dshModelReasoningDeclaration(
   apiFormat: 'openai' | 'responses' | 'anthropic',
 ): DshModelReasoningDeclaration | null {
   const bare = bareModelIdOf(modelId);
-  if (DEEPSEEK_V4_PATTERN.test(bare)) {
+  if (DEEPSEEK_V4_PATTERN.test(bare) || bare.toLowerCase() === DEEPSEEK_V4_LEGACY_CHAT_ID) {
     if (apiFormat !== 'openai') return null;
     return DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION;
   }
