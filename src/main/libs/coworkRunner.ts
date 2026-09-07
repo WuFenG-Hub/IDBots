@@ -26,7 +26,7 @@ import {
   writeDshSkillSessionEnvFile,
 } from './dshSkillSessionEnv';
 import { mapDshReasoningEffort } from './dshReasoningEffort';
-import { dshModelReasoningDeclaration } from './dshModelReasoning';
+import { dshModelReasoningDeclaration, undeclaredReasoningRouteWarning } from './dshModelReasoning';
 import { toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
 import {
   CoworkDshSteerWindowClosedError,
@@ -7126,6 +7126,25 @@ export class CoworkRunner extends EventEmitter {
     // any non-off effort would fail the turn outright.
     const effortRidesRoute = officialDeepSeekNative
       || dshModelReasoningDeclaration(route.model, apiFormat) !== null;
+    if (!effortRidesRoute && reasoningEffort != null && reasoningEffort !== '') {
+      // Undeclared family + configured effort = the effort silently drops and
+      // the provider's server default decides thinking. Warn once per route
+      // identity so the next gateway default flip is visible in cowork.log.
+      const warning = undeclaredReasoningRouteWarning({
+        provider: route.provider,
+        model: route.model,
+        apiFormat,
+        effort: reasoningEffort,
+      });
+      if (warning) {
+        coworkLog('WARN', 'dshTurnProviderFromRoute', warning, {
+          provider: route.provider,
+          model: route.model,
+          apiFormat,
+          effort: reasoningEffort,
+        });
+      }
+    }
     return {
       key: officialDeepSeekNative ? 'deepseek-official' : route.provider,
       apiFormat,
