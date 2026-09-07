@@ -1,0 +1,187 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import {
+  claimManagedOrchestratorSession,
+  resolveOrchestratorPermissionReply,
+  buildOrchestratorPermissionPrompt,
+} from '../src/main/services/orchestratorPermissionRelay';
+
+/**
+ * Regression coverage for the orchestrator text-relay channel: orchestrator /
+ * group-task / private-chat (side panel) worker sessions run with
+ * confirmationMode 'text' but had NO relay owner, so host safety gates (skill
+ * install, delete, wallet external transfer) emitted permissionRequests that
+ * were neither visible in any UI nor matched against chat replies — the 60s
+ * watchdog auto-denied them. Run: npx tsx --test tests/orchestratorPermissionRelay.test.ts
+ */
+
+class StubRunner extends EventEmitter {
+  responded: Array<{ requestId: string; result: any }> = [];
+  pending = new Map<string, true>();
+  private relays = new Set<string>();
+
+  registerTextPermissionRelay(id: string) { this.relays.add(id); }
+  unregisterTextPermissionRelay(id: string) { this.relays.delete(id); }
+  hasTextPermissionRelay(id: string) { return this.relays.has(id); }
+  isPermissionPending(requestId: string) { return this.pending.has(requestId); }
+  respondToPermission(requestId: string, result: any) {
+    this.responded.push({ requestId, result });
+    this.pending.delete(requestId);
+  }
+}
+
+function makeStore(lang = 'zh') {
+  const transcript: Array<{ sessionId: string; message: any }> = [];
+  return {
+    transcript,
+    addMessage(sessionId: string, message: any) {
+      const record = { id: `m${transcript.length + 1}`, ...message };
+      transcript.push({ sessionId, message: record });
+      return record;
+    },
+    getAppLanguage: () => lang,
+  };
+}
+
+const installGateRequest = (requestId = 'dsh-policy-1') => ({
+  requestId,
+  toolName: 'skill_tool',
+  toolInput: { reason: 'install_skill requires owner confirmation' },
+});
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const SESSION = 'orch-worker-1';
+
+test('skill-install confirmation question is posted into the managed session transcript', () => {
+  const runner = new StubRunner();
+  const store = makeStore();
+  const seenMessages: Array<[string, unknown]> = [];
+  runner.on('message', (sessionId, message) => seenMessages.push([sessionId, message]));
+
+  runner.pending.set('dsh-policy-1', true);
+  claimManagedOrchestratorSession(runner as never, SESSION, store as never);
+  runner.emit('permissionRequest', SESSION, installGateRequest());
+
+  assert.equal(store.transcript.length, 1, 'question message injected into transcript');
+  const injected = store.transcript[0]!;
+  assert.equal(injected.sessionId, SESSION);
+  assert.equal(injected.message.type, 'system');
+  assert.ok(injected.message.content.includes('安全确认'), 'zh confirmation headline');
+  assert.ok(injected.message.content.includes('skill_tool'), 'requested tool name');
+  assert.ok(injected.message.content.includes('install_skill requires owner confirmation'), 'gate reason as detail');
+  assert.ok(injected.message.content.includes('允许'), 'allow reply instruction');
+  assert.deepEqual(injected.message.metadata.orchestratorPermissionRequest, {
+    requestId: 'dsh-policy-1',
+    toolName: 'skill_tool',
+  });
+  assert.equal(seenMessages.length, 1, 'question also emitted on the message stream');
+  assert.equal(seenMessages[0]![0], SESSION);
+});
+
+test('a following chat message 允许 routes an allow result back to the runner', async () => {
+  const runner = new StubRunner();
+  const store = makeStore();
+  runner.pending.set('dsh-policy-1', true);
+  claimManagedOrchestratorSession(runner as never, SESSION, store as never);
+  runner.emit('permissionRequest', SESSION, installGateRequest());
+
+  const reply = await resolveOrchestratorPermissionReply(runner as never, SESSION, '允许');
+  assert.ok(reply, 'reply handled by the relay');
+  assert.equal(reply!.assistantMessageId, null);
+  assert.ok(reply!.replyText.includes('已允许'), 'canned confirmation reply');
+  assert.equal(runner.responded.length, 1);
+  assert.equal(runner.responded[0]!.requestId, 'dsh-policy-1');
+  assert.equal(runner.responded[0]!.result.behavior, 'allow');
+  assert.deepEqual(runner.responded[0]!.result.updatedInput, installGateRequest().toolInput);
+});
+
+test('拒绝 routes a deny result back to the runner', async () => {
+  const runner = new StubRunner();
+  const store = makeStore();
+  runner.pending.set('dsh-policy-1', true);
+  claimManagedOrchestratorSession(runner as never, SESSION, store as never);
+  runner.emit('permissionRequest', SESSION, installGateRequest());
+
+  const reply = await resolveOrchestratorPermissionReply(runner as never, SESSION, '拒绝');
+  assert.ok(reply);
+  assert.ok(reply!.replyText.includes('已拒绝'));
+  assert.equal(runner.responded[0]!.result.behavior, 'deny');
+});
+
+test('a non-matching reply keeps the confirmation pending', async () => {
+  const runner = new StubRunner();
+  const store = makeStore();
+  runner.pending.set('dsh-policy-1', true);
+  claimManagedOrchestratorSession(runner as never, SESSION, store as never);
+  runner.emit('permissionRequest', SESSION, installGateRequest());
+
+  const reply = await resolveOrchestratorPermissionReply(runner as never, SESSION, '再想想');
+  assert.ok(reply);
+  assert.ok(reply!.replyText.includes('待确认'));
+  assert.equal(runner.responded.length, 0, 'no answer routed');
+});
+
+test('sessions without a relay owner (answered elsewhere) fall through to a normal turn', async () => {
+  const runner = new StubRunner();
+  const store = makeStore();
+  runner.pending.set('dsh-policy-1', true);
+  claimManagedOrchestratorSession(runner as never, SESSION, store as never);
+  runner.emit('permissionRequest', SESSION, installGateRequest());
+
+  // The prompt was answered elsewhere (renderer overlay): the runner no
+  // longer holds the request.
+  runner.pending.delete('dsh-policy-1');
+  const reply = await resolveOrchestratorPermissionReply(runner as never, SESSION, '允许');
+  assert.equal(reply, null, 'stale local record dropped, message flows into a normal turn');
+  assert.equal(runner.responded.length, 0, 'no duplicate respond');
+});
+
+test('unmanaged and IM-owned sessions are not relayed', () => {
+  const runner = new StubRunner();
+  const store = makeStore();
+
+  runner.pending.set('req-a', true);
+  runner.emit('permissionRequest', 'unclaimed-session', installGateRequest('req-a'));
+  assert.equal(store.transcript.length, 0, 'unmanaged session untouched');
+
+  runner.pending.set('req-b', true);
+  claimManagedOrchestratorSession(runner as never, SESSION, store as never);
+  runner.registerTextPermissionRelay(SESSION); // IM/order own this session
+  runner.emit('permissionRequest', SESSION, installGateRequest('req-b'));
+  assert.equal(store.transcript.length, 0, 'relay-owned session skipped');
+});
+
+test('unanswered confirmations auto-deny after the configured window', async () => {
+  const runner = new StubRunner();
+  const store = makeStore();
+  runner.pending.set('dsh-policy-1', true);
+  claimManagedOrchestratorSession(runner as never, SESSION, store as never, { timeoutMs: 15 });
+  runner.emit('permissionRequest', SESSION, installGateRequest());
+
+  await sleep(50);
+  assert.equal(runner.responded.length, 1);
+  assert.equal(runner.responded[0]!.result.behavior, 'deny');
+  assert.match(runner.responded[0]!.result.message, /timed out/);
+});
+
+test('prompt builder surfaces the safety-context tool name for AskUserQuestion gates', () => {
+  const prompt = buildOrchestratorPermissionPrompt({
+    requestId: 'ask-1',
+    toolName: 'AskUserQuestion',
+    toolInput: {
+      context: { requestedToolName: 'Bash', requestedToolInput: { command: 'rm -rf build' } },
+      questions: [{ question: '允许删除任务目录外的路径吗？', options: [{ label: '允许' }, { label: '拒绝' }] }],
+    },
+  }, 'zh');
+  assert.ok(prompt.includes('Bash'), 'safety-context tool name wins over AskUserQuestion');
+  assert.ok(prompt.includes('允许删除任务目录外的路径吗？'), 'question text as detail');
+
+  const en = buildOrchestratorPermissionPrompt({
+    requestId: 'ask-2',
+    toolName: 'skill_tool',
+    toolInput: { reason: 'needs confirmation' },
+  }, 'en');
+  assert.ok(en.includes('A safety confirmation is required'), 'english prompt for en sessions');
+});
