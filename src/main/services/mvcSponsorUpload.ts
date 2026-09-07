@@ -36,10 +36,12 @@ import {
   pickUtxos,
   signMvcAddressMessage,
   signMvcPreparedUserInputs,
+  trafficBalanceBytesOf,
   type MvcSponsorAddressInfo,
   type MvcSponsorDraft,
   type SponsorMvcUtxo,
 } from './mvcSponsorClient';
+import { appendMetaidLog } from './metaidLog';
 import { recordLocalTrafficSpend, resolveSponsorTrafficAccount } from './trafficAccountService';
 
 export {
@@ -265,12 +267,20 @@ async function fallbackSelfPaidForSponsorError(input: {
   quotaBefore?: MvcSponsorAddressInfo;
   advisoryFeeEstimate?: number;
 }): Promise<Record<string, unknown>> {
+  const reason = normalizeSponsorReason((input.error as { reason?: unknown })?.reason, input.fallbackReason);
+  // Self-pay spends the bot's own wallet — never let that happen silently
+  // (the 2026-09-07 outage: exhausted legacy quota forced every traffic-mode
+  // write to self-pay with no trace of why).
+  appendMetaidLog('WARN', 'Sponsored MVC file upload falling back to self-paid', {
+    reason,
+    stage: input.stage,
+  });
   return input.selfPaidUpload({
     attempted: true,
     used: false,
     mode: 'self_paid',
     sponsor: 'mvc_sponsor_v2',
-    reason: normalizeSponsorReason((input.error as { reason?: unknown })?.reason, input.fallbackReason),
+    reason,
     stage: input.stage,
     quotaBefore: input.quotaBefore,
     advisoryFeeEstimate: input.advisoryFeeEstimate,
@@ -342,17 +352,6 @@ export async function uploadMvcSponsorDirectFile(
     });
   }
 
-  if (estimatedMinerFee > 0 && quotaBefore.availableAmount < estimatedMinerFee) {
-    return fallbackSelfPaidForSponsorError({
-      error: { reason: 'insufficient_quota' },
-      selfPaidUpload: input.selfPaidUpload,
-      fallbackReason: 'insufficient_quota',
-      stage: 'address_info',
-      quotaBefore,
-      advisoryFeeEstimate: estimatedMinerFee,
-    });
-  }
-
   let challenge: { challengeId: string; message: string; expiresAt?: string; raw: Record<string, unknown> };
   try {
     challenge = await sponsorClient.getChallenge();
@@ -392,6 +391,35 @@ export async function uploadMvcSponsorDirectFile(
     botMnemonic: input.mnemonic,
     botWalletPath: input.walletPath,
   });
+
+  // Balance preflight, gated on the billing account the pre will actually use.
+  // With a traffic account the upload bills account bytes, so the legacy
+  // sponsor quota (availableAmount) is irrelevant — gating on it silently
+  // self-paid every traffic-mode upload once a bot's legacy quota ran out
+  // (2026-09-07). estimatedMinerFee is computed at feeRate 1, so it doubles
+  // as the tx byte-size estimate for the traffic-bytes comparison.
+  if (trafficAccount) {
+    const trafficBalanceBytes = trafficBalanceBytesOf(quotaBefore);
+    if (trafficBalanceBytes !== undefined && estimatedMinerFee > 0 && trafficBalanceBytes < estimatedMinerFee) {
+      return fallbackSelfPaidForSponsorError({
+        error: { reason: 'insufficient_traffic' },
+        selfPaidUpload: input.selfPaidUpload,
+        fallbackReason: 'insufficient_traffic',
+        stage: 'address_info',
+        quotaBefore,
+        advisoryFeeEstimate: estimatedMinerFee,
+      });
+    }
+  } else if (estimatedMinerFee > 0 && quotaBefore.availableAmount < estimatedMinerFee) {
+    return fallbackSelfPaidForSponsorError({
+      error: { reason: 'insufficient_quota' },
+      selfPaidUpload: input.selfPaidUpload,
+      fallbackReason: 'insufficient_quota',
+      stage: 'address_info',
+      quotaBefore,
+      advisoryFeeEstimate: estimatedMinerFee,
+    });
+  }
 
   let pre: {
     preparedTxHex: string;

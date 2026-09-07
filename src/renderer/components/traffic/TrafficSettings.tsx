@@ -601,7 +601,10 @@ const TrafficSettings: React.FC = () => {
     window.setTimeout(() => setRechargeNotice(''), 2500);
   };
 
-  const visibleDailyRows = dailyRows ?? dailyFallbackRows ?? [];
+  // Usage table always renders newest-first, regardless of backend row order
+  // (the local-journal fallback aggregates ascending; both get sorted here).
+  const visibleDailyRows = [...(dailyRows ?? dailyFallbackRows ?? [])]
+    .sort((a, b) => b.date.localeCompare(a.date) || a.botAddress.localeCompare(b.botAddress));
   // Prefer the server claimable flag; also treat enabled && !claimed as
   // claimable (same backend formula) so a missing/false claimable field
   // cannot hide the button. If status failed after the account exists,

@@ -165,13 +165,15 @@ test('uploadMvcSponsorDirectFile falls back to self-paid when sponsor service is
 test('uploadMvcSponsorDirectFile falls back to self-paid when sponsor pre rejects with insufficient quota', async () => {
   const mvcAddress = '1K9eUW4vED3qfWmr4Fcre64sU7D38QM1tX';
   const fetchImpl = createFetchStub([
+    // availableAmount must clear the local legacy-quota preflight so the flow
+    // actually reaches the pre stage this test exercises.
     ['/v2/assist/gas/address/info', {
       exists: true,
-      balance: 1,
-      grantedAmount: 1,
+      balance: 5000,
+      grantedAmount: 5000,
       reservedAmount: 0,
       spentAmount: 0,
-      availableAmount: 1,
+      availableAmount: 5000,
       status: 'active',
     }],
     ['/v2/assist/gas/mvc/challenge', { challengeId: 'challenge-1', message: 'sign this message' }],
