@@ -364,6 +364,19 @@ function normalizeAddressInfo(record: Record<string, unknown>): MvcSponsorAddres
   };
 }
 
+/**
+ * Traffic-account byte balance reported by address/info (`traffic` block), or
+ * undefined when the backend does not include one. Traffic billing draws from
+ * this balance, NOT from the legacy sponsor quota (availableAmount).
+ */
+export function trafficBalanceBytesOf(info: MvcSponsorAddressInfo): number | undefined {
+  const raw = info.raw?.traffic;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const value = Number(record.balanceBytes ?? record.balance_bytes);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 function normalizeChallenge(record: Record<string, unknown>): {
   challengeId: string;
   message: string;

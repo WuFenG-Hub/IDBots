@@ -38,6 +38,7 @@ import { runMvcSponsorCreatePin, type CreatePinFeeAssistMetadata } from './mvcSp
 import { recordChainWriteFromCreatePin } from '../libs/chainWriteLedger';
 import { getConfiguredTrafficApiBase, resolveSponsorTrafficAccount } from './trafficAccountService';
 import type { MvcSponsorTrafficAccount } from './mvcSponsorClient';
+import { appendMetaidLog } from './metaidLog';
 import {
   getTrafficFallbackPolicy,
   getTrafficPinMode,
@@ -46,20 +47,6 @@ import {
 import { resolveCreatePinFeeRate } from './feeRateStore';
 
 const MANAPI_BASE = 'https://manapi.metaid.io';
-
-const METAID_RPC_LOG = 'metaid-rpc.log';
-
-function appendMetaidLog(level: string, message: string, details?: object): void {
-  try {
-    const { app } = require('electron');
-    const logDir = app.getPath('userData');
-    const logPath = path.join(logDir, METAID_RPC_LOG);
-    const line = `[${new Date().toISOString()}] [${level}] ${message}${details ? '\n' + JSON.stringify(details, null, 2) : ''}\n`;
-    fs.appendFileSync(logPath, line);
-  } catch {
-    // Ignore if app not ready
-  }
-}
 
 function getErrorMessage(err: unknown): string {
   if (err != null && typeof err === 'object' && 'message' in err && typeof (err as Error).message === 'string') {

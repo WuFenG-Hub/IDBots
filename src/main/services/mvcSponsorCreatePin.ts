@@ -18,10 +18,12 @@ import {
   isNoUserUtxoDraftError,
   signMvcAddressMessage,
   signMvcPreparedUserInputs,
+  trafficBalanceBytesOf,
   type MvcSponsorAddressInfo,
   type MvcSponsorTrafficAccount,
   type MvcSponsorV2Client,
 } from './mvcSponsorClient';
+import { appendMetaidLog } from './metaidLog';
 import { recordLocalTrafficSpend } from './trafficAccountService';
 import type {
   MvcSponsorFeeAssistMetadata,
@@ -191,6 +193,16 @@ export async function runMvcSponsorCreatePin(
       quotaBefore: params.quotaBefore,
       advisoryFeeEstimate: params.advisoryFeeEstimate,
     };
+    // Self-pay spends the bot's own wallet — never let that happen silently
+    // (the 2026-09-07 outage: exhausted legacy quota forced every traffic-mode
+    // pin to self-pay with no trace of why).
+    appendMetaidLog('WARN', 'Sponsored MVC createPin falling back to self-paid', {
+      metabotId: input.metabotId,
+      mvcAddress: input.mvcAddress,
+      reason: params.reason,
+      stage: params.stage,
+      fallbackPolicy: input.fallbackPolicy,
+    });
     if (input.fallbackPolicy === 'strict') {
       throw new TrafficInsufficientError({ reason: params.reason, stage: params.stage, feeAssist });
     }
@@ -229,14 +241,6 @@ export async function runMvcSponsorCreatePin(
   }
 
   const advisoryFeeEstimate = Math.ceil(draft.estimatedTxSize * input.feeRate);
-  if (advisoryFeeEstimate > 0 && quotaBefore.availableAmount < advisoryFeeEstimate) {
-    return fallbackToSelfPaid({
-      reason: 'insufficient_quota',
-      stage: 'address_info',
-      quotaBefore,
-      advisoryFeeEstimate,
-    });
-  }
 
   let challenge: SponsorChallenge;
   try {
@@ -264,6 +268,29 @@ export async function runMvcSponsorCreatePin(
 
   const trafficAccount = input.trafficAccount
     ?? await deps.resolveTrafficAccount?.({ challengeId: challenge.challengeId });
+
+  // Balance preflight, gated on the billing account the pre will actually use.
+  // With a traffic account the pin bills account bytes, so the legacy sponsor
+  // quota (availableAmount) is irrelevant — gating on it silently self-paid
+  // every traffic-mode pin once a bot's legacy quota ran out (2026-09-07).
+  if (trafficAccount) {
+    const trafficBalanceBytes = trafficBalanceBytesOf(quotaBefore);
+    if (trafficBalanceBytes !== undefined && draft.estimatedTxSize > 0 && trafficBalanceBytes < draft.estimatedTxSize) {
+      return fallbackToSelfPaid({
+        reason: 'insufficient_traffic',
+        stage: 'address_info',
+        quotaBefore,
+        advisoryFeeEstimate,
+      });
+    }
+  } else if (advisoryFeeEstimate > 0 && quotaBefore.availableAmount < advisoryFeeEstimate) {
+    return fallbackToSelfPaid({
+      reason: 'insufficient_quota',
+      stage: 'address_info',
+      quotaBefore,
+      advisoryFeeEstimate,
+    });
+  }
 
   let pre: SponsorPreResult;
   try {

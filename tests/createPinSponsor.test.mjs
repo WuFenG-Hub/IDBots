@@ -403,7 +403,7 @@ test('runMvcSponsorCreatePin classifies draft balance failures as no_user_utxo',
   assert.equal(result.feeAssist.reason, 'no_user_utxo');
 });
 
-test('runMvcSponsorCreatePin falls back with insufficient_quota before challenge when quota is too low', async () => {
+test('runMvcSponsorCreatePin falls back with insufficient_quota when legacy quota is too low and no traffic account resolves', async () => {
   const draftResult = buildDraftWorkerResult();
   const fetchImpl = createFetchStub([
     ['/v2/assist/gas/address/info', {
@@ -441,7 +441,113 @@ test('runMvcSponsorCreatePin falls back with insufficient_quota before challenge
   assert.equal(broadcastState.calls, 1);
   assert.equal(result.feeAssist.reason, 'insufficient_quota');
   assert.equal(result.feeAssist.stage, 'address_info');
-  assert.equal(callsTo(fetchImpl, '/v2/assist/gas/mvc/challenge').length, 0);
+  // The legacy-quota gate now runs after challenge + traffic-account
+  // resolution (traffic billing must not be gated on legacy quota), so the
+  // challenge call happens before the fallback — but pre is never reached.
+  assert.equal(callsTo(fetchImpl, '/v2/assist/gas/mvc/challenge').length, 1);
+  assert.equal(callsTo(fetchImpl, '/v2/assist/gas/mvc/pre').length, 0);
+});
+
+test('runMvcSponsorCreatePin bills the traffic account even when the legacy quota is exhausted', async () => {
+  // Regression (2026-09-07): a bot whose legacy sponsor quota was exhausted
+  // (availableAmount ~ 0) silently self-paid every traffic-mode pin because
+  // the legacy-quota preflight ran before the traffic account was consulted.
+  const draftResult = buildDraftWorkerResult();
+  let preBody = null;
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/gas/address/info', {
+      exists: true,
+      balance: 1,
+      grantedAmount: 1,
+      reservedAmount: 0,
+      spentAmount: 0,
+      availableAmount: 1,
+      status: 'active',
+      traffic: { accountId: 'gmid-account', balanceBytes: 1_000_000, reservedBytes: 0 },
+    }],
+    CHALLENGE_ROUTE,
+    ['/v2/assist/gas/mvc/pre', (init) => {
+      preBody = JSON.parse(init.body);
+      return {
+        preparedTxHex: draftResult.draft.unsignedTxHex,
+        orderId: 'order-1',
+        minerFee: 100,
+        userInputIndexes: [0],
+      };
+    }],
+    ['/v2/assist/gas/mvc/commit', { txId: COMMIT_TXID, txSize: 300, minerFee: 100 }],
+  ]);
+  const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
+  const trafficAccount = { accountId: 'gmid-account', authSignature: 'YXV0aA==', timestamp: 1730000000 };
+
+  const result = await runMvcSponsorCreatePin(
+    {
+      metabotId: 9106,
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: TEST_ADDRESS,
+      feeRate: 1,
+      fallbackPolicy: 'selfpay',
+      baseUrl: 'https://sponsor.test',
+      fetchImpl,
+    },
+    {
+      runDraftWorker: async () => draftResult,
+      runBroadcastWorker,
+      recordSpentOutpoints: () => {},
+      replacePendingFundingUtxos: () => {},
+      resolveTrafficAccount: async () => trafficAccount,
+    },
+  );
+
+  assert.equal(broadcastState.calls, 0);
+  assert.ok(preBody);
+  assert.deepEqual(preBody.trafficAccount, trafficAccount);
+  assert.equal(result.feeAssist.used, true);
+  assert.deepEqual(result.txids, [COMMIT_TXID]);
+});
+
+test('runMvcSponsorCreatePin falls back with insufficient_traffic when the traffic account bytes are too low', async () => {
+  const draftResult = buildDraftWorkerResult();
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/gas/address/info', {
+      exists: true,
+      balance: 5000,
+      grantedAmount: 5000,
+      reservedAmount: 0,
+      spentAmount: 0,
+      availableAmount: 5000,
+      status: 'active',
+      traffic: { accountId: 'gmid-account', balanceBytes: 0, reservedBytes: 0 },
+    }],
+    CHALLENGE_ROUTE,
+  ]);
+  const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
+
+  const result = await runMvcSponsorCreatePin(
+    {
+      metabotId: 9107,
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: TEST_ADDRESS,
+      feeRate: 1,
+      fallbackPolicy: 'selfpay',
+      baseUrl: 'https://sponsor.test',
+      fetchImpl,
+    },
+    {
+      runDraftWorker: async () => draftResult,
+      runBroadcastWorker,
+      recordSpentOutpoints: () => {},
+      replacePendingFundingUtxos: () => {},
+      resolveTrafficAccount: async () => ({ accountId: 'gmid-account', authSignature: 'YXV0aA==', timestamp: 1730000000 }),
+    },
+  );
+
+  assert.equal(broadcastState.calls, 1);
+  assert.equal(result.feeAssist.reason, 'insufficient_traffic');
+  assert.equal(result.feeAssist.stage, 'address_info');
+  assert.equal(callsTo(fetchImpl, '/v2/assist/gas/mvc/pre').length, 0);
 });
 
 test('runMvcSponsorCreatePin falls back on pre quota and traffic insufficiency', async () => {
@@ -568,7 +674,8 @@ test('runMvcSponsorCreatePin throws TrafficInsufficientError under the strict po
         spentAmount: 0,
         availableAmount: 1,
         status: 'active',
-      }]],
+      }],
+      CHALLENGE_ROUTE],
       reason: 'insufficient_quota',
     },
     {
