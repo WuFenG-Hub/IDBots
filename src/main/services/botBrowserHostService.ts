@@ -213,7 +213,7 @@ function buildQaQuestionResource(input: {
   uri: string;
   detail: QaQuestionDetail;
   runUrl: string;
-}): Record<string, unknown> {
+}): BrowserResolveResult {
   const question = input.detail.question;
   const publisher = question.publisher ?? { globalMetaId: '', metaId: '', name: '', avatar: '' };
   return {
@@ -222,7 +222,9 @@ function buildQaQuestionResource(input: {
     resourceType: 'metaapp',
     title: question.title || question.pinId,
     owner: {
-      kind: 'qa-question-publisher',
+      // The page IS a MetaApp render (the bundled qanda app), so the
+      // metaapp-publisher kind applies; the question author rides in the name.
+      kind: 'metaapp-publisher',
       globalMetaId: publisher.globalMetaId,
       name: publisher.name || publisher.globalMetaId || 'Unknown publisher',
       verificationState: 'partial',
@@ -580,7 +582,7 @@ export function createBotBrowserHostService(
    */
   const tryResolveQaQuestionResource = async (
     uri: string,
-  ): Promise<Record<string, unknown> | null> => {
+  ): Promise<BrowserResolveResult | null> => {
     if (!input.resolveQaQuestion || !input.resolveQaAppUrl) return null;
     const match = QA_QUESTION_PIN_URI_RE.exec(text(uri));
     if (!match) return null;
@@ -607,7 +609,7 @@ export function createBotBrowserHostService(
     async resolveResource(resolveInput) {
       const qaResource = await tryResolveQaQuestionResource(resolveInput.uri);
       if (qaResource) {
-        return toHostResult(browserCommandSuccess(qaResource) as CoreBrowserCommandResult<unknown>);
+        return toHostResult(browserCommandSuccess(qaResource));
       }
       const resolvedConfig = resolveHostBrowserConfig(browserConfig, env);
       const nameAliasProviders = createNameAliasProviders({
