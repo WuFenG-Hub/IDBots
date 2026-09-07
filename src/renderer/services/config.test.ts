@@ -202,6 +202,50 @@ test('mergeProvidersConfig rewrites free-provider model names to display names',
   assert.equal(deepseekModels[0].name, 'deepseek-chat');
 });
 
+test('mergeProvidersConfig rewrites known free-provider models to the canonical deepseek-v4-flash preset', () => {
+  // Installs provisioned while the relay reported the legacy DeepSeek V3 wire
+  // values store contextWindow 64000 / maxOutputTokens 4096; normalization
+  // must rewrite the known id to the canonical deepseek-v4-flash preset (1M
+  // context, 32K output, thinking on at max effort) so the cowork context
+  // ring and effort selector behave exactly like the deepseek provider's
+  // deepseek-v4-flash.
+  const stored = makeConfig({
+    'metaid-free': {
+      enabled: true,
+      apiKey: 'mrk_x',
+      baseUrl: 'https://relay.example',
+      apiFormat: 'openai',
+      models: [
+        { id: 'deepseek-chat', name: 'deepseek-chat', contextWindow: 64_000, maxOutputTokens: 4_096, supportsImage: false },
+        { id: 'future-relay-model', name: 'future-relay-model', contextWindow: 64_000, maxOutputTokens: 4_096 },
+      ],
+    },
+    deepseek: {
+      enabled: true,
+      apiKey: 'sk-ds',
+      baseUrl: 'https://api.deepseek.com',
+      apiFormat: 'openai',
+      models: [{ id: 'deepseek-chat', name: 'deepseek-chat', contextWindow: 64_000, supportsImage: false }],
+    },
+  });
+
+  const merged = mergeProvidersConfig(undefined, stored.providers);
+  const freeModels = merged!['metaid-free']!.models!;
+  assert.equal(freeModels[0].contextWindow, 1_000_000);
+  assert.equal(freeModels[0].maxOutputTokens, 32_768);
+  assert.equal(freeModels[0].supportsImage, false);
+  assert.equal(freeModels[0].options?.reasoningEffort, 'max');
+  assert.deepEqual(freeModels[0].options?.thinking, { type: 'enabled' });
+  // Unknown relay ids keep the relay-reported values untouched.
+  assert.equal(freeModels[1].contextWindow, 64_000);
+  assert.equal(freeModels[1].maxOutputTokens, 4_096);
+  assert.equal(freeModels[1].options, undefined);
+  // A user-configured provider with the same model id keeps its stored values.
+  const deepseekModels = merged!.deepseek!.models!;
+  assert.equal(deepseekModels[0].contextWindow, 64_000);
+  assert.equal(deepseekModels[0].options, undefined);
+});
+
 test('mergeProvidersConfig rewrites the legacy free-provider name to the canonical label', () => {
   // Installs provisioned before the IDBots-Free rename still store
   // "MetaID Free" as the provider name; normalization must force the

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   LLM_FREE_PROVIDER_KEY,
   LLM_RELAY_WELCOME_BOT_ID_KEY,
+  getFreeProviderModelCanonical,
   getFreeProviderModelDisplayName,
   isFreeProviderConfigured,
   planFreeQuotaProvisioning,
@@ -19,6 +20,29 @@ test('getFreeProviderModelDisplayName maps relay wire ids to product names', () 
   assert.equal(getFreeProviderModelDisplayName('deepseek-chat'), 'deepseek-v4-flash');
   assert.equal(getFreeProviderModelDisplayName('another-relay-model'), 'another-relay-model');
   assert.equal(getFreeProviderModelDisplayName(undefined), undefined);
+});
+
+test('getFreeProviderModelCanonical mirrors the deepseek-v4-flash preset for the relay wire id', () => {
+  // The relay bootstrap payload still reports the legacy V3 wire values
+  // (64K context / 4K output) for deepseek-chat while actually serving
+  // deepseek-v4-flash; the canonical config must match the deepseek
+  // provider's deepseek-v4-flash preset (1M context, 32K output, thinking on
+  // at max effort).
+  const canonical = getFreeProviderModelCanonical('deepseek-chat');
+  assert.ok(canonical);
+  assert.equal(canonical.contextWindow, 1_000_000);
+  assert.equal(canonical.maxOutputTokens, 32_768);
+  assert.equal(canonical.supportsImage, false);
+  assert.equal(canonical.options.reasoningEffort, 'max');
+  assert.deepEqual(canonical.options.thinking, { type: 'enabled' });
+  // Fresh object per call: mutating the result must not pollute the table.
+  canonical.options.thinking.type = 'disabled';
+  assert.equal(getFreeProviderModelCanonical('deepseek-chat').options.thinking.type, 'enabled');
+});
+
+test('getFreeProviderModelCanonical returns null for unknown relay ids', () => {
+  assert.equal(getFreeProviderModelCanonical('another-relay-model'), null);
+  assert.equal(getFreeProviderModelCanonical(undefined), null);
 });
 
 test('isFreeProviderConfigured requires credentials and models', () => {

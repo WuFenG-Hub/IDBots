@@ -14,6 +14,10 @@ test('deepseek-v4 family declares the official chat-completions dialect, vendor 
     'deepseek-v4-pro',
     'deepseek-v4-flash-vision-exp',
     'deepseek/deepseek-v4-flash',
+    // The free-quota relay's (metaid-free) wire id for deepseek-v4-flash;
+    // absent from pi-ai's installed catalog, so the declaration is what keeps
+    // the effort selector alive on the free model.
+    'deepseek-chat',
   ]) {
     const declaration = dshModelReasoningDeclaration(id, 'openai');
     assert.ok(declaration, id);
@@ -34,6 +38,8 @@ test('deepseek-v4 family declares the official chat-completions dialect, vendor 
 test('deepseek stays chat-completions-only; anthropic stays undeclared for every family', () => {
   assert.equal(dshModelReasoningDeclaration('deepseek-v4-flash', 'responses'), null);
   assert.equal(dshModelReasoningDeclaration('deepseek-v4-flash', 'anthropic'), null);
+  assert.equal(dshModelReasoningDeclaration('deepseek-chat', 'responses'), null);
+  assert.equal(dshModelReasoningDeclaration('deepseek-chat', 'anthropic'), null);
   assert.equal(dshModelReasoningDeclaration('glm-5.3-flash', 'anthropic'), null);
 })
 

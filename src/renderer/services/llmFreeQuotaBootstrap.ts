@@ -22,6 +22,7 @@ import {
   LLM_FREE_PROVIDER_KEY,
   LLM_RELAY_WELCOME_BOT_ID_KEY,
   FREE_PROVIDER_DISPLAY_NAME,
+  getFreeProviderModelCanonical,
   getFreeProviderModelDisplayName,
   isFreeProviderConfigured,
   planFreeQuotaProvisioning,
@@ -76,6 +77,10 @@ async function provisionProviderConfig(result: LlmRelayBootstrapResult): Promise
     name: getFreeProviderModelDisplayName(model.id),
     contextWindow: model.contextWindow,
     maxOutputTokens: model.maxOutputTokens,
+    // Known relay ids (deepseek-chat = deepseek-v4-flash upstream) override
+    // the relay's stale wire values with the canonical deepseek-provider
+    // preset; unknown ids keep the relay-reported fields untouched.
+    ...getFreeProviderModelCanonical(model.id),
   }));
   await configService.updateConfig({
     providers: {
