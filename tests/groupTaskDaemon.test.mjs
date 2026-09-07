@@ -2554,11 +2554,15 @@ test('#14 closing re-assert (single-commander): a straggler after review entry t
       senderName: 'Coder Bot', content: 'final build passed, uploading', chainTimestamp: 103,
     });
     await h.loop.runTick();
-    assert.equal(
-      h.sends.filter((s) => s.metabotId === 1).length,
-      0,
-      'no host re-assert line after the straggler — the host is never a speaker',
+    // EP33 P1②: monitor-derived supervisor hints recorded before review may
+    // now be ANSWERED by the chair in review (the chair speaks there) — that
+    // is bot speech, not a host re-assert. The STRAGGLER itself must trigger
+    // no closing line and no re-assert of any kind.
+    assert.ok(
+      !h.sends.some((s) => /进入验收|进入验收阶段|closing/i.test(String(s.content))),
+      'no closing/re-assert line — the host is never a speaker',
     );
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
   } finally {
     h.cleanup();
@@ -8770,8 +8774,8 @@ test('task #66 A: an empty final reply after mid-turn group_chat sends is a DELI
 
 test('task #66 A: the bootstrap planning turn yields to a chair that already dispatched in its own voice', async () => {
   const logs = [];
-  // The planning-turn LLM sees the group log where the chair already
-  // dispatched (task #66 shape) and correctly answers [NO_REPLY].
+  // The minimal directive asks only for what is missing; the LLM correctly
+  // answers [NO_REPLY] (task #66 shape: everything was already delivered).
   const h = await createHarness({
     emitLog: (message) => logs.push(message),
     deps: { performChat: async () => '[NO_REPLY]' },
@@ -8788,14 +8792,14 @@ test('task #66 A: the bootstrap planning turn yields to a chair that already dis
 
     assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1', 'planning marked complete');
     assert.ok(
-      logs.some((line) => line.includes('already dispatched in its own voice')),
-      'the bootstrap short-circuits without burning attempts',
+      logs.some((line) => line.includes('planning bootstrap completed minimally')),
+      'the minimal path ran without burning attempts',
     );
     assert.ok(
       !logs.some((line) => line.includes('planning turn failed')),
       'no attempt budget consumed',
     );
-    // The daemon posts no plan of its own — the chair's dispatch stands.
+    // Nothing was missing — no duplicate content posted.
     assert.equal(h.sends.length, 0);
   } finally {
     h.cleanup();
@@ -8868,3 +8872,74 @@ test('task #66 ②: the chair playbook carries the verification-economy rule', (
   assert.match(prompt, /Do NOT re-download and re-hash what a host verification fact or a worker-supplied checksum already confirms/);
   assert.match(prompt, /SEMANTIC layer/);
 });
+
+// ---------------------------------------------------------------------------
+// EP33 fixes: P1② review-phase supervision, P2 planning dedupe
+// ---------------------------------------------------------------------------
+
+test('EP33 P1②: a review-phase supervisor nudge wakes the chair (reopen hatch); checkpoint still defers', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.groupTaskStore.updateTaskStatus(task.id, 'review');
+    h.groupTaskStore.addSupervisorSignal({
+      taskId: task.id, kind: 'nudge', note: 'defect found in acceptance: zip URI missing i0 suffix', target: 'Coder Bot',
+    });
+
+    await h.loop.runTick();
+
+    const signals = h.groupTaskStore.listSupervisorSignals(task.id);
+    assert.equal(signals[0].processedAt != null, true, 'review nudge is ANSWERED, not deferred forever');
+    assert.ok(h.sends.some((send) => send.metabotId === 1), 'the chair spoke in its own voice');
+    assert.ok(
+      !h.sends.some((send) => /GROUP_TASK_NOTICE/.test(send.content)),
+      'still no host-authored group notice (single-commander)',
+    );
+
+    // An open checkpoint still defers (the owner is mid-decision).
+    const h2 = await createHarness();
+    const task2 = h2.createTask([2]);
+    h2.groupTaskStore.updateTaskStatus(task2.id, 'review');
+    h2.groupTaskStore.openCheckpoint({ taskId: task2.id, topic: 'draft approval', msgPinId: 'pin-cp' });
+    h2.groupTaskStore.addSupervisorSignal({
+      taskId: task2.id, kind: 'nudge', note: 'check while checkpoint open',
+    });
+    await h2.loop.runTick();
+    assert.equal(h2.groupTaskStore.listSupervisorSignals(task2.id)[0].processedAt, null, 'checkpoint defers the supervisor turn');
+    h2.cleanup();
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('EP33 P2: planning bootstrap yields to a chair that already opened the task (minimal turn, no duplicate opening)', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3], { activate: false }); // planning
+    // The owner's Twin opened the task manually: voting kickoff mentioning the
+    // workers, members voted — exactly EP33's shape.
+    insertGroupMessage(h.db, {
+      pinId: 'twin-open-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '【第33期选题投票】候选池发布，请全员投票：A xxx / B yyy',
+      mention: ['gmid-w2', 'gmid-w3'],
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1', 'bootstrap completed');
+    assert.ok(
+      logs.some((line) => line.includes('planning bootstrap completed minimally')),
+      'the minimal path ran',
+    );
+    assert.ok(
+      !h.sends.some((send) => send.metabotId === 1 && /欢迎|welcome|候选/i.test(send.content)),
+      'no duplicate opening content',
+    );
+    assert.ok(h.sends.filter((send) => send.metabotId === 1).length <= 1, 'at most one minimal chair post');
+  } finally {
+    h.cleanup();
+  }
+});
+

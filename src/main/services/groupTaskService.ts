@@ -2715,6 +2715,23 @@ export async function closeGroupTask(
   if (opts.status !== 'done' && opts.status !== 'cancelled') {
     throw new Error(`closeGroupTask status must be 'done' or 'cancelled'`);
   }
+  // EP33 / P1 close-out: the daemon's supervisor-signal sweeper only runs for
+  // non-terminal tasks, so pending nudge/flag rows used to stay unprocessed
+  // forever once the task closed (EP33 signals #62/#63). Close them here with
+  // a null pin (no chair answer) so the ledger never dangles.
+  try {
+    const pending = getGroupTaskStore()
+      .listPendingSupervisorSignals(taskId)
+      .filter((signal) => signal.kind === 'nudge' || signal.kind === 'flag');
+    if (pending.length > 0) {
+      getGroupTaskStore().markSupervisorSignalsProcessed(pending.map((signal) => signal.id), null);
+    }
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Pending supervisor-signal close-out failed for task ${taskId}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (opts.reason?.trim()) {
     console.log(`[GroupTask] Closing task ${taskId} as ${opts.status}: ${opts.reason.trim()}`);
   }
