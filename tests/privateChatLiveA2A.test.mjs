@@ -382,6 +382,12 @@ test('private chat prompt includes recent A2A context and topic-ending policy', 
   assert.match(prompt, /coherent topic/i);
   assert.match(prompt, /do not need to reply to every message/i);
   assert.match(prompt, /latest meaningful message/i);
+  // Output hygiene (2026-09-07 A2A leak): the reply goes on-chain verbatim,
+  // so meta-decisions must stay out of the visible text.
+  assert.match(prompt, /delivered to the peer exactly as written/i);
+  assert.match(prompt, /delivered to the peer on-chain verbatim/i);
+  assert.match(prompt, /make the judgment calls in this policy \(whether to reply, wrapping up, saying bye\) silently/i);
+  assert.match(prompt, /leaks your internal state to the peer/i);
   assert.match(prompt, /Thinking\.\.\./);
   assert.match(prompt, /\.\.\.\./);
   assert.match(prompt, /say exactly "bye"/i);
