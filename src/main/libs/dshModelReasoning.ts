@@ -84,10 +84,12 @@ const GLM_CHAT_COMPLETIONS_DECLARATION: DshModelReasoningDeclaration = {
 // non-streaming, with tools and ~200KB payloads). `off` cannot disable
 // thinking on this wire (no disable parameter), so it keeps the send-nothing
 // shape: off → null → absent from the thinkingLevelMap → provider default.
+// Compat: only fields the RESPONSES_COMPAT_GATE offers are settable —
+// supportsStore and the chat-completions dialect knobs are completions-only
+// and fail plugin load on this wire.
 const GLM_RESPONSES_DECLARATION: DshModelReasoningDeclaration = {
   reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'high' },
   compat: {
-    supportsStore: false,
     supportsDeveloperRole: false,
   },
 };
