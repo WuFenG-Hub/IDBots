@@ -15,7 +15,7 @@ Review the acting Bot, action target and impact, edit the instruction, and confi
 
 `BotActionCard` accepts a versioned request, initial confirmation/receipt and asynchronous confirmation and output callbacks. Mount a new request with a new React key. The example adapter uses localStorage; production must persist confirmations and receipts in the session backend and deduplicate by session, request and version before continuing a model turn. Client-side gating alone does not guarantee exactly-once execution across windows or crashes.
 
-The production Cowork tool renderer, DSH service, BotBrowser router and model tool registration are not connected yet. The successful receipt is explicitly fixture data. The next implementation step is a validated Bot action envelope, durable confirmation/receipt IPC, session-bound rendering, action execution and trusted BotBrowser handoff. The existing permission/question flow remains separate.
+The production Cowork tool renderer, DSH service, BotBrowser router and model tool registration are not connected yet. The successful receipt is explicitly fixture data. The preview now separates intent confirmation from the simulated `allowed-once` approval step; production must replace that button with the existing permission panel and DSH `idbots/approval/respond` flow. The next implementation step is a validated Bot action envelope, durable confirmation/receipt IPC, session-bound rendering, action execution and trusted BotBrowser handoff. The existing permission/question flow remains separate.
 
 ## Verification
 

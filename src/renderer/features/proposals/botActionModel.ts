@@ -1,5 +1,5 @@
 export type BotActionRisk = 'local' | 'external' | 'onchain';
-export type BotActionStatus = 'awaiting_confirmation' | 'executing' | 'succeeded' | 'failed';
+export type BotActionStatus = 'awaiting_confirmation' | 'awaiting_tool_approval' | 'executing' | 'succeeded' | 'failed';
 
 export interface BotActionRequest {
   id: string;
