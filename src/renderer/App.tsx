@@ -6,6 +6,7 @@ import Sidebar from './components/Sidebar';
 import Toast from './components/Toast';
 import WindowTitleBar from './components/window/WindowTitleBar';
 import { CoworkView } from './components/cowork';
+import CoworkPermissionOverlay from './components/cowork/CoworkPermissionOverlay';
 import { MetaAppsView } from './components/metaapps';
 import { ScheduledTasksView } from './components/scheduledTasks';
 import { GroupTasksView, NewGroupTaskModal } from './components/groupTasks';
@@ -126,6 +127,13 @@ const App: React.FC = () => {
   const dispatch = useDispatch();
   const selectedModel = useSelector((state: RootState) => state.model.selectedModel);
   const currentSessionId = useSelector((state: RootState) => state.cowork.currentSessionId);
+
+  // Register cowork stream listeners at app level: permission prompts can
+  // arrive while the user is in Bot Browser or any non-cowork view, and they
+  // must enqueue even when CoworkView (the usual init site) never mounts.
+  useEffect(() => {
+    void coworkService.init();
+  }, []);
   const pendingConsents = useSelector((state: RootState) => state.agentGame.pendingConsents);
   const pendingConsent = pendingConsents[0] ?? null;
   const isWindows = window.electron.platform === 'win32';
@@ -1211,6 +1219,9 @@ const App: React.FC = () => {
       {toastMessage && (
         <Toast message={toastMessage} onClose={() => setToastMessage(null)} />
       )}
+      <CoworkPermissionOverlay
+        inlineSessionId={mainView === 'cowork' && showHomeSurface ? currentSessionId : null}
+      />
       {isNewGroupTaskOpen && (
         <NewGroupTaskModal
           onClose={() => setIsNewGroupTaskOpen(false)}

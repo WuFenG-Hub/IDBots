@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { shouldForwardCoworkStreamEvent } = await import('../dist-electron/services/coworkStreamForwarding.js');
+// The electron compile output lives under dist-electron/main/ (tsc rootDir=src
+// since the src/main+src/renderer split). Probe the current layout first and
+// fall back to the legacy flat path for older checkouts.
+const forwardingModule = await import('../dist-electron/main/services/coworkStreamForwarding.js')
+  .catch(() => import('../dist-electron/services/coworkStreamForwarding.js'));
+const { shouldForwardCoworkStreamEvent } = forwardingModule;
 
 test('shouldForwardCoworkStreamEvent suppresses hidden internal sessions', () => {
   const store = {

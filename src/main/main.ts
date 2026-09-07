@@ -5972,9 +5972,12 @@ const getCoworkRunner = () => {
         && request?.toolName !== 'AskUserQuestion') {
         return;
       }
-      if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
-        return;
-      }
+      // Unlike stream events, permission prompts are forwarded regardless of
+      // session-list visibility: the owner still has to answer prompts raised
+      // by hidden or background sessions, and dropping them here silently
+      // burns the 60s watchdog into an automatic denial. The renderer's
+      // global permission overlay renders prompts for sessions that have no
+      // inline composer seat.
       const safeRequest = sanitizePermissionRequestForIpc(request);
       const windows = BrowserWindow.getAllWindows();
       windows.forEach(win => {
