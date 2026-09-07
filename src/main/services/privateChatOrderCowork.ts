@@ -194,6 +194,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
     const visibleSessionId = this.getDisplaySessionId(sessionId, request);
     this.injectProcessingNotice(visibleSessionId, request);
     this.sessionIds.add(sessionId);
+    this.coworkRunner.registerTextPermissionRelay(sessionId);
     const responsePromise = this.createAccumulatorPromise(sessionId, request);
     this.startVideoLongTaskStatusUpdates(sessionId, visibleSessionId, request);
 

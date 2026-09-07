@@ -4,13 +4,22 @@ import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+// The electron compile output lives under dist-electron/main/ (tsc rootDir=src
+// since the src/main+src/renderer split). Probe the current layout first and
+// fall back to the legacy flat path for older checkouts.
+let privateChatOrderCoworkModule;
+try {
+  privateChatOrderCoworkModule = require('../dist-electron/main/services/privateChatOrderCowork.js');
+} catch {
+  privateChatOrderCoworkModule = require('../dist-electron/services/privateChatOrderCowork.js');
+}
 const {
   DEFAULT_ORDER_TIMEOUT_MS,
   VIDEO_ORDER_STATUS_INTERVAL_MS,
   VIDEO_ORDER_TIMEOUT_MS,
   PrivateChatOrderCowork,
   resolveOrderExecutionTimeoutMs,
-} = require('../dist-electron/services/privateChatOrderCowork.js');
+} = privateChatOrderCoworkModule;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -33,6 +42,9 @@ class FakeCoworkRunner extends EventEmitter {
   }
 
   respondToPermission() {}
+  registerTextPermissionRelay() {}
+  unregisterTextPermissionRelay() {}
+  isPermissionPending() { return false; }
 }
 
 class FakeCoworkStore {
@@ -174,9 +186,10 @@ test('runOrder sends long-video notice and recurring scoped ORDER_STATUS updates
   assert.ok(statusCountAtComplete >= 3, `expected initial notice plus recurring updates, got ${statusCountAtComplete}`);
   assert.equal(remoteStatusUpdates.length, statusCountAtComplete);
   assert.match(remoteStatusUpdates[0], new RegExp(`^\\[ORDER_STATUS:${orderTxid}\\]`));
-  assert.match(remoteStatusUpdates[0], /视频任务/);
-  assert.match(remoteStatusUpdates[0], /耐心等待|耗时|时间/);
-  assert.ok(remoteStatusUpdates.slice(1).some((text) => /还在处理|处理中|已处理/.test(text)));
+  // Order notices are English-only since 8ac69ff7 ("match A2A service language").
+  assert.match(remoteStatusUpdates[0], /video task/);
+  assert.match(remoteStatusUpdates[0], /may take longer/);
+  assert.ok(remoteStatusUpdates.slice(1).some((text) => /still processing/.test(text)));
   assert.ok(remoteStatusUpdates.every((text) => /order pin id: video-order-pin-i0/.test(text)));
 });
 
@@ -227,15 +240,18 @@ test('runOrder resolves timeout with a visible non-deliverable fallback', async 
 
   assert.equal(result.isDeliverable, false);
   assert.equal(result.ratingInvite, '');
-  assert.match(result.serviceReply, /服务执行超时/);
+  assert.match(result.serviceReply, /service execution timed out/);
   assert.match(result.serviceReply, /guangzhou/i);
-  assert.deepEqual(runner.stopSessionCalls, [{ sessionId, options: { finalStatus: 'completed' } }]);
+  assert.deepEqual(runner.stopSessionCalls, [{
+    sessionId,
+    options: { finalStatus: 'completed', reason: 'private chat order finished (timeout fallback)' },
+  }]);
 
   const session = store.getSession(sessionId);
   const lastMessage = session.messages[session.messages.length - 1];
   assert.equal(lastMessage.type, 'assistant');
   assert.equal(lastMessage.metadata?.orderTimeoutFallback, true);
-  assert.match(lastMessage.content, /服务执行超时/);
+  assert.match(lastMessage.content, /service execution timed out/);
 
   const hasCompleteEvent = rendererEvents.some((event) => event.channel === 'cowork:stream:complete');
   assert.equal(hasCompleteEvent, true);

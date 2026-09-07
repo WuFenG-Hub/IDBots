@@ -38,9 +38,12 @@ test('permissionRequest forwarding ignores session-list visibility', () => {
 
   // The text-confirmation gate for private-chat automation stays: non-Ask
   // prompts in text mode are answered through the message channel, and
-  // AskUserQuestion remains a user-facing interaction.
+  // AskUserQuestion remains a user-facing interaction. Suppression now also
+  // requires a live text-relay owner (IM chats, gig orders) — text-mode
+  // orchestrator/worker/scheduler sessions must reach the renderer overlay.
   assert.match(handler, /getSessionConfirmationMode\(sessionId\) === 'text'/);
   assert.match(handler, /request\?\.toolName !== 'AskUserQuestion'/);
+  assert.match(handler, /coworkRunner\.hasTextPermissionRelay\(sessionId\)/);
 
   // Prompts must still reach every window with the session id attached.
   assert.match(handler, /webContents\.send\('cowork:stream:permission', \{ sessionId, request: safeRequest \}/);
