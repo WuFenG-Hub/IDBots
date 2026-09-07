@@ -8976,27 +8976,11 @@ if (!gotTheLock) {
         if (forkIndex === -1) {
           return { success: false, error: 'Fork point message not found' };
         }
-        // Append a compact history of the conversation before the fork point to
-        // the fork's system prompt so the restarted SDK session knows what
-        // happened earlier. Cap the tail to keep the prompt reasonable.
-        const history = sourceMessages.slice(0, forkIndex + 1);
-        const historyLines: string[] = [];
-        let historyChars = 0;
-        const MAX_FORK_HISTORY_CHARS = 12_000;
-        for (const message of history) {
-          const line = `${message.type === 'user' ? 'User' : message.type === 'assistant' ? 'Assistant' : 'Tool'}: ${message.content}`;
-          if (historyChars + line.length > MAX_FORK_HISTORY_CHARS) {
-            historyLines.push('... [earlier conversation truncated]');
-            break;
-          }
-          historyLines.push(line);
-          historyChars += line.length;
-        }
-        const historyContext = historyLines.join('\n');
-        const systemPromptOverride = source.systemPrompt
-          ? `${source.systemPrompt}\n\n<fork_history>\n${historyContext}\n</fork_history>`
-          : `<fork_history>\n${historyContext}\n</fork_history>`;
-        const forked = coworkStoreInst.forkSession(sessionId, messageId, { title, systemPromptOverride });
+        // History context is NOT baked into the fork's system prompt anymore:
+        // the runner hands the branched history to the kernel as a one-shot
+        // digest on the fork's first turn (buildSessionHistoryHandoff), which
+        // costs tokens once instead of riding the system prompt on every turn.
+        const forked = coworkStoreInst.forkSession(sessionId, messageId, { title });
         if (!forked) {
           return { success: false, error: 'Failed to fork session: session or message not found' };
         }

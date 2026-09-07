@@ -1301,6 +1301,19 @@ export class CoworkStore implements MemoryBackend {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN goal TEXT;');
         changed = true;
       }
+
+      // Sweep failed-fork orphans: a fork whose session row exists but has
+      // zero messages is unambiguously a fork that died mid-copy (forkSession
+      // always copies at least the fork-point message; the historical id-reuse
+      // UNIQUE violation left exactly these rows behind). Idempotent: after
+      // the first pass there is nothing to delete.
+      this.db.run(`
+        DELETE FROM cowork_sessions
+        WHERE parent_session_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM cowork_messages WHERE session_id = cowork_sessions.id
+          )
+      `);
     } catch (error) {
       console.warn('[CoworkStore] Failed to verify cowork_sessions columns:', error);
     }
@@ -4712,26 +4725,38 @@ export class CoworkStore implements MemoryBackend {
       source.modelProvider ?? null
     );
 
-    // Batch-copy messages preserving ids/timestamps/sequences with one flush.
-    for (const message of forkMessages) {
-      const sequenceRow = this.db.exec(`
-        SELECT COALESCE(MAX(sequence), 0) + 1 as next_seq
-        FROM cowork_messages
-        WHERE session_id = ?
-      `, [forked.id]);
-      const sequence = sequenceRow[0]?.values[0]?.[0] as number || 1;
-      this.db.run(`
-        INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `, [
-        message.id,
-        forked.id,
-        message.type,
-        message.content,
-        message.metadata ? JSON.stringify(message.metadata) : null,
-        message.timestamp,
-        sequence,
-      ]);
+    // Batch-copy messages with one flush. Timestamps are preserved; ids are
+    // NOT: cowork_messages.id is a global primary key, so reusing the source
+    // ids hit a UNIQUE constraint on the first row and left an orphan session
+    // behind (createSession had already flushed). Copies take fresh uuids.
+    try {
+      for (const message of forkMessages) {
+        const sequenceRow = this.db.exec(`
+          SELECT COALESCE(MAX(sequence), 0) + 1 as next_seq
+          FROM cowork_messages
+          WHERE session_id = ?
+        `, [forked.id]);
+        const sequence = sequenceRow[0]?.values[0]?.[0] as number || 1;
+        this.db.run(`
+          INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [
+          uuidv4(),
+          forked.id,
+          message.type,
+          message.content,
+          message.metadata ? JSON.stringify(message.metadata) : null,
+          message.timestamp,
+          sequence,
+        ]);
+      }
+    } catch (error) {
+      // Defensive: never leak a half-forked session row. FK cascade is not
+      // guaranteed (PRAGMA foreign_keys), so delete children explicitly.
+      this.db.run('DELETE FROM cowork_messages WHERE session_id = ?', [forked.id]);
+      this.db.run('DELETE FROM cowork_sessions WHERE id = ?', [forked.id]);
+      this.saveDb();
+      throw error;
     }
     this.db.run(`
       UPDATE cowork_sessions

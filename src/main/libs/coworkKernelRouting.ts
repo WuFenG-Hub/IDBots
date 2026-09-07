@@ -77,22 +77,30 @@ export function buildSessionHistoryHandoff(
   messages: Array<{ type?: string; content?: string }>,
   reason: SessionHistoryHandoffReason = 'legacy-handle'
 ): string {
+  // Walk from the end: when the budget runs out the RECENT turns survive —
+  // they carry what the next reply actually depends on.
   const lines: string[] = [];
   let used = 0;
-  for (const message of messages) {
+  let truncated = false;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
     if (message.type !== 'user' && message.type !== 'assistant') continue;
     const text = String(message.content ?? '').replace(/\s+/g, ' ').trim();
     if (!text) continue;
     const role = message.type === 'user' ? 'User' : 'Assistant';
     const clipped = text.length > HANDOFF_LINE_CHARS ? `${truncateUtf16Units(text, HANDOFF_LINE_CHARS - 1)}…` : text;
     const line = `${role}: ${clipped}`;
-    if (used + line.length + 1 > HANDOFF_MAX_CHARS) break;
-    lines.push(line);
+    if (used + line.length + 1 > HANDOFF_MAX_CHARS) {
+      truncated = true;
+      break;
+    }
+    lines.unshift(line);
     used += line.length + 1;
   }
   if (lines.length === 0) return '';
   return [
     SESSION_HANDOFF_HEADERS[reason],
+    ...(truncated ? ['... [earlier turns truncated]'] : []),
     ...lines,
     'Continue from this context. Do not claim you remember anything that is not in this handoff or the current user message.',
   ].join('\n');

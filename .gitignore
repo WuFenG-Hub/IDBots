@@ -61,6 +61,7 @@ tests/*
 !tests/dshRuntimeGlmResponsesBoot.test.mjs
 !tests/dshKernelBootFailure.test.mjs
 !tests/coworkKernelRouting.test.mjs
+!tests/coworkForkSession.test.mjs
 !tests/coworkDshIntegration.test.mjs
 !tests/composerCommands.test.ts
 !tests/coworkTranscriptExport.test.mjs

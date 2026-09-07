@@ -81,3 +81,15 @@ test('branched-session handoff announces the branch origin with the same digest 
   assert.doesNotMatch(text, /ignored/)
   assert.match(text, /Do not claim you remember anything/)
 })
+
+test('handoff keeps the RECENT turns when the budget runs out', () => {
+  const fills = Array.from({ length: 9 }, (_, i) => ({
+    type: 'assistant',
+    content: `turn-${i + 1}-`.padEnd(440, 'x'),
+  }))
+  const text = buildSessionHistoryHandoff(fills, 'branched-session')
+  assert.match(text, /\[earlier turns truncated\]/, 'truncation is announced')
+  assert.match(text, /turn-9-/, 'the most recent turn survives')
+  assert.match(text, /turn-8-/, 'recent turns are kept')
+  assert.doesNotMatch(text, /turn-1-/, 'the oldest turns are dropped first')
+})
