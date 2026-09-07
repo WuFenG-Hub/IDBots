@@ -31,9 +31,10 @@ test('deepseek-v4 family declares the official chat-completions dialect, vendor 
   }
 })
 
-test('non-openai formats stay undeclared (responses is opt-in, anthropic is another dialect)', () => {
+test('deepseek stays chat-completions-only; anthropic stays undeclared for every family', () => {
   assert.equal(dshModelReasoningDeclaration('deepseek-v4-flash', 'responses'), null);
   assert.equal(dshModelReasoningDeclaration('deepseek-v4-flash', 'anthropic'), null);
+  assert.equal(dshModelReasoningDeclaration('glm-5.3-flash', 'anthropic'), null);
 })
 
 test('other families stay undeclared — no capability guessing', () => {
@@ -54,4 +55,22 @@ test('GLM models use the Z.AI thinking wire without reasoning_effort', () => {
     high: 'enabled',
     max: 'enabled',
   });
+});
+
+test('GLM on the Responses wire opts into reasoning explicitly (2026-09-03 z.ai default flip)', () => {
+  for (const id of ['glm-5.3-flash', 'z-ai/glm-5.3-flash', 'glm-4.6-air']) {
+    const declaration = dshModelReasoningDeclaration(id, 'responses');
+    assert.ok(declaration, id);
+    // Enabled rungs ride reasoning.effort; off keeps the send-nothing shape
+    // (Responses has no disable parameter — off falls back to the provider
+    // default instead of pretending to disable).
+    assert.equal(declaration.reasoningEfforts.off, null);
+    assert.equal(declaration.reasoningEfforts.low, 'low');
+    assert.equal(declaration.reasoningEfforts.high, 'high');
+    assert.equal(declaration.reasoningEfforts.max, 'high');
+    assert.equal('minimal' in declaration.reasoningEfforts, false);
+    // No chat-completions dialect knobs on the Responses shape.
+    assert.equal(declaration.compat.thinkingFormat, undefined);
+    assert.equal(declaration.compat.supportsDeveloperRole, false);
+  }
 });

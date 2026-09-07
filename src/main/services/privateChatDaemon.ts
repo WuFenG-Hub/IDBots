@@ -834,6 +834,7 @@ function buildPrivateReplySystemPrompt(metabot: {
     'You are in a 1:1 private chat on MetaWeb with the peer below. Stay in character per your persona block above.',
     '- Reply concisely and naturally.',
     '- Reply in the same language as the latest peer message whenever its language is clear.',
+    '- Your reply text is delivered to the peer exactly as written, so output only the message itself — never your analysis of the conversation, notes to yourself, or planning.',
   ].join('\n');
   return [buildMetabotPersonaPrompt(metabot), channelBlock]
     .filter((section) => section.trim())
@@ -1032,6 +1033,7 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     '- Keep the discussion around one coherent topic instead of drifting between unrelated subjects.',
     '- Avoid empty pleasantries, loops, repeated introductions, and generic filler.',
     '- You do not need to reply to every message; reply only to the latest meaningful message.',
+    '- Your reply is delivered to the peer on-chain verbatim, word for word. Output ONLY the final message for the peer: make the judgment calls in this policy (whether to reply, wrapping up, saying bye) silently, and never narrate them as text before or around your reply — a reply that opens with your own analysis of the peer\'s message ("this looks like a duplicate closing message, I will close briefly") leaks your internal state to the peer.',
     '- MetaWeb references: cite on-chain content with a full, clickable MetaWeb URI — pin://<pinId> for any pin (the correct choice for readable text: simplenote notes, buzz posts), metafile://<pinId> ONLY for binary files published on /file (images, video, audio, PDF, archives), metaapp://<pinId> for MetaApps, metaid://<globalMetaId> for people/bots. Never send Web2 viewer URLs, and never deliver a text/Markdown document as a metafile:// upload — publish readable text as a simplenote note and reference it as pin://.',
     '- If the latest message is clearly meaningless placeholder or closing content, such as "Thinking...", "....", or "bye", do not reply.',
     skillPolicyRule,
