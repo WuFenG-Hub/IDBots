@@ -69,8 +69,11 @@ test('GLM on the Responses wire opts into reasoning explicitly (2026-09-03 z.ai 
     assert.equal(declaration.reasoningEfforts.high, 'high');
     assert.equal(declaration.reasoningEfforts.max, 'high');
     assert.equal('minimal' in declaration.reasoningEfforts, false);
-    // No chat-completions dialect knobs on the Responses shape.
-    assert.equal(declaration.compat.thinkingFormat, undefined);
-    assert.equal(declaration.compat.supportsDeveloperRole, false);
+    // Only RESPONSES_COMPAT_GATE fields — supportsStore and the chat-completions
+    // dialect knobs are completions-only and fail dsh-llm-pi-ai plugin load on
+    // this wire (the 2026-09-07 boot regression).
+    assert.deepEqual(declaration.compat, { supportsDeveloperRole: false });
+    assert.equal('supportsStore' in declaration.compat, false);
+    assert.equal('thinkingFormat' in declaration.compat, false);
   }
 });
