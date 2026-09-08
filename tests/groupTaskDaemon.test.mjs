@@ -9047,3 +9047,111 @@ test('R3.2/R3.3: exhausted supervisor signals alert as RECOVERED when the task h
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// R6/R7/R8 (OpenTeam chat scenario 2026-09): chair-side daemon adaptations
+// ---------------------------------------------------------------------------
+
+test('R6 gating: chat-mode workers wake on conversational messages without an @', () => {
+  // Task-mode regression: a bare conversational line wakes no worker.
+  const taskMode = decideGroupTaskResponders(
+    gateMessage({ content: 'anyone have thoughts on the plan?' }),
+    gateTask(), GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.ok(
+    !taskMode.some((decision) => decision.reason === 'worker_mentioned'),
+    'task mode keeps workers mention-gated',
+  );
+
+  // Chat mode: the same line wakes every worker (protocol-only lines do not).
+  const chatTask = { ...gateTask(), mode: 'chat' };
+  const chatDecisions = decideGroupTaskResponders(
+    gateMessage({ content: 'anyone have thoughts on the plan?' }),
+    chatTask, GATE_MEMBERS, GATE_BOTS,
+  );
+  const chatWorkers = chatDecisions.filter((decision) => decision.reason === 'worker_mentioned');
+  assert.equal(chatWorkers.length, GATE_MEMBERS.filter((member) => member.role === 'worker').length);
+  const protocolOnly = decideGroupTaskResponders(
+    gateMessage({ content: '[STATUS:DONE]' }),
+    chatTask, GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.ok(
+    !protocolOnly.some((decision) => decision.reason === 'worker_mentioned'),
+    'protocol-only lines never wake chat workers',
+  );
+});
+
+test('R7: an out-of-band chair response closes pending supervisor signals with its pin', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing
+    h.groupTaskStore.addSupervisorSignal({
+      taskId: task.id,
+      kind: 'nudge',
+      note: 'post a status update',
+    });
+    const pendingBefore = h.groupTaskStore.listPendingSupervisorSignals(task.id);
+    assert.equal(pendingBefore.length, 1);
+
+    // The chair answers OUT-OF-BAND (Twin direct / status tag / plain reply):
+    // a genuine chair message landing AFTER the signal was created, never
+    // posted by the daemon (fresh pin, no host notice).
+    const responsePin = `${'9'.repeat(64)}i0`;
+    // Signal created_at is REAL sqlite now; anchor the response to the same
+    // clock (the fake daemon clock is unrelated to chain timestamps).
+    insertGroupMessage(h.db, {
+      pinId: responsePin,
+      senderMetaId: 'metaid-twin',
+      senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'False alarm — I already covered this with the owner directly.',
+      chainTimestamp: Math.floor(Date.now() / 1000) + 5,
+    });
+
+    const chatCallsBefore = h.chatCalls.length;
+    await h.loop.runTick();
+
+    // Closed with the chair's own pin — and NO redundant chair answer turn.
+    const signals = h.groupTaskStore.listSupervisorSignals(task.id);
+    assert.equal(signals.length, 1);
+    assert.ok(signals[0].processedAt != null, 'signal processed');
+    assert.equal(signals[0].chairResponsePinId, responsePin, 'closed with the out-of-band pin');
+    assert.equal(h.chatCalls.length, chatCallsBefore, 'no daemon chair turn was dispatched');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R7: a response created BEFORE a newer signal does not close it', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    // Chair response lands first (old news)…
+    insertGroupMessage(h.db, {
+      pinId: `${'8'.repeat(64)}i0`,
+      senderMetaId: 'metaid-twin',
+      senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'Earlier remark, unrelated to the later nudge.',
+      chainTimestamp: Math.floor(Date.now() / 1000) - 600,
+    });
+    // …then the supervisor records a FRESH nudge — the old message must not
+    // close it; the daemon drives the normal chair answer turn instead.
+    h.groupTaskStore.addSupervisorSignal({
+      taskId: task.id,
+      kind: 'nudge',
+      note: 'fresh question for the chair',
+    });
+    await h.loop.runTick();
+    const signals = h.groupTaskStore.listSupervisorSignals(task.id);
+    assert.ok(signals[0].processedAt != null, 'answered by the daemon chair turn');
+    assert.notEqual(
+      signals[0].chairResponsePinId,
+      `${'8'.repeat(64)}i0`,
+      'the pre-signal message is not the closure pin',
+    );
+    assert.ok(h.chatCalls.some((call) => call.userMessage.includes('fresh question')), 'chair turn ran');
+  } finally {
+    h.cleanup();
+  }
+});

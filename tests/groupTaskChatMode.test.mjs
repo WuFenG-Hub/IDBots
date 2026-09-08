@@ -588,3 +588,80 @@ test('R4 control: without a mid-turn send the final text goes on-chain exactly o
     store.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// R6/R8 chair-side pure helpers (stall exemption, discussion tag, local prompt)
+// ---------------------------------------------------------------------------
+
+const { isGroupTaskDiscussionDeclaration } = require('../dist-electron/main/services/groupTaskDaemon.js');
+const { computeGroupTaskStall } = require('../dist-electron/main/services/groupTaskService.js');
+const {
+  buildGroupTaskSystemPrompt,
+  buildGroupTaskBlock,
+} = require('../dist-electron/main/services/groupTaskPrompts.js');
+
+test('R8: isGroupTaskDiscussionDeclaration accepts only the bare tag on its own line', () => {
+  assert.equal(isGroupTaskDiscussionDeclaration('[DISCUSSION]'), true);
+  assert.equal(isGroupTaskDiscussionDeclaration('Debating the approach now.\n[DISCUSSION]'), true);
+  assert.equal(isGroupTaskDiscussionDeclaration('[DISCUSSION] extra words on the line'), false);
+  assert.equal(isGroupTaskDiscussionDeclaration('we are in a [DISCUSSION] phase'), false);
+  assert.equal(isGroupTaskDiscussionDeclaration('`[DISCUSSION]`'), false, 'backticked citation');
+  assert.equal(isGroupTaskDiscussionDeclaration(''), false);
+});
+
+test('R6: chat tasks never read as stalled (waiting is legal)', () => {
+  const nowMs = Date.now();
+  const idleTask = {
+    id: 1,
+    status: 'executing',
+    mode: 'task',
+    lastDrivenAt: Math.floor((nowMs - 3 * 60 * 60_000) / 1000),
+    updatedAt: null,
+  };
+  assert.equal(computeGroupTaskStall(idleTask, nowMs).stall, true, 'task mode control');
+  const idleChat = { ...idleTask, mode: 'chat' };
+  assert.equal(computeGroupTaskStall(idleChat, nowMs).stall, false, 'chat exempt');
+});
+
+const promptTask = { title: 'build it', goal: 'ship it', acceptanceCriteria: 'works', groupId: null };
+const promptMembersList = [
+  { name: 'Twin Bot', role: 'chair' },
+  { name: 'Coder Bot', role: 'worker' },
+];
+
+test('R6: local chat-mode prompt swaps the task playbook for the chat playbook', () => {
+  const chatPrompt = buildGroupTaskBlock({
+    task: { ...promptTask, mode: 'chat' },
+    members: promptMembersList,
+    botName: 'Coder Bot',
+    botRole: 'worker',
+  });
+  assert.ok(chatPrompt.includes('Group Chat'), 'chat framing');
+  assert.ok(chatPrompt.includes('free-form CHAT group'), 'chat playbook present');
+  assert.ok(!chatPrompt.includes('[WORKING]'), 'no ACK ceremony');
+  assert.ok(!chatPrompt.includes('[DELIVERABLE]` lines'), 'no deliverable discipline');
+  assert.ok(!chatPrompt.includes('Assign different subtasks'), 'no dispatch discipline');
+  assert.ok(!chatPrompt.includes('STEP DEADLINES'), 'no deadline discipline');
+
+  const taskPrompt = buildGroupTaskBlock({
+    task: { ...promptTask, mode: 'task' },
+    members: promptMembersList,
+    botName: 'Coder Bot',
+    botRole: 'worker',
+  });
+  assert.ok(taskPrompt.includes('Group Task'), 'task framing');
+  assert.ok(taskPrompt.includes('[WORKING]'), 'ACK ceremony intact in task mode');
+});
+
+test('R6: chat-mode chair prompt carries no chair dispatch/lifecycle rules', () => {
+  const chatChair = buildGroupTaskBlock({
+    task: { ...promptTask, mode: 'chat' },
+    members: promptMembersList,
+    botName: 'Twin Bot',
+    botRole: 'chair',
+  });
+  assert.ok(!chatChair.includes('[STATUS:REVIEW]'), 'no lifecycle tag rules');
+  assert.ok(!chatChair.includes('STEP DEADLINES'), 'no deadline discipline');
+  assert.ok(!chatChair.includes('decompose it into concrete subtasks'), 'no decomposition duty');
+  assert.ok(chatChair.includes('ONE VOICE PER TURN'), 'one-voice rule present');
+});

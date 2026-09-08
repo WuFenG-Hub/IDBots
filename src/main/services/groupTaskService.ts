@@ -276,6 +276,11 @@ export function computeGroupTaskStall(
   if (TERMINAL_STATUSES.has(task.status)) {
     return { stall: false, stallAfterMinutes: GROUP_TASK_STALL_AFTER_MINUTES };
   }
+  // R6 (OpenTeam chat scenario): a chat group has no pipeline to stall —
+  // "waiting for the other side to talk" is a legal state, not a stuck task.
+  if (task.mode === 'chat') {
+    return { stall: false, stallAfterMinutes: GROUP_TASK_STALL_AFTER_MINUTES };
+  }
   const drivenMs = task.lastDrivenAt != null ? task.lastDrivenAt * 1000 : null;
   const lastActivityMs = drivenMs ?? parseSqliteUtc(task.updatedAt);
   const stall = lastActivityMs != null
