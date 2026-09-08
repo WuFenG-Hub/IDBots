@@ -107,3 +107,16 @@ test('surfaces control.send failures as an error result without throwing', async
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /Private message send failed: target has no chatPublicKey on chain/);
 });
+
+test('private chat success receipt surfaces the fee channel when the write ran sponsored', async () => {
+  const { byName } = makeHarness({
+    sendResult: {
+      txids: ['tx-p'], pinId: 'privPin1i0', totalCost: 300,
+      feeAssist: { attempted: true, used: false, mode: 'self_paid', reason: 'circuit_open', stage: 'address_info' },
+    },
+  });
+  const result = await byName.send_private_chat.handler({ to: 'idq1target', content: 'hi' });
+  assert.equal(result.isError, undefined);
+  assert.match(result.content[0].text, /Private message sent\./);
+  assert.match(result.content[0].text, /sponsor: skipped — circuit breaker open after repeated broadcast failures, paid by the bot's own wallet/);
+});

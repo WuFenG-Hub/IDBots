@@ -38,6 +38,9 @@ export interface SendEncryptedSimplemsgInput {
 export interface SendEncryptedSimplemsgResult {
   txids: string[];
   pinId: string;
+  /** createPin passthrough fields (traffic-mode fee-channel trace); optional. */
+  totalCost?: number;
+  feeAssist?: unknown;
 }
 
 const nowSecondsValue = (nowSeconds?: number | (() => number)): number => {
