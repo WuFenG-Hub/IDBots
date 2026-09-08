@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { chainWriteFailureDetail, feeAssistReceiptLines } from './chainFeeAssistReceipt';
 import type { AssignGroupChatTaskParams } from '../services/assignGroupChatTaskService';
 
 /**
@@ -20,7 +21,7 @@ export type GroupChatControl = {
     referrer?: string;
     k?: string;
     network?: 'mvc' | 'doge' | 'btc';
-  }): Promise<{ txids: string[]; pinId: string; totalCost?: number }>;
+  }): Promise<{ txids: string[]; pinId: string; totalCost?: number; feeAssist?: unknown }>;
   sendGroupMessage(input: {
     metabotId: number;
     groupId: string;
@@ -30,7 +31,7 @@ export type GroupChatControl = {
     channelId?: string;
     mention?: string[];
     network?: 'mvc' | 'doge' | 'btc';
-  }): Promise<{ txids: string[]; pinId: string; totalCost?: number }>;
+  }): Promise<{ txids: string[]; pinId: string; totalCost?: number; feeAssist?: unknown }>;
   /**
    * Task #65: when this cowork session belongs to a GROUP TASK, the on-chain
    * group id of that task's group (else null). The send_group_message action
@@ -63,11 +64,15 @@ function asString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function formatPinResult(title: string, result: { txids: string[]; pinId: string }): string {
+function formatPinResult(
+  title: string,
+  result: { txids: string[]; pinId: string; feeAssist?: unknown },
+): string {
   return [
     title,
     `- pinId: ${result.pinId}`,
     `- txids: ${(result.txids ?? []).join(', ')}`,
+    ...feeAssistReceiptLines(result.feeAssist),
     `- pin link: [pin://${result.pinId}](pin://${result.pinId})`,
   ].join('\n');
 }
@@ -319,7 +324,7 @@ export function buildGroupChatAgentTools(deps: {
             true,
           );
         }
-        return textResult(`Send group message failed: ${msg}`, true);
+        return textResult(`Send group message failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );

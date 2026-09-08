@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import type { MetaFileUploadControl } from './metaFileUploadAgentTools';
+import { chainWriteFailureDetail, feeAssistReceiptLines } from './chainFeeAssistReceipt';
 
 /**
  * Chain-write surface the host (main.ts) provides for on-chain pin creation.
@@ -9,7 +10,9 @@ import type { MetaFileUploadControl } from './metaFileUploadAgentTools';
  * /api/metaid/create-pin RPC endpoint calls. The service owns wallet/UTXO
  * selection, fee-rate resolution, and network routing; no routing logic
  * lives here. The narrower metaidData/options shapes mirror
- * MetaidDataPayload/CreatePinOptions with a string-only payload.
+ * MetaidDataPayload/CreatePinOptions with a string-only payload. feeAssist
+ * carries the sponsor/self-paid fee-channel trace when the write ran in
+ * traffic mode (undefined for plain self-paid writes).
  */
 export type ChainWriteCreatePin = (
   metabotId: number,
@@ -23,7 +26,7 @@ export type ChainWriteCreatePin = (
     encoding?: 'utf-8' | 'base64';
   },
   options?: { feeRate?: number; network?: 'mvc' | 'doge' | 'btc' | 'opcat'; origin?: string },
-) => Promise<{ txids: string[]; pinId: string; totalCost: number }>;
+) => Promise<{ txids: string[]; pinId: string; totalCost: number; feeAssist?: unknown }>;
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
 type SdkToolFactory = (
@@ -58,12 +61,14 @@ export function formatBuzzResult(input: {
   txids: string[];
   totalCost: number;
   attachments: string[];
+  feeAssist?: unknown;
 }): string {
   const lines: string[] = ['Buzz posted on-chain.'];
   if (input.pinId) lines.push(`- pinId: ${input.pinId}`);
   if (input.txids.length) lines.push(`- txids: ${input.txids.join(', ')}`);
   lines.push(`- cost: ${input.totalCost} sats`);
   for (const uri of input.attachments) lines.push(`- attachment: ${uri}`);
+  lines.push(...feeAssistReceiptLines(input.feeAssist));
   if (input.pinId) {
     lines.push(`- view link: [pin://${input.pinId}](pin://${input.pinId})`);
   }
@@ -203,11 +208,12 @@ export function buildPostBuzzAgentTools(deps: {
             txids: Array.isArray(result.txids) ? result.txids : [],
             totalCost: result.totalCost,
             attachments,
+            feeAssist: result.feeAssist,
           }),
         );
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        return textResult(`Buzz post failed: ${msg}`, true);
+        return textResult(`Buzz post failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );

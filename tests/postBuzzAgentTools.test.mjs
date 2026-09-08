@@ -222,3 +222,65 @@ test('formatBuzzResult lists txids, cost, attachments, and the public link', () 
   const minimal = formatBuzzResult({ pinId: '', txids: [], totalCost: 0, attachments: [] });
   assert.equal(minimal, 'Buzz posted on-chain.\n- cost: 0 sats');
 });
+
+test('post_buzz receipt surfaces the fee channel for sponsored and fallback writes', async () => {
+  const sponsored = makeHarness({
+    pinResult: {
+      ...SAMPLE_PIN_RESULT,
+      feeAssist: { attempted: true, used: true, mode: 'mvc_sponsor_v2', stage: 'done', orderId: 'order-9' },
+    },
+  });
+  const ok = await sponsored.byName.post_buzz.handler({ content: 'hi' });
+  assert.match(ok.content[0].text, /sponsor: applied \(MVC fee sponsor covered this write, order order-9\)/);
+
+  const fellBack = makeHarness({
+    pinResult: {
+      ...SAMPLE_PIN_RESULT,
+      feeAssist: {
+        attempted: true,
+        used: false,
+        mode: 'self_paid',
+        reason: 'commit_failed',
+        stage: 'commit',
+        orderId: 'order-8',
+        commitOrderOutcome: 'failed',
+      },
+    },
+  });
+  const fb = await fellBack.byName.post_buzz.handler({ content: 'hi' });
+  assert.match(
+    fb.content[0].text,
+    /sponsor: unavailable, fell back to the bot's own wallet \(reason: commit_failed at commit, order order-8: failed\)/,
+  );
+
+  // Plain self-paid write (no sponsor involvement): receipt stays unchanged.
+  const plain = makeHarness();
+  const p = await plain.byName.post_buzz.handler({ content: 'hi' });
+  assert.doesNotMatch(p.content[0].text, /sponsor:/);
+});
+
+test('post_buzz failure receipts carry the structured fee-assist suffix when both channels failed', async () => {
+  const bothFailed = new Error(
+    'Sponsored MVC createPin fell back to self-paid (sponsor commit_failed at commit) but the self-paid broadcast failed: MetaBot balance is insufficient for this chain write.',
+  );
+  bothFailed.code = 'mvc_selfpaid_fallback_failed';
+  bothFailed.data = {
+    feeAssist: {
+      attempted: true,
+      used: false,
+      mode: 'self_paid',
+      reason: 'commit_failed',
+      stage: 'commit',
+      orderId: 'order-7',
+      selfPaidError: 'MetaBot balance is insufficient for this chain write.',
+    },
+  };
+  const { byName } = makeHarness({ createPinError: bothFailed });
+  const result = await byName.post_buzz.handler({ content: 'hi' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Buzz post failed: Sponsored MVC createPin fell back to self-paid/);
+  assert.match(
+    result.content[0].text,
+    /\[fee assist: code=mvc_selfpaid_fallback_failed; sponsor=commit_failed@commit; order=order-7; selfpay_error=MetaBot balance is insufficient for this chain write\.\]/,
+  );
+});

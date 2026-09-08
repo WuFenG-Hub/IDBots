@@ -22,6 +22,7 @@ import {
   createMvcSponsorV2Client,
   getErrorMessage,
   getMvcSponsorCommitMessage,
+  isMvcInsufficientSelfPayError,
   isNoUserUtxoDraftError,
   reconcileSponsorOrderAfterCommitFailure,
   signMvcAddressMessage,
@@ -33,6 +34,15 @@ import {
 } from './mvcSponsorClient';
 import { appendMetaidLog } from './metaidLog';
 import { recordLocalTrafficSpend } from './trafficAccountService';
+import {
+  isSponsorBroadcastFailureError,
+  isSponsorCircuitOpen,
+  recordSponsorBroadcastFailure,
+  recordSponsorSuccess,
+  sponsorCircuitRecentFailures,
+  sponsorCircuitRetryAfterMs,
+  SPONSOR_BREAKER_COOLDOWN_MS,
+} from './mvcSponsorCircuitBreaker';
 import type {
   MvcSponsorFeeAssistMetadata,
   MvcSponsorFeeAssistReason,
@@ -127,15 +137,28 @@ function normalizeSponsorReason(value: unknown, fallback: MvcSponsorFeeAssistRea
     || value === 'commit_failed'
     || value === 'pre_rejected'
     || value === 'no_user_utxo'
+    || value === 'circuit_open'
     ? value
     : fallback;
 }
 
 function isNoUserUtxoDraftFailure(error: unknown): boolean {
-  const message = getErrorMessage(error, '');
-  return isNoUserUtxoDraftError(error)
-    || /not enough balance|余额不足/i.test(message)
-    || message.includes('所有已知 MVC 手续费输入都已失效');
+  return isMvcInsufficientSelfPayError(error);
+}
+
+/** Count one sponsor broadcast failure toward the per-address circuit breaker. */
+function noteSponsorBroadcastFailure(metabotId: number, mvcAddress: string, context: string): void {
+  if (!mvcAddress) return;
+  const { failures, tripped } = recordSponsorBroadcastFailure(mvcAddress);
+  if (tripped) {
+    appendMetaidLog('WARN', 'Sponsor broadcast-failure circuit breaker tripped — going self-paid for the cooldown', {
+      metabotId,
+      mvcAddress,
+      context,
+      failures,
+      cooldownMs: SPONSOR_BREAKER_COOLDOWN_MS,
+    });
+  }
 }
 
 export async function runMvcSponsorCreatePin(
@@ -183,12 +206,46 @@ export async function runMvcSponsorCreatePin(
     if (input.fallbackPolicy === 'strict') {
       throw new TrafficInsufficientError({ reason: params.reason, stage: params.stage, feeAssist });
     }
-    const broadcastResult = await deps.runBroadcastWorker();
-    return { ...broadcastResult, feeAssist };
+    try {
+      const broadcastResult = await deps.runBroadcastWorker();
+      return { ...broadcastResult, feeAssist };
+    } catch (error) {
+      // Both channels failed (R1.3/D3): keep the raw self-paid error as the
+      // message tail and attach the structured feeAssist so tool receipts can
+      // show the sponsor reason AND the self-paid failure side by side. A
+      // broke wallet gets the stable INSUFFICIENT_SELFPAY_FUNDS code (D4).
+      const rawMessage = getErrorMessage(error, 'unknown error');
+      const failedError = error instanceof Error
+        ? error as Error & { code?: string; data?: Record<string, unknown> }
+        : new Error(rawMessage) as Error & { code?: string; data?: Record<string, unknown> };
+      const code = isMvcInsufficientSelfPayError(error)
+        ? 'INSUFFICIENT_SELFPAY_FUNDS'
+        : typeof failedError.code === 'string' && failedError.code.trim()
+          ? failedError.code
+          : 'mvc_selfpaid_fallback_failed';
+      failedError.code = code;
+      failedError.message = `Sponsored MVC createPin fell back to self-paid (sponsor ${params.reason} at ${params.stage}) but the self-paid broadcast failed: ${rawMessage}`;
+      const existingData = failedError.data && typeof failedError.data === 'object' ? failedError.data : {};
+      failedError.data = { ...existingData, feeAssist: { ...feeAssist, selfPaidError: rawMessage } };
+      throw failedError;
+    }
   };
 
   if (!input.mvcAddress) {
     return fallbackToSelfPaid({ reason: 'service_unavailable', stage: 'address_info' });
+  }
+
+  // R3.2 circuit breaker: after repeated sponsor broadcast failures for this
+  // address, skip the sponsor entirely for the cooldown and go self-paid —
+  // no doomed orders, no reconcile wait. Sponsored successes reset it.
+  if (isSponsorCircuitOpen(input.mvcAddress)) {
+    appendMetaidLog('WARN', 'Sponsored MVC createPin skipped — sponsor circuit breaker open, going self-paid', {
+      metabotId: input.metabotId,
+      mvcAddress: input.mvcAddress,
+      recentFailures: sponsorCircuitRecentFailures(input.mvcAddress),
+      retryAfterMs: sponsorCircuitRetryAfterMs(input.mvcAddress),
+    });
+    return fallbackToSelfPaid({ reason: 'circuit_open', stage: 'address_info' });
   }
 
   let quotaBefore: MvcSponsorAddressInfo;
@@ -274,6 +331,10 @@ export async function runMvcSponsorCreatePin(
   } catch (error) {
     // pre_rejected now falls back too: the sponsor refused the draft but
     // nothing was broadcast, so the bot's own wallet can still deliver.
+    // Broadcast-reconciliation rejections here count toward the breaker.
+    if (isSponsorBroadcastFailureError(error)) {
+      noteSponsorBroadcastFailure(input.metabotId, input.mvcAddress, 'pre');
+    }
     const reason = normalizeSponsorReason((error as { reason?: unknown })?.reason, 'pre_rejected');
     return fallbackToSelfPaid({ reason, stage: 'pre', quotaBefore, advisoryFeeEstimate });
   }
@@ -340,6 +401,8 @@ export async function runMvcSponsorCreatePin(
         txId: reconciliation.txId,
         commitError: getErrorMessage(error, 'commit failed'),
       });
+      // The sponsor did deliver — prove-of-recovery closes the breaker.
+      recordSponsorSuccess(input.mvcAddress);
       commit = {
         txId: reconciliation.txId,
         txSize: reconciliation.txSize,
@@ -352,6 +415,9 @@ export async function runMvcSponsorCreatePin(
       // draws from the same address, so the two transactions usually conflict
       // and at most one lands; a duplicate is possible only if the sponsor
       // recovers inside the race window, and the trace below pinpoints it.
+      if (isSponsorBroadcastFailureError(error)) {
+        noteSponsorBroadcastFailure(input.metabotId, input.mvcAddress, 'commit');
+      }
       appendMetaidLog('WARN', 'Sponsored MVC createPin commit failed — falling back to self-paid', {
         metabotId: input.metabotId,
         mvcAddress: input.mvcAddress,
@@ -377,6 +443,7 @@ export async function runMvcSponsorCreatePin(
 
   const sponsoredMinerFee = commit.minerFee ?? pre.minerFee;
   deps.recordSpentOutpoints(draftSpentOutpoints);
+  recordSponsorSuccess(input.mvcAddress);
   // Local spend journal + balance-cache deduction (best-effort, never throws).
   recordLocalTrafficSpend({
     txId: commit.txId,

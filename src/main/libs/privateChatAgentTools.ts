@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { chainWriteFailureDetail, feeAssistReceiptLines } from './chainFeeAssistReceipt';
 
 /**
  * Control surface the host (main.ts) provides for the send_private_chat tool.
@@ -14,7 +15,7 @@ export type PrivateChatControl = {
     toGlobalMetaId: string;
     content: string;
     replyPin?: string;
-  }): Promise<{ txids: string[]; pinId: string }>;
+  }): Promise<{ txids: string[]; pinId: string; feeAssist?: unknown }>;
 };
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
@@ -103,12 +104,13 @@ export function buildPrivateChatAgentTools(deps: {
             'Private message sent.',
             `- pinId: ${result.pinId}`,
             `- txids: ${(result.txids ?? []).join(', ')}`,
+            ...feeAssistReceiptLines(result.feeAssist),
             `- pin link: [pin://${result.pinId}](pin://${result.pinId})`,
           ].join('\n'),
         );
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        return textResult(`Private message send failed: ${msg}`, true);
+        return textResult(`Private message send failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );

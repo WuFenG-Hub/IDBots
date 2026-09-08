@@ -23,6 +23,11 @@ const {
   normalizeTrafficFallbackPolicy,
   normalizeTrafficPinMode,
 } = await import('../dist-electron/main/services/trafficSettings.js');
+const {
+  isSponsorCircuitOpen,
+  recordSponsorSuccess,
+  resetSponsorCircuitBreakerForTests,
+} = await import('../dist-electron/main/services/mvcSponsorCircuitBreaker.js');
 
 const MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -1003,4 +1008,199 @@ test('traffic settings default to account quota and tolerate unreadable stores',
   assert.equal(getTrafficPinMode({ get: () => { throw new Error('closed'); } }), 'traffic');
   assert.equal(getTrafficFallbackPolicy({ get: () => 'strict' }), 'selfpay');
   assert.equal(getTrafficFallbackPolicy({ get: () => undefined }), 'selfpay');
+});
+
+test('runMvcSponsorCreatePin opens the sponsor circuit after repeated broadcast failures', async () => {
+  resetSponsorCircuitBreakerForTests();
+  const routes = (draftResult) => [
+    ADDRESS_INFO_ROUTE,
+    CHALLENGE_ROUTE,
+    ['/v2/assist/gas/mvc/pre', {
+      preparedTxHex: draftResult.draft.unsignedTxHex,
+      orderId: 'order-1',
+      minerFee: 100,
+      userInputIndexes: [0],
+    }],
+    ['/v2/assist/gas/mvc/commit', () => ({
+      code: 1,
+      msg: 'SPONSOR_BROADCAST_PENDING: orderId=order-1: broadcast failed: rpc error: [-25]Missing inputs',
+    })],
+    ['/v2/assist/gas/mvc/order/order-1', {
+      orderId: 'order-1',
+      status: 'failed',
+      txSize: 300,
+      minerFee: 100,
+      pending: false,
+      final: true,
+    }],
+  ];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const draftResult = buildDraftWorkerResult();
+    const fetchImpl = createFetchStub(routes(draftResult));
+    const { runBroadcastWorker } = makeBroadcastWorker();
+    const result = await runMvcSponsorCreatePin(
+      {
+        metabotId: 9150 + attempt,
+        mnemonic: MNEMONIC,
+        walletPath: WALLET_PATH,
+        mvcAddress: TEST_ADDRESS,
+        feeRate: 1,
+        fallbackPolicy: 'selfpay',
+        baseUrl: 'https://sponsor.test',
+        fetchImpl,
+        commitReconcileMaxWaitMs: 0,
+      },
+      {
+        runDraftWorker: async () => draftResult,
+        runBroadcastWorker,
+        recordSpentOutpoints: () => {},
+        replacePendingFundingUtxos: () => {},
+      },
+    );
+    assert.equal(result.feeAssist.reason, 'commit_failed');
+  }
+  assert.equal(isSponsorCircuitOpen(TEST_ADDRESS), true);
+
+  // 4th write: the sponsor is skipped entirely — zero sponsor HTTP calls,
+  // straight to the bot's own wallet with the circuit_open trace.
+  const fetchImpl = createFetchStub([]);
+  const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
+  const result = await runMvcSponsorCreatePin(
+    {
+      metabotId: 9153,
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: TEST_ADDRESS,
+      feeRate: 1,
+      fallbackPolicy: 'selfpay',
+      baseUrl: 'https://sponsor.test',
+      fetchImpl,
+    },
+    {
+      runDraftWorker: async () => buildDraftWorkerResult(),
+      runBroadcastWorker,
+      recordSpentOutpoints: () => {},
+      replacePendingFundingUtxos: () => {},
+    },
+  );
+  assert.equal(fetchImpl.calls.length, 0);
+  assert.equal(broadcastState.calls, 1);
+  assert.equal(result.feeAssist.used, false);
+  assert.equal(result.feeAssist.reason, 'circuit_open');
+  assert.equal(result.feeAssist.stage, 'address_info');
+
+  // Simulate the post-cooldown half-open probe succeeding: the sponsored
+  // write path calls recordSponsorSuccess itself, closing the breaker so the
+  // very next write goes back to the sponsor.
+  recordSponsorSuccess(TEST_ADDRESS);
+  const draftResult = buildDraftWorkerResult();
+  const healthyFetch = createFetchStub([
+    ADDRESS_INFO_ROUTE,
+    CHALLENGE_ROUTE,
+    ['/v2/assist/gas/mvc/pre', {
+      preparedTxHex: draftResult.draft.unsignedTxHex,
+      orderId: 'order-2',
+      minerFee: 100,
+      userInputIndexes: [0],
+    }],
+    ['/v2/assist/gas/mvc/commit', { txId: COMMIT_TXID, txSize: 300, minerFee: 100 }],
+  ]);
+  const healthy = await runMvcSponsorCreatePin(
+    {
+      metabotId: 9154,
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: TEST_ADDRESS,
+      feeRate: 1,
+      fallbackPolicy: 'selfpay',
+      baseUrl: 'https://sponsor.test',
+      fetchImpl: healthyFetch,
+    },
+    {
+      runDraftWorker: async () => draftResult,
+      runBroadcastWorker: makeBroadcastWorker().runBroadcastWorker,
+      recordSpentOutpoints: () => {},
+      replacePendingFundingUtxos: () => {},
+    },
+  );
+  assert.equal(healthy.feeAssist.used, true);
+  assert.equal(isSponsorCircuitOpen(TEST_ADDRESS), false);
+});
+
+test('runMvcSponsorCreatePin attaches structured feeAssist when the self-paid fallback also fails', async () => {
+  resetSponsorCircuitBreakerForTests();
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/gas/address/info', () => ({ code: 1, msg: 'service down' })],
+  ]);
+  const selfPaidError = new Error('MetaBot balance is insufficient for this chain write.');
+
+  await assert.rejects(
+    runMvcSponsorCreatePin(
+      {
+        metabotId: 9160,
+        mnemonic: MNEMONIC,
+        walletPath: WALLET_PATH,
+        mvcAddress: TEST_ADDRESS,
+        feeRate: 1,
+        fallbackPolicy: 'selfpay',
+        baseUrl: 'https://sponsor.test',
+        fetchImpl,
+      },
+      {
+        runDraftWorker: async () => buildDraftWorkerResult(),
+        runBroadcastWorker: async () => {
+          throw selfPaidError;
+        },
+        recordSpentOutpoints: () => {},
+        replacePendingFundingUtxos: () => {},
+      },
+    ),
+    (error) => {
+      assert.match(
+        error.message,
+        /fell back to self-paid \(sponsor service_unavailable at address_info\) but the self-paid broadcast failed: MetaBot balance is insufficient/,
+      );
+      // The wallet cannot cover the fallback write — D4 stable code.
+      assert.equal(error.code, 'INSUFFICIENT_SELFPAY_FUNDS');
+      assert.equal(error.data.feeAssist.mode, 'self_paid');
+      assert.equal(error.data.feeAssist.reason, 'service_unavailable');
+      assert.equal(error.data.feeAssist.selfPaidError, 'MetaBot balance is insufficient for this chain write.');
+      return true;
+    },
+  );
+});
+
+test('runMvcSponsorCreatePin keeps the generic fallback code when the self-paid failure is not a balance issue', async () => {
+  resetSponsorCircuitBreakerForTests();
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/gas/address/info', () => ({ code: 1, msg: 'service down' })],
+  ]);
+
+  await assert.rejects(
+    runMvcSponsorCreatePin(
+      {
+        metabotId: 9161,
+        mnemonic: MNEMONIC,
+        walletPath: WALLET_PATH,
+        mvcAddress: TEST_ADDRESS,
+        feeRate: 1,
+        fallbackPolicy: 'selfpay',
+        baseUrl: 'https://sponsor.test',
+        fetchImpl,
+      },
+      {
+        runDraftWorker: async () => buildDraftWorkerResult(),
+        runBroadcastWorker: async () => {
+          throw new Error('worker crashed');
+        },
+        recordSpentOutpoints: () => {},
+        replacePendingFundingUtxos: () => {},
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, 'mvc_selfpaid_fallback_failed');
+      assert.equal(error.data.feeAssist.selfPaidError, 'worker crashed');
+      return true;
+    },
+  );
 });

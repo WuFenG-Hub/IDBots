@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import { markdownSelfLink } from './metawebUri';
+import { chainWriteFailureDetail, feeAssistReceiptLines } from './chainFeeAssistReceipt';
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
 type SdkToolFactory = (
@@ -97,11 +98,12 @@ export function buildLikePinAgentTools(deps: {
             totalCost: result.totalCost,
             targetPinId: pinId,
             isLike,
+            feeAssist: result.feeAssist,
           }),
         );
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        return textResult(`Reaction publish failed: ${msg}`, true);
+        return textResult(`Reaction publish failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );
@@ -119,6 +121,7 @@ export function formatLikePinResult(input: {
   totalCost: number;
   targetPinId: string;
   isLike: 1 | -1 | 0;
+  feeAssist?: unknown;
 }): string {
   const action =
     input.isLike === 1 ? 'Liked' : input.isLike === -1 ? 'Disliked' : 'Canceled your reaction on';
@@ -127,6 +130,7 @@ export function formatLikePinResult(input: {
   if (input.txids.length) lines.push(`- txids: ${input.txids.join(', ')}`);
   lines.push(`- target pinId: ${input.targetPinId}`);
   lines.push(`- cost: ${input.totalCost} sats`);
+  lines.push(...feeAssistReceiptLines(input.feeAssist));
   if (input.reactionPinId) {
     lines.push(`- view link: ${markdownSelfLink(`pin://${input.reactionPinId}`)}`);
   }

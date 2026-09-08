@@ -118,6 +118,19 @@ export function isNoUserUtxoDraftError(error: unknown): boolean {
   return /MetaBot balance is insufficient for this chain write\./i.test(getErrorMessage(error, ''));
 }
 
+/**
+ * Insufficient-balance fingerprints of the SELF-PAID broadcast path (the
+ * bot's own wallet cannot cover the fallback write — D4/R1.4 of the
+ * 2026-09-08 host-fix RFP). ASCII protocol fingerprints and fixed
+ * host-generated strings only, never natural-language intent matching.
+ */
+export function isMvcInsufficientSelfPayError(error: unknown): boolean {
+  const message = getErrorMessage(error, '');
+  return isNoUserUtxoDraftError(error)
+    || /not enough balance|余额不足/i.test(message)
+    || message.includes('所有已知 MVC 手续费输入都已失效');
+}
+
 function isRetryableHttpStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 504);
 }

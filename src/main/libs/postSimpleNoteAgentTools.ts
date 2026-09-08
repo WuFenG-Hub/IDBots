@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import type { MetaFileUploadControl } from './metaFileUploadAgentTools';
 import { markdownSelfLink } from './metawebUri';
+import { chainWriteFailureDetail, feeAssistReceiptLines } from './chainFeeAssistReceipt';
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
 type SdkToolFactory = (
@@ -198,11 +199,12 @@ export function buildPostSimpleNoteAgentTools(deps: {
             title,
             coverImg,
             attachments,
+            feeAssist: result.feeAssist,
           }),
         );
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        return textResult(`Note publish failed: ${msg}`, true);
+        return textResult(`Note publish failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );
@@ -222,6 +224,7 @@ export function formatSimpleNoteResult(input: {
   title: string;
   coverImg?: string;
   attachments: string[];
+  feeAssist?: unknown;
 }): string {
   const lines: string[] = ['Note published on-chain.'];
   if (input.pinId) lines.push(`- pinId: ${input.pinId}`);
@@ -230,6 +233,7 @@ export function formatSimpleNoteResult(input: {
   lines.push(`- cost: ${input.totalCost} sats`);
   if (input.coverImg) lines.push(`- cover: ${input.coverImg}`);
   for (const uri of input.attachments) lines.push(`- attachment: ${uri}`);
+  lines.push(...feeAssistReceiptLines(input.feeAssist));
   if (input.pinId) {
     lines.push(`- view link: ${markdownSelfLink(`pin://${input.pinId}`)}`);
   }

@@ -351,3 +351,16 @@ test('send_group_message keeps the generic error surface for non-sponsor failure
   });
   assert.match(result.content[0].text, /Send group message failed: HTTP 500/);
 });
+
+test('group send receipt surfaces the fee channel when the write ran sponsored', async () => {
+  const { byName } = makeHarness({
+    sendResult: {
+      txids: ['tx-s'], pinId: 'msgPin1i0', totalCost: 451,
+      feeAssist: { attempted: true, used: true, mode: 'mvc_sponsor_v2', stage: 'done', orderId: 'order-5' },
+    },
+  });
+  const result = await byName.group_chat.handler({ action: 'send_group_message', group_id: GROUP_ID, content: 'hello' });
+  assert.equal(result.isError, undefined);
+  assert.match(result.content[0].text, /Group message sent \(SimpleGroupChat\)\./);
+  assert.match(result.content[0].text, /sponsor: applied \(MVC fee sponsor covered this write, order order-5\)/);
+});
