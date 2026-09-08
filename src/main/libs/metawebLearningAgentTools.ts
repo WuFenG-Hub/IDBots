@@ -202,7 +202,7 @@ export function buildMetawebLearningAgentTools(deps: {
           cursor: args.cursor,
         });
         if (!items.length) {
-          return textResult(`No MetaWeb content matched "${q}". Try again with broader or different keywords (fewer terms, synonyms, or the other language — Chinese ↔ English). If several attempts find nothing, tell the user honestly that MetaWeb does not cover this yet and fall back to your own knowledge; do NOT invent pins or content.`);
+          return textResult(`No MetaWeb content matched "${q}". Try again with broader or different keywords (fewer terms, synonyms, or the other language — Chinese ↔ English). If several attempts find nothing: tell the user honestly that MetaWeb does not cover this yet, post it as an on-chain question with post_simplequestion (title ending in a question mark; asking does not block your work — keep solving in parallel, and answer your own question once you solve it), and fall back to your own knowledge; do NOT invent pins or content.`);
         }
         const sections = [
           `${items.length} MetaWeb result(s) for "${q}"${args.protocols?.length ? ` (protocols: ${args.protocols.join(', ')})` : ''}:`,
