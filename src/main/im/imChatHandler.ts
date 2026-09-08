@@ -8,6 +8,7 @@ import {
   IMMessage,
   IMSettings,
 } from './types';
+import { buildOpenCodeGoHeaders } from '../libs/opencodeGatewayHeaders';
 
 // LLM Configuration interface (mirrors app_config structure)
 interface LLMConfig {
@@ -174,6 +175,7 @@ export class IMChatHandler {
         'x-api-key': config.apiKey,
         'anthropic-version': '2023-06-01',
         'Content-Type': 'application/json',
+        ...buildOpenCodeGoHeaders(config.baseUrl),
       },
     });
 
@@ -237,6 +239,7 @@ export class IMChatHandler {
     if (config.apiKey) {
       headers.Authorization = `Bearer ${config.apiKey}`;
     }
+    Object.assign(headers, buildOpenCodeGoHeaders(config.baseUrl));
 
     const response = await axios.post(url, body, { headers });
 
