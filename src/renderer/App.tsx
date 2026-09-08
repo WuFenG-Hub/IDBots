@@ -1015,13 +1015,14 @@ const App: React.FC = () => {
       const orderTxid = normalizeFocusedOrderTxid(detail.focusedOrderTxid ?? detail.orderTxid);
       if (sessionId) {
         setFocusedOrderTarget(orderTxid ? { sessionId, orderTxid } : null);
+        botBrowserShell.switchToHome();
         setMainView('cowork');
         await coworkService.loadSession(sessionId);
       }
     };
     window.addEventListener('cowork:viewSession', handleViewSession);
     return () => window.removeEventListener('cowork:viewSession', handleViewSession);
-  }, []);
+  }, [botBrowserShell.switchToHome]);
 
   useEffect(() => {
     if (!isInitialized) return;
