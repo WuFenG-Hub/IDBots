@@ -46,6 +46,15 @@ import {
 } from './mvcSponsorClient';
 import { appendMetaidLog } from './metaidLog';
 import { recordLocalTrafficSpend, resolveSponsorTrafficAccount } from './trafficAccountService';
+import {
+  isSponsorBroadcastFailureError,
+  isSponsorCircuitOpen,
+  recordSponsorBroadcastFailure,
+  recordSponsorSuccess,
+  sponsorCircuitRecentFailures,
+  sponsorCircuitRetryAfterMs,
+  SPONSOR_BREAKER_COOLDOWN_MS,
+} from './mvcSponsorCircuitBreaker';
 
 export {
   createMvcSponsorV2Client,
@@ -66,7 +75,8 @@ export type MvcSponsorFeeAssistReason =
   | 'insufficient_quota'
   | 'insufficient_traffic'
   | 'pre_rejected'
-  | 'commit_failed';
+  | 'commit_failed'
+  | 'circuit_open';
 export type MvcSponsorFeeAssistStage =
   | 'address_info'
   | 'challenge'
@@ -86,6 +96,8 @@ export interface MvcSponsorFeeAssistMetadata {
   commitRecovered?: boolean;
   /** Sponsor-order outcome observed while reconciling a failed commit. */
   commitOrderOutcome?: 'failed' | 'pending' | 'unknown';
+  /** Raw error of the self-paid fallback when that fallback also failed. */
+  selfPaidError?: string;
   quotaBefore?: MvcSponsorAddressInfo;
   quotaAfter?: MvcSponsorAddressInfo;
   advisoryFeeEstimate?: number;
@@ -215,6 +227,7 @@ function normalizeSponsorReason(value: unknown, fallback: MvcSponsorFeeAssistRea
     || value === 'commit_failed'
     || value === 'pre_rejected'
     || value === 'no_user_utxo'
+    || value === 'circuit_open'
     ? value
     : fallback;
 }
@@ -277,18 +290,49 @@ async function fallbackSelfPaidForSponsorError(input: {
     orderId: input.orderId,
     commitOrderOutcome: input.commitOrderOutcome,
   });
-  return input.selfPaidUpload({
-    attempted: true,
-    used: false,
-    mode: 'self_paid',
-    sponsor: 'mvc_sponsor_v2',
-    reason,
-    stage: input.stage,
-    orderId: input.orderId,
-    commitOrderOutcome: input.commitOrderOutcome,
-    quotaBefore: input.quotaBefore,
-    advisoryFeeEstimate: input.advisoryFeeEstimate,
-  });
+  try {
+    return await input.selfPaidUpload({
+      attempted: true,
+      used: false,
+      mode: 'self_paid',
+      sponsor: 'mvc_sponsor_v2',
+      reason,
+      stage: input.stage,
+      orderId: input.orderId,
+      commitOrderOutcome: input.commitOrderOutcome,
+      quotaBefore: input.quotaBefore,
+      advisoryFeeEstimate: input.advisoryFeeEstimate,
+    });
+  } catch (error) {
+    // Both channels failed (R1.3/D3): keep the raw self-paid error as the
+    // message tail and attach the structured feeAssist so tool receipts can
+    // show the sponsor reason AND the self-paid failure side by side.
+    const rawMessage = getErrorMessage(error, 'unknown error');
+    const failedError = error instanceof Error
+      ? error as Error & { code?: string; data?: Record<string, unknown> }
+      : new Error(rawMessage) as Error & { code?: string; data?: Record<string, unknown> };
+    const code = typeof failedError.code === 'string' && failedError.code.trim() ? failedError.code : 'mvc_selfpaid_fallback_failed';
+    failedError.code = code;
+    failedError.message = `Sponsored MVC file upload fell back to self-paid (sponsor ${reason} at ${input.stage}) but the self-paid upload failed: ${rawMessage}`;
+    const existingData = failedError.data && typeof failedError.data === 'object' ? failedError.data : {};
+    failedError.data = {
+      ...existingData,
+      feeAssist: {
+        attempted: true,
+        used: false,
+        mode: 'self_paid',
+        sponsor: 'mvc_sponsor_v2',
+        reason,
+        stage: input.stage,
+        orderId: input.orderId,
+        commitOrderOutcome: input.commitOrderOutcome,
+        quotaBefore: input.quotaBefore,
+        advisoryFeeEstimate: input.advisoryFeeEstimate,
+        selfPaidError: rawMessage,
+      } satisfies MvcSponsorFeeAssistMetadata,
+    };
+    throw failedError;
+  }
 }
 
 export async function uploadMvcSponsorDirectFile(
@@ -305,6 +349,23 @@ export async function uploadMvcSponsorDirectFile(
   };
 
   const sponsorClient = createMvcSponsorV2Client({ baseUrl: input.baseUrl, fetchImpl: input.fetchImpl });
+
+  // R3.2 circuit breaker: after repeated sponsor broadcast failures for this
+  // address, skip the sponsor entirely for the cooldown and go self-paid —
+  // no doomed orders, no reconcile wait. Sponsored successes reset it.
+  if (isSponsorCircuitOpen(input.mvcAddress)) {
+    appendMetaidLog('WARN', 'Sponsored MVC file upload skipped — sponsor circuit breaker open, going self-paid', {
+      mvcAddress: input.mvcAddress,
+      recentFailures: sponsorCircuitRecentFailures(input.mvcAddress),
+      retryAfterMs: sponsorCircuitRetryAfterMs(input.mvcAddress),
+    });
+    return fallbackSelfPaidForSponsorError({
+      error: { reason: 'circuit_open' },
+      selfPaidUpload: input.selfPaidUpload,
+      fallbackReason: 'circuit_open',
+      stage: 'address_info',
+    });
+  }
 
   let quotaBefore: MvcSponsorAddressInfo;
   try {
@@ -436,6 +497,18 @@ export async function uploadMvcSponsorDirectFile(
   } catch (error) {
     // pre_rejected now falls back too: the sponsor refused the draft but
     // nothing was broadcast, so the bot's own wallet can still deliver.
+    // Broadcast-reconciliation rejections here count toward the breaker.
+    if (isSponsorBroadcastFailureError(error)) {
+      const { failures, tripped } = recordSponsorBroadcastFailure(input.mvcAddress);
+      if (tripped) {
+        appendMetaidLog('WARN', 'Sponsor broadcast-failure circuit breaker tripped — going self-paid for the cooldown', {
+          mvcAddress: input.mvcAddress,
+          context: 'pre',
+          failures,
+          cooldownMs: SPONSOR_BREAKER_COOLDOWN_MS,
+        });
+      }
+    }
     return fallbackSelfPaidForSponsorError({
       error,
       selfPaidUpload: input.selfPaidUpload,
@@ -510,6 +583,8 @@ export async function uploadMvcSponsorDirectFile(
         txId: reconciliation.txId,
         commitError: getErrorMessage(error, 'commit failed'),
       });
+      // The sponsor did deliver — proof-of-recovery closes the breaker.
+      recordSponsorSuccess(input.mvcAddress);
       commit = {
         txId: reconciliation.txId,
         txSize: reconciliation.txSize,
@@ -518,6 +593,17 @@ export async function uploadMvcSponsorDirectFile(
       };
       commitRecovered = true;
     } else {
+      if (isSponsorBroadcastFailureError(error)) {
+        const { failures, tripped } = recordSponsorBroadcastFailure(input.mvcAddress);
+        if (tripped) {
+          appendMetaidLog('WARN', 'Sponsor broadcast-failure circuit breaker tripped — going self-paid for the cooldown', {
+            mvcAddress: input.mvcAddress,
+            context: 'commit',
+            failures,
+            cooldownMs: SPONSOR_BREAKER_COOLDOWN_MS,
+          });
+        }
+      }
       appendMetaidLog('WARN', 'Sponsored MVC file upload commit failed — falling back to self-paid', {
         mvcAddress: input.mvcAddress,
         orderId: pre.orderId,
@@ -542,6 +628,7 @@ export async function uploadMvcSponsorDirectFile(
   }
 
   const sponsoredMinerFee = commit.minerFee ?? pre.minerFee;
+  recordSponsorSuccess(input.mvcAddress);
   // Local spend journal + balance-cache deduction (best-effort, never throws).
   recordLocalTrafficSpend({
     txId: commit.txId,

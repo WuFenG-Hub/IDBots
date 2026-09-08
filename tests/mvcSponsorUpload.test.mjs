@@ -9,6 +9,10 @@ const {
   createMvcSponsorV2Client,
   uploadMvcSponsorDirectFile,
 } = await import('../dist-electron/main/services/mvcSponsorUpload.js');
+const {
+  recordSponsorBroadcastFailure,
+  resetSponsorCircuitBreakerForTests,
+} = await import('../dist-electron/main/services/mvcSponsorCircuitBreaker.js');
 
 const MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -409,4 +413,94 @@ test('createMvcSponsorV2Client unwraps the code-0 envelope and normalizes fields
   assert.equal(info.exists, true);
   assert.equal(info.availableAmount, 10);
   assert.equal(info.status, 'active');
+});
+
+test('uploadMvcSponsorDirectFile skips the sponsor entirely when the circuit breaker is open', async () => {
+  resetSponsorCircuitBreakerForTests();
+  const mvcAddress = '1K9eUW4vED3qfWmr4Fcre64sU7D38QM1tX';
+  const { filePath } = await makeTestFile();
+
+  recordSponsorBroadcastFailure(mvcAddress);
+  recordSponsorBroadcastFailure(mvcAddress);
+  recordSponsorBroadcastFailure(mvcAddress);
+
+  let sponsorCalls = 0;
+  const stub = createFetchStub([
+    ['/v2/assist/gas/address/info', {
+      exists: true,
+      balance: 5000,
+      grantedAmount: 5000,
+      reservedAmount: 0,
+      spentAmount: 0,
+      availableAmount: 5000,
+      status: 'active',
+    }],
+  ]);
+  const fetchImpl = async (url, init) => {
+    sponsorCalls += 1;
+    return stub(url, init);
+  };
+
+  let selfPaidFeeAssist = null;
+  const result = await uploadMvcSponsorDirectFile({
+    filePath,
+    fileName: 'sponsor-test.bin',
+    contentType: 'application/octet-stream;binary',
+    bytes: 16,
+    extension: '.bin',
+    mnemonic: MNEMONIC,
+    walletPath: WALLET_PATH,
+    mvcAddress,
+    selfPaidUpload: async (feeAssist) => {
+      selfPaidFeeAssist = feeAssist;
+      return { success: true, pinId: 'selfpaid-i0' };
+    },
+    fetchImpl,
+    fetchUtxos: async () => [],
+  });
+
+  assert.equal(sponsorCalls, 0);
+  assert.equal(result.pinId, 'selfpaid-i0');
+  assert.ok(selfPaidFeeAssist);
+  assert.equal(selfPaidFeeAssist.used, false);
+  assert.equal(selfPaidFeeAssist.mode, 'self_paid');
+  assert.equal(selfPaidFeeAssist.reason, 'circuit_open');
+  assert.equal(selfPaidFeeAssist.stage, 'address_info');
+});
+
+test('uploadMvcSponsorDirectFile attaches structured feeAssist when the self-paid fallback also fails', async () => {
+  resetSponsorCircuitBreakerForTests();
+  const { filePath } = await makeTestFile();
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/gas/address/info', () => ({ code: 1, msg: 'service down' })],
+  ]);
+
+  await assert.rejects(
+    uploadMvcSponsorDirectFile({
+      filePath,
+      fileName: 'sponsor-test.bin',
+      contentType: 'application/octet-stream;binary',
+      bytes: 16,
+      extension: '.bin',
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: '1K9eUW4vED3qfWmr4Fcre64sU7D38QM1tX',
+      selfPaidUpload: async () => {
+        throw new Error('MetaBot balance is insufficient for this chain write.');
+      },
+      fetchImpl,
+      fetchUtxos: async () => [],
+    }),
+    (error) => {
+      assert.match(
+        error.message,
+        /fell back to self-paid \(sponsor service_unavailable at address_info\) but the self-paid upload failed: MetaBot balance is insufficient/,
+      );
+      assert.equal(error.code, 'mvc_selfpaid_fallback_failed');
+      assert.equal(error.data.feeAssist.mode, 'self_paid');
+      assert.equal(error.data.feeAssist.reason, 'service_unavailable');
+      assert.equal(error.data.feeAssist.selfPaidError, 'MetaBot balance is insufficient for this chain write.');
+      return true;
+    },
+  );
 });
