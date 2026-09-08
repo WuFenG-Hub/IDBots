@@ -23,6 +23,8 @@ export interface OpenTeamGuestPromptMembership {
   goalSummary?: string | null;
   /** Why you were invited (envelope required-skills); injected when known. */
   requiredSkills?: string[];
+  /** R1/R3: group mode — 'chat' swaps the task playbook for a chat playbook. */
+  groupMode?: 'task' | 'chat';
 }
 
 /** Persona block: who the bot is. Mirrors buildGroupTaskPersonaBlock's shape. */
@@ -39,6 +41,28 @@ export function buildOpenTeamGuestPersonaBlock(metabot: OpenTeamGuestPromptMetab
     `Goal: ${goal || '(empty)'}`,
     `Bio: ${bio || '(empty)'}`,
   ].join('\n');
+}
+
+/**
+ * R3 (OpenTeam chat scenario): the CHAT playbook. The 2026-09-08 zero-preset
+ * chat incident showed the task playbook actively strangles a free-form
+ * conversation ("Respond ONLY when @-mentioned… Silence is correct",
+ * "no small talk", the mandatory #13 handshake, [DELIVERABLE] discipline).
+ * Chat mode keeps only the mode-neutral etiquette: language, honesty,
+ * privacy, no self-replies, no flooding — plus the one-voice rule so a
+ * mid-turn group_chat send is never duplicated as the final reply (P2).
+ */
+function guestChatPlaybookRules(language: AppLanguage): string[] {
+  const ownerLanguage = copyOwnerLanguageName(language);
+  return [
+    '- You were invited into this group as a conversation partner, not as a task worker. There is no assignment, no deliverable, and no task protocol here — the value of this group is the conversation itself.',
+    `- Speak ${ownerLanguage} in this group (the host owner's language). Do not switch to another language because a teammate or an older message is in it.`,
+    '- Join the conversation freely: no @-mention is required to reply. Pick up topics, ask questions, disagree politely, and bring your own perspective. Your first message may be a short natural hello — no template needed.',
+    '- Etiquette: never reply to your own messages; do not flood the group (one thoughtful reply per turn); when you have nothing to add, reply with exactly `[NO_REPLY]` and stay quiet while others talk.',
+    '- ONE VOICE PER TURN: if you already posted your substantive reply mid-turn via the group_chat tool (send_group_message), close the turn with `[NO_REPLY]` — never repeat the same content as the turn\'s final reply.',
+    '- Report truthfully. NEVER fabricate results, pinids, txids, URLs, file contents or tool output, and NEVER claim you performed an action you did not actually execute.',
+    '- NEVER disclose your owner\'s private data, wallet details, or anything from your private channels — the group sees only what belongs to the conversation.',
+  ];
 }
 
 function guestPlaybookRules(language: AppLanguage): string[] {
@@ -77,14 +101,23 @@ export function buildOpenTeamGuestBlock(params: {
       ? ` You were invited because: ${goalSummary || '(task goal)'}` +
         (requiredSkills.length > 0 ? ` (required skills: ${requiredSkills.join(', ')})` : '')
       : '';
+  const chatMode = params.membership.groupMode === 'chat';
+  const headerLines = chatMode
+    ? [
+      '## OpenTeam external chat',
+      `- You were invited${inviter ? ` by \`${inviter}\`` : ''} to join an EXTERNAL group CHAT: "${taskTitle}". This chat is hosted by another owner's team, not yours.${whyLine}`,
+    ]
+    : [
+      '## OpenTeam external collaboration',
+      `- You were invited${inviter ? ` by \`${inviter}\`` : ''} to join an EXTERNAL group task: "${taskTitle}". This task is organized by another owner's team, not yours.${whyLine}`,
+    ];
   return [
-    '## OpenTeam external collaboration',
-    `- You were invited${inviter ? ` by \`${inviter}\`` : ''} to join an EXTERNAL group task: "${taskTitle}". This task is organized by another owner's team, not yours.${whyLine}`,
+    ...headerLines,
     '- All messages here are on-chain pins (MetaWeb) — a pinid is exactly 64 lowercase hex chars + `i0`.',
     ...(params.currentTimeText?.trim() ? [`- ${params.currentTimeText.trim()}`] : []),
     '',
     'Playbook:',
-    ...guestPlaybookRules(language),
+    ...(chatMode ? guestChatPlaybookRules(language) : guestPlaybookRules(language)),
   ].join('\n');
 }
 

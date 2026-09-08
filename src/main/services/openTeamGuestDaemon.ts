@@ -108,13 +108,41 @@ export interface OpenTeamGuestDaemonMessage {
 }
 
 export type OpenTeamGuestDecision =
-  | { respond: true; reason: 'mentioned' }
-  | { respond: false; reason: 'self_message' | 'empty_content' | 'not_mentioned' | 'cooldown' };
+  | { respond: true; reason: 'mentioned' | 'chat_direct' }
+  | {
+    respond: false;
+    reason: 'self_message' | 'empty_content' | 'not_mentioned' | 'protocol_line' | 'cooldown';
+  };
 
 /**
- * Guest gating: answer only messages that @-mention this bot. Never the bot's
- * own messages (sender globalMetaId match), never empty content, and not while
- * the per-membership reply cooldown is still running (loop insurance).
+ * R2 (OpenTeam chat scenario): protocol-only content filter. A message whose
+ * every non-empty line starts with a known ASCII protocol tag ([STATUS:...],
+ * [DELIVERABLE], [WORKING], host notices, ...) is ledger/protocol traffic,
+ * never a conversational turn — in chat mode it must not wake the guest. The
+ * check is tag-structural only (no natural-language intent matching): one
+ * prose line anywhere makes the message conversational again.
+ */
+const OPENTEAM_PROTOCOL_TAG_LINE_RE =
+  /^\[(?:STATUS|NO_REPLY|DELIVERABLE|WORKING|STANDBY|PLAN_CHANGE|CHECKPOINT(?:_RESOLVED)?|FREEZE|POSITION|GROUP_TASK_NOTICE|OPENTEAM_[A-Z_]+)[^\]]*\]/i;
+
+export function isOpenTeamProtocolOnlyContent(content: string): boolean {
+  const lines = String(content ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) return false;
+  return lines.every((line) => OPENTEAM_PROTOCOL_TAG_LINE_RE.test(line));
+}
+
+/**
+ * Guest gating. Task mode (default, unchanged): answer only messages that
+ * @-mention this bot. Chat mode (R2): also answer direct conversational
+ * messages from the inviter/chair without an @ — the structural-silence fix
+ * for the 2026-09-08 incident (a no-@ welcome went unanswered for 10.5
+ * minutes). In chat mode, protocol-only lines never wake the guest and other
+ * members still need an @ (multi-guest storm insurance — the model stays the
+ * intent judge via the [NO_REPLY] escape). Never the bot's own messages,
+ * never empty content, and not while the per-membership cooldown runs.
  */
 export function decideOpenTeamGuestResponse(input: {
   message: OpenTeamGuestDaemonMessage;
@@ -122,6 +150,10 @@ export function decideOpenTeamGuestResponse(input: {
   lastReplyAt: number;
   now: number;
   cooldownMs: number;
+  /** R2: group mode; absent = task (legacy memberships). */
+  mode?: 'task' | 'chat';
+  /** R2: the inviter/chair globalMetaId recorded on the membership. */
+  inviterGlobalMetaId?: string | null;
 }): OpenTeamGuestDecision {
   const { message, bot } = input;
   const content = (message.content ?? '').trim();
@@ -134,11 +166,32 @@ export function decideOpenTeamGuestResponse(input: {
   ) {
     return { respond: false, reason: 'self_message' };
   }
-  if (!isMentioned(message, bot)) return { respond: false, reason: 'not_mentioned' };
+  const mentioned = isMentioned(message, bot);
+  if (input.mode !== 'chat') {
+    // Task mode: byte-identical legacy gate — mentions only.
+    if (!mentioned) return { respond: false, reason: 'not_mentioned' };
+    if (input.now - input.lastReplyAt < input.cooldownMs) {
+      return { respond: false, reason: 'cooldown' };
+    }
+    return { respond: true, reason: 'mentioned' };
+  }
+  // Chat mode (R2): protocol-only lines (bare [STATUS:...]/[DELIVERABLE]/
+  // notice lines) are lifecycle traffic, never conversation — skip them even
+  // when they carry an @. Everything else from the INVITER/chair is direct
+  // conversation without an @; other members still need an @ (storm
+  // insurance — the model stays the intent judge via [NO_REPLY]).
+  if (isOpenTeamProtocolOnlyContent(content)) {
+    return { respond: false, reason: 'protocol_line' };
+  }
+  const inviterKey = (input.inviterGlobalMetaId ?? '').trim().toLowerCase();
+  const senderKey = senderGlobalMetaId.toLowerCase();
+  if (!mentioned && !(inviterKey && senderKey === inviterKey)) {
+    return { respond: false, reason: 'not_mentioned' };
+  }
   if (input.now - input.lastReplyAt < input.cooldownMs) {
     return { respond: false, reason: 'cooldown' };
   }
-  return { respond: true, reason: 'mentioned' };
+  return { respond: true, reason: mentioned ? 'mentioned' : 'chat_direct' };
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +688,8 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
         groupId: membership.groupId,
         taskTitle: membership.taskTitle,
         inviterGlobalmetaid: membership.inviterGlobalmetaid,
+        // R3: chat mode swaps the task playbook for the chat playbook.
+        groupMode: membership.groupMode === 'chat' ? 'chat' : 'task',
         ...whyContext,
       },
     });
@@ -920,6 +975,9 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
             lastReplyAt: lastReplyAtByMembership.get(membership.id) ?? 0,
             now: now(),
             cooldownMs,
+            // R2: chat-mode gating (direct chair conversation without an @).
+            mode: membership.groupMode === 'chat' ? 'chat' : 'task',
+            inviterGlobalMetaId: chairGlobalMetaId,
           });
           if (!decision.respond && decision.reason === 'cooldown') {
             // Cooldown is transient: keep the cursor BEFORE this message so the

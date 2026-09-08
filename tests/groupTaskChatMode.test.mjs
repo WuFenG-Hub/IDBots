@@ -14,6 +14,11 @@ const {
   buildOpenTeamInviteMessage,
   parseOpenTeamEnvelope,
 } = require('../dist-electron/main/services/openTeamProtocols.js');
+const {
+  decideOpenTeamGuestResponse,
+  isOpenTeamProtocolOnlyContent,
+} = require('../dist-electron/main/services/openTeamGuestDaemon.js');
+const { buildOpenTeamGuestPrompt } = require('../dist-electron/main/services/openTeamGuestPrompt.js');
 
 const makeTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-group-task-mode-'));
 
@@ -192,4 +197,205 @@ test('membership without groupMode reads as task (legacy rows)', async () => {
   } finally {
     store.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// R2: chat-mode guest gating (decideOpenTeamGuestResponse)
+// ---------------------------------------------------------------------------
+
+const GUEST_GMID = 'idqguest';
+const CHAIR_GMID = 'idqchair';
+const OTHER_GMID = 'idqother';
+const gateBot = () => ({ name: 'Guest Bot', globalmetaid: GUEST_GMID, metaid: 'metaid-guest' });
+const gateMessage = (overrides = {}) => ({
+  id: 1,
+  pinId: null,
+  senderMetaId: 'metaid-x',
+  senderGlobalMetaId: CHAIR_GMID,
+  senderName: 'Chair',
+  content: 'hello there',
+  mention: null,
+  ...overrides,
+});
+const gateInput = (overrides = {}) => ({
+  lastReplyAt: 0,
+  now: 100_000,
+  cooldownMs: 20_000,
+  ...overrides,
+});
+
+test('task mode keeps the strict mention gate (regression)', () => {
+  const bot = gateBot();
+  const decision = decideOpenTeamGuestResponse({
+    ...gateInput(),
+    mode: 'task',
+    inviterGlobalMetaId: CHAIR_GMID,
+    message: gateMessage({ content: 'welcome to the group, make yourself at home', senderGlobalMetaId: CHAIR_GMID }),
+    bot,
+  });
+  assert.equal(decision.respond, false);
+  assert.equal(decision.reason, 'not_mentioned');
+});
+
+test('chat mode answers a no-@ conversational message from the chair (P1 incident replay)', () => {
+  const bot = gateBot();
+  const decision = decideOpenTeamGuestResponse({
+    ...gateInput(),
+    mode: 'chat',
+    inviterGlobalMetaId: CHAIR_GMID,
+    message: gateMessage({ content: 'welcome to the group, make yourself at home' }),
+    bot,
+  });
+  assert.equal(decision.respond, true);
+  assert.equal(decision.reason, 'chat_direct');
+});
+
+test('chat mode still answers @mentions with reason=mentioned', () => {
+  const bot = gateBot();
+  const decision = decideOpenTeamGuestResponse({
+    ...gateInput(),
+    mode: 'chat',
+    inviterGlobalMetaId: CHAIR_GMID,
+    message: gateMessage({ content: 'hey @Guest Bot, what do you think?' }),
+    bot,
+  });
+  assert.equal(decision.respond, true);
+  assert.equal(decision.reason, 'mentioned');
+});
+
+test('chat mode: non-@ messages from other members stay gated (storm insurance)', () => {
+  const bot = gateBot();
+  const decision = decideOpenTeamGuestResponse({
+    ...gateInput(),
+    mode: 'chat',
+    inviterGlobalMetaId: CHAIR_GMID,
+    message: gateMessage({ content: 'anyone want coffee?', senderGlobalMetaId: OTHER_GMID, senderName: 'Other' }),
+    bot,
+  });
+  assert.equal(decision.respond, false);
+  assert.equal(decision.reason, 'not_mentioned');
+});
+
+test('chat mode: protocol-only lines never wake the guest, even with an @', () => {
+  const bot = gateBot();
+  const decision = decideOpenTeamGuestResponse({
+    ...gateInput(),
+    mode: 'chat',
+    inviterGlobalMetaId: CHAIR_GMID,
+    message: gateMessage({ content: '[STATUS:DONE]\n[DELIVERABLE] note: pin://' + 'a'.repeat(64) + 'i0' }),
+    bot,
+  });
+  assert.equal(decision.respond, false);
+  assert.equal(decision.reason, 'protocol_line');
+});
+
+test('chat mode: mixed prose + status tag from the chair stays conversational', () => {
+  const bot = gateBot();
+  const decision = decideOpenTeamGuestResponse({
+    ...gateInput(),
+    mode: 'chat',
+    inviterGlobalMetaId: CHAIR_GMID,
+    message: gateMessage({ content: 'Great talking with you all — closing the room now.\n[STATUS:DONE]' }),
+    bot,
+  });
+  assert.equal(decision.respond, true);
+  assert.equal(decision.reason, 'chat_direct');
+});
+
+test('self messages and empty content stay filtered in chat mode', () => {
+  const bot = gateBot();
+  assert.equal(
+    decideOpenTeamGuestResponse({
+      ...gateInput(),
+      mode: 'chat',
+      inviterGlobalMetaId: CHAIR_GMID,
+      message: gateMessage({ content: 'my own echo', senderGlobalMetaId: GUEST_GMID }),
+      bot,
+    }).reason,
+    'self_message',
+  );
+  assert.equal(
+    decideOpenTeamGuestResponse({
+      ...gateInput(),
+      mode: 'chat',
+      inviterGlobalMetaId: CHAIR_GMID,
+      message: gateMessage({ content: '   ' }),
+      bot,
+    }).reason,
+    'empty_content',
+  );
+});
+
+test('chat mode cooldown still gates direct messages (loop insurance)', () => {
+  const bot = gateBot();
+  const decision = decideOpenTeamGuestResponse({
+    lastReplyAt: 90_000,
+    now: 100_000,
+    cooldownMs: 20_000,
+    mode: 'chat',
+    inviterGlobalMetaId: CHAIR_GMID,
+    message: gateMessage({ content: 'still there?' }),
+    bot,
+  });
+  assert.equal(decision.respond, false);
+  assert.equal(decision.reason, 'cooldown');
+});
+
+test('isOpenTeamProtocolOnlyContent: tag-structural only', () => {
+  assert.equal(isOpenTeamProtocolOnlyContent('[STATUS:EXECUTING]'), true);
+  assert.equal(isOpenTeamProtocolOnlyContent('[STATUS:DONE]\n[NO_REPLY]'), true);
+  // A line LED BY a protocol tag is protocol traffic even with a prose tail —
+  // host notices are never conversational, whatever rides after the tag.
+  assert.equal(isOpenTeamProtocolOnlyContent('[GROUP_TASK_NOTICE:welcome] hi'), true, 'notice-led line');
+  assert.equal(isOpenTeamProtocolOnlyContent('Great chat — closing.\n[STATUS:DONE]'), false, 'mixed prose');
+  assert.equal(isOpenTeamProtocolOnlyContent(''), false);
+  assert.equal(isOpenTeamProtocolOnlyContent('[OPENTEAM_KICK] {"v":1}'), true);
+});
+
+// ---------------------------------------------------------------------------
+// R3: chat-mode guest prompt (task playbook byte-identical regression)
+// ---------------------------------------------------------------------------
+
+const promptMetabot = { name: 'Guest Bot', role: 'pal', soul: 'curious', goal: '', bio: '' };
+const promptMembershipBase = {
+  groupId: 'c'.repeat(64) + 'i0',
+  taskTitle: 'zero-preset collision',
+  inviterGlobalmetaid: CHAIR_GMID,
+};
+
+test('task-mode guest prompt is byte-identical to the legacy prompt', () => {
+  const legacy = buildOpenTeamGuestPrompt({
+    metabot: promptMetabot,
+    membership: { ...promptMembershipBase },
+  });
+  const taskMode = buildOpenTeamGuestPrompt({
+    metabot: promptMetabot,
+    membership: { ...promptMembershipBase, groupMode: 'task' },
+  });
+  assert.equal(taskMode, legacy);
+});
+
+test('chat-mode guest prompt drops the task-discipline lines', () => {
+  const chat = buildOpenTeamGuestPrompt({
+    metabot: promptMetabot,
+    membership: { ...promptMembershipBase, groupMode: 'chat' },
+  });
+  assert.ok(!chat.includes('Respond ONLY when @-mentioned'), 'no silence gate line');
+  assert.ok(!chat.includes('no small talk'), 'no small-talk ban');
+  assert.ok(!chat.includes('#13 handshake'), 'no mandatory handshake');
+  assert.ok(!chat.includes('[DELIVERABLE]'), 'no deliverable discipline');
+  assert.ok(!chat.includes('stay on the task goal'), 'no task-goal tether');
+  // Mode-neutral etiquette survives.
+  assert.ok(chat.includes('NEVER disclose'), 'privacy rule kept');
+  assert.ok(chat.includes('NEVER fabricate'), 'honesty rule kept');
+  assert.ok(chat.includes('ONE VOICE PER TURN'), 'one-voice rule present');
+  assert.ok(chat.includes('group CHAT'), 'chat framing present');
+});
+
+test('chat-mode prompt keeps the persona block intact', () => {
+  const chat = buildOpenTeamGuestPrompt({
+    metabot: promptMetabot,
+    membership: { ...promptMembershipBase, groupMode: 'chat' },
+  });
+  assert.ok(chat.includes('You are Guest Bot'), 'persona block present');
 });
