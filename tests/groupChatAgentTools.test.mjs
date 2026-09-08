@@ -320,3 +320,34 @@ test('group-task sessions send straight through when the correct group id is pas
   assert.equal(calls.send[0].groupId, taskGroup);
   assert.doesNotMatch(result.content[0].text, /routed to this session's task group/);
 });
+
+// ---------------------------------------------------------------------------
+// GT#70 ②: sponsor-pending sends teach the recovery instead of dumping the error
+// ---------------------------------------------------------------------------
+
+test('send_group_message maps SPONSOR_BROADCAST_PENDING to a wait-and-retry-once teaching result', async () => {
+  const { calls, byName } = makeHarness({
+    sendError: new Error('SPONSOR_BROADCAST_PENDING: orderId=deadbeef: broadcast reconciliation in progress'),
+  });
+  const result = await byName.group_chat.handler({
+    action: 'send_group_message',
+    group_id: GROUP_ID,
+    content: 'media handoff',
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /NOT delivered: the fee-sponsor service is still reconciling/);
+  assert.match(result.content[0].text, /Wait 30-60 seconds/);
+  assert.match(result.content[0].text, /retry this send ONCE/);
+  assert.doesNotMatch(result.content[0].text, /Send group message failed: SPONSOR/);
+  assert.equal(calls.send.length, 1, 'one attempt — no internal rapid-retry');
+});
+
+test('send_group_message keeps the generic error surface for non-sponsor failures', async () => {
+  const { byName } = makeHarness({ sendError: new Error('HTTP 500') });
+  const result = await byName.group_chat.handler({
+    action: 'send_group_message',
+    group_id: GROUP_ID,
+    content: 'hello',
+  });
+  assert.match(result.content[0].text, /Send group message failed: HTTP 500/);
+});

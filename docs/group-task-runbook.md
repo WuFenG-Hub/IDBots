@@ -112,7 +112,11 @@ the next tick — one tick of latency by design.
 | `[CHECKPOINT: …]` / `[CHECKPOINT_RESOLVED: …]` | chair | opens/closes the human gate; owner is notified privately |
 | `[FREEZE: <pinid>]` | chair | marks the delivery-of-record version |
 
-Tags from non-authorized senders are ignored. Historical host notice lines
+Tags from non-authorized senders are ignored. A tag CITED in prose must be
+backtick-wrapped — the parser applies a bare tag at the end of the last line
+as an instruction even when the author only meant to quote it (task #70: a
+"…then I post [STATUS:REVIEW]。" promise flipped the task prematurely; the
+chair playbook now mandates backticks for citations). Historical host notice lines
 (`[GROUP_TASK_NOTICE:*]`) still parse as data but are no longer produced and are
 excluded from every "member spoke" accounting.
 
