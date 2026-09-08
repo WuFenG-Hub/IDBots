@@ -22,6 +22,7 @@ import {
   createMvcSponsorV2Client,
   getErrorMessage,
   getMvcSponsorCommitMessage,
+  isMvcInsufficientSelfPayError,
   isNoUserUtxoDraftError,
   reconcileSponsorOrderAfterCommitFailure,
   signMvcAddressMessage,
@@ -142,10 +143,7 @@ function normalizeSponsorReason(value: unknown, fallback: MvcSponsorFeeAssistRea
 }
 
 function isNoUserUtxoDraftFailure(error: unknown): boolean {
-  const message = getErrorMessage(error, '');
-  return isNoUserUtxoDraftError(error)
-    || /not enough balance|余额不足/i.test(message)
-    || message.includes('所有已知 MVC 手续费输入都已失效');
+  return isMvcInsufficientSelfPayError(error);
 }
 
 /** Count one sponsor broadcast failure toward the per-address circuit breaker. */
@@ -214,12 +212,17 @@ export async function runMvcSponsorCreatePin(
     } catch (error) {
       // Both channels failed (R1.3/D3): keep the raw self-paid error as the
       // message tail and attach the structured feeAssist so tool receipts can
-      // show the sponsor reason AND the self-paid failure side by side.
+      // show the sponsor reason AND the self-paid failure side by side. A
+      // broke wallet gets the stable INSUFFICIENT_SELFPAY_FUNDS code (D4).
       const rawMessage = getErrorMessage(error, 'unknown error');
       const failedError = error instanceof Error
         ? error as Error & { code?: string; data?: Record<string, unknown> }
         : new Error(rawMessage) as Error & { code?: string; data?: Record<string, unknown> };
-      const code = typeof failedError.code === 'string' && failedError.code.trim() ? failedError.code : 'mvc_selfpaid_fallback_failed';
+      const code = isMvcInsufficientSelfPayError(error)
+        ? 'INSUFFICIENT_SELFPAY_FUNDS'
+        : typeof failedError.code === 'string' && failedError.code.trim()
+          ? failedError.code
+          : 'mvc_selfpaid_fallback_failed';
       failedError.code = code;
       failedError.message = `Sponsored MVC createPin fell back to self-paid (sponsor ${params.reason} at ${params.stage}) but the self-paid broadcast failed: ${rawMessage}`;
       const existingData = failedError.data && typeof failedError.data === 'object' ? failedError.data : {};

@@ -1160,10 +1160,46 @@ test('runMvcSponsorCreatePin attaches structured feeAssist when the self-paid fa
         error.message,
         /fell back to self-paid \(sponsor service_unavailable at address_info\) but the self-paid broadcast failed: MetaBot balance is insufficient/,
       );
-      assert.equal(error.code, 'mvc_selfpaid_fallback_failed');
+      // The wallet cannot cover the fallback write — D4 stable code.
+      assert.equal(error.code, 'INSUFFICIENT_SELFPAY_FUNDS');
       assert.equal(error.data.feeAssist.mode, 'self_paid');
       assert.equal(error.data.feeAssist.reason, 'service_unavailable');
       assert.equal(error.data.feeAssist.selfPaidError, 'MetaBot balance is insufficient for this chain write.');
+      return true;
+    },
+  );
+});
+
+test('runMvcSponsorCreatePin keeps the generic fallback code when the self-paid failure is not a balance issue', async () => {
+  resetSponsorCircuitBreakerForTests();
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/gas/address/info', () => ({ code: 1, msg: 'service down' })],
+  ]);
+
+  await assert.rejects(
+    runMvcSponsorCreatePin(
+      {
+        metabotId: 9161,
+        mnemonic: MNEMONIC,
+        walletPath: WALLET_PATH,
+        mvcAddress: TEST_ADDRESS,
+        feeRate: 1,
+        fallbackPolicy: 'selfpay',
+        baseUrl: 'https://sponsor.test',
+        fetchImpl,
+      },
+      {
+        runDraftWorker: async () => buildDraftWorkerResult(),
+        runBroadcastWorker: async () => {
+          throw new Error('worker crashed');
+        },
+        recordSpentOutpoints: () => {},
+        replacePendingFundingUtxos: () => {},
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, 'mvc_selfpaid_fallback_failed');
+      assert.equal(error.data.feeAssist.selfPaidError, 'worker crashed');
       return true;
     },
   );

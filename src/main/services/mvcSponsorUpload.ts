@@ -34,6 +34,7 @@ import {
   getErrorMessage,
   getEstimatedBaseTxSize,
   getOpReturnScriptSize,
+  isMvcInsufficientSelfPayError,
   isNoUserUtxoDraftError,
   pickUtxos,
   reconcileSponsorOrderAfterCommitFailure,
@@ -306,12 +307,17 @@ async function fallbackSelfPaidForSponsorError(input: {
   } catch (error) {
     // Both channels failed (R1.3/D3): keep the raw self-paid error as the
     // message tail and attach the structured feeAssist so tool receipts can
-    // show the sponsor reason AND the self-paid failure side by side.
+    // show the sponsor reason AND the self-paid failure side by side. A
+    // broke wallet gets the stable INSUFFICIENT_SELFPAY_FUNDS code (D4).
     const rawMessage = getErrorMessage(error, 'unknown error');
     const failedError = error instanceof Error
       ? error as Error & { code?: string; data?: Record<string, unknown> }
       : new Error(rawMessage) as Error & { code?: string; data?: Record<string, unknown> };
-    const code = typeof failedError.code === 'string' && failedError.code.trim() ? failedError.code : 'mvc_selfpaid_fallback_failed';
+    const code = isMvcInsufficientSelfPayError(error)
+      ? 'INSUFFICIENT_SELFPAY_FUNDS'
+      : typeof failedError.code === 'string' && failedError.code.trim()
+        ? failedError.code
+        : 'mvc_selfpaid_fallback_failed';
     failedError.code = code;
     failedError.message = `Sponsored MVC file upload fell back to self-paid (sponsor ${reason} at ${input.stage}) but the self-paid upload failed: ${rawMessage}`;
     const existingData = failedError.data && typeof failedError.data === 'object' ? failedError.data : {};

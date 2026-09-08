@@ -496,7 +496,8 @@ test('uploadMvcSponsorDirectFile attaches structured feeAssist when the self-pai
         error.message,
         /fell back to self-paid \(sponsor service_unavailable at address_info\) but the self-paid upload failed: MetaBot balance is insufficient/,
       );
-      assert.equal(error.code, 'mvc_selfpaid_fallback_failed');
+      // The wallet cannot cover the fallback upload — D4 stable code.
+      assert.equal(error.code, 'INSUFFICIENT_SELFPAY_FUNDS');
       assert.equal(error.data.feeAssist.mode, 'self_paid');
       assert.equal(error.data.feeAssist.reason, 'service_unavailable');
       assert.equal(error.data.feeAssist.selfPaidError, 'MetaBot balance is insufficient for this chain write.');
