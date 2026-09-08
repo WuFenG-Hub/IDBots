@@ -10691,6 +10691,7 @@ if (!gotTheLock) {
     goal?: string;
     acceptanceCriteria?: string;
     memberMetabotIds?: number[];
+    mode?: 'task' | 'chat';
   }) => {
     try {
       const task = await withSqliteRecovery('groupTask:create', () =>
@@ -10699,6 +10700,7 @@ if (!gotTheLock) {
           goal: String(input?.goal ?? '').trim(),
           acceptanceCriteria: typeof input?.acceptanceCriteria === 'string' ? input.acceptanceCriteria : undefined,
           memberMetabotIds: Array.isArray(input?.memberMetabotIds) ? input.memberMetabotIds : [],
+          mode: input?.mode === 'chat' ? 'chat' : 'task',
           createdBy: 'user',
         }));
       return { success: true, task };

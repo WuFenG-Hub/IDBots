@@ -6,6 +6,7 @@
 
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import { normalizeRawGlobalMetaId } from './shared/globalMetaId';
+import { normalizeGroupTaskMode, type GroupTaskMode } from './libs/groupTaskMode';
 import {
   normalizeStaffingPlan,
   type GroupTaskStaffingPlan,
@@ -174,6 +175,13 @@ export interface GroupTask {
    * dispatch replies; resume requires explicit owner confirmation.
    */
   dispatchPausedAt: number | null;
+  /**
+   * R1 (OpenTeam chat scenario): 'task' = dispatch-deliver-accept pipeline;
+   * 'chat' = free-form conversation (monitoring exempt, deliverable
+   * discipline off). Immutable for the life of the group; legacy rows read
+   * as 'task'.
+   */
+  mode: GroupTaskMode;
 }
 
 export interface GroupTaskMember {
@@ -445,6 +453,12 @@ export interface CreateGroupTaskInput {
   createPinId?: string | null;
   /** R2: originating CoWork session (relay target on close). */
   sourceSessionId?: string | null;
+  /**
+   * R1 (OpenTeam chat scenario): 'task' (default) or 'chat'. Chat groups are
+   * born 'executing' (a conversation has no planning phase) and are exempt
+   * from task monitoring on every path that reads task.mode.
+   */
+  mode?: GroupTaskMode;
 }
 
 export interface AddGroupTaskMemberInput {
@@ -538,6 +552,7 @@ interface GroupTaskRow {
   archived_at: number | null;
   source_session_id: string | null;
   dispatch_paused_at: number | null;
+  mode: string | null;
 }
 
 interface GroupTaskMemberRow {
@@ -974,6 +989,7 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     archivedAt: row.archived_at ?? null,
     sourceSessionId: row.source_session_id ?? null,
     dispatchPausedAt: row.dispatch_paused_at ?? null,
+    mode: normalizeGroupTaskMode(row.mode),
   };
 }
 
@@ -1102,20 +1118,26 @@ export class GroupTaskStore {
   // --- group_tasks ---
 
   createTask(input: CreateGroupTaskInput): GroupTask {
+    const mode = normalizeGroupTaskMode(input.mode);
+    // R1: a chat group is born 'executing' — a conversation has no planning
+    // phase and no kickoff ceremony; lifecycle tags stay optional.
+    const initialStatus = mode === 'chat' ? 'executing' : 'planning';
     this.db.run(
       `INSERT INTO group_tasks (
         group_id, title, goal, acceptance_criteria, status, chair_metabot_id, created_by,
-        last_processed_msg_id, create_pin_id, source_session_id
-      ) VALUES (?, ?, ?, ?, 'planning', ?, ?, 0, ?, ?)`,
+        last_processed_msg_id, create_pin_id, source_session_id, mode
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       [
         input.groupId,
         input.title,
         input.goal,
         input.acceptanceCriteria ?? null,
+        initialStatus,
         input.chairMetabotId,
         input.createdBy,
         input.createPinId ?? null,
         input.sourceSessionId?.trim() || null,
+        mode,
       ],
     );
     const id = this.lastInsertId();

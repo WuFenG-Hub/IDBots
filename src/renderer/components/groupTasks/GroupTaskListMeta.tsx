@@ -158,6 +158,11 @@ export const GroupTaskHoverCard: React.FC<{
             <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${groupTaskStatusBadgeClass(task.status)}`}>
               {i18nService.t(groupTaskStatusLabelKey(task.status))}
             </span>
+            {task.mode === 'chat' ? (
+              <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-claude-accent/10 text-claude-accent">
+                {i18nService.t('groupTasksFormModeChat')}
+              </span>
+            ) : null}
             {relative.compact ? (
               <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 {relative.compact}

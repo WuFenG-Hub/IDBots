@@ -22,6 +22,7 @@ import {
   copyReviewVersionTag,
   SUPERVISOR_NOTE_MAX_CHARS,
 } from '../libs/groupTaskCopy';
+import type { GroupTaskMode } from '../libs/groupTaskMode';
 import {
   GroupTaskStore,
   type GroupTask,
@@ -135,6 +136,12 @@ export interface CreateGroupTaskOptions {
    * the panel IPC (panel-created tasks have no originating session).
    */
   sourceSessionId?: string;
+  /**
+   * R1 (OpenTeam chat scenario): 'task' (default, dispatch-deliver-accept
+   * pipeline) or 'chat' (free-form conversation: task monitoring exempt,
+   * deliverable discipline off, relaxed response gating).
+   */
+  mode?: GroupTaskMode;
 }
 
 export interface ProposeGroupTaskStaffingOptions {
@@ -864,6 +871,32 @@ function buildKickoffMessage(input: {
 
 
 /**
+ * R1 (OpenTeam chat scenario): the CHAT-mode opener posted by the chair right
+ * after group creation. Deliberately not a task brief — no goal restatement,
+ * no acceptance line, no observer assignments — just the topic, the roster and
+ * an explicit "this is a conversation" framing so no participant dresses the
+ * chat up as a task. The mention array (built by the caller) carries every
+ * local member so the relaxed chat gating starts with everyone awake.
+ */
+function buildChatKickoffMessage(input: {
+  title: string;
+  goal: string;
+  chairName: string;
+  memberNames: string[];
+}): string {
+  return [
+    `[GROUP CHAT] ${input.title}`,
+    `Topic: ${input.goal}`,
+    `Host: ${input.chairName}`,
+    input.memberNames.length > 0
+      ? `Participants: ${input.memberNames.join(', ')}`
+      : 'Participants: (host only)',
+    '',
+    'This is a free-form chat group — no deliverables, no task protocol. Talk freely; speak only for yourself; silence while others think is fine.',
+  ].join('\n');
+}
+
+/**
  * Create a group task end to end: resolve twin (chair) -> create the on-chain
  * group -> wait for the indexer -> persist task + member rows -> join each local
  * member -> chair posts the kickoff message.
@@ -971,6 +1004,7 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
     );
   }
 
+  const taskMode: GroupTaskMode = opts.mode === 'chat' ? 'chat' : 'task';
   const task = store.createTask({
     groupId,
     title,
@@ -980,6 +1014,7 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
     createdBy: opts.createdBy,
     createPinId: pinId,
     sourceSessionId: opts.sourceSessionId?.trim() || null,
+    mode: taskMode,
   });
   if (claimId != null) {
     store.bindStaffingProposalTask(claimId, task.id);
@@ -1076,20 +1111,31 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Cre
   }
 
   try {
+    // R1: chat mode opens with a conversation framing (no goal/acceptance
+    // brief, no observer assignments) and the mention array wakes EVERY local
+    // member — a chat has no assignment split, everyone is a participant.
+    const chatMode = taskMode === 'chat';
+    const workerGmids = workerIds
+      .map((workerId) => (metabotStore.getMetabotById(workerId)?.globalmetaid ?? '').trim())
+      .filter(Boolean);
     await sendGroupChatMessageFn(chairMetabotId, groupId, {
-      content: buildKickoffMessage({
-        title,
-        goal,
-        acceptanceCriteria: opts.acceptanceCriteria,
-        chairName,
-        memberNames,
-        observerRoles: opts.observerRoles,
-        activeMemberNames: opts.activeMemberNames,
-      }),
+      content: chatMode
+        ? buildChatKickoffMessage({ title, goal, chairName, memberNames })
+        : buildKickoffMessage({
+          title,
+          goal,
+          acceptanceCriteria: opts.acceptanceCriteria,
+          chairName,
+          memberNames,
+          observerRoles: opts.observerRoles,
+          activeMemberNames: opts.activeMemberNames,
+        }),
       nickName: chairName,
       // Mention array only — the roster text stays @-free (P0-3); the wake-up
       // gate reads the mention array, so assigned workers wake at creation.
-      mention: kickoffMentionIds.length > 0 ? kickoffMentionIds : undefined,
+      mention: chatMode
+        ? (workerGmids.length > 0 ? workerGmids : undefined)
+        : (kickoffMentionIds.length > 0 ? kickoffMentionIds : undefined),
     });
   } catch (error) {
     console.warn(

@@ -7,6 +7,7 @@
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import type { OpenTeamTaskStatus } from './libs/openTeamTaskStatus';
 import { parseOpenTeamTaskStatusTag } from './libs/openTeamTaskStatus';
+import { normalizeGroupTaskMode, type GroupTaskMode } from './libs/groupTaskMode';
 
 export type OpenTeamMembershipStatus = 'active' | 'left';
 export type OpenTeamInviteStatus = 'pending' | 'accepted' | 'declined' | 'expired';
@@ -54,6 +55,12 @@ export interface OpenTeamMembership {
   taskStatus: OpenTeamTaskStatus | null;
   /** When taskStatus was last (re-)derived (sqlite datetime 'now', UTC). */
   taskStatusUpdatedAt: string | null;
+  /**
+   * R1 (OpenTeam chat scenario): the group's mode as declared by the inviter
+   * ('task' | 'chat'); drives guest-side gating/prompt/cadence. NULL (legacy
+   * rows / older inviters) reads as 'task'.
+   */
+  groupMode: GroupTaskMode;
 }
 
 /** How a guest membership ended (drives the guest-side "removed" notice). */
@@ -130,6 +137,8 @@ export interface UpsertOpenTeamMembershipInput {
   taskTitle?: string | null;
   invitePinId?: string | null;
   joinedPinId?: string | null;
+  /** R1: group mode carried on the invite envelope ('task' when absent). */
+  groupMode?: GroupTaskMode;
 }
 
 export interface CreateOpenTeamInviteInput {
@@ -165,6 +174,7 @@ interface OpenTeamMembershipRow {
   left_reason: string | null;
   task_status: string | null;
   task_status_updated_at: string | null;
+  group_mode: string | null;
 }
 
 interface OpenTeamInviteRow {
@@ -208,6 +218,7 @@ function rowToOpenTeamMembership(row: OpenTeamMembershipRow): OpenTeamMembership
       ? taskStatus
       : null,
     taskStatusUpdatedAt: row.task_status_updated_at ?? null,
+    groupMode: normalizeGroupTaskMode(row.group_mode),
   };
 }
 
@@ -362,6 +373,7 @@ export class OpenTeamMembershipStore {
            task_title = COALESCE(?, task_title),
            invite_pin_id = COALESCE(?, invite_pin_id),
            joined_pin_id = COALESCE(?, joined_pin_id),
+           group_mode = COALESCE(?, group_mode),
            activated_at = datetime('now'),
            left_at = NULL,
            left_cause = NULL,
@@ -375,6 +387,7 @@ export class OpenTeamMembershipStore {
           input.taskTitle ?? null,
           input.invitePinId ?? null,
           input.joinedPinId ?? null,
+          input.groupMode ?? null,
           input.groupId,
           input.metabotId,
         ],
@@ -387,8 +400,8 @@ export class OpenTeamMembershipStore {
     this.db.run(
       `INSERT INTO openteam_memberships (
         group_id, metabot_id, globalmetaid, inviter_globalmetaid, task_title,
-        invite_pin_id, joined_pin_id, status, activated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'))`,
+        invite_pin_id, joined_pin_id, status, activated_at, group_mode
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), ?)`,
       [
         input.groupId,
         input.metabotId,
@@ -397,6 +410,7 @@ export class OpenTeamMembershipStore {
         input.taskTitle ?? null,
         input.invitePinId ?? null,
         input.joinedPinId ?? null,
+        input.groupMode ?? 'task',
       ],
     );
     const id = this.lastInsertId();

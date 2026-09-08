@@ -921,7 +921,8 @@ export class SqliteStore {
         source_session_id TEXT,
         comm_total_bytes INTEGER,
         comm_message_count INTEGER,
-        dispatch_paused_at INTEGER
+        dispatch_paused_at INTEGER,
+        mode TEXT NOT NULL DEFAULT 'task' CHECK(mode IN ('task','chat'))
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
@@ -930,6 +931,9 @@ export class SqliteStore {
     this.migrateGroupTasksCommStats();
     // G-04: supervisor pause gate — epoch ms while dispatch is paused, NULL = running.
     this.migrateGroupTasksDispatchPausedAt();
+    // R1 (OpenTeam chat scenario): group mode 'task' | 'chat'. Legacy rows and
+    // untouched callers default to 'task' — byte-identical behavior.
+    this.migrateGroupTasksModeColumn();
 
     // G-04: supervisor intervention ledger (nudge / flag / pause / resume) —
     // structured signals recorded from the Twin supervisor channel, visible
@@ -1212,6 +1216,10 @@ export class SqliteStore {
     this.migrateOpenTeamMembershipsLeftColumns();
     // Migration: add task_status/task_status_updated_at to openteam_memberships (host task status sync).
     this.migrateOpenTeamMembershipsTaskStatusColumns();
+    // Migration: add group_mode to openteam_memberships (R1 — the mode declared
+    // by the chair at group creation and carried on the invite envelope; the
+    // guest daemon switches gating/prompt/cadence on it. NULL = legacy 'task').
+    this.migrateOpenTeamMembershipsGroupModeColumn();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_invites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2779,6 +2787,23 @@ export class SqliteStore {
   }
 
   /**
+   * R1 (OpenTeam chat scenario): add group_mode to openteam_memberships —
+   * 'task' | 'chat' as declared by the inviter and carried on the invite
+   * envelope. NULL (legacy rows / older inviters) reads as 'task'.
+   */
+  private migrateOpenTeamMembershipsGroupModeColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_memberships)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('group_mode')) return;
+      this.db.run("ALTER TABLE openteam_memberships ADD COLUMN group_mode TEXT");
+      this.save();
+    } catch (error) {
+      console.warn('migrateOpenTeamMembershipsGroupModeColumn:', error);
+    }
+  }
+
+  /**
    * Migration: bind each observable Group Task to at most one canonical Twin
    * orchestration task. Existing tasks remain valid and are reconciled lazily.
    */
@@ -2831,6 +2856,26 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupTasksDispatchPausedAt:', e);
+    }
+  }
+
+  /**
+   * R1 (OpenTeam chat scenario): add `mode` to group_tasks — 'task' (classic
+   * dispatch-deliver-accept pipeline) or 'chat' (free-form conversation, task
+   * monitoring exempted). Idempotent PRAGMA-guarded; legacy rows fall back to
+   * the column default 'task' so pre-existing groups keep their behavior.
+   */
+  private migrateGroupTasksModeColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('mode')) return;
+      this.db.run(
+        "ALTER TABLE group_tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'task' CHECK(mode IN ('task','chat'))",
+      );
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupTasksModeColumn:', e);
     }
   }
 

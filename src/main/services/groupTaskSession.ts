@@ -281,6 +281,8 @@ export function injectOpenTeamGuestContext(input: {
   sessionId: string;
   taskTitle?: string | null;
   inviterGlobalmetaid?: string | null;
+  /** R1: group mode ('task' | 'chat'); defaults to 'task'. */
+  groupMode?: 'task' | 'chat';
   recentMessages: GroupTaskContextMessage[];
   recentCount?: number;
 }): void {
@@ -292,10 +294,13 @@ export function injectOpenTeamGuestContext(input: {
   const logLines = recent.length > 0
     ? recent.map((message) => `${message.senderName ?? 'Unknown'}: ${message.content ?? ''}`)
     : ['(no messages yet)'];
+  const chatMode = input.groupMode === 'chat';
   const snapshot = [
     '[SYSTEM OpenTeam context snapshot — injected by the host at invite-accept time, not a group participant message]',
-    `You were invited${inviter ? ` by \`${inviter}\`` : ''} to an external group task: "${input.taskTitle?.trim() || '(untitled task)'}".`,
-    'Your replies come from your own machine as a remote teammate.',
+    `You were invited${inviter ? ` by \`${inviter}\`` : ''} to an external group ${chatMode ? 'CHAT' : 'task'}: "${input.taskTitle?.trim() || '(untitled)'}".`,
+    chatMode
+      ? 'This is a free-form conversation — no deliverables, no task protocol. Your replies come from your own machine as a remote teammate.'
+      : 'Your replies come from your own machine as a remote teammate.',
     '',
     `Recent group log (last ${recentCount} messages):`,
     ...logLines,

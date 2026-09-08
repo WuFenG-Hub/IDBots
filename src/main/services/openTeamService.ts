@@ -520,6 +520,9 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
     chairGlobalMetaId: inviterGmid,
     targetGlobalMetaId: invitee,
     expiresAt: Math.floor(now() / 1000) + inviteTtlSeconds,
+    // R1: carry the group's mode so the guest host applies the same chat/task
+    // semantics (gating, prompt, monitoring). Legacy guests ignore the field.
+    mode: task.mode === 'chat' ? 'chat' : 'task',
   });
   // Persist the pending invite BEFORE sending the envelope: a crash between
   // send and record would otherwise leave a ghost invite the guest may accept
