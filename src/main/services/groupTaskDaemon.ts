@@ -5777,17 +5777,59 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       if (exhaustedIds.length > 0) {
         store.markSupervisorSignalsProcessed(exhaustedIds, null);
+        // RFP-2026-09-08 R3.2/R3.3 (task #70): re-check the task LIVE before
+        // alerting — the attempts may have failed while the chair session was
+        // frozen behind a hung tool call, and by alert time the task may have
+        // recovered (#70: the alert fired 93s AFTER the task entered review,
+        // mislabeled as "chair did not answer").
+        const classifySupervisorExhaustion = (): { summary: string; subject: string } => {
+          const fresh = deps.getGroupTaskStore().getTaskById(task.id);
+          const liveStatus = fresh?.status ?? task.status;
+          let lastDeliverableMs = 0;
+          try {
+            for (const deliverable of deps.getGroupTaskStore().listDeliverables(task.id)) {
+              const ms = parseSqliteUtcMs(deliverable.createdAt ?? null);
+              if (ms != null && ms > lastDeliverableMs) lastDeliverableMs = ms;
+            }
+          } catch {
+            // classification is best-effort
+          }
+          const progressed = lastDeliverableMs > 0 && now() - lastDeliverableMs < 5 * 60_000;
+          const turnsInFlightNow = [...turnInFlight.entries()]
+            .filter(([key]) => key.startsWith(`${task.id}:`) && !latchedTurnKeys.has(key))
+            .map(([key, value]) => ({ botId: Number(key.split(':')[1]), since: value.startedAt }));
+          if (progressed || (liveStatus !== task.status && liveStatus === 'review')) {
+            return {
+              subject: `supervisor_signals_recovered:${exhaustedIds.join('-')}`,
+              summary:
+                `Supervisor signal(s) #${exhaustedIds.join(', #')} could not be delivered while the chair ` +
+                `session was unresponsive, but the task has since recovered` +
+                `${liveStatus !== task.status ? ` (now ${liveStatus})` : ''} (fresh deliverable activity within ` +
+                '5 min). The signals were closed — this is a "recovered" notice, not a new incident; no action needed.',
+            };
+          }
+          const blockedHint = turnsInFlightNow.length > 0
+            ? ` Likely root cause: a turn is still in flight for bot ` +
+              `${turnsInFlightNow.map((t) => `${t.botId} (${Math.round((now() - t.since) / 60_000)} min)`).join(', ')}` +
+              ' — the session may be blocked by an unreturned tool call (the chain-write budget breaks such freezes within minutes).'
+            : '';
+          return {
+            subject: `supervisor_signals_unanswered:${exhaustedIds.join('-')}`,
+            summary:
+              `The chair did not answer supervisor signal(s) #${exhaustedIds.join(', #')} after 3 attempts; ` +
+              `they were closed without a chair response.${blockedHint} Check the chair bot and its LLM configuration.`,
+          };
+        };
+        const verdict = classifySupervisorExhaustion();
         notifySourceSessionMilestone(
           task,
           'anomaly',
           buildSourceSessionAnomalyNotice({
             title: task.title,
             status: task.status,
-            summary:
-              `The chair did not answer supervisor signal(s) #${exhaustedIds.join(', #')} after 3 attempts; ` +
-              'the signals were closed without a chair response. Check the chair bot and its LLM configuration.',
+            summary: verdict.summary,
           }),
-          `supervisor_signals_unanswered:${exhaustedIds.join('-')}`,
+          verdict.subject,
         );
       }
       emitLog(
@@ -8393,6 +8435,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       `[GroupTaskDaemon] Task ${task.id}: no progress for ${Math.round(idleMs / 60_000)} min ` +
       '(no new group message, no new deliverable) — reporting stall anomaly to the origin session',
     );
+    // RFP-2026-09-08 R2.2 (task #70): classify WHY — "blocked by an
+    // unreturned tool call" vs "idle" read differently and the owner must not
+    // have to guess.
+    const turnsInFlight = [...turnInFlight.entries()]
+      .filter(([key]) => key.startsWith(`${task.id}:`) && !latchedTurnKeys.has(key))
+      .map(([key, value]) => ({ botId: Number(key.split(':')[1]), since: value.startedAt }));
+    const blockedText = turnsInFlight.length > 0
+      ? ` A turn is in flight for bot ${turnsInFlight.map((t) => `${t.botId} (${Math.round((now() - t.since) / 60_000)} min)`).join(', ')} — ` +
+        'the session may be blocked by an unreturned tool call; the chain-write budget breaks such freezes within minutes.'
+      : ' No turn is in flight — the group is idle.';
     notifySourceSessionMilestone(
       task,
       'anomaly',
@@ -8400,8 +8452,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         title: task.title,
         status: task.status,
         summary:
-          `No progress for ${Math.round(idleMs / 60_000)} minutes (no new group messages, no new deliverables). ` +
-          'Check the task detail view — the chair may be waiting on a stuck member or a silent failure.',
+          `No progress for ${Math.round(idleMs / 60_000)} minutes (no new group messages, no new deliverables).` +
+          blockedText +
+          ' Check the task detail view — the chair may be waiting on a stuck member or a silent failure.',
       }),
       'stall',
     );

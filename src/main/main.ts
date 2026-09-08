@@ -268,6 +268,7 @@ import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
+import { withChainWriteBudget } from './libs/chainWriteBudget';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
 import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
@@ -5607,15 +5608,20 @@ const getCoworkRunner = () => {
       metabotChainWrite: {
         createPin: (metabotId, metaidData, options) =>
           // R3: funding failures surface with the bot's current MVC balance.
-          withMvcBalanceHint(
-            getMetabotStore(),
-            metabotId,
-            options?.network,
-            () => createPin(getMetabotStore(), metabotId, metaidData, {
-              ...options,
-              feeRate: options?.feeRate ?? resolveCreatePinFeeRate(options?.network ?? 'mvc'),
-            }),
-            { estimateNeedSats: () => estimateMvcPinNeedSats() },
+          // Task #70 R1: every chain-write tool call is bounded — a hung
+          // createPin recovery chain must cost minutes, not the whole turn.
+          withChainWriteBudget(
+            `createPin(${String(metaidData?.path ?? 'pin')})`,
+            () => withMvcBalanceHint(
+              getMetabotStore(),
+              metabotId,
+              options?.network,
+              () => createPin(getMetabotStore(), metabotId, metaidData, {
+                ...options,
+                feeRate: options?.feeRate ?? resolveCreatePinFeeRate(options?.network ?? 'mvc'),
+              }),
+              { estimateNeedSats: () => estimateMvcPinNeedSats() },
+            ),
           ),
         encryptGroupMessage: (message, groupId) => encryptGroupMessageECB(message, groupId),
         getMetabotDisplayName: (metabotId) =>
@@ -5632,14 +5638,17 @@ const getCoworkRunner = () => {
         resolveMetabotIdByName: (name) => resolveMetabotIdByName(getMetabotStore(), name),
         getMetabotMvcAddress: (metabotId) =>
           getMetabotStore().getMetabotById(metabotId)?.mvc_address ?? null,
-        transfer: (params) => executeWalletMvcTransfer(
-          {
-            metabotStore: getMetabotStore(),
-            transferStore: getBotWalletTransferStore(),
-            settingsReader: getStore(),
-            getFeeRate: () => getGlobalFeeRate('mvc'),
-          },
-          params,
+        transfer: (params) => withChainWriteBudget(
+          'wallet_transfer',
+          () => executeWalletMvcTransfer(
+            {
+              metabotStore: getMetabotStore(),
+              transferStore: getBotWalletTransferStore(),
+              settingsReader: getStore(),
+              getFeeRate: () => getGlobalFeeRate('mvc'),
+            },
+            params,
+          ),
         ),
         listTransfers: (limit, metabotId) =>
           getBotWalletTransferStore().list(limit, metabotId),
@@ -5660,7 +5669,7 @@ const getCoworkRunner = () => {
           if (!peerChatPubkey) {
             throw new Error('target has no chatPublicKey on chain');
           }
-          return sendEncryptedSimplemsg({
+          return withChainWriteBudget('send_private_chat', () => sendEncryptedSimplemsg({
             metabotId,
             wallet,
             peerGlobalMetaId: toGlobalMetaId,
@@ -5669,7 +5678,7 @@ const getCoworkRunner = () => {
             replyPin,
             contentType: 'text/plain',
             createPin: (id, payload) => createPin(metabotStore, id, payload, { feeRate: getGlobalFeeRate('mvc') }),
-          });
+          }));
         },
       },
       // group_chat tool backend (replacing metabot-chat-groupchat). assignTask
@@ -5733,14 +5742,19 @@ const getCoworkRunner = () => {
           if (channelId) payload.channelId = channelId;
           if (mention?.length) payload.mention = mention;
           const resolvedNetwork = network ?? 'mvc';
-          return createPin(metabotStore, metabotId, {
-            operation: 'create',
-            path: '/protocols/simplegroupchat',
-            encryption: '0',
-            version: '1.0',
-            contentType: 'application/json',
-            payload: JSON.stringify(payload),
-          }, { network: resolvedNetwork, feeRate: resolveCreatePinFeeRate(resolvedNetwork) });
+          // Task #70 R1: this exact call froze a chair session for 30 min
+          // when the createPin recovery chain never settled — bound it.
+          return withChainWriteBudget(
+            'group_chat send_group_message',
+            () => createPin(metabotStore, metabotId, {
+              operation: 'create',
+              path: '/protocols/simplegroupchat',
+              encryption: '0',
+              version: '1.0',
+              contentType: 'application/json',
+              payload: JSON.stringify(payload),
+            }, { network: resolvedNetwork, feeRate: resolveCreatePinFeeRate(resolvedNetwork) }),
+          );
         },
       },
       // omni_read tool backend (replacing metabot-omni-reader): plain GETs

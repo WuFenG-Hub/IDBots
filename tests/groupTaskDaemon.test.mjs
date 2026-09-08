@@ -8997,3 +8997,53 @@ test('GT#70 ③: a chair dispatch landing WHILE the planning LLM runs is success
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// RFP-2026-09-08 R3.2/R3.3: supervisor-exhaustion alert classification
+// ---------------------------------------------------------------------------
+
+test('R3.2/R3.3: exhausted supervisor signals alert as RECOVERED when the task has fresh activity', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    ackTimeoutMs: 180_000,
+    deps: {
+      sendMilestoneToSourceSession: (input) => { milestones.push(input); return true; },
+      performChat: async () => { throw new Error('LLM unreachable'); },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    // Milestone delivery requires a source session; wire one.
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-r32-origin', task.id]);
+    // A pending nudge whose chair turn fails every attempt.
+    h.groupTaskStore.addSupervisorSignal({ taskId: task.id, kind: 'nudge', note: 'check the zip uri' });
+    // Fresh deliverable activity INSIDE the 5-min window → recovered verdict.
+    h.groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'pin-fresh-i0',
+      authorGlobalmetaid: 'gmid-w2',
+      kind: 'pinid',
+      uri: `pin://${'ab'.repeat(32)}i0`,
+    });
+    for (let i = 0; i < 4; i += 1) await h.loop.runTick();
+
+    const exhaustedAlerts = milestones.filter((m) => /supervisor_signals_(recovered|unanswered)/.test(m.subject ?? ''));
+    assert.ok(exhaustedAlerts.length >= 1, `an exhaustion alert fired (got ${JSON.stringify(milestones.map((m) => m.subject))})`);
+    assert.match(
+      exhaustedAlerts[exhaustedAlerts.length - 1].subject,
+      /supervisor_signals_recovered/,
+      'the RECOVERED variant fires for a task with fresh activity',
+    );
+    assert.match(
+      String(exhaustedAlerts[exhaustedAlerts.length - 1].message),
+      /has since recovered/,
+    );
+    assert.ok(
+      !milestones.some((m) => /supervisor_signals_unanswered/.test(m.subject ?? '')),
+      'no stale unanswered alert for a recovered task',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
