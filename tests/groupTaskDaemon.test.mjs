@@ -8943,3 +8943,57 @@ test('EP33 P2: planning bootstrap yields to a chair that already opened the task
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// GT#70 ①③: status-tag citation rule + planning race re-check
+// ---------------------------------------------------------------------------
+
+test('GT#70 ①: the chair playbook mandates backtick-wrapped status-tag citations', () => {
+  const prompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Twin Bot' },
+    task: { title: 'T', goal: 'G' },
+    members: [
+      { name: 'Twin Bot', role: 'chair' },
+      { name: 'Coder Bot', role: 'worker' },
+    ],
+    botRole: 'chair',
+  });
+  assert.match(prompt, /CITATIONS of status tags must be backtick-wrapped/);
+  assert.match(prompt, /A BARE tag landing at the end of your last line is parsed as an instruction and flips the task IMMEDIATELY/);
+});
+
+test('GT#70 ③: a chair dispatch landing WHILE the planning LLM runs is success, not a burned attempt', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    deps: {
+      // Simulate the GT#70 race: at gate-check time nothing exists; the chair's
+      // mid-turn kickoff lands as a side effect DURING the LLM call.
+      performChat: async () => {
+        insertGroupMessage(h.db, {
+          pinId: 'race-kickoff-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+          senderName: 'Twin Bot',
+          content: '【开工对齐】@Coder Bot 你负责 S1，20 分钟内交付。',
+          mention: ['gmid-w2'],
+          chainTimestamp: Math.floor(h.state.nowMs / 1000),
+        });
+        return '[NO_REPLY]';
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1', 'planning marked complete');
+    assert.ok(
+      logs.some((line) => line.includes('the chair dispatched while the planning LLM ran')),
+      'the race is recognized as success',
+    );
+    assert.ok(
+      !logs.some((line) => line.includes('planning turn failed')),
+      'no attempt budget burned',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

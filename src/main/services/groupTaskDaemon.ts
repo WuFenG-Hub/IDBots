@@ -5424,8 +5424,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         thinking: 'enabled',
       })).trim();
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
-        // EP33/P2 note: an already-dispatched chair never reaches this branch
-        // — the hoisted gate above handled it with the minimal directive.
+        // GT#70 (③): the chair may have dispatched WHILE this LLM call ran
+        // (the hoisted gate raced a mid-turn kickoff landing seconds later) —
+        // the [NO_REPLY] is then CORRECT, not a failure. Re-check the gate
+        // before burning an attempt.
+        if (chairAlreadyDispatched(sqlite.getDatabase(), task, members, botsById)) {
+          sqlite.set(plannedKey, '1');
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: planning bootstrap completed — the chair dispatched ` +
+            'while the planning LLM ran; the [NO_REPLY] was correct (no attempt burned)',
+          );
+          return;
+        }
         throw new Error('planning turn produced no usable plan');
       }
       // G-03 hardening: the planning dispatch is a HOST-owned protocol message

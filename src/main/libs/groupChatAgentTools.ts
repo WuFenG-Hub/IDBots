@@ -306,6 +306,19 @@ export function buildGroupChatAgentTools(deps: {
         return textResult(formatPinResult('Group message sent (SimpleGroupChat).', result) + routingNote);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
+        // GT#70 (②): the fee-sponsor reconciliation window is a NORMAL
+        // transient, not an outage — teach the recovery instead of dumping
+        // the raw error (observed: a bot rapid-retried 3x back-to-back and
+        // only recovered after hand-rolling a 40s sleep).
+        if (/SPONSOR_BROADCAST_PENDING/i.test(msg)) {
+          return textResult(
+            'Group message NOT delivered: the fee-sponsor service is still reconciling a previous broadcast ' +
+            '(SPONSOR_BROADCAST_PENDING — a normal transient, NOT an outage; do not report it as a failure). ' +
+            'Wait 30-60 seconds (a bash sleep works), then retry this send ONCE. Do NOT retry back-to-back — ' +
+            'each immediate retry restarts the conflict window.',
+            true,
+          );
+        }
         return textResult(`Send group message failed: ${msg}`, true);
       }
     }
