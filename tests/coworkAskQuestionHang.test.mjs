@@ -17,6 +17,7 @@ const runnerSource = readSource('src', 'main', 'libs', 'coworkRunner.ts');
 const hubSource = readSource('src', 'main', 'libs', 'coworkDshTurn.ts');
 const kernelSource = readSource('src', 'main', 'libs', 'dshKernel', 'dshKernel.ts');
 const panelSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkPermissionPanel.tsx');
+const overlaySource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkPermissionOverlay.tsx');
 const sessionDetailSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkSessionDetail.tsx');
 const appSource = readSource('src', 'renderer', 'App.tsx');
 const i18nSource = readSource('src', 'renderer', 'services', 'i18n.ts');
@@ -95,6 +96,9 @@ test('approval owns the active session composer slot instead of a viewport overl
   assert.match(sessionDetailSource, /pendingPermissions\.find\(\(permission\) => permission\.sessionId === currentSession\.id\)/);
   assert.match(sessionDetailSource, /pendingPermission \? \([\s\S]*?<CoworkPermissionPanel[\s\S]*?: \([\s\S]*?<CoworkPromptInput/);
   assert.doesNotMatch(appSource, /\{permissionPanel\}/);
+  assert.doesNotMatch(overlaySource, /<CoworkPermissionPanel/);
+  assert.match(overlaySource, /cowork:viewSession/);
+  assert.match(overlaySource, /line-clamp-2/);
 });
 
 test('safety approvals use their structured tool context instead of ordinary question controls', () => {

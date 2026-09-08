@@ -3,6 +3,7 @@ import { clearCoworkSessionUpstream } from './coworkOpenAICompatProxy';
 import type { CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
 import { isQuestionLikeMemoryText } from './coworkMemoryExtractor';
 import { truncateUtf16Units } from './llmSafeText';
+import { buildOpenCodeGoHeaders } from './opencodeGatewayHeaders';
 
 /**
  * System-brain seam for the memory judge/extractor. These are fleet-level
@@ -318,6 +319,7 @@ async function judgeWithLlm(
             'Content-Type': 'application/json',
             'x-api-key': config.apiKey,
             'anthropic-version': '2023-06-01',
+            ...buildOpenCodeGoHeaders(config.baseURL),
           },
           body: JSON.stringify({
             model: config.model,
@@ -520,6 +522,7 @@ async function runTurnMemoryExtractionDefault(input: {
             'Content-Type': 'application/json',
             'x-api-key': config.apiKey,
             'anthropic-version': '2023-06-01',
+            ...buildOpenCodeGoHeaders(config.baseURL),
           },
           body: JSON.stringify({
             model: config.model,
