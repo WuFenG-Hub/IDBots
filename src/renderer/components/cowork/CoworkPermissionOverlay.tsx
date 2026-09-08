@@ -1,11 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useMemo } from 'react';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
-import type { CoworkPermissionResult } from '../../types/cowork';
-import { coworkService } from '../../services/cowork';
 import { i18nService } from '../../services/i18n';
-import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
-import CoworkPermissionPanel from './CoworkPermissionPanel';
+import { ArrowRightIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 
 interface CoworkPermissionOverlayProps {
   /**
@@ -21,9 +18,8 @@ interface CoworkPermissionOverlayProps {
  * renders prompts for the currently open chat, so prompts raised by background,
  * IM-automation or hidden sessions would otherwise queue with nowhere to
  * render and burn the runner's 60s watchdog into an automatic denial. This
- * overlay floats above every view; answers route back through
- * respondToPermission(requestId), which the runner resolves to the owning
- * session.
+ * overlay floats above every view and links back to the owning session. The
+ * session's composer takeover remains the single place where users answer.
  */
 const CoworkPermissionOverlay: React.FC<CoworkPermissionOverlayProps> = ({ inlineSessionId }) => {
   const pendingPermissions = useSelector((state: RootState) => state.cowork.pendingPermissions);
@@ -32,23 +28,19 @@ const CoworkPermissionOverlay: React.FC<CoworkPermissionOverlayProps> = ({ inlin
     () => pendingPermissions.find((entry) => entry.sessionId !== inlineSessionId) ?? null,
     [pendingPermissions, inlineSessionId],
   );
-  const [responding, setResponding] = useState(false);
-
-  useEffect(() => {
-    setResponding(false);
-  }, [permission?.requestId]);
-
   const sessionTitle = useMemo(() => {
     if (!permission) return null;
     return sessions.find((session) => session.id === permission.sessionId)?.title ?? null;
   }, [permission, sessions]);
 
-  const handleRespond = useCallback(async (result: CoworkPermissionResult) => {
-    if (!permission || responding) return;
-    setResponding(true);
-    const success = await coworkService.respondToPermission(permission.requestId, result);
-    if (!success) setResponding(false);
-  }, [permission, responding]);
+  const summary = useMemo(() => {
+    if (!permission) return '';
+    if (permission.toolName !== 'AskUserQuestion') return permission.toolName;
+    const questions = permission.toolInput?.questions;
+    if (!Array.isArray(questions)) return permission.toolName;
+    const first = questions.find((item) => item && typeof item === 'object' && typeof (item as Record<string, unknown>).question === 'string');
+    return first ? String((first as Record<string, unknown>).question) : permission.toolName;
+  }, [permission]);
 
   const handleOpenSession = useCallback(() => {
     if (!permission) return;
@@ -59,29 +51,28 @@ const CoworkPermissionOverlay: React.FC<CoworkPermissionOverlayProps> = ({ inlin
 
   return (
     <div
-      className="fixed top-14 right-4 z-[90] w-[min(480px,calc(100vw-2rem))] overflow-hidden rounded-[20px] border border-claude-accent/70 dark:border-claude-accent/50 bg-claude-surface dark:bg-claude-darkSurface shadow-elevated animate-slide-up"
+      className="fixed right-4 top-14 z-[90] w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border border-claude-border bg-claude-surface shadow-elevated animate-slide-up dark:border-claude-darkBorder dark:bg-claude-darkSurface"
       data-cowork-permission-overlay="true"
     >
-      <div className="flex items-center gap-2 px-4 py-2.5 bg-claude-accent/20 dark:bg-claude-accent/15 text-[#7a5b00] dark:text-[#ffe47a] text-xs font-medium">
-        <ExclamationTriangleIcon className="h-4 w-4 shrink-0" />
-        <span className="truncate">
-          {i18nService.t('coworkGlobalPermissionTitle')}
-          {sessionTitle ? ` · ${sessionTitle}` : ''}
-        </span>
+      <div className="flex items-start gap-3 p-3">
+        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-yellow-500/10 text-yellow-600 dark:text-yellow-400">
+          <ExclamationTriangleIcon className="h-5 w-5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-claude-text dark:text-claude-darkText">
+            {i18nService.t('coworkGlobalPermissionTitle')}
+          </p>
+          {sessionTitle && <p className="mt-0.5 truncate text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">{sessionTitle}</p>}
+          <p className="mt-1 line-clamp-2 text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">{summary}</p>
+        </div>
         <button
           type="button"
           onClick={handleOpenSession}
-          className="ml-auto shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-claude-textSecondary dark:text-claude-darkTextSecondary hover:bg-claude-accent/20 dark:hover:bg-claude-accent/15 transition-colors"
+          className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-claude-accent transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
         >
           {i18nService.t('coworkGlobalPermissionOpenSession')}
+          <ArrowRightIcon className="h-3.5 w-3.5" />
         </button>
-      </div>
-      <div className="p-3">
-        <CoworkPermissionPanel
-          permission={permission}
-          onRespond={handleRespond}
-          responding={responding}
-        />
       </div>
     </div>
   );
