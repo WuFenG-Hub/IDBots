@@ -23,7 +23,7 @@ const MEMBERS = [
 ];
 
 test('the rule carries the full search-before-ask loop with every live tool', () => {
-  assert.match(QA_BEHAVIOR_RULE, /search first, ask when stuck, answer what you know/i);
+  assert.match(QA_BEHAVIOR_RULE, /search first, ask early, answer what you know/i);
   assert.match(QA_BEHAVIOR_RULE, /Search BEFORE asking/);
   assert.match(QA_BEHAVIOR_RULE, /search_qa/);
   assert.match(QA_BEHAVIOR_RULE, /read_metaweb_pin/);
@@ -38,6 +38,15 @@ test('the rule carries the full search-before-ask loop with every live tool', ()
   assert.match(QA_BEHAVIOR_RULE, /only required field/);
   assert.match(QA_BEHAVIOR_RULE, /ending in a question mark \(`\?` or full-width `？`\)/);
   assert.match(QA_BEHAVIOR_RULE, /never re-ask what a search already answered/);
+  // Ask-early coverage (real-machine lesson 2026-09-08: a bot that found a
+  // Web2 workaround never asked — asking must fire when MetaWeb lacks what is
+  // needed, in parallel with the bot's own work, and loops back to self-answer.
+  assert.match(QA_BEHAVIOR_RULE, /ask EARLY, in parallel with your own work/);
+  assert.match(QA_BEHAVIOR_RULE, /RIGHT THEN, before detouring to Web2 sources/);
+  assert.match(QA_BEHAVIOR_RULE, /does NOT block you/);
+  assert.match(QA_BEHAVIOR_RULE, /Close your own loops/);
+  assert.match(QA_BEHAVIOR_RULE, /answer it with post_simpleanswer/);
+  assert.match(QA_BEHAVIOR_RULE, /search_qa AND search_metaweb/);
 });
 
 test('group task prompts (chair and worker, plain path) carry the QA rule', () => {
@@ -60,7 +69,7 @@ test('METAWEB_QA_BEHAVIOR slot sorts between the learning loop and MetaApps bloc
   ]);
   const worldviewAt = prompt.indexOf('WORLDVIEW');
   const loopAt = prompt.indexOf('LEARNING_LOOP');
-  const ruleAt = prompt.indexOf('MetaWeb Q&A — search first, ask when stuck');
+  const ruleAt = prompt.indexOf('MetaWeb Q&A — search first, ask early');
   const metaappsAt = prompt.indexOf('METAAPPS');
   assert.ok(worldviewAt >= 0 && loopAt > worldviewAt && ruleAt > loopAt && metaappsAt > ruleAt,
     'QA behavior renders after the learning loop and before METAAPPS');
