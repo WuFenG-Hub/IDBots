@@ -8,6 +8,7 @@
 
 import { resolveApiConfigForModel } from '../libs/claudeSettings';
 import { clearCoworkSessionUpstream } from '../libs/coworkOpenAICompatProxy';
+import { buildOpenCodeGoHeaders } from '../libs/opencodeGatewayHeaders';
 import { effortForAnthropicWire, effortForOpenAiWire, type LlmEffortLevel } from '../libs/llmEffort';
 import { runWithLlmFallback } from './llmFallback';
 
@@ -487,6 +488,7 @@ async function callAnthropicStyleWithTools(
   if (apiKey.trim()) {
     headers['x-api-key'] = apiKey.trim();
   }
+  Object.assign(headers, buildOpenCodeGoHeaders(url));
 
   const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
   const text = await response.text();
@@ -599,6 +601,7 @@ async function callOpenAIStyleWithTools(
   if (apiKey.trim()) {
     headers.Authorization = `Bearer ${apiKey.trim()}`;
   }
+  Object.assign(headers, buildOpenCodeGoHeaders(url));
 
   const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
   const text = await response.text();
@@ -777,6 +780,7 @@ async function callDeepSeekResponsesStyle(
   if (apiKey.trim()) {
     headers.Authorization = `Bearer ${apiKey.trim()}`;
   }
+  Object.assign(headers, buildOpenCodeGoHeaders(url));
 
   const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
   const text = await response.text();

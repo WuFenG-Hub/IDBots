@@ -7,6 +7,7 @@ import {
   buildAnthropicModelRequestOptions,
   buildOpenAICompatibleModelRequestOptions,
 } from './modelRequestOptions';
+import { buildOpenCodeGoSessionHeaders } from './opencodeGatewayHeaders';
 
 const CONNECTIVITY_TEST_TOKEN_BUDGET = 64;
 
@@ -166,6 +167,7 @@ export async function testProviderConnection(
           'x-api-key': providerConfig.apiKey,
           'anthropic-version': '2023-06-01',
           'Content-Type': 'application/json',
+          ...buildOpenCodeGoSessionHeaders(providerKey, normalizedBaseUrl),
         },
         body: JSON.stringify({
           model: firstModel.id,
@@ -186,6 +188,7 @@ export async function testProviderConnection(
       if (providerConfig.apiKey) {
         headers.Authorization = `Bearer ${providerConfig.apiKey}`;
       }
+      Object.assign(headers, buildOpenCodeGoSessionHeaders(providerKey, normalizedBaseUrl));
       const openAIRequestBody: Record<string, unknown> = useResponsesApi
         ? {
             model: firstModel.id,

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { configService, mergeProvidersConfig } from '../services/config';
 import { apiService } from '../services/api';
+import { buildOpenCodeGoSessionHeaders } from '../services/opencodeGatewayHeaders';
 import { themeService } from '../services/theme';
 import { i18nService, LanguageType } from '../services/i18n';
 import { decryptSecret, encryptWithPassword, decryptWithPassword, EncryptedPayload, PasswordEncryptedPayload } from '../services/encryption';
@@ -1593,6 +1594,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
             'x-api-key': providerConfig.apiKey,
             'anthropic-version': '2023-06-01',
             'Content-Type': 'application/json',
+            ...buildOpenCodeGoSessionHeaders(activeProvider, normalizedBaseUrl),
           },
           body: JSON.stringify({
             model: firstModel.id,
@@ -1611,6 +1613,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         if (providerConfig.apiKey) {
           headers.Authorization = `Bearer ${providerConfig.apiKey}`;
         }
+        Object.assign(headers, buildOpenCodeGoSessionHeaders(activeProvider, normalizedBaseUrl));
         const openAIRequestBody: Record<string, unknown> = useResponsesApi
           ? {
               model: firstModel.id,

@@ -5,6 +5,7 @@ import {
   buildAnthropicModelRequestOptions,
   buildOpenAICompatibleModelRequestOptions,
 } from './modelRequestOptions';
+import { buildOpenCodeGoSessionHeaders } from './opencodeGatewayHeaders';
 import { ChatMessagePayload, ChatUserMessageInput, ImageAttachment } from '../types/chat';
 
 export interface ApiConfig {
@@ -730,6 +731,7 @@ class ApiService {
         if (config.apiKey) {
           headers.Authorization = `Bearer ${config.apiKey}`;
         }
+        Object.assign(headers, buildOpenCodeGoSessionHeaders(provider, config.baseUrl));
 
         const requestUrl = useResponsesApi
           ? this.buildOpenAIResponsesUrl(config.baseUrl, provider)

@@ -13,6 +13,7 @@ import {
 import { DeepSeekReasoningStore } from './deepseekReasoningStore';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER } from './coworkAssistantReply';
 import { coworkLog } from './coworkLogger';
+import { buildOpenCodeGoHeaders } from './opencodeGatewayHeaders';
 import { writeFileAtomicSync } from './atomicFile';
 import { snipStaleToolResultBlocks } from './coworkToolResultSnip';
 import { foldLowValueToolResults } from './coworkToolResultFold';
@@ -3799,6 +3800,10 @@ async function handleRequest(
   if (upstream.apiKey) {
     headers.Authorization = `Bearer ${upstream.apiKey}`;
   }
+  // OpenCode Go ("Console Go") refuses requests without a stable session id.
+  // Reuse the cowork session key when present so the gateway can prompt-cache
+  // across turns; one-shot calls fall back to a fresh uuid inside the helper.
+  Object.assign(headers, buildOpenCodeGoHeaders(upstream.baseURL, messagesRouteSessionKey));
 
   const targetURLs = buildUpstreamTargetUrls(upstream.baseURL, upstreamAPIType, upstream.provider);
   let currentTargetURL = targetURLs[0];
