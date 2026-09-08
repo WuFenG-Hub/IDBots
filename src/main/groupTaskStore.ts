@@ -733,6 +733,18 @@ function rowToGroupTaskSupervisorSignal(row: GroupTaskSupervisorSignalRow): Grou
 }
 
 /** Improvement #4 (v1.3): one recorded chair plan-change resolution. */
+export interface GroupTaskPosition {
+  id: number;
+  taskId: number;
+  msgPinId: string | null;
+  authorGlobalmetaid: string | null;
+  /** The recorded statement (objection / boundary / agreed conclusion). */
+  statement: string;
+  /** 1-based line number in the source message. */
+  lineNo: number;
+  createdAt: string | null;
+}
+
 export interface GroupTaskPlanChange {
   id: number;
   taskId: number;
@@ -741,6 +753,28 @@ export interface GroupTaskPlanChange {
   /** One line: original plan -> blocker -> fallback, as the chair posted it. */
   summary: string;
   createdAt: string | null;
+}
+
+interface GroupTaskPositionRow {
+  id: number;
+  task_id: number;
+  msg_pin_id: string | null;
+  author_globalmetaid: string | null;
+  statement: string;
+  line_no: number;
+  created_at: string | null;
+}
+
+function rowToGroupTaskPosition(row: GroupTaskPositionRow): GroupTaskPosition {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    msgPinId: row.msg_pin_id ?? null,
+    authorGlobalmetaid: row.author_globalmetaid ?? null,
+    statement: row.statement,
+    lineNo: Number(row.line_no) || 1,
+    createdAt: row.created_at ?? null,
+  };
 }
 
 interface GroupTaskPlanChangeRow {
@@ -2295,6 +2329,47 @@ export class GroupTaskStore {
    * Improvement #4 (v1.3): record one chair plan-change resolution (from a
    * [PLAN_CHANGE: ...] tag). Deduped by the caller via hasPlanChange.
    */
+  /**
+   * R9: record one discussion artifact ([POSITION: …] line). Deduped by
+   * (task, msg pin, line no) — reprocessing a message inserts nothing.
+   */
+  addPosition(input: {
+    taskId: number;
+    msgPinId: string | null;
+    authorGlobalmetaid?: string | null;
+    statement: string;
+    lineNo?: number;
+  }): GroupTaskPosition | null {
+    const statement = input.statement.trim();
+    if (!statement) return null;
+    const msgPinId = input.msgPinId?.trim() || null;
+    // The unique index backs the dedupe: a message without a pin cannot be
+    // deduped, so it is skipped rather than duplicated on every tick.
+    if (!msgPinId) return null;
+    const lineNo = Math.max(1, Math.trunc(input.lineNo ?? 1));
+    this.db.run(
+      `INSERT OR IGNORE INTO group_task_positions (
+        task_id, msg_pin_id, author_globalmetaid, statement, line_no
+      ) VALUES (?, ?, ?, ?, ?)`,
+      [input.taskId, msgPinId, input.authorGlobalmetaid ?? null, statement, lineNo],
+    );
+    this.saveDb();
+    const row = this.getOne<GroupTaskPositionRow>(
+      'SELECT * FROM group_task_positions WHERE task_id = ? AND msg_pin_id = ? AND line_no = ?',
+      [input.taskId, msgPinId, lineNo],
+    );
+    return row ? rowToGroupTaskPosition(row) : null;
+  }
+
+  /** R9: every recorded discussion artifact for one task (oldest first). */
+  listPositions(taskId: number): GroupTaskPosition[] {
+    const rows = this.getAll<GroupTaskPositionRow>(
+      'SELECT * FROM group_task_positions WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskPosition);
+  }
+
   addPlanChange(input: {
     taskId: number;
     msgPinId?: string | null;

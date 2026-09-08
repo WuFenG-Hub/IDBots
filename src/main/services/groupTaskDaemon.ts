@@ -31,6 +31,7 @@ import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import { isOpenTeamProtocolOnlyContent } from './openTeamGuestDaemon';
+import { parsePositionLines } from '../libs/groupTaskPositions';
 import {
   GROUP_LOG_PROTOCOL_MAX_CHARS,
   isCeremonyAckLine,
@@ -4657,6 +4658,36 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       } catch (error) {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: deliverable verification failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // R9 (OpenTeam chat scenario): discussion artifacts — [POSITION: …]
+    // lines from ANY member (objections, boundary statements, agreed
+    // conclusions) are recorded on the task ledger, each citing its source
+    // pin. TASK-mode groups only: a chat group's ledger stays empty by design
+    // (zero-noise contract). Dedupe by (task, msg pin, line); failures log.
+    if (!message.senderSuspect && message.pinId && task.mode !== 'chat') {
+      try {
+        const positions = parsePositionLines(stripFencedCodeBlocks(content));
+        if (positions.length > 0) {
+          for (const position of positions) {
+            store.addPosition({
+              taskId: task.id,
+              msgPinId: message.pinId,
+              authorGlobalmetaid: message.senderGlobalMetaId,
+              statement: position.text,
+              lineNo: position.line,
+            });
+          }
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: recorded ${positions.length} [POSITION] discussion artifact(s) from ${message.senderName}`,
+          );
+        }
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: [POSITION] record failed: ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }

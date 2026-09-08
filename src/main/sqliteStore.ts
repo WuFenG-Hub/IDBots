@@ -1190,6 +1190,27 @@ export class SqliteStore {
         ON group_task_plan_changes(task_id, id);
     `);
 
+    // R9 (OpenTeam chat scenario): discussion artifacts — objections, boundary
+    // statements, agreed conclusions recorded from [POSITION: …] lines in
+    // TASK-mode groups (chat groups record none). One row per line, deduped by
+    // (task, message pin, line), each citing its source pin. CREATE TABLE IF
+    // NOT EXISTS is the idempotent first-run migration; existing rows untouched.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        msg_pin_id TEXT,
+        author_globalmetaid TEXT,
+        statement TEXT NOT NULL,
+        line_no INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_group_task_positions_dedupe
+        ON group_task_positions(task_id, msg_pin_id, line_no);
+    `);
+
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_memberships (
@@ -1272,6 +1293,31 @@ export class SqliteStore {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_openteam_guest_invites_group
         ON openteam_guest_invites(group_id, id);
+    `);
+
+    // R10 (OpenTeam chat scenario, H-50 ③): dialogue cognition records —
+    // persistent statements from group conversations (positions, boundaries,
+    // agreements, corrections) with source-pin citations. Interface + storage
+    // milestone: the table and store exist and are tested; conversation-pipeline
+    // extraction is second-phase. Group-scoped (OpenTeam guest hosts have no
+    // local task row), idempotent per source pin.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS dialogue_cognitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        task_id INTEGER,
+        kind TEXT NOT NULL DEFAULT 'note'
+          CHECK(kind IN ('position','boundary','agreement','correction','note')),
+        statement TEXT NOT NULL,
+        author_global_metaid TEXT,
+        participants_json TEXT,
+        source_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_dialogue_cognitions_group
+        ON dialogue_cognitions(group_id, id);
     `);
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_group_chat_messages_group_id

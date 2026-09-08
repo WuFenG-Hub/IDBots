@@ -255,6 +255,16 @@ export function injectGroupTaskContext(input: {
  * GroupTask row, so the session binds to the on-chain group id
  * (externalConversationId 'openteam:<groupId>') and the injected context is
  * task title + recent transcript.
+ *
+ * R11 (P6, OpenTeam chat scenario 2026-09): this session is the LOG MIRROR —
+ * eagerly created at invite-accept for context injection and A2A visibility,
+ * with every guest turn's user+assistant pair written back into it by the
+ * daemon. The model NEVER runs a turn on it (skill turns run in the separate
+ * per-group guest session, externalConversationId 'openteam-guest:<groupId>'
+ * in openTeamGuestDaemon). New sessions carry the explicit mirror title and
+ * metadata so post-mortems cannot misread the pair as "one prompt, two model
+ * turns" (session 289bc3f2 vs 54612951 in the 2026-09-08 incident); existing
+ * mappings keep their id and are untouched.
  */
 export function ensureOpenTeamGuestSession(
   coworkStore: CoworkStore,
@@ -269,8 +279,8 @@ export function ensureOpenTeamGuestSession(
     botName,
     {
       externalConversationId: `openteam:${membership.groupId}`,
-      metadata: { groupId: membership.groupId, openTeam: true },
-      title: `OpenTeam Group Task (${botName})`,
+      metadata: { groupId: membership.groupId, openTeam: true, role: 'log-mirror' },
+      title: `OpenTeam Group Task (${botName}) [log mirror]`,
     },
   );
 }

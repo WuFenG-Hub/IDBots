@@ -665,3 +665,133 @@ test('R6: chat-mode chair prompt carries no chair dispatch/lifecycle rules', () 
   assert.ok(!chatChair.includes('decompose it into concrete subtasks'), 'no decomposition duty');
   assert.ok(chatChair.includes('ONE VOICE PER TURN'), 'one-voice rule present');
 });
+
+// ---------------------------------------------------------------------------
+// R9/R10/R11 (P2 batch): positions ledger, cognition store, mirror labeling
+// ---------------------------------------------------------------------------
+
+const { parsePositionLines } = require('../dist-electron/main/libs/groupTaskPositions.js');
+const { DialogueCognitionStore } = require('../dist-electron/main/dialogueCognitionStore.js');
+const { ensureOpenTeamGuestSession } = require('../dist-electron/main/services/groupTaskSession.js');
+
+// --- R9: [POSITION] line parser -------------------------------------------
+
+test('R9: parsePositionLines extracts leading-tag lines only', () => {
+  const parsed = parsePositionLines(
+    [
+      'Let me put this on the record.',
+      '[POSITION: I object to plan B — the data pipeline cannot rerun mid-day.]',
+      'Also note `[POSITION: backticked citation]` is not a position.',
+      '[POSITION: boundary — no production writes without owner review.]',
+      '[POSITION:]',
+    ].join('\n'),
+  );
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].line, 2);
+  assert.match(parsed[0].text, /I object to plan B/);
+  assert.match(parsed[1].text, /boundary — no production writes/);
+  assert.equal(parsePositionLines('[POSITION: inline] more text after the bracket').length, 0);
+  assert.equal(parsePositionLines('').length, 0);
+});
+
+// --- R9: positions ledger store --------------------------------------------
+
+test('R9: addPosition records and dedupes by (task, pin, line); listPositions cites source', async () => {
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  try {
+    const groupTaskStore = new GroupTaskStore(store.getDatabase(), store.getSaveFunction());
+    const task = groupTaskStore.createTask(baseTaskInput());
+    const pin = `${'3'.repeat(64)}i0`;
+    const first = groupTaskStore.addPosition({
+      taskId: task.id,
+      msgPinId: pin,
+      authorGlobalmetaid: 'idqmember',
+      statement: 'I object to the second proposal.',
+      lineNo: 2,
+    });
+    assert.ok(first);
+    // Re-ingest the same message: no duplicate row.
+    groupTaskStore.addPosition({
+      taskId: task.id,
+      msgPinId: pin,
+      authorGlobalmetaid: 'idqmember',
+      statement: 'I object to the second proposal.',
+      lineNo: 2,
+    });
+    const positions = groupTaskStore.listPositions(task.id);
+    assert.equal(positions.length, 1);
+    assert.equal(positions[0].msgPinId, pin, 'source pin cited');
+    assert.equal(positions[0].authorGlobalmetaid, 'idqmember');
+    // Pin-less or empty statements never record (cannot dedupe / nothing to say).
+    assert.equal(groupTaskStore.addPosition({ taskId: task.id, msgPinId: null, statement: 'x', lineNo: 1 }), null);
+    assert.equal(groupTaskStore.addPosition({ taskId: task.id, msgPinId: pin, statement: '   ', lineNo: 3 }), null);
+  } finally {
+    store.close();
+  }
+});
+
+// --- R10: dialogue cognition store -----------------------------------------
+
+test('R10: a cognition record can be written and read back with source pin + fields', async () => {
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  try {
+    const cognitionStore = new DialogueCognitionStore(store.getDatabase(), store.getSaveFunction());
+    const groupId = '6'.repeat(64) + 'i0';
+    const pin = `${'4'.repeat(64)}i0`;
+    const written = cognitionStore.recordDialogueCognition({
+      groupId,
+      kind: 'boundary',
+      statement: 'I do not want my name on the partnership plaque without review.',
+      authorGlobalMetaId: 'idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz',
+      participants: ['idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz', 'idq1g35d5yftpq3jv0ukejte7z76qdqp7sve8l2etm'],
+      sourcePinId: pin,
+    });
+    assert.ok(written, 'record written');
+    assert.equal(written.kind, 'boundary');
+    assert.equal(written.sourcePinId, pin);
+    const readBack = cognitionStore.listDialogueCognitions(groupId);
+    assert.equal(readBack.length, 1);
+    assert.equal(readBack[0].statement, written.statement);
+    assert.equal(readBack[0].taskId, null, 'group-scoped, no local task row required');
+    assert.match(readBack[0].participantsJson, /idq1g35d5yftpq3jv0ukejte7z76qdqp7sve8l2etm/);
+    // Idempotent per source pin: re-recording returns the same row.
+    const again = cognitionStore.recordDialogueCognition({
+      groupId,
+      kind: 'boundary',
+      statement: 'I do not want my name on the partnership plaque without review.',
+      sourcePinId: pin,
+    });
+    assert.equal(again.id, written.id);
+    assert.equal(cognitionStore.listDialogueCognitions(groupId).length, 1);
+    // Unknown kinds normalize to note; junk input is rejected.
+    assert.equal(cognitionStore.recordDialogueCognition({ groupId, statement: 'x', kind: 'bogus' }).kind, 'note');
+    assert.equal(cognitionStore.recordDialogueCognition({ groupId: '  ', statement: 'x' }), null);
+  } finally {
+    store.close();
+  }
+});
+
+// --- R11: mirror session labeling ------------------------------------------
+
+test('R11: the eager guest session is created as an explicit log mirror', async () => {
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  try {
+    const coworkStore = new CoworkStore(store.getDatabase(), () => {});
+    const groupId = '7'.repeat(64) + 'i0';
+    const { session, created } = ensureOpenTeamGuestSession(coworkStore, 42, 'Guest Bot', {
+      groupId,
+      taskTitle: 'zero-preset collision',
+    });
+    assert.ok(created);
+    assert.match(session.title, /\[log mirror\]/, 'title carries the mirror role');
+    // Second call resolves the SAME session (single mirror per membership).
+    const again = ensureOpenTeamGuestSession(coworkStore, 42, 'Guest Bot', { groupId, taskTitle: 't' });
+    assert.equal(again.created, false);
+    assert.equal(again.session.id, session.id);
+  } finally {
+    store.close();
+  }
+});

@@ -54,6 +54,7 @@ import { ScheduledTaskStore } from './scheduledTaskStore';
 import { dshPluginsDirFor, resolveDshPluginEntries } from './libs/dshPluginManager';
 import { GroupTaskStore, setGroupTaskStoreStatusBroadcaster, type GroupTaskStatus } from './groupTaskStore';
 import { OpenTeamMembershipStore } from './openTeamMembershipStore';
+import { DialogueCognitionStore } from './dialogueCognitionStore';
 import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
@@ -6364,6 +6365,21 @@ const getOpenTeamMembershipStore = () => {
     );
   }
   return openTeamMembershipStore;
+};
+
+// R10 (OpenTeam chat scenario): dialogue cognition storage — instantiated so
+// the interface is real and the table is live for future recall wiring; no
+// conversation-pipeline consumer writes to it yet (interface+storage phase).
+let dialogueCognitionStore: DialogueCognitionStore | null = null;
+const getDialogueCognitionStore = () => {
+  if (!dialogueCognitionStore) {
+    const sqliteStore = getStore();
+    dialogueCognitionStore = new DialogueCognitionStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return dialogueCognitionStore;
 };
 
 let orchestrationStore: OrchestrationStore | null = null;
