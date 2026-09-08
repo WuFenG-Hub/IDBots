@@ -202,7 +202,25 @@ fact-gathering stays, decision-making goes.
   ledger like turn replies) plus the one-voice-per-turn rule ([NO_REPLY] as the
   turn closer when everything was already said mid-turn).
 
-## 10. Known follow-ups
+## 10. Chain-write tool budget & alert classification (RFP 2026-09-08)
+
+- **R1 budget**: every host-executed chain-write tool call (createPin users —
+  post_buzz / post_simplenote / omni_cast / group_chat sends / private-chat
+  sends / wallet transfers) is wrapped in `withChainWriteBudget` (3 min,
+  `src/main/libs/chainWriteBudget.ts`). The wrapper does NOT cancel the
+  underlying operation (a broadcast may still land) — it returns a structured
+  teaching failure so the model regains control in minutes instead of
+  freezing for the 30-min turn budget (task #70: a hung createPin recovery
+  chain froze the chair session for exactly 30 min).
+- **R2.2 stall classification**: the no-progress stall anomaly now states
+  whether a turn is in flight (blocked-by-tool-call hint) or the group is
+  idle — the owner no longer guesses.
+- **R3.2/R3.3 supervisor-exhaustion alerts**: before alerting, the daemon
+  re-checks the task live; fresh deliverable activity or a review transition
+  flips the alert to the "recovered" variant (no stale mislabeled alerts);
+  otherwise the alert carries the blocked-turn root-cause hint.
+
+## 11. Known follow-ups
 
 - The internal [WORKING long-task] lease machinery can shrink once mid-turn
   speech proves reliable in the field — workers can speak for themselves now.
