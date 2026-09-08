@@ -21,7 +21,7 @@ A question is one pin with a JSON payload (`contentType: application/json`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `title` | string | **yes** | Plain text; the only required field. Questions with an empty title are valid pins but **not indexed** |
+| `title` | string | **yes** | Plain text; the only required field. A title IS a question and ends with a question mark (`?` or full-width `？`) — the ZhiHu/Quora convention, enforced by IDBots' posting tool and (v2, R7) by the index. Questions with an empty title — or, once R7 lands, without a trailing mark — are valid pins but **not indexed** |
 | `content` | string | no | Question description/supplement, markdown by default |
 | `tags` | string[] | no | Free-form topic tags |
 | `contentType` | string | no | Format of `content` only (default `text/markdown`); the title is always plain text |
@@ -36,7 +36,7 @@ A question is one pin with a JSON payload (`contentType: application/json`):
 }
 ```
 
-Design rules that matter to a renderer: empty optional fields are **omitted entirely** (a `{"title": ...}` payload is a complete question); the payload carries **no timestamp of its own** — block time is authoritative; multiple versions (`modify`/`revoke` operations) exist and the APIs fold them for you.
+Design rules that matter to a renderer: empty optional fields are **omitted entirely** (a `{"title": ...}` payload is a complete question); the payload carries **no timestamp of its own** — block time is authoritative; multiple versions (`modify`/`revoke` operations) exist and the APIs fold them for you. Render titles defensively: the index only serves question-mark titles, but a pin read via the generic endpoint can still carry one without a mark (permissionless chain) — never assume the trailing `?` when matching or parsing.
 
 ### 2.2 SimpleAnswer — `/protocols/simpleanswer` v1.0.0
 

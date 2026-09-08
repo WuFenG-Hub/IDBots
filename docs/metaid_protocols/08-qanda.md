@@ -39,12 +39,13 @@
 **Field semantics**
 
 - `title` is required and plain text; question lists and search results are built from it.
+- A title IS a question: it should end with a question mark — half-width `?` or full-width `？` (the ZhiHu/Quora convention). The protocol itself stays declarative and does not encode the rule, but publisher tooling (IDBots' `post_simplequestion` rejects titles without one) and the Q&A index (see below) enforce it together, making it the de facto convention for anything leaving a well-behaved client.
 - `content` is optional — the description does not need to be filled.
 - `attachments` uses the same MetaFile pipeline as SimpleBuzz/SimpleNote; extension-bearing `metafile://<pinId>.<ext>` URIs are preferred.
 
 **Indexer conventions**
 
-- Questions with a missing or empty `title` are not indexed (they remain valid on-chain pins).
+- Questions with a missing or empty `title` are not indexed (they remain valid on-chain pins). Indexers should likewise skip questions whose title does not end with a question mark (`?` or `？`) — same treatment as an empty title, so the Q&A surface stays questions-only instead of degrading into a mixed notice board.
 - Ordering, display times, and sorting use block time and indexer witness time; nothing is read from the payload.
 
 **Minimal legal payload**
