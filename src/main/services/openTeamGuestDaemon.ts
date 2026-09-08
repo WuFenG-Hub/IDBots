@@ -273,6 +273,12 @@ export interface OpenTeamGuestDaemonDeps {
   performChat: OpenTeamGuestPerformChatFn;
   sendGroupMessage: OpenTeamGuestSendGroupMessageFn;
   /**
+   * R4 single-send guarantee: true when this (bot, group) already sent a group
+   * message after sinceMs (the outgoing-send ledger wired in main.ts). Unwired
+   * = the suppression is disabled (plain behavior).
+   */
+  hasSentToGroupSince?: (metabotId: number, groupId: string, sinceMs: number) => boolean;
+  /**
    * M3 skill machinery — all three must be wired for chat-skill turns; unwired
    * (or failing) the daemon stays on the plain LLM completion path.
    */
@@ -722,6 +728,30 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
 
     let reply = '';
     let skillTurn: { cwd: string; startedAt: number; completedAt: number } | null = null;
+    // R4: anchored BEFORE the turn — the mid-turn send check asks "did this
+    // (bot, group) send anything after this moment".
+    const skillTurnStartedAt = now();
+    const skillTurnAttempted = canRunSkillTurn;
+    /** P1-3 mirror-session logging (shared by the send and suppression paths). */
+    const logTurnToMirrorSession = (user: string, finalReply: string): void => {
+      if (!deps.getCoworkStore) return;
+      try {
+        const coworkStore = deps.getCoworkStore();
+        const { session } = ensureOpenTeamGuestSession(
+          coworkStore,
+          bot.id,
+          bot.name?.trim() || `bot-${bot.id}`,
+          { groupId: membership.groupId, taskTitle: membership.taskTitle },
+        );
+        coworkStore.addMessage(session.id, { type: 'user', content: user });
+        coworkStore.addMessage(session.id, { type: 'assistant', content: finalReply });
+      } catch (error) {
+        emitLog(
+          `[OpenTeamGuestDaemon] Group ${membership.groupId}: session logging failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
     if (canRunSkillTurn) {
       const coworkStore = deps.getCoworkStore!();
       const session = ensureGuestSession(coworkStore, membership, bot);
@@ -734,7 +764,6 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
         'If the skill produced a file, put its absolute local path on its own line in your reply — the host uploads it on-chain and appends the [DELIVERABLE] metafile line for you. NEVER write or invent a metafile:// URI yourself.',
       ].join('\n');
       coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
-      const startedAt = now();
       try {
         const skillTurnResult = await deps.runSkillTurn!({
           sessionId: session.id,
@@ -747,7 +776,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
         if (reply) {
           skillTurn = {
             cwd: (skillTurnResult.cwd ?? '').trim() || session.cwd,
-            startedAt,
+            startedAt: skillTurnStartedAt,
             completedAt: now(),
           };
         }
@@ -809,13 +838,40 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
       ).trim();
     }
     if (!reply) return;
-    // [NO_REPLY] escape hatch: the model opted to stay silent. Checked BEFORE
-    // any upload so a suppressed message never spends upload fees.
+    // [NO_REPLY] escape hatch: the model opted to stay silent — either nothing
+    // to say OR it already said it mid-turn (the one-voice rule). Checked
+    // BEFORE any upload so a suppressed message never spends upload fees.
     if (NO_REPLY_PATTERN.test(reply)) {
       emitLog(
         `[OpenTeamGuestDaemon] Group ${membership.groupId}: bot ${bot.id} answered [NO_REPLY]; send suppressed`,
       );
       return;
+    }
+
+    // R4 single-send guarantee (P2 fix): a skill turn may have already spoken
+    // to this group via the group_chat tool (send_group_message). If ANY send
+    // for this (bot, group) landed after the turn started, the final text is a
+    // duplicate report — it must stay OFF-CHAIN (session log only, below).
+    // Checked before file uploads so a suppressed send never spends fees.
+    if (skillTurnAttempted && deps.hasSentToGroupSince) {
+      try {
+        if (deps.hasSentToGroupSince(bot.id, membership.groupId, skillTurnStartedAt)) {
+          emitLog(
+            `[OpenTeamGuestDaemon] Group ${membership.groupId}: bot ${bot.id} already sent to this group ` +
+            `mid-turn; final-text auto-send suppressed (single-send guarantee) — the text stays in the ` +
+            'session log only',
+          );
+          logTurnToMirrorSession(userMessage, reply);
+          return;
+        }
+      } catch (error) {
+        // The guarantee is best-effort observable: a ledger read failure must
+        // not silence a legitimate reply.
+        emitLog(
+          `[OpenTeamGuestDaemon] Group ${membership.groupId}: mid-turn send check failed ` +
+          `(sending anyway): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     if (skillTurn && (deps.uploadDeliverableFile || deps.publishTextDeliverable)) {
@@ -834,24 +890,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     });
     // P1-3: log the turn into the guest session (the one eagerly created at
     // invite-accept time) so the invitee's host has context continuity.
-    if (deps.getCoworkStore) {
-      try {
-        const coworkStore = deps.getCoworkStore();
-        const { session } = ensureOpenTeamGuestSession(
-          coworkStore,
-          bot.id,
-          bot.name?.trim() || `bot-${bot.id}`,
-          { groupId: membership.groupId, taskTitle: membership.taskTitle },
-        );
-        coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
-        coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
-      } catch (error) {
-        emitLog(
-          `[OpenTeamGuestDaemon] Group ${membership.groupId}: session logging failed: ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
+    logTurnToMirrorSession(userMessage, reply);
   };
 
   /**

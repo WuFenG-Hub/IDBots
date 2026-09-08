@@ -399,3 +399,161 @@ test('chat-mode prompt keeps the persona block intact', () => {
   });
   assert.ok(chat.includes('You are Guest Bot'), 'persona block present');
 });
+
+// ---------------------------------------------------------------------------
+// R4: single-send guarantee — outgoing group-send ledger + daemon suppression
+// ---------------------------------------------------------------------------
+
+const {
+  createOpenTeamGuestDaemonLoop,
+} = require('../dist-electron/main/services/openTeamGuestDaemon.js');
+const {
+  recordOutgoingGroupSend,
+  hasOutgoingGroupSendSince,
+  resetOutgoingGroupSendLedger,
+} = require('../dist-electron/main/services/groupSendLedger.js');
+const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
+const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
+
+const R4_GROUP = 'd'.repeat(64) + 'i0';
+
+const insertWalletR4 = (db, id) => {
+  db.run(
+    `INSERT INTO metabot_wallets (id, mnemonic, path, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [id, `abandon ability able about above absent absorb abstract absurd abuse access accident ${id}`, "m/44'/10001'/0'/0/0", 1700000000000 + id],
+  );
+};
+
+const insertMetabotR4 = (db, { id, walletId, name, globalmetaid }) => {
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
+      name, enabled, metaid, globalmetaid, metabot_type, created_by, role, soul,
+      boss_global_metaid, llm_id, allow_chat_skills, bio, goal, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id, walletId, `mvc-${id}`, `btc-${id}`, `doge-${id}`, `public-${id}`, `chat-public-${id}`,
+      name, 1, `metaid-${id}`, globalmetaid, 'worker', '0000', `${name} role`, `${name} soul`,
+      null, null, JSON.stringify(['skill-doc']), null, null, 1700000000000 + id, 1700000000000 + id,
+    ],
+  );
+};
+
+const insertGroupMessageR4 = (db, { pinId, groupId = R4_GROUP, senderMetaId, senderGlobalMetaId, senderName, content }) => {
+  db.run(
+    `INSERT INTO group_chat_messages (
+      pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+      sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+      reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, '', '[]', NULL, 'mvc', '{}', 0, NULL)`,
+    [pinId, pinId.replace(/i0$/, ''), groupId, senderMetaId, senderGlobalMetaId, senderName, content],
+  );
+};
+
+test('outgoing group-send ledger: record + hasSince semantics', () => {
+  resetOutgoingGroupSendLedger();
+  recordOutgoingGroupSend({ metabotId: 7, groupId: R4_GROUP, pinId: 'pini0', at: 1_000 });
+  recordOutgoingGroupSend({ metabotId: 8, groupId: R4_GROUP, pinId: 'pinj0', at: 1_500 });
+  assert.equal(hasOutgoingGroupSendSince(7, R4_GROUP, 999), true, 'send after the anchor counts');
+  assert.equal(hasOutgoingGroupSendSince(7, R4_GROUP, 1_000), false, 'anchor itself is exclusive');
+  assert.equal(hasOutgoingGroupSendSince(7, R4_GROUP, 999, { excludePinId: 'pini0' }), false, 'excluded pin ignored');
+  assert.equal(hasOutgoingGroupSendSince(7, 'e'.repeat(64) + 'i0', 0), false, 'other group');
+  assert.equal(hasOutgoingGroupSendSince(9, R4_GROUP, 0), false, 'other bot');
+  resetOutgoingGroupSendLedger();
+});
+
+/** R4 daemon-loop harness: one skill turn per mention; the ledger stub decides. */
+const createR4Harness = async ({ midTurnSent }) => {
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  const db = store.getDatabase();
+  const metabotStore = new MetabotStore(db, store.getSaveFunction());
+  const membershipStore = new OpenTeamMembershipStore(db, store.getSaveFunction());
+  const coworkStore = new CoworkStore(db, () => {});
+  insertWalletR4(db, 7);
+  insertMetabotR4(db, { id: 7, walletId: 7, name: 'Guest Bot', globalmetaid: 'gmid-r4guest' });
+  const calls = { send: [], skillTurn: [] };
+  const loop = createOpenTeamGuestDaemonLoop({
+    getStore: () => store,
+    getMetabotStore: () => metabotStore,
+    getOpenTeamMembershipStore: () => membershipStore,
+    performChat: async () => 'plain reply',
+    sendGroupMessage: async (metabotId, groupId, opts) => {
+      calls.send.push([metabotId, groupId, opts]);
+      return { pinId: 'daemon-send-pini0' };
+    },
+    hasSentToGroupSince: () => midTurnSent,
+    getCoworkStore: () => coworkStore,
+    getChatSkillsRoutingPrompt: async () => ({ prompt: 'ROUTING', activeSkillIds: ['skill-doc'] }),
+    runSkillTurn: async (params) => {
+      calls.skillTurn.push(params);
+      return { replyText: 'Already sent mid-turn via group_chat. Report: joined and greeted.', assistantMessageId: 'a1', cwd: tempDir };
+    },
+    emitLog: () => {},
+    now: () => 1_800_000_000_000,
+    cooldownMs: 0,
+  });
+  return { store, db, membershipStore, coworkStore, loop, calls };
+};
+
+test('R4 replay (P2 incident): mid-turn group_chat send suppresses the final-text auto-send', async () => {
+  const { store, db, membershipStore, coworkStore, loop, calls } = await createR4Harness({ midTurnSent: true });
+  try {
+    membershipStore.upsertActiveMembership({
+      groupId: R4_GROUP,
+      metabotId: 7,
+      globalmetaid: 'gmid-r4guest',
+      inviterGlobalmetaid: 'gmid-r4chair',
+      taskTitle: 'zero-preset collision',
+    });
+    insertGroupMessageR4(db, {
+      pinId: 'f'.repeat(64) + 'i0',
+      senderMetaId: 'metaid-chair',
+      senderGlobalMetaId: 'gmid-r4chair',
+      senderName: 'Chair',
+      content: '@Guest Bot welcome to the group',
+    });
+    await loop.runTick();
+
+    assert.equal(calls.skillTurn.length, 1, 'the skill turn ran');
+    // Single-send guarantee: the duplicate report must stay OFF-chain.
+    assert.equal(calls.send.length, 0, 'final-text auto-send suppressed');
+    // The suppressed text still lands in the mirror session (session log only).
+    const mapping = coworkStore.getConversationMapping('metaweb_group_task', `openteam:${R4_GROUP}`, 7);
+    assert.ok(mapping, 'mirror session mapping exists');
+    const session = coworkStore.getSession(mapping.coworkSessionId);
+    assert.ok(
+      session.messages.some((message) => message.type === 'assistant' && message.content.includes('Already sent mid-turn')),
+      'suppressed final text preserved in the session log',
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test('R4 control: without a mid-turn send the final text goes on-chain exactly once', async () => {
+  const { store, db, membershipStore, loop, calls } = await createR4Harness({ midTurnSent: false });
+  try {
+    membershipStore.upsertActiveMembership({
+      groupId: R4_GROUP,
+      metabotId: 7,
+      globalmetaid: 'gmid-r4guest',
+      inviterGlobalmetaid: 'gmid-r4chair',
+      taskTitle: 'zero-preset collision',
+    });
+    insertGroupMessageR4(db, {
+      pinId: '1'.repeat(64) + 'i0',
+      senderMetaId: 'metaid-chair',
+      senderGlobalMetaId: 'gmid-r4chair',
+      senderName: 'Chair',
+      content: '@Guest Bot say something',
+    });
+    await loop.runTick();
+    assert.equal(calls.skillTurn.length, 1);
+    assert.equal(calls.send.length, 1, 'exactly one on-chain send');
+    assert.match(calls.send[0][2].content, /Already sent mid-turn/);
+  } finally {
+    store.close();
+  }
+});
