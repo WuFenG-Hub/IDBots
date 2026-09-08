@@ -1,4 +1,5 @@
 import React, { useState, useRef, useCallback, useLayoutEffect, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 
 interface TooltipProps {
   content: React.ReactNode;
@@ -28,6 +29,7 @@ const Tooltip: React.FC<TooltipProps> = ({
   const showTooltip = useCallback(() => {
     if (disabled) return;
     timeoutRef.current = setTimeout(() => {
+      setTooltipStyle(null);
       setIsVisible(true);
     }, delay);
   }, [delay, disabled]);
@@ -128,26 +130,30 @@ const Tooltip: React.FC<TooltipProps> = ({
   }, [isVisible, updatePosition]);
 
   return (
-    <div
-      ref={wrapperRef}
-      className={`relative inline-block ${className}`}
-      onMouseEnter={showTooltip}
-      onMouseLeave={hideTooltip}
-    >
-      {children}
-      {isVisible && content && (
+    <>
+      <div
+        ref={wrapperRef}
+        className={`relative inline-block ${className}`}
+        onMouseEnter={showTooltip}
+        onMouseLeave={hideTooltip}
+      >
+        {children}
+      </div>
+      {isVisible && content && createPortal(
         <div
           ref={tooltipRef}
-          className={`absolute z-[100] px-3.5 py-2.5 text-[13px] leading-relaxed rounded-xl shadow-xl
+          role="tooltip"
+          className={`pointer-events-none z-[100] px-3.5 py-2.5 text-[13px] leading-relaxed rounded-xl shadow-xl
             dark:bg-claude-darkBg bg-claude-bg
             dark:text-claude-darkText text-claude-text
             dark:border-claude-darkBorder border-claude-border border`}
-          style={tooltipStyle ?? { maxWidth }}
+          style={tooltipStyle ?? { position: 'fixed', visibility: 'hidden', maxWidth }}
         >
           {content}
-        </div>
+        </div>,
+        document.body,
       )}
-    </div>
+    </>
   );
 };
 
