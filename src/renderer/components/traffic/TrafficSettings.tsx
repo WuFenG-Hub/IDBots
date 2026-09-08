@@ -638,6 +638,31 @@ const TrafficSettings: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* apiBase override banner: the override input lives in the collapsed
+          Advanced section, so surface it here while active — billing and
+          sponsor writes are leaving production (2026-09 staging-residue incident). */}
+      {settings?.apiBase ? (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
+          <ExclamationTriangleIcon className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <h4 className="text-sm font-semibold text-amber-600 dark:text-amber-400">
+              {i18nService.t('trafficApiBaseOverrideTitle')}
+            </h4>
+            <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5 break-all">
+              {i18nService.t('trafficApiBaseOverrideDesc').replace('{value}', settings.apiBase)}
+            </p>
+          </div>
+          <button
+            type="button"
+            className={`${ghostButtonClass} shrink-0`}
+            onClick={() => handleSaveApiBase('')}
+            disabled={apiBaseSaving}
+          >
+            {apiBaseSaving ? i18nService.t('trafficApiBaseSaving') : i18nService.t('trafficApiBaseOverrideReset')}
+          </button>
+        </div>
+      ) : null}
+
       {/* Mode */}
       <div>
         <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-1">
