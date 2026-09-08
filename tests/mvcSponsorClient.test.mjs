@@ -10,6 +10,7 @@ const {
   isNoUserUtxoDraftError,
   isSponsorClientError,
   pickUtxos,
+  reconcileSponsorOrderAfterCommitFailure,
   signMvcAddressMessage,
   signMvcPreparedUserInputs,
 } = await import('../dist-electron/main/services/mvcSponsorClient.js');
@@ -594,4 +595,78 @@ test('isSponsorClientError recognizes only mvc_fee_assist errors', async () => {
   assert.ok(isSponsorClientError(error));
   assert.equal(isSponsorClientError(new Error('boom')), false);
   assert.equal(isSponsorClientError({ code: 'other_error' }), false);
+});
+
+function orderSnapshot(overrides = {}) {
+  return {
+    orderId: 'order-1',
+    status: 'reconciling',
+    txSize: 300,
+    minerFee: 100,
+    pending: true,
+    final: false,
+    raw: {},
+    ...overrides,
+  };
+}
+
+test('reconcileSponsorOrderAfterCommitFailure resolves a terminal broadcasted order', async () => {
+  const reconciliation = await reconcileSponsorOrderAfterCommitFailure({
+    orderId: 'order-1',
+    client: { getSponsorOrder: async () => orderSnapshot({ status: 'broadcasted', txId: COMMIT_TXID, pending: false, final: true }) },
+  });
+  assert.equal(reconciliation.outcome, 'broadcasted');
+  assert.equal(reconciliation.txId, COMMIT_TXID);
+  assert.equal(reconciliation.txSize, 300);
+  assert.equal(reconciliation.minerFee, 100);
+});
+
+test('reconcileSponsorOrderAfterCommitFailure resolves a terminal failure without waiting', async () => {
+  const reconciliation = await reconcileSponsorOrderAfterCommitFailure({
+    orderId: 'order-1',
+    client: { getSponsorOrder: async () => orderSnapshot({ status: 'failed', pending: false, final: true, failureReason: 'missing inputs' }) },
+  });
+  assert.equal(reconciliation.outcome, 'failed');
+  assert.equal(reconciliation.status, 'failed');
+  assert.equal(reconciliation.failureReason, 'missing inputs');
+});
+
+test('reconcileSponsorOrderAfterCommitFailure reports pending at the wait deadline', async () => {
+  const reconciliation = await reconcileSponsorOrderAfterCommitFailure({
+    orderId: 'order-1',
+    maxWaitMs: 0,
+    client: { getSponsorOrder: async () => orderSnapshot({ status: 'reconciling' }) },
+  });
+  assert.equal(reconciliation.outcome, 'pending');
+  assert.equal(reconciliation.status, 'reconciling');
+});
+
+test('reconcileSponsorOrderAfterCommitFailure polls a pending order until it resolves', async () => {
+  let polls = 0;
+  const reconciliation = await reconcileSponsorOrderAfterCommitFailure({
+    orderId: 'order-1',
+    pollIntervalMs: 1,
+    maxWaitMs: 1_000,
+    sleepImpl: async () => {},
+    client: {
+      getSponsorOrder: async () => {
+        polls += 1;
+        return polls < 3
+          ? orderSnapshot({ status: 'reconciling' })
+          : orderSnapshot({ status: 'failed', pending: false, final: true });
+      },
+    },
+  });
+  assert.equal(reconciliation.outcome, 'failed');
+  assert.equal(polls, 3);
+});
+
+test('reconcileSponsorOrderAfterCommitFailure reports unknown when the status endpoint never answers', async () => {
+  const reconciliation = await reconcileSponsorOrderAfterCommitFailure({
+    orderId: 'order-1',
+    maxWaitMs: 0,
+    client: { getSponsorOrder: async () => { throw new Error('unreachable'); } },
+  });
+  assert.equal(reconciliation.outcome, 'unknown');
+  assert.equal(reconciliation.status, undefined);
 });

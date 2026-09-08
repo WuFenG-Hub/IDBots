@@ -257,7 +257,10 @@ test('uploadMvcSponsorDirectFile falls back to self-paid on insufficient traffic
   assert.equal(selfPaidFeeAssist.stage, 'pre');
 });
 
-test('uploadMvcSponsorDirectFile hard-fails with feeAssist diagnostics on commit failure', async () => {
+test('uploadMvcSponsorDirectFile reconciles a dead commit order and falls back to self-paid', async () => {
+  // 2026-09-08 outage regression: a commit failure (SPONSOR_BROADCAST_PENDING
+  // / node broadcast errors) used to hard-fail; it must now reconcile the
+  // order and, once terminal-dead, switch to the bot's own wallet.
   const mvcAddress = '1K9eUW4vED3qfWmr4Fcre64sU7D38QM1tX';
   const draft = await buildTestDraft(mvcAddress);
   const fetchImpl = createFetchStub([
@@ -277,36 +280,114 @@ test('uploadMvcSponsorDirectFile hard-fails with feeAssist diagnostics on commit
       minerFee: 100,
       userInputIndexes: [0],
     }],
-    ['/v2/assist/gas/mvc/commit', () => ({ code: 1, msg: 'commit rejected' })],
-    ['/v2/assist/gas/mvc/order/', () => ({ code: 1, msg: 'order unavailable' })],
+    ['/v2/assist/gas/mvc/commit', () => ({
+      code: 1,
+      msg: 'SPONSOR_BROADCAST_PENDING: orderId=order-1: broadcast failed: rpc error: code = Unknown desc = [-25]Missing inputs; transaction not seen',
+    })],
+    ['/v2/assist/gas/mvc/order/order-1', {
+      orderId: 'order-1',
+      status: 'failed',
+      txSize: 300,
+      minerFee: 100,
+      pending: false,
+      final: true,
+      failureReason: 'broadcast failed: missing inputs',
+    }],
   ]);
   const { filePath } = await makeTestFile();
 
-  await assert.rejects(
-    uploadMvcSponsorDirectFile({
-      filePath,
-      fileName: 'sponsor-test.bin',
-      contentType: 'application/octet-stream;binary',
-      bytes: 16,
-      extension: '.bin',
-      mnemonic: MNEMONIC,
-      walletPath: WALLET_PATH,
-      mvcAddress,
-      selfPaidUpload: async () => ({ success: true, pinId: 'selfpaid-i0' }),
-      fetchImpl,
-      fetchUtxos: async () => [
-        { txId: TEST_TXID, outputIndex: 0, satoshis: 50000, address: mvcAddress, height: 1 },
-      ],
-    }),
-    (error) => {
-      assert.equal(error.code, 'mvc_fee_assist_commit_failed');
-      assert.equal(error.data.feeAssist.used, false);
-      assert.equal(error.data.feeAssist.reason, 'commit_failed');
-      assert.equal(error.data.feeAssist.stage, 'commit');
-      assert.equal(error.data.feeAssist.orderId, 'order-1');
-      return true;
+  let selfPaidFeeAssist = null;
+  const result = await uploadMvcSponsorDirectFile({
+    filePath,
+    fileName: 'sponsor-test.bin',
+    contentType: 'application/octet-stream;binary',
+    bytes: 16,
+    extension: '.bin',
+    mnemonic: MNEMONIC,
+    walletPath: WALLET_PATH,
+    mvcAddress,
+    selfPaidUpload: async (feeAssist) => {
+      selfPaidFeeAssist = feeAssist;
+      return { success: true, pinId: 'selfpaid-i0' };
     },
-  );
+    fetchImpl,
+    fetchUtxos: async () => [
+      { txId: TEST_TXID, outputIndex: 0, satoshis: 50000, address: mvcAddress, height: 1 },
+    ],
+    commitReconcileMaxWaitMs: 0,
+  });
+
+  assert.equal(result.pinId, 'selfpaid-i0');
+  assert.ok(selfPaidFeeAssist);
+  assert.equal(selfPaidFeeAssist.used, false);
+  assert.equal(selfPaidFeeAssist.mode, 'self_paid');
+  assert.equal(selfPaidFeeAssist.reason, 'commit_failed');
+  assert.equal(selfPaidFeeAssist.stage, 'commit');
+  assert.equal(selfPaidFeeAssist.orderId, 'order-1');
+  assert.equal(selfPaidFeeAssist.commitOrderOutcome, 'failed');
+});
+
+test('uploadMvcSponsorDirectFile resolves a commit whose order actually broadcast (no double-write)', async () => {
+  const RECOVERED_TXID = 'bb'.repeat(32);
+  const mvcAddress = '1K9eUW4vED3qfWmr4Fcre64sU7D38QM1tX';
+  const draft = await buildTestDraft(mvcAddress);
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/gas/address/info', {
+      exists: true,
+      balance: 5000,
+      grantedAmount: 5000,
+      reservedAmount: 0,
+      spentAmount: 0,
+      availableAmount: 5000,
+      status: 'active',
+    }],
+    ['/v2/assist/gas/mvc/challenge', { challengeId: 'challenge-1', message: 'sign this message' }],
+    ['/v2/assist/gas/mvc/pre', {
+      preparedTxHex: draft.unsignedTxHex,
+      orderId: 'order-1',
+      minerFee: 100,
+      userInputIndexes: [0],
+    }],
+    ['/v2/assist/gas/mvc/commit', () => ({ code: 1, msg: 'commit response lost' })],
+    ['/v2/assist/gas/mvc/order/order-1', {
+      orderId: 'order-1',
+      status: 'broadcasted',
+      txId: RECOVERED_TXID,
+      txSize: 300,
+      minerFee: 100,
+      pending: false,
+      final: true,
+    }],
+  ]);
+  const { filePath } = await makeTestFile();
+
+  let selfPaidCalls = 0;
+  const result = await uploadMvcSponsorDirectFile({
+    filePath,
+    fileName: 'sponsor-test.bin',
+    contentType: 'application/octet-stream;binary',
+    bytes: 16,
+    extension: '.bin',
+    mnemonic: MNEMONIC,
+    walletPath: WALLET_PATH,
+    mvcAddress,
+    selfPaidUpload: async () => {
+      selfPaidCalls += 1;
+      return { success: true, pinId: 'selfpaid-i0' };
+    },
+    fetchImpl,
+    fetchUtxos: async () => [
+      { txId: TEST_TXID, outputIndex: 0, satoshis: 50000, address: mvcAddress, height: 1 },
+    ],
+    commitReconcileMaxWaitMs: 0,
+  });
+
+  assert.equal(selfPaidCalls, 0);
+  assert.equal(result.pinId, `${RECOVERED_TXID}i0`);
+  assert.deepEqual(result.txids, [RECOVERED_TXID]);
+  assert.equal(result.feeAssist.used, true);
+  assert.equal(result.feeAssist.commitRecovered, true);
+  assert.equal(result.feeAssist.orderId, 'order-1');
 });
 
 test('createMvcSponsorV2Client unwraps the code-0 envelope and normalizes fields', async () => {

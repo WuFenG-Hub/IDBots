@@ -10,6 +10,11 @@
  * backend TRAFFIC_INSUFFICIENT error code (traffic-account billing, not yet
  * live); preSponsor accepts an optional trafficAccount pass-through so the
  * backend can switch an order to traffic billing once it ships.
+ *
+ * reconcileSponsorOrderAfterCommitFailure re-checks a committed order after a
+ * failed commit so callers can tell "broadcasted after all" (resolve as
+ * sponsored success) apart from a dead/pending order before any self-paid
+ * fallback (never double-write).
  */
 
 import { TxComposer, mvc } from 'meta-contract';
@@ -679,6 +684,88 @@ export function createMvcSponsorV2Client(input: {
     },
     getSponsorOrder,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Post-commit-failure order reconciliation
+// ---------------------------------------------------------------------------
+
+/** Snapshot shape returned by MvcSponsorV2Client.getSponsorOrder. */
+export interface SponsorOrderSnapshot {
+  orderId: string;
+  status: string;
+  txId?: string;
+  txSize: number;
+  minerFee: number;
+  pending: boolean;
+  final: boolean;
+  failureReason?: string;
+  raw: Record<string, unknown>;
+}
+
+export type SponsorCommitReconciliationOutcome = 'broadcasted' | 'failed' | 'pending' | 'unknown';
+
+export interface SponsorCommitReconciliation {
+  outcome: SponsorCommitReconciliationOutcome;
+  /** Order status as last seen; absent when the status endpoint never answered. */
+  status?: string;
+  txId?: string;
+  txSize?: number;
+  minerFee?: number;
+  failureReason?: string;
+}
+
+export const DEFAULT_COMMIT_RECONCILE_POLL_INTERVAL_MS = 5_000;
+export const DEFAULT_COMMIT_RECONCILE_MAX_WAIT_MS = 30_000;
+
+/**
+ * After a commit failure the sponsor already holds our signed tx, so a
+ * self-paid fallback must first prove the order will not land (2026-09-08
+ * owner rule: any sponsor failure auto-switches to the bot's wallet — but
+ * never double-write). Polls the order status within a bounded budget:
+ * - final + broadcasted + txId  -> 'broadcasted' (resolve as sponsored success)
+ * - final + anything else       -> 'failed' (terminal, will not land — safe to fall back)
+ * - still pending at deadline   -> 'pending' (abandoned; fall back with a trace)
+ * - status endpoint unreachable -> 'unknown' (fall back with a trace)
+ */
+export async function reconcileSponsorOrderAfterCommitFailure(input: {
+  orderId: string;
+  client: { getSponsorOrder(orderId: string): Promise<SponsorOrderSnapshot> };
+  pollIntervalMs?: number;
+  maxWaitMs?: number;
+  sleepImpl?: (ms: number) => Promise<void>;
+}): Promise<SponsorCommitReconciliation> {
+  const pollIntervalMs = Math.max(0, input.pollIntervalMs ?? DEFAULT_COMMIT_RECONCILE_POLL_INTERVAL_MS);
+  const maxWaitMs = Math.max(0, input.maxWaitMs ?? DEFAULT_COMMIT_RECONCILE_MAX_WAIT_MS);
+  const sleep = input.sleepImpl ?? delay;
+  const deadline = Date.now() + maxWaitMs;
+  let statusEverReached = false;
+  for (;;) {
+    try {
+      const order = await input.client.getSponsorOrder(input.orderId);
+      statusEverReached = true;
+      if (order.final) {
+        if (order.status === 'broadcasted' && order.txId) {
+          return {
+            outcome: 'broadcasted',
+            status: order.status,
+            txId: order.txId,
+            txSize: order.txSize,
+            minerFee: order.minerFee,
+          };
+        }
+        return { outcome: 'failed', status: order.status, failureReason: order.failureReason };
+      }
+      if (Date.now() >= deadline) {
+        return { outcome: 'pending', status: order.status };
+      }
+    } catch {
+      if (Date.now() >= deadline) {
+        return { outcome: statusEverReached ? 'pending' : 'unknown' };
+      }
+    }
+    await sleep(Math.max(0, Math.min(pollIntervalMs, deadline - Date.now())));
+  }
 }
 
 // ---------------------------------------------------------------------------

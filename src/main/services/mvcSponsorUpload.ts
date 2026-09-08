@@ -7,12 +7,14 @@
  *
  * Flow: address info -> unsigned /file inscription draft -> quota check ->
  * challenge -> pre (sponsor prepares tx) -> sign user-owned inputs ->
- * commit (sponsor broadcasts). Self-paid fallback semantics preserved and
- * aligned with mvcSponsorCreatePin: service_unavailable / no_user_utxo /
- * insufficient_quota / insufficient_traffic all fall back to a regular
- * self-paid direct upload (sponsor link down OR balance/traffic exhausted ->
- * switch to the bot's own wallet); pre_rejected / commit_failed are hard
- * failures carrying feeAssist diagnostics.
+ * commit (sponsor broadcasts). Self-paid fallback semantics aligned with
+ * mvcSponsorCreatePin (2026-09-08 owner rule: a sponsor outage or error must
+ * never block the write — auto-switch to the bot's own wallet with an
+ * explicit trace): ANY sponsor failure — service_unavailable / no_user_utxo /
+ * insufficient_quota / insufficient_traffic / pre_rejected / commit_failed —
+ * falls back to a regular self-paid direct upload. Commit-stage failures
+ * reconcile the sponsor order first so an already-broadcast tx resolves as
+ * sponsored success instead of double-writing.
  *
  * The sponsor protocol itself (API client, message signing, UTXO fetch,
  * size/fee estimation, user-input signing) lives in mvcSponsorClient.ts;
@@ -34,6 +36,7 @@ import {
   getOpReturnScriptSize,
   isNoUserUtxoDraftError,
   pickUtxos,
+  reconcileSponsorOrderAfterCommitFailure,
   signMvcAddressMessage,
   signMvcPreparedUserInputs,
   trafficBalanceBytesOf,
@@ -79,6 +82,10 @@ export interface MvcSponsorFeeAssistMetadata {
   reason?: MvcSponsorFeeAssistReason;
   stage?: MvcSponsorFeeAssistStage;
   orderId?: string;
+  /** True when a failed commit was reconciled to an order that had broadcast. */
+  commitRecovered?: boolean;
+  /** Sponsor-order outcome observed while reconciling a failed commit. */
+  commitOrderOutcome?: 'failed' | 'pending' | 'unknown';
   quotaBefore?: MvcSponsorAddressInfo;
   quotaAfter?: MvcSponsorAddressInfo;
   advisoryFeeEstimate?: number;
@@ -103,6 +110,9 @@ export interface MvcSponsorDirectUploadInput {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   fetchUtxos?: (address: string) => Promise<SponsorMvcUtxo[]>;
+  /** Order-reconciliation timing after a failed commit (tests override; defaults 5s/30s). */
+  commitReconcilePollIntervalMs?: number;
+  commitReconcileMaxWaitMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,22 +219,6 @@ function normalizeSponsorReason(value: unknown, fallback: MvcSponsorFeeAssistRea
     : fallback;
 }
 
-/**
- * Reasons that mean the sponsor cannot/will not cover the fee and the upload
- * should transparently fall back to the bot's own wallet. Mirrors
- * mvcSponsorCreatePin.isFallbackReason so the file-upload and create-pin paths
- * share the same fallback policy: service_unavailable (link down) and the
- * insufficient_quota/insufficient_traffic (balance/traffic exhausted) cases all
- * switch to self-paid instead of hard-failing. pre_rejected / commit_failed
- * remain hard failures because the sponsor has already engaged the tx.
- */
-function isFallbackReason(reason: MvcSponsorFeeAssistReason | undefined): boolean {
-  return reason === 'service_unavailable'
-    || reason === 'no_user_utxo'
-    || reason === 'insufficient_quota'
-    || reason === 'insufficient_traffic';
-}
-
 function attachFeeAssistError(input: {
   error: unknown;
   fallbackCode: string;
@@ -264,16 +258,24 @@ async function fallbackSelfPaidForSponsorError(input: {
   selfPaidUpload: MvcSponsorDirectUploadInput['selfPaidUpload'];
   fallbackReason: MvcSponsorFeeAssistReason;
   stage: MvcSponsorFeeAssistStage;
+  orderId?: string;
   quotaBefore?: MvcSponsorAddressInfo;
   advisoryFeeEstimate?: number;
+  /** Sponsor-order outcome observed while reconciling a failed commit. */
+  commitOrderOutcome?: 'failed' | 'pending' | 'unknown';
 }): Promise<Record<string, unknown>> {
   const reason = normalizeSponsorReason((input.error as { reason?: unknown })?.reason, input.fallbackReason);
   // Self-pay spends the bot's own wallet — never let that happen silently
   // (the 2026-09-07 outage: exhausted legacy quota forced every traffic-mode
-  // write to self-pay with no trace of why).
+  // write to self-pay with no trace of why). The WARN log + feeAssist trace
+  // keep every fallback visible; the 2026-09-08 hard-fail regression
+  // (SPONSOR_BROADCAST_PENDING blocking all writes) is why commit-stage
+  // failures now land here too.
   appendMetaidLog('WARN', 'Sponsored MVC file upload falling back to self-paid', {
     reason,
     stage: input.stage,
+    orderId: input.orderId,
+    commitOrderOutcome: input.commitOrderOutcome,
   });
   return input.selfPaidUpload({
     attempted: true,
@@ -282,6 +284,8 @@ async function fallbackSelfPaidForSponsorError(input: {
     sponsor: 'mvc_sponsor_v2',
     reason,
     stage: input.stage,
+    orderId: input.orderId,
+    commitOrderOutcome: input.commitOrderOutcome,
     quotaBefore: input.quotaBefore,
     advisoryFeeEstimate: input.advisoryFeeEstimate,
   });
@@ -356,21 +360,12 @@ export async function uploadMvcSponsorDirectFile(
   try {
     challenge = await sponsorClient.getChallenge();
   } catch (error) {
-    const reason = normalizeSponsorReason((error as { reason?: unknown })?.reason, 'service_unavailable');
-    if (isFallbackReason(reason)) {
-      return fallbackSelfPaidForSponsorError({
-        error,
-        selfPaidUpload: input.selfPaidUpload,
-        fallbackReason: reason,
-        stage: 'challenge',
-        quotaBefore,
-        advisoryFeeEstimate: estimatedMinerFee,
-      });
-    }
-    attachFeeAssistError({
+    // Every sponsor failure falls back under the current policy (nothing has
+    // been broadcast at this stage, so the fallback is always safe).
+    return fallbackSelfPaidForSponsorError({
       error,
-      fallbackCode: 'mvc_fee_assist_challenge_failed',
-      fallbackReason: 'service_unavailable',
+      selfPaidUpload: input.selfPaidUpload,
+      fallbackReason: normalizeSponsorReason((error as { reason?: unknown })?.reason, 'service_unavailable'),
       stage: 'challenge',
       quotaBefore,
       advisoryFeeEstimate: estimatedMinerFee,
@@ -439,21 +434,12 @@ export async function uploadMvcSponsorDirectFile(
       trafficAccount,
     });
   } catch (error) {
-    const reason = normalizeSponsorReason((error as { reason?: unknown })?.reason, 'pre_rejected');
-    if (isFallbackReason(reason)) {
-      return fallbackSelfPaidForSponsorError({
-        error,
-        selfPaidUpload: input.selfPaidUpload,
-        fallbackReason: reason,
-        stage: 'pre',
-        quotaBefore,
-        advisoryFeeEstimate: estimatedMinerFee,
-      });
-    }
-    attachFeeAssistError({
+    // pre_rejected now falls back too: the sponsor refused the draft but
+    // nothing was broadcast, so the bot's own wallet can still deliver.
+    return fallbackSelfPaidForSponsorError({
       error,
-      fallbackCode: 'mvc_fee_assist_pre_failed',
-      fallbackReason: 'pre_rejected',
+      selfPaidUpload: input.selfPaidUpload,
+      fallbackReason: normalizeSponsorReason((error as { reason?: unknown })?.reason, 'pre_rejected'),
       stage: 'pre',
       quotaBefore,
       advisoryFeeEstimate: estimatedMinerFee,
@@ -472,15 +458,20 @@ export async function uploadMvcSponsorDirectFile(
       userInputIndexes: pre.userInputIndexes,
     })).txHex;
   } catch (error) {
-    attachFeeAssistError({
+    // Local signing failure: the sponsor never received a signed tx, so the
+    // order can never be committed — falling back is double-write-safe.
+    appendMetaidLog('WARN', 'Sponsored MVC file upload user-input signing failed — falling back to self-paid', {
+      orderId: pre.orderId,
+      error: getErrorMessage(error, 'user-input signing failed'),
+    });
+    return fallbackSelfPaidForSponsorError({
       error,
-      fallbackCode: 'mvc_fee_assist_commit_failed',
+      selfPaidUpload: input.selfPaidUpload,
       fallbackReason: 'pre_rejected',
       stage: 'commit',
       orderId: pre.orderId,
       quotaBefore,
       advisoryFeeEstimate,
-      sponsoredMinerFee: pre.minerFee,
     });
   }
 
@@ -492,6 +483,7 @@ export async function uploadMvcSponsorDirectFile(
     message: commitMessage,
   });
 
+  let commitRecovered = false;
   let commit: { txId: string; txSize?: number; minerFee?: number; raw: Record<string, unknown> };
   try {
     commit = await sponsorClient.commitSponsor({
@@ -501,16 +493,52 @@ export async function uploadMvcSponsorDirectFile(
       signature: commitSignature.signature,
     });
   } catch (error) {
-    attachFeeAssistError({
-      error,
-      fallbackCode: 'mvc_fee_assist_commit_failed',
-      fallbackReason: 'commit_failed',
-      stage: 'commit',
+    // The sponsor already holds our signed tx — reconcile the order before
+    // any fallback so a broadcast that merely lost its response resolves as
+    // success instead of double-writing. Mirrors mvcSponsorCreatePin (the
+    // 2026-09-08 outage fix: sponsor-side broadcast failures used to
+    // hard-fail every sponsored upload).
+    const reconciliation = await reconcileSponsorOrderAfterCommitFailure({
       orderId: pre.orderId,
-      quotaBefore,
-      advisoryFeeEstimate,
-      sponsoredMinerFee: pre.minerFee,
+      client: sponsorClient,
+      pollIntervalMs: input.commitReconcilePollIntervalMs,
+      maxWaitMs: input.commitReconcileMaxWaitMs,
     });
+    if (reconciliation.outcome === 'broadcasted' && reconciliation.txId) {
+      appendMetaidLog('WARN', 'Sponsored MVC file upload commit failed its response but the order broadcast — resolving as sponsored success', {
+        orderId: pre.orderId,
+        txId: reconciliation.txId,
+        commitError: getErrorMessage(error, 'commit failed'),
+      });
+      commit = {
+        txId: reconciliation.txId,
+        txSize: reconciliation.txSize,
+        minerFee: reconciliation.minerFee,
+        raw: { commitRecovered: true },
+      };
+      commitRecovered = true;
+    } else {
+      appendMetaidLog('WARN', 'Sponsored MVC file upload commit failed — falling back to self-paid', {
+        mvcAddress: input.mvcAddress,
+        orderId: pre.orderId,
+        commitOrderOutcome: reconciliation.outcome,
+        orderStatus: reconciliation.status,
+        orderFailureReason: reconciliation.failureReason,
+        commitError: getErrorMessage(error, 'commit failed'),
+      });
+      return fallbackSelfPaidForSponsorError({
+        error,
+        selfPaidUpload: input.selfPaidUpload,
+        fallbackReason: 'commit_failed',
+        stage: 'commit',
+        orderId: pre.orderId,
+        quotaBefore,
+        advisoryFeeEstimate,
+        commitOrderOutcome: reconciliation.outcome === 'failed' || reconciliation.outcome === 'pending' || reconciliation.outcome === 'unknown'
+          ? reconciliation.outcome
+          : undefined,
+      });
+    }
   }
 
   const sponsoredMinerFee = commit.minerFee ?? pre.minerFee;
@@ -548,6 +576,7 @@ export async function uploadMvcSponsorDirectFile(
       sponsor: 'mvc_sponsor_v2',
       stage: 'done',
       orderId: pre.orderId,
+      commitRecovered: commitRecovered || undefined,
       quotaBefore,
       quotaAfter,
       advisoryFeeEstimate,
