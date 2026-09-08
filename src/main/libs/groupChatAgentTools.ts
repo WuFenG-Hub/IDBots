@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { chainWriteFailureDetail } from './chainFeeAssistReceipt';
 import type { AssignGroupChatTaskParams } from '../services/assignGroupChatTaskService';
 
 /**
@@ -319,7 +320,7 @@ export function buildGroupChatAgentTools(deps: {
             true,
           );
         }
-        return textResult(`Send group message failed: ${msg}`, true);
+        return textResult(`Send group message failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );

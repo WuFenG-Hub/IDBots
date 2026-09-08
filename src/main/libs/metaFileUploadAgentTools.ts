@@ -1,5 +1,6 @@
 import path from 'path';
 import { z } from 'zod';
+import { chainWriteFailureDetail, feeAssistReceiptLines } from './chainFeeAssistReceipt';
 
 /** Upload result produced by uploadMetaFile (see services/metaFileUploadShared.js buildUploadSuccessPayload). */
 export type MetaFileUploadResult = Record<string, unknown>;
@@ -100,22 +101,10 @@ export function formatUploadResult(result: MetaFileUploadResult): string {
 
   // feeAssist records how the direct MVC upload was paid for. `used: true`
   // means the sponsor covered it; `attempted && !used` means the sponsor link
-  // was down or the balance/traffic was insufficient, so the service fell back
-  // to the bot's own wallet. Surface both so the bot/user knows the payment
-  // path and any degradation.
-  const feeAssist = result.feeAssist;
-  if (feeAssist != null && typeof feeAssist === 'object') {
-    const fa = feeAssist as Record<string, unknown>;
-    if (fa.used === true) {
-      lines.push('- sponsor: applied (MVC sponsor covered this direct upload)');
-    } else if (fa.attempted === true) {
-      const reason = asString(fa.reason) || 'unknown';
-      const stage = asString(fa.stage);
-      lines.push(
-        `- sponsor: unavailable, fell back to the bot's own wallet (reason: ${reason}${stage ? ` at ${stage}` : ''})`,
-      );
-    }
-  }
+  // was down, the balance/traffic was insufficient, or the broadcast failed —
+  // the service fell back to the bot's own wallet. Shared helper keeps the
+  // wording identical across every chain-write tool.
+  lines.push(...feeAssistReceiptLines(result.feeAssist));
 
   const txids = Array.isArray(result.txids) ? result.txids.filter(Boolean) : [];
   if (txids.length) lines.push(`- txids: ${txids.join(', ')}`);
@@ -213,17 +202,11 @@ export function buildMetaFileUploadAgentTools(deps: {
         return textResult(formatUploadResult(result));
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        // Hard sponsor failures (pre_rejected / commit_failed) carry structured
-        // feeAssist diagnostics on error.data. Surface the reason/stage so the
-        // bot gets a clear, actionable failure instead of a bare message.
-        const feeAssist = (error as { data?: { feeAssist?: Record<string, unknown> } } | null)
-          ?.data?.feeAssist;
-        const reason = feeAssist && typeof feeAssist === 'object' ? asString(feeAssist.reason) : '';
-        const stage = feeAssist && typeof feeAssist === 'object' ? asString(feeAssist.stage) : '';
-        const detail = reason
-          ? ` (sponsor ${stage ? `${stage} ` : ''}${reason}; not retried via the self-paid wallet)`
-          : '';
-        return textResult(`File upload failed: ${msg}${detail}`, true);
+        // Sponsor-path failures carry structured feeAssist diagnostics on
+        // error.data (including the self-paid fallback error when BOTH
+        // channels failed). Surface them so the bot gets a clear, actionable
+        // failure instead of a bare message.
+        return textResult(`File upload failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );

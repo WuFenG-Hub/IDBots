@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import type { MetaFileUploadControl } from './metaFileUploadAgentTools';
 import { markdownSelfLink } from './metawebUri';
+import { chainWriteFailureDetail, feeAssistReceiptLines } from './chainFeeAssistReceipt';
 import {
   listSimpleQaAnswers,
   recordSimpleQaAnswer,
@@ -269,11 +270,12 @@ export function buildPostSimpleQaAgentTools(deps: {
             totalCost: result.totalCost,
             title,
             attachments,
+            feeAssist: result.feeAssist,
           }),
         );
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        return textResult(`Question publish failed: ${msg}`, true);
+        return textResult(`Question publish failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );
@@ -389,11 +391,12 @@ export function buildPostSimpleQaAgentTools(deps: {
             questionPinId: answerTo,
             attachments,
             priorAnswerCount: priorAnswers.length,
+            feeAssist: result.feeAssist,
           }),
         );
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        return textResult(`Answer publish failed: ${msg}`, true);
+        return textResult(`Answer publish failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );
@@ -412,6 +415,7 @@ export function formatSimpleQuestionResult(input: {
   totalCost: number;
   title: string;
   attachments: string[];
+  feeAssist?: unknown;
 }): string {
   const lines: string[] = ['Question published on-chain.'];
   if (input.pinId) {
@@ -422,6 +426,7 @@ export function formatSimpleQuestionResult(input: {
   lines.push(`- title: ${input.title}`);
   lines.push(`- cost: ${input.totalCost} sats`);
   for (const uri of input.attachments) lines.push(`- attachment: ${uri}`);
+  lines.push(...feeAssistReceiptLines(input.feeAssist));
   if (input.pinId) {
     lines.push(`- view link: ${markdownSelfLink(`pin://${input.pinId}`)}`);
   }
@@ -438,6 +443,7 @@ export function formatSimpleAnswerResult(input: {
   questionPinId: string;
   attachments: string[];
   priorAnswerCount: number;
+  feeAssist?: unknown;
 }): string {
   const lines: string[] = ['Answer published on-chain.'];
   if (input.pinId) lines.push(`- answer pinId: ${input.pinId}`);
@@ -445,6 +451,7 @@ export function formatSimpleAnswerResult(input: {
   lines.push(`- question pinId: ${input.questionPinId}`);
   lines.push(`- cost: ${input.totalCost} sats`);
   for (const uri of input.attachments) lines.push(`- attachment: ${uri}`);
+  lines.push(...feeAssistReceiptLines(input.feeAssist));
   if (input.priorAnswerCount > 0) {
     lines.push(`- note: this is answer #${input.priorAnswerCount + 1} you published to this question from this host`);
   }

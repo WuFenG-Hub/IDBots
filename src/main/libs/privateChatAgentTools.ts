@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { chainWriteFailureDetail } from './chainFeeAssistReceipt';
 
 /**
  * Control surface the host (main.ts) provides for the send_private_chat tool.
@@ -108,7 +109,7 @@ export function buildPrivateChatAgentTools(deps: {
         );
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        return textResult(`Private message send failed: ${msg}`, true);
+        return textResult(`Private message send failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );

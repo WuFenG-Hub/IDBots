@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
+import { chainWriteFailureDetail, feeAssistReceiptLines } from './chainFeeAssistReceipt';
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
 type SdkToolFactory = (
@@ -64,12 +65,14 @@ export function formatCastResult(input: {
   pinId: string;
   txids: string[];
   totalCost: number;
+  feeAssist?: unknown;
 }): string {
   const lines: string[] = ['Pin cast on-chain.'];
   const txid = input.txids[0];
   if (txid) lines.push(`- txid: ${txid}`);
   if (input.pinId) lines.push(`- pinId: ${input.pinId}`);
   lines.push(`- cost: ${input.totalCost} sats`);
+  lines.push(...feeAssistReceiptLines(input.feeAssist));
   if (input.pinId) {
     lines.push(`- view link: [pin://${input.pinId}](pin://${input.pinId})`);
   }
@@ -268,11 +271,12 @@ export function buildOmniCasterAgentTools(deps: {
             pinId: result.pinId,
             txids: Array.isArray(result.txids) ? result.txids : [],
             totalCost: result.totalCost,
+            feeAssist: result.feeAssist,
           }),
         );
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        return textResult(`omni_cast failed: ${msg}`, true);
+        return textResult(`omni_cast failed: ${msg}${chainWriteFailureDetail(error)}`, true);
       }
     }
   );

@@ -133,7 +133,7 @@ test('formatUploadResult marks the sponsor path and reports verification outcome
     ...SAMPLE_RESULT,
     feeAssist: { attempted: true, used: true, mode: 'mvc_sponsor_v2', stage: 'done' },
   });
-  assert.match(sponsored, /sponsor: applied \(MVC sponsor covered this direct upload\)/);
+  assert.match(sponsored, /sponsor: applied \(MVC fee sponsor covered this write\)/);
 
   // Sponsor attempted but balance insufficient -> fell back to self-paid.
   const fellBack = formatUploadResult({
@@ -179,5 +179,5 @@ test('upload_file surfaces the feeAssist reason when a hard sponsor failure abor
   assert.equal(result.isError, true);
   const text = result.content[0].text;
   assert.match(text, /File upload failed: sponsor commit rejected/);
-  assert.match(text, /sponsor commit commit_failed; not retried via the self-paid wallet/);
+  assert.match(text, /\[fee assist: code=mvc_fee_assist_commit_failed; sponsor=commit_failed@commit; order=order-1\]/);
 });
