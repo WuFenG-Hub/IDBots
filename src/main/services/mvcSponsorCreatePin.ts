@@ -3,12 +3,19 @@
  * Runs the generic sponsor v2 protocol (mvcSponsorClient) for any MetaID pin:
  * unsigned worker draft -> quota preflight -> challenge -> pre -> sign user
  * inputs -> commit, then maintains the MVC spend session state exactly like
- * the broadcast path. Fallback semantics for the createPin main path:
- * service_unavailable / no_user_utxo / insufficient_quota /
- * insufficient_traffic fall back to the regular self-paid broadcast
- * (fallbackPolicy 'selfpay', tagged with feeAssist metadata) or throw a
- * TrafficInsufficientError ('strict'); pre_rejected / commit_failed are hard
- * failures carrying feeAssist diagnostics.
+ * the broadcast path. Fallback semantics for the createPin main path
+ * (2026-09-08 owner rule: a sponsor outage or error must never block the
+ * write — auto-switch to the bot's own wallet with an explicit trace):
+ * ANY sponsor failure — service_unavailable / no_user_utxo /
+ * insufficient_quota / insufficient_traffic / pre_rejected / commit_failed —
+ * falls back to the regular self-paid broadcast (fallbackPolicy 'selfpay',
+ * tagged with feeAssist metadata) or throws a TrafficInsufficientError
+ * ('strict'). Commit-stage failures reconcile the sponsor order first: an
+ * order that actually broadcast resolves as sponsored success, a
+ * terminal-dead order falls back safely, and an order still reconciling past
+ * the bounded wait budget falls back too (WARN log + feeAssist carry the
+ * orderId and order outcome; the residual duplicate-ping risk of a late
+ * sponsor recovery is accepted and traceable).
  */
 
 import {
@@ -16,6 +23,7 @@ import {
   getErrorMessage,
   getMvcSponsorCommitMessage,
   isNoUserUtxoDraftError,
+  reconcileSponsorOrderAfterCommitFailure,
   signMvcAddressMessage,
   signMvcPreparedUserInputs,
   trafficBalanceBytesOf,
@@ -38,11 +46,13 @@ type SponsorChallenge = Awaited<ReturnType<MvcSponsorV2Client['getChallenge']>>;
 type SponsorPreResult = Awaited<ReturnType<MvcSponsorV2Client['preSponsor']>>;
 type SponsorCommitResult = Awaited<ReturnType<MvcSponsorV2Client['commitSponsor']>>;
 
-export type MvcSponsorCreatePinFallbackReason =
-  | 'service_unavailable'
-  | 'no_user_utxo'
-  | 'insufficient_quota'
-  | 'insufficient_traffic';
+/**
+ * Reasons that route a sponsored createPin to the self-paid fallback. Every
+ * sponsor failure qualifies (2026-09-08 owner rule: sponsor outage or error
+ * auto-switches to the bot's own wallet); commit_failed additionally
+ * reconciles the order first so an already-broadcast tx never double-writes.
+ */
+export type MvcSponsorCreatePinFallbackReason = MvcSponsorFeeAssistReason;
 
 /** feeAssist metadata attached to sponsored/fallback createPin results. */
 export interface CreatePinFeeAssistMetadata extends MvcSponsorFeeAssistMetadata {
@@ -89,6 +99,9 @@ export interface MvcSponsorCreatePinInput {
   trafficAccount?: MvcSponsorTrafficAccount;
   /** MetaID pin path (e.g. /protocols/simplemsg), journaled as the spend kind. */
   journalKind?: string;
+  /** Order-reconciliation timing after a failed commit (tests override; defaults 5s/30s). */
+  commitReconcilePollIntervalMs?: number;
+  commitReconcileMaxWaitMs?: number;
 }
 
 export interface MvcSponsorCreatePinDeps {
@@ -118,57 +131,11 @@ function normalizeSponsorReason(value: unknown, fallback: MvcSponsorFeeAssistRea
     : fallback;
 }
 
-function isFallbackReason(reason: MvcSponsorFeeAssistReason): reason is MvcSponsorCreatePinFallbackReason {
-  return reason === 'service_unavailable'
-    || reason === 'no_user_utxo'
-    || reason === 'insufficient_quota'
-    || reason === 'insufficient_traffic';
-}
-
 function isNoUserUtxoDraftFailure(error: unknown): boolean {
   const message = getErrorMessage(error, '');
   return isNoUserUtxoDraftError(error)
     || /not enough balance|余额不足/i.test(message)
     || message.includes('所有已知 MVC 手续费输入都已失效');
-}
-
-function getStableErrorCode(error: unknown, fallback: string): string {
-  const code = (error as { code?: unknown } | undefined)?.code;
-  return typeof code === 'string' && code.trim() ? code.trim() : fallback;
-}
-
-function attachFeeAssistError(input: {
-  error: unknown;
-  fallbackCode: string;
-  fallbackReason: MvcSponsorFeeAssistReason;
-  stage: MvcSponsorFeeAssistStage;
-  orderId?: string;
-  quotaBefore?: MvcSponsorAddressInfo;
-  advisoryFeeEstimate?: number;
-  sponsoredMinerFee?: number;
-}): never {
-  const error = input.error instanceof Error
-    ? input.error as Error & { code?: string; data?: Record<string, unknown>; reason?: MvcSponsorFeeAssistReason }
-    : new Error(getErrorMessage(input.error, `MVC sponsor ${input.stage} failed.`)) as Error & { code?: string; data?: Record<string, unknown> };
-  error.code = getStableErrorCode(error, input.fallbackCode);
-  const existingData = error.data && typeof error.data === 'object' ? error.data : {};
-  error.data = {
-    ...existingData,
-    feeAssist: {
-      attempted: true,
-      used: false,
-      mode: 'mvc_sponsor_v2',
-      sponsor: 'mvc_sponsor_v2',
-      reason: normalizeSponsorReason((error as { reason?: unknown }).reason, input.fallbackReason),
-      stage: input.stage,
-      orderId: input.orderId,
-      quotaBefore: input.quotaBefore,
-      advisoryFeeEstimate: input.advisoryFeeEstimate,
-      sponsoredMinerFee: input.sponsoredMinerFee,
-      savedFee: input.sponsoredMinerFee,
-    } satisfies MvcSponsorFeeAssistMetadata,
-  };
-  throw error;
 }
 
 export async function runMvcSponsorCreatePin(
@@ -180,8 +147,11 @@ export async function runMvcSponsorCreatePin(
   const fallbackToSelfPaid = async (params: {
     reason: MvcSponsorCreatePinFallbackReason;
     stage: MvcSponsorFeeAssistStage;
+    orderId?: string;
     quotaBefore?: MvcSponsorAddressInfo;
     advisoryFeeEstimate?: number;
+    /** Sponsor-order outcome observed while reconciling a failed commit. */
+    commitOrderOutcome?: 'failed' | 'pending' | 'unknown';
   }): Promise<MvcSponsorCreatePinResult> => {
     const feeAssist: CreatePinFeeAssistMetadata = {
       attempted: true,
@@ -190,17 +160,24 @@ export async function runMvcSponsorCreatePin(
       sponsor: 'mvc_sponsor_v2',
       reason: params.reason,
       stage: params.stage,
+      orderId: params.orderId,
+      commitOrderOutcome: params.commitOrderOutcome,
       quotaBefore: params.quotaBefore,
       advisoryFeeEstimate: params.advisoryFeeEstimate,
     };
     // Self-pay spends the bot's own wallet — never let that happen silently
     // (the 2026-09-07 outage: exhausted legacy quota forced every traffic-mode
-    // pin to self-pay with no trace of why).
+    // pin to self-pay with no trace of why). The WARN log + feeAssist trace
+    // keep every fallback visible; the 2026-09-08 hard-fail regression
+    // (SPONSOR_BROADCAST_PENDING blocking all writes) is why commit-stage
+    // failures now land here too.
     appendMetaidLog('WARN', 'Sponsored MVC createPin falling back to self-paid', {
       metabotId: input.metabotId,
       mvcAddress: input.mvcAddress,
       reason: params.reason,
       stage: params.stage,
+      orderId: params.orderId,
+      commitOrderOutcome: params.commitOrderOutcome,
       fallbackPolicy: input.fallbackPolicy,
     });
     if (input.fallbackPolicy === 'strict') {
@@ -246,18 +223,10 @@ export async function runMvcSponsorCreatePin(
   try {
     challenge = await sponsorClient.getChallenge();
   } catch (error) {
+    // Every sponsor failure falls back under the 'selfpay' policy (nothing
+    // has been broadcast at this stage, so the fallback is always safe).
     const reason = normalizeSponsorReason((error as { reason?: unknown })?.reason, 'service_unavailable');
-    if (isFallbackReason(reason)) {
-      return fallbackToSelfPaid({ reason, stage: 'challenge', quotaBefore, advisoryFeeEstimate });
-    }
-    attachFeeAssistError({
-      error,
-      fallbackCode: 'mvc_fee_assist_challenge_failed',
-      fallbackReason: 'service_unavailable',
-      stage: 'challenge',
-      quotaBefore,
-      advisoryFeeEstimate,
-    });
+    return fallbackToSelfPaid({ reason, stage: 'challenge', quotaBefore, advisoryFeeEstimate });
   }
 
   const challengeSignature = await signMvcAddressMessage({
@@ -303,18 +272,10 @@ export async function runMvcSponsorCreatePin(
       trafficAccount,
     });
   } catch (error) {
+    // pre_rejected now falls back too: the sponsor refused the draft but
+    // nothing was broadcast, so the bot's own wallet can still deliver.
     const reason = normalizeSponsorReason((error as { reason?: unknown })?.reason, 'pre_rejected');
-    if (isFallbackReason(reason)) {
-      return fallbackToSelfPaid({ reason, stage: 'pre', quotaBefore, advisoryFeeEstimate });
-    }
-    attachFeeAssistError({
-      error,
-      fallbackCode: 'mvc_fee_assist_pre_failed',
-      fallbackReason: 'pre_rejected',
-      stage: 'pre',
-      quotaBefore,
-      advisoryFeeEstimate,
-    });
+    return fallbackToSelfPaid({ reason, stage: 'pre', quotaBefore, advisoryFeeEstimate });
   }
 
   let signedTxHex: string;
@@ -328,15 +289,19 @@ export async function runMvcSponsorCreatePin(
       userInputIndexes: pre.userInputIndexes,
     })).txHex;
   } catch (error) {
-    attachFeeAssistError({
-      error,
-      fallbackCode: 'mvc_fee_assist_commit_failed',
-      fallbackReason: 'pre_rejected',
+    // Local signing failure: the sponsor never received a signed tx, so the
+    // order can never be committed — falling back is double-write-safe.
+    appendMetaidLog('WARN', 'Sponsored MVC createPin user-input signing failed — falling back to self-paid', {
+      metabotId: input.metabotId,
+      orderId: pre.orderId,
+      error: getErrorMessage(error, 'user-input signing failed'),
+    });
+    return fallbackToSelfPaid({
+      reason: 'pre_rejected',
       stage: 'commit',
       orderId: pre.orderId,
       quotaBefore,
       advisoryFeeEstimate,
-      sponsoredMinerFee: pre.minerFee,
     });
   }
 
@@ -347,6 +312,7 @@ export async function runMvcSponsorCreatePin(
     message: commitMessage,
   });
 
+  let commitRecovered = false;
   let commit: SponsorCommitResult;
   try {
     commit = await sponsorClient.commitSponsor({
@@ -356,16 +322,57 @@ export async function runMvcSponsorCreatePin(
       signature: commitSignature.signature,
     });
   } catch (error) {
-    attachFeeAssistError({
-      error,
-      fallbackCode: 'mvc_fee_assist_commit_failed',
-      fallbackReason: 'commit_failed',
-      stage: 'commit',
+    // The sponsor already holds our signed tx — reconcile the order before
+    // any fallback so a broadcast that merely lost its response resolves as
+    // success instead of double-writing. This is the 2026-09-08 outage fix:
+    // sponsor-side broadcast failures ([-25]Missing inputs /
+    // SPONSOR_BROADCAST_PENDING) used to hard-fail every traffic-mode write.
+    const reconciliation = await reconcileSponsorOrderAfterCommitFailure({
       orderId: pre.orderId,
-      quotaBefore,
-      advisoryFeeEstimate,
-      sponsoredMinerFee: pre.minerFee,
+      client: sponsorClient,
+      pollIntervalMs: input.commitReconcilePollIntervalMs,
+      maxWaitMs: input.commitReconcileMaxWaitMs,
     });
+    if (reconciliation.outcome === 'broadcasted' && reconciliation.txId) {
+      appendMetaidLog('WARN', 'Sponsored MVC createPin commit failed its response but the order broadcast — resolving as sponsored success', {
+        metabotId: input.metabotId,
+        orderId: pre.orderId,
+        txId: reconciliation.txId,
+        commitError: getErrorMessage(error, 'commit failed'),
+      });
+      commit = {
+        txId: reconciliation.txId,
+        txSize: reconciliation.txSize,
+        minerFee: reconciliation.minerFee,
+        raw: { commitRecovered: true },
+      };
+      commitRecovered = true;
+    } else {
+      // A still-pending order is abandoned deliberately: the self-paid tx
+      // draws from the same address, so the two transactions usually conflict
+      // and at most one lands; a duplicate is possible only if the sponsor
+      // recovers inside the race window, and the trace below pinpoints it.
+      appendMetaidLog('WARN', 'Sponsored MVC createPin commit failed — falling back to self-paid', {
+        metabotId: input.metabotId,
+        mvcAddress: input.mvcAddress,
+        orderId: pre.orderId,
+        commitOrderOutcome: reconciliation.outcome,
+        orderStatus: reconciliation.status,
+        orderFailureReason: reconciliation.failureReason,
+        commitError: getErrorMessage(error, 'commit failed'),
+        fallbackPolicy: input.fallbackPolicy,
+      });
+      return fallbackToSelfPaid({
+        reason: 'commit_failed',
+        stage: 'commit',
+        orderId: pre.orderId,
+        quotaBefore,
+        advisoryFeeEstimate,
+        commitOrderOutcome: reconciliation.outcome === 'failed' || reconciliation.outcome === 'pending' || reconciliation.outcome === 'unknown'
+          ? reconciliation.outcome
+          : undefined,
+      });
+    }
   }
 
   const sponsoredMinerFee = commit.minerFee ?? pre.minerFee;
@@ -412,6 +419,7 @@ export async function runMvcSponsorCreatePin(
       sponsor: 'mvc_sponsor_v2',
       stage: 'done',
       orderId: pre.orderId,
+      commitRecovered: commitRecovered || undefined,
       quotaBefore,
       quotaAfter,
       advisoryFeeEstimate,

@@ -590,71 +590,302 @@ test('runMvcSponsorCreatePin falls back on pre quota and traffic insufficiency',
   }
 });
 
-test('runMvcSponsorCreatePin hard-fails on pre_rejected and commit_failed under both policies', async () => {
-  const cases = [
-    {
-      routes: (draftResult) => [
-        ADDRESS_INFO_ROUTE,
-        CHALLENGE_ROUTE,
-        ['/v2/assist/gas/mvc/pre', { code: 1, msg: 'address not match' }],
-      ],
-      code: 'mvc_fee_assist_pre_failed',
-      reason: 'pre_rejected',
-      stage: 'pre',
-    },
-    {
-      routes: (draftResult) => [
-        ADDRESS_INFO_ROUTE,
-        CHALLENGE_ROUTE,
-        ['/v2/assist/gas/mvc/pre', {
-          preparedTxHex: draftResult.draft.unsignedTxHex,
-          orderId: 'order-1',
-          minerFee: 100,
-          userInputIndexes: [0],
-        }],
-        ['/v2/assist/gas/mvc/commit', () => ({ code: 1, msg: 'commit rejected' })],
-      ],
-      code: 'mvc_fee_assist_commit_failed',
-      reason: 'commit_failed',
-      stage: 'commit',
-    },
-  ];
-  for (const fallbackPolicy of ['selfpay', 'strict']) {
-    for (const [index, testCase] of cases.entries()) {
-      const draftResult = buildDraftWorkerResult();
-      const fetchImpl = createFetchStub(testCase.routes(draftResult));
-      const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
+test('runMvcSponsorCreatePin falls back to self-paid on pre_rejected at pre', async () => {
+  // 2026-09-08 semantics: the sponsor refused the draft but nothing was
+  // broadcast, so the bot's own wallet delivers instead of hard-failing.
+  const draftResult = buildDraftWorkerResult();
+  const fetchImpl = createFetchStub([
+    ADDRESS_INFO_ROUTE,
+    CHALLENGE_ROUTE,
+    ['/v2/assist/gas/mvc/pre', { code: 1, msg: 'address not match' }],
+  ]);
+  const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
 
-      await assert.rejects(
-        runMvcSponsorCreatePin(
-          {
-            metabotId: 9120 + index,
-            mnemonic: MNEMONIC,
-            walletPath: WALLET_PATH,
-            mvcAddress: TEST_ADDRESS,
-            feeRate: 1,
-            fallbackPolicy,
-            baseUrl: 'https://sponsor.test',
-            fetchImpl,
-          },
-          {
-            runDraftWorker: async () => draftResult,
-            runBroadcastWorker,
-            recordSpentOutpoints: () => {},
-            replacePendingFundingUtxos: () => {},
-          },
-        ),
-        (error) => {
-          assert.equal(error.code, testCase.code);
-          assert.equal(error.data.feeAssist.used, false);
-          assert.equal(error.data.feeAssist.reason, testCase.reason);
-          assert.equal(error.data.feeAssist.stage, testCase.stage);
-          return true;
-        },
-      );
-      assert.equal(broadcastState.calls, 0);
-    }
-  }
+  const result = await runMvcSponsorCreatePin(
+    {
+      metabotId: 9120,
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: TEST_ADDRESS,
+      feeRate: 1,
+      fallbackPolicy: 'selfpay',
+      baseUrl: 'https://sponsor.test',
+      fetchImpl,
+    },
+    {
+      runDraftWorker: async () => draftResult,
+      runBroadcastWorker,
+      recordSpentOutpoints: () => {},
+      replacePendingFundingUtxos: () => {},
+    },
+  );
+
+  assert.equal(broadcastState.calls, 1);
+  assert.equal(result.feeAssist.used, false);
+  assert.equal(result.feeAssist.mode, 'self_paid');
+  assert.equal(result.feeAssist.reason, 'pre_rejected');
+  assert.equal(result.feeAssist.stage, 'pre');
+});
+
+test('runMvcSponsorCreatePin reconciles a dead commit order (sponsor broadcast outage) and falls back to self-paid', async () => {
+  // 2026-09-08 outage regression: SPONSOR_BROADCAST_PENDING / [-25]Missing
+  // inputs at commit used to hard-fail every traffic-mode write with no
+  // fallback. The order must now be reconciled first and, once terminal-dead,
+  // the write switches to the bot's own wallet.
+  const draftResult = buildDraftWorkerResult();
+  const fetchImpl = createFetchStub([
+    ADDRESS_INFO_ROUTE,
+    CHALLENGE_ROUTE,
+    ['/v2/assist/gas/mvc/pre', {
+      preparedTxHex: draftResult.draft.unsignedTxHex,
+      orderId: 'order-1',
+      minerFee: 100,
+      userInputIndexes: [0],
+    }],
+    ['/v2/assist/gas/mvc/commit', () => ({
+      code: 1,
+      msg: 'SPONSOR_BROADCAST_PENDING: orderId=order-1: broadcast failed: rpc error: code = Unknown desc = [-25]Missing inputs; transaction not seen',
+    })],
+    ['/v2/assist/gas/mvc/order/order-1', {
+      orderId: 'order-1',
+      status: 'failed',
+      txSize: 300,
+      minerFee: 100,
+      pending: false,
+      final: true,
+      failureReason: 'broadcast failed: missing inputs',
+    }],
+  ]);
+  const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
+
+  const result = await runMvcSponsorCreatePin(
+    {
+      metabotId: 9121,
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: TEST_ADDRESS,
+      feeRate: 1,
+      fallbackPolicy: 'selfpay',
+      baseUrl: 'https://sponsor.test',
+      fetchImpl,
+      commitReconcileMaxWaitMs: 0,
+    },
+    {
+      runDraftWorker: async () => draftResult,
+      runBroadcastWorker,
+      recordSpentOutpoints: () => {},
+      replacePendingFundingUtxos: () => {},
+    },
+  );
+
+  assert.equal(broadcastState.calls, 1);
+  assert.equal(result.pinId, `${'ff'.repeat(32)}i0`);
+  assert.equal(result.feeAssist.used, false);
+  assert.equal(result.feeAssist.mode, 'self_paid');
+  assert.equal(result.feeAssist.reason, 'commit_failed');
+  assert.equal(result.feeAssist.stage, 'commit');
+  assert.equal(result.feeAssist.orderId, 'order-1');
+  assert.equal(result.feeAssist.commitOrderOutcome, 'failed');
+});
+
+test('runMvcSponsorCreatePin resolves a commit whose order actually broadcast (no double-write)', async () => {
+  const RECOVERED_TXID = 'bb'.repeat(32);
+  const draftResult = buildDraftWorkerResult();
+  const fetchImpl = createFetchStub([
+    ADDRESS_INFO_ROUTE,
+    CHALLENGE_ROUTE,
+    ['/v2/assist/gas/mvc/pre', {
+      preparedTxHex: draftResult.draft.unsignedTxHex,
+      orderId: 'order-1',
+      minerFee: 100,
+      userInputIndexes: [0],
+    }],
+    ['/v2/assist/gas/mvc/commit', () => ({ code: 1, msg: 'commit response lost' })],
+    ['/v2/assist/gas/mvc/order/order-1', {
+      orderId: 'order-1',
+      status: 'broadcasted',
+      txId: RECOVERED_TXID,
+      txSize: 300,
+      minerFee: 100,
+      pending: false,
+      final: true,
+    }],
+  ]);
+  const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
+
+  const result = await runMvcSponsorCreatePin(
+    {
+      metabotId: 9122,
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: TEST_ADDRESS,
+      feeRate: 1,
+      fallbackPolicy: 'selfpay',
+      baseUrl: 'https://sponsor.test',
+      fetchImpl,
+      commitReconcileMaxWaitMs: 0,
+    },
+    {
+      runDraftWorker: async () => draftResult,
+      runBroadcastWorker,
+      recordSpentOutpoints: () => {},
+      replacePendingFundingUtxos: () => {},
+    },
+  );
+
+  // The sponsor tx landed, so the write resolves as sponsored success — the
+  // self-paid fallback must never run (that would duplicate the pin).
+  assert.equal(broadcastState.calls, 0);
+  assert.deepEqual(result.txids, [RECOVERED_TXID]);
+  assert.equal(result.pinId, `${RECOVERED_TXID}i0`);
+  assert.equal(result.feeAssist.used, true);
+  assert.equal(result.feeAssist.mode, 'mvc_sponsor_v2');
+  assert.equal(result.feeAssist.commitRecovered, true);
+  assert.equal(result.feeAssist.orderId, 'order-1');
+});
+
+test('runMvcSponsorCreatePin falls back to self-paid when the commit order stays pending past the wait budget', async () => {
+  const draftResult = buildDraftWorkerResult();
+  const fetchImpl = createFetchStub([
+    ADDRESS_INFO_ROUTE,
+    CHALLENGE_ROUTE,
+    ['/v2/assist/gas/mvc/pre', {
+      preparedTxHex: draftResult.draft.unsignedTxHex,
+      orderId: 'order-1',
+      minerFee: 100,
+      userInputIndexes: [0],
+    }],
+    ['/v2/assist/gas/mvc/commit', () => ({ code: 1, msg: 'SPONSOR_BROADCAST_PENDING: broadcast reconciliation in progress' })],
+    ['/v2/assist/gas/mvc/order/order-1', {
+      orderId: 'order-1',
+      status: 'reconciling',
+      txSize: 300,
+      minerFee: 100,
+      pending: true,
+      final: false,
+    }],
+  ]);
+  const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
+
+  const result = await runMvcSponsorCreatePin(
+    {
+      metabotId: 9123,
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: TEST_ADDRESS,
+      feeRate: 1,
+      fallbackPolicy: 'selfpay',
+      baseUrl: 'https://sponsor.test',
+      fetchImpl,
+      commitReconcileMaxWaitMs: 0,
+    },
+    {
+      runDraftWorker: async () => draftResult,
+      runBroadcastWorker,
+      recordSpentOutpoints: () => {},
+      replacePendingFundingUtxos: () => {},
+    },
+  );
+
+  assert.equal(broadcastState.calls, 1);
+  assert.equal(result.feeAssist.used, false);
+  assert.equal(result.feeAssist.reason, 'commit_failed');
+  assert.equal(result.feeAssist.commitOrderOutcome, 'pending');
+  assert.equal(result.feeAssist.orderId, 'order-1');
+});
+
+test('runMvcSponsorCreatePin falls back to self-paid when the order status endpoint is unreachable', async () => {
+  const draftResult = buildDraftWorkerResult();
+  const fetchImpl = createFetchStub([
+    ADDRESS_INFO_ROUTE,
+    CHALLENGE_ROUTE,
+    ['/v2/assist/gas/mvc/pre', {
+      preparedTxHex: draftResult.draft.unsignedTxHex,
+      orderId: 'order-1',
+      minerFee: 100,
+      userInputIndexes: [0],
+    }],
+    ['/v2/assist/gas/mvc/commit', () => ({ code: 1, msg: 'commit rejected' })],
+  ]);
+  const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
+
+  const result = await runMvcSponsorCreatePin(
+    {
+      metabotId: 9124,
+      mnemonic: MNEMONIC,
+      walletPath: WALLET_PATH,
+      mvcAddress: TEST_ADDRESS,
+      feeRate: 1,
+      fallbackPolicy: 'selfpay',
+      baseUrl: 'https://sponsor.test',
+      fetchImpl,
+      commitReconcileMaxWaitMs: 0,
+    },
+    {
+      runDraftWorker: async () => draftResult,
+      runBroadcastWorker,
+      recordSpentOutpoints: () => {},
+      replacePendingFundingUtxos: () => {},
+    },
+  );
+
+  assert.equal(broadcastState.calls, 1);
+  assert.equal(result.feeAssist.used, false);
+  assert.equal(result.feeAssist.reason, 'commit_failed');
+  assert.equal(result.feeAssist.commitOrderOutcome, 'unknown');
+});
+
+test('runMvcSponsorCreatePin throws TrafficInsufficientError under the strict policy on commit failure', async () => {
+  const draftResult = buildDraftWorkerResult();
+  const fetchImpl = createFetchStub([
+    ADDRESS_INFO_ROUTE,
+    CHALLENGE_ROUTE,
+    ['/v2/assist/gas/mvc/pre', {
+      preparedTxHex: draftResult.draft.unsignedTxHex,
+      orderId: 'order-1',
+      minerFee: 100,
+      userInputIndexes: [0],
+    }],
+    ['/v2/assist/gas/mvc/commit', () => ({ code: 1, msg: 'commit rejected' })],
+    ['/v2/assist/gas/mvc/order/order-1', {
+      orderId: 'order-1',
+      status: 'failed',
+      txSize: 300,
+      minerFee: 100,
+      pending: false,
+      final: true,
+    }],
+  ]);
+  const { runBroadcastWorker, state: broadcastState } = makeBroadcastWorker();
+
+  await assert.rejects(
+    runMvcSponsorCreatePin(
+      {
+        metabotId: 9125,
+        mnemonic: MNEMONIC,
+        walletPath: WALLET_PATH,
+        mvcAddress: TEST_ADDRESS,
+        feeRate: 1,
+        fallbackPolicy: 'strict',
+        baseUrl: 'https://sponsor.test',
+        fetchImpl,
+        commitReconcileMaxWaitMs: 0,
+      },
+      {
+        runDraftWorker: async () => draftResult,
+        runBroadcastWorker,
+        recordSpentOutpoints: () => {},
+        replacePendingFundingUtxos: () => {},
+      },
+    ),
+    (error) => {
+      assert.ok(error instanceof TrafficInsufficientError);
+      assert.equal(error.reason, 'commit_failed');
+      assert.equal(error.feeAssist.commitOrderOutcome, 'failed');
+      return true;
+    },
+  );
+  assert.equal(broadcastState.calls, 0);
 });
 
 test('runMvcSponsorCreatePin throws TrafficInsufficientError under the strict policy', async () => {
