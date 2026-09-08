@@ -36,6 +36,7 @@ test('the rule carries the full search-before-ask loop with every live tool', ()
   assert.match(QA_BEHAVIOR_RULE, /\/protocols\/simpleanswer/);
   assert.match(QA_BEHAVIOR_RULE, /like_pin/);
   assert.match(QA_BEHAVIOR_RULE, /only required field/);
+  assert.match(QA_BEHAVIOR_RULE, /ending in a question mark \(`\?` or full-width `？`\)/);
   assert.match(QA_BEHAVIOR_RULE, /never re-ask what a search already answered/);
 });
 

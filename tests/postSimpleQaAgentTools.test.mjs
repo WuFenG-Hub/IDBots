@@ -145,10 +145,10 @@ test('full question writes content/contentType/tags/attachments and mentions the
 
 test('explicit content_type is honored; empty content omits contentType entirely', async () => {
   const { calls, byName } = makeHarness();
-  await byName.post_simplequestion.handler({ title: 't1', content: 'plain', content_type: 'text/plain' });
+  await byName.post_simplequestion.handler({ title: 't1?', content: 'plain', content_type: 'text/plain' });
   let payload = JSON.parse(calls.createPin[0].metaidData.payload);
   assert.equal(payload.contentType, 'text/plain');
-  await byName.post_simplequestion.handler({ title: 't2', content_type: 'text/plain' });
+  await byName.post_simplequestion.handler({ title: 't2?', content_type: 'text/plain' });
   payload = JSON.parse(calls.createPin[1].metaidData.payload);
   assert.equal('contentType' in payload, false);
 });
@@ -158,10 +158,10 @@ test('rejects empty title, relative attachment paths and missing files honestly'
   const empty = await byName.post_simplequestion.handler({ title: '   ' });
   assert.equal(empty.isError, true);
   assert.match(empty.content[0].text, /requires `title`/);
-  const relative = await byName.post_simplequestion.handler({ title: 't', attachments: ['shot.png'] });
+  const relative = await byName.post_simplequestion.handler({ title: 't?', attachments: ['shot.png'] });
   assert.equal(relative.isError, true);
   assert.match(relative.content[0].text, /ABSOLUTE local file paths/);
-  const missing = await byName.post_simplequestion.handler({ title: 't', attachments: ['/nonexistent/shot.png'] });
+  const missing = await byName.post_simplequestion.handler({ title: 't?', attachments: ['/nonexistent/shot.png'] });
   assert.equal(missing.isError, true);
   assert.match(missing.content[0].text, /file not found/);
 });
@@ -516,4 +516,40 @@ test('ledger without a store or with a failing store never breaks posting flows'
   } finally {
     setSimpleQaAnswerLedgerStore(null);
   }
+});
+
+// ---------------------------------------------------------------------------
+// A title IS a question (ZhiHu/Quora convention): the tool rejects titles
+// without a trailing question mark — the IDBots-side half of the rule the
+// Q&A index mirrors (docs/metaid_protocols/08-qanda.md).
+// ---------------------------------------------------------------------------
+
+test('question titles must end with a question mark (? or full-width ？)', async () => {
+  const noMark = makeHarness();
+  const rejected = await noMark.byName.post_simplequestion.handler({
+    title: 'How to recover a wallet when the mnemonic is lost',
+    content: 'details',
+  });
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.content[0].text, /must end with a question mark/);
+  assert.match(rejected.content[0].text, /nothing was published/);
+  assert.equal(noMark.calls.createPin.length, 0);
+
+  const midMark = makeHarness();
+  const middleOnly = await midMark.byName.post_simplequestion.handler({
+    title: 'Is this right? Because I am not sure',
+  });
+  assert.equal(middleOnly.isError, true);
+  assert.match(middleOnly.content[0].text, /must end with a question mark/);
+  assert.equal(midMark.calls.createPin.length, 0);
+
+  // Both half-width and full-width marks pass; nothing else changes.
+  const half = makeHarness();
+  await half.byName.post_simplequestion.handler({ title: 'What is the fee rate?' });
+  assert.equal(half.calls.createPin.length, 1);
+  const full = makeHarness();
+  const fullResult = await full.byName.post_simplequestion.handler({ title: '钱包助记词丢了怎么办？' });
+  assert.equal(fullResult.isError, undefined);
+  assert.equal(full.calls.createPin.length, 1);
+  assert.equal(JSON.parse(full.calls.createPin[0].metaidData.payload).title, '钱包助记词丢了怎么办？');
 });

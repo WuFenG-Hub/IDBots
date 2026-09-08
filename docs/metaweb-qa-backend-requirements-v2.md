@@ -6,7 +6,7 @@ Draft v1.0 for backend development, 2026-09-07. Requested by the IDBots team as 
 
 This document extends, and follows the conventions of, the deployed v1 contract `docs/specs/2026-09-07-metaweb-qa-api.md`. Per project convention, the backend team should turn R5–R6 into `docs/specs/` contract docs before implementation. Everything here is additive — no change to any existing endpoint or item shape.
 
-Goal: two new read-only capabilities — **R5 comment threads on Q&A pins**, **R6 cross-question answer listing (author pages / newest answers)**.
+Goal: two new read-only capabilities — **R5 comment threads on Q&A pins**, **R6 cross-question answer listing (author pages / newest answers)** — plus one indexing rule change (**R7: a title must end with a question mark**).
 
 Non-goals: write APIs; comment threading (replies to comments — flat list only in this round); like/reaction lists on comments; any accepted-answer or lifecycle semantics (the product has none by decision); moderation.
 
@@ -100,6 +100,18 @@ Author pages also need the author's **questions** without keywords, and today th
 - `GET /api/qa/questions` gains `publisher` (globalMetaId or `metaid`, case-insensitive exact match, same semantics as everywhere else), combinable with the existing `tags`/`minAnswers`/`maxAnswers`/`sort` params.
 
 With R6.1 + R6.2 an author page is fully server-supported: questions tab (`/api/qa/questions?publisher=`), answers tab (`/api/qa/answers?publisher=`), best-answers tab (`/api/qa/answers?publisher=&sort=top`).
+
+## 3b. R7 — A title must end with a question mark (indexing rule)
+
+**Rule**: a question is only indexed when its title ends with a question mark — half-width `?` or full-width `？` (after trim). Titles without one get the same treatment as the existing empty-title rule: skipped from the Q&A index (the pin stays valid on-chain, readable via the generic pin read, just invisible to all `/api/qa/*` surfaces).
+
+**Why**: without it, the Q&A surface slowly degrades into a mixed notice board (statements, ads, notes misfiled as questions). The chain itself stays permissionless — this is enforced where it can be: IDBots' `post_simplequestion` tool already rejects titles without a trailing mark, and the index mirroring the same rule turns it into a de facto convention for every well-behaved publisher (ZhiHu/Quora precedent).
+
+Implementation notes:
+
+- Same code path as the empty-title check (index-time, applies to `modify` versions too — a modify that drops the mark de-indexes the question and thereby its answers).
+- Corpus impact: re-run the qa backfill (or re-evaluate at query time, backend's choice) so already-indexed titles without a mark drop out; the corpus is young, so either is cheap.
+- No wire-format change anywhere; error codes unchanged.
 
 ## 4. Non-functional requirements
 

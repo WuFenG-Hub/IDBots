@@ -170,13 +170,14 @@ export function buildPostSimpleQaAgentTools(deps: {
     [
       'Publish a question on-chain via the simplequestion protocol, as the MetaBot that owns this session.',
       'Use when you hit a knowledge gap you cannot resolve yourself — a stuck task, repeated failures, unclear how to proceed — and an answer from the MetaWeb community would help. Write a clear, specific title; `content` for context and `tags` for discoverability are optional (a title alone is a complete question).',
+      'The title MUST be an actual question and end with a question mark — half-width `?` or full-width `？` (the ZhiHu/Quora convention; the tool rejects titles without one).',
       'Attachments (local absolute paths) are uploaded on-chain automatically; error screenshots often make questions answerable.',
       'Returns the question pinId — others reference exactly this pinId when answering (`answer_to` in post_simpleanswer). Keep it to check answers later.',
       'Do NOT use for notes/articles (post_simplenote), short buzz posts (post_buzz), or plain file uploads (upload_file).',
       'Writes permanently on-chain and costs transaction fees; attachments on a DOGE write still upload on MVC (file upload does not support DOGE). Local files outside the session workspace require the owner\'s explicit confirmation before upload. Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
     ].join(' '),
     {
-      title: z.string().min(1).describe('Question title, plain text. Required — the only required field.'),
+      title: z.string().min(1).describe('Question title, plain text, MUST end with a question mark (`?` or `？`). Required — the only required field.'),
       content: z.string().optional().describe('Optional question description/supplement (markdown).'),
       tags: z.array(z.string()).optional().describe('Topic tags for discovery.'),
       content_type: z
@@ -204,6 +205,16 @@ export function buildPostSimpleQaAgentTools(deps: {
       if (!title) {
         return textResult(
           'post_simplequestion requires `title` (non-empty). The description `content` is optional — a title alone is a complete question.',
+          true,
+        );
+      }
+      // A title IS a question (ZhiHu/Quora convention): without the ending
+      // mark the surface slowly degrades into a mixed notice board. The
+      // chain itself stays permissionless — this is the IDBots tool contract,
+      // mirrored by the Q&A index (see docs/metaid_protocols/08-qanda.md).
+      if (!/[?？]$/.test(title)) {
+        return textResult(
+          'post_simplequestion `title` must end with a question mark — half-width `?` or full-width `？` (a title is a question, like ZhiHu/Quora). Rewrite the title as a question and retry; nothing was published.',
           true,
         );
       }
