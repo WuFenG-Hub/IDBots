@@ -63,6 +63,13 @@ const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_COOLDOWN_MS = 20_000;
+/**
+ * R5 (OpenTeam chat scenario): chat groups run a shorter reply cooldown —
+ * task cadence (20s) reads as lag in a live conversation, while the loop
+ * insurance that cooldown provides still holds (self-message skip + prompt
+ * etiquette + [NO_REPLY]).
+ */
+const DEFAULT_CHAT_COOLDOWN_MS = 8_000;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 /** Bounded retry: consecutive failures on one message before the cursor gives up and advances past it. */
 const MAX_CONSECUTIVE_MESSAGE_FAILURES = 3;
@@ -312,6 +319,8 @@ export interface OpenTeamGuestDaemonDeps {
   now?: () => number;
   intervalMs?: number;
   cooldownMs?: number;
+  /** R5: chat-mode reply cooldown (default 8s; task mode keeps 20s). */
+  chatCooldownMs?: number;
   contextMessageCount?: number;
   /**
    * P1-3: when wired, guest turns are logged into the eager session created at
@@ -376,6 +385,7 @@ const parseSqliteUtcMs = (value: string | null): number => {
 export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): OpenTeamGuestDaemonLoop {
   const intervalMs = Math.max(1_000, Math.trunc(deps.intervalMs ?? DEFAULT_INTERVAL_MS));
   const cooldownMs = Math.max(0, Math.trunc(deps.cooldownMs ?? DEFAULT_COOLDOWN_MS));
+  const chatCooldownMs = Math.max(0, Math.trunc(deps.chatCooldownMs ?? DEFAULT_CHAT_COOLDOWN_MS));
   const contextMessageCount = Math.max(1, Math.trunc(deps.contextMessageCount ?? DEFAULT_CONTEXT_MESSAGE_COUNT));
   const membershipCheckIntervalMs = Math.max(
     1_000,
@@ -1013,7 +1023,8 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
             bot,
             lastReplyAt: lastReplyAtByMembership.get(membership.id) ?? 0,
             now: now(),
-            cooldownMs,
+            // R5: chat groups use the shorter cadence.
+            cooldownMs: membership.groupMode === 'chat' ? chatCooldownMs : cooldownMs,
             // R2: chat-mode gating (direct chair conversation without an @).
             mode: membership.groupMode === 'chat' ? 'chat' : 'task',
             inviterGlobalMetaId: chairGlobalMetaId,

@@ -400,6 +400,37 @@ test('chat-mode prompt keeps the persona block intact', () => {
   assert.ok(chat.includes('You are Guest Bot'), 'persona block present');
 });
 
+
+// ---------------------------------------------------------------------------
+// R5: chat-mode reply cadence (cooldown tier)
+// ---------------------------------------------------------------------------
+
+test('R5: chat gating uses the shorter chat cooldown, task gating keeps 20s-class cooldown', () => {
+  const bot = gateBot();
+  // lastReply 10s ago: inside the task cooldown (20s) but outside chat (8s).
+  const decisionChat = decideOpenTeamGuestResponse({
+    lastReplyAt: 90_000,
+    now: 100_000,
+    cooldownMs: 8_000,
+    mode: 'chat',
+    inviterGlobalMetaId: CHAIR_GMID,
+    message: gateMessage({ content: 'still there?' }),
+    bot,
+  });
+  assert.equal(decisionChat.respond, true, 'chat cadence allows a 10s-old last reply');
+  const decisionTask = decideOpenTeamGuestResponse({
+    lastReplyAt: 90_000,
+    now: 100_000,
+    cooldownMs: 20_000,
+    mode: 'task',
+    inviterGlobalMetaId: CHAIR_GMID,
+    message: gateMessage({ content: '@Guest Bot still there?' }),
+    bot,
+  });
+  assert.equal(decisionTask.respond, false);
+  assert.equal(decisionTask.reason, 'cooldown');
+});
+
 // ---------------------------------------------------------------------------
 // R4: single-send guarantee — outgoing group-send ledger + daemon suppression
 // ---------------------------------------------------------------------------
