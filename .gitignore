@@ -60,6 +60,7 @@ tests/*
 !tests/dshKernelRuntime.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/dshRuntimeGlmResponsesBoot.test.mjs
+!tests/dshRuntimeOpencodeSessionHeaders.test.mjs
 !tests/dshKernelBootFailure.test.mjs
 !tests/coworkKernelRouting.test.mjs
 !tests/coworkForkSession.test.mjs
