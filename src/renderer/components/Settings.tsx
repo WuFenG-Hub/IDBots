@@ -25,7 +25,7 @@ import type {
 } from '../types/cowork';
 import type { GroupTaskSummary } from '../types/groupTask';
 import { groupTaskService } from '../services/groupTaskService';
-import { formatContextWindowSize, parseContextWindowSizeInput } from '../utils/contextWindowSize';
+import { formatContextWindowSize, NEW_MODEL_DEFAULT_CONTEXT_WINDOW, NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS, parseContextWindowSizeInput } from '../utils/contextWindowSize';
 import { groupTaskStatusBadgeClass } from './groupTasks/groupTaskUtils';
 import { groupTaskStatusLabelKey } from './groupTasks/GroupTasksView';
 import IMSettings from './im/IMSettings';
@@ -1328,7 +1328,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setEditingModelId(null);
     setNewModelName('');
     setNewModelId('');
-    setNewModelContextWindow('');
+    // New models start from the 1M default (visible and editable); clearing
+    // the field still falls back to the known-model catalog at resolution.
+    setNewModelContextWindow(formatContextWindowSize(NEW_MODEL_DEFAULT_CONTEXT_WINDOW));
     setNewModelSupportsImage(false);
     setModelFormError(null);
   };
@@ -1341,7 +1343,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setNewModelId(modelId);
     // Prefill the stored explicit window (if any) so the user can see and
     // change it; an empty field means "no explicit value persisted".
-    setNewModelContextWindow(contextWindow ? String(contextWindow) : '');
+    setNewModelContextWindow(contextWindow ? formatContextWindowSize(contextWindow) : '');
     setNewModelSupportsImage(!!supportsImage);
     setModelFormError(null);
   };
@@ -1393,6 +1395,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       id: modelId,
       name: modelName,
       supportsImage: newModelSupportsImage,
+      // A new model pins a 32K output ceiling so an uncatalogued id never
+      // falls back to the 8192 main-process default (which thinking-heavy
+      // models burn on reasoning alone — the cw-86812c4f stall). Edits keep
+      // whatever the entry already stored via the spread above.
+      ...(!isEditingModel && { maxOutputTokens: NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS }),
       // Empty input clears an explicitly stored window (JSON drops the
       // undefined key) so resolution falls back to the known-model catalog.
       contextWindow: parsedContextWindow,
@@ -1451,7 +1458,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setCustomProviderModels([]);
     setCustomModelName('');
     setCustomModelId('');
-    setCustomModelContextWindow('');
+    // Same new-model default as the add-model form (1M, editable).
+    setCustomModelContextWindow(formatContextWindowSize(NEW_MODEL_DEFAULT_CONTEXT_WINDOW));
     setCustomProviderError(null);
     setIsAddingCustomProvider(true);
   };
@@ -1483,6 +1491,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         id: modelId,
         name: modelName,
         supportsImage: false,
+        // Same rationale as the add-model form: draft entries pin the 32K
+        // output ceiling so they never resolve to the 8192 fallback.
+        maxOutputTokens: NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS,
         // Omitted when left empty so resolution keeps the known-model catalog
         // / 128K default instead of pinning an explicit value.
         ...(parsedContextWindow !== undefined ? { contextWindow: parsedContextWindow } : {}),
@@ -1490,7 +1501,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     ]);
     setCustomModelName('');
     setCustomModelId('');
-    setCustomModelContextWindow('');
+    setCustomModelContextWindow(formatContextWindowSize(NEW_MODEL_DEFAULT_CONTEXT_WINDOW));
     setCustomProviderError(null);
   };
 

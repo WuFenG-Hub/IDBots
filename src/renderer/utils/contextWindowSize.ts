@@ -9,6 +9,18 @@
 /** Sanity ceiling for a user-entered window (100M tokens is never real). */
 export const CONTEXT_WINDOW_INPUT_MAX = 100_000_000;
 
+/** Window prefilled when the add-model / custom-provider forms open. */
+export const NEW_MODEL_DEFAULT_CONTEXT_WINDOW = 1_000_000;
+
+/**
+ * Output ceiling pinned onto every newly created model entry. Without an
+ * explicit value an uncatalogued id falls back to the 8192 main-process
+ * default, which thinking-heavy models burn on reasoning alone (the
+ * 2026-09-09 cw-86812c4f stall); 32K only caps generation and costs nothing
+ * for short replies since billing is by actual tokens used.
+ */
+export const NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
+
 /**
  * Parse the raw input into a token count.
  *
