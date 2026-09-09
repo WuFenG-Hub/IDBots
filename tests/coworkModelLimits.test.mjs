@@ -417,3 +417,86 @@ test('catalog supportsImage maps onto supportsVision', async () => {
   assert.equal(limits.supportsVision, true);
   assert.equal(limits.source, 'available-model');
 });
+
+// ---------------------------------------------------------------------------
+// DeepSeek V4 family fallback (2026-09-09 cw-86812c4f stall): ephemeral SKU
+// suffixes (deepseek-v4.1-flash-expires-on-0910) escape the exact catalog and
+// fell to DEFAULT_COWORK_MAX_OUTPUT_TOKENS (8192); with reasoning effort
+// 'max' the thinking alone burned that ceiling and the turn ended as a
+// hollow-completed reasoning-only truncation. Any id whose last path segment
+// starts with 'deepseek-v4' now inherits the family limits.
+// ---------------------------------------------------------------------------
+
+test('uncatalogued v4.1 promo SKU with partial provider metadata inherits the family output ceiling (cw-86812c4f regression)', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  // The exact production config of the stalled session: provider entry with
+  // contextWindow but NO maxOutputTokens, and no catalog entry for the id.
+  const limits = resolveCoworkModelLimits({
+    model: { defaultModel: 'deepseek-v4.1-flash-expires-on-0910', availableModels: [] },
+    providers: {
+      deepseek: {
+        enabled: true,
+        models: [
+          { id: 'deepseek-v4.1-flash-expires-on-0910', supportsImage: false, contextWindow: 1_000_000 },
+        ],
+      },
+    },
+  });
+
+  assert.equal(limits.contextWindow, 1_000_000);
+  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.supportsVision, false);
+  assert.equal(limits.source, 'provider-model');
+});
+
+test('uncatalogued v4 family id without any provider metadata resolves family-model limits', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek-v4.2-ultra');
+  assert.equal(limits.contextWindow, 1_000_000);
+  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.supportsVision, false);
+  assert.equal(limits.source, 'family-model');
+});
+
+test('gateway-prefixed v4.1 ids match on the last path segment', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek/deepseek-v4.1-flash');
+  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.source, 'family-model');
+});
+
+test('family fallback marks vision SKUs and never overrides explicit provider values', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const vision = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek-v4.1-flash-vision');
+  assert.equal(vision.supportsVision, true);
+  assert.equal(vision.maxOutputTokens, 32_768);
+
+  const explicit = resolveCoworkModelLimits({
+    model: { defaultModel: 'deepseek-v4.1-pro', availableModels: [] },
+    providers: {
+      deepseek: {
+        enabled: true,
+        models: [{ id: 'deepseek-v4.1-pro', maxOutputTokens: 16_000 }],
+      },
+    },
+  });
+  assert.equal(explicit.maxOutputTokens, 16_000);
+  assert.equal(explicit.source, 'provider-model');
+});
+
+test('non-deepseek unknown models keep the conservative 8192 fallback', async () => {
+  const { resolveCoworkModelLimits, DEFAULT_COWORK_MAX_OUTPUT_TOKENS } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'some-gw/deepseek-chat');
+  assert.equal(limits.maxOutputTokens, DEFAULT_COWORK_MAX_OUTPUT_TOKENS);
+  assert.equal(limits.source, 'fallback');
+});

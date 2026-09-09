@@ -16,7 +16,7 @@ export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
 export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
 
-export type CoworkModelLimitSource = 'provider-model' | 'available-model' | 'known-model' | 'fallback';
+export type CoworkModelLimitSource = 'provider-model' | 'available-model' | 'known-model' | 'family-model' | 'fallback';
 
 export interface CoworkModelLimits {
   modelId: string;
@@ -132,6 +132,30 @@ function normalizeModelId(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+/**
+ * DeepSeek V4 family fallback for ids no exact catalog entry tracks. The
+ * vendor ships ephemeral/regional SKUs that append suffixes to the family
+ * name (deepseek-v4.1-flash-expires-on-0910) — an exact-match catalog can
+ * never keep up, and the uncatalogued id fell to
+ * DEFAULT_COWORK_MAX_OUTPUT_TOKENS (8192). With reasoning effort 'max' the
+ * thinking tokens alone consumed that ceiling and the turn died as a
+ * hollow-completed reasoning-only truncation (the 2026-09-09 cw-86812c4f
+ * stall). The whole V4 family shares one API contract (1M context, the
+ * 32K-declared output ceiling), so any id whose last path segment (gateways
+ * prefix vendor ids: 'deepseek/deepseek-v4.1-flash') starts with
+ * 'deepseek-v4' inherits the family limits. Vision stays fail-safe false
+ * unless the SKU name says 'vision'.
+ */
+function deepseekV4FamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>> | undefined {
+  const segment = (modelId.split('/').pop() ?? modelId).toLowerCase();
+  if (!segment.startsWith('deepseek-v4')) return undefined;
+  return {
+    contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+    maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
+    supportsVision: segment.includes('vision'),
+  };
+}
+
 function toPositiveInteger(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined;
@@ -217,7 +241,7 @@ function buildLimits(
   source: CoworkModelLimitSource,
   explicit?: Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>>,
 ): CoworkModelLimits {
-  const known = KNOWN_MODEL_LIMITS[modelId];
+  const known = KNOWN_MODEL_LIMITS[modelId] ?? deepseekV4FamilyLimits(modelId);
   return {
     modelId,
     contextWindow: explicit?.contextWindow ?? known?.contextWindow ?? DEFAULT_COWORK_CONTEXT_WINDOW,
@@ -244,7 +268,9 @@ export function modelSupportsVision(modelId: string | null | undefined): boolean
   if (!normalized) {
     return false;
   }
-  return KNOWN_MODEL_LIMITS[normalized]?.supportsVision ?? false;
+  return KNOWN_MODEL_LIMITS[normalized]?.supportsVision
+    ?? deepseekV4FamilyLimits(normalized)?.supportsVision
+    ?? false;
 }
 
 export function resolveCoworkModelLimits(
@@ -277,6 +303,10 @@ export function resolveCoworkModelLimits(
 
   if (KNOWN_MODEL_LIMITS[modelId]) {
     return buildLimits(modelId, 'known-model');
+  }
+
+  if (deepseekV4FamilyLimits(modelId)) {
+    return buildLimits(modelId, 'family-model');
   }
 
   return buildLimits(modelId, 'fallback');

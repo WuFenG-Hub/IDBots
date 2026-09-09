@@ -39,7 +39,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT } from './coworkAssistantReply';
+import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -7959,6 +7959,26 @@ export class CoworkRunner extends EventEmitter {
         outcome = await runGuardedTurn(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT);
       }
 
+      // Output-ceiling truncation (turn/end reason `max-tokens`): the turn
+      // was cut by maxTokens, never deliberately finished. DeepSeek reasoning
+      // shares the output budget, so an effort-max step can burn the whole
+      // ceiling on thinking alone — including turns whose earlier steps made
+      // tool calls (cw-86812c4f: six tool steps, then a reasoning-only
+      // truncation that settled as a hollow `completed` with nothing shown to
+      // the user; the emptyTerminal flag above deliberately ignores such
+      // turns because they did produce tool work). Continue once from the
+      // preserved history; a second truncation falls through to the
+      // truncation-note + idle settlement below instead of looping.
+      if (outcome.kind === 'max-tokens' && !activeSession.abortController.signal.aborted) {
+        coworkLog(
+          'WARN',
+          'runDshSessionLocal',
+          'Turn cut by the output token ceiling (max-tokens) — auto-continuing once',
+          { sessionId }
+        );
+        outcome = await runGuardedTurn(TRUNCATED_TURN_CONTINUE_PROMPT);
+      }
+
       // Transient environmental failure (TRANSPORT/TIMEOUT/RATE_LIMIT/SERVER/
       // EMPTY_RESPONSE): the runtime's step-level retry ladder has already
       // stretched to ~3 minutes; if the turn STILL died, the machine sat
@@ -8087,6 +8107,14 @@ export class CoworkRunner extends EventEmitter {
       // bridge treats an empty reply as a non-answer).
       if (outcome.emptyTerminal) {
         this.reportEmptyTerminalTurn(sessionId);
+        finish('idle');
+      } else if (outcome.kind === 'max-tokens') {
+        // Truncated past the auto-continue budget: the reply (or the
+        // reasoning that should have produced it) was cut by the output
+        // ceiling twice in a row. Never settle that as a silent `completed` —
+        // tell the user the turn was truncated and leave the session `idle`
+        // so re-sending / "继续" picks the preserved history back up.
+        this.reportReplyTruncatedTurn(sessionId);
         finish('idle');
       } else {
         finish('completed');
@@ -11812,6 +11840,17 @@ export class CoworkRunner extends EventEmitter {
    */
   private reportEmptyTerminalTurn(sessionId: string): void {
     this.addSystemMessage(sessionId, '', { emptyTerminalTurn: true });
+  }
+
+  /**
+   * Surface a truncation note when a turn ended on the output-token ceiling
+   * even after the auto-continue budget (turn/end reason `max-tokens` twice
+   * in a row). Same metadata/i18n pattern as reportEmptyTerminalTurn: empty
+   * content + a flag the renderer renders via the `coworkReplyTruncatedTurn`
+   * key, so the note follows the UI language.
+   */
+  private reportReplyTruncatedTurn(sessionId: string): void {
+    this.addSystemMessage(sessionId, '', { replyTruncatedTurn: true });
   }
 
   private findAttachmentsOutsideCwd(prompt: string, cwd: string): string[] {

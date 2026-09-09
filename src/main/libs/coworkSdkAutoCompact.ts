@@ -37,7 +37,7 @@ function isClaudeModelId(modelId: string): boolean {
 /**
  * True when the SDK's built-in auto-compact can be safely enabled for this
  * model: a non-Claude model id with limits we trust (provider/available/
- * known-model, not the generic fallback) and a context window large enough
+ * known-model/family-model, not the generic fallback) and a context window large enough
  * for the CLI's 100k minimum auto-compact window.
  */
 export function shouldEnableSdkAutoCompact(
