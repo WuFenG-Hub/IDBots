@@ -6,6 +6,7 @@
 
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import { normalizeRawGlobalMetaId } from './shared/globalMetaId';
+import { normalizeGroupTaskMode, type GroupTaskMode } from './libs/groupTaskMode';
 import {
   normalizeStaffingPlan,
   type GroupTaskStaffingPlan,
@@ -174,6 +175,13 @@ export interface GroupTask {
    * dispatch replies; resume requires explicit owner confirmation.
    */
   dispatchPausedAt: number | null;
+  /**
+   * R1 (OpenTeam chat scenario): 'task' = dispatch-deliver-accept pipeline;
+   * 'chat' = free-form conversation (monitoring exempt, deliverable
+   * discipline off). Immutable for the life of the group; legacy rows read
+   * as 'task'.
+   */
+  mode: GroupTaskMode;
 }
 
 export interface GroupTaskMember {
@@ -445,6 +453,12 @@ export interface CreateGroupTaskInput {
   createPinId?: string | null;
   /** R2: originating CoWork session (relay target on close). */
   sourceSessionId?: string | null;
+  /**
+   * R1 (OpenTeam chat scenario): 'task' (default) or 'chat'. Chat groups are
+   * born 'executing' (a conversation has no planning phase) and are exempt
+   * from task monitoring on every path that reads task.mode.
+   */
+  mode?: GroupTaskMode;
 }
 
 export interface AddGroupTaskMemberInput {
@@ -538,6 +552,7 @@ interface GroupTaskRow {
   archived_at: number | null;
   source_session_id: string | null;
   dispatch_paused_at: number | null;
+  mode: string | null;
 }
 
 interface GroupTaskMemberRow {
@@ -718,6 +733,18 @@ function rowToGroupTaskSupervisorSignal(row: GroupTaskSupervisorSignalRow): Grou
 }
 
 /** Improvement #4 (v1.3): one recorded chair plan-change resolution. */
+export interface GroupTaskPosition {
+  id: number;
+  taskId: number;
+  msgPinId: string | null;
+  authorGlobalmetaid: string | null;
+  /** The recorded statement (objection / boundary / agreed conclusion). */
+  statement: string;
+  /** 1-based line number in the source message. */
+  lineNo: number;
+  createdAt: string | null;
+}
+
 export interface GroupTaskPlanChange {
   id: number;
   taskId: number;
@@ -726,6 +753,28 @@ export interface GroupTaskPlanChange {
   /** One line: original plan -> blocker -> fallback, as the chair posted it. */
   summary: string;
   createdAt: string | null;
+}
+
+interface GroupTaskPositionRow {
+  id: number;
+  task_id: number;
+  msg_pin_id: string | null;
+  author_globalmetaid: string | null;
+  statement: string;
+  line_no: number;
+  created_at: string | null;
+}
+
+function rowToGroupTaskPosition(row: GroupTaskPositionRow): GroupTaskPosition {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    msgPinId: row.msg_pin_id ?? null,
+    authorGlobalmetaid: row.author_globalmetaid ?? null,
+    statement: row.statement,
+    lineNo: Number(row.line_no) || 1,
+    createdAt: row.created_at ?? null,
+  };
 }
 
 interface GroupTaskPlanChangeRow {
@@ -974,6 +1023,7 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     archivedAt: row.archived_at ?? null,
     sourceSessionId: row.source_session_id ?? null,
     dispatchPausedAt: row.dispatch_paused_at ?? null,
+    mode: normalizeGroupTaskMode(row.mode),
   };
 }
 
@@ -1102,20 +1152,26 @@ export class GroupTaskStore {
   // --- group_tasks ---
 
   createTask(input: CreateGroupTaskInput): GroupTask {
+    const mode = normalizeGroupTaskMode(input.mode);
+    // R1: a chat group is born 'executing' — a conversation has no planning
+    // phase and no kickoff ceremony; lifecycle tags stay optional.
+    const initialStatus = mode === 'chat' ? 'executing' : 'planning';
     this.db.run(
       `INSERT INTO group_tasks (
         group_id, title, goal, acceptance_criteria, status, chair_metabot_id, created_by,
-        last_processed_msg_id, create_pin_id, source_session_id
-      ) VALUES (?, ?, ?, ?, 'planning', ?, ?, 0, ?, ?)`,
+        last_processed_msg_id, create_pin_id, source_session_id, mode
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       [
         input.groupId,
         input.title,
         input.goal,
         input.acceptanceCriteria ?? null,
+        initialStatus,
         input.chairMetabotId,
         input.createdBy,
         input.createPinId ?? null,
         input.sourceSessionId?.trim() || null,
+        mode,
       ],
     );
     const id = this.lastInsertId();
@@ -2273,6 +2329,47 @@ export class GroupTaskStore {
    * Improvement #4 (v1.3): record one chair plan-change resolution (from a
    * [PLAN_CHANGE: ...] tag). Deduped by the caller via hasPlanChange.
    */
+  /**
+   * R9: record one discussion artifact ([POSITION: …] line). Deduped by
+   * (task, msg pin, line no) — reprocessing a message inserts nothing.
+   */
+  addPosition(input: {
+    taskId: number;
+    msgPinId: string | null;
+    authorGlobalmetaid?: string | null;
+    statement: string;
+    lineNo?: number;
+  }): GroupTaskPosition | null {
+    const statement = input.statement.trim();
+    if (!statement) return null;
+    const msgPinId = input.msgPinId?.trim() || null;
+    // The unique index backs the dedupe: a message without a pin cannot be
+    // deduped, so it is skipped rather than duplicated on every tick.
+    if (!msgPinId) return null;
+    const lineNo = Math.max(1, Math.trunc(input.lineNo ?? 1));
+    this.db.run(
+      `INSERT OR IGNORE INTO group_task_positions (
+        task_id, msg_pin_id, author_globalmetaid, statement, line_no
+      ) VALUES (?, ?, ?, ?, ?)`,
+      [input.taskId, msgPinId, input.authorGlobalmetaid ?? null, statement, lineNo],
+    );
+    this.saveDb();
+    const row = this.getOne<GroupTaskPositionRow>(
+      'SELECT * FROM group_task_positions WHERE task_id = ? AND msg_pin_id = ? AND line_no = ?',
+      [input.taskId, msgPinId, lineNo],
+    );
+    return row ? rowToGroupTaskPosition(row) : null;
+  }
+
+  /** R9: every recorded discussion artifact for one task (oldest first). */
+  listPositions(taskId: number): GroupTaskPosition[] {
+    const rows = this.getAll<GroupTaskPositionRow>(
+      'SELECT * FROM group_task_positions WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskPosition);
+  }
+
   addPlanChange(input: {
     taskId: number;
     msgPinId?: string | null;

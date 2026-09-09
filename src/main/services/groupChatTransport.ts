@@ -17,6 +17,7 @@ import type { UserIdentity } from '../types/userIdentity';
 import { createPin, createPinForIdentity } from './metaidCore';
 import { encryptGroupMessageECB } from './metaWebCrypto';
 import { getRate as getGlobalFeeRate } from './feeRateStore';
+import { recordOutgoingGroupSend } from './groupSendLedger';
 
 export interface CreateGroupChatOptions {
   groupName: string;
@@ -263,6 +264,7 @@ export async function sendGroupChatMessageAsIdentity(
     },
     options: { feeRate: getGlobalFeeRate('mvc') },
   });
+  recordOutgoingGroupSend({ metabotId: -1, groupId, pinId: result.pinId, origin: 'transport:identity' });
   return { pinId: result.pinId };
 }
 
@@ -292,6 +294,9 @@ export async function sendGroupChatMessage(
     contentType: 'application/json',
     payload: JSON.stringify(body),
   }, { feeRate: getGlobalFeeRate('mvc'), origin: 'internal:group-chat' });
+  // R4 single-send ledger: every bot-signed group send is recorded the moment
+  // the pin lands so the guest daemon can prove "already sent this turn".
+  recordOutgoingGroupSend({ metabotId, groupId, pinId: result.pinId, origin: 'transport' });
   return { pinId: result.pinId };
 }
 

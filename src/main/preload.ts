@@ -836,7 +836,7 @@ contextBridge.exposeInMainWorld('electron', {
     },
   },
   groupTask: {
-    create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) =>
+    create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[]; mode?: 'task' | 'chat' }) =>
       ipcRenderer.invoke('groupTask:create', input),
     list: (filter?: { status?: string }) => ipcRenderer.invoke('groupTask:list', filter),
     get: (taskId: number) => ipcRenderer.invoke('groupTask:get', { taskId }),

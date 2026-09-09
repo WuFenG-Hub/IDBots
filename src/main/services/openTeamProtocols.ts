@@ -6,7 +6,7 @@
  *   [OPENTEAM_INVITE] {JSON}
  *     { v:1, inviteId, groupId, taskTitle, goalSummary, requiredSkills[],
  *       inviterGlobalMetaId, inviterName, chairGlobalMetaId, targetGlobalMetaId,
- *       expiresAt }
+ *       expiresAt, mode? }   // mode: 'task' (default) | 'chat' (R1)
  *   [OPENTEAM_ACCEPT:inviteId] {JSON}   // { joinedPinId }
  *   [OPENTEAM_DECLINE:inviteId] reason  // plain-text reason
  *   [OPENTEAM_KICK] {JSON}              // { v:1, groupId, taskTitle, reason }
@@ -46,6 +46,12 @@ export interface OpenTeamInvitePayload {
   targetGlobalMetaId: string;
   /** Unix seconds after which the invite is no longer acceptable. */
   expiresAt: number;
+  /**
+   * R1 (OpenTeam chat scenario): the group's mode as declared by the chair at
+   * creation — 'task' (default) or 'chat'. Optional and backward compatible:
+   * envelopes from older inviters omit it and read as 'task'.
+   */
+  mode?: 'task' | 'chat';
 }
 
 export interface OpenTeamAcceptEnvelope {
@@ -175,6 +181,9 @@ function parseOpenTeamInvitePayload(jsonText: string): OpenTeamInvitePayload | n
     chairGlobalMetaId: asTrimmedString(record.chairGlobalMetaId),
     targetGlobalMetaId,
     expiresAt,
+    // R1: only carried when the envelope states it — a parsed legacy envelope
+    // stays byte-identical to pre-mode parsers (deep-equal contract).
+    ...(asTrimmedString(record.mode) === 'chat' ? { mode: 'chat' as const } : {}),
   };
 }
 

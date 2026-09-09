@@ -63,6 +63,13 @@ const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_COOLDOWN_MS = 20_000;
+/**
+ * R5 (OpenTeam chat scenario): chat groups run a shorter reply cooldown —
+ * task cadence (20s) reads as lag in a live conversation, while the loop
+ * insurance that cooldown provides still holds (self-message skip + prompt
+ * etiquette + [NO_REPLY]).
+ */
+const DEFAULT_CHAT_COOLDOWN_MS = 8_000;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 /** Bounded retry: consecutive failures on one message before the cursor gives up and advances past it. */
 const MAX_CONSECUTIVE_MESSAGE_FAILURES = 3;
@@ -108,13 +115,41 @@ export interface OpenTeamGuestDaemonMessage {
 }
 
 export type OpenTeamGuestDecision =
-  | { respond: true; reason: 'mentioned' }
-  | { respond: false; reason: 'self_message' | 'empty_content' | 'not_mentioned' | 'cooldown' };
+  | { respond: true; reason: 'mentioned' | 'chat_direct' }
+  | {
+    respond: false;
+    reason: 'self_message' | 'empty_content' | 'not_mentioned' | 'protocol_line' | 'cooldown';
+  };
 
 /**
- * Guest gating: answer only messages that @-mention this bot. Never the bot's
- * own messages (sender globalMetaId match), never empty content, and not while
- * the per-membership reply cooldown is still running (loop insurance).
+ * R2 (OpenTeam chat scenario): protocol-only content filter. A message whose
+ * every non-empty line starts with a known ASCII protocol tag ([STATUS:...],
+ * [DELIVERABLE], [WORKING], host notices, ...) is ledger/protocol traffic,
+ * never a conversational turn — in chat mode it must not wake the guest. The
+ * check is tag-structural only (no natural-language intent matching): one
+ * prose line anywhere makes the message conversational again.
+ */
+const OPENTEAM_PROTOCOL_TAG_LINE_RE =
+  /^\[(?:STATUS|NO_REPLY|DELIVERABLE|WORKING|STANDBY|PLAN_CHANGE|CHECKPOINT(?:_RESOLVED)?|FREEZE|POSITION|GROUP_TASK_NOTICE|OPENTEAM_[A-Z_]+)[^\]]*\]/i;
+
+export function isOpenTeamProtocolOnlyContent(content: string): boolean {
+  const lines = String(content ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) return false;
+  return lines.every((line) => OPENTEAM_PROTOCOL_TAG_LINE_RE.test(line));
+}
+
+/**
+ * Guest gating. Task mode (default, unchanged): answer only messages that
+ * @-mention this bot. Chat mode (R2): also answer direct conversational
+ * messages from the inviter/chair without an @ — the structural-silence fix
+ * for the 2026-09-08 incident (a no-@ welcome went unanswered for 10.5
+ * minutes). In chat mode, protocol-only lines never wake the guest and other
+ * members still need an @ (multi-guest storm insurance — the model stays the
+ * intent judge via the [NO_REPLY] escape). Never the bot's own messages,
+ * never empty content, and not while the per-membership cooldown runs.
  */
 export function decideOpenTeamGuestResponse(input: {
   message: OpenTeamGuestDaemonMessage;
@@ -122,6 +157,10 @@ export function decideOpenTeamGuestResponse(input: {
   lastReplyAt: number;
   now: number;
   cooldownMs: number;
+  /** R2: group mode; absent = task (legacy memberships). */
+  mode?: 'task' | 'chat';
+  /** R2: the inviter/chair globalMetaId recorded on the membership. */
+  inviterGlobalMetaId?: string | null;
 }): OpenTeamGuestDecision {
   const { message, bot } = input;
   const content = (message.content ?? '').trim();
@@ -134,11 +173,32 @@ export function decideOpenTeamGuestResponse(input: {
   ) {
     return { respond: false, reason: 'self_message' };
   }
-  if (!isMentioned(message, bot)) return { respond: false, reason: 'not_mentioned' };
+  const mentioned = isMentioned(message, bot);
+  if (input.mode !== 'chat') {
+    // Task mode: byte-identical legacy gate — mentions only.
+    if (!mentioned) return { respond: false, reason: 'not_mentioned' };
+    if (input.now - input.lastReplyAt < input.cooldownMs) {
+      return { respond: false, reason: 'cooldown' };
+    }
+    return { respond: true, reason: 'mentioned' };
+  }
+  // Chat mode (R2): protocol-only lines (bare [STATUS:...]/[DELIVERABLE]/
+  // notice lines) are lifecycle traffic, never conversation — skip them even
+  // when they carry an @. Everything else from the INVITER/chair is direct
+  // conversation without an @; other members still need an @ (storm
+  // insurance — the model stays the intent judge via [NO_REPLY]).
+  if (isOpenTeamProtocolOnlyContent(content)) {
+    return { respond: false, reason: 'protocol_line' };
+  }
+  const inviterKey = (input.inviterGlobalMetaId ?? '').trim().toLowerCase();
+  const senderKey = senderGlobalMetaId.toLowerCase();
+  if (!mentioned && !(inviterKey && senderKey === inviterKey)) {
+    return { respond: false, reason: 'not_mentioned' };
+  }
   if (input.now - input.lastReplyAt < input.cooldownMs) {
     return { respond: false, reason: 'cooldown' };
   }
-  return { respond: true, reason: 'mentioned' };
+  return { respond: true, reason: mentioned ? 'mentioned' : 'chat_direct' };
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +280,12 @@ export interface OpenTeamGuestDaemonDeps {
   performChat: OpenTeamGuestPerformChatFn;
   sendGroupMessage: OpenTeamGuestSendGroupMessageFn;
   /**
+   * R4 single-send guarantee: true when this (bot, group) already sent a group
+   * message after sinceMs (the outgoing-send ledger wired in main.ts). Unwired
+   * = the suppression is disabled (plain behavior).
+   */
+  hasSentToGroupSince?: (metabotId: number, groupId: string, sinceMs: number) => boolean;
+  /**
    * M3 skill machinery — all three must be wired for chat-skill turns; unwired
    * (or failing) the daemon stays on the plain LLM completion path.
    */
@@ -253,6 +319,8 @@ export interface OpenTeamGuestDaemonDeps {
   now?: () => number;
   intervalMs?: number;
   cooldownMs?: number;
+  /** R5: chat-mode reply cooldown (default 8s; task mode keeps 20s). */
+  chatCooldownMs?: number;
   contextMessageCount?: number;
   /**
    * P1-3: when wired, guest turns are logged into the eager session created at
@@ -317,6 +385,7 @@ const parseSqliteUtcMs = (value: string | null): number => {
 export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): OpenTeamGuestDaemonLoop {
   const intervalMs = Math.max(1_000, Math.trunc(deps.intervalMs ?? DEFAULT_INTERVAL_MS));
   const cooldownMs = Math.max(0, Math.trunc(deps.cooldownMs ?? DEFAULT_COOLDOWN_MS));
+  const chatCooldownMs = Math.max(0, Math.trunc(deps.chatCooldownMs ?? DEFAULT_CHAT_COOLDOWN_MS));
   const contextMessageCount = Math.max(1, Math.trunc(deps.contextMessageCount ?? DEFAULT_CONTEXT_MESSAGE_COUNT));
   const membershipCheckIntervalMs = Math.max(
     1_000,
@@ -635,6 +704,8 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
         groupId: membership.groupId,
         taskTitle: membership.taskTitle,
         inviterGlobalmetaid: membership.inviterGlobalmetaid,
+        // R3: chat mode swaps the task playbook for the chat playbook.
+        groupMode: membership.groupMode === 'chat' ? 'chat' : 'task',
         ...whyContext,
       },
     });
@@ -667,6 +738,30 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
 
     let reply = '';
     let skillTurn: { cwd: string; startedAt: number; completedAt: number } | null = null;
+    // R4: anchored BEFORE the turn — the mid-turn send check asks "did this
+    // (bot, group) send anything after this moment".
+    const skillTurnStartedAt = now();
+    const skillTurnAttempted = canRunSkillTurn;
+    /** P1-3 mirror-session logging (shared by the send and suppression paths). */
+    const logTurnToMirrorSession = (user: string, finalReply: string): void => {
+      if (!deps.getCoworkStore) return;
+      try {
+        const coworkStore = deps.getCoworkStore();
+        const { session } = ensureOpenTeamGuestSession(
+          coworkStore,
+          bot.id,
+          bot.name?.trim() || `bot-${bot.id}`,
+          { groupId: membership.groupId, taskTitle: membership.taskTitle },
+        );
+        coworkStore.addMessage(session.id, { type: 'user', content: user });
+        coworkStore.addMessage(session.id, { type: 'assistant', content: finalReply });
+      } catch (error) {
+        emitLog(
+          `[OpenTeamGuestDaemon] Group ${membership.groupId}: session logging failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
     if (canRunSkillTurn) {
       const coworkStore = deps.getCoworkStore!();
       const session = ensureGuestSession(coworkStore, membership, bot);
@@ -679,7 +774,6 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
         'If the skill produced a file, put its absolute local path on its own line in your reply — the host uploads it on-chain and appends the [DELIVERABLE] metafile line for you. NEVER write or invent a metafile:// URI yourself.',
       ].join('\n');
       coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
-      const startedAt = now();
       try {
         const skillTurnResult = await deps.runSkillTurn!({
           sessionId: session.id,
@@ -692,7 +786,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
         if (reply) {
           skillTurn = {
             cwd: (skillTurnResult.cwd ?? '').trim() || session.cwd,
-            startedAt,
+            startedAt: skillTurnStartedAt,
             completedAt: now(),
           };
         }
@@ -754,13 +848,40 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
       ).trim();
     }
     if (!reply) return;
-    // [NO_REPLY] escape hatch: the model opted to stay silent. Checked BEFORE
-    // any upload so a suppressed message never spends upload fees.
+    // [NO_REPLY] escape hatch: the model opted to stay silent — either nothing
+    // to say OR it already said it mid-turn (the one-voice rule). Checked
+    // BEFORE any upload so a suppressed message never spends upload fees.
     if (NO_REPLY_PATTERN.test(reply)) {
       emitLog(
         `[OpenTeamGuestDaemon] Group ${membership.groupId}: bot ${bot.id} answered [NO_REPLY]; send suppressed`,
       );
       return;
+    }
+
+    // R4 single-send guarantee (P2 fix): a skill turn may have already spoken
+    // to this group via the group_chat tool (send_group_message). If ANY send
+    // for this (bot, group) landed after the turn started, the final text is a
+    // duplicate report — it must stay OFF-CHAIN (session log only, below).
+    // Checked before file uploads so a suppressed send never spends fees.
+    if (skillTurnAttempted && deps.hasSentToGroupSince) {
+      try {
+        if (deps.hasSentToGroupSince(bot.id, membership.groupId, skillTurnStartedAt)) {
+          emitLog(
+            `[OpenTeamGuestDaemon] Group ${membership.groupId}: bot ${bot.id} already sent to this group ` +
+            `mid-turn; final-text auto-send suppressed (single-send guarantee) — the text stays in the ` +
+            'session log only',
+          );
+          logTurnToMirrorSession(userMessage, reply);
+          return;
+        }
+      } catch (error) {
+        // The guarantee is best-effort observable: a ledger read failure must
+        // not silence a legitimate reply.
+        emitLog(
+          `[OpenTeamGuestDaemon] Group ${membership.groupId}: mid-turn send check failed ` +
+          `(sending anyway): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     if (skillTurn && (deps.uploadDeliverableFile || deps.publishTextDeliverable)) {
@@ -779,24 +900,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     });
     // P1-3: log the turn into the guest session (the one eagerly created at
     // invite-accept time) so the invitee's host has context continuity.
-    if (deps.getCoworkStore) {
-      try {
-        const coworkStore = deps.getCoworkStore();
-        const { session } = ensureOpenTeamGuestSession(
-          coworkStore,
-          bot.id,
-          bot.name?.trim() || `bot-${bot.id}`,
-          { groupId: membership.groupId, taskTitle: membership.taskTitle },
-        );
-        coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
-        coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
-      } catch (error) {
-        emitLog(
-          `[OpenTeamGuestDaemon] Group ${membership.groupId}: session logging failed: ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
+    logTurnToMirrorSession(userMessage, reply);
   };
 
   /**
@@ -919,7 +1023,11 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
             bot,
             lastReplyAt: lastReplyAtByMembership.get(membership.id) ?? 0,
             now: now(),
-            cooldownMs,
+            // R5: chat groups use the shorter cadence.
+            cooldownMs: membership.groupMode === 'chat' ? chatCooldownMs : cooldownMs,
+            // R2: chat-mode gating (direct chair conversation without an @).
+            mode: membership.groupMode === 'chat' ? 'chat' : 'task',
+            inviterGlobalMetaId: chairGlobalMetaId,
           });
           if (!decision.respond && decision.reason === 'cooldown') {
             // Cooldown is transient: keep the cursor BEFORE this message so the

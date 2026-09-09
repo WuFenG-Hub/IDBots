@@ -30,6 +30,8 @@ import type {
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
+import { isOpenTeamProtocolOnlyContent } from './openTeamGuestDaemon';
+import { parsePositionLines } from '../libs/groupTaskPositions';
 import {
   GROUP_LOG_PROTOCOL_MAX_CHARS,
   isCeremonyAckLine,
@@ -216,6 +218,17 @@ const MD_EMPHASIS_RESIDUE = /^[\s*_]*$/;
  *
  * Pure + exported for unit tests.
  */
+/**
+ * R8: the chair's discussion declaration — a BARE `[DISCUSSION]` token on its
+ * own line (same shape discipline as [STATUS:*] tags: never bolded, never
+ * backticked, never mid-sentence). Prose mentioning the tag does not count.
+ */
+export function isGroupTaskDiscussionDeclaration(content: string): boolean {
+  return String(content ?? '')
+    .split('\n')
+    .some((line) => line.trim() === '[DISCUSSION]');
+}
+
 export function adjudicateStatusDirectives(
   content: string,
   currentStatus: string,
@@ -936,6 +949,15 @@ const DEFAULT_REMOTE_PRESENCE_THROTTLE_MS = 60_000;
 const DEFAULT_NO_PROGRESS_STALL_MS = 60 * 60_000;
 /** G-01: kv stamp for the no-progress anomaly (set on report, cleared on progress). */
 const NO_PROGRESS_STALL_STAMP_PREFIX = 'group_task_no_progress_stall:';
+/**
+ * R8 (OpenTeam chat scenario): kv stamp (epoch ms) while the chair has
+ * declared the task in an open DISCUSSION (bare `[DISCUSSION]` tag on its own
+ * line). While fresh, no-progress monitoring is suspended — a discussion may
+ * legitimately sit silent; it ends with the chair's next applied [STATUS:*]
+ * instruction or expires after 24h.
+ */
+const GROUP_TASK_DISCUSSION_KV_PREFIX = 'group_task_discussion_active:';
+const GROUP_TASK_DISCUSSION_MAX_MS = 24 * 60 * 60_000;
 /** Task #51: kv stamp for the smaller no-progress chair nudge (one per idle episode). */
 const NO_PROGRESS_NUDGE_STAMP_PREFIX = 'group_task_no_progress_nudge:';
 /**
@@ -1030,6 +1052,8 @@ export interface GroupTaskDaemonMessage {
 export interface GroupTaskDaemonTask {
   id: number;
   status: string;
+  /** R1/R6 (OpenTeam chat scenario): 'chat' relaxes gating and exempts monitoring. */
+  mode?: 'task' | 'chat';
   /**
    * HITL: true while the task has an open human checkpoint. Responder gating
    * treats this exactly like the review phase (workers silent, chair talks to
@@ -1167,7 +1191,12 @@ export function decideGroupTaskResponders(
     if (member.role === 'worker') {
       // Human-gate phases (review / open HITL checkpoint): workers never
       // respond, even when @-mentioned.
-      if (!isHumanGatePhase && mentioned) {
+      // R6 (OpenTeam chat scenario): in a chat group a worker also wakes on
+      // any conversational (non-protocol) member/owner message — the local
+      // mirror of the guest daemon's relaxed chat gate. Protocol-only lines
+      // ([STATUS:]/[DELIVERABLE]/notice tag-led) never wake anyone.
+      const chatConversational = task.mode === 'chat' && !isOpenTeamProtocolOnlyContent(content);
+      if (!isHumanGatePhase && (mentioned || chatConversational)) {
         decisions.push({ metabotId: member.metabotId, reason: 'worker_mentioned' });
       }
       continue;
@@ -3515,6 +3544,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         goal: task.goal,
         acceptanceCriteria: task.acceptanceCriteria,
         groupId: task.groupId ?? null,
+        // R6: chat groups swap the task playbook for the chat playbook.
+        mode: task.mode === 'chat' ? 'chat' : 'task',
       },
       members: promptMembers,
       botRole,
@@ -4314,6 +4345,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const parseContent = stripFencedCodeBlocks(content);
     if (message.senderSuspect) {
       // no deliverable collection for non-member speakers
+    } else if (task.mode === 'chat') {
+      // R6/R9 (OpenTeam chat scenario): chat groups run zero ledger
+      // discipline — a stray [DELIVERABLE] line in a conversation is noise,
+      // never a task artifact.
     } else if (hasDeliverableTagLine(parseContent) && !isChairMessage) {
       // Round-4: per-candidate ingestion. Every [DELIVERABLE] tag occurrence
       // (its own line or inline) produces one candidate; valid candidates each
@@ -4628,6 +4663,36 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
+    // R9 (OpenTeam chat scenario): discussion artifacts — [POSITION: …]
+    // lines from ANY member (objections, boundary statements, agreed
+    // conclusions) are recorded on the task ledger, each citing its source
+    // pin. TASK-mode groups only: a chat group's ledger stays empty by design
+    // (zero-noise contract). Dedupe by (task, msg pin, line); failures log.
+    if (!message.senderSuspect && message.pinId && task.mode !== 'chat') {
+      try {
+        const positions = parsePositionLines(stripFencedCodeBlocks(content));
+        if (positions.length > 0) {
+          for (const position of positions) {
+            store.addPosition({
+              taskId: task.id,
+              msgPinId: message.pinId,
+              authorGlobalmetaid: message.senderGlobalMetaId,
+              statement: position.text,
+              lineNo: position.line,
+            });
+          }
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: recorded ${positions.length} [POSITION] discussion artifact(s) from ${message.senderName}`,
+          );
+        }
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: [POSITION] record failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     // P0-8: public integrity declarations (honest correction/report) are
     // recorded into the acceptance record. Dedupe by message pin.
     if (!message.senderSuspect && message.pinId && isIntegrityDeclaration(content)) {
@@ -4686,6 +4751,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               `${error instanceof Error ? error.message : String(error)}`,
             );
           }
+        }
+      }
+    }
+
+    // R8 (OpenTeam chat scenario): the chair's bare [DISCUSSION] declaration
+    // arms the discussion state — while fresh, no-progress monitoring suspends
+    // (a legitimately-talking task must not be nudged for silence). Ended by
+    // the chair's next applied [STATUS:*] instruction or auto-expiry.
+    if (isGroupTaskDiscussionDeclaration(content)) {
+      const discussionChair = members.find((member) => member.role === 'chair');
+      const discussionChairGmid = (discussionChair?.globalmetaid ?? '').trim();
+      const discussionSenderGmid = (message.senderGlobalMetaId ?? '').trim();
+      if (discussionChairGmid && discussionSenderGmid && discussionSenderGmid === discussionChairGmid) {
+        try {
+          deps.getStore().set(`${GROUP_TASK_DISCUSSION_KV_PREFIX}${task.id}`, now());
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: chair declared an open discussion — ` +
+            'no-progress monitoring suspended until the next status instruction (max 24h)',
+          );
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: discussion declaration record failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       }
     }
@@ -4948,6 +5037,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             }
           }
           appliedStatusDirective = true;
+          // R8: an applied lifecycle move ends the open discussion (if any).
+          try {
+            deps.getStore().delete(`${GROUP_TASK_DISCUSSION_KV_PREFIX}${task.id}`);
+          } catch {
+            // best-effort — expiry covers a failed delete
+          }
         } catch (error) {
           if (error instanceof StaleReviewReentryError) {
             emitLog(
@@ -5570,6 +5665,88 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `supervisor_signals_no_chair:${pendingIds.join('-')}`,
       );
       return;
+    }
+
+    // R7 (P4 fix, 2026-09-08 incident): close-on-response. A chair that
+    // answered through ANY group path — a Twin-direct reply, a status tag, a
+    // plain message — has responded, even though no daemon-driven supervisor
+    // turn produced a pin. Before dispatching another chair turn, look for a
+    // genuine chair message newer than each signal's creation (excluding
+    // daemon-posted pins and host notices); every signal covered by such a
+    // response closes with that pin instead of piling false "chair did not
+    // respond" cycles. Signals created AFTER the found response stay pending.
+    try {
+      const chairGmidForClosure = (chairMember.globalmetaid ?? '').trim().toLowerCase();
+      if (chairGmidForClosure && task.groupId) {
+        // 2-minute clock tolerance: chain timestamps and local created_at are
+        // different clocks (same tolerance family as the invite skew).
+        const CLOSURE_SKEW_MS = 2 * 60_000;
+        const createdAtMsById = new Map<number, number>();
+        for (const signal of pending) {
+          const ms = parseSqliteUtcMs(signal.createdAt ?? null);
+          if (Number.isFinite(ms)) createdAtMsById.set(signal.id, ms);
+        }
+        const oldestPendingMs = createdAtMsById.size > 0
+          ? Math.min(...createdAtMsById.values())
+          : Number.NaN;
+        if (Number.isFinite(oldestPendingMs)) {
+          const sinceSec = Math.floor((oldestPendingMs - CLOSURE_SKEW_MS) / 1000);
+          const excludePins = new Set(daemonChairSentPins.get(task.id) ?? []);
+          const rows = mapMessageRows(sqlite.getDatabase().exec(
+            `SELECT id, pin_id, content, chain_timestamp FROM group_chat_messages
+             WHERE group_id = ? AND sender_global_metaid = ? AND pin_id IS NOT NULL AND pin_id != ''
+               AND chain_timestamp IS NOT NULL AND chain_timestamp >= ?
+             ORDER BY id DESC
+             LIMIT 50`,
+            [task.groupId, chairGmidForClosure, sinceSec],
+          ));
+          let responsePin: string | null = null;
+          let responseAtMs = Number.NaN;
+          for (const row of rows) {
+            const pin = String(row.pin_id ?? '');
+            if (!pin || excludePins.has(pin)) continue;
+            if (hasGroupTaskNotice(row.content ?? '')) continue;
+            responsePin = pin;
+            responseAtMs = Number(row.chain_timestamp) * 1000;
+            break;
+          }
+          if (responsePin != null) {
+            const closedIds: number[] = [];
+            const stillPendingIds: number[] = [];
+            for (const signal of pending) {
+              const createdMs = createdAtMsById.get(signal.id);
+              // No readable createdAt closes defensively (older than the
+              // response by construction of the query anchor).
+              if (createdMs == null || createdMs <= responseAtMs + CLOSURE_SKEW_MS) {
+                closedIds.push(signal.id);
+              } else {
+                stillPendingIds.push(signal.id);
+              }
+            }
+            if (closedIds.length > 0) {
+              store.markSupervisorSignalsProcessed(closedIds, responsePin);
+              for (const id of closedIds) {
+                sqlite.delete(`${GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX}${id}`);
+              }
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: chair already responded in-group (pin ${responsePin.slice(0, 12)}…) — ` +
+                `closed supervisor signal(s) #${closedIds.join(', #')} without another chair turn` +
+                (stillPendingIds.length > 0 ? `; #${stillPendingIds.join(', #')} stay pending` : ''),
+              );
+            }
+            if (stillPendingIds.length === 0) return;
+            pendingIds.length = 0;
+            pendingIds.push(...stillPendingIds);
+          }
+        }
+      }
+    } catch (error) {
+      // Closure is an optimization over the standard path — a failure here
+      // falls through to the ordinary chair-answer turn.
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: supervisor close-on-response check failed ` +
+        `(falling back to the chair turn): ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
     const signalLines = pending.map((signal) => {
@@ -8311,6 +8488,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   const monitorNoProgressStall = (task: GroupTask): void => {
     const sqlite = deps.getStore();
+    // R8: a chair-declared open discussion suspends progress monitoring —
+    // silence inside a discussion is thinking, not stalling. Ends via the
+    // chair's next applied status instruction or the 24h expiry.
+    const discussionStartedMs = Number(sqlite.get<number>(`${GROUP_TASK_DISCUSSION_KV_PREFIX}${task.id}`) ?? 0) || 0;
+    if (discussionStartedMs > 0 && now() - discussionStartedMs < GROUP_TASK_DISCUSSION_MAX_MS) return;
     const stampKey = `${NO_PROGRESS_STALL_STAMP_PREFIX}${task.id}`;
     let lastMessageMs: number | null = null;
     try {
@@ -9399,11 +9581,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // OpenTeam M2: remote-teammate unreachable evaluation (throttled presence
     // probe + group-message silence window). The resulting fact block rides
     // every chair turn this tick; empty when everyone is reachable/unwired.
+    // R6 (OpenTeam chat scenario): chat groups never judge silence as
+    // unreachable — waiting for the other side to talk is a legal state.
+    const isChatModeTask = task.mode === 'chat';
     let remoteStatusBlock = '';
     try {
-      remoteStatusBlock = buildRemoteStatusBlock(
-        await evaluateRemoteTeammates(task, members, botsById, ownerGlobalMetaId),
-      );
+      remoteStatusBlock = isChatModeTask
+        ? ''
+        : buildRemoteStatusBlock(
+          await evaluateRemoteTeammates(task, members, botsById, ownerGlobalMetaId),
+        );
     } catch (error) {
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: remote teammate evaluation failed (tick continues): ` +
@@ -9489,12 +9676,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // gate left a task pinned in planning (chair plan attempts exhausted during
     // the outage) completely blind: no nudge, no stall anomaly, stall=False
     // forever in the detail view.
-    if ((task.status === 'executing' || task.status === 'planning') && !checkpointOpenAtTick && !dispatchPausedAtTick && task.groupId) {
+    if (
+      (task.status === 'executing' || task.status === 'planning')
+      && !checkpointOpenAtTick && !dispatchPausedAtTick && task.groupId
+      // R6: chat groups are conversations — silence is never "no progress".
+      && !isChatModeTask
+    ) {
       monitorNoProgressStall(task);
     }
 
     // P0-2: auto-mark silent assigned/working members unreachable (badge for chair).
-    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick) {
+    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick && !isChatModeTask) {
       monitorMemberUnreachable(task, members);
     }
 
@@ -9502,7 +9694,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // stale, mark them timeout + inject a chair re-assign hint (L2), then brief
     // the owner if still silent past the escalation window (L3). The hint block
     // rides the existing remoteStatusBlock chair-context channel.
-    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick) {
+    if (task.status === 'executing' && !checkpointOpenAtTick && !dispatchPausedAtTick && !isChatModeTask) {
       const timeoutBlock = await monitorLocalWorkerTimeout(task, members, ownerGlobalMetaId);
       if (timeoutBlock) {
         remoteStatusBlock = [remoteStatusBlock, timeoutBlock].filter(Boolean).join('\n\n');
@@ -9510,12 +9702,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
 
     // P0-3: once-per-assignment chair reminder for missing [WORKING] ACKs.
-    if (!checkpointOpenAtTick && !dispatchPausedAtTick) {
+    if (!checkpointOpenAtTick && !dispatchPausedAtTick && !isChatModeTask) {
       await monitorAcksAndReminders(task, members);
     }
     // P0-4: re-verify lagging deliverables + missed delivery deadlines.
-    await monitorDeliverableVerification(task);
-    if (!checkpointOpenAtTick && !dispatchPausedAtTick) {
+    // R6: chat groups have no assignments and no deliverables to watch.
+    if (!isChatModeTask) await monitorDeliverableVerification(task);
+    if (!checkpointOpenAtTick && !dispatchPausedAtTick && !isChatModeTask) {
       // P1-3: delivery-timeout reclaim directives ride the same chair-context
       // channel as the member-timeout hints.
       const deliveryRecoveryBlock = await monitorDeliveryDeadlines(task, members);
@@ -9557,6 +9750,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       (task.status === 'executing' || task.status === 'planning')
       && !dispatchPausedAtTick
       && !checkpointOpenAtTick
+      && !isChatModeTask
       && chairMemberId != null
     ) {
       const pendingRaw = sqlite.get<string>(`${CHAIR_RESPONSE_PENDING_PREFIX}${task.id}`);
@@ -9706,7 +9900,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           deferReply(entry); // still cooling down; keep waiting
           continue;
         }
-        if ((replyCountByKey.get(key) ?? 0) >= replyBudget) continue; // permanently spent
+        // R6: chat groups run unmetered — a 40-reply task budget would
+        // permanently silence a long conversation. Loop insurance stays via
+        // cooldown + prompt etiquette + [NO_REPLY].
+        if (task.mode !== 'chat' && (replyCountByKey.get(key) ?? 0) >= replyBudget) continue; // permanently spent
         if (isChair && entry.reason !== 'chair_mentioned' && twinChairActive(db, task.id, task.groupId, deferredMessage.pinId, chairGlobalMetaId)) {
           continue; // the Twin already spoke about this message (or in the recent window); drop the auto reply
         }
@@ -9981,7 +10178,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             });
             continue;
           }
-          if ((replyCountByKey.get(key) ?? 0) >= replyBudget) {
+          if (task.mode !== 'chat' && (replyCountByKey.get(key) ?? 0) >= replyBudget) {
             emitLog(`[GroupTaskDaemon] Task ${task.id}: bot ${decision.metabotId} reply budget exhausted; skipping`);
             continue;
           }

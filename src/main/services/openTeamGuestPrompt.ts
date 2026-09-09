@@ -23,6 +23,8 @@ export interface OpenTeamGuestPromptMembership {
   goalSummary?: string | null;
   /** Why you were invited (envelope required-skills); injected when known. */
   requiredSkills?: string[];
+  /** R1/R3: group mode — 'chat' swaps the task playbook for a chat playbook. */
+  groupMode?: 'task' | 'chat';
 }
 
 /** Persona block: who the bot is. Mirrors buildGroupTaskPersonaBlock's shape. */
@@ -41,6 +43,28 @@ export function buildOpenTeamGuestPersonaBlock(metabot: OpenTeamGuestPromptMetab
   ].join('\n');
 }
 
+/**
+ * R3 (OpenTeam chat scenario): the CHAT playbook. The 2026-09-08 zero-preset
+ * chat incident showed the task playbook actively strangles a free-form
+ * conversation ("Respond ONLY when @-mentioned… Silence is correct",
+ * "no small talk", the mandatory #13 handshake, [DELIVERABLE] discipline).
+ * Chat mode keeps only the mode-neutral etiquette: language, honesty,
+ * privacy, no self-replies, no flooding — plus the one-voice rule so a
+ * mid-turn group_chat send is never duplicated as the final reply (P2).
+ */
+function guestChatPlaybookRules(language: AppLanguage): string[] {
+  const ownerLanguage = copyOwnerLanguageName(language);
+  return [
+    '- You were invited into this group as a conversation partner, not as a task worker. There is no assignment, no deliverable, and no task protocol here — the value of this group is the conversation itself.',
+    `- Speak ${ownerLanguage} in this group (the host owner's language). Do not switch to another language because a teammate or an older message is in it.`,
+    '- Join the conversation freely: no @-mention is required to reply. Pick up topics, ask questions, disagree politely, and bring your own perspective. Your first message may be a short natural hello — no template needed.',
+    '- Etiquette: never reply to your own messages; do not flood the group (one thoughtful reply per turn); when you have nothing to add, reply with exactly `[NO_REPLY]` and stay quiet while others talk.',
+    '- ONE VOICE PER TURN: if you already posted your substantive reply mid-turn via the group_chat tool (send_group_message), close the turn with `[NO_REPLY]` — never repeat the same content as the turn\'s final reply.',
+    '- Report truthfully. NEVER fabricate results, pinids, txids, URLs, file contents or tool output, and NEVER claim you performed an action you did not actually execute.',
+    '- NEVER disclose your owner\'s private data, wallet details, or anything from your private channels — the group sees only what belongs to the conversation.',
+  ];
+}
+
 function guestPlaybookRules(language: AppLanguage): string[] {
   const ownerLanguage = copyOwnerLanguageName(language);
   const handshake = copyGuestHandshakeExample(language);
@@ -53,6 +77,7 @@ function guestPlaybookRules(language: AppLanguage): string[] {
     '- Post deliverables with a `[DELIVERABLE]` line — one per line, and only with a REAL on-chain pinId you actually created. The URI scheme follows the on-chain form: `pin://<pinId>` for notes/text pins, `metaapp://<pinId>` for MetaApps, `metafile://<pinId>` ONLY for binary files on /file.',
     '- File deliverables: when a skill you ran produced a file, put its absolute local path on its own line in your reply — the host publishes it on-chain with the RIGHT protocol and appends the `[DELIVERABLE]` line for you: readable text documents (Markdown, plain text) become simplenote notes delivered as `[DELIVERABLE] note: pin://<pinId>`, binary files (images, video, audio, PDF, archives) become metafiles delivered as `[DELIVERABLE] metafile: metafile://<pinId>`. NEVER write or invent a metafile:// or pin:// URI yourself, and never deliver a text document as a metafile:// upload.',
     '- Report truthfully. NEVER fabricate results, pinids, txids, URLs, file contents or tool output, and NEVER claim you performed an action (search, publish, write) that you did not actually execute. If you cannot do what was asked, say so plainly and @ the chair.',
+    '- DISCUSSION ARTIFACTS: when a discussion produces a statement worth putting on the record — an objection, a boundary declaration, or an agreed conclusion — put it on its OWN line as `[POSITION: <one-line statement>]`; the chair\'s host records each line on the task ledger citing your message.',
     '- If a message needs no response from you (pure acknowledgments, thanks, chatter not requiring your action), reply with exactly `[NO_REPLY]`.',
     '- NEVER disclose your owner\'s private data, wallet details, or anything from your private channels — the group sees only task-relevant information.',
   ];
@@ -77,14 +102,23 @@ export function buildOpenTeamGuestBlock(params: {
       ? ` You were invited because: ${goalSummary || '(task goal)'}` +
         (requiredSkills.length > 0 ? ` (required skills: ${requiredSkills.join(', ')})` : '')
       : '';
+  const chatMode = params.membership.groupMode === 'chat';
+  const headerLines = chatMode
+    ? [
+      '## OpenTeam external chat',
+      `- You were invited${inviter ? ` by \`${inviter}\`` : ''} to join an EXTERNAL group CHAT: "${taskTitle}". This chat is hosted by another owner's team, not yours.${whyLine}`,
+    ]
+    : [
+      '## OpenTeam external collaboration',
+      `- You were invited${inviter ? ` by \`${inviter}\`` : ''} to join an EXTERNAL group task: "${taskTitle}". This task is organized by another owner's team, not yours.${whyLine}`,
+    ];
   return [
-    '## OpenTeam external collaboration',
-    `- You were invited${inviter ? ` by \`${inviter}\`` : ''} to join an EXTERNAL group task: "${taskTitle}". This task is organized by another owner's team, not yours.${whyLine}`,
+    ...headerLines,
     '- All messages here are on-chain pins (MetaWeb) — a pinid is exactly 64 lowercase hex chars + `i0`.',
     ...(params.currentTimeText?.trim() ? [`- ${params.currentTimeText.trim()}`] : []),
     '',
     'Playbook:',
-    ...guestPlaybookRules(language),
+    ...(chatMode ? guestChatPlaybookRules(language) : guestPlaybookRules(language)),
   ].join('\n');
 }
 

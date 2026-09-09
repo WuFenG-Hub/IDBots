@@ -683,6 +683,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${groupTaskStatusBadgeClass(detail.status)}`}>
             {i18nService.t(groupTaskStatusLabelKey(detail.status))}
           </span>
+          {detail.mode === 'chat' && (
+            <span className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium bg-claude-accent/10 text-claude-accent">
+              {i18nService.t('groupTasksFormModeChat')}
+            </span>
+          )}
           {detail.groupId && <RoomIdBadge groupId={detail.groupId} />}
         </div>
         <div className="non-draggable flex items-center gap-2">

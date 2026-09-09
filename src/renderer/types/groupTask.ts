@@ -37,6 +37,12 @@ export interface GroupTask {
   archivedAt: number | null;
   /** G-04: epoch ms while a supervisor pause holds dispatch; null = running. */
   dispatchPausedAt?: number | null;
+  /**
+   * R1 (OpenTeam chat scenario): 'task' = dispatch-deliver-accept pipeline;
+   * 'chat' = free-form conversation (monitoring exempt, deliverable discipline
+   * off). Absent = legacy 'task'.
+   */
+  mode?: 'task' | 'chat';
 }
 
 export interface GroupTaskMember {
@@ -364,6 +370,8 @@ export interface GroupTaskCreateInput {
   goal: string;
   acceptanceCriteria?: string;
   memberMetabotIds?: number[];
+  /** R1: 'task' (default) or 'chat' — free-form conversation group. */
+  mode?: 'task' | 'chat';
 }
 
 export type GroupTaskListTab = 'active' | 'done' | 'cancelled' | 'all';

@@ -19,6 +19,8 @@ const NewGroupTaskModal: React.FC<NewGroupTaskModalProps> = ({ onClose, onCreate
   const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
   const [workerBots, setWorkerBots] = useState<Metabot[]>([]);
   const [selectedMemberIds, setSelectedMemberIds] = useState<number[]>([]);
+  // R1: task (classic pipeline) vs chat (free-form conversation) group.
+  const [groupMode, setGroupMode] = useState<'task' | 'chat'>('task');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Default to the chat-first guide; the manual form is a fallback entry.
@@ -61,8 +63,9 @@ const NewGroupTaskModal: React.FC<NewGroupTaskModalProps> = ({ onClose, onCreate
       const task = await groupTaskService.createTask({
         title: title.trim(),
         goal: goal.trim(),
-        acceptanceCriteria: acceptanceCriteria.trim() || undefined,
+        acceptanceCriteria: groupMode === 'chat' ? undefined : acceptanceCriteria.trim() || undefined,
         memberMetabotIds: selectedMemberIds,
+        mode: groupMode,
       });
       onCreated(task);
     } catch (err) {
@@ -101,6 +104,30 @@ const NewGroupTaskModal: React.FC<NewGroupTaskModalProps> = ({ onClose, onCreate
 
         <div className="space-y-4">
           <div>
+            <label className={labelClass}>{i18nService.t('groupTasksFormMode')}</label>
+            <div className="grid grid-cols-2 gap-2">
+              {(['task', 'chat'] as const).map((candidate) => (
+                <button
+                  key={candidate}
+                  type="button"
+                  onClick={() => setGroupMode(candidate)}
+                  aria-pressed={groupMode === candidate}
+                  className={`px-3 py-2 text-sm rounded-lg border text-left transition-colors ${
+                    groupMode === candidate
+                      ? 'border-claude-accent bg-claude-accent/10 text-claude-accent font-medium'
+                      : 'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover/50 dark:hover:bg-claude-darkSurfaceHover/50'
+                  }`}
+                >
+                  {i18nService.t(candidate === 'task' ? 'groupTasksFormModeTask' : 'groupTasksFormModeChat')}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70 mt-1.5 leading-relaxed">
+              {i18nService.t(groupMode === 'chat' ? 'groupTasksFormModeChatHint' : 'groupTasksFormModeTaskHint')}
+            </p>
+          </div>
+
+          <div>
             <label className={labelClass}>{i18nService.t('groupTasksFormTitle')}</label>
             <input
               type="text"
@@ -122,15 +149,17 @@ const NewGroupTaskModal: React.FC<NewGroupTaskModalProps> = ({ onClose, onCreate
             />
           </div>
 
-          <div>
-            <label className={labelClass}>{i18nService.t('groupTasksFormAcceptance')}</label>
-            <textarea
-              value={acceptanceCriteria}
-              onChange={(e) => setAcceptanceCriteria(e.target.value)}
-              className={`${inputClass} h-16 resize-none`}
-              placeholder={i18nService.t('groupTasksFormAcceptancePlaceholder')}
-            />
-          </div>
+          {groupMode === 'task' && (
+            <div>
+              <label className={labelClass}>{i18nService.t('groupTasksFormAcceptance')}</label>
+              <textarea
+                value={acceptanceCriteria}
+                onChange={(e) => setAcceptanceCriteria(e.target.value)}
+                className={`${inputClass} h-16 resize-none`}
+                placeholder={i18nService.t('groupTasksFormAcceptancePlaceholder')}
+              />
+            </div>
+          )}
 
           <div>
             <label className={labelClass}>{i18nService.t('groupTasksFormMembers')}</label>

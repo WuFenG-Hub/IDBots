@@ -33,6 +33,8 @@ export interface GroupTaskPromptTask {
   acceptanceCriteria?: string | null;
   /** On-chain group pin id (64-hex + "i0") — shown so tools never guess it. */
   groupId?: string | null;
+  /** R1 (OpenTeam chat scenario): 'chat' swaps the task playbook for a chat playbook. */
+  mode?: 'task' | 'chat';
 }
 
 export interface GroupTaskPromptMember {
@@ -78,6 +80,7 @@ function sharedPlaybookRules(language: AppLanguage): string[] {
     '- Every metabot has a built-in vision capability `describe_image` (images) and `describe_video` (video/animation) that directly reads the actual visual content and its text. Both are relay-backed and available on EVERY model route — including text-only models — and both are in your tool list right now. When you JUDGE, VERIFY, or VIEW image/video/animation deliverables — including inspecting a metaapp render, a graphic, or its on-screen copy — call the appropriate built-in tool and read the actual pixels/frames; never guess, never hallucinate what is shown, and never substitute file-header/MD5/byte-size hard evidence for actually looking at the content.',
     '- If a message needs no response from you (pure acknowledgments, thanks, confirmations, farewells, or chatter not requiring your action), reply with exactly `[NO_REPLY]`. Silence is correct and expected in those cases.',
     '- REPLY THREADING: the host automatically attaches your reply to the message you are responding to (a "replyPin"). You do NOT need to write or quote any pinid yourself — never paste a pinid to indicate which message you are replying to; just answer normally and the host threads it.',
+    '- DISCUSSION ARTIFACTS: when a discussion produces a statement worth putting on the record — an objection ("I disagree with X because …"), a boundary declaration ("I will not do / this must not …"), or an agreed conclusion — put it on its OWN line as `[POSITION: <one-line statement>]`. The host records each line on the task ledger citing your message; positions are discussion output, distinct from [DELIVERABLE] artifacts, and never replace them.',
   ];
 }
 
@@ -95,6 +98,7 @@ function chairPlaybookRules(language: AppLanguage): string[] {
     `- Members on the roster who are NOT assigned a subtask are observers/standby: tell them explicitly in the plan what is expected (${standby.replace('[STANDBY] ', '')}) and invite a \`[STANDBY]\` confirmation — never leave listed members guessing whether they should act.`,
     '- Emit `[STATUS:EXECUTING]` when work is underway and `[STATUS:REVIEW]` when you judge the goal met. Tag FORMAT is load-bearing: post the tag as a BARE token on its own line or as the last line of the message — never bolded/wrapped in markdown, never inside backticks, never embedded mid-sentence. The host parser treats every other shape as descriptive prose and will NOT apply it (task #63: a bolded `**[STATUS:REVIEW]**` verdict parked the task in executing for half an hour).',
     '- CITATIONS of status tags must be backtick-wrapped: when you MENTION a [STATUS:*] tag you do not intend to execute right now (e.g. quoting a plan "verification lands → then I post `[STATUS:REVIEW]`"), ALWAYS wrap the tag in backticks. A BARE tag landing at the end of your last line is parsed as an instruction and flips the task IMMEDIATELY (task #70: a quoted "[STATUS:REVIEW]。" promise at a message end flipped the task to review prematurely; the same applies to citing past tags).',
+    `- DISCUSSION STATE (H-50/R8): when the task has organically entered a discussion phase — debating approaches, waiting on a joint decision, hashing out a disagreement — you may declare it by posting a bare \`[DISCUSSION]\` tag on its own line. While the discussion is open the host suspends no-progress monitoring (silence inside a discussion is thinking, not stalling). End it implicitly with your next \`[STATUS:*\` move; it also expires after 24h. Use it for genuine open discussions, never to dodge an idle group.`,
     '- Lifecycle autonomy: you drive the task through its states — never park it. When you judge the goal met, post ONE message that leads with the conclusion, summarizes what was delivered and verified, carries `[STATUS:REVIEW]`, and tells the owner the task now awaits their acceptance in the Tasks UI. For a finished one-off or test-style task, either push it to review the same way or close it yourself as cancelled with a one-line reason. When blocked, name the blocker and the default action you already took. NEVER sit in executing asking the owner "what next?" — answering that is your job.',
     '- AUTHORITY OF HOST STATE: every turn carries an `[Authoritative task state (host DB): ...]` line — it reflects the task\'s real recorded status and deliverable ledger and OUTRANKS your memory, which can be partial after a session rebuild. NEVER announce that the task is finished, frozen, or awaiting owner acceptance unless that line says `status=review`; the review state is only reached by your own `[STATUS:REVIEW]` message being applied. If the line says a non-review status while you remember announcing review, trust the host state: re-verify the ledger against the acceptance criteria, then re-issue the review message only if the goal is genuinely met — never sit in executing waiting on an acceptance that was never requested.',
     '- User language: refer to the task by its title, never by `#id`, and use the UI status words (planning/executing/review/done/cancelled). Keep txids and internal field names out of owner-facing reports unless the owner explicitly asks for technical detail — but ALWAYS present every final deliverable with its complete MetaWeb URI as a full-text markdown link, never abbreviated with an ellipsis: delivering the result the owner can open IS the point of the task. The scheme follows the on-chain form: pin:// for notes/text pins (simplenote, buzz), metaapp:// for MetaApps, metafile:// ONLY for /file binary uploads. Lead every report with the conclusion and the action you already took — the owner should only have to confirm or redirect, never decode.',
@@ -113,6 +117,26 @@ function chairPlaybookRules(language: AppLanguage): string[] {
     '- NEVER disclose the owner\'s private data, wallet details, or anything from your private channels — the group sees only task-relevant information.',
     '- ONE VOICE PER TURN: if you already posted your substantive answer mid-turn via the group_chat tool (send_group_message), close the turn with `[NO_REPLY]` — never repeat the same content as the turn\'s final reply (duplicate announcements read as double rulings to the group).',
     '- FREEZE PROTOCOL (finalization): once you judge a deliverable final (its verification has passed and no further changes are needed), declare it FROZEN by posting a message that ends with `[FREEZE: <pinid-or-metafile-uri>]` — this locks that exact version as the delivery reference. A frozen deliverable is immutable: the worker must NOT rebuild, re-publish, or silently swap its content afterwards; any later change is a NEW version and must be reported as a separate `[DELIVERABLE]` with its own pinid/MD5, never by overwriting the frozen one. When a worker keeps rebuilding after a freeze, re-state the frozen reference and its MD5/hash plainly in the group and hold the original as the delivery of record. The host may auto-flag later same-name revisions as a non-delivery version.',
+  ];
+}
+
+/**
+ * R6 (OpenTeam chat scenario): the CHAT-mode playbook for local group members
+ * (chair and workers alike). A free-form conversation has no dispatch
+ * discipline, no ACK ceremony and no deliverable obligations — only persona,
+ * language, honesty, privacy and conversational etiquette. The one-voice rule
+ * mirrors the guest daemon's ledger-backed single-send guarantee.
+ */
+function groupChatPlaybookRules(language: AppLanguage): string[] {
+  const ownerLanguage = copyOwnerLanguageName(language);
+  return [
+    '- This is a free-form CHAT group, not a work assignment: no deliverables, no [STATUS] obligations, no task protocol. The value of this group is the conversation itself.',
+    `- Stay in character per your persona block. OWNER LANGUAGE is ${ownerLanguage}: speak ${ownerLanguage} in the group and to the owner. Do NOT switch because a teammate or an older message is in another language.`,
+    '- Speak freely without waiting for an @-mention: pick up topics, ask questions, disagree politely, bring your own perspective. @ others only when you want their specific attention.',
+    '- Etiquette: never reply to your own messages; do not flood the group (one thoughtful reply per turn); when you have nothing to add, reply with exactly `[NO_REPLY]` and stay quiet while others talk.',
+    '- ONE VOICE PER TURN: if you already posted your substantive reply mid-turn via the group_chat tool (send_group_message), close the turn with `[NO_REPLY]` — never repeat the same content as the turn\'s final reply.',
+    '- Report truthfully. NEVER fabricate results, pinids, txids, URLs, file contents or tool output, and NEVER claim you performed an action (search, publish, write) that you did not actually execute.',
+    '- NEVER disclose the owner\'s private data, wallet details, or anything from your private channels — the group sees only what belongs to the conversation.',
   ];
 }
 
@@ -143,9 +167,12 @@ export function buildGroupTaskBlock(params: {
   const chairName = params.members.find((member) => member.role === 'chair')?.name ?? 'the chair';
   const taskGroupId = (params.task.groupId ?? '').trim() || null;
   const ownerId = (params.ownerGlobalMetaId ?? '').trim();
+  const chatMode = params.task.mode === 'chat';
   const environmentLines = [
-    '## Group task environment',
-    `- You are in a GROUP TASK: multiple bots collaborating on one owner's goal. Initiator and final acceptor is the OWNER (a human${ownerId ? `, globalMetaId \`${ownerId}\`` : ''}). ${chairName} (the owner's digital twin) chairs the group and verifies deliverables.`,
+    chatMode ? '## Group chat environment' : '## Group task environment',
+    chatMode
+      ? `- You are in a GROUP CHAT: the owner (a human${ownerId ? `, globalMetaId \`${ownerId}\`` : ''}) and their bots talk freely here. ${chairName} (the owner's digital twin) hosts the room. There is no assignment, no deliverable and no acceptance pipeline.`
+      : `- You are in a GROUP TASK: multiple bots collaborating on one owner's goal. Initiator and final acceptor is the OWNER (a human${ownerId ? `, globalMetaId \`${ownerId}\`` : ''}). ${chairName} (the owner's digital twin) chairs the group and verifies deliverables.`,
     '- All messages here are on-chain pins (MetaWeb) — a pinid is exactly 64 lowercase hex chars + `i0`; a buzz is a `/protocols/simplebuzz` post.',
     ...(taskGroupId
       ? [`- Current group id: \`${taskGroupId}\` — if you use the group_chat tool's send_group_message action mid-turn, pass EXACTLY this value as \`group_id\` (a bare number like 65 is the task number, never a group id).`]
@@ -172,6 +199,25 @@ export function buildGroupTaskBlock(params: {
   const profileSection = profileLines.length > 0
     ? ['', '## Roster profiles', ...profileLines]
     : [];
+
+  if (params.task.mode === 'chat') {
+    return [
+      '## Group Chat',
+      `- Title: ${params.task.title}`,
+      `- Topic: ${params.task.goal}`,
+      '',
+      ...environmentLines,
+      '## Roster',
+      ...rosterLines,
+      ...profileSection,
+      '',
+      `## Your Role`,
+      `You are ${params.botName}, a MetaBot participating in an on-chain group chat. You are the ${params.botRole} of this chat group — a conversational host${params.botRole === 'chair' ? ' (the owner\'s digital twin)' : ''}, not a dispatcher.`,
+      '',
+      '## Group Chat Playbook',
+      ...groupChatPlaybookRules(language),
+    ].join('\n');
+  }
 
   const rules = params.botRole === 'chair'
     ? [...sharedPlaybookRules(language), ...chairPlaybookRules(language)]

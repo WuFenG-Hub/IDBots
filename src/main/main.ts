@@ -54,6 +54,7 @@ import { ScheduledTaskStore } from './scheduledTaskStore';
 import { dshPluginsDirFor, resolveDshPluginEntries } from './libs/dshPluginManager';
 import { GroupTaskStore, setGroupTaskStoreStatusBroadcaster, type GroupTaskStatus } from './groupTaskStore';
 import { OpenTeamMembershipStore } from './openTeamMembershipStore';
+import { DialogueCognitionStore } from './dialogueCognitionStore';
 import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
@@ -300,6 +301,7 @@ import {
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt, encryptGroupMessageECB } from './services/metaWebCrypto';
 import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, fetchGroupInfo, fetchGroupMembers, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
+import { recordOutgoingGroupSend, hasOutgoingGroupSendSince } from './services/groupSendLedger';
 import { createAgentGameHost, type AgentGameHost } from './agentGame';
 import type { GameManifest, GameSession } from './agentGame/abi';
 import { toSessionView as toPublicSessionView } from './agentGame/abi';
@@ -3946,6 +3948,10 @@ const startSqliteDaemons = (): void => {
     getOpenTeamMembershipStore,
     performChat: performChatCompletionForOrchestrator,
     sendGroupMessage: (metabotId, groupId, opts) => sendGroupChatMessage(metabotId, groupId, opts),
+    // R4 single-send guarantee: mid-turn sends (group_chat tool) recorded in
+    // the outgoing-send ledger are checked before the final-text auto-send.
+    hasSentToGroupSince: (metabotId, groupId, sinceMs) =>
+      hasOutgoingGroupSendSince(metabotId, groupId, sinceMs),
     // P1-2 self-check fallback: periodic on-chain membership verification so a
     // kicked guest marks its membership left even when the KICK simplemsg
     // never arrives.
@@ -5746,14 +5752,20 @@ const getCoworkRunner = () => {
           // when the createPin recovery chain never settled — bound it.
           return withChainWriteBudget(
             'group_chat send_group_message',
-            () => createPin(metabotStore, metabotId, {
-              operation: 'create',
-              path: '/protocols/simplegroupchat',
-              encryption: '0',
-              version: '1.0',
-              contentType: 'application/json',
-              payload: JSON.stringify(payload),
-            }, { network: resolvedNetwork, feeRate: resolveCreatePinFeeRate(resolvedNetwork) }),
+            async () => {
+              const sent = await createPin(metabotStore, metabotId, {
+                operation: 'create',
+                path: '/protocols/simplegroupchat',
+                encryption: '0',
+                version: '1.0',
+                contentType: 'application/json',
+                payload: JSON.stringify(payload),
+              }, { network: resolvedNetwork, feeRate: resolveCreatePinFeeRate(resolvedNetwork) });
+              // R4 single-send ledger: mid-turn tool sends are recorded so the
+              // guest daemon never duplicates them as the turn's final text.
+              recordOutgoingGroupSend({ metabotId, groupId, pinId: sent.pinId, origin: 'group_chat_tool' });
+              return sent;
+            },
           );
         },
       },
@@ -6353,6 +6365,21 @@ const getOpenTeamMembershipStore = () => {
     );
   }
   return openTeamMembershipStore;
+};
+
+// R10 (OpenTeam chat scenario): dialogue cognition storage — instantiated so
+// the interface is real and the table is live for future recall wiring; no
+// conversation-pipeline consumer writes to it yet (interface+storage phase).
+let dialogueCognitionStore: DialogueCognitionStore | null = null;
+const getDialogueCognitionStore = () => {
+  if (!dialogueCognitionStore) {
+    const sqliteStore = getStore();
+    dialogueCognitionStore = new DialogueCognitionStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return dialogueCognitionStore;
 };
 
 let orchestrationStore: OrchestrationStore | null = null;
@@ -10691,6 +10718,7 @@ if (!gotTheLock) {
     goal?: string;
     acceptanceCriteria?: string;
     memberMetabotIds?: number[];
+    mode?: 'task' | 'chat';
   }) => {
     try {
       const task = await withSqliteRecovery('groupTask:create', () =>
@@ -10699,6 +10727,7 @@ if (!gotTheLock) {
           goal: String(input?.goal ?? '').trim(),
           acceptanceCriteria: typeof input?.acceptanceCriteria === 'string' ? input.acceptanceCriteria : undefined,
           memberMetabotIds: Array.isArray(input?.memberMetabotIds) ? input.memberMetabotIds : [],
+          mode: input?.mode === 'chat' ? 'chat' : 'task',
           createdBy: 'user',
         }));
       return { success: true, task };

@@ -921,7 +921,8 @@ export class SqliteStore {
         source_session_id TEXT,
         comm_total_bytes INTEGER,
         comm_message_count INTEGER,
-        dispatch_paused_at INTEGER
+        dispatch_paused_at INTEGER,
+        mode TEXT NOT NULL DEFAULT 'task' CHECK(mode IN ('task','chat'))
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
@@ -930,6 +931,9 @@ export class SqliteStore {
     this.migrateGroupTasksCommStats();
     // G-04: supervisor pause gate — epoch ms while dispatch is paused, NULL = running.
     this.migrateGroupTasksDispatchPausedAt();
+    // R1 (OpenTeam chat scenario): group mode 'task' | 'chat'. Legacy rows and
+    // untouched callers default to 'task' — byte-identical behavior.
+    this.migrateGroupTasksModeColumn();
 
     // G-04: supervisor intervention ledger (nudge / flag / pause / resume) —
     // structured signals recorded from the Twin supervisor channel, visible
@@ -1186,6 +1190,27 @@ export class SqliteStore {
         ON group_task_plan_changes(task_id, id);
     `);
 
+    // R9 (OpenTeam chat scenario): discussion artifacts — objections, boundary
+    // statements, agreed conclusions recorded from [POSITION: …] lines in
+    // TASK-mode groups (chat groups record none). One row per line, deduped by
+    // (task, message pin, line), each citing its source pin. CREATE TABLE IF
+    // NOT EXISTS is the idempotent first-run migration; existing rows untouched.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        msg_pin_id TEXT,
+        author_globalmetaid TEXT,
+        statement TEXT NOT NULL,
+        line_no INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_group_task_positions_dedupe
+        ON group_task_positions(task_id, msg_pin_id, line_no);
+    `);
+
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_memberships (
@@ -1212,6 +1237,10 @@ export class SqliteStore {
     this.migrateOpenTeamMembershipsLeftColumns();
     // Migration: add task_status/task_status_updated_at to openteam_memberships (host task status sync).
     this.migrateOpenTeamMembershipsTaskStatusColumns();
+    // Migration: add group_mode to openteam_memberships (R1 — the mode declared
+    // by the chair at group creation and carried on the invite envelope; the
+    // guest daemon switches gating/prompt/cadence on it. NULL = legacy 'task').
+    this.migrateOpenTeamMembershipsGroupModeColumn();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_invites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1264,6 +1293,31 @@ export class SqliteStore {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_openteam_guest_invites_group
         ON openteam_guest_invites(group_id, id);
+    `);
+
+    // R10 (OpenTeam chat scenario, H-50 ③): dialogue cognition records —
+    // persistent statements from group conversations (positions, boundaries,
+    // agreements, corrections) with source-pin citations. Interface + storage
+    // milestone: the table and store exist and are tested; conversation-pipeline
+    // extraction is second-phase. Group-scoped (OpenTeam guest hosts have no
+    // local task row), idempotent per source pin.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS dialogue_cognitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        task_id INTEGER,
+        kind TEXT NOT NULL DEFAULT 'note'
+          CHECK(kind IN ('position','boundary','agreement','correction','note')),
+        statement TEXT NOT NULL,
+        author_global_metaid TEXT,
+        participants_json TEXT,
+        source_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_dialogue_cognitions_group
+        ON dialogue_cognitions(group_id, id);
     `);
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_group_chat_messages_group_id
@@ -2779,6 +2833,23 @@ export class SqliteStore {
   }
 
   /**
+   * R1 (OpenTeam chat scenario): add group_mode to openteam_memberships —
+   * 'task' | 'chat' as declared by the inviter and carried on the invite
+   * envelope. NULL (legacy rows / older inviters) reads as 'task'.
+   */
+  private migrateOpenTeamMembershipsGroupModeColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_memberships)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('group_mode')) return;
+      this.db.run("ALTER TABLE openteam_memberships ADD COLUMN group_mode TEXT");
+      this.save();
+    } catch (error) {
+      console.warn('migrateOpenTeamMembershipsGroupModeColumn:', error);
+    }
+  }
+
+  /**
    * Migration: bind each observable Group Task to at most one canonical Twin
    * orchestration task. Existing tasks remain valid and are reconciled lazily.
    */
@@ -2831,6 +2902,26 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupTasksDispatchPausedAt:', e);
+    }
+  }
+
+  /**
+   * R1 (OpenTeam chat scenario): add `mode` to group_tasks — 'task' (classic
+   * dispatch-deliver-accept pipeline) or 'chat' (free-form conversation, task
+   * monitoring exempted). Idempotent PRAGMA-guarded; legacy rows fall back to
+   * the column default 'task' so pre-existing groups keep their behavior.
+   */
+  private migrateGroupTasksModeColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('mode')) return;
+      this.db.run(
+        "ALTER TABLE group_tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'task' CHECK(mode IN ('task','chat'))",
+      );
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupTasksModeColumn:', e);
     }
   }
 

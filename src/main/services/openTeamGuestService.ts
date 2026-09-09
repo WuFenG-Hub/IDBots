@@ -416,6 +416,10 @@ export async function handleOpenTeamInvite(
       taskTitle: invite.taskTitle,
       invitePinId: invite.inviteId,
       joinedPinId,
+      // R1: the group's mode as declared by the inviter — the guest daemon
+      // switches gating/prompt/cadence on it ('task' when the envelope
+      // omitted the field, e.g. an older inviter host).
+      groupMode: invite.mode === 'chat' ? 'chat' : 'task',
     });
     // The guest daemon answers only messages arriving after the join.
     membershipStore.catchUpCursorToLatest(invite.groupId, metabot.id);
@@ -446,6 +450,7 @@ export async function handleOpenTeamInvite(
         sessionId: session.id,
         taskTitle: invite.taskTitle,
         inviterGlobalmetaid: invite.inviterGlobalMetaId,
+        groupMode: invite.mode === 'chat' ? 'chat' : 'task',
         recentMessages: deps.listRecentGroupMessages(invite.groupId, 20),
       });
       // P0-1: the invite itself enters the guest's A2A session stream, so the
