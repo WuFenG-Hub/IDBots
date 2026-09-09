@@ -356,6 +356,7 @@ man_base_data_pebble/
 !tests/groupTaskComposerEnterSend.test.mjs
 !tests/accentInkButtonText.test.mjs
 !tests/avatarSource.test.mjs
+!tests/coworkWelcomeHeroBot.test.mjs
 
 !tests/metabotSettingsService.test.mjs
 !tests/coworkReadImageGuard.test.mjs

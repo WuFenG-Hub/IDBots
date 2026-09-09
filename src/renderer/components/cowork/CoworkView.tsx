@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
+import { CpuChipIcon } from '@heroicons/react/24/outline';
 import { RootState, store } from '../../store';
 import { clearCurrentSession, setCurrentSession, setStreaming, clearPreferredMetabotId, setNewTaskMetabotId } from '../../store/slices/coworkSlice';
 import { clearActiveSkills, setActiveSkillIds } from '../../store/slices/skillSlice';
@@ -603,6 +604,15 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   // flash while the roster IPC is still in flight.
   const isBootstrap = metabotsLoaded && !hasTwin;
 
+  // The bot the selector is locked to: drives the welcome hero (avatar, name,
+  // description) above the composer.
+  const selectedNewTaskBot = metabots.find((m) => m.id === selectedMetabotId) ?? null;
+  const descriptionKey = !selectedNewTaskBot
+    ? 'coworkDescription'
+    : selectedNewTaskBot.metabot_type === 'twin'
+      ? 'coworkDescriptionTwin'
+      : 'coworkDescriptionPro';
+
   // Fill (without sending) one of the bootstrap shortcuts into the composer.
   const handleBootstrapShortcut = (text: string) => {
     promptInputRef.current?.setValue(text);
@@ -733,12 +743,31 @@ const CoworkView: React.FC<CoworkViewProps> = ({
           <div className="flex-1 flex flex-col items-center justify-center text-center space-y-6">
             {/* Welcome Section - centered */}
             <div className="text-center space-y-5">
-              <img src="logo.png" alt="logo" className="w-16 h-16 mx-auto" />
+              {selectedNewTaskBot ? (
+                <div className="flex flex-col items-center gap-3">
+                  {selectedNewTaskBot.avatar && (selectedNewTaskBot.avatar.startsWith('data:') || selectedNewTaskBot.avatar.startsWith('http')) ? (
+                    <img
+                      src={selectedNewTaskBot.avatar}
+                      alt={selectedNewTaskBot.name}
+                      className="w-[85px] h-[85px] rounded-xl object-cover"
+                    />
+                  ) : (
+                    <div className="w-[85px] h-[85px] rounded-xl dark:bg-claude-darkSurface bg-claude-surface flex items-center justify-center">
+                      <CpuChipIcon className="h-10 w-10 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                    </div>
+                  )}
+                  <div className="text-base font-medium dark:text-claude-darkText text-claude-text">
+                    {selectedNewTaskBot.name}
+                  </div>
+                </div>
+              ) : (
+                <img src="logo.png" alt="logo" className="w-16 h-16 mx-auto" />
+              )}
               <h2 className="text-3xl font-bold tracking-tight dark:text-claude-darkText text-claude-text">
                 {i18nService.t('coworkWelcome')}
               </h2>
               <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary max-w-md mx-auto">
-                {i18nService.t('coworkDescription')}
+                {i18nService.t(descriptionKey)}
               </p>
             </div>
 
