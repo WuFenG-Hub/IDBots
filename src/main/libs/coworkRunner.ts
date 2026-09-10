@@ -192,6 +192,7 @@ import {
   type ChainWriteCreatePin,
 } from './postBuzzAgentTools';
 import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
+import { buildAgentpediaAgentTools } from './agentpediaAgentTools';
 import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
 import { buildLikePinAgentTools } from './likePinAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
@@ -8983,6 +8984,18 @@ export class CoworkRunner extends EventEmitter {
             tool,
             createPin: this.metabotChainWrite.createPin,
             uploadFile: gatedUpload,
+            sessionId,
+            resolveMetabotId,
+          })
+        );
+        // Agentpedia protocol writers (/protocols/agentpedia/*): rev,
+        // challenge, ruling, review, editor registry chain, genesis
+        // constitution, param proposals. Payloads are schema-gated
+        // pre-write (composite draft-07 schemas, see agentpediaSchemas).
+        memoryTools.push(
+          ...buildAgentpediaAgentTools({
+            tool,
+            createPin: this.metabotChainWrite.createPin,
             sessionId,
             resolveMetabotId,
           })
