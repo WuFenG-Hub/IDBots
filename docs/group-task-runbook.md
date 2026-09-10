@@ -112,11 +112,19 @@ the next tick — one tick of latency by design.
 | `[CHECKPOINT: …]` / `[CHECKPOINT_RESOLVED: …]` | chair | opens/closes the human gate; owner is notified privately |
 | `[FREEZE: <pinid>]` | chair | marks the delivery-of-record version |
 
-Tags from non-authorized senders are ignored. A tag CITED in prose must be
-backtick-wrapped — the parser applies a bare tag at the end of the last line
-as an instruction even when the author only meant to quote it (task #70: a
-"…then I post [STATUS:REVIEW]。" promise flipped the task prematurely; the
-chair playbook now mandates backticks for citations). Historical host notice lines
+Tags from non-authorized senders are ignored. A `[STATUS:*]` tag carries the
+instruction ONLY when it sits at an END of its line: leading the line (a bare
+token on its own line, or leading the final line with explanation after it —
+the task #52/#63 verdict shapes) or capping it ("终检完成，进入验收
+[STATUS:REVIEW]" — the task #52 short-verdict shape). A bare tag EMBEDDED
+mid-line with words on BOTH sides — a clock/plan line like
+"…→ 放行 → [STATUS:REVIEW]。全组最后两棒。" — is a citation and is NOT
+applied; the rate-limited descriptive note tells the chair to re-send a bare
+tag when a move was actually intended (task #72: such a line flipped a task
+to review 45 minutes early and suppressed three dispatches before the
+`dispatch_held` notes reopened it; task #70: a "…then I post
+[STATUS:REVIEW]。" promise did the same earlier). Citations should still be
+backtick-wrapped. Historical host notice lines
 (`[GROUP_TASK_NOTICE:*]`) still parse as data but are no longer produced and are
 excluded from every "member spoke" accounting.
 

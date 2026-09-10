@@ -29,7 +29,7 @@ import type {
 } from '../openTeamMembershipStore';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
-import { isMentioned } from './groupChatMentionUtils';
+import { contentAddressesRosterName, isMentioned } from './groupChatMentionUtils';
 import { isOpenTeamProtocolOnlyContent } from './openTeamGuestDaemon';
 import { parsePositionLines } from '../libs/groupTaskPositions';
 import {
@@ -96,8 +96,8 @@ import {
   extractLocalFilePaths,
   parseWorkingAck,
   hasStandbyMarker,
-  isIntegrityDeclaration,
-  isCorrectionText,
+  parseIntegrityDeclaration,
+  isCorrectionDeclaration,
   type ParsedDeliverable,
 } from './groupTaskDeliverableParser';
 import { buildMetafileUri } from './serviceDeliveryArtifacts.js';
@@ -198,8 +198,14 @@ const MD_EMPHASIS_RESIDUE = /^[\s*_]*$/;
  * GT-04 (task #56): legality-aware status-directive adjudication.
  *
  * Candidate tags, in priority order:
- *  a) the LAST tag on the last non-empty line (the protocol instruction field —
- *     G-03/task #52 semantics unchanged, mid-line on that line still counts);
+ *  a) the LAST tag on the last non-empty line, when the tag LEADS the line
+ *     ("[STATUS:REVIEW] — 说明文字", empty or emphasis-only prefix) or CAPS it
+ *     ("终检完成，进入验收 [STATUS:REVIEW]", empty or emphasis-only suffix —
+ *     the task #52/#47 verdict shapes keep working). GT#72: a tag EMBEDDED
+ *     mid-line with words on BOTH sides — a clock/plan line like "时钟：… →
+ *     我实读放行 → [STATUS:REVIEW]。全组最后两棒。" (task #72) or the task
+ *     #70 promise "…then I post [STATUS:REVIEW]。" — is a CITATION of a
+ *     future step, not the verdict, and stays descriptive;
  *  b) STANDALONE tag lines elsewhere in the body (a tag alone on its own line
  *     is unambiguous protocol formatting — this is what saved task #56, whose
  *     real [STATUS:EXECUTING] instruction sat on its own line mid-message while
@@ -207,8 +213,8 @@ const MD_EMPHASIS_RESIDUE = /^[\s*_]*$/;
  *     emphasis-wrapped own-line tags (`**[STATUS:REVIEW]**`) count too — a
  *     chair's wrap-up routinely bolds the verdict line.
  *
- * Everything else — prose-embedded tags on earlier lines, non-final tags on the
- * last line, and anything inside code quotes — is descriptive text.
+ * Everything else — prose-embedded tags on earlier lines, mid-line tags with
+ * prose on both sides, and anything inside code quotes — is descriptive text.
  *
  * The FIRST candidate whose transition is legal from the current status is the
  * instruction; remaining candidates are rejected (illegal). Previously the
@@ -242,7 +248,16 @@ export function adjudicateStatusDirectives(
       break;
     }
   }
-  type Occurrence = { tag: 'executing' | 'review'; lineIndex: number; standalone: boolean };
+  type Occurrence = {
+    tag: 'executing' | 'review';
+    lineIndex: number;
+    standalone: boolean;
+    /** GT#72: the tag occupies an END of the instruction field — it LEADS its
+     * line (empty/emphasis-only prefix, the task #52/#63 verdict shapes) or
+     * CAPS the line (empty/emphasis-only suffix, the task #52 short-verdict
+     * shape "终检完成，进入验收 [STATUS:REVIEW]"). */
+    leadOrEnd: boolean;
+  };
   const occurrences: Occurrence[] = [];
   lines.forEach((rawLine, lineIndex) => {
     const line = rawLine.trim();
@@ -254,12 +269,20 @@ export function adjudicateStatusDirectives(
       // Task #63: `**[STATUS:REVIEW]**` on its own line counts as standalone —
       // emphasis residue never carries sentence meaning (see MD_EMPHASIS_RESIDUE).
       const standalone = MD_EMPHASIS_RESIDUE.test(prefix) && MD_EMPHASIS_RESIDUE.test(suffix);
-      occurrences.push({ tag, lineIndex, standalone });
+      const leadOrEnd = MD_EMPHASIS_RESIDUE.test(prefix) || MD_EMPHASIS_RESIDUE.test(suffix);
+      occurrences.push({ tag, lineIndex, standalone, leadOrEnd });
     }
   });
   // (a) the end-line instruction field: the LAST tag on the last non-empty
-  // line (any position on that line — the task #52 verdict shape).
-  const endLineOccurrences = occurrences.filter((occ) => occ.lineIndex === endLineIndex);
+  // line, but only when it LEADS the line ("[STATUS:REVIEW] — 说明文字") or
+  // CAPS it ("终检完成，进入验收 [STATUS:REVIEW]" — the task #52/#47 verdict
+  // shapes keep working). GT#72: a tag EMBEDDED mid-line with words on BOTH
+  // sides — a clock/plan line like "时钟：… → 我实读放行 → [STATUS:REVIEW]。
+  // 全组最后两棒。" (task #72) or the task #70 promise "…then I post
+  // [STATUS:REVIEW]。" — is a CITATION of a future step, never the verdict
+  // itself; it stays descriptive and the rate-limited descriptive note tells
+  // the chair to re-send a bare tag if a move was intended.
+  const endLineOccurrences = occurrences.filter((occ) => occ.lineIndex === endLineIndex && occ.leadOrEnd);
   const candidates: Occurrence[] = [];
   if (endLineOccurrences.length > 0) candidates.push(endLineOccurrences[endLineOccurrences.length - 1]);
   // (b) standalone tag lines elsewhere, in message order.
@@ -556,9 +579,11 @@ export function hasWorkerUpstreamWait(content: string | null | undefined): boole
  * lets one member's clause mask another's prose wait (the foreign tag's
  * free-text token reads as satisfied, skipping the prose branch) or taint a
  * member with a wait that governs someone else's step. The clause runs from
- * the member's @mention to the next @mention, blank line, or thematic break.
- * Returns null when the mention is not literal text (mention-array-only
- * dispatches) — callers then keep whole-message semantics.
+ * the member's @mention to the next @mention, blank line, or thematic break;
+ * GT#72: when no @-token exists, a BARE full-roster-name occurrence starts
+ * the clause instead (chairs address members both ways). Returns null when
+ * neither form is literal text (mention-array-only dispatches) — callers
+ * then keep whole-message semantics.
  */
 export function extractMemberDispatchClause(
   content: string | null | undefined,
@@ -567,12 +592,24 @@ export function extractMemberDispatchClause(
   const text = String(content ?? '');
   const name = String(botName ?? '').trim();
   if (!text || !name) return null;
+  const clauseEnd = /(?:\r?\n[ \t]*\r?\n)|(?:\r?\n[ \t]*-{3,}[ \t]*$)|(?:\s@)/m;
   const at = text.toLowerCase().indexOf(`@${name.toLowerCase()}`);
-  if (at < 0) return null;
-  const rest = text.slice(at);
-  const tail = rest.slice(1);
-  const end = /(?:\r?\n[ \t]*\r?\n)|(?:\r?\n[ \t]*-{3,}[ \t]*$)|(?:\s@)/m.exec(tail);
-  return end ? rest.slice(0, 1 + end.index) : rest;
+  if (at >= 0) {
+    const rest = text.slice(at);
+    const end = clauseEnd.exec(rest.slice(1));
+    return end ? rest.slice(0, 1 + end.index) : rest;
+  }
+  // GT#72: chairs also address members by BARE full roster name
+  // ("Builder阿码 这三点随你第一落一起落进 schema。3. 啊明，下一棒…[DEADLINE:
+  // 45m]。") — the clause must scope to the right member there too, or a
+  // later member's deadline bleeds into the bare-named member's arming.
+  // The bare occurrence may sit INSIDE a longer roster name ("阿码" inside
+  // "@Builder阿码") — that slice is equivalent, so no disambiguation needed.
+  const bare = text.toLowerCase().indexOf(name.toLowerCase());
+  if (bare < 0) return null;
+  const rest = text.slice(bare);
+  const end = clauseEnd.exec(rest.slice(name.length));
+  return end ? rest.slice(0, name.length + end.index) : rest;
 }
 /**
  * P2-8: multi-driver mutex — kv heartbeat claim per task
@@ -1161,16 +1198,39 @@ export function decideGroupTaskResponders(
     && Boolean(bot.globalmetaid?.trim())
     && senderGlobalMetaId === bot.globalmetaid!.trim();
 
+  const chairMember = members.find((member) => member.role === 'chair');
+  // GT#72: a CHAIR-authored message wakes a worker whose FULL roster name
+  // appears bare (no @) — the same compensation the auto-planning dispatch
+  // applies through resolveMentionIdsForWorkers. Chairs habitually address
+  // assignees by bare name; without this, task #72's second-baton assignment
+  // ("阿码，第二棒正式开工" — no @, empty mention array) never woke the
+  // assignee and idled 7.5 minutes until a third party @-mentioned him.
+  const chairSenderGlobalMetaId = (chairMember?.globalmetaid ?? '').trim();
+  const senderIsChair = Boolean(
+    chairSenderGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairSenderGlobalMetaId,
+  );
+  const rosterNames = members.map(
+    (member) => botsById.get(member.metabotId ?? -1)?.name ?? member.name ?? null,
+  );
+  // GT#72: the bare-name wake is gated to ASSIGNMENT-SHAPED chair messages —
+  // the playbook mandates a [DEADLINE] on every assignment, so the tag is the
+  // deterministic assignment marker. Verdict prose, round-ups, and liveness
+  // notices that merely CITE a member's name stay quiet (task #51: the
+  // chair's own "Coder Bot is in a long-running turn" notice must wake
+  // nobody).
+  const bareNameWakeEligible = senderIsChair && /\[DEADLINE\s*:/i.test(content);
+
   // Resolve mention/name hits once per member.
   const hits = new Map<number, boolean>();
   for (const member of members) {
     if (member.metabotId == null) continue;
     const bot = botsById.get(member.metabotId);
     if (!bot) continue;
-    hits.set(member.metabotId, isMentioned(message, bot));
+    const bareNamed = bareNameWakeEligible
+      && member.role === 'worker'
+      && contentAddressesRosterName(content, bot.name, rosterNames);
+    hits.set(member.metabotId, isMentioned(message, bot) || bareNamed);
   }
-
-  const chairMember = members.find((member) => member.role === 'chair');
   const chairHit = chairMember?.metabotId != null ? hits.get(chairMember.metabotId) === true : false;
   const workerHitCount = members.filter(
     (member) => member.role === 'worker'
@@ -2220,6 +2280,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   // Loop prevention state (in-memory, per loop instance; no new DB columns).
   const lastReplyAtByKey = new Map<string, number>();
   const replyCountByKey = new Map<string, number>();
+  // GT#72: the budget counts LOGICAL replies (one charge per (task, bot,
+  // trigger message)). A re-dispatch of the same trigger — a failed turn's
+  // durable-queue retry, a wedged-turn force-settle requeue, a coalesced
+  // backlog drain — is the SAME committed reply, not new spend. Charging
+  // every dispatch attempt is what silently muted a verification-heavy chair
+  // after ~22 logical replies (40 dispatch charges) and parked GT#72 in
+  // executing until a supervisor nudge rescued it.
+  const replyBudgetChargedMessages = new Set<string>();
+  const replyBudgetChargeKey = (key: string, messageId: number): string => `${key}:${messageId}`;
   const keyOf = (taskId: number, metabotId: number): string => `${taskId}:${metabotId}`;
 
   // P2-7 (round 2): pin_ids of messages THIS daemon posted as the chair
@@ -2762,6 +2831,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   // ownership or they would break the one-turn-per-session invariant for the
   // replacement turn.
   const turnInFlight = new Map<string, { startedAt: number; token: object }>();
+  // GT#72: the last in-flight token a "skipped — already in flight" log line
+  // was emitted for (per guard key + label). A long chair turn re-triggers
+  // the skip on every tick — a planning turn once spammed 16 identical lines
+  // in 80 seconds — so each in-flight episode speaks at most once.
+  const skipLogToken = new Map<string, object>();
   const pendingTurnJobs = new Set<Promise<void>>();
   const latchWatchers = new Set<ReturnType<typeof setInterval>>();
   /**
@@ -3326,6 +3400,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     db: Database,
     task: GroupTask,
     triggering: GroupTaskDaemonMessage,
+    chairGlobalMetaIdLog: string,
   ): string => {
     const recent = queryRecentMessages(db, task.groupId!, contextMessageCount);
     // Entropy P0: every message is head+tail truncated and runs of ceremony
@@ -3334,6 +3409,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const logEntropyP0 = parseGroupTaskEntropyP0Config(
       deps.getStore().get<string>('groupTaskEntropyP0'),
     );
+    const chairGmidForLog = (chairGlobalMetaIdLog ?? '').trim().toLowerCase();
+    const senderRoleForLog = (message: GroupTaskDaemonMessage): 'chair' | 'worker' | 'owner' | null => {
+      const gmid = (message.senderGlobalMetaId ?? '').trim().toLowerCase();
+      if (!gmid) return null;
+      return chairGmidForLog && gmid === chairGmidForLog ? 'chair' : null;
+    };
     const entries = recent.map((row) => {
       const message = toDaemonMessage(row);
       return {
@@ -3343,12 +3424,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         suspect: Boolean(message.senderSuspect),
         content: message.content ?? '',
         isTrigger: row.id === triggering.id,
+        role: senderRoleForLog(message),
       };
     });
     const lines = renderGroupLogLines(entries, { fold: logEntropyP0.logFold });
     return [
       buildAuthoritativeStateLine(task),
-      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; protocol lines ([DELIVERABLE]/[FREEZE]/[STATUS:]/[PLAN_CHANGE]/[CHECKPOINT]) and the triggering message are shown in full, other long messages are head+tail truncated, acknowledgment lines folded; to read any message in full use the group-task show action with view=full / before_id paging)]`,
+      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; chair messages, protocol lines ([DELIVERABLE]/[FREEZE]/[STATUS:]/[PLAN_CHANGE]/[CHECKPOINT]/[DEADLINE]/[DEPENDS_ON]) and the triggering message are shown in full, other long messages are head+tail truncated, acknowledgment lines folded; to read any message in full use the group-task show action with view=full / before_id paging)]`,
       ...lines,
     ].join('\n');
   };
@@ -3816,6 +3898,40 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  };
+
+  /**
+   * GT#72: a (task, bot) that exhausted its reply budget is PERMANENTLY
+   * silent for the rest of this app run — pending triggers (deliverable
+   * verdicts, assignments, owner questions) are dropped at the dispatch gates.
+   * That lockout previously left nothing but a daemon log line: the chair of
+   * GT#72 sat muted for 12 minutes with a finished, verified release candidate
+   * until a supervisor nudge rescued it. Raise ONE owner-visible anomaly per
+   * (task, bot) — the origin session (the owner's Twin) is the rail that
+   * actually reacted last time, so route the fact there.
+   */
+  const alertReplyBudgetExhausted = (
+    task: GroupTask,
+    member: { role: string; name?: string | null; metabotId?: number | null } | undefined,
+    bot: { id: number; name?: string | null } | undefined,
+  ): void => {
+    if (!member || !bot || member.metabotId == null) return;
+    const label = member.name?.trim() || bot.name?.trim() || `bot ${bot.id}`;
+    const roleText = member.role === 'chair' ? 'chair' : 'worker';
+    notifySourceSessionMilestone(
+      task,
+      'anomaly',
+      buildSourceSessionAnomalyNotice({
+        title: task.title,
+        status: deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status,
+        summary:
+          `The ${roleText} (${label}) exhausted its per-task reply budget (${replyBudget} replies) — ` +
+          `its turns are now dropped until the app restarts, and nothing (assignments, deliverable verdicts, ` +
+          'or even owner mentions) can wake it in this task. If the task still needs this member, restart the ' +
+          'app so the in-memory budget resets; otherwise close the task out.',
+      }),
+      `reply_budget_exhausted:bot:${bot.id}`,
+    );
   };
 
   const maybeSendOwnerReport = async (
@@ -4374,7 +4490,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `(${rejected.map((candidate) => candidate.note ?? 'invalid').join('; ')})`,
         );
       }
-      const isCorrection = isCorrectionText(parseContent);
+      const isCorrection = isCorrectionDeclaration(parseContent);
       for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
         const candidate = candidates[candidateIndex];
         if (!candidate.valid) continue; // placeholder/truncated/example → never recorded
@@ -4693,21 +4809,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
-    // P0-8: public integrity declarations (honest correction/report) are
-    // recorded into the acceptance record. Dedupe by message pin.
-    if (!message.senderSuspect && message.pinId && isIntegrityDeclaration(content)) {
+    // P0-8 → GT#72: public integrity declarations are EXPLICIT protocol tags
+    // ([CORRECTION] / [HONEST_REPORT], line-leading) recorded into the
+    // acceptance record; the old prose-keyword guess filled task #72's ledger
+    // with 48 near-all-false rows. Dedupe by message pin.
+    const integrityKind = parseIntegrityDeclaration(content);
+    if (!message.senderSuspect && message.pinId && integrityKind != null) {
       try {
         if (!store.hasIntegrityEventWithMsgPin(task.id, message.pinId)) {
-          const isCorrection = isCorrectionText(content);
           store.addIntegrityEvent({
             taskId: task.id,
             msgPinId: message.pinId,
             authorGlobalmetaid: message.senderGlobalMetaId,
-            eventType: isCorrection ? 'correction' : 'honest_report',
+            eventType: integrityKind,
             detail: content.slice(0, 500),
           });
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: recorded integrity ${isCorrection ? 'correction' : 'report'} from ${message.senderName}`,
+            `[GroupTaskDaemon] Task ${task.id}: recorded integrity ${integrityKind === 'correction' ? 'correction' : 'report'} from ${message.senderName}`,
           );
         }
       } catch (error) {
@@ -6195,7 +6313,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const { systemPrompt: baseSystemPrompt, volatileContext } = await buildTurnSystemPrompt(bot, task, promptMembers, member.role, ownerGlobalMetaId);
     // Volatile context (time + experience/cognition) rides the user turn so
     // the system prompt stays byte-stable across group turns.
-    let userMessage = [volatileContext, buildGroupLogUserMessage(db, task, message)]
+    let userMessage = [volatileContext, buildGroupLogUserMessage(db, task, message, chairGlobalMetaId)]
       .filter(Boolean)
       .join('\n\n');
     if (verificationNotes.length > 0) {
@@ -6760,8 +6878,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // The reply budget is charged at dispatch (committed work — a retry storm
     // must not be free); the cooldown timestamp only moves on SUCCESS (a failed
     // turn posted nothing, so its durable-queue retry must not sit out a
-    // cooldown it never earned).
-    replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
+    // cooldown it never earned). GT#72: the charge is one per (task, bot,
+    // message) — re-dispatches of an already-charged trigger never count again
+    // (see replyBudgetChargedMessages).
+    {
+      const chargeKey = replyBudgetChargeKey(key, message.id);
+      if (!replyBudgetChargedMessages.has(chargeKey)) {
+        replyBudgetChargedMessages.add(chargeKey);
+        replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
+      }
+    }
     emitLog(
       `[GroupTaskDaemon] Task ${task.id}: dispatched async ${member.role} turn for bot ${bot.id} ` +
       `(message #${message.id}, reason ${args.reason}${args.entry ? ', from deferred queue' : ''})`,
@@ -7024,7 +7150,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     liveness?: { taskId: number; metabotId: number; isChair: boolean },
   ): boolean => {
     if (turnInFlight.has(guardKey)) {
-      emitLog(`[GroupTaskDaemon] ${label}: skipped — a turn is already in flight for ${guardKey}`);
+      const current = turnInFlight.get(guardKey);
+      const skipKey = `${guardKey}|${label}`;
+      if (!current || skipLogToken.get(skipKey) !== current.token) {
+        if (current) skipLogToken.set(skipKey, current.token);
+        emitLog(`[GroupTaskDaemon] ${label}: skipped — a turn is already in flight for ${guardKey}`);
+      }
       return false;
     }
     const turnToken: object = {};
@@ -8148,6 +8279,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * GT#72: the member's most recent [WORKING] ACK message time (null when the
+   * recent window holds none). Bounded scan of the member's latest messages —
+   * used to satisfy an assignment watch that armed AFTER the ACK landed.
+   */
+  const findRecentWorkingAckMs = (
+    task: GroupTask,
+    member: GroupTaskMember,
+  ): number | null => {
+    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+    if (!task.groupId || !gmid) return null;
+    try {
+      const rows = deps.getStore().getDatabase().exec(
+        'SELECT content, created_at FROM group_chat_messages WHERE group_id = ? AND sender_global_metaid = ? ORDER BY id DESC LIMIT 8',
+        [task.groupId, gmid],
+      )[0]?.values ?? [];
+      for (const row of rows) {
+        const content = String(row[0] ?? '');
+        if (parseWorkingAck(stripGroupTaskQuotedCode(content))) {
+          const ms = parseSqliteUtcMs(String(row[1] ?? ''));
+          if (ms != null && ms > 0) return ms;
+        }
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
   const handleMemberProtocolMarkers = (
     task: GroupTask,
     message: GroupTaskDaemonMessage,
@@ -8164,10 +8324,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
     const isChairMessage = Boolean(chairGmid && senderGmid === chairGmid);
     if (isChairMessage) {
+      // GT#72: the ACK watch follows the same bare-name wake the responder
+      // gate applies (assignment-shaped chair messages only — a [DEADLINE]
+      // tag), so an assignment that wakes the assignee also arms their ACK
+      // watch; the assignment lifecycle (wake → ACK watch → deadline clock)
+      // never splits across two different mention definitions.
+      const rosterNames = members.map(
+        (candidate) => botsById.get(candidate.metabotId ?? -1)?.name ?? candidate.name ?? null,
+      );
+      const bareNameWatchEligible = /\[DEADLINE\s*:/i.test(message.content ?? '');
       for (const member of members) {
         if (member.role !== 'worker' || member.metabotId == null) continue;
         const bot = botsById.get(member.metabotId);
-        if (!bot || !isMentioned(message, bot)) continue;
+        const bareNamed = bareNameWatchEligible
+          && contentAddressesRosterName(message.content, bot?.name, rosterNames);
+        if (!bot || !(isMentioned(message, bot) || bareNamed)) continue;
         // GT#47 R3: during review / an open checkpoint the mention is part of
         // a review-closing or checkpoint message, not a work assignment —
         // arming the 3-min no-ACK watch here is exactly what fired the false
@@ -8229,7 +8400,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${message.id}`, '1');
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: derived assignment to ${member.name ?? member.metabotId} ` +
-                `(message #${message.id}, DEPENDS_ON upstream ${derived}) inherits the upstream ACK; no new ACK watch`,
+                  `(message #${message.id}, DEPENDS_ON upstream ${derived}) inherits the upstream ACK; no new ACK watch`,
               );
             } else {
               // P5 (v1.1): dependency-waiting is a legal state — the worker
@@ -8238,9 +8409,42 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // the #21-style false "did not ACK" warnings.
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: derived assignment to ${member.name ?? member.metabotId} ` +
-                `(message #${message.id}) upstream not delivered; dependency-wait, no ACK watch`,
+                  `(message #${message.id}) upstream not delivered; dependency-wait, no ACK watch`,
               );
             }
+            continue;
+          }
+          // GT#72: the ACK can land MOMENTS BEFORE this watch arms — the
+          // worker answered the assignment while the daemon was still
+          // processing it (task #72: 啊明's [WORKING] for the merge assignment
+          // arrived 47s before the re-mention's watch armed, so no deadline
+          // ever ticked). A fresh [WORKING] inside the ACK window satisfies
+          // this watch retroactively: mark ack-seen and arm the chair-stated
+          // deadline from THIS assignment instead of waiting for an ACK that
+          // already happened.
+          const recentAckMs = findRecentWorkingAckMs(task, member);
+          if (recentAckMs != null && now() - recentAckMs <= ackTimeoutMs) {
+            sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${message.id}`, '1');
+            const clause = extractMemberDispatchClause(contentText, bot.name)
+              ?? extractMemberDispatchClause(contentText, member.name)
+              ?? contentText;
+            const retroMinutes = parseChairDeadlineMinutes(clause);
+            if (retroMinutes != null && retroMinutes > 0) {
+              sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+              sqlite.set(
+                `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+                JSON.stringify({
+                  dueAt: now() + retroMinutes * 60_000,
+                  ackedAt: recentAckMs,
+                  taskDescription: null,
+                }),
+              );
+            }
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] just before ` +
+                `assignment (message #${message.id}) armed its watch — retroactively satisfied` +
+                `${retroMinutes != null && retroMinutes > 0 ? `, armed the chair-stated deadline: ${retroMinutes}m` : ' (no chair-stated deadline on the assignment)'}`,
+            );
             continue;
           }
           // Task #51 false-alarm fix: persist the assignment's CHAIN second
@@ -8376,9 +8580,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         // A numberless ACK against a deadline-less assignment arms nothing:
         // the chair playbook requires a deadline on every assignment, and a
         // missing one is the chair's sequencing gap, not the host's to invent.
-        const chairDeadlineMinutes = parseChairDeadlineMinutes(
-          resolveAssignmentContent(task, assignmentMessageId, message.replyPin),
-        );
+        // GT#72: the parse is scoped to the member's OWN dispatch clause —
+        // chairs write multi-assignment messages, and whole-message parsing
+        // armed 阿码's clock with 啊明's "[DEADLINE: 45m]" (harmless only by
+        // luck; reversed numbers would false-ring). Clause extraction falls
+        // back to the whole message for mention-array-only dispatches.
+        const assignmentContent = resolveAssignmentContent(task, assignmentMessageId, message.replyPin);
+        const memberClause = extractMemberDispatchClause(assignmentContent, memberBot?.name)
+          ?? extractMemberDispatchClause(assignmentContent, member.name)
+          ?? assignmentContent;
+        const chairDeadlineMinutes = parseChairDeadlineMinutes(memberClause);
         if (chairDeadlineMinutes != null && chairDeadlineMinutes > 0) {
           // Arming a fresh deadline starts a fresh reminder cycle — a leftover
           // delivery-reminded flag from the previous (missed or delivered)
@@ -9903,7 +10114,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         // R6: chat groups run unmetered — a 40-reply task budget would
         // permanently silence a long conversation. Loop insurance stays via
         // cooldown + prompt etiquette + [NO_REPLY].
-        if (task.mode !== 'chat' && (replyCountByKey.get(key) ?? 0) >= replyBudget) continue; // permanently spent
+        // GT#72: a trigger ALREADY charged (its first dispatch spent the
+        // budget) is a retry of committed work — it drains even at the cap,
+        // so a failed turn can never be stranded by the budget it paid.
+        if (
+          task.mode !== 'chat'
+          && (replyCountByKey.get(key) ?? 0) >= replyBudget
+          && !replyBudgetChargedMessages.has(replyBudgetChargeKey(key, entry.messageId))
+        ) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: bot ${entry.metabotId} deferred reply for message #${entry.messageId} ` +
+              `dropped — reply budget exhausted (${replyBudget})`,
+          );
+          alertReplyBudgetExhausted(task, member, bot);
+          continue;
+        }
         if (isChair && entry.reason !== 'chair_mentioned' && twinChairActive(db, task.id, task.groupId, deferredMessage.pinId, chairGlobalMetaId)) {
           continue; // the Twin already spoke about this message (or in the recent window); drop the auto reply
         }
@@ -10041,6 +10266,43 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById, {
           entropyFloorGate: entropyP0.floorGate,
         });
+        // GT#72: a chair assignment message that wakes NO worker is a stalled
+        // assignment in the making — the assignee never sees it (no dispatch,
+        // no ACK watch, no deadline). Deterministic, protocol-tag-driven fact:
+        // the message carries a [DEADLINE] tag yet the wake gate matched zero
+        // workers. Surface it as a parse note so the chair re-addresses the
+        // assignment with an @-token; review/checkpoint silence and paused
+        // dispatch are by design and never note.
+        if (
+          !humanGateActive
+          && !gatingTask.dispatchPaused
+          && chairGlobalMetaId
+          && (message.senderGlobalMetaId ?? '').trim().toLowerCase() === chairGlobalMetaId.trim().toLowerCase()
+          && /\[DEADLINE:/i.test(message.content ?? '')
+          && !decisions.some((decision) =>
+            members.find((candidate) => candidate.metabotId === decision.metabotId)?.role === 'worker')
+        ) {
+          try {
+            store.recordHostNote({
+              taskId: task.id,
+              kind: 'parse',
+              target: 'assignment wake',
+              dedupeKey: `parse_assignment_nowake:${task.id}:${message.id}`,
+              body:
+                `Message #${message.id} carries a [DEADLINE] assignment but wakes no member ` +
+                '(no @-mention, no full roster name, empty mention array) — the assignee will never see it. ' +
+                'Re-post the assignment addressing the member by their exact roster name with an @-token.',
+            });
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: deadline-bearing chair message #${message.id} wakes no worker — parse note recorded`,
+            );
+          } catch (noteError) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: assignment-wake note record failed: ` +
+              `${noteError instanceof Error ? noteError.message : String(noteError)}`,
+            );
+          }
+        }
         // Task #51 safety net: a chair decision means the chair owes this
         // message a response. The entry is cleared by chair speech (above) or
         // a completed chair turn (dispatchReplyTurn); if neither lands within
@@ -10178,8 +10440,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             });
             continue;
           }
-          if (task.mode !== 'chat' && (replyCountByKey.get(key) ?? 0) >= replyBudget) {
+          if (
+            task.mode !== 'chat'
+            && (replyCountByKey.get(key) ?? 0) >= replyBudget
+            && !replyBudgetChargedMessages.has(replyBudgetChargeKey(key, message.id))
+          ) {
             emitLog(`[GroupTaskDaemon] Task ${task.id}: bot ${decision.metabotId} reply budget exhausted; skipping`);
+            alertReplyBudgetExhausted(task, member, bot);
             continue;
           }
 

@@ -1440,6 +1440,88 @@ test('loop prevention: reply budget per (task, bot)', async () => {
   }
 });
 
+test('GT#72: the reply budget counts LOGICAL replies — a failed turn retry is never blocked by the budget it already charged', async () => {
+  // One-shot LLM failure: the first dispatch charges the message's logical
+  // reply and fails; the durable-queue retry is the SAME reply, so it must
+  // drain even at the cap. Pre-GT#72 the re-dispatch was itself charged
+  // (and the drain gate dropped it at the cap), stranding the trigger.
+  const h = await createHarness({ replyBudget: 1, chatError: 'llm hiccup' });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'retry-m1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot one',
+    });
+    await h.loop.runTick(); // dispatch 1: charged, LLM throws once, re-queued
+    assert.equal(h.sends.length, 0, 'nothing sent while the turn fails');
+
+    await h.loop.runTick(); // retry: already charged — passes the budget gate
+    assert.equal(h.sends.length, 1, 'the retry of a charged message is not budget-blocked');
+
+    // A NEW message is a NEW logical reply — still capped.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'retry-m2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot two',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'a new logical reply is still budget-capped');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#72: reply budget exhaustion raises one owner-visible anomaly (the chair is never silently muted)', async () => {
+  // Pre-GT#72 the exhaustion left nothing but a daemon log line — GT#72's
+  // chair sat muted for 12 minutes with a verified release candidate until a
+  // supervisor nudge rescued it. The anomaly rides the origin-session rail
+  // (the one that actually reacted) exactly once per (task, bot).
+  const milestones = [];
+  const h = await createHarness({
+    replyBudget: 1,
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-budget', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'budget-m1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot one',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'budget-m2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot two',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'still capped');
+
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'budget-m3-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot three',
+    });
+    await h.loop.runTick();
+
+    const budgetAnomalies = milestones.filter(
+      (m) => m.kind === 'anomaly' && m.subject === 'reply_budget_exhausted:bot:2',
+    );
+    assert.equal(budgetAnomalies.length, 1, 'exactly one exhaustion anomaly per (task, bot)');
+    assert.match(budgetAnomalies[0].message, /exhausted its per-task reply budget/);
+    assert.match(budgetAnomalies[0].message, /restart/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('chair reply does not count against the per-tick worker cap', async () => {
   const h = await createHarness({ maxRepliesPerTaskPerTick: 1 });
   try {
@@ -1818,15 +1900,17 @@ test('task #52 self-heal guard: a directive older than the last transition must 
 // ---------------------------------------------------------------------------
 
 test('GT-04 adjudication: pure verdicts across the historical message shapes', () => {
-  // Task #56 (msg 2815): standalone EXECUTING mid-body, descriptive REVIEW on
-  // the end line — the end-line tag no longer sinks the real instruction.
+  // Task #56 (msg 2815): standalone EXECUTING mid-body, REVIEW cited after
+  // prose on the end line — the end-line tag no longer sinks the real
+  // instruction. GT#72: the embedded citation is descriptive (it was never an
+  // instruction), not a rejected candidate — citations earn no audit noise.
   const v56 = adjudicateStatusDirectives(
     '分工如上，请 @Coder Bot 开工。\n[STATUS:EXECUTING]\n交付齐了之后我再 [STATUS:REVIEW]。',
     'planning',
   );
   assert.equal(v56.instruction, 'executing');
-  assert.deepEqual(v56.rejected, ['review']);
-  assert.deepEqual(v56.descriptive, []);
+  assert.deepEqual(v56.rejected, []);
+  assert.deepEqual(v56.descriptive, ['review']);
 
   // Task #52: end-line tag with trailing prose stays the instruction.
   const v52 = adjudicateStatusDirectives(
@@ -1879,12 +1963,22 @@ test('GT-04 adjudication: pure verdicts across the historical message shapes', (
   // Mixed: a legal instruction plus a same-status sibling — the sibling is a
   // no-op, not a "rejected" tag the group gets scolded about.
   const mixed = adjudicateStatusDirectives(
-    '重派说明如上。\n[STATUS:EXECUTING]\n此前误发的 [STATUS:REVIEW] 作废。',
+    '重派说明如上。\n[STATUS:EXECUTING]\n[STATUS:REVIEW]（前值，已作废）',
     'review',
   );
   assert.equal(mixed.instruction, 'executing');
   assert.deepEqual(mixed.rejected, []);
   assert.deepEqual(mixed.noOp, ['review']);
+
+  // GT#72: the same sibling cited MID-LINE (words on both sides) is a
+  // descriptive citation, not a no-op candidate.
+  const mixedCited = adjudicateStatusDirectives(
+    '重派说明如上。\n[STATUS:EXECUTING]\n此前误发的 [STATUS:REVIEW] 作废。',
+    'review',
+  );
+  assert.equal(mixedCited.instruction, 'executing');
+  assert.deepEqual(mixedCited.noOp, []);
+  assert.deepEqual(mixedCited.descriptive, ['review']);
 });
 
 test('Task #63: markdown-emphasis-wrapped standalone tag lines are instructions; quotes and prose stay descriptive', () => {
@@ -1926,6 +2020,71 @@ test('Task #63: markdown-emphasis-wrapped standalone tag lines are instructions;
   assert.deepEqual(vProse.descriptive, ['review']);
 });
 
+test('GT#72: a status tag EMBEDDED after prose on the end line is a citation, never the instruction', () => {
+  // The literal #4399 shape: a clock/plan line whose last token is the tag
+  // being cited as a FUTURE step ("release → [STATUS:REVIEW]。") — pre-GT#72
+  // this flipped the task to review 45 minutes early (mid-assembly) and
+  // suppressed three dispatches until dispatch_held notes reopened it.
+  const vClock = adjudicateStatusDirectives(
+    '两份关键交付同时核验完毕，全过。\n时钟：v1.0 ~02:30 → 小明复核 ~02:45 → 我实读放行 → [STATUS:REVIEW]。全组最后两棒。',
+    'executing',
+  );
+  assert.equal(vClock.instruction, null, 'the embedded end-line citation must NOT instruct');
+  assert.deepEqual(vClock.descriptive, ['review']);
+
+  // Task #70 shape: a quoted promise ending the message.
+  const v70 = adjudicateStatusDirectives(
+    '等我核完这批交付，然后我发 [STATUS:REVIEW]。',
+    'executing',
+  );
+  assert.equal(v70.instruction, null);
+  assert.deepEqual(v70.descriptive, ['review']);
+
+  // A tag that LEADS the final line (with explanation after it) stays the
+  // task #52 verdict shape — the GT#72 fix must not regress it.
+  const vLead = adjudicateStatusDirectives(
+    '✅ 全部交付核验完成。\n[STATUS:REVIEW] — 本任务全部完成，现等待验收。',
+    'executing',
+  );
+  assert.equal(vLead.instruction, 'review');
+
+  // Arrows before a LEADING tag are prose too — lead is judged on prefix
+  // emptiness, not punctuation flavor.
+  const vArrowLead = adjudicateStatusDirectives('汇总如上。\n[STATUS:EXECUTING] → 复工，按新分工。', 'review');
+  assert.equal(vArrowLead.instruction, 'executing');
+});
+
+test('GT#72 replay: the premature-flip clock line keeps the task in executing and records the citation note', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing, mid-assembly — the #72 state
+    insertGroupMessage(h.db, {
+      pinId: 'clock-line-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '两条裁决收到，chair 确认全部采纳。\n'
+        + '@Coder Bot v1.0 组装全部解锁，开工，[DEADLINE: 20m]。\n'
+        + '时钟：v1.0 ~02:30 → 复核 ~02:45 → 我实读放行 → [STATUS:REVIEW]。全组最后两棒。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'a cited future step must not flip the task — #72 never re-runs the premature flip',
+    );
+    // The chair learns immediately: the descriptive-citation note (task #63
+    // heritage) rides the parse channel so a REAL verdict mis-formatted this
+    // way re-sends a bare tag on its next turn instead of stalling.
+    const citeNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'parse' && note.target === 'status citation');
+    assert.equal(citeNotes.length, 1, 'the demoted end-line citation is reported to the chair');
+    assert.match(citeNotes[0].body, /not applied; task stays executing/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-line REVIEW, and the group hears why', async () => {
   const h = await createHarness();
   try {
@@ -1953,12 +2112,13 @@ test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-
       'applied transition is audited',
     );
     // Single-commander: the parse verdict is a host environment note for the
-    // chair (never an in-group post wearing the chair identity).
+    // chair (never an in-group post wearing the chair identity). GT#72: the
+    // end-line REVIEW sits after prose (a future promise), so it is
+    // descriptive — not a rejected sibling — and an applied instruction plus
+    // a descriptive citation records no correction note.
     const parseNotes = h.groupTaskStore.listPendingHostNotes(task.id)
       .filter((note) => note.kind === 'parse' && note.body.includes('message #'));
-    assert.equal(parseNotes.length, 1, 'the parse verdict was recorded for the chair');
-    assert.ok(parseNotes[0].body.includes('applied [STATUS:EXECUTING]'), 'note names the applied tag');
-    assert.ok(parseNotes[0].body.toLowerCase().includes('review'), 'note cites the rejected tag');
+    assert.equal(parseNotes.length, 0, 'an applied instruction plus a descriptive citation records no note');
   } finally {
     h.cleanup();
   }
@@ -4358,7 +4518,7 @@ test('round-4 correction-first: a 更正 message supersedes the matched delivera
     insertGroupMessage(h.db, {
       pinId: 'd2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot',
-      content: `链接更正：此前的 buzz 交付链接为无效路由。\n[DELIVERABLE] buzz 正确预览链接: https://openagentinternet.org/browser/pin/${REAL_PINID_2}（实测 HTTP 200）`,
+      content: `[CORRECTION] 链接更正：此前的 buzz 交付链接为无效路由。\n[DELIVERABLE] buzz 正确预览链接: https://openagentinternet.org/browser/pin/${REAL_PINID_2}（实测 HTTP 200）`,
     });
     await h.loop.runTick();
     rows = h.groupTaskStore.listDeliverables(task.id);
@@ -5413,7 +5573,7 @@ test('P0-8: member correction message records an integrity event (deduped by pin
     h.state.nowMs = Date.now();
     insertGroupMessage(h.db, {
       pinId: 'pin-correction-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '更正：我此前的链接无效，正确预览如下',
+      senderName: 'Coder Bot', content: '[CORRECTION] 更正：我此前的链接无效，正确预览如下',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
@@ -5422,9 +5582,29 @@ test('P0-8: member correction message records an integrity event (deduped by pin
     assert.equal(events[0].eventType, 'correction');
     assert.equal(events[0].msgPinId, 'pin-correction-1');
 
+    // GT#72: prose keywords (the old detector) never land on the ledger.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-prose-noise', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '设计中"纠正权民主化"是原则之一，第八节为诚实声明。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listIntegrityEvents(task.id).length, 1, 'prose keyword noise never records');
+
+    // [HONEST_REPORT] is the second declared kind.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-honest-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[HONEST_REPORT] 该 pinid 未发布成功，如实报告',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const allEvents = h.groupTaskStore.listIntegrityEvents(task.id);
+    assert.equal(allEvents.length, 2);
+    assert.equal(allEvents[1].eventType, 'honest_report');
+
     // same pin re-processed (retry) → no duplicate
     await h.loop.runTick();
-    assert.equal(h.groupTaskStore.listIntegrityEvents(task.id).length, 1);
+    assert.equal(h.groupTaskStore.listIntegrityEvents(task.id).length, 2, 'still correction + honest_report, no duplicates');
   } finally {
     h.cleanup();
   }
@@ -7032,7 +7212,14 @@ test('G-03: a chair body tag with no message-end instruction never transitions a
   }
 });
 
-test('task #52: a tag mid-line on the LAST line is the instruction even with prose around it', async () => {
+test('GT#72: a tag mid-line with words on BOTH sides is a citation — the note asks for a bare re-send', async () => {
+  // The old task #52 ruling accepted the whole last line as the instruction
+  // field ("终检完成 [STATUS:REVIEW] 请 owner 验收" applied). GT#72 withdrew
+  // that for tags EMBEDDED mid-line: the shape is indistinguishable from the
+  // #4399 clock-line citation that flipped a task to review 45 minutes early.
+  // Chairs still have two end shapes (leading the line, capping the line);
+  // an intended verdict written mid-line self-heals through the citation
+  // note on the next chair turn.
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
@@ -7045,9 +7232,12 @@ test('task #52: a tag mid-line on the LAST line is the instruction even with pro
     await h.loop.runTick();
     assert.equal(
       h.groupTaskStore.getTaskById(task.id).status,
-      'review',
-      'the message-END field is the whole last line — G-03\'s absolute-trailing form rejected this real verdict shape (task #52)',
+      'executing',
+      'an embedded mid-line tag never flips the task (GT#72 premature-flip lesson)',
     );
+    const citeNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'parse' && note.target === 'status citation');
+    assert.equal(citeNotes.length, 1, 'the citation note tells the chair to re-send a bare tag');
   } finally {
     h.cleanup();
   }
@@ -8959,7 +9149,9 @@ test('GT#70 ①: the chair playbook mandates backtick-wrapped status-tag citatio
     botRole: 'chair',
   });
   assert.match(prompt, /CITATIONS of status tags must be backtick-wrapped/);
-  assert.match(prompt, /A BARE tag landing at the end of your last line is parsed as an instruction and flips the task IMMEDIATELY/);
+  assert.match(prompt, /A bare end-positioned tag is parsed as an instruction and flips the task IMMEDIATELY/);
+  // GT#72: the tag-lead rule is taught in the same breath as the citation rule.
+  assert.match(prompt, /the tag must sit at an END of its line/);
 });
 
 test('GT#70 ③: a chair dispatch landing WHILE the planning LLM runs is success, not a burned attempt', async () => {
@@ -9151,6 +9343,219 @@ test('R7: a response created BEFORE a newer signal does not close it', async () 
       'the pre-signal message is not the closure pin',
     );
     assert.ok(h.chatCalls.some((call) => call.userMessage.includes('fresh question')), 'chair turn ran');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT#72 (observation round 1): chair bare-name assignment wakes + deadline
+// clause scoping + retroactive ACK satisfaction.
+// ---------------------------------------------------------------------------
+
+test('GT#72: contentAddressesRosterName — full names and unique short forms match; ambiguity and prose do not', () => {
+  const { contentAddressesRosterName } = require('../dist-electron/main/services/groupChatMentionUtils.js');
+  const roster = ['Twin Bot', 'Coder Bot', 'Builder阿码', '小明同学'];
+  assert.equal(contentAddressesRosterName('Builder阿码，第二棒正式开工 [DEADLINE: 60m]', 'Builder阿码', roster), true);
+  assert.equal(contentAddressesRosterName('builder阿码 交一下', 'Builder阿码', roster), true, 'case-insensitive');
+  // Unique trimmed forms — the task #72 short-name habits: drop the latin
+  // prefix ("阿码" for Builder阿码) or the trailing part ("小明" for 小明同学).
+  assert.equal(contentAddressesRosterName('阿码，预备作业即刻开工', 'Builder阿码', roster), true, 'unique suffix form addresses the member');
+  assert.equal(contentAddressesRosterName('小明，接评审棒', '小明同学', roster), true, 'unique prefix form addresses the member');
+  // A form that also addresses ANOTHER member is ambiguous — never a wake.
+  const ambiguousRoster = ['小明同学', '同学王'];
+  assert.equal(contentAddressesRosterName('同学们，开工', '小明同学', ambiguousRoster), false);
+  assert.equal(contentAddressesRosterName('同学们，开工', '同学王', ambiguousRoster), false);
+  // Latin forms need word boundaries — "co" of "Coder Bot" must not fire on
+  // ordinary prose words.
+  assert.equal(contentAddressesRosterName('please confirm the spec', 'Coder Bot', roster), false);
+  assert.equal(contentAddressesRosterName('Coder，接第二棒', 'Coder Bot', roster), true, 'whole-word prefix matches');
+  assert.equal(contentAddressesRosterName('无关正文', 'Builder阿码', roster), false);
+  assert.equal(contentAddressesRosterName('', 'Builder阿码', roster), false);
+});
+
+test('GT#72: a chair assignment by BARE full roster name wakes the assignee and arms the ACK watch', async () => {
+  // The #4344 replay: the chair assigned the second baton with a bare name
+  // (no @, empty mention array) and the assignee was never woken — rescued
+  // 7.5 minutes later only because a teammate happened to @ him.
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]); // executing; roster: Twin Bot (chair), Coder Bot (worker)
+    insertGroupMessage(h.db, {
+      pinId: 'bare-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '两条核验做完了。\nCoder Bot，第二棒正式开工 [DEADLINE: 60m]：字段级协议规范，以事实卡为硬约束。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.chatCalls.length, 1, 'the bare-named assignee got a turn');
+    assert.equal(h.sends.length, 1, 'the assignee answered in the group');
+    assert.ok(
+      logs.some((line) => line.includes('assignment to Coder Bot (message #') && line.includes('waiting for [WORKING] ACK')),
+      'the ACK watch armed for the bare-named assignee',
+    );
+    // A worker sending the same bare name does NOT wake anyone (loose
+    // matching is chair-only — worker chatter stays @-gated).
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'worker-bare-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'Twin Bot 我交付完了',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'a worker\'s bare name never wakes the chair');
+
+    // The bare-name wake is gated to ASSIGNMENT-SHAPED chair messages: a
+    // name cited in a deadline-less round-up (task #51's liveness-notice
+    // shape) wakes nobody.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'notice-bare-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'ℹ️ Coder Bot is in a long-running turn; no action needed.',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'a bare name in a deadline-less chair notice never wakes the cited worker');
+
+    // The #4344 shape proper: SHORT-FORM assignment ("Coder" for "Coder Bot")
+    // on a deadline-bearing chair message wakes the assignee.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'shortname-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'Coder，第一落 [DEADLINE: 60m]：字段级协议规范，即刻开工。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 2, 'the short-form assignment reached its assignee');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#72: a deadline-bearing chair message that wakes NO worker records the assignment-wake note', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'nowake-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      // Short form "Coder" is neither the roster name "Coder Bot" nor an @-token.
+      content: '阿码，预备作业即刻开工，[DEADLINE: 30m]，交付形式 simplenote 落链。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.chatCalls.length, 0, 'nobody wakes for a short-form assignment');
+    const notes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'parse' && note.target === 'assignment wake');
+    assert.equal(notes.length, 1, 'the stalled assignment is reported to the chair');
+    assert.match(notes[0].body, /wakes no member/);
+    assert.match(notes[0].body, /exact roster name/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#72: deadline arming is scoped to the member\'s own dispatch clause (no cross-member bleed)', async () => {
+  // The #4347 replay: one chair message carried 啊明's [DEADLINE: 45m] AND a
+  // deadline-less clause for another worker — whole-message parsing armed the
+  // WRONG member's clock with 45m. Clause scoping must read only the ACKing
+  // member's own clause.
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]); // Coder Bot + Designer Bot
+    insertGroupMessage(h.db, {
+      pinId: 'multi-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '调研核验完成。\n'
+        + '@Designer Bot，下一棒：PRD v0.8 组稿预备，现在开工，[DEADLINE: 45m]。\n'
+        + '@Coder Bot 这三点随你第一落一起落进 schema。\n'
+        + '当前时钟：组稿 02:12。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick(); // both workers dispatched
+
+    // Coder Bot ACKs — its own clause carries NO deadline: nothing armed.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'coder-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：schema 增补，预计 20 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`) ?? null,
+      null,
+      'Coder Bot ACKs a deadline-less clause — no clock armed (no 45m bleed)',
+    );
+
+    // Designer Bot ACKs — its own clause carries the 45m: armed.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'designer-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单：组稿预备，预计 40 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:3`);
+    assert.ok(armed, 'Designer Bot ACKs its own [DEADLINE: 45m] clause — clock armed');
+    assert.match(JSON.parse(armed).taskDescription ?? '', /组稿预备/);
+    assert.ok(logs.some((line) => line.includes('armed the chair-stated deadline: 45m')));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#72: an ACK that lands just BEFORE the assignment\'s watch arming satisfies it retroactively', async () => {
+  // The #4352/#4353 replay: the worker ACKed the merge assignment, and 47
+  // seconds later a chair re-mention armed a fresh ACK watch that no ACK
+  // would ever satisfy — the deadline never ticked.
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]);
+    // 1. Initial assignment — arms a watch, gets ACKed normally.
+    insertGroupMessage(h.db, {
+      pinId: 'merge-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 组稿预备，现在开工。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'merge-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：组稿预备，预计 30 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    // 2. Chair RE-mentions the same assignment with a deadline — the watch
+    // would arm here, but the member already ACKed seconds ago.
+    h.state.nowMs += 20_000;
+    insertGroupMessage(h.db, {
+      pinId: 'merge-reassign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot，下一棒：PRD v0.8 组稿预备 [DEADLINE: 45m]，单一 Markdown 文件十章节。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.ok(
+      logs.some((line) => line.includes('ACKed [WORKING] just before assignment') && line.includes('retroactively satisfied')),
+      'the watch recognized the just-prior ACK',
+    );
+    assert.ok(
+      logs.some((line) => line.includes('retroactively satisfied, armed the chair-stated deadline: 45m')),
+      'the deadline armed from the re-mention assignment',
+    );
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
+    assert.ok(armed, 'expected_delivery armed despite the ACK-before-watch race');
   } finally {
     h.cleanup();
   }
