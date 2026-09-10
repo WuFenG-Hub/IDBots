@@ -26,6 +26,18 @@ export const EMPTY_TERMINAL_TURN_CONTINUE_PROMPT =
   'The previous turn ended without producing any output or tool action. Continue the task from where you left off and perform the next step.';
 
 /**
+ * Cue fed back to the model when a turn was cut by the output-token ceiling
+ * (turn/end reason `max-tokens`) and is auto-continued. Covers both shapes of
+ * the truncation: a mid-reply cut (partial answer text) and a reasoning-only
+ * burnout where thinking consumed the whole budget before any text or tool
+ * call (the cw-86812c4f stall). Keep the reasoning short and deliver the
+ * answer — otherwise a ceiling that thinking alone can exhaust truncates the
+ * continuation too.
+ */
+export const TRUNCATED_TURN_CONTINUE_PROMPT =
+  'Your previous response was cut off by the output token limit. Continue from where you left off with minimal further reasoning and deliver the complete answer.';
+
+/**
  * Provider failure codes that mean "the request never got answered for
  * environmental reasons" — network unreachable (TRANSPORT), request timed out
  * (TIMEOUT), provider 429/5xx (RATE_LIMIT/SERVER), or a stream that closed
