@@ -9830,6 +9830,24 @@ if (!gotTheLock) {
     });
   });
 
+  // 0.1.5 plan mode: sidebar Plan chip toggles the DSH session's plan mode
+  // (dsh-plan-mode ctx.planMode.set via idbots/plan-mode/set). Returns the
+  // controller outcome plus the current { active, pending? } view; ok:false
+  // when no live kernel owns the session.
+  ipcMain.handle('cowork:plan-mode:set', async (_event, options: { sessionId: string; active: boolean }) => {
+    return withSqliteRecovery('cowork:plan-mode:set', async () => {
+      try {
+        return await getCoworkRunner().dshSetPlanMode(options.sessionId, options.active === true);
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          ok: false,
+          reason: error instanceof Error ? error.message : 'Failed to set plan mode',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:get', async (_event, sessionId: string) => {
     return withSqliteRecovery('cowork:session:get', async () => {
       try {

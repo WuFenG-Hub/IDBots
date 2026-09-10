@@ -450,6 +450,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:setModel', options),
     renameSession: (options: { sessionId: string; title: string }) =>
       ipcRenderer.invoke('cowork:session:rename', options),
+    setPlanMode: (options: { sessionId: string; active: boolean }) =>
+      ipcRenderer.invoke('cowork:plan-mode:set', options),
     getSession: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:get', sessionId),
     refreshPeerProfile: (input: { sessionId: string; force?: boolean }) =>

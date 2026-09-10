@@ -248,6 +248,10 @@ export interface DshUserQuestionAsk {
     header?: string
     options?: Array<{ label: string; description?: string }>
     multiSelect?: boolean
+    /** 0.1.5 plan review: full plan markdown attached by exit_plan_mode. */
+    detail?: string
+    /** Wire passthrough (e.g. { kind: 'plan-review' }); not rendered today. */
+    intent?: Record<string, unknown>
   }>
 }
 

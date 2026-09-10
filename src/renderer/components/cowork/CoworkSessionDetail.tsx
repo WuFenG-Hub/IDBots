@@ -57,6 +57,7 @@ import {
   XMarkIcon,
   PaperAirplaneIcon,
   SparklesIcon,
+  ClipboardDocumentListIcon,
 } from '@heroicons/react/24/outline';
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
@@ -2616,6 +2617,35 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [hasTwinBot, setHasTwinBot] = useState<boolean | null>(null);
   const [isRetiringWelcome, setIsRetiringWelcome] = useState(false);
   const [retireWelcomeError, setRetireWelcomeError] = useState<string | null>(null);
+  // 0.1.5 plan mode chip: local mirror of the DSH session's plan state.
+  // The kernel-side value is not yet pushed to the renderer, so the chip
+  // initializes inactive and syncs from the toggle RPC's returned
+  // { active, pending } view (kernel state survives on the session log).
+  const [planModeState, setPlanModeState] = useState<{ active: boolean; pending: boolean }>({ active: false, pending: false });
+  const [planModeBusy, setPlanModeBusy] = useState(false);
+  const planModeSessionId = currentSession?.id ?? null;
+  useEffect(() => {
+    setPlanModeState({ active: false, pending: false });
+    setPlanModeBusy(false);
+  }, [planModeSessionId]);
+  const handlePlanModeToggle = useCallback(async () => {
+    if (!planModeSessionId || planModeBusy) return;
+    setPlanModeBusy(true);
+    try {
+      const response = await window.electron.cowork.setPlanMode({
+        sessionId: planModeSessionId,
+        active: !planModeState.active,
+      });
+      if (response?.ok && response.plan) {
+        const effective = response.plan.pending ?? response.plan.active;
+        setPlanModeState({ active: effective === true, pending: response.result === 'queued' });
+      }
+    } catch {
+      // Keep the prior chip state; the next toggle retries the RPC.
+    } finally {
+      setPlanModeBusy(false);
+    }
+  }, [planModeSessionId, planModeBusy, planModeState.active]);
   const [fetchedPeerAvatar, setFetchedPeerAvatar] = useState<string | null>(null);
   const [isProcessingRefund, setIsProcessingRefund] = useState(false);
   const [refundActionError, setRefundActionError] = useState<string | null>(null);
@@ -4005,6 +4035,22 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 disableControls={resolvedExecutionMode === 'sandbox'}
               />
               <TodoPanel messages={currentSession.messages} />
+              <button
+                type="button"
+                onClick={() => { void handlePlanModeToggle(); }}
+                disabled={planModeBusy}
+                title={i18nService.t('coworkPlanModeHint')}
+                className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  planModeState.active
+                    ? 'border-blue-400/70 dark:border-blue-500/60 bg-blue-500/10 text-blue-600 dark:text-blue-400'
+                    : 'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset'
+                }`}
+              >
+                <ClipboardDocumentListIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                <span className="font-medium">
+                  {i18nService.t('coworkPlanMode')}{planModeState.pending ? '…' : ''}
+                </span>
+              </button>
               <PermissionModeSelector
                 sessionId={currentSession.id}
                 currentMode={currentSession.permissionMode ?? 'default'}

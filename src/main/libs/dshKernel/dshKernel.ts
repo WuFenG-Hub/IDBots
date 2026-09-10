@@ -322,6 +322,20 @@ export class DshKernel {
     return this.client.request('idbots/compact', { sessionId: dshSessionId })
   }
 
+  /**
+   * Plan-mode switch (dsh-plan-mode ctx.planMode.set). Must land on the
+   * kernel that owns the live agent — the result reports the controller
+   * outcome ('committed' | 'queued' | 'cancelled' | 'noop') plus the
+   * controller's current { active, pending? } view.
+   */
+  async planModeSet(
+    dshSessionId: string,
+    active: boolean,
+  ): Promise<{ ok: boolean; result?: string; plan?: { active: boolean; pending?: boolean } }> {
+    this.requireClient()
+    return this.client.request('idbots/plan-mode/set', { sessionId: dshSessionId, active })
+  }
+
   /** Answer a pending ask_user_question bridged from the runtime. */
   async respondAsk(
     id: string,

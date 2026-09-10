@@ -725,6 +725,26 @@ export class DshTurnHub {
     return kernel.usageProjection(dshId)
   }
 
+  /**
+   * Plan-mode switch for a cowork session. Unlike the read-only
+   * persistence-backed RPCs this must reach the kernel that owns the live
+   * agent (ctx.planMode.set mutates session state), so there is no
+   * anyRunningKernel fallback and no prewarm — a session whose runtime was
+   * reaped has no live mode to switch.
+   */
+  async planModeSet(
+    coworkSessionId: string,
+    active: boolean,
+    opts?: { dshSessionId?: string },
+  ): Promise<{ ok: boolean; result?: string; plan?: { active: boolean; pending?: boolean }; reason?: string }> {
+    const dshId = this.dshByCowork.get(coworkSessionId)
+      ?? this.pinnedDshIds.get(coworkSessionId)
+      ?? opts?.dshSessionId
+    const kernel = this.kernelForDsh(dshId)
+    if (!kernel || !dshId) return { ok: false, reason: 'DSH kernel not running for this session' }
+    return kernel.planModeSet(dshId, active)
+  }
+
   async respondApproval(id: string, outcome: 'allowed-once' | 'rejected'): Promise<void> {
     const kernel = this.askKernelById.get(id) ?? this.firstRunningKernel()
     if (!kernel) throw new Error('DshTurnHub: runtime not started')

@@ -7430,6 +7430,17 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Plan-mode toggle for DSH sessions (sidebar Plan chip). Resolves the
+   * kernel-facing dsh id the same way the read-only panel queries do, then
+   * switches through the hub — which must reach the kernel owning the live
+   * agent, so a session whose runtime was reaped reports ok:false.
+   */
+  dshSetPlanMode(sessionId: string, active: boolean): Promise<{ ok: boolean; result?: string; plan?: { active: boolean; pending?: boolean }; reason?: string }> {
+    if (!this.dshTurnHub) return Promise.resolve({ ok: false, reason: 'DSH turn hub unavailable' })
+    return this.dshTurnHub.planModeSet(sessionId, active, this.dshPanelReadOptions(sessionId))
+  }
+
+  /**
    * One cowork turn on the DSH runtime: resolve the provider route from the
    * current API config, run the turn through the shared hub, and land every
    * event through the same store writes and runner events the Claude path
@@ -7902,6 +7913,10 @@ export class CoworkRunner extends EventEmitter {
               ...(q.header !== undefined ? { header: q.header } : {}),
               ...(Array.isArray(q.options) ? { options: q.options } : { options: [] }),
               ...(q.multiSelect !== undefined ? { multiSelect: q.multiSelect } : {}),
+              // 0.1.5 plan review: exit_plan_mode carries the full plan
+              // markdown on question.detail; the modal renders it above the
+              // options so the user can read what they are approving.
+              ...(typeof q.detail === 'string' && q.detail.length > 0 ? { detail: q.detail } : {}),
             }));
             const wireAnswersFromModal = (modalAnswers: Record<string, unknown> | undefined) =>
               (ask.questions ?? []).map((q) => {
@@ -7909,10 +7924,20 @@ export class CoworkRunner extends EventEmitter {
                 if (typeof raw !== 'string' || raw.trim().length === 0) {
                   return { id: q.id, selected: [], custom: 'The user declined to answer.' };
                 }
-                return {
-                  id: q.id,
-                  selected: raw.split('|||').map((v) => v.trim()).filter(Boolean),
-                };
+                // Segments matching one of the question's option labels go to
+                // selected; anything else is free-form feedback (the plan-mode
+                // review loop relies on custom carrying the user's revision
+                // notes back to the model).
+                const labels = new Set((Array.isArray(q.options) ? q.options : []).map((o) => o?.label).filter((v) => typeof v === 'string'));
+                const selected: string[] = [];
+                const customParts: string[] = [];
+                for (const segment of raw.split('|||').map((v) => v.trim()).filter(Boolean)) {
+                  if (labels.has(segment)) selected.push(segment);
+                  else customParts.push(segment);
+                }
+                return customParts.length > 0
+                  ? { id: q.id, selected, custom: customParts.join(' ') }
+                  : { id: q.id, selected };
               });
             // Full-trust parity: questions explicitly marked low-risk
             // (single-select, header 'auto-confirm') answer themselves with

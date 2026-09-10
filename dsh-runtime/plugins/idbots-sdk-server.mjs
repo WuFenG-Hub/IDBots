@@ -257,6 +257,14 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       this.idbotsPersistence = persistenceCtx.sessionPersistence
       return () => { this.idbotsPersistence = null }
     })
+    // Plan-mode controller (dsh-plan-mode): the host flips session mode
+    // through ctx.planMode.set(...). Reactive inject keeps compositions
+    // without plan-mode mountable; the RPC reports unavailable then.
+    this.idbotsPlanMode = null
+    ctx.inject(['planMode'], (planModeCtx) => {
+      this.idbotsPlanMode = planModeCtx.planMode
+      return () => { this.idbotsPlanMode = null }
+    })
   }
 
   liveAgent(sessionId) {
@@ -283,10 +291,11 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'idbots/subagent/interrupt': return this.idbotsSubagentInterrupt(params)
       case 'idbots/usage': return this.idbotsUsage(params)
       case 'idbots/compact': return this.idbotsCompact(params)
+      case 'idbots/plan-mode/set': return this.idbotsPlanModeSet(params)
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'session/dispose', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/subagent/interrupt', 'idbots/usage', 'idbots/compact'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'session/dispose', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/subagent/interrupt', 'idbots/usage', 'idbots/compact', 'idbots/plan-mode/set'],
         }
       }
       default: return super.handleRequest(method, params)
@@ -915,7 +924,25 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       // null when the composition omits them, same graceful-absence contract.
       sessionStats: snapshot.values.sessionStats ?? null,
       turnOutline: snapshot.values.turnOutline ?? null,
+      // 0.1.5 plan-mode wire view ({ active, pending }) for the sidebar
+      // mode chip; null when the composition omits dsh-plan-mode.
+      plan: snapshot.values.plan ?? null,
     }
+  }
+
+  /**
+   * Host-driven plan-mode switch (dsh-plan-mode ctx.planMode.set). Returns
+   * { ok, result } where result is the controller outcome: 'committed'
+   * (logged now), 'queued' (applies at the next in-turn pre-step),
+   * 'cancelled' (opposite pending selection cleared), or 'noop'.
+   */
+  idbotsPlanModeSet({ sessionId, active } = {}) {
+    if (this.idbotsPlanMode === null) {
+      throw new Error('idbots-sdk-server: plan-mode service not composed in this runtime')
+    }
+    const agent = this.liveAgent(sessionId)
+    const result = this.idbotsPlanMode.set(agent, active === true)
+    return { ok: true, result, plan: this.idbotsPlanMode.get(agent) }
   }
 
   /**

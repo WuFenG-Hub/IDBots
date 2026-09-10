@@ -1094,6 +1094,7 @@ interface IElectronAPI {
       modelProvider?: string | null;
     }) => Promise<{ success: boolean; model?: string | null; error?: string }>;
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
+    setPlanMode: (options: { sessionId: string; active: boolean }) => Promise<{ ok: boolean; result?: string; plan?: { active: boolean; pending?: boolean }; reason?: string }>;
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     refreshPeerProfile: (input: { sessionId: string; force?: boolean }) => Promise<{ success: boolean; changed?: boolean; error?: string }>;
     getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkMessagePage; error?: string }>;
