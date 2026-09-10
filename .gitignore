@@ -390,6 +390,7 @@ man_base_data_pebble/
 !tests/coworkPermissionOverlay.test.tsx
 !tests/orchestratorPermissionRelay.test.ts
 !tests/opencodeGatewayHeaders.test.mjs
+!tests/agentpediaReplayVectors.test.mjs
 
 # Local extracted skill packages and tool output artifacts (runtime-generated)
 /.idbots-extract/
