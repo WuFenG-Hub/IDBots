@@ -31,6 +31,8 @@
 //     model: string,                     //   model for the auxiliary search call
 //   },                                   //   mounted once the host has seen a DeepSeek provider
 //   workspace?: { cwd: string },       // mounts DSH-native bash/fs tools at cwd
+//   spill?: { maxInlineBytes?: number }, // 0.1.5 spill-policy cap (default 8192;
+//                                        // workspace compositions only)
 //   subagentModelSelection?: {          // child-delegation model choice (0.1.2):
 //     enabled?: boolean,                //   default true; allowlist = every configured
 //   },                                  //   provider/model route (the provider table is
@@ -289,6 +291,10 @@ export function generateRuntimeConfig(input) {
       name: '@deepseek-ai/dsh-compaction-basic',
       config: { thresholdRatio: 0.8, retainRatio: 0.16, maxTokens: 8192, compactionRetries: 1 },
     },
+    // 0.1.5 tool-result pruner: model-free head/middle/tail pruning of
+    // tool-result surface nodes during compaction (defaults 8192/4096/1024
+    // chars). compaction-basic picks the service up via ctx.get when mounted.
+    { id: 'tool-result-pruner', name: '@deepseek-ai/dsh-compaction-tool-result-pruner' },
     {
       id: 'persistence',
       name: '@deepseek-ai/dsh-session-persistence-jsonl',
@@ -385,6 +391,27 @@ export function generateRuntimeConfig(input) {
     ...(input.workspace ? [
       { id: 'shell-env', name: '@deepseek-ai/dsh-shell-env' },
       { id: 'subprocess', name: '@deepseek-ai/dsh-subprocess-local' },
+      // 0.1.5 spill trio (workspace compositions only — the model reads a
+      // spill file back through the fs/bash tools mounted below). All-text
+      // tool results over maxInlineBytes land in a session-scoped spill file
+      // with a bounded head/tail preview + path in history; the policy's
+      // cap sits UNDER idbots-tool-result-shaping's 20K so mid-size results
+      // spill recoverably while shaping stays the hard backstop for mixed
+      // content and pathological sizes.
+      {
+        id: 'spill-local',
+        name: '@deepseek-ai/dsh-spill-local',
+        config: { root: join(input.sessionRoot, 'spill') },
+      },
+      {
+        id: 'spill-policy',
+        name: '@deepseek-ai/dsh-spill-policy',
+        config: {
+          maxInlineBytes: Number.isFinite(input.spill?.maxInlineBytes) && input.spill.maxInlineBytes > 0
+            ? input.spill.maxInlineBytes
+            : 8192,
+        },
+      },
       {
         id: 'bash',
         name: '@deepseek-ai/dsh-bash-local',
