@@ -4518,7 +4518,7 @@ test('round-4 correction-first: a 更正 message supersedes the matched delivera
     insertGroupMessage(h.db, {
       pinId: 'd2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot',
-      content: `链接更正：此前的 buzz 交付链接为无效路由。\n[DELIVERABLE] buzz 正确预览链接: https://openagentinternet.org/browser/pin/${REAL_PINID_2}（实测 HTTP 200）`,
+      content: `[CORRECTION] 链接更正：此前的 buzz 交付链接为无效路由。\n[DELIVERABLE] buzz 正确预览链接: https://openagentinternet.org/browser/pin/${REAL_PINID_2}（实测 HTTP 200）`,
     });
     await h.loop.runTick();
     rows = h.groupTaskStore.listDeliverables(task.id);
@@ -5573,7 +5573,7 @@ test('P0-8: member correction message records an integrity event (deduped by pin
     h.state.nowMs = Date.now();
     insertGroupMessage(h.db, {
       pinId: 'pin-correction-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '更正：我此前的链接无效，正确预览如下',
+      senderName: 'Coder Bot', content: '[CORRECTION] 更正：我此前的链接无效，正确预览如下',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
     await h.loop.runTick();
@@ -5582,9 +5582,29 @@ test('P0-8: member correction message records an integrity event (deduped by pin
     assert.equal(events[0].eventType, 'correction');
     assert.equal(events[0].msgPinId, 'pin-correction-1');
 
+    // GT#72: prose keywords (the old detector) never land on the ledger.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-prose-noise', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '设计中"纠正权民主化"是原则之一，第八节为诚实声明。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listIntegrityEvents(task.id).length, 1, 'prose keyword noise never records');
+
+    // [HONEST_REPORT] is the second declared kind.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-honest-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[HONEST_REPORT] 该 pinid 未发布成功，如实报告',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const allEvents = h.groupTaskStore.listIntegrityEvents(task.id);
+    assert.equal(allEvents.length, 2);
+    assert.equal(allEvents[1].eventType, 'honest_report');
+
     // same pin re-processed (retry) → no duplicate
     await h.loop.runTick();
-    assert.equal(h.groupTaskStore.listIntegrityEvents(task.id).length, 1);
+    assert.equal(h.groupTaskStore.listIntegrityEvents(task.id).length, 2, 'still correction + honest_report, no duplicates');
   } finally {
     h.cleanup();
   }

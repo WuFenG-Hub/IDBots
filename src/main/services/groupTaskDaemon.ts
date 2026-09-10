@@ -96,8 +96,8 @@ import {
   extractLocalFilePaths,
   parseWorkingAck,
   hasStandbyMarker,
-  isIntegrityDeclaration,
-  isCorrectionText,
+  parseIntegrityDeclaration,
+  isCorrectionDeclaration,
   type ParsedDeliverable,
 } from './groupTaskDeliverableParser';
 import { buildMetafileUri } from './serviceDeliveryArtifacts.js';
@@ -4485,7 +4485,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `(${rejected.map((candidate) => candidate.note ?? 'invalid').join('; ')})`,
         );
       }
-      const isCorrection = isCorrectionText(parseContent);
+      const isCorrection = isCorrectionDeclaration(parseContent);
       for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
         const candidate = candidates[candidateIndex];
         if (!candidate.valid) continue; // placeholder/truncated/example → never recorded
@@ -4804,21 +4804,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
-    // P0-8: public integrity declarations (honest correction/report) are
-    // recorded into the acceptance record. Dedupe by message pin.
-    if (!message.senderSuspect && message.pinId && isIntegrityDeclaration(content)) {
+    // P0-8 → GT#72: public integrity declarations are EXPLICIT protocol tags
+    // ([CORRECTION] / [HONEST_REPORT], line-leading) recorded into the
+    // acceptance record; the old prose-keyword guess filled task #72's ledger
+    // with 48 near-all-false rows. Dedupe by message pin.
+    const integrityKind = parseIntegrityDeclaration(content);
+    if (!message.senderSuspect && message.pinId && integrityKind != null) {
       try {
         if (!store.hasIntegrityEventWithMsgPin(task.id, message.pinId)) {
-          const isCorrection = isCorrectionText(content);
           store.addIntegrityEvent({
             taskId: task.id,
             msgPinId: message.pinId,
             authorGlobalmetaid: message.senderGlobalMetaId,
-            eventType: isCorrection ? 'correction' : 'honest_report',
+            eventType: integrityKind,
             detail: content.slice(0, 500),
           });
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: recorded integrity ${isCorrection ? 'correction' : 'report'} from ${message.senderName}`,
+            `[GroupTaskDaemon] Task ${task.id}: recorded integrity ${integrityKind === 'correction' ? 'correction' : 'report'} from ${message.senderName}`,
           );
         }
       } catch (error) {

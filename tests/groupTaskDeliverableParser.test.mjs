@@ -345,13 +345,21 @@ test('P2-2: computeWorkingHeartbeatUntil adds the ETA plus the grace window', ()
 // P0-8: integrity declarations
 // ---------------------------------------------------------------------------
 
-test('P0-8: isIntegrityDeclaration recognizes honest correction language', () => {
-  const { isIntegrityDeclaration } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
-  assert.equal(isIntegrityDeclaration('更正：我此前的链接无效，正确预览如下'), true);
-  assert.equal(isIntegrityDeclaration('如实说明：该 pinid 未发布成功'), true);
-  assert.equal(isIntegrityDeclaration('Correction: the previous URI was invalid'), true);
-  assert.equal(isIntegrityDeclaration('honest report: the pin was not published'), true);
-  assert.equal(isIntegrityDeclaration('普通消息没有任何关键词'), false);
+test('GT#72: integrity declarations are line-leading protocol tags, never prose keywords', () => {
+  const { parseIntegrityDeclaration, isCorrectionDeclaration } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  assert.equal(parseIntegrityDeclaration('[CORRECTION] 更正：我此前的链接无效，正确预览如下'), 'correction');
+  assert.equal(parseIntegrityDeclaration('**[CORRECTION]** 上一版取值有误，以本条为准'), 'correction', 'emphasis-wrapped tag counts');
+  assert.equal(parseIntegrityDeclaration('[HONEST_REPORT] 该 pinid 未发布成功，如实报告'), 'honest_report');
+  assert.equal(isCorrectionDeclaration('[CORRECTION] 链接勘误'), true);
+  // Prose keywords are NEVER declarations (task #72: 48 noise rows from this).
+  assert.equal(parseIntegrityDeclaration('更正：我此前的链接无效，正确预览如下'), null, 'prose correction words do not count');
+  assert.equal(parseIntegrityDeclaration('设计中"纠正权民主化"是原则之一'), null, 'design-principle phrasing does not count');
+  assert.equal(parseIntegrityDeclaration('第八节为诚实声明'), null);
+  assert.equal(parseIntegrityDeclaration('Correction: the previous URI was invalid'), null, 'English prose words do not count either');
+  // Citation shapes stay citations.
+  assert.equal(parseIntegrityDeclaration('发 `[CORRECTION]` 即可入账'), null, 'backticked tag is a citation');
+  assert.equal(parseIntegrityDeclaration('示例:\n```\n[CORRECTION]\n```\n如上'), null, 'fenced tag is documentation');
+  assert.equal(parseIntegrityDeclaration('先说结论，再发 [CORRECTION] 标签'), null, 'mid-line tag is prose');
 });
 
 // ---------------------------------------------------------------------------

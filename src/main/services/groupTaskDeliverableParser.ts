@@ -452,18 +452,45 @@ export function hasStandbyMarker(content: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// P0-8: integrity declarations (honest self-correction)
+// P0-8 → GT#72: integrity declarations (explicit protocol tags only)
 // ---------------------------------------------------------------------------
 
-/** True when the message publicly declares a correction or honest report. */
-const CORRECTION_RE = /更正|修正|纠正|补正|勘误|以…?为准|以此为准|请以此为准|\bcorrection\b|\berrata\b|\bcorrigendum\b|\brevised\b|\bsupersede[sd]?\b|take this as (?:the )?(?:canonical|correct)|this is the correct/i;
-const HONEST_REPORT_RE = /诚实|如实|\bhonest report\b|\bto be clear\b|\bhonestly\b/i;
-export function isIntegrityDeclaration(content: string): boolean {
-  const text = String(content ?? '');
-  return CORRECTION_RE.test(text) || HONEST_REPORT_RE.test(text);
+/**
+ * The original prose-keyword detection (更正/修正/纠正/勘误/诚实/如实/…) was
+ * hardcoded single-language intent matching and misfired on ordinary task
+ * language — task #72's ledger absorbed 48 events in 110 minutes, nearly all
+ * false positives ("纠正权民主化" as a design principle, "诚实声明" as section
+ * copy). Declarations are now explicit ASCII protocol tags, line-leading like
+ * [DELIVERABLE]:
+ *   [CORRECTION]    — the sender publicly corrects or supersedes their own
+ *                     earlier statement/artifact (drives the deliverable
+ *                     supersede-in-place aggregation);
+ *   [HONEST_REPORT] — the sender voluntarily puts a limit or failure on the
+ *                     record (could not verify X, the pin never published).
+ * Mid-line mentions and backticked/fenced tags are citations, never
+ * declarations — the same shape discipline as every other tag family.
+ */
+export type IntegrityDeclarationKind = 'correction' | 'honest_report';
+
+const INTEGRITY_TAG_LED_RE = /^[\s*_]*\[(correction|honest_report)\]/i;
+
+function stripIntegrityQuotedCode(content: string): string {
+  return String(content ?? '')
+    .replace(/```[\s\S]*?(?:```|$)/g, '')
+    .replace(/`[^`\n]*`/g, '');
 }
 
-/** True when the message is a correction (not merely an honest failure report). */
-export function isCorrectionText(content: string): boolean {
-  return CORRECTION_RE.test(String(content ?? ''));
+/** The message's declared integrity kind, or null when it carries no tag line. */
+export function parseIntegrityDeclaration(content: string | null | undefined): IntegrityDeclarationKind | null {
+  const text = stripIntegrityQuotedCode(String(content ?? ''));
+  for (const line of text.split('\n')) {
+    const match = INTEGRITY_TAG_LED_RE.exec(line.trimStart());
+    if (match) return match[1].toLowerCase() as IntegrityDeclarationKind;
+  }
+  return null;
+}
+
+/** True when the message declares a correction of the sender's own earlier output. */
+export function isCorrectionDeclaration(content: string | null | undefined): boolean {
+  return parseIntegrityDeclaration(content) === 'correction';
 }
