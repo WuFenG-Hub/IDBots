@@ -208,26 +208,6 @@ export class DshEventMapper {
         break
       }
 
-      case 'reasoning-chunks': {
-        const texts = Array.isArray(data.texts) ? data.texts : []
-        const piece = texts.filter((part: unknown) => typeof part === 'string').join('')
-        if (piece.length > 0) {
-          this.reasoningBlockLive = true
-          this.reasoningFromChunks = true
-          this.reasoningFromDeltas = true
-          this.appendReasoning(actions, piece)
-        }
-        break
-      }
-
-      case 'tool-call-chunks': {
-        // DSH web-stream mirror of the tool-call blocks. Routes that surface
-        // only this stream (no assistant/chunk block-start) still get the
-        // commentary conversion at the earliest possible moment.
-        this.convertRidingTextToThinking(actions)
-        break
-      }
-
       case 'assistant/message': {
         this.finalizeAssistantMessage(actions, data)
         const usage = this.withRoute(data.usage ?? undefined)

@@ -156,8 +156,8 @@ const main = async () => {
   const imageFollowUp = seen.filter((r) => JSON.stringify(r.body?.messages ?? []).includes('data:image/png;base64,')).at(-1)
   record('follow-up provider request carries the image_url data URL', Boolean(imageFollowUp))
 
-  // Turn 3b: REGRESSION — an image the attachment store rejects (here: 2100px
-  // on a side, over the 2000px limit) must degrade to an omission note and the
+  // Turn 3b: REGRESSION — an image the attachment store rejects (here: 8200px
+  // on a side, over the 8192px limit) must degrade to an omission note and the
   // turn MUST still end. Before the fix, the store's AttachmentError escaped
   // idbotsToolRespond after the pending entry was already deleted, so the
   // model's tool call never settled and the session wedged permanently (a
@@ -166,7 +166,7 @@ const main = async () => {
   await client.prompt(sessionId, [{ type: 'text', text: 'CALL_HOST_TOOL_IMAGE please' }])
   const priorRequestIds = new Set([request.params.id, request2.params.id, request3.params.id])
   const request3b = await waitFor((n) => n.method === 'idbots/tool/request' && !priorRequestIds.has(n.params.id))
-  const oversizePng = makePngWithSize(2100, 100)
+  const oversizePng = makePngWithSize(8200, 100)
   await client.request('idbots/tool/respond', {
     id: request3b.params.id,
     ok: true,

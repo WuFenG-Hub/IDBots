@@ -1,13 +1,15 @@
-// Persistence zstd migration + encoding E2E (0.1.2).
+// Persistence zstd migration + encoding E2E (0.1.2; artifact names updated for 0.1.5).
 //
 //  1. Unit: migrateSessionRootToZstd rewrites plaintext artifacts atomically
 //     (roundtrip bytes, idempotence, crash-recovery for both-exist pairs,
 //     noise files untouched).
-//  2. E2E: a generated (default zstd) composition writes session.jsonl.zstd
-//     and resumes cleanly.
+//  2. E2E: a generated (default zstd) composition writes session.v3.jsonl.zstd
+//     (0.1.5 format generation v3) and resumes cleanly.
 //  3. Integration: a REAL 0.1.1-rc.2-era plaintext session (dev data copy)
 //     migrates and then resumes + replays under a zstd composition — proving
-//     the backend's mixed-encoding guard passes only after migration.
+//     the backend's mixed-encoding guard passes only after migration, and
+//     (0.1.5) that the built-in v0→v3 format migration replays the legacy
+//     log's history into the live session.
 //
 // Run: node test/persistence-zstd.test.mjs   (from dsh-runtime/)
 
@@ -115,7 +117,8 @@ const EVENTS = (n) => Array.from({ length: n }, (_, i) =>
 const main = async () => {
   const { server, seen } = await startMockServer(48802)
 
-  // (2) fresh zstd root: artifact lands as session.jsonl.zstd.
+  // (2) fresh zstd root: artifact lands as session.v3.jsonl.zstd (0.1.5
+  // format generation v3; v0's bare session.jsonl.zstd name is legacy-only).
   {
     const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zstd-fresh-'))
     const config = generateRuntimeConfig({
@@ -142,18 +145,19 @@ const main = async () => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name)
         if (entry.isDirectory()) scan(full)
-        else if (entry.name === 'session.jsonl.zstd' || entry.name === 'session.jsonl') artifacts.push(entry.name)
+        else if (entry.name.startsWith('session') && (entry.name.endsWith('.jsonl.zstd') || entry.name.endsWith('.jsonl'))) artifacts.push(entry.name)
       }
     }
     scan(sessionRoot)
-    assert.ok(artifacts.includes('session.jsonl.zstd'), 'fresh sessions write the zstd artifact')
+    assert.ok(artifacts.includes('session.v3.jsonl.zstd'), `fresh sessions write the v3 zstd artifact (saw: ${artifacts.join(', ') || 'none'})`)
     assert.ok(!artifacts.includes('session.jsonl'), 'no plaintext artifact on a zstd root')
+    assert.ok(!artifacts.includes('session.jsonl.zstd'), 'no legacy v0 artifact on a fresh root')
     await client.prompt(sid, [{ type: 'text', text: 'PING again' }])
     await new Promise((r) => setTimeout(r, 500))
     await client.close()
     fs.rmSync(sessionRoot, { recursive: true, force: true })
     fs.rmSync(configPath, { force: true })
-    console.log('PASS  zstd composition writes and resumes session.jsonl.zstd')
+    console.log('PASS  zstd composition writes and resumes session.v3.jsonl.zstd')
   }
 
   // (3) REAL 0.1.1-rc.2-era plaintext session: migrate → resume + replay.
@@ -192,6 +196,17 @@ const main = async () => {
     await client.initialize({ cwd: OLD_CWD, provider: 'mockgw', model: 'mock-1' })
     const ensured = await client.request('session/ensure', { sessionId: SESSION_ID, provider: 'mockgw', model: 'mock-1' })
     assert.equal(ensured?.resumed, true, 'legacy session resumes on the migrated zstd root')
+    // 0.1.5: opening the legacy v0 log for write runs the built-in v0→v3
+    // format migration and publishes the successor beside the untouched
+    // source artifact (the v0 file stays byte-identical for auditability).
+    assert.ok(
+      fs.existsSync(path.join(sessionRoot, encodedDir, SESSION_ID, 'session.v3.jsonl.zstd')),
+      'v0→v3 format migration published the v3 artifact',
+    )
+    assert.ok(
+      fs.existsSync(path.join(sessionRoot, encodedDir, SESSION_ID, 'session.jsonl.zstd')),
+      'legacy v0 artifact retained untouched',
+    )
     await client.prompt(SESSION_ID, [{ type: 'text', text: 'PING' }])
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('turn timeout')), 30000)
