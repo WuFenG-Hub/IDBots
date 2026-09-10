@@ -1440,6 +1440,88 @@ test('loop prevention: reply budget per (task, bot)', async () => {
   }
 });
 
+test('GT#72: the reply budget counts LOGICAL replies — a failed turn retry is never blocked by the budget it already charged', async () => {
+  // One-shot LLM failure: the first dispatch charges the message's logical
+  // reply and fails; the durable-queue retry is the SAME reply, so it must
+  // drain even at the cap. Pre-GT#72 the re-dispatch was itself charged
+  // (and the drain gate dropped it at the cap), stranding the trigger.
+  const h = await createHarness({ replyBudget: 1, chatError: 'llm hiccup' });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'retry-m1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot one',
+    });
+    await h.loop.runTick(); // dispatch 1: charged, LLM throws once, re-queued
+    assert.equal(h.sends.length, 0, 'nothing sent while the turn fails');
+
+    await h.loop.runTick(); // retry: already charged — passes the budget gate
+    assert.equal(h.sends.length, 1, 'the retry of a charged message is not budget-blocked');
+
+    // A NEW message is a NEW logical reply — still capped.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'retry-m2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot two',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'a new logical reply is still budget-capped');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#72: reply budget exhaustion raises one owner-visible anomaly (the chair is never silently muted)', async () => {
+  // Pre-GT#72 the exhaustion left nothing but a daemon log line — GT#72's
+  // chair sat muted for 12 minutes with a verified release candidate until a
+  // supervisor nudge rescued it. The anomaly rides the origin-session rail
+  // (the one that actually reacted) exactly once per (task, bot).
+  const milestones = [];
+  const h = await createHarness({
+    replyBudget: 1,
+    deps: {
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-budget', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'budget-m1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot one',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'budget-m2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot two',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'still capped');
+
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'budget-m3-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot three',
+    });
+    await h.loop.runTick();
+
+    const budgetAnomalies = milestones.filter(
+      (m) => m.kind === 'anomaly' && m.subject === 'reply_budget_exhausted:bot:2',
+    );
+    assert.equal(budgetAnomalies.length, 1, 'exactly one exhaustion anomaly per (task, bot)');
+    assert.match(budgetAnomalies[0].message, /exhausted its per-task reply budget/);
+    assert.match(budgetAnomalies[0].message, /restart/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('chair reply does not count against the per-tick worker cap', async () => {
   const h = await createHarness({ maxRepliesPerTaskPerTick: 1 });
   try {
