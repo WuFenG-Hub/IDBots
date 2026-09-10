@@ -10,6 +10,9 @@ import { dshModelReasoningDeclaration } from '../dist-electron/main/libs/dshMode
 
 test('deepseek-v4 family declares the official chat-completions dialect, vendor prefix or not', () => {
   for (const id of [
+    // The renamed V4.1 id (2026-09-10) and its gateway-prefixed form.
+    'deepseek-flash',
+    'deepseek/deepseek-flash',
     'deepseek-v4-flash',
     'deepseek-v4-pro',
     'deepseek-v4-flash-vision-exp',

@@ -195,7 +195,11 @@ type ModelLike = {
   options?: ModelOptions;
 };
 
-export const DEEPSEEK_DEFAULT_MODEL_ID = 'deepseek-v4-flash';
+// DeepSeek's current flagship is DeepSeek-V4.1-Flash, served under the
+// `deepseek-flash` model id (renamed from `deepseek-v4-flash` at the V4.1
+// launch, 2026-09-10). V4.1 Flash is natively multimodal, so the separate
+// vision-exp SKU was retired upstream.
+export const DEEPSEEK_DEFAULT_MODEL_ID = 'deepseek-flash';
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
 // The DeepSeek API allows up to 384K output tokens for the whole V4 family;
 // the app declares a 32K ceiling (aligned with the MetaApp bridge limit).
@@ -206,13 +210,14 @@ export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
 // usage ring falls back to the 128K default.
 export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
-export const DEEPSEEK_V4_FLASH_VISION_MODEL_ID = 'deepseek-v4-flash-vision-exp';
 
 const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
   {
-    id: 'deepseek-v4-flash',
-    name: 'DeepSeek V4 Flash',
-    supportsImage: false,
+    id: 'deepseek-flash',
+    name: 'DeepSeek V4.1 Flash',
+    // V4.1 Flash supports vision natively (the retired vision-exp SKU folded
+    // into it), so image input no longer needs a separate model.
+    supportsImage: true,
     contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
     maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
     // DeepSeek-first policy (reconsidered 2026-08-18 — a one-day 快速 default
@@ -238,23 +243,18 @@ const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
       thinking: { type: 'enabled' },
     },
   },
-  {
-    id: DEEPSEEK_V4_FLASH_VISION_MODEL_ID,
-    name: 'DeepSeek V4 Flash Vision Exp',
-    supportsImage: true,
-    contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
-    maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
-    options: {
-      reasoningEffort: 'max',
-      thinking: { type: 'enabled' },
-    },
-  },
 ]);
 
 const DEEPSEEK_DEFAULT_MODEL_ORDER = DEEPSEEK_DEFAULT_MODELS.map((model) => model.id);
 
+// Retired DeepSeek ids → the current official replacement. `deepseek-v4-flash`
+// and `deepseek-v4-flash-vision-exp` were retired with the V4.1 Flash launch:
+// upstream still accepts the aliases but serves V4.1 Flash (vision included),
+// so both fold into `deepseek-flash`.
 const DEEPSEEK_LEGACY_MODEL_MIGRATION_MAP: Readonly<Record<string, ModelLike>> = Object.freeze({
   'deepseek-chat': DEEPSEEK_DEFAULT_MODELS[0],
+  'deepseek-v4-flash': DEEPSEEK_DEFAULT_MODELS[0],
+  'deepseek-v4-flash-vision-exp': DEEPSEEK_DEFAULT_MODELS[0],
   'deepseek-reasoner': DEEPSEEK_DEFAULT_MODELS[1],
 });
 
@@ -319,40 +319,11 @@ function maybeCanonicalizeDeepSeekDefaults<T extends ModelLike>(models: T[]): T[
   );
 }
 
-/** Stored catalogs that are exactly Flash+Pro (the 0.1.0 default pair) pick up
- *  the 0.1.1 vision model. Custom lists are left alone. */
-const PREVIOUS_DEEPSEEK_DEFAULT_IDS = Object.freeze(['deepseek-v4-flash', 'deepseek-v4-pro']);
-
-function cloneDefaultModel<T extends ModelLike>(model: ModelLike): T {
-  return {
-    ...model,
-    options: model.options
-      ? {
-          ...model.options,
-          thinking: model.options.thinking ? { ...model.options.thinking } : undefined,
-        }
-      : undefined,
-  } as T;
-}
-
-function ensureCanonicalDeepSeekCatalog<T extends ModelLike>(models: T[]): T[] {
-  const ids = new Set(models.map((model) => model.id));
-  const isPreviousDefaultPair = models.length === PREVIOUS_DEEPSEEK_DEFAULT_IDS.length
-    && PREVIOUS_DEEPSEEK_DEFAULT_IDS.every((id) => ids.has(id));
-  if (isPreviousDefaultPair) {
-    const vision = DEEPSEEK_DEFAULT_MODELS.find((entry) => entry.id === DEEPSEEK_V4_FLASH_VISION_MODEL_ID);
-    if (vision) {
-      return maybeCanonicalizeDeepSeekDefaults([...models, cloneDefaultModel<T>(vision)]);
-    }
-  }
-  return maybeCanonicalizeDeepSeekDefaults(models);
-}
-
 function normalizeDeepSeekModelList<T extends ModelLike>(models?: T[] | null): T[] | undefined {
   if (!models) {
     return undefined;
   }
-  return ensureCanonicalDeepSeekCatalog(dedupeModels(models.map((model) => normalizeDeepSeekModel(model) as T)));
+  return maybeCanonicalizeDeepSeekDefaults(dedupeModels(models.map((model) => normalizeDeepSeekModel(model) as T)));
 }
 
 function normalizeDeepSeekDefaultModel(defaultModel: string, availableModels: ModelLike[]): string {
@@ -522,7 +493,7 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://opencode.ai/zen/go/v1',
       apiFormat: 'responses',
       models: [
-        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 }
+        { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', supportsImage: true, contextWindow: 1_000_000 }
       ]
     },
     commandcode: {
@@ -531,13 +502,14 @@ export const defaultConfig: AppConfig = {
       // Command Code gateway (https://commandcode.ai/docs/provider): one Bearer
       // key, Chat Completions / Messages / Models all mounted under /provider/v1.
       // We pin the OpenAI Chat Completions format; the model catalog mirrors the
-      // GET /provider/v1/models snapshot (2026-08-27) with endpoint-reported
-      // context windows.
+      // GET /provider/v1/models snapshot (2026-09-11) with endpoint-reported
+      // context windows. Users can re-sync any time via the Fetch Models button.
       baseUrl: 'https://api.commandcode.ai/provider/v1',
       apiFormat: 'openai',
       models: [
         { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', supportsImage: true, contextWindow: 1_000_000 },
         { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', supportsImage: true, contextWindow: 1_000_000 },
         { id: 'claude-fable-5', name: 'Claude Fable 5', supportsImage: true, contextWindow: 1_000_000 },
         { id: 'claude-opus-5', name: 'Claude Opus 5', supportsImage: true, contextWindow: 1_000_000 },
         { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', supportsImage: true, contextWindow: 1_000_000 },
@@ -550,9 +522,11 @@ export const defaultConfig: AppConfig = {
         { id: 'gpt-5.4', name: 'GPT-5.4', supportsImage: true, contextWindow: 400_000 },
         { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', supportsImage: true, contextWindow: 400_000 },
         { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', supportsImage: true, contextWindow: 400_000 },
-        { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', supportsImage: false, contextWindow: 1_000_000 },
-        { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro (latest)', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek V4 Flash (latest)', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'deepseek/deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision (exp)', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'deepseek/deepseek-v4-flash-fast', name: 'DeepSeek V4 Flash Fast', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', supportsImage: true, contextWindow: 1_000_000 },
         { id: 'moonshotai/Kimi-K3', name: 'Kimi K3', supportsImage: true, contextWindow: 1_000_000 },
         { id: 'moonshotai/Kimi-K2.7-Code', name: 'Kimi K2.7 Code', supportsImage: true, contextWindow: 256_000 },
         { id: 'moonshotai/Kimi-K2.7-Code-Highspeed', name: 'Kimi K2.7 Code HighSpeed', supportsImage: true, contextWindow: 262_000 },
@@ -566,11 +540,10 @@ export const defaultConfig: AppConfig = {
         { id: 'zai-org/GLM-5', name: 'GLM-5', supportsImage: false, contextWindow: 200_000 },
         { id: 'MiniMaxAI/MiniMax-M3', name: 'MiniMax M3', supportsImage: true, contextWindow: 1_000_000 },
         { id: 'MiniMaxAI/MiniMax-M2.7', name: 'MiniMax M2.7', supportsImage: false, contextWindow: 200_000 },
-        { id: 'minimax/minimax-m3-free', name: 'MiniMax M3 (Free)', supportsImage: true, contextWindow: 1_000_000 },
-        { id: 'minimax/minimax-m2.7-free', name: 'MiniMax M2.7 (Free)', supportsImage: false, contextWindow: 197_000 },
         { id: 'MiniMaxAI/MiniMax-M2.5', name: 'MiniMax M2.5', supportsImage: false, contextWindow: 200_000 },
         { id: 'xiaomi/mimo-v2.5-pro', name: 'MiMo V2.5 Pro', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'xiaomi/mimo-v2.5', name: 'MiMo V2.5', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'Qwen/Qwen3.8-Max-0902', name: 'Qwen 3.8 Max 0902', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'Qwen/Qwen3.8-Max', name: 'Qwen 3.8 Max', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'Qwen/Qwen3.8-27B', name: 'Qwen 3.8 27B', supportsImage: true, contextWindow: 262_144 },
         { id: 'Qwen/Qwen3.8-Flash', name: 'Qwen 3.8 Flash', supportsImage: false, contextWindow: 1_000_000 },
@@ -579,9 +552,12 @@ export const defaultConfig: AppConfig = {
         { id: 'Qwen/Qwen3.7-Flash', name: 'Qwen 3.7 Flash', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'Qwen/Qwen3.6-Max-Preview', name: 'Qwen 3.6 Max Preview', supportsImage: false, contextWindow: 200_000 },
         { id: 'Qwen/Qwen3.6-Plus', name: 'Qwen 3.6 Plus', supportsImage: true, contextWindow: 200_000 },
+        { id: 'meituan/LongCat-2.0:free', name: 'LongCat 2.0', supportsImage: false, contextWindow: 1_048_576 },
         { id: 'stepfun/Step-3.7-Flash', name: 'Step 3.7 Flash', supportsImage: true, contextWindow: 256_000 },
         { id: 'stepfun/Step-3.5-Flash', name: 'Step 3.5 Flash', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'tencent/hy3-paid', name: 'Tencent Hy3', supportsImage: false, contextWindow: 262_144 },
+        { id: 'tencent/hy4-preview', name: 'Tencent Hy4 Preview', supportsImage: false, contextWindow: 1_048_576 },
+        { id: 'google/gemini-3.8-flash', name: 'Gemini 3.8 Flash', supportsImage: true, contextWindow: 1_000_000 },
         { id: 'google/gemini-3.7-flash', name: 'Gemini 3.7 Flash', supportsImage: true, contextWindow: 1_048_576 },
         { id: 'google/gemini-3.6-flash', name: 'Gemini 3.6 Flash', supportsImage: true, contextWindow: 1_000_000 },
         { id: 'google/gemini-3.5-flash', name: 'Gemini 3.5 Flash', supportsImage: true, contextWindow: 1_000_000 },
@@ -591,10 +567,13 @@ export const defaultConfig: AppConfig = {
         { id: 'nvidia/nemotron-3-ultra-550b-a55b', name: 'Nemotron 3 Ultra', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'thinkingmachines/inkling', name: 'Inkling', supportsImage: true, contextWindow: 256_000 },
         { id: 'thinkingmachines/inkling-small', name: 'Inkling Small', supportsImage: true, contextWindow: 1_000_000 },
-        { id: 'poolside/laguna-s-2.1-free', name: 'Laguna S 2.1 (Free)', supportsImage: false, contextWindow: 256_000 },
+        { id: 'poolside/laguna-s-2.1-free', name: 'Laguna S 2.1', supportsImage: false, contextWindow: 256_000 },
+        { id: 'inclusionai/ling-3.0-flash-sante:free', name: 'Ling 3.0 Flash Sante', supportsImage: false, contextWindow: 262_144 },
         { id: 'meta/muse-spark-1.1', name: 'Muse Spark 1.1', supportsImage: false, contextWindow: 1_048_576 },
         { id: 'meta/muse-spark-1.2', name: 'Muse Spark 1.2', supportsImage: false, contextWindow: 1_048_576 },
         { id: 'meta/muse-spark-1.2-contributor', name: 'Muse Spark 1.2 Contributor', supportsImage: false, contextWindow: 1_048_576 },
+        { id: 'meta/muse-spark-1.3', name: 'Muse Spark 1.3', supportsImage: false, contextWindow: 1_048_576 },
+        { id: 'meta/muse-spark-1.3-contributor', name: 'Muse Spark 1.3 Contributor', supportsImage: false, contextWindow: 1_048_576 },
         { id: 'xai/grok-4.5', name: 'Grok 4.5', supportsImage: true, contextWindow: 500_000 },
         { id: 'xai/grok-4.6', name: 'Grok 4.6', supportsImage: true, contextWindow: 500_000 }
       ]

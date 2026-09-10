@@ -67,7 +67,7 @@ export function dshRuntimeKeyOf(provider: Pick<DshTurnProviderRoute, 'key'>): st
 const DSH_WEBSEARCH_API_KEY_ENV = 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'
 /** Model serving the auxiliary search call (cheap + fast; search quality is
  *  provider-side, the model only formats the query — official DSH default). */
-const DSH_WEBSEARCH_MODEL = 'deepseek-v4-flash'
+const DSH_WEBSEARCH_MODEL = 'deepseek-flash'
 
 /** Stable per-route credential env var name. The runtime child env is fixed
  *  at spawn while the route table is a cross-session UNION, so every route

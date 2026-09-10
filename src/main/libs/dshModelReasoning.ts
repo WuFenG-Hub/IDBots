@@ -38,13 +38,15 @@ export interface DshModelReasoningDeclaration {
   compat: Record<string, unknown>;
 }
 
-// DeepSeek V4 family, bare ids (deepseek-v4-flash) and vendor-prefixed ids
-// (deepseek/deepseek-v4-flash) alike. The declaration mirrors the official
-// DeepSeek profile shipped in pi-ai's own catalog
+// DeepSeek V4 family, bare ids (deepseek-flash, deepseek-v4-flash) and
+// vendor-prefixed ids (deepseek/deepseek-flash) alike. The declaration
+// mirrors the official DeepSeek profile shipped in pi-ai's own catalog
 // (@earendil-works/pi-ai providers/data/deepseek.json): chat-completions
 // `thinking` enable/disable + reasoning_effort low/high/max — the same ladder
-// the first-party dsh-llm-deepseek adapter speaks natively.
-const DEEPSEEK_V4_PATTERN = /deepseek-v4(?:[.\-_]|$)/i;
+// the first-party dsh-llm-deepseek adapter speaks natively. The V4.1 rename
+// (`deepseek-v4-flash` → `deepseek-flash`, 2026-09-10) keeps the same wire
+// dialect, so both id shapes match.
+const DEEPSEEK_V4_PATTERN = /deepseek-(?:v4|flash)(?:[.\-_]|$)/i;
 
 // `deepseek-chat` is the free-quota relay's (metaid-free) wire id for
 // deepseek-v4-flash — the app's own legacy-model migration already treats it

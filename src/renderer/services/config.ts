@@ -87,9 +87,10 @@ const buildProviderSignature = (
 // canonical product config: display names instead of the relay's internal
 // wire ids, and — for known ids — the canonical limits/options. The relay
 // still reports deepseek-chat with the legacy 64K/4K DeepSeek V3 wire values
-// while actually serving deepseek-v4-flash (1M context), so installs
-// provisioned before this normalization get their stored entry rewritten on
-// load (ConfigService.init persists the corrected config back).
+// while actually serving the current flash model (deepseek-flash, 1M
+// context), so installs provisioned before this normalization get their
+// stored entry rewritten on load (ConfigService.init persists the corrected
+// config back).
 const normalizeFreeProviderModels = (
   models: NonNullable<NonNullable<AppConfig['providers']>[string]['models']> | undefined,
 ) => models?.map((model) => ({

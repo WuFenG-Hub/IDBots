@@ -14,16 +14,20 @@ const legacyProviderModels = [
   { id: 'deepseek-chat', name: 'DeepSeek Chat', supportsImage: false },
 ];
 
-test('defaultConfig uses DeepSeek V4 Flash, Pro, and Flash Vision Exp as the built-in DeepSeek defaults', () => {
+test('defaultConfig uses DeepSeek V4.1 Flash and V4 Pro as the built-in DeepSeek defaults', () => {
   assert.deepEqual(
     defaultConfig.model.availableModels.map(({ id, name }) => ({ id, name })),
     [
-      { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+      { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' },
       { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
-      { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision Exp' },
     ],
   );
-  assert.equal(defaultConfig.model.defaultModel, 'deepseek-v4-flash');
+  assert.equal(defaultConfig.model.defaultModel, 'deepseek-flash');
+  // V4.1 Flash is natively multimodal — the retired vision-exp SKU folded in.
+  assert.equal(
+    defaultConfig.model.availableModels.find(({ id }) => id === 'deepseek-flash')?.supportsImage,
+    true,
+  );
   assert.deepEqual(
     defaultConfig.model.availableModels.find(({ id }) => id === 'deepseek-v4-pro')?.options,
     {
@@ -42,13 +46,12 @@ test('defaultConfig uses DeepSeek V4 Flash, Pro, and Flash Vision Exp as the bui
   assert.deepEqual(
     defaultConfig.providers?.deepseek.models?.map(({ id, name }) => ({ id, name })),
     [
-      { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+      { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' },
       { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
-      { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision Exp' },
     ],
   );
   assert.equal(
-    defaultConfig.model.availableModels.find(({ id }) => id === 'deepseek-v4-flash-vision-exp')?.supportsImage,
+    defaultConfig.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-flash')?.supportsImage,
     true,
   );
   assert.deepEqual(
@@ -85,10 +88,10 @@ test('normalizeDeepSeekAppConfig migrates legacy DeepSeek defaults in stored con
     },
   });
 
-  assert.equal(normalized.model.defaultModel, 'deepseek-v4-flash');
+  assert.equal(normalized.model.defaultModel, 'deepseek-flash');
   assert.deepEqual(
     normalized.model.availableModels.map(({ id }) => id),
-    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
+    ['deepseek-flash', 'deepseek-v4-pro'],
   );
   assert.deepEqual(
     normalized.model.availableModels.find(({ id }) => id === 'deepseek-v4-pro')?.options,
@@ -107,10 +110,10 @@ test('normalizeDeepSeekAppConfig migrates legacy DeepSeek defaults in stored con
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.map(({ id }) => id),
-    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
+    ['deepseek-flash', 'deepseek-v4-pro'],
   );
   assert.equal(
-    normalized.model.availableModels.find(({ id }) => id === 'deepseek-v4-flash-vision-exp')?.supportsImage,
+    normalized.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-flash')?.supportsImage,
     true,
   );
   assert.deepEqual(
@@ -160,7 +163,7 @@ test('normalizeDeepSeekAppConfig upgrades legacy ids without dropping custom Dee
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.map(({ id }) => id),
-    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
+    ['deepseek-flash', 'deepseek-v4-pro'],
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-v4-pro')?.options,
@@ -171,7 +174,10 @@ test('normalizeDeepSeekAppConfig upgrades legacy ids without dropping custom Dee
   );
 });
 
-test('normalizeDeepSeekAppConfig appends the 0.1.1 vision model onto a stored Flash+Pro catalog', () => {
+test('normalizeDeepSeekAppConfig migrates a stored V4-era Flash+Pro catalog to the renamed flash id', () => {
+  // The 0.1.x default pair deepseek-v4-flash + deepseek-v4-pro predates the
+  // 2026-09-10 V4.1 rename: normalization folds the retired v4-flash id into
+  // deepseek-flash (which is natively multimodal) and appends nothing.
   const storedPair = [
     { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false },
     { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', supportsImage: false },
@@ -194,16 +200,53 @@ test('normalizeDeepSeekAppConfig appends the 0.1.1 vision model onto a stored Fl
 
   assert.deepEqual(
     normalized.model.availableModels.map(({ id }) => id),
-    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
+    ['deepseek-flash', 'deepseek-v4-pro'],
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.map(({ id }) => id),
-    ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
+    ['deepseek-flash', 'deepseek-v4-pro'],
   );
-  assert.equal(normalized.model.defaultModel, 'deepseek-v4-flash');
+  assert.equal(normalized.model.defaultModel, 'deepseek-flash');
+  assert.equal(
+    normalized.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-flash')?.supportsImage,
+    true,
+  );
 });
 
-test('normalizeDeepSeekAppConfig leaves a custom DeepSeek catalog untouched', () => {
+test('normalizeDeepSeekAppConfig folds the retired vision-exp alias into deepseek-flash', () => {
+  // The 0.1.1 default trio carried deepseek-v4-flash-vision-exp as a separate
+  // vision SKU; V4.1 Flash absorbs it, so the trio dedupes to the new pair.
+  const storedTrio = [
+    { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false },
+    { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', supportsImage: false },
+    { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision Exp', supportsImage: true },
+  ];
+  const normalized = normalizeDeepSeekAppConfig({
+    ...defaultConfig,
+    model: {
+      ...defaultConfig.model,
+      availableModels: storedTrio,
+      defaultModel: 'deepseek-v4-flash-vision-exp',
+    },
+    providers: {
+      ...defaultConfig.providers!,
+      deepseek: {
+        ...defaultConfig.providers!.deepseek,
+        models: storedTrio,
+      },
+    },
+  });
+
+  assert.deepEqual(
+    normalized.providers?.deepseek.models?.map(({ id }) => id),
+    ['deepseek-flash', 'deepseek-v4-pro'],
+  );
+  assert.equal(normalized.model.defaultModel, 'deepseek-flash');
+});
+
+test('normalizeDeepSeekAppConfig migrates retired ids in a custom DeepSeek catalog without adding models', () => {
+  // A one-entry custom catalog predating the V4.1 rename keeps its shape —
+  // nothing is injected — but the retired id folds into deepseek-flash.
   const normalized = normalizeDeepSeekAppConfig({
     ...defaultConfig,
     model: {
@@ -226,12 +269,13 @@ test('normalizeDeepSeekAppConfig leaves a custom DeepSeek catalog untouched', ()
 
   assert.deepEqual(
     normalized.model.availableModels.map(({ id }) => id),
-    ['deepseek-v4-flash'],
+    ['deepseek-flash'],
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.map(({ id }) => id),
-    ['deepseek-v4-flash'],
+    ['deepseek-flash'],
   );
+  assert.equal(normalized.model.defaultModel, 'deepseek-flash');
 });
 
 test('normalizeDeepSeekAppConfig backfills legacy DeepSeek api config into provider config', () => {

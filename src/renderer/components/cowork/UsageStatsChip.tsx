@@ -3,20 +3,27 @@ import { i18nService } from '../../services/i18n';
 import type { CoworkUsageStats } from '../../types/cowork';
 
 /**
- * DeepSeek V4 pricing (CNY per 1M tokens). Standard off-peak rates from the
- * official DeepSeek pricing page (api-docs.deepseek.com), denominated in CNY to
- * match the wallet balance display (the DeepSeek account is billed in CNY).
+ * DeepSeek pricing (CNY per 1M tokens). Off-peak rates from the official
+ * DeepSeek pricing page (api-docs.deepseek.com), denominated in CNY to match
+ * the wallet balance display (the DeepSeek account is billed in CNY).
  * Peak-hour rates double (9:00–12:00 / 14:00–18:00 Beijing time) — not modeled
- * here; the displayed cost is an ESTIMATE at standard rates.
+ * here; the displayed cost is an ESTIMATE at off-peak rates.
+ *
+ * 2026-09-10 repricing (V4.1 Flash launch): flash output dropped to ¥4/1M.
+ * The retired aliases deepseek-v4-flash / vision-exp bill at the flash price,
+ * and from 2026-09-14 deepseek-v4-pro also routes to V4.1 Flash at the flash
+ * price — so every id below shares the flash rate.
  */
+const DEEPSEEK_FLASH_RATE = { cacheHitPerM: 0.02, cacheMissPerM: 1, outputPerM: 4 };
 const DEEPSEEK_RATES: Record<string, { cacheHitPerM: number; cacheMissPerM: number; outputPerM: number }> = {
-  'deepseek-v4-pro': { cacheHitPerM: 0.025, cacheMissPerM: 3, outputPerM: 6 },
-  'deepseek-v4-flash': { cacheHitPerM: 0.02, cacheMissPerM: 1, outputPerM: 2 },
-  'deepseek-v4-flash-vision-exp': { cacheHitPerM: 0.02, cacheMissPerM: 1, outputPerM: 2 },
+  'deepseek-flash': DEEPSEEK_FLASH_RATE,
+  'deepseek-v4-pro': DEEPSEEK_FLASH_RATE,
+  'deepseek-v4-flash': DEEPSEEK_FLASH_RATE,
+  'deepseek-v4-flash-vision-exp': DEEPSEEK_FLASH_RATE,
 };
 
 /** Defaults to the cheapest tier when the model id is unknown. */
-const DEEPSEEK_DEFAULT_RATE = DEEPSEEK_RATES['deepseek-v4-flash'];
+const DEEPSEEK_DEFAULT_RATE = DEEPSEEK_RATES['deepseek-flash'];
 
 function estimateDeepSeekCostCNY(model: string | undefined, stats: CoworkUsageStats): number {
   const rate = (model && DEEPSEEK_RATES[model]) || DEEPSEEK_DEFAULT_RATE;

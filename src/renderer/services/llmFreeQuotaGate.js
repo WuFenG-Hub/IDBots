@@ -22,7 +22,7 @@ export const LLM_RELAY_WELCOME_BOT_ID_KEY = 'llmRelay.welcomeBotId';
  * wire names sent to the API; the UI should show these product names instead.
  */
 const FREE_PROVIDER_MODEL_DISPLAY_NAMES = {
-  'deepseek-chat': 'deepseek-v4-flash',
+  'deepseek-chat': 'deepseek-flash',
 };
 
 export function getFreeProviderModelDisplayName(modelId) {
@@ -36,10 +36,12 @@ export function getFreeProviderModelDisplayName(modelId) {
  * Canonical client-side limits/options for known free-relay model ids. The
  * relay's bootstrap payload still reports the legacy DeepSeek V3 wire values
  * for `deepseek-chat` (contextWindow 64000 / maxOutputTokens 4096) while the
- * relay actually serves deepseek-v4-flash upstream — so the known id mirrors
- * the deepseek provider's deepseek-v4-flash preset exactly (keep in sync with
- * DEEPSEEK_DEFAULT_MODELS in ../config.ts). Ids absent from this table keep
- * whatever the relay reported.
+ * relay actually serves the current flash model (deepseek-flash, formerly
+ * deepseek-v4-flash) upstream — so the known id mirrors the deepseek
+ * provider's deepseek-flash preset exactly (keep in sync with
+ * DEEPSEEK_DEFAULT_MODELS in ../config.ts; supportsImage stays false here
+ * because the relay's own image support is unverified). Ids absent from this
+ * table keep whatever the relay reported.
  */
 const FREE_PROVIDER_MODEL_CANONICAL = {
   'deepseek-chat': {
