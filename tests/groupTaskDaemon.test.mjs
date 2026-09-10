@@ -9327,3 +9327,82 @@ test('R7: a response created BEFORE a newer signal does not close it', async () 
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// GT#72 (observation round 1): chair bare-name assignment wakes + deadline
+// clause scoping + retroactive ACK satisfaction.
+// ---------------------------------------------------------------------------
+
+test('GT#72: contentIncludesFullRosterName — bare full roster name matches, ambiguous short forms do not', () => {
+  const { contentIncludesFullRosterName } = require('../dist-electron/main/services/groupChatMentionUtils.js');
+  const roster = ['Twin Bot', 'Coder Bot', 'Builder阿码', '阿码 Junior'];
+  assert.equal(contentIncludesFullRosterName('Builder阿码，第二棒正式开工 [DEADLINE: 60m]', 'Builder阿码', roster), true);
+  assert.equal(contentIncludesFullRosterName('builder阿码 交一下', 'Builder阿码', roster), true, 'case-insensitive');
+  // A short form that another roster name contains is ambiguous — never a wake.
+  assert.equal(contentIncludesFullRosterName('阿码 交一下', 'Builder阿码', roster), false);
+  assert.equal(contentIncludesFullRosterName('阿码 交一下', '阿码 Junior', roster), false);
+  assert.equal(contentIncludesFullRosterName('无关正文', 'Builder阿码', roster), false);
+  assert.equal(contentIncludesFullRosterName('', 'Builder阿码', roster), false);
+});
+
+test('GT#72: a chair assignment by BARE full roster name wakes the assignee and arms the ACK watch', async () => {
+  // The #4344 replay: the chair assigned the second baton with a bare name
+  // (no @, empty mention array) and the assignee was never woken — rescued
+  // 7.5 minutes later only because a teammate happened to @ him.
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]); // executing; roster: Twin Bot (chair), Coder Bot (worker)
+    insertGroupMessage(h.db, {
+      pinId: 'bare-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '两条核验做完了。\nCoder Bot，第二棒正式开工 [DEADLINE: 60m]：字段级协议规范，以事实卡为硬约束。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.chatCalls.length, 1, 'the bare-named assignee got a turn');
+    assert.equal(h.sends.length, 1, 'the assignee answered in the group');
+    assert.ok(
+      logs.some((line) => line.includes('assignment to Coder Bot (message #') && line.includes('waiting for [WORKING] ACK')),
+      'the ACK watch armed for the bare-named assignee',
+    );
+    // A worker sending the same bare name does NOT wake anyone (loose
+    // matching is chair-only — worker chatter stays @-gated).
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'worker-bare-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'Twin Bot 我交付完了',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'a worker\'s bare name never wakes the chair');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#72: a deadline-bearing chair message that wakes NO worker records the assignment-wake note', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'nowake-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      // Short form "Coder" is neither the roster name "Coder Bot" nor an @-token.
+      content: '阿码，预备作业即刻开工，[DEADLINE: 30m]，交付形式 simplenote 落链。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.chatCalls.length, 0, 'nobody wakes for a short-form assignment');
+    const notes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'parse' && note.target === 'assignment wake');
+    assert.equal(notes.length, 1, 'the stalled assignment is reported to the chair');
+    assert.match(notes[0].body, /wakes no member/);
+    assert.match(notes[0].body, /exact roster name/);
+  } finally {
+    h.cleanup();
+  }
+});
+

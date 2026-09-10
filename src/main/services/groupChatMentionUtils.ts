@@ -62,6 +62,34 @@ export function mentionContainsMetaId(
   return ids.some((id) => targets.includes(String(id).trim()));
 }
 
+/**
+ * GT#72: does the content carry the bot's FULL roster name as a bare token?
+ * Chairs routinely address assignees by bare name ("Builder阿码, 第二棒正式
+ * 开工…") — the wake gate must not lose the assignment just because the @ was
+ * dropped. This mirrors what the auto-planning dispatch already does via
+ * resolveMentionIdsForWorkers ("wakes the assigned workers even when the LLM
+ * wrote bare names"). Deliberately NOT a substring guess: only the exact
+ * roster name counts, and when another roster name strictly contains this
+ * name the bare form is ambiguous and does not count (the @-token stays the
+ * only wake for the shorter name).
+ */
+export function contentIncludesFullRosterName(
+  content: string | null | undefined,
+  botName: string | null | undefined,
+  rosterNames: Array<string | null | undefined>,
+): boolean {
+  const name = (botName ?? '').trim();
+  const text = String(content ?? '');
+  if (!text || !name) return false;
+  const target = name.toLowerCase();
+  if (!text.toLowerCase().includes(target)) return false;
+  const ambiguous = rosterNames.some((other) => {
+    const candidate = (other ?? '').trim().toLowerCase();
+    return candidate && candidate !== target && candidate.includes(target);
+  });
+  return !ambiguous;
+}
+
 /** Worker mention gate: mention-array hit OR explicit @name in the content. */
 export function isMentioned(
   message: GroupChatMentionMessage,

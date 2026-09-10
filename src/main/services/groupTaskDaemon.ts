@@ -29,7 +29,7 @@ import type {
 } from '../openTeamMembershipStore';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
-import { isMentioned } from './groupChatMentionUtils';
+import { contentIncludesFullRosterName, isMentioned } from './groupChatMentionUtils';
 import { isOpenTeamProtocolOnlyContent } from './openTeamGuestDaemon';
 import { parsePositionLines } from '../libs/groupTaskPositions';
 import {
@@ -1184,16 +1184,32 @@ export function decideGroupTaskResponders(
     && Boolean(bot.globalmetaid?.trim())
     && senderGlobalMetaId === bot.globalmetaid!.trim();
 
+  const chairMember = members.find((member) => member.role === 'chair');
+  // GT#72: a CHAIR-authored message wakes a worker whose FULL roster name
+  // appears bare (no @) — the same compensation the auto-planning dispatch
+  // applies through resolveMentionIdsForWorkers. Chairs habitually address
+  // assignees by bare name; without this, task #72's second-baton assignment
+  // ("阿码，第二棒正式开工" — no @, empty mention array) never woke the
+  // assignee and idled 7.5 minutes until a third party @-mentioned him.
+  const chairSenderGlobalMetaId = (chairMember?.globalmetaid ?? '').trim();
+  const senderIsChair = Boolean(
+    chairSenderGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairSenderGlobalMetaId,
+  );
+  const rosterNames = members.map(
+    (member) => botsById.get(member.metabotId ?? -1)?.name ?? member.name ?? null,
+  );
+
   // Resolve mention/name hits once per member.
   const hits = new Map<number, boolean>();
   for (const member of members) {
     if (member.metabotId == null) continue;
     const bot = botsById.get(member.metabotId);
     if (!bot) continue;
-    hits.set(member.metabotId, isMentioned(message, bot));
+    const bareNamed = senderIsChair
+      && member.role === 'worker'
+      && contentIncludesFullRosterName(content, bot.name, rosterNames);
+    hits.set(member.metabotId, isMentioned(message, bot) || bareNamed);
   }
-
-  const chairMember = members.find((member) => member.role === 'chair');
   const chairHit = chairMember?.metabotId != null ? hits.get(chairMember.metabotId) === true : false;
   const workerHitCount = members.filter(
     (member) => member.role === 'worker'
@@ -8238,10 +8254,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
     const isChairMessage = Boolean(chairGmid && senderGmid === chairGmid);
     if (isChairMessage) {
+      // GT#72: the ACK watch follows the same bare-full-roster-name wake the
+      // responder gate applies — an assignment message that wakes the assignee
+      // must also arm their ACK watch, or the assignment lifecycle (wake →
+      // ACK watch → deadline clock) splits across two different mention
+      // definitions.
+      const rosterNames = members.map(
+        (candidate) => botsById.get(candidate.metabotId ?? -1)?.name ?? candidate.name ?? null,
+      );
       for (const member of members) {
         if (member.role !== 'worker' || member.metabotId == null) continue;
         const bot = botsById.get(member.metabotId);
-        if (!bot || !isMentioned(message, bot)) continue;
+        const bareNamed = contentIncludesFullRosterName(message.content, bot?.name, rosterNames);
+        if (!bot || !(isMentioned(message, bot) || bareNamed)) continue;
         // GT#47 R3: during review / an open checkpoint the mention is part of
         // a review-closing or checkpoint message, not a work assignment —
         // arming the 3-min no-ACK watch here is exactly what fired the false
@@ -10129,6 +10154,43 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById, {
           entropyFloorGate: entropyP0.floorGate,
         });
+        // GT#72: a chair assignment message that wakes NO worker is a stalled
+        // assignment in the making — the assignee never sees it (no dispatch,
+        // no ACK watch, no deadline). Deterministic, protocol-tag-driven fact:
+        // the message carries a [DEADLINE] tag yet the wake gate matched zero
+        // workers. Surface it as a parse note so the chair re-addresses the
+        // assignment with an @-token; review/checkpoint silence and paused
+        // dispatch are by design and never note.
+        if (
+          !humanGateActive
+          && !gatingTask.dispatchPaused
+          && chairGlobalMetaId
+          && (message.senderGlobalMetaId ?? '').trim().toLowerCase() === chairGlobalMetaId.trim().toLowerCase()
+          && /\[DEADLINE:/i.test(message.content ?? '')
+          && !decisions.some((decision) =>
+            members.find((candidate) => candidate.metabotId === decision.metabotId)?.role === 'worker')
+        ) {
+          try {
+            store.recordHostNote({
+              taskId: task.id,
+              kind: 'parse',
+              target: 'assignment wake',
+              dedupeKey: `parse_assignment_nowake:${task.id}:${message.id}`,
+              body:
+                `Message #${message.id} carries a [DEADLINE] assignment but wakes no member ` +
+                '(no @-mention, no full roster name, empty mention array) — the assignee will never see it. ' +
+                'Re-post the assignment addressing the member by their exact roster name with an @-token.',
+            });
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: deadline-bearing chair message #${message.id} wakes no worker — parse note recorded`,
+            );
+          } catch (noteError) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: assignment-wake note record failed: ` +
+              `${noteError instanceof Error ? noteError.message : String(noteError)}`,
+            );
+          }
+        }
         // Task #51 safety net: a chair decision means the chair owes this
         // message a response. The entry is cleared by chair speech (above) or
         // a completed chair turn (dispatchReplyTurn); if neither lands within
