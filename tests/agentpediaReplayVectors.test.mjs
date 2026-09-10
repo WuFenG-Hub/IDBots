@@ -69,6 +69,7 @@ function buildOptions(vec) {
     arbiterOverrides,
     frozenArbiterOverrides: vec.frozenArbiterOverrides ?? {},
     editorsRep: vec.editorsRep ?? {},
+    clusterAliases: vec.clusterAliases ?? {},
   };
 }
 
@@ -100,12 +101,25 @@ function assertExpect(view, expect) {
           : parent.includes(expected);
       assert.ok(ok, `${path}: expected to contain ${JSON.stringify(expected)}, got ${JSON.stringify(parent)}`);
     } else {
-      const actual = resolve(view, path);
-      assert.deepStrictEqual(
-        actual,
-        expected,
-        `${path}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
-      );
+      const indexed = path.match(/^(.*)\.\$contains\.(\d+)$/);
+      if (indexed) {
+        const parent = resolve(view, indexed[1]);
+        if (!Array.isArray(parent)) {
+          throw new Error(`${indexed[1]} is not an array: ${JSON.stringify(parent)}`);
+        }
+        assert.deepStrictEqual(
+          parent[Number(indexed[2])],
+          expected,
+          `${path}: expected graveyard[${indexed[2]}] to equal ${JSON.stringify(expected)}, got ${JSON.stringify(parent[Number(indexed[2])])}`,
+        );
+      } else {
+        const actual = resolve(view, path);
+        assert.deepStrictEqual(
+          actual,
+          expected,
+          `${path}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+        );
+      }
     }
   }
 }

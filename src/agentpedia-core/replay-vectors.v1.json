@@ -4,7 +4,7 @@
     "version": "v1.0",
     "algoVersion": "adoption-algo-v1",
     "pipelineCount": 25,
-    "supplementaryCount": 6,
+    "supplementaryCount": 12,
     "compatibilityStatement": "25/25 pipeline vectors must pass to claim adoption-algo-v1 compatibility (v0.1.6 §2).",
     "sources": {
       "specLayers": [
@@ -46,7 +46,8 @@
       "ratePerSlugDaily default 10 and rateGlobalDaily 20 are scenario defaults (spec pins no initials); V17 overrides ratePerSlugDaily so only the global limit binds.",
       "Reputation deltas (confirm-goodfaith +1 etc.) are engine constants pending reputation-algo-v1 pinning; V24 exercises direction only.",
       "Event payloads here are minimal engine-facing shapes with synthetic ids; wire-level draft-07 validation against the 6-layer schema composite is G1's job (ajv) on tool-generated payloads.",
-      "Supplementary vectors S1-S6 are NOT part of the 25/25 pipeline; they cover AC-C2 exemption boundaries and AC-D6 protected conjunction for the mechanical verification plan (G3/G4)."
+      "Supplementary vectors S1-S12 are NOT part of the 25/25 pipeline: S1-S6 cover AC-C2 exemption boundaries and AC-D6 protected conjunction; S7-S12 lock the coverage gaps requested by the M1 report (C3 cluster merging via clusterAliases injection, C8 insufficient stake, C10 forged baselineRev, D2 PoC timeout, D4 self-appointment reverse cases, D5 bootstrap-window expiry + E-2 basic-right persistence).",
+      "E-2 conformance (pin://892ce8b2889cf20d2901dc955182b0674c5c7c85eccc055230bef205f377cca3i0): tier output is T0/T0+/T1/T2; T0 forbids revs (graveyard reason t0-no-rev), T0+ carries the basic edit right; V20/V21/S6/S12 assert the tier states."
     ]
   },
   "defaults": {
@@ -495,7 +496,7 @@
       "expect": { "entries.zh:a.status": "protected", "graveyard.$contains": { "pin": "ed", "reason": "protected-unauthorized" }, "entries.zh:a.head": "t1" }
     },
     {
-      "id": "S6", "title": "D6 negative: registered T1 editor (below T2) is graveyards on protected entry", "source": "pin://e4c9dfc82dbea89d0e5f8900f40112dee40dad324b3a50ad4a1221dc2cda048ai0 §1-2",
+      "id": "S6", "title": "D6 negative: registered editor past T0 but below T2 (T0+) is graveyards on protected entry", "source": "pin://e4c9dfc82dbea89d0e5f8900f40112dee40dad324b3a50ad4a1221dc2cda048ai0 §1-2",
       "paramOverrides": { "t0DurationHours": 0, "t1MinValidRevs": 1, "t2MinValidRevs": 999 },
       "events": [
         { "pin": "c0", "path": "rev", "sender": "E1", "height": 10, "payload": { "v": 1, "type": "create", "lang": "zh", "slug": "base", "title": "Base", "contentHash": "h1" } },
@@ -516,7 +517,104 @@
         { "pin": "v5", "path": "ruling", "sender": "A5", "height": 36, "payload": { "v": 1, "action": "vote", "proposalPin": "p1", "approve": true } },
         { "pin": "xe", "path": "rev", "sender": "X", "height": 37, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "base", "title": "Base", "contentHash": "h2", "parentRev": "c0", "basedOn": "c0" } }
       ],
-      "expect": { "editors.X.status": "active", "editors.X.tier": "T1", "entries.zh:base.status": "protected", "graveyard.$contains": { "pin": "xe", "reason": "protected-unauthorized" } }
+      "expect": { "editors.X.status": "active", "editors.X.tier": "T0+", "entries.zh:base.status": "protected", "graveyard.$contains": { "pin": "xe", "reason": "protected-unauthorized" } }
+    },
+    {
+      "id": "S7", "title": "C3 cluster merging: same-controller alias shares the global daily counter (D4)", "source": "pin://79ee51b8528c93ecf9caffa1e5ae673a2421e15309b108958414b850400f6c6ai0 §4",
+      "paramOverrides": { "ratePerSlugDaily": 999 },
+      "clusterAliases": { "E1b": "E1" },
+      "founders": ["E1", "E1b", "E2", "E3", "E4", "A1", "A2", "A3", "A4", "A5", "A6", "A7"],
+      "events": [
+        { "pin": "c0", "path": "rev", "sender": "E1", "height": 10, "payload": { "v": 1, "type": "create", "lang": "zh", "slug": "a", "title": "A", "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+        { "pin": "e1", "path": "rev", "sender": "E1", "height": 11, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "abababababababababababababababababababababababababababababababab", "parentRev": "c0", "basedOn": "c0" } },
+        { "pin": "e2", "path": "rev", "sender": "E1", "height": 12, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac", "parentRev": "e1", "basedOn": "e1" } },
+        { "pin": "e3", "path": "rev", "sender": "E1", "height": 13, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad", "parentRev": "e2", "basedOn": "e2" } },
+        { "pin": "e4", "path": "rev", "sender": "E1", "height": 14, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae", "parentRev": "e3", "basedOn": "e3" } },
+        { "pin": "e5", "path": "rev", "sender": "E1", "height": 15, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "afafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafaf", "parentRev": "e4", "basedOn": "e4" } },
+        { "pin": "e6", "path": "rev", "sender": "E1", "height": 16, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "babababababababababababababababababababababababababababababababa", "parentRev": "e5", "basedOn": "e5" } },
+        { "pin": "e7", "path": "rev", "sender": "E1", "height": 17, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "parentRev": "e6", "basedOn": "e6" } },
+        { "pin": "e8", "path": "rev", "sender": "E1", "height": 18, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc", "parentRev": "e7", "basedOn": "e7" } },
+        { "pin": "e9", "path": "rev", "sender": "E1", "height": 19, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "bdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbd", "parentRev": "e8", "basedOn": "e8" } },
+        { "pin": "f1", "path": "rev", "sender": "E1b", "height": 21, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "cacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacaca", "parentRev": "e9", "basedOn": "e9" } },
+        { "pin": "f2", "path": "rev", "sender": "E1b", "height": 22, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "cbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcb", "parentRev": "f1", "basedOn": "f1" } },
+        { "pin": "f3", "path": "rev", "sender": "E1b", "height": 23, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "parentRev": "f2", "basedOn": "f2" } },
+        { "pin": "f4", "path": "rev", "sender": "E1b", "height": 24, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", "parentRev": "f3", "basedOn": "f3" } },
+        { "pin": "f5", "path": "rev", "sender": "E1b", "height": 25, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "cececececececececececececececececececececececececececececececece", "parentRev": "f4", "basedOn": "f4" } },
+        { "pin": "f6", "path": "rev", "sender": "E1b", "height": 26, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "dadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadada", "parentRev": "f5", "basedOn": "f5" } },
+        { "pin": "f7", "path": "rev", "sender": "E1b", "height": 27, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "dbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdb", "parentRev": "f6", "basedOn": "f6" } },
+        { "pin": "f8", "path": "rev", "sender": "E1b", "height": 28, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "dcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdc", "parentRev": "f7", "basedOn": "f7" } },
+        { "pin": "f9", "path": "rev", "sender": "E1b", "height": 29, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "parentRev": "f8", "basedOn": "f8" } },
+        { "pin": "f10", "path": "rev", "sender": "E1b", "height": 30, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "dededededededededededededededededededededededededededededededede", "parentRev": "f9", "basedOn": "f9" } },
+        { "pin": "g1", "path": "rev", "sender": "E1b", "height": 31, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "eaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaea", "parentRev": "f10", "basedOn": "f10" } }
+      ],
+      "expect": { "entries.zh:a.head": "f10", "graveyard.length": 1, "graveyard.$contains": { "pin": "g1", "reason": "rate-global" } }
+    },
+    {
+      "id": "S8", "title": "C8: stake below constitution stakeAmountSat never registers", "source": "spec v0.1 §7 (pin://bd28bfc0e9d2488005c85caa3aa77618d05623dc15273cc38f6d73c33b868b10i0) + pin://79ee51b8528c93ecf9caffa1e5ae673a2421e15309b108958414b850400f6c6ai0 D7",
+      "events": [
+        { "pin": "c0", "path": "rev", "sender": "E1", "height": 10, "payload": { "v": 1, "type": "create", "lang": "zh", "slug": "base", "title": "Base", "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+        { "pin": "ch", "path": "editor", "sender": "E1", "height": 20, "payload": { "v": 1, "action": "challenge", "editor": "X", "nonce": "0123456789abcdef" } },
+        { "pin": "rv", "path": "review", "sender": "X", "height": 21, "payload": { "v": 1, "targetRev": "c0", "score": 4, "dimensions": { "accuracy": 4, "citation": 4, "neutrality": 4 } } },
+        { "pin": "poc", "path": "editor", "sender": "X", "height": 22, "payload": { "v": 1, "action": "poc-response", "editor": "X", "challengePin": "ch", "responsePin": "rv" } },
+        { "pin": "reg", "path": "editor", "sender": "X", "height": 23, "payload": { "v": 1, "action": "register", "editor": "X", "challengePin": "ch", "responsePin": "rv", "stake": { "txid": "abababababababababababababababababababababababababababababababab", "amountSat": 50000 } } },
+        { "pin": "en1", "path": "editor", "sender": "E1", "height": 24, "payload": { "v": 1, "action": "endorse", "editor": "X", "registerPin": "reg" } },
+        { "pin": "xr", "path": "rev", "sender": "X", "height": 26, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "base", "title": "Base", "contentHash": "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac", "parentRev": "c0", "basedOn": "c0" } }
+      ],
+      "expect": { "graveyard.$contains": { "pin": "reg", "reason": "stake-insufficient" }, "graveyard.$contains.1": { "pin": "en1", "reason": "endorse-no-register" }, "graveyard.$contains.2": { "pin": "xr", "reason": "unregistered" }, "editors.X.status": "none", "entries.zh:base.head": "c0" }
+    },
+    {
+      "id": "S9", "title": "C10: forged baselineRev on a frozen entry is graveyards; entry stays frozen; correct re-proposal succeeds", "source": "pin://ab4224e2be9fe2e45cb927d286b14896a2c7009eb66b7aeee2f9dd391eb832eei0 §2 rule 1",
+      "events": [
+        { "pin": "t1", "path": "rev", "sender": "E1", "height": 10, "payload": { "v": 1, "type": "create", "lang": "zh", "slug": "a", "title": "A", "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+        { "pin": "t2", "path": "rev", "sender": "E1", "height": 11, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "abababababababababababababababababababababababababababababababab", "parentRev": "t1", "basedOn": "t1" } },
+        { "pin": "t3", "path": "rev", "sender": "E2", "height": 12, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac", "parentRev": "t2", "basedOn": "t2" } },
+        { "pin": "r1", "path": "rev", "sender": "E1", "height": 20, "payload": { "v": 1, "type": "revert", "lang": "zh", "slug": "a", "title": "A", "revertTo": "t1", "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "parentRev": "t3" } },
+        { "pin": "r2", "path": "rev", "sender": "E2", "height": 21, "payload": { "v": 1, "type": "revert", "lang": "zh", "slug": "a", "title": "A", "revertTo": "t2", "contentHash": "abababababababababababababababababababababababababababababababab", "parentRev": "r1::eq" } },
+        { "pin": "r3", "path": "rev", "sender": "E1", "height": 22, "payload": { "v": 1, "type": "revert", "lang": "zh", "slug": "a", "title": "A", "revertTo": "t1", "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "parentRev": "r2::eq" } },
+        { "pin": "c1", "path": "challenge", "sender": "E2", "height": 30, "payload": { "v": 1, "targetRev": "r3::eq", "reason": "editwar", "detail": "vector scenario forged baseline case" } },
+        { "pin": "p1", "path": "ruling", "sender": "E1", "height": 40, "payload": { "v": 1, "action": "proposal", "challengePin": "c1", "seed": "c1", "outcome": "unfreeze", "baselineRev": "t1", "params": null } },
+        { "pin": "p2", "path": "ruling", "sender": "E1", "height": 41, "payload": { "v": 1, "action": "proposal", "challengePin": "c1", "seed": "c1", "outcome": "unfreeze", "baselineRev": "r2::eq", "params": null } }
+      ],
+      "expect": { "graveyard.$contains": { "pin": "p1", "reason": "baseline-rev-mismatch" }, "proposals.p2.state": "open", "entries.zh:a.status": "frozen", "entries.zh:a.head": "r3::eq" }
+    },
+    {
+      "id": "S10", "title": "D2 negative: poc-response after the 60-minute window is graveyards and registration cannot proceed", "source": "spec v0.1 §7 semantics 2 (pin://bd28bfc0e9d2488005c85caa3aa77618d05623dc15273cc38f6d73c33b868b10i0)",
+      "events": [
+        { "pin": "c0", "path": "rev", "sender": "E1", "height": 10, "payload": { "v": 1, "type": "create", "lang": "zh", "slug": "base", "title": "Base", "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+        { "pin": "ch", "path": "editor", "sender": "E1", "height": 20, "payload": { "v": 1, "action": "challenge", "editor": "X", "nonce": "0123456789abcdef" } },
+        { "pin": "rv", "path": "review", "sender": "X", "height": 21, "payload": { "v": 1, "targetRev": "c0", "score": 4, "dimensions": { "accuracy": 4, "citation": 4, "neutrality": 4 } } },
+        { "pin": "poc", "path": "editor", "sender": "X", "height": 27, "payload": { "v": 1, "action": "poc-response", "editor": "X", "challengePin": "ch", "responsePin": "rv" } },
+        { "pin": "reg", "path": "editor", "sender": "X", "height": 28, "payload": { "v": 1, "action": "register", "editor": "X", "challengePin": "ch", "responsePin": "rv", "stake": { "txid": "abababababababababababababababababababababababababababababababab", "amountSat": 100000 } } }
+      ],
+      "expect": { "graveyard.$contains": { "pin": "poc", "reason": "poc-window-exceeded" }, "graveyard.$contains.1": { "pin": "reg", "reason": "register-invalid" }, "editors.X.status": "none" }
+    },
+    {
+      "id": "S11", "title": "D4 reverse: self-appointment without the four essentials never reaches the active set", "source": "PRD §2 S4 four-essentials chain; spec v0.1 §7",
+      "events": [
+        { "pin": "c0", "path": "rev", "sender": "E1", "height": 10, "payload": { "v": 1, "type": "create", "lang": "zh", "slug": "base", "title": "Base", "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+        { "pin": "en1", "path": "editor", "sender": "X", "height": 20, "payload": { "v": 1, "action": "endorse", "editor": "X", "registerPin": "nonexistent" } },
+        { "pin": "reg", "path": "editor", "sender": "X", "height": 21, "payload": { "v": 1, "action": "register", "editor": "X", "challengePin": "ch", "responsePin": "rv", "stake": { "txid": "abababababababababababababababababababababababababababababababab", "amountSat": 100000 } } },
+        { "pin": "xr", "path": "rev", "sender": "X", "height": 22, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "base", "title": "Base", "contentHash": "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac", "parentRev": "c0", "basedOn": "c0" } }
+      ],
+      "expect": { "graveyard.$contains": { "pin": "en1", "reason": "endorser-not-t2" }, "graveyard.$contains.1": { "pin": "reg", "reason": "register-invalid" }, "graveyard.$contains.2": { "pin": "xr", "reason": "unregistered" }, "editors.X.status": "none", "entries.zh:base.head": "c0" }
+    },
+    {
+      "id": "S12", "title": "D5 + E-2: founder T2 direct-pass expires with the bootstrap window; basic edit right persists (T0+)", "source": "pin://e4c9dfc82dbea89d0e5f8900f40112dee40dad324b3a50ad4a1221dc2cda048ai0 §3 + E-2 pin://892ce8b2889cf20d2901dc955182b0674c5c7c85eccc055230bef205f377cca3i0",
+      "checkpoints": [
+        {
+          "pins": ["genesis", "c0"],
+          "expect": { "editors.E1.tier": "T2", "entries.zh:a.head": "c0" }
+        },
+        {
+          "pins": null,
+          "expect": { "editors.E1.tier": "T0+", "entries.zh:a.head": "le", "entries.zh:a.status": "normal", "graveyard.length": 0 }
+        }
+      ],
+      "events": [
+        { "pin": "c0", "path": "rev", "sender": "E1", "height": 10, "payload": { "v": 1, "type": "create", "lang": "zh", "slug": "a", "title": "A", "contentHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+        { "pin": "le", "path": "rev", "sender": "E1", "height": 5000, "payload": { "v": 1, "type": "edit", "lang": "zh", "slug": "a", "title": "A", "contentHash": "abababababababababababababababababababababababababababababababab", "parentRev": "c0", "basedOn": "c0" } }
+      ],
+      "expect": { "editors.E1.tier": "T0+" }
     }
   ]
 }

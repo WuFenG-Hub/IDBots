@@ -61,6 +61,9 @@ export function replay(inputEvents, options = {}) {
   const blocksPerDay = options.blocksPerDay ?? 144;
   const arbiterOverrides = options.arbiterOverrides ?? {}; // proposalPin -> [arbiter ids]
   const frozenArbiterOverrides = options.frozenArbiterOverrides ?? {}; // entryKey -> [ids]
+  // v0.1.2 D4 cluster merging: same-controller MetaIDs share rate/edit-war counters.
+  const clusterAliases = options.clusterAliases ?? {}; // aliasId -> rootId
+  const countRoot = (id) => clusterAliases[id] ?? id;
 
   const pending = []; // mempool pins, excluded until confirmed (F6)
   const confirmed = [];
@@ -117,12 +120,14 @@ export function replay(inputEvents, options = {}) {
     const bootstrapping = h < bootstrapEndH;
     if (ed.founder && bootstrapping) return 'T2'; // v0.1.2 D7.3 + v0.1.3 §3: founder T2 only inside bootstrap window
     if (ageDays >= params.t2MinDays && ed.validRevs >= params.t2MinValidRevs) return 'T2';
-    // T1 = past the T0 cold-start window. NOTE (spec question for loop): reading
-    // v0.1.2 D2 as "age >= t0 AND validRevs >= t1MinValidRevs" makes T1 unreachable
-    // because T0 forbids revs entirely, so validRevs could never grow; the engine
-    // treats T0 expiry as the T1 gate and keeps t1MinValidRevs reserved for T2 math
-    // until the architect rules on the ladder.
-    if (ageH >= params.t0DurationHours) return 'T1';
+    // E-2 (pin://892ce8b2889cf20d2901dc955182b0674c5c7c85eccc055230bef205f377cca3i0;
+    // ruling pin://66518de4898e00912744afd2b562c99eab3225983139afd24828362e0d53031ci0):
+    // layered authorization — T0 expiry restores the basic edit right; t1MinValidRevs
+    // only marks the T1 identity tier and never gates basic rights.
+    if (ed.founder && bootstrapping) return 'T2'; // v0.1.2 D7.3 + v0.1.3 §3: founder T2 only inside bootstrap window
+    if (ageDays >= params.t2MinDays && ed.validRevs >= params.t2MinValidRevs) return 'T2';
+    if (ageH >= params.t0DurationHours && ed.validRevs >= params.t1MinValidRevs) return 'T1';
+    if (ageH >= params.t0DurationHours) return 'T0+'; // basic edit right active, T1 marker not yet met
     return 'T0';
   };
   const isActive = (id, h) => tierOf(id, h) != null;
@@ -204,6 +209,7 @@ export function replay(inputEvents, options = {}) {
   // ----- rev helpers -----
   const checkRevGates = (e, en, h) => {
     if (!isActive(e.sender, h)) return 'unregistered';
+    if (tierOf(e.sender, h) === 'T0') return 't0-no-rev'; // E-2: T0 window is read+review only
     if (en.status === 'frozen') {
       const arb = en.frozenArbiters ?? [];
       if (!arb.includes(e.sender)) return 'frozen-unauthorized';
@@ -215,7 +221,8 @@ export function replay(inputEvents, options = {}) {
       if (!(tier === 'T2' && repOk)) return 'protected-unauthorized'; // v0.1.3 §1 conjunction
     }
     const day = dayOf(h);
-    const gk = `${e.sender}|${day}`;
+    const root = countRoot(e.sender); // D4: cluster-merged counting
+    const gk = `${root}|${day}`;
     const sk = `${gk}|${e.entryKey}`;
     if ((dayGlobal.get(gk) ?? 0) + 1 > params.rateGlobalDaily) return 'rate-global';
     if ((daySlug.get(sk) ?? 0) + 1 > params.ratePerSlugDaily) return 'rate-slug';
@@ -223,7 +230,8 @@ export function replay(inputEvents, options = {}) {
   };
   const countRev = (e, en, h) => {
     const day = dayOf(h);
-    const gk = `${e.sender}|${day}`;
+    const root = countRoot(e.sender); // D4: cluster-merged counting
+    const gk = `${root}|${day}`;
     const sk = `${gk}|${en.key ?? ''}`;
     dayGlobal.set(gk, (dayGlobal.get(gk) ?? 0) + 1);
     daySlug.set(sk, (daySlug.get(sk) ?? 0) + 1);
@@ -232,9 +240,10 @@ export function replay(inputEvents, options = {}) {
 
   const revertWeight = (en, e) => {
     // v0.1.2 §3 (D3) + v0.1.5 §3 (F-1 final): plain revert 1.0; vandalism-fix 0.5;
-    // repeat vandalism-fix by the SAME editor on the SAME entry restores 1.0.
+    // repeat vandalism-fix by the SAME editor (cluster root, D4) on the SAME entry
+    // restores 1.0.
     if (e.payload.claim && e.payload.claim.changeType === 'vandalism-fix') {
-      const repeated = en.revertWeights.some((w) => w.editor === e.sender && w.vf);
+      const repeated = en.revertWeights.some((w) => w.editor === countRoot(e.sender) && w.vf);
       return repeated ? 1 : 0.5;
     }
     return 1;
@@ -274,6 +283,7 @@ export function replay(inputEvents, options = {}) {
 
     if (path === '/protocols/agentpedia/editor') {
       const applicant = payload.editor;
+      editorOf(applicant); // failed applicants stay visible in the registry view (audit)
       switch (payload.action) {
         case 'challenge': {
           if (!isActive(ev.sender, h)) { graveyardIt(ev.pin, 'unregistered'); break; }
@@ -500,7 +510,7 @@ export function replay(inputEvents, options = {}) {
         // edit-war window accounting (v0.1.2 §3 weights, v0.1.5 §1 sole criterion)
         const winH = (params.revertWarWindowHours ?? 6) * blocksPerHour;
         const w = revertWeight(en, ev);
-        en.revertWeights.push({ h, editor: ev.sender, weight: w, vf: ev.payload.claim?.changeType === 'vandalism-fix' });
+        en.revertWeights.push({ h, editor: countRoot(ev.sender), weight: w, vf: ev.payload.claim?.changeType === 'vandalism-fix' });
         en.revertWeights = en.revertWeights.filter((x) => x.h > h - winH);
         const cumulative = en.revertWeights.reduce((s, x) => s + x.weight, 0);
         if (en.status === 'normal' && cumulative >= (params.revertWarThreshold ?? 3)) {

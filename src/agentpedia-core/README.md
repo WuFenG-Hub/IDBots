@@ -20,7 +20,7 @@ node --test tests/agentpediaReplayVectors.test.mjs
 npm run test:agentpedia
 ```
 
-Expected: 33/33 pass (25 pipeline + 6 supplementary + 2 structural). The headline
+Expected: 39/39 pass (25 pipeline + 12 supplementary + 2 structural). The headline
 assertion is the 25/25 compatibility statement required by spec v0.1.6 §2.
 
 ## Source of truth
@@ -75,10 +75,25 @@ semantics). The synthesized vector file updates three places, disclosed in
 - **Reviews** are recorded without a membership gate because the registration PoC is
   itself a review pinned by the not-yet-registered applicant (v0.1 §7.2); membership
   enforcement belongs at consumption (featured scoring, not implemented in MVP).
-- **T1 ladder (OPEN SPEC QUESTION for the architect)**: reading v0.1.2 D2 as
-  "T1 = age >= t0DurationHours AND validRevs >= t1MinValidRevs" makes T1 unreachable —
-  T0 forbids revs entirely, so `validRevs` can never grow. The engine gates T1 on
-  T0 expiry alone and keeps `t1MinValidRevs` reserved until ruled on.
+- **T1 ladder — RESOLVED by E-2** (semantic erratum
+  pin://892ce8b2889cf20d2901dc955182b0674c5c7c85eccc055230bef205f377cca3i0, ruling
+  pin://66518de4898e00912744afd2b562c99eab3225983139afd24828362e0d53031ci0): the
+  literal v0.1.2 D2 reading is a circular dependency (T0 forbids revs, so
+  validRevs could never grow into the T1 gate). Ruled reading, implemented here:
+  - basic edit right R = registered active ∧ outside the T0 window ∧ general
+    legality gates (v0.1 §3.2.7) — the time threshold is the anti-sybil backbone
+    and stays on the basic right; rev counts never gate it;
+  - T1 = registration age ≥ t0DurationHours ∧ validRevs ≥ t1MinValidRevs — an
+    identity marker only (no exclusive MVP privilege);
+  - tier output is therefore four-valued: `T0` (inside the cold-start window, no
+    revs — graveyard reason `t0-no-rev`), `T0+` (window served, basic right active,
+    marker not yet met), `T1`, `T2`;
+  - validRevs counts all applied revs of record (equivalent revs and redirects
+    included; graveyarded/orphan pins never counted), per E-2.
+- **Cluster merging (v0.1.2 D4)**: rate and edit-war counters key on the cluster
+  root (`clusterAliases` option, alias -> root MetaID); war-side same-editor
+  exemption checks (F-1) also resolve through the root. Identity-bearing roles
+  (arbiter candidacy, endorsement) stay per-MetaID.
 
 ## G2 contract (dual implementation)
 
