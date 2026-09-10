@@ -2831,6 +2831,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   // ownership or they would break the one-turn-per-session invariant for the
   // replacement turn.
   const turnInFlight = new Map<string, { startedAt: number; token: object }>();
+  // GT#72: the last in-flight token a "skipped — already in flight" log line
+  // was emitted for (per guard key + label). A long chair turn re-triggers
+  // the skip on every tick — a planning turn once spammed 16 identical lines
+  // in 80 seconds — so each in-flight episode speaks at most once.
+  const skipLogToken = new Map<string, object>();
   const pendingTurnJobs = new Set<Promise<void>>();
   const latchWatchers = new Set<ReturnType<typeof setInterval>>();
   /**
@@ -7145,7 +7150,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     liveness?: { taskId: number; metabotId: number; isChair: boolean },
   ): boolean => {
     if (turnInFlight.has(guardKey)) {
-      emitLog(`[GroupTaskDaemon] ${label}: skipped — a turn is already in flight for ${guardKey}`);
+      const current = turnInFlight.get(guardKey);
+      const skipKey = `${guardKey}|${label}`;
+      if (!current || skipLogToken.get(skipKey) !== current.token) {
+        if (current) skipLogToken.set(skipKey, current.token);
+        emitLog(`[GroupTaskDaemon] ${label}: skipped — a turn is already in flight for ${guardKey}`);
+      }
       return false;
     }
     const turnToken: object = {};
