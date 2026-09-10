@@ -15,6 +15,9 @@ const SOURCE_LABEL_KEYS: Record<string, string> = {
   cowork: 'sleepGuardSourceCowork',
   scheduledTask: 'sleepGuardSourceScheduledTask',
   dream: 'sleepGuardSourceDream',
+  groupTask: 'sleepGuardSourceGroupTask',
+  groupChat: 'sleepGuardSourceGroupChat',
+  a2aChat: 'sleepGuardSourceA2aChat',
 };
 
 /**

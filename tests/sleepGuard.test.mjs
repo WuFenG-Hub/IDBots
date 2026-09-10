@@ -5,12 +5,30 @@ let evaluateSleepGuardWork;
 let resolvePreventDeviceSleepEnabled;
 let PREVENT_DEVICE_SLEEP_SETTING_KEY;
 let SleepGuard;
+let collectSleepGuardWorkFrom;
+let groupTaskTurnIdsOf;
 try {
   ({ evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, SleepGuard } =
     await import('../dist-electron/main/sleepGuard.js'));
 } catch {
   ({ evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, SleepGuard } =
     await import('../dist-electron/sleepGuard.js'));
+}
+({ collectSleepGuardWorkFrom, groupTaskTurnIdsOf } = await import('../dist-electron/main/sleepGuardWorkSources.js'));
+
+// The three work-source getters that back the group-task / group-chat / A2A
+// sources. Imported for real so the test fails if the main process keeps
+// compiling against getters that no longer exist (a rename would otherwise
+// silently leave those sources empty forever).
+let getGroupTaskTurnActivity;
+let getActiveGroupChatReplyTaskIds;
+let getActiveA2AReplyTaskIds;
+try {
+  ({ getGroupTaskTurnActivity } = await import('../dist-electron/main/services/groupTaskDaemon.js'));
+  ({ getActiveGroupChatReplyTaskIds } = await import('../dist-electron/main/services/cognitiveOrchestrator.js'));
+  ({ getActiveA2AReplyTaskIds } = await import('../dist-electron/main/services/privateChatDaemon.js'));
+} catch (error) {
+  console.error('Failed to load the real work-source getters:', error);
 }
 
 /**
@@ -103,7 +121,14 @@ function createFakeSpawn(impl) {
 const silentWarn = () => {};
 
 const CAFFEINATE_PATH = '/usr/bin/caffeinate';
-const idle = { coworkSessionIds: [], scheduledTaskIds: [], dreamingMetabotIds: [] };
+const idle = {
+  coworkSessionIds: [],
+  scheduledTaskIds: [],
+  dreamingMetabotIds: [],
+  groupTaskTurnIds: [],
+  groupChatReplyTaskIds: [],
+  a2aReplyTaskIds: [],
+};
 const working = { ...idle, coworkSessionIds: ['s1'] };
 
 test('evaluateSleepGuardWork: idle input yields inactive with no sources', () => {
@@ -125,6 +150,18 @@ test('evaluateSleepGuardWork: each work source is detected', () => {
     active: true,
     sources: ['dream'],
   });
+  assert.deepEqual(evaluateSleepGuardWork({ ...idle, groupTaskTurnIds: ['7:1'] }), {
+    active: true,
+    sources: ['groupTask'],
+  });
+  assert.deepEqual(evaluateSleepGuardWork({ ...idle, groupChatReplyTaskIds: ['12'] }), {
+    active: true,
+    sources: ['groupChat'],
+  });
+  assert.deepEqual(evaluateSleepGuardWork({ ...idle, a2aReplyTaskIds: ['abc123i0'] }), {
+    active: true,
+    sources: ['a2aChat'],
+  });
 });
 
 test('evaluateSleepGuardWork: multiple active sources are all reported', () => {
@@ -132,9 +169,156 @@ test('evaluateSleepGuardWork: multiple active sources are all reported', () => {
     coworkSessionIds: ['s1', 's2'],
     scheduledTaskIds: ['t1'],
     dreamingMetabotIds: [1, 2, 3],
+    groupTaskTurnIds: ['7:1'],
+    groupChatReplyTaskIds: ['12'],
+    a2aReplyTaskIds: ['abc123i0'],
   });
   assert.equal(state.active, true);
-  assert.deepEqual(state.sources, ['cowork', 'scheduledTask', 'dream']);
+  assert.deepEqual(state.sources, ['cowork', 'scheduledTask', 'dream', 'groupTask', 'groupChat', 'a2aChat']);
+});
+
+// ── work sources that are not cowork sessions ───────────────────────────────
+
+test('SleepGuard (darwin): an in-process group-task turn alone holds the assertion', () => {
+  const blocker = createFakeBlocker();
+  const helper = createFakeHelper(5150);
+  const spawnHelper = createFakeSpawn(() => helper);
+  const guard = createGuard({ powerSaveBlocker: blocker, platform: 'darwin', spawnHelper });
+
+  // Group-task turns are multi-minute: chair planning / verification / chain
+  // sends / deliverable uploads run in-process with no cowork session behind
+  // them, so this source alone must engage the guard.
+  const engaged = guard.apply(evaluateSleepGuardWork({ ...idle, groupTaskTurnIds: ['7:1'] }));
+  assert.equal(engaged.active, true);
+  assert.deepEqual(engaged.sources, ['groupTask']);
+  assert.equal(engaged.engaged, true);
+  assert.equal(engaged.engagedBy, 'caffeinate');
+  assert.deepEqual(spawnHelper.calls()[0].args, ['-i', '-w', String(process.pid)]);
+
+  // The session-less plain reply paths are the same story.
+  assert.equal(
+    guard.apply(evaluateSleepGuardWork({ ...idle, groupChatReplyTaskIds: ['12'] })).engaged,
+    true,
+  );
+  assert.equal(guard.apply(evaluateSleepGuardWork({ ...idle, a2aReplyTaskIds: ['abc123i0'] })).engaged, true);
+  assert.equal(spawnHelper.calls().length, 1, 'one helper for all of them — engagement is idempotent');
+
+  // Turn settles -> the guard releases and the helper is reaped.
+  const released = guard.apply(evaluateSleepGuardWork(idle));
+  assert.equal(released.active, false);
+  assert.deepEqual(released.sources, []);
+  assert.equal(released.engaged, false);
+  assert.equal(released.engagedBy, null);
+  assert.equal(helper.killCalls, 1);
+});
+
+// ── work-source collection seam ─────────────────────────────────────────────
+
+const emptyGetters = {
+  getActiveCoworkSessionIds: () => [],
+  getActiveScheduledTaskIds: () => [],
+  getDreamingMetabotIds: () => [],
+  getGroupTaskTurns: () => [],
+  getActiveGroupChatReplyTaskIds: () => [],
+  getActiveA2AReplyTaskIds: () => [],
+};
+
+test('collectSleepGuardWorkFrom: idle getters collect an all-empty work input', () => {
+  const work = collectSleepGuardWorkFrom(emptyGetters);
+  assert.deepEqual(work, {
+    coworkSessionIds: [],
+    scheduledTaskIds: [],
+    dreamingMetabotIds: [],
+    groupTaskTurnIds: [],
+    groupChatReplyTaskIds: [],
+    a2aReplyTaskIds: [],
+  });
+  assert.equal(evaluateSleepGuardWork(work).active, false);
+});
+
+test('collectSleepGuardWorkFrom: every source is collected into its own slot', () => {
+  const work = collectSleepGuardWorkFrom({
+    getActiveCoworkSessionIds: () => ['s1'],
+    getActiveScheduledTaskIds: () => ['t1'],
+    getDreamingMetabotIds: () => [3],
+    getGroupTaskTurns: () => [{ taskId: 7, metabotId: 1, startedAt: 1 }],
+    getActiveGroupChatReplyTaskIds: () => ['12'],
+    getActiveA2AReplyTaskIds: () => ['abc123i0'],
+  });
+  assert.deepEqual(work, {
+    coworkSessionIds: ['s1'],
+    scheduledTaskIds: ['t1'],
+    dreamingMetabotIds: [3],
+    groupTaskTurnIds: ['7:1'],
+    groupChatReplyTaskIds: ['12'],
+    a2aReplyTaskIds: ['abc123i0'],
+  });
+  assert.deepEqual(evaluateSleepGuardWork(work).sources, [
+    'cowork',
+    'scheduledTask',
+    'dream',
+    'groupTask',
+    'groupChat',
+    'a2aChat',
+  ]);
+});
+
+test('collectSleepGuardWorkFrom: one broken source degrades to empty, never throws', () => {
+  const failures = [];
+  const work = collectSleepGuardWorkFrom(
+    {
+      ...emptyGetters,
+      getActiveCoworkSessionIds: () => {
+        throw new Error('runner torn down');
+      },
+      getActiveGroupChatReplyTaskIds: () => null, // non-array return
+      getGroupTaskTurns: () => [{ taskId: 7, metabotId: 1, startedAt: 1 }],
+    },
+    (source, error) => failures.push({ source, message: error instanceof Error ? error.message : String(error) }),
+  );
+
+  assert.deepEqual(work.coworkSessionIds, [], 'throwing getter yields an empty list');
+  assert.deepEqual(work.groupChatReplyTaskIds, [], 'non-array getter yields an empty list');
+  assert.deepEqual(work.groupTaskTurnIds, ['7:1'], 'healthy sources still collected');
+  assert.deepEqual(failures, [
+    { source: 'cowork', message: 'runner torn down' },
+    { source: 'groupChat', message: 'sleepGuardWorkSources: unexpected non-array work source value' },
+  ]);
+  // The guard still engages from the surviving source: a broken collector can
+  // never leave real work unguarded.
+  assert.equal(evaluateSleepGuardWork(work).active, true);
+  assert.deepEqual(evaluateSleepGuardWork(work).sources, ['groupTask']);
+});
+
+test('groupTaskTurnIdsOf: turns map to the daemon key shape taskId:metabotId', () => {
+  assert.deepEqual(groupTaskTurnIdsOf([]), []);
+  assert.deepEqual(
+    groupTaskTurnIdsOf([
+      { taskId: 7, metabotId: 1 },
+      { taskId: 12, metabotId: 44 },
+    ]),
+    ['7:1', '12:44'],
+  );
+});
+
+test('real work-source getters exist and report no work when the app is idle', () => {
+  assert.equal(typeof getGroupTaskTurnActivity, 'function', 'groupTaskDaemon.getGroupTaskTurnActivity');
+  assert.equal(typeof getActiveGroupChatReplyTaskIds, 'function', 'cognitiveOrchestrator.getActiveGroupChatReplyTaskIds');
+  assert.equal(typeof getActiveA2AReplyTaskIds, 'function', 'privateChatDaemon.getActiveA2AReplyTaskIds');
+
+  // Note: these run in a plain node process (no app), which is exactly the
+  // "no daemon running" state -> truthful empty lists, never a throw.
+  assert.deepEqual(getGroupTaskTurnActivity(), []);
+  assert.deepEqual(getActiveGroupChatReplyTaskIds(), []);
+  assert.deepEqual(getActiveA2AReplyTaskIds(), []);
+
+  const work = collectSleepGuardWorkFrom({
+    ...emptyGetters,
+    getGroupTaskTurns: () => getGroupTaskTurnActivity(),
+    getActiveGroupChatReplyTaskIds: () => getActiveGroupChatReplyTaskIds(),
+    getActiveA2AReplyTaskIds: () => getActiveA2AReplyTaskIds(),
+  });
+  assert.equal(evaluateSleepGuardWork(work).active, false);
 });
 
 // ── non-darwin: legacy powerSaveBlocker('prevent-app-suspension') ────────────

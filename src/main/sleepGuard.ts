@@ -39,10 +39,32 @@
  * The guard is engaged only while the setting is on AND at least one work
  * source is active, and is released as soon as either goes away — the OS sleep
  * policy is untouched outside of that.
+ *
+ * ── What counts as "work" (collection lives in sleepGuardWorkSources.ts) ────
+ *  The guard never infers work from "the app is running": long-lived daemons
+ *  (p2p indexer, MCP skill servers, the local MetaApp server, listeners) must
+ *  NOT keep the device awake forever. It only tracks bounded units of work:
+ *   - `cowork`        — a running cowork session. This is the single long-work
+ *                       entry point of the platform: interactive chat, Bot
+ *                       Browser sessions, IM turns, A2A online chats, private
+ *                       order executions and nightly study runs all fund the
+ *                       same `CoworkRunner.activeSessions` map.
+ *   - `scheduledTask` — a scheduled task executing around its session.
+ *   - `dream`         — a nightly dream consolidation.
+ *   - `groupTask`     — a group-task daemon turn in flight (its in-process
+ *                       planning/verification/upload stretches have no session).
+ *   - `groupChat`     — a group-chat auto-reply pipeline in flight.
+ *   - `a2aChat`       — an online private-chat (A2A) reply pipeline in flight.
  */
 import { spawn as nodeSpawn } from 'node:child_process';
 
-export type SleepGuardSource = 'cowork' | 'scheduledTask' | 'dream';
+export type SleepGuardSource =
+  | 'cowork'
+  | 'scheduledTask'
+  | 'dream'
+  | 'groupTask'
+  | 'groupChat'
+  | 'a2aChat';
 
 export interface SleepGuardWorkInput {
   /** Ids of actively-running cowork sessions (covers interactive sessions,
@@ -53,6 +75,30 @@ export interface SleepGuardWorkInput {
   scheduledTaskIds: readonly string[];
   /** Metabot ids currently running a nightly dream consolidation. */
   dreamingMetabotIds: readonly number[];
+  /**
+   * Keys (`taskId:metabotId`) of group-task daemon turns currently in flight.
+   *
+   * A group-task turn is multi-minute by construction (the daemon budgets a
+   * 10-minute plain / 30-minute skill turn before its 45-minute latch), but
+   * only its SKILL turns run inside a cowork session: chair planning,
+   * verification, chain sends, deliverable uploads and the acceptance summary
+   * all run in-process in the daemon. Without this source the guard would drop
+   * the assertion (or never hold it) for those stretches of a live task.
+   */
+  groupTaskTurnIds: readonly string[];
+  /**
+   * Task keys of in-flight group-chat auto-reply pipelines (the cognitive
+   * orchestrator's `runReplyPipeline`). Its skill-turn branch is a cowork
+   * session, but the plain branch is a direct, possibly minute-long reasoning
+   * completion with `thinking: enabled` and no session behind it.
+   */
+  groupChatReplyTaskIds: readonly string[];
+  /**
+   * Pin ids of in-flight A2A / online private-chat reply pipelines. Same shape
+   * as `groupChatReplyTaskIds`: the long skill branch is a cowork session, the
+   * plain branch is a session-less completion.
+   */
+  a2aReplyTaskIds: readonly string[];
 }
 
 export interface SleepGuardWorkState {
@@ -161,12 +207,18 @@ export interface SleepGuardEngagement {
 /**
  * Pure policy: decide whether the sleep guard must be engaged from the set of
  * active work sources. Kept side-effect free so it can be unit-tested directly.
+ *
+ * Source order is stable (it is what the badge tooltip lists), and every work
+ * source is independent: one active source is enough to hold the assertion.
  */
 export function evaluateSleepGuardWork(input: SleepGuardWorkInput): SleepGuardWorkState {
   const sources: SleepGuardSource[] = [];
   if (input.coworkSessionIds.length > 0) sources.push('cowork');
   if (input.scheduledTaskIds.length > 0) sources.push('scheduledTask');
   if (input.dreamingMetabotIds.length > 0) sources.push('dream');
+  if (input.groupTaskTurnIds.length > 0) sources.push('groupTask');
+  if (input.groupChatReplyTaskIds.length > 0) sources.push('groupChat');
+  if (input.a2aReplyTaskIds.length > 0) sources.push('a2aChat');
   return { active: sources.length > 0, sources };
 }
 

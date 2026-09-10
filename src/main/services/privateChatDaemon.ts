@@ -238,6 +238,18 @@ export interface PrivateChatA2AAnalysis {
 
 /** In-flight task keys to avoid duplicate processing */
 const thinkingTasks = new Set<string>();
+
+/**
+ * Pin ids of A2A / online private-chat reply pipelines currently in flight.
+ *
+ * Consumed by the sleep guard (src/main/sleepGuardWorkSources.ts): the skill
+ * branch of a reply runs inside a cowork session, but the plain branch is a
+ * session-less reasoning completion, so the pipeline itself must count as work
+ * for as long as it runs. Cleared when the daemon stops.
+ */
+export function getActiveA2AReplyTaskIds(): string[] {
+  return Array.from(thinkingTasks);
+}
 /** Backoff state for chat-skill turns that failed with a retryable error. */
 const privateChatSkillTurnRetries = new Map<string, { attempts: number; nextRetryAt: number }>();
 const interruptibleA2AGuidanceTurns = new Map<string, {

@@ -150,9 +150,14 @@ import {
   planPrivateChatListenerReadiness,
   shouldRunListener,
 } from './services/metaWebListenerReadiness';
-import { startOrchestrator as startCognitiveOrchestrator, stopOrchestrator as stopCognitiveOrchestrator } from './services/cognitiveOrchestrator';
+import {
+  getActiveGroupChatReplyTaskIds,
+  startOrchestrator as startCognitiveOrchestrator,
+  stopOrchestrator as stopCognitiveOrchestrator,
+} from './services/cognitiveOrchestrator';
 import {
   endPrivateChatA2AConversation,
+  getActiveA2AReplyTaskIds,
   interruptPrivateChatA2AGuidanceTurnBeforeOutput,
   PRIVATE_CHAT_CONTEXT_MAX_MESSAGES,
   recordOutgoingPrivateChatA2ADisplay,
@@ -263,7 +268,8 @@ import {
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
-import { SleepGuard, evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, type SleepGuardWorkInput, type SleepGuardState } from './sleepGuard';
+import { SleepGuard, evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, type SleepGuardSource, type SleepGuardState } from './sleepGuard';
+import { collectSleepGuardWorkFrom } from './sleepGuardWorkSources';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
@@ -3740,6 +3746,11 @@ const startSqliteDaemons = (): void => {
     tickWatchdogMs: 45 * 60 * 1000,
     emitTaskEvent: (payload) => {
       broadcastGroupTaskEvent(payload);
+      // A group-task turn is in-process work that is only partly backed by a
+      // cowork session (see collectSleepGuardWork), so engage/release the sleep
+      // guard the moment a turn starts or settles instead of waiting for the
+      // 20s safety poll.
+      if (payload?.type === 'groupTask:turnActivityChanged') recomputeSleepGuard();
     },
     readPinForVerification: async (pinId) => {
       try {
@@ -7528,9 +7539,16 @@ const getScheduler = () => {
 // Opt-in host setting (General ▸ 「阻止设备休眠」, default OFF, persisted in the
 // app kv store). Only when the setting is ON does the guard engage a mechanism
 // — `/usr/bin/caffeinate -i` on macOS (see src/main/sleepGuard.ts) — and only
-// while at least one work source (active cowork session / running scheduled
-// task / nightly dream) is active. Pure policy lives in src/main/sleepGuard.ts;
-// this block wires it to the live work sources and the stored setting.
+// while at least one bounded unit of work is active: a running cowork session
+// (the entry point shared by interactive chat, Bot Browser sessions, IM turns,
+// A2A online chats, private-order executions and nightly study runs), a
+// scheduled task, a nightly dream, a group-task daemon turn, a group-chat
+// auto-reply pipeline or an A2A reply pipeline. Pure policy lives in
+// src/main/sleepGuard.ts, the injected collection seam (per-source fault
+// isolation) in src/main/sleepGuardWorkSources.ts; this block wires both to the
+// live subsystems and the stored setting. Long-lived daemons are deliberately
+// NOT work: they run for the whole app session and would hold the sleep
+// assertion forever.
 const readPreventDeviceSleepEnabled = (): boolean => {
   try {
     return resolvePreventDeviceSleepEnabled(getStore().get(PREVENT_DEVICE_SLEEP_SETTING_KEY));
@@ -7553,27 +7571,20 @@ const getSleepGuard = (): SleepGuard => {
   return sleepGuard;
 };
 
-const collectSleepGuardWork = (): SleepGuardWorkInput => {
-  let coworkSessionIds: string[] = [];
-  try {
-    coworkSessionIds = getCoworkRunner().getActiveSessionIds();
-  } catch (error) {
-    console.warn('[SleepGuard] collect cowork sessions failed:', error);
-  }
-  let scheduledTaskIds: string[] = [];
-  try {
-    scheduledTaskIds = getScheduler().getActiveTaskIds();
-  } catch (error) {
-    console.warn('[SleepGuard] collect scheduled tasks failed:', error);
-  }
-  let dreamingMetabotIds: number[] = [];
-  try {
-    dreamingMetabotIds = getDreamService()?.getDreamingBotIds() ?? [];
-  } catch (error) {
-    console.warn('[SleepGuard] collect dreaming bots failed:', error);
-  }
-  return { coworkSessionIds, scheduledTaskIds, dreamingMetabotIds };
-};
+const collectSleepGuardWork = () =>
+  collectSleepGuardWorkFrom(
+    {
+      getActiveCoworkSessionIds: () => getCoworkRunner().getActiveSessionIds(),
+      getActiveScheduledTaskIds: () => getScheduler().getActiveTaskIds(),
+      getDreamingMetabotIds: () => getDreamService()?.getDreamingBotIds() ?? [],
+      getGroupTaskTurns: () => getGroupTaskTurnActivity(),
+      getActiveGroupChatReplyTaskIds: () => getActiveGroupChatReplyTaskIds(),
+      getActiveA2AReplyTaskIds: () => getActiveA2AReplyTaskIds(),
+    },
+    (source: SleepGuardSource, error) => {
+      console.warn(`[SleepGuard] collect ${source} work failed:`, error);
+    },
+  );
 
 const recomputeSleepGuard = (): void => {
   try {

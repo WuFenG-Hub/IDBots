@@ -66,7 +66,14 @@ try {
   } = require('../dist-electron/sleepGuard.js'));
 }
 
-const idle = { coworkSessionIds: [], scheduledTaskIds: [], dreamingMetabotIds: [] };
+const idle = {
+  coworkSessionIds: [],
+  scheduledTaskIds: [],
+  dreamingMetabotIds: [],
+  groupTaskTurnIds: [],
+  groupChatReplyTaskIds: [],
+  a2aReplyTaskIds: [],
+};
 const ASSERTIONS_DISABLED = process.env.SLEEP_GUARD_CHECK_DISABLE_ASSERTIONS === '1';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -353,12 +360,98 @@ app
         coworkSessionIds: ['real-host-check-1'],
         scheduledTaskIds: ['t1'],
         dreamingMetabotIds: [1],
+        groupTaskTurnIds: ['7:1'],
+        groupChatReplyTaskIds: ['12'],
+        a2aReplyTaskIds: ['abc123i0'],
       }),
     );
     check(
       'multi-source apply stays engaged',
-      state.engaged === true && state.sources.includes('dream'),
+      state.engaged === true &&
+        state.sources.includes('dream') &&
+        state.sources.includes('groupTask') &&
+        state.sources.includes('groupChat') &&
+        state.sources.includes('a2aChat'),
       JSON.stringify(state),
+    );
+
+    // 4b. The in-process (non-cowork) turn sources alone must hold a REAL OS
+    //     assertion: a group-task turn, a group-chat reply and an A2A reply
+    //     each run partly with no cowork session behind them.
+    for (const [source, patch] of [
+      ['groupTask', { groupTaskTurnIds: ['7:1'] }],
+      ['groupChat', { groupChatReplyTaskIds: ['12'] }],
+      ['a2aChat', { a2aReplyTaskIds: ['abc123i0'] }],
+    ]) {
+      state = guard.apply(evaluateSleepGuardWork({ ...idle, ...patch }));
+      check(
+        `${source}: a session-less turn alone engages the guard`,
+        state.active === true && state.engaged === true && state.sources.length === 1 && state.sources[0] === source,
+        JSON.stringify(state),
+      );
+      if (isDarwin) {
+        await sleep(700);
+        const owned = caffeinateAssertionFor(parseOwnedAssertions(readAssertions()), process.pid);
+        console.log(`  pmset (${source} engaged): ${formatEntry(owned)}`);
+        check(`OS: ${source} holds a real PreventUserIdleSystemSleep assertion`, owned !== null, formatEntry(owned));
+      }
+      state = guard.apply(evaluateSleepGuardWork(idle));
+      check(
+        `${source}: turn settling releases the guard`,
+        state.active === false && state.engaged === false,
+        JSON.stringify(state),
+      );
+      if (isDarwin) {
+        await sleep(700);
+        const after = caffeinateAssertionFor(parseOwnedAssertions(readAssertions()), process.pid);
+        check(`OS: ${source} assertion gone once the turn settles`, after === null, formatEntry(after));
+      }
+    }
+
+    // 4c. The collection seam: the real production collector (per-source fault
+    //     isolation) is exercised here, so a broken getter can never leave
+    //     real work unguarded. Values are injected because a live group-task
+    //     turn or A2A reply cannot be produced inside this scratch Electron app
+    //     (those daemons belong to the app, not to this check).
+    let collectSleepGuardWorkFrom;
+    let groupTaskTurnIdsOf;
+    try {
+      ({ collectSleepGuardWorkFrom, groupTaskTurnIdsOf } = require('../dist-electron/main/sleepGuardWorkSources.js'));
+    } catch {
+      ({ collectSleepGuardWorkFrom, groupTaskTurnIdsOf } = require('../dist-electron/sleepGuardWorkSources.js'));
+    }
+    const collectFailures = [];
+    const collected = collectSleepGuardWorkFrom(
+      {
+        getActiveCoworkSessionIds: () => {
+          throw new Error('runner unavailable');
+        },
+        getActiveScheduledTaskIds: () => [],
+        getDreamingMetabotIds: () => [],
+        getGroupTaskTurns: () => [{ taskId: 7, metabotId: 1, startedAt: Date.now() }],
+        getActiveGroupChatReplyTaskIds: () => ['12'],
+        getActiveA2AReplyTaskIds: () => ['abc123i0'],
+      },
+      (source, error) => collectFailures.push(`${source}:${error instanceof Error ? error.message : String(error)}`),
+    );
+    check(
+      'collector: a broken source degrades to empty while the others still collect',
+      collected.coworkSessionIds.length === 0 &&
+        collectFailures.length === 1 &&
+        collected.groupTaskTurnIds.length === 1 &&
+        collected.groupChatReplyTaskIds.length === 1 &&
+        collected.a2aReplyTaskIds.length === 1,
+      `failures=${JSON.stringify(collectFailures)} work=${JSON.stringify(collected)}`,
+    );
+    check(
+      'collector: collected work drives the guard',
+      evaluateSleepGuardWork(collected).active === true,
+      JSON.stringify(evaluateSleepGuardWork(collected)),
+    );
+    check(
+      'collector: group-task keys use the daemon shape taskId:metabotId',
+      JSON.stringify(groupTaskTurnIdsOf([{ taskId: 7, metabotId: 1 }])) === JSON.stringify(['7:1']),
+      JSON.stringify(groupTaskTurnIdsOf([{ taskId: 7, metabotId: 1 }])),
     );
 
     // 5. Idle again -> released in the real runtime AND at the OS level.
