@@ -63,31 +63,46 @@ export function mentionContainsMetaId(
 }
 
 /**
- * GT#72: does the content carry the bot's FULL roster name as a bare token?
- * Chairs routinely address assignees by bare name ("Builder阿码, 第二棒正式
- * 开工…") — the wake gate must not lose the assignment just because the @ was
- * dropped. This mirrors what the auto-planning dispatch already does via
- * resolveMentionIdsForWorkers ("wakes the assigned workers even when the LLM
- * wrote bare names"). Deliberately NOT a substring guess: only the exact
- * roster name counts, and when another roster name strictly contains this
- * name the bare form is ambiguous and does not count (the @-token stays the
- * only wake for the shorter name).
+ * GT#72: does the content ADDRESS the bot by a bare roster-name form? Chairs
+ * routinely address assignees without the @ ("阿码，第二棒正式开工…" for the
+ * roster name "Builder阿码"; "小明，接评审棒" for "小明同学"). Accepted forms:
+ * the FULL roster name, or a unique trimmed form — a prefix or suffix of the
+ * name of at least 2 chars ("阿码" drops the latin prefix, "小明" drops the
+ * trailing part). A candidate that also addresses ANOTHER roster member is
+ * ambiguous and does not count (the @-token stays the only wake). Callers
+ * gate this on assignment-shaped chair messages ([DEADLINE] tag) — verdict
+ * prose and liveness notices that merely cite a name must stay quiet.
  */
-export function contentIncludesFullRosterName(
+export function contentAddressesRosterName(
   content: string | null | undefined,
   botName: string | null | undefined,
   rosterNames: Array<string | null | undefined>,
 ): boolean {
-  const name = (botName ?? '').trim();
-  const text = String(content ?? '');
+  const name = (botName ?? '').trim().toLowerCase();
+  const text = String(content ?? '').toLowerCase();
   if (!text || !name) return false;
-  const target = name.toLowerCase();
-  if (!text.toLowerCase().includes(target)) return false;
-  const ambiguous = rosterNames.some((other) => {
-    const candidate = (other ?? '').trim().toLowerCase();
-    return candidate && candidate !== target && candidate.includes(target);
-  });
-  return !ambiguous;
+  const others = rosterNames
+    .map((other) => (other ?? '').trim().toLowerCase())
+    .filter((other) => other && other !== name);
+  const addressesOnlyThis = (candidate: string): boolean =>
+    !others.some((other) => other.startsWith(candidate) || other.endsWith(candidate));
+  // CJK candidates have no word boundaries — plain containment. Latin
+  // candidates must match as whole words, or a 2-char head ("co" of
+  // "Coder Bot") would fire on every "confirm"/"code" in the message.
+  const contains = (candidate: string): boolean => {
+    if (/[\u4e00-\u9fff]/.test(candidate)) return text.includes(candidate);
+    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|[^a-z0-9_])${escaped}(?:[^a-z0-9_]|$)`).test(text);
+  };
+  if (contains(name)) return addressesOnlyThis(name);
+  // Trimmed forms: prefixes and suffixes of the roster name, 2..len-1 chars.
+  for (let cut = 2; cut < name.length; cut += 1) {
+    const head = name.slice(0, cut);
+    if (contains(head) && addressesOnlyThis(head)) return true;
+    const tail = name.slice(name.length - cut);
+    if (contains(tail) && addressesOnlyThis(tail)) return true;
+  }
+  return false;
 }
 
 /** Worker mention gate: mention-array hit OR explicit @name in the content. */

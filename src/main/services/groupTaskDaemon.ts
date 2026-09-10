@@ -29,7 +29,7 @@ import type {
 } from '../openTeamMembershipStore';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
-import { contentIncludesFullRosterName, isMentioned } from './groupChatMentionUtils';
+import { contentAddressesRosterName, isMentioned } from './groupChatMentionUtils';
 import { isOpenTeamProtocolOnlyContent } from './openTeamGuestDaemon';
 import { parsePositionLines } from '../libs/groupTaskPositions';
 import {
@@ -1212,6 +1212,13 @@ export function decideGroupTaskResponders(
   const rosterNames = members.map(
     (member) => botsById.get(member.metabotId ?? -1)?.name ?? member.name ?? null,
   );
+  // GT#72: the bare-name wake is gated to ASSIGNMENT-SHAPED chair messages —
+  // the playbook mandates a [DEADLINE] on every assignment, so the tag is the
+  // deterministic assignment marker. Verdict prose, round-ups, and liveness
+  // notices that merely CITE a member's name stay quiet (task #51: the
+  // chair's own "Coder Bot is in a long-running turn" notice must wake
+  // nobody).
+  const bareNameWakeEligible = senderIsChair && /\[DEADLINE\s*:/i.test(content);
 
   // Resolve mention/name hits once per member.
   const hits = new Map<number, boolean>();
@@ -1219,9 +1226,9 @@ export function decideGroupTaskResponders(
     if (member.metabotId == null) continue;
     const bot = botsById.get(member.metabotId);
     if (!bot) continue;
-    const bareNamed = senderIsChair
+    const bareNamed = bareNameWakeEligible
       && member.role === 'worker'
-      && contentIncludesFullRosterName(content, bot.name, rosterNames);
+      && contentAddressesRosterName(content, bot.name, rosterNames);
     hits.set(member.metabotId, isMentioned(message, bot) || bareNamed);
   }
   const chairHit = chairMember?.metabotId != null ? hits.get(chairMember.metabotId) === true : false;
@@ -8297,18 +8304,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
     const isChairMessage = Boolean(chairGmid && senderGmid === chairGmid);
     if (isChairMessage) {
-      // GT#72: the ACK watch follows the same bare-full-roster-name wake the
-      // responder gate applies — an assignment message that wakes the assignee
-      // must also arm their ACK watch, or the assignment lifecycle (wake →
-      // ACK watch → deadline clock) splits across two different mention
-      // definitions.
+      // GT#72: the ACK watch follows the same bare-name wake the responder
+      // gate applies (assignment-shaped chair messages only — a [DEADLINE]
+      // tag), so an assignment that wakes the assignee also arms their ACK
+      // watch; the assignment lifecycle (wake → ACK watch → deadline clock)
+      // never splits across two different mention definitions.
       const rosterNames = members.map(
         (candidate) => botsById.get(candidate.metabotId ?? -1)?.name ?? candidate.name ?? null,
       );
+      const bareNameWatchEligible = /\[DEADLINE\s*:/i.test(message.content ?? '');
       for (const member of members) {
         if (member.role !== 'worker' || member.metabotId == null) continue;
         const bot = botsById.get(member.metabotId);
-        const bareNamed = contentIncludesFullRosterName(message.content, bot?.name, rosterNames);
+        const bareNamed = bareNameWatchEligible
+          && contentAddressesRosterName(message.content, bot?.name, rosterNames);
         if (!bot || !(isMentioned(message, bot) || bareNamed)) continue;
         // GT#47 R3: during review / an open checkpoint the mention is part of
         // a review-closing or checkpoint message, not a work assignment —

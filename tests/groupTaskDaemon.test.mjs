@@ -9333,16 +9333,25 @@ test('R7: a response created BEFORE a newer signal does not close it', async () 
 // clause scoping + retroactive ACK satisfaction.
 // ---------------------------------------------------------------------------
 
-test('GT#72: contentIncludesFullRosterName — bare full roster name matches, ambiguous short forms do not', () => {
-  const { contentIncludesFullRosterName } = require('../dist-electron/main/services/groupChatMentionUtils.js');
-  const roster = ['Twin Bot', 'Coder Bot', 'Builder阿码', '阿码 Junior'];
-  assert.equal(contentIncludesFullRosterName('Builder阿码，第二棒正式开工 [DEADLINE: 60m]', 'Builder阿码', roster), true);
-  assert.equal(contentIncludesFullRosterName('builder阿码 交一下', 'Builder阿码', roster), true, 'case-insensitive');
-  // A short form that another roster name contains is ambiguous — never a wake.
-  assert.equal(contentIncludesFullRosterName('阿码 交一下', 'Builder阿码', roster), false);
-  assert.equal(contentIncludesFullRosterName('阿码 交一下', '阿码 Junior', roster), false);
-  assert.equal(contentIncludesFullRosterName('无关正文', 'Builder阿码', roster), false);
-  assert.equal(contentIncludesFullRosterName('', 'Builder阿码', roster), false);
+test('GT#72: contentAddressesRosterName — full names and unique short forms match; ambiguity and prose do not', () => {
+  const { contentAddressesRosterName } = require('../dist-electron/main/services/groupChatMentionUtils.js');
+  const roster = ['Twin Bot', 'Coder Bot', 'Builder阿码', '小明同学'];
+  assert.equal(contentAddressesRosterName('Builder阿码，第二棒正式开工 [DEADLINE: 60m]', 'Builder阿码', roster), true);
+  assert.equal(contentAddressesRosterName('builder阿码 交一下', 'Builder阿码', roster), true, 'case-insensitive');
+  // Unique trimmed forms — the task #72 short-name habits: drop the latin
+  // prefix ("阿码" for Builder阿码) or the trailing part ("小明" for 小明同学).
+  assert.equal(contentAddressesRosterName('阿码，预备作业即刻开工', 'Builder阿码', roster), true, 'unique suffix form addresses the member');
+  assert.equal(contentAddressesRosterName('小明，接评审棒', '小明同学', roster), true, 'unique prefix form addresses the member');
+  // A form that also addresses ANOTHER member is ambiguous — never a wake.
+  const ambiguousRoster = ['小明同学', '同学王'];
+  assert.equal(contentAddressesRosterName('同学们，开工', '小明同学', ambiguousRoster), false);
+  assert.equal(contentAddressesRosterName('同学们，开工', '同学王', ambiguousRoster), false);
+  // Latin forms need word boundaries — "co" of "Coder Bot" must not fire on
+  // ordinary prose words.
+  assert.equal(contentAddressesRosterName('please confirm the spec', 'Coder Bot', roster), false);
+  assert.equal(contentAddressesRosterName('Coder，接第二棒', 'Coder Bot', roster), true, 'whole-word prefix matches');
+  assert.equal(contentAddressesRosterName('无关正文', 'Builder阿码', roster), false);
+  assert.equal(contentAddressesRosterName('', 'Builder阿码', roster), false);
 });
 
 test('GT#72: a chair assignment by BARE full roster name wakes the assignee and arms the ACK watch', async () => {
@@ -9377,6 +9386,31 @@ test('GT#72: a chair assignment by BARE full roster name wakes the assignee and 
     });
     await h.loop.runTick();
     assert.equal(h.chatCalls.length, 1, 'a worker\'s bare name never wakes the chair');
+
+    // The bare-name wake is gated to ASSIGNMENT-SHAPED chair messages: a
+    // name cited in a deadline-less round-up (task #51's liveness-notice
+    // shape) wakes nobody.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'notice-bare-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'ℹ️ Coder Bot is in a long-running turn; no action needed.',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'a bare name in a deadline-less chair notice never wakes the cited worker');
+
+    // The #4344 shape proper: SHORT-FORM assignment ("Coder" for "Coder Bot")
+    // on a deadline-bearing chair message wakes the assignee.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'shortname-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'Coder，第一落 [DEADLINE: 60m]：字段级协议规范，即刻开工。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 2, 'the short-form assignment reached its assignee');
   } finally {
     h.cleanup();
   }
