@@ -90,7 +90,7 @@ export const GROUP_LOG_PROTOCOL_MAX_CHARS = 4000;
  * [WORKING]/[STANDBY] deliberately stay out — they are the ceremony class the
  * fold pass handles.
  */
-const GROUP_LOG_PROTOCOL_TAG_RE = /\[(DELIVERABLE|FREEZE\s*:|STATUS\s*:|PLAN_CHANGE\s*:|CHECKPOINT(?:_RESOLVED)?\s*:)/i;
+const GROUP_LOG_PROTOCOL_TAG_RE = /\[(DELIVERABLE|FREEZE\s*:|STATUS\s*:|PLAN_CHANGE\s*:|CHECKPOINT(?:_RESOLVED)?\s*:|DEADLINE\s*:|DEPENDS_ON\s*:)/i;
 
 /** True when the message carries protocol content that must not lose its middle. */
 export function isProtocolCarryingLine(content: string | null | undefined): boolean {
@@ -118,6 +118,9 @@ export interface GroupLogEntry {
   content: string;
   suspect?: boolean;
   isTrigger?: boolean;
+  /** GT#72: chair messages ride the protocol budget — they are rare and their
+   * middles carry load-bearing assignments/rulings that workers must read. */
+  role?: 'chair' | 'worker' | 'owner' | null;
 }
 
 /**
@@ -126,9 +129,13 @@ export interface GroupLogEntry {
  * counter line. Folding is skipped entirely when `fold` is false.
  *
  * fix/group-task-fix-v2 (B1): protocol-carrying lines ([DELIVERABLE],
- * [FREEZE], [STATUS:], [PLAN_CHANGE], [CHECKPOINT]) and the triggering
- * message ride the large protocol budget — their middles are exactly the
- * content a resend round-trip would otherwise have to recover.
+ * [FREEZE], [STATUS:], [PLAN_CHANGE], [CHECKPOINT], [DEADLINE],
+ * [DEPENDS_ON]) and the triggering message ride the large protocol budget —
+ * their middles are exactly the content a resend round-trip would otherwise
+ * have to recover. GT#72: CHAIR messages ride it too — a truncated chair
+ * ruling cost one re-send turn in task #72 before the worker learned the
+ * show-action escape hatch; the chair speaks rarely, so the extra input heat
+ * is cheap next to a lost instruction.
  */
 export function renderGroupLogLines(
   entries: GroupLogEntry[],
@@ -147,7 +154,9 @@ export function renderGroupLogLines(
     foldNames = [];
   };
   for (const entry of entries) {
-    const budget = entry.isTrigger || isProtocolCarryingLine(entry.content)
+    const budget = entry.isTrigger
+      || entry.role === 'chair'
+      || isProtocolCarryingLine(entry.content)
       ? GROUP_LOG_PROTOCOL_MAX_CHARS
       : GROUP_LOG_MESSAGE_MAX_CHARS;
     const line = `${entry.senderName}${entry.suspect ? ' [SUSPECT]' : ''}: ${truncateGroupLogLine(entry.content, budget)}`;

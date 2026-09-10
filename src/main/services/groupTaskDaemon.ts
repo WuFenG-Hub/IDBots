@@ -3395,6 +3395,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     db: Database,
     task: GroupTask,
     triggering: GroupTaskDaemonMessage,
+    chairGlobalMetaIdLog: string,
   ): string => {
     const recent = queryRecentMessages(db, task.groupId!, contextMessageCount);
     // Entropy P0: every message is head+tail truncated and runs of ceremony
@@ -3403,6 +3404,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const logEntropyP0 = parseGroupTaskEntropyP0Config(
       deps.getStore().get<string>('groupTaskEntropyP0'),
     );
+    const chairGmidForLog = (chairGlobalMetaIdLog ?? '').trim().toLowerCase();
+    const senderRoleForLog = (message: GroupTaskDaemonMessage): 'chair' | 'worker' | 'owner' | null => {
+      const gmid = (message.senderGlobalMetaId ?? '').trim().toLowerCase();
+      if (!gmid) return null;
+      return chairGmidForLog && gmid === chairGmidForLog ? 'chair' : null;
+    };
     const entries = recent.map((row) => {
       const message = toDaemonMessage(row);
       return {
@@ -3412,12 +3419,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         suspect: Boolean(message.senderSuspect),
         content: message.content ?? '',
         isTrigger: row.id === triggering.id,
+        role: senderRoleForLog(message),
       };
     });
     const lines = renderGroupLogLines(entries, { fold: logEntropyP0.logFold });
     return [
       buildAuthoritativeStateLine(task),
-      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; protocol lines ([DELIVERABLE]/[FREEZE]/[STATUS:]/[PLAN_CHANGE]/[CHECKPOINT]) and the triggering message are shown in full, other long messages are head+tail truncated, acknowledgment lines folded; to read any message in full use the group-task show action with view=full / before_id paging)]`,
+      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages; chair messages, protocol lines ([DELIVERABLE]/[FREEZE]/[STATUS:]/[PLAN_CHANGE]/[CHECKPOINT]/[DEADLINE]/[DEPENDS_ON]) and the triggering message are shown in full, other long messages are head+tail truncated, acknowledgment lines folded; to read any message in full use the group-task show action with view=full / before_id paging)]`,
       ...lines,
     ].join('\n');
   };
@@ -6298,7 +6306,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const { systemPrompt: baseSystemPrompt, volatileContext } = await buildTurnSystemPrompt(bot, task, promptMembers, member.role, ownerGlobalMetaId);
     // Volatile context (time + experience/cognition) rides the user turn so
     // the system prompt stays byte-stable across group turns.
-    let userMessage = [volatileContext, buildGroupLogUserMessage(db, task, message)]
+    let userMessage = [volatileContext, buildGroupLogUserMessage(db, task, message, chairGlobalMetaId)]
       .filter(Boolean)
       .join('\n\n');
     if (verificationNotes.length > 0) {

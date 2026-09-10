@@ -116,6 +116,18 @@ test('fix-v2 B1: protocol-carrying and trigger lines keep their middles in the g
   assert.ok(lines[1].includes(' … '), 'plain long line carries the elision marker');
   assert.ok(lines[2].includes(middle), 'trigger line keeps its full middle');
 
+  // GT#72: assignment tags ride the protocol class, and CHAIR messages ride
+  // it wholesale — a truncated chair ruling cost a re-send turn in task #72.
+  assert.equal(isProtocolCarryingLine('@阿码 第一落 [DEADLINE: 60m]：字段级协议规范'), true, 'deadline-tagged assignment is protocol');
+  assert.equal(isProtocolCarryingLine('[DEPENDS_ON: pin://abci0] 第二棒'), true, 'dependency tag is protocol');
+  const chairRuling = `两份核验做完了，结论摊开说。1. 事实卡形式不达标，打回补落链……${middle}……请用 post_simplenote 真正落一条，仍按 30m 交付。`;
+  const chairLines = renderGroupLogLines([
+    { senderName: 'AI_Sunny', content: chairRuling, role: 'chair' },
+    { senderName: 'AI_Sunny', content: plain, role: undefined },
+  ], { fold: false });
+  assert.ok(chairLines[0].includes(middle), 'a chair message keeps its full middle');
+  assert.ok(!chairLines[1].includes(middle), 'same sender without the chair role still truncates');
+
   // The protocol budget is still a cap, not unlimited.
   const giant = `[DELIVERABLE] ${'x'.repeat(GROUP_LOG_PROTOCOL_MAX_CHARS + 5000)}`;
   const giantLines = renderGroupLogLines([{ senderName: 'Lucy', content: giant }], { fold: false });
