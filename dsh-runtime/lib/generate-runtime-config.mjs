@@ -457,6 +457,11 @@ export function generateRuntimeConfig(input) {
       },
       { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
       { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' },
+      // 0.1.5 model-facing glob/grep over the packaged ripgrep binary: no
+      // system rg, no shell layer (fixed argv through ctx.subprocess), and
+      // formatted-result spill rides the trio mounted above. Stock config —
+      // over-cap glob pages take the modification-time head, not sampling.
+      { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
       { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
     ] : []),
     ...(input.extraEntries ?? []),
