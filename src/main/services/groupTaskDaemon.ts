@@ -579,9 +579,11 @@ export function hasWorkerUpstreamWait(content: string | null | undefined): boole
  * lets one member's clause mask another's prose wait (the foreign tag's
  * free-text token reads as satisfied, skipping the prose branch) or taint a
  * member with a wait that governs someone else's step. The clause runs from
- * the member's @mention to the next @mention, blank line, or thematic break.
- * Returns null when the mention is not literal text (mention-array-only
- * dispatches) — callers then keep whole-message semantics.
+ * the member's @mention to the next @mention, blank line, or thematic break;
+ * GT#72: when no @-token exists, a BARE full-roster-name occurrence starts
+ * the clause instead (chairs address members both ways). Returns null when
+ * neither form is literal text (mention-array-only dispatches) — callers
+ * then keep whole-message semantics.
  */
 export function extractMemberDispatchClause(
   content: string | null | undefined,
@@ -590,12 +592,24 @@ export function extractMemberDispatchClause(
   const text = String(content ?? '');
   const name = String(botName ?? '').trim();
   if (!text || !name) return null;
+  const clauseEnd = /(?:\r?\n[ \t]*\r?\n)|(?:\r?\n[ \t]*-{3,}[ \t]*$)|(?:\s@)/m;
   const at = text.toLowerCase().indexOf(`@${name.toLowerCase()}`);
-  if (at < 0) return null;
-  const rest = text.slice(at);
-  const tail = rest.slice(1);
-  const end = /(?:\r?\n[ \t]*\r?\n)|(?:\r?\n[ \t]*-{3,}[ \t]*$)|(?:\s@)/m.exec(tail);
-  return end ? rest.slice(0, 1 + end.index) : rest;
+  if (at >= 0) {
+    const rest = text.slice(at);
+    const end = clauseEnd.exec(rest.slice(1));
+    return end ? rest.slice(0, 1 + end.index) : rest;
+  }
+  // GT#72: chairs also address members by BARE full roster name
+  // ("Builder阿码 这三点随你第一落一起落进 schema。3. 啊明，下一棒…[DEADLINE:
+  // 45m]。") — the clause must scope to the right member there too, or a
+  // later member's deadline bleeds into the bare-named member's arming.
+  // The bare occurrence may sit INSIDE a longer roster name ("阿码" inside
+  // "@Builder阿码") — that slice is equivalent, so no disambiguation needed.
+  const bare = text.toLowerCase().indexOf(name.toLowerCase());
+  if (bare < 0) return null;
+  const rest = text.slice(bare);
+  const end = clauseEnd.exec(rest.slice(name.length));
+  return end ? rest.slice(0, name.length + end.index) : rest;
 }
 /**
  * P2-8: multi-driver mutex — kv heartbeat claim per task
@@ -8238,6 +8252,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * GT#72: the member's most recent [WORKING] ACK message time (null when the
+   * recent window holds none). Bounded scan of the member's latest messages —
+   * used to satisfy an assignment watch that armed AFTER the ACK landed.
+   */
+  const findRecentWorkingAckMs = (
+    task: GroupTask,
+    member: GroupTaskMember,
+  ): number | null => {
+    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+    if (!task.groupId || !gmid) return null;
+    try {
+      const rows = deps.getStore().getDatabase().exec(
+        'SELECT content, created_at FROM group_chat_messages WHERE group_id = ? AND sender_global_metaid = ? ORDER BY id DESC LIMIT 8',
+        [task.groupId, gmid],
+      )[0]?.values ?? [];
+      for (const row of rows) {
+        const content = String(row[0] ?? '');
+        if (parseWorkingAck(stripGroupTaskQuotedCode(content))) {
+          const ms = parseSqliteUtcMs(String(row[1] ?? ''));
+          if (ms != null && ms > 0) return ms;
+        }
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
   const handleMemberProtocolMarkers = (
     task: GroupTask,
     message: GroupTaskDaemonMessage,
@@ -8328,7 +8371,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${message.id}`, '1');
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: derived assignment to ${member.name ?? member.metabotId} ` +
-                `(message #${message.id}, DEPENDS_ON upstream ${derived}) inherits the upstream ACK; no new ACK watch`,
+                  `(message #${message.id}, DEPENDS_ON upstream ${derived}) inherits the upstream ACK; no new ACK watch`,
               );
             } else {
               // P5 (v1.1): dependency-waiting is a legal state — the worker
@@ -8337,9 +8380,42 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // the #21-style false "did not ACK" warnings.
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: derived assignment to ${member.name ?? member.metabotId} ` +
-                `(message #${message.id}) upstream not delivered; dependency-wait, no ACK watch`,
+                  `(message #${message.id}) upstream not delivered; dependency-wait, no ACK watch`,
               );
             }
+            continue;
+          }
+          // GT#72: the ACK can land MOMENTS BEFORE this watch arms — the
+          // worker answered the assignment while the daemon was still
+          // processing it (task #72: 啊明's [WORKING] for the merge assignment
+          // arrived 47s before the re-mention's watch armed, so no deadline
+          // ever ticked). A fresh [WORKING] inside the ACK window satisfies
+          // this watch retroactively: mark ack-seen and arm the chair-stated
+          // deadline from THIS assignment instead of waiting for an ACK that
+          // already happened.
+          const recentAckMs = findRecentWorkingAckMs(task, member);
+          if (recentAckMs != null && now() - recentAckMs <= ackTimeoutMs) {
+            sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${message.id}`, '1');
+            const clause = extractMemberDispatchClause(contentText, bot.name)
+              ?? extractMemberDispatchClause(contentText, member.name)
+              ?? contentText;
+            const retroMinutes = parseChairDeadlineMinutes(clause);
+            if (retroMinutes != null && retroMinutes > 0) {
+              sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+              sqlite.set(
+                `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+                JSON.stringify({
+                  dueAt: now() + retroMinutes * 60_000,
+                  ackedAt: recentAckMs,
+                  taskDescription: null,
+                }),
+              );
+            }
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] just before ` +
+                `assignment (message #${message.id}) armed its watch — retroactively satisfied` +
+                `${retroMinutes != null && retroMinutes > 0 ? `, armed the chair-stated deadline: ${retroMinutes}m` : ' (no chair-stated deadline on the assignment)'}`,
+            );
             continue;
           }
           // Task #51 false-alarm fix: persist the assignment's CHAIN second
@@ -8475,9 +8551,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         // A numberless ACK against a deadline-less assignment arms nothing:
         // the chair playbook requires a deadline on every assignment, and a
         // missing one is the chair's sequencing gap, not the host's to invent.
-        const chairDeadlineMinutes = parseChairDeadlineMinutes(
-          resolveAssignmentContent(task, assignmentMessageId, message.replyPin),
-        );
+        // GT#72: the parse is scoped to the member's OWN dispatch clause —
+        // chairs write multi-assignment messages, and whole-message parsing
+        // armed 阿码's clock with 啊明's "[DEADLINE: 45m]" (harmless only by
+        // luck; reversed numbers would false-ring). Clause extraction falls
+        // back to the whole message for mention-array-only dispatches.
+        const assignmentContent = resolveAssignmentContent(task, assignmentMessageId, message.replyPin);
+        const memberClause = extractMemberDispatchClause(assignmentContent, memberBot?.name)
+          ?? extractMemberDispatchClause(assignmentContent, member.name)
+          ?? assignmentContent;
+        const chairDeadlineMinutes = parseChairDeadlineMinutes(memberClause);
         if (chairDeadlineMinutes != null && chairDeadlineMinutes > 0) {
           // Arming a fresh deadline starts a fresh reminder cycle — a leftover
           // delivery-reminded flag from the previous (missed or delivered)

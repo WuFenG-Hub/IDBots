@@ -9406,3 +9406,103 @@ test('GT#72: a deadline-bearing chair message that wakes NO worker records the a
   }
 });
 
+test('GT#72: deadline arming is scoped to the member\'s own dispatch clause (no cross-member bleed)', async () => {
+  // The #4347 replay: one chair message carried 啊明's [DEADLINE: 45m] AND a
+  // deadline-less clause for another worker — whole-message parsing armed the
+  // WRONG member's clock with 45m. Clause scoping must read only the ACKing
+  // member's own clause.
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]); // Coder Bot + Designer Bot
+    insertGroupMessage(h.db, {
+      pinId: 'multi-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '调研核验完成。\n'
+        + '@Designer Bot，下一棒：PRD v0.8 组稿预备，现在开工，[DEADLINE: 45m]。\n'
+        + '@Coder Bot 这三点随你第一落一起落进 schema。\n'
+        + '当前时钟：组稿 02:12。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick(); // both workers dispatched
+
+    // Coder Bot ACKs — its own clause carries NO deadline: nothing armed.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'coder-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：schema 增补，预计 20 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`) ?? null,
+      null,
+      'Coder Bot ACKs a deadline-less clause — no clock armed (no 45m bleed)',
+    );
+
+    // Designer Bot ACKs — its own clause carries the 45m: armed.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'designer-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单：组稿预备，预计 40 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:3`);
+    assert.ok(armed, 'Designer Bot ACKs its own [DEADLINE: 45m] clause — clock armed');
+    assert.match(JSON.parse(armed).taskDescription ?? '', /组稿预备/);
+    assert.ok(logs.some((line) => line.includes('armed the chair-stated deadline: 45m')));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#72: an ACK that lands just BEFORE the assignment\'s watch arming satisfies it retroactively', async () => {
+  // The #4352/#4353 replay: the worker ACKed the merge assignment, and 47
+  // seconds later a chair re-mention armed a fresh ACK watch that no ACK
+  // would ever satisfy — the deadline never ticked.
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]);
+    // 1. Initial assignment — arms a watch, gets ACKed normally.
+    insertGroupMessage(h.db, {
+      pinId: 'merge-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 组稿预备，现在开工。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'merge-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：组稿预备，预计 30 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    // 2. Chair RE-mentions the same assignment with a deadline — the watch
+    // would arm here, but the member already ACKed seconds ago.
+    h.state.nowMs += 20_000;
+    insertGroupMessage(h.db, {
+      pinId: 'merge-reassign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot，下一棒：PRD v0.8 组稿预备 [DEADLINE: 45m]，单一 Markdown 文件十章节。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.ok(
+      logs.some((line) => line.includes('ACKed [WORKING] just before assignment') && line.includes('retroactively satisfied')),
+      'the watch recognized the just-prior ACK',
+    );
+    assert.ok(
+      logs.some((line) => line.includes('retroactively satisfied, armed the chair-stated deadline: 45m')),
+      'the deadline armed from the re-mention assignment',
+    );
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
+    assert.ok(armed, 'expected_delivery armed despite the ACK-before-watch race');
+  } finally {
+    h.cleanup();
+  }
+});
