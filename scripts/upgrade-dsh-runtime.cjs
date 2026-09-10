@@ -51,10 +51,34 @@ function main() {
       changed += 1;
     }
   }
+  // Overrides must move in the same pass: npm refuses an override of a direct
+  // dependency whose spec differs from the dependency's own (EOVERRIDE), and a
+  // stale transitive-only override would silently hold that package at the old
+  // version while everything else upgrades.
+  const overrides = pkg.overrides || {};
+  const overrideNames = Object.keys(overrides).filter(
+    (name) => name.startsWith(DSH_SCOPE) && typeof overrides[name] === 'string',
+  );
+  for (const name of overrideNames) {
+    if (overrides[name] !== target) {
+      overrides[name] = target;
+      changed += 1;
+    }
+  }
   fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
-  console.log(`[upgrade:dsh] pinned ${names.length} ${DSH_SCOPE}* packages to ${target} (${changed} spec(s) changed)`);
+  console.log(
+    `[upgrade:dsh] pinned ${names.length} dependencies + ${overrideNames.length} overrides ` +
+    `${DSH_SCOPE}* packages to ${target} (${changed} spec(s) changed)`,
+  );
 
   console.log('[upgrade:dsh] regenerating dsh-runtime/package-lock.json via npm install ...');
+  // Regenerate from a clean slate: the existing node_modules/lockfile pin the
+  // OLD kernel line, and npm's ideal-tree builder tries to reconcile it —
+  // dsh-sdk-client pulls the full `dsh` app bundle, whose old pinned transitive
+  // packages peer-conflict with the new root pins (ERESOLVE). Exact root pins
+  // make a fresh resolve deterministic, so dropping the stale state is safe.
+  fs.rmSync(path.join(runtimeDir, 'package-lock.json'), { force: true });
+  fs.rmSync(path.join(runtimeDir, 'node_modules'), { recursive: true, force: true });
   const install = spawnSync(NPM_BIN, ['install', '--prefix', runtimeDir], { stdio: 'inherit' });
   if (install.status !== 0) {
     fail(
