@@ -1862,6 +1862,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // 通用设置
     autoLaunch: '开机自启动',
     autoLaunchDescription: '系统启动时自动运行应用',
+    preventDeviceSleep: '阻止设备休眠',
+    preventDeviceSleepDescription: 'IDBots 工作时保持系统不休眠（仅阻止空闲自动睡眠；合盖、低电量等仍会休眠）',
 
     // 定时任务
     // Group Tasks (群任务)
@@ -4290,6 +4292,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // General Settings
     autoLaunch: 'Launch at Login',
     autoLaunchDescription: 'Automatically start the app when you log in',
+    preventDeviceSleep: 'Prevent Device Sleep',
+    preventDeviceSleepDescription: 'Keep the system awake while IDBots is working (blocks idle auto-sleep only; closing the lid, low battery and similar still sleep)',
 
     // Group Tasks
     groupTasks: 'Group Tasks',

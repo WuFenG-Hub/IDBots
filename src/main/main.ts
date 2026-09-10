@@ -263,7 +263,7 @@ import {
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
-import { SleepGuard, evaluateSleepGuardWork, type SleepGuardWorkInput, type SleepGuardState } from './sleepGuard';
+import { SleepGuard, evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, type SleepGuardWorkInput, type SleepGuardState } from './sleepGuard';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
@@ -7525,14 +7525,27 @@ const getScheduler = () => {
 };
 
 // --- Sleep Guard: keep the host device awake while IDBots is working ---------
-// Engages Electron's `powerSaveBlocker` only while at least one work source
-// (active cowork session / running scheduled task / nightly dream) is active,
-// and releases it as soon as everything is idle. Pure policy lives in
-// src/main/sleepGuard.ts; this block wires it to the live work sources.
+// Opt-in host setting (General ▸ 「阻止设备休眠」, default OFF, persisted in the
+// app kv store). Only when the setting is ON does the guard engage a mechanism
+// — `/usr/bin/caffeinate -i` on macOS (see src/main/sleepGuard.ts) — and only
+// while at least one work source (active cowork session / running scheduled
+// task / nightly dream) is active. Pure policy lives in src/main/sleepGuard.ts;
+// this block wires it to the live work sources and the stored setting.
+const readPreventDeviceSleepEnabled = (): boolean => {
+  try {
+    return resolvePreventDeviceSleepEnabled(getStore().get(PREVENT_DEVICE_SLEEP_SETTING_KEY));
+  } catch (error) {
+    // Missing key (fresh install / no config) or unreadable store -> default OFF.
+    console.warn('[SleepGuard] read prevent-device-sleep setting failed:', error);
+    return false;
+  }
+};
+
 const getSleepGuard = (): SleepGuard => {
   if (!sleepGuard) {
     sleepGuard = new SleepGuard({
       powerSaveBlocker,
+      enabled: readPreventDeviceSleepEnabled(),
       onChanged: (state) => broadcastSleepGuardStatus(state),
     });
     broadcastSleepGuardStatus(sleepGuard.getState());
@@ -7772,6 +7785,27 @@ if (!gotTheLock) {
   // Sleep guard status for the harness frontend (badge).
   ipcMain.handle('powerGuard:status', () => {
     return getSleepGuard().getState();
+  });
+
+  // Host setting: 「阻止设备休眠」 (General settings). Stored in the app kv
+  // config store so a missing key (fresh install) resolves to OFF, and applied
+  // to the running guard immediately — no app restart needed.
+  ipcMain.handle('powerGuard:getPreventDeviceSleep', () => {
+    return { enabled: readPreventDeviceSleepEnabled() };
+  });
+
+  ipcMain.handle('powerGuard:setPreventDeviceSleep', (_event, enabled: unknown) => {
+    try {
+      const next = enabled === true;
+      getStore().set(PREVENT_DEVICE_SLEEP_SETTING_KEY, next);
+      getSleepGuard().setEnabled(next);
+      recomputeSleepGuard();
+      broadcastStoreChanged(PREVENT_DEVICE_SLEEP_SETTING_KEY);
+      return { success: true };
+    } catch (error) {
+      console.error('[SleepGuard] update prevent-device-sleep setting failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   });
 
   ipcMain.handle('store:set', (_event, key, value) => {

@@ -29,9 +29,16 @@
  *  the lid, choosing Apple menu ▸ Sleep, and low-battery forced sleep still put
  *  the machine to sleep; the guard does not (and cannot) override those.
  *
- * The guard is engaged only while at least one work source is active, and is
- * released as soon as all sources are idle — the OS sleep policy is untouched
- * outside of actual work.
+ * ── Host-level setting (General ▸ 「阻止设备休眠」) ───────────────────────────
+ *  Sleep prevention is opt-in and OFF by default (a missing config key must
+ *  stay off). When the setting is off the guard performs no sleep-prevention
+ *  side effect at all: it neither spawns `caffeinate` nor calls
+ *  `powerSaveBlocker`. Toggling it applies immediately — disabling releases any
+ *  held mechanism, enabling engages at once if work is already active.
+ *
+ * The guard is engaged only while the setting is on AND at least one work
+ * source is active, and is released as soon as either goes away — the OS sleep
+ * policy is untouched outside of that.
  */
 import { spawn as nodeSpawn } from 'node:child_process';
 
@@ -70,6 +77,22 @@ export interface SleepGuardState {
    * `null` when released.
    */
   engagedBy: SleepGuardEngagedBy | null;
+  /**
+   * Host-level setting (General settings ▸ 「阻止设备休眠」). When false the
+   * guard is a no-op: `engaged` is always false regardless of active work.
+   */
+  preventDeviceSleepEnabled: boolean;
+}
+
+/**
+ * Resolve the host-level setting from its stored config value.
+ *
+ * Default-OFF contract: only an explicit boolean `true` enables the feature. A
+ * missing key (fresh install / no config yet), a partial write, or any
+ * non-boolean value (legacy `'true'`, `1`, `{}`) all resolve to `false`.
+ */
+export function resolvePreventDeviceSleepEnabled(rawConfigValue: unknown): boolean {
+  return rawConfigValue === true;
 }
 
 export type PowerSaveBlockerType = 'prevent-app-suspension' | 'prevent-display-sleep';
@@ -95,6 +118,15 @@ export type SleepGuardSpawnHelper = (command: string, args: readonly string[]) =
 
 /** System helper used on macOS to hold a supported sleep assertion. */
 export const CAFFEINATE_PATH = '/usr/bin/caffeinate';
+
+/**
+ * App kv-config key backing the host setting (General ▸ 「阻止设备休眠」).
+ * Lives in the same store the harness renderer reads/writes through
+ * `window.electron.store`, so the main process can read it at boot. Never
+ * rename this literal: existing installations would silently lose the setting
+ * and fall back to OFF.
+ */
+export const PREVENT_DEVICE_SLEEP_SETTING_KEY = 'sleep_guard_prevent_device_sleep';
 
 /**
  * `-i` prevents user-idle system sleep (the supported assertion type);
@@ -142,6 +174,11 @@ export interface SleepGuardOptions {
   powerSaveBlocker: PowerSaveBlockerLike;
   /** Called whenever the engaged/active state (or the mechanism) changes. */
   onChanged?: (state: SleepGuardState) => void;
+  /**
+   * Host-level setting (General settings ▸ 「阻止设备休眠」). Defaults to
+   * `false`: without an explicit opt-in the guard never touches the OS.
+   */
+  enabled?: boolean;
   /** Platform override; defaults to `process.platform` (injected for tests). */
   platform?: NodeJS.Platform;
   /** Spawn seam for the macOS helper; defaults to `child_process.spawn`. */
@@ -174,7 +211,14 @@ export class SleepGuard {
   private helper: SpawnedProcessLike | null = null;
   private helperExitHandler: (() => void) | null = null;
   private engagedBy: SleepGuardEngagedBy | null = null;
-  private state: SleepGuardState = { active: false, sources: [], engaged: false, engagedBy: null };
+  private enabled: boolean;
+  private state: SleepGuardState = {
+    active: false,
+    sources: [],
+    engaged: false,
+    engagedBy: null,
+    preventDeviceSleepEnabled: false,
+  };
 
   constructor(options: SleepGuardOptions) {
     this.powerSaveBlocker = options.powerSaveBlocker;
@@ -184,15 +228,37 @@ export class SleepGuard {
     this.parentPid = options.parentPid ?? process.pid;
     this.helperPath = options.helperPath ?? CAFFEINATE_PATH;
     this.warn = options.warn ?? defaultWarn;
+    this.enabled = options.enabled === true;
+    this.state.preventDeviceSleepEnabled = this.enabled;
   }
 
   apply(work: SleepGuardWorkState): SleepGuardState {
-    if (work.active) {
+    if (this.enabled && work.active) {
       if (this.currentEngagedBy() === null) this.engage();
     } else if (this.helper !== null || this.blockerId !== null || this.engagedBy !== null) {
+      // Either the setting is off (never hold a mechanism) or the work ended.
       this.release();
     }
     return this.syncState(work.active, work.sources);
+  }
+
+  /**
+   * Apply the host-level setting at runtime — takes effect immediately, with no
+   * app restart. Disabling releases any held mechanism right away; enabling
+   * engages at once when work is already active.
+   */
+  setEnabled(enabled: boolean): SleepGuardState {
+    this.enabled = enabled === true;
+    if (!this.enabled) {
+      if (this.helper !== null || this.blockerId !== null || this.engagedBy !== null) this.release();
+    } else if (this.state.active && this.currentEngagedBy() === null) {
+      this.engage();
+    }
+    return this.syncState(this.state.active, this.state.sources);
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
   }
 
   getState(): SleepGuardState {
@@ -201,6 +267,7 @@ export class SleepGuard {
       sources: [...this.state.sources],
       engaged: this.state.engaged,
       engagedBy: this.state.engagedBy,
+      preventDeviceSleepEnabled: this.state.preventDeviceSleepEnabled,
     };
   }
 
@@ -221,7 +288,13 @@ export class SleepGuard {
   /** Release the mechanism and reset state (used on app shutdown). */
   dispose(): void {
     this.release();
-    this.state = { active: false, sources: [], engaged: false, engagedBy: null };
+    this.state = {
+      active: false,
+      sources: [],
+      engaged: false,
+      engagedBy: null,
+      preventDeviceSleepEnabled: this.enabled,
+    };
   }
 
   // ── internals ─────────────────────────────────────────────────────────────
@@ -388,6 +461,7 @@ export class SleepGuard {
       sources: [...sources],
       engaged: engagedBy !== null,
       engagedBy,
+      preventDeviceSleepEnabled: this.enabled,
     };
     const sourcesChanged =
       prev.sources.length !== next.sources.length ||
@@ -397,6 +471,7 @@ export class SleepGuard {
       prev.active !== next.active ||
       prev.engaged !== next.engaged ||
       prev.engagedBy !== next.engagedBy ||
+      prev.preventDeviceSleepEnabled !== next.preventDeviceSleepEnabled ||
       sourcesChanged
     ) {
       this.onChanged?.(this.getState());

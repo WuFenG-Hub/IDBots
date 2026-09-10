@@ -25,6 +25,12 @@
  *   SLEEP_GUARD_CHECK_DISABLE_ASSERTIONS=1 env -u ELECTRON_RUN_AS_NODE \
  *     ./node_modules/.bin/electron scripts/sleep-guard-real-host-check.cjs
  *
+ * Host-setting contrast (General ▸ 「阻止设备休眠」, default OFF): the check first
+ * drives the guard on the fresh-install path (no config key -> OFF, work active,
+ * provably NO assertion), then flips the setting ON at runtime and requires the
+ * assertion to appear, then switches it OFF again mid-work and requires the
+ * assertion to disappear — all without restarting the app.
+ *
  * Exit code 0 = all checks passed, 1 = any check failed.
  */
 const os = require('os');
@@ -38,12 +44,26 @@ app.setPath('userData', path.join(os.tmpdir(), 'idbots-sleep-guard-check-userdat
 if (process.platform === 'darwin' && app.dock) app.dock.hide();
 
 let evaluateSleepGuardWork;
+let resolvePreventDeviceSleepEnabled;
+let PREVENT_DEVICE_SLEEP_SETTING_KEY;
 let SleepGuard;
 let CAFFEINATE_PATH;
 try {
-  ({ evaluateSleepGuardWork, SleepGuard, CAFFEINATE_PATH } = require('../dist-electron/main/sleepGuard.js'));
+  ({
+    evaluateSleepGuardWork,
+    resolvePreventDeviceSleepEnabled,
+    PREVENT_DEVICE_SLEEP_SETTING_KEY,
+    SleepGuard,
+    CAFFEINATE_PATH,
+  } = require('../dist-electron/main/sleepGuard.js'));
 } catch {
-  ({ evaluateSleepGuardWork, SleepGuard, CAFFEINATE_PATH } = require('../dist-electron/sleepGuard.js'));
+  ({
+    evaluateSleepGuardWork,
+    resolvePreventDeviceSleepEnabled,
+    PREVENT_DEVICE_SLEEP_SETTING_KEY,
+    SleepGuard,
+    CAFFEINATE_PATH,
+  } = require('../dist-electron/sleepGuard.js'));
 }
 
 const idle = { coworkSessionIds: [], scheduledTaskIds: [], dreamingMetabotIds: [] };
@@ -211,9 +231,56 @@ app
       check('OS assertion checks (n/a platform)', true, 'pmset is macOS-only');
     }
 
-    const guard = new SleepGuard(guardOptions);
+    // 1. Host setting default must be OFF for a missing/odd config value.
+    check(
+      'setting default: missing config key resolves to OFF',
+      resolvePreventDeviceSleepEnabled(undefined) === false &&
+        resolvePreventDeviceSleepEnabled(null) === false &&
+        resolvePreventDeviceSleepEnabled('true') === false &&
+        resolvePreventDeviceSleepEnabled(1) === false,
+      'undefined/null/legacy-string/legacy-number all resolve false',
+    );
 
-    // 1. Idle -> guard must NOT engage.
+    // 1b. Default-value evidence on the REAL app kv store (the same store the
+    //     harness renderer writes through `window.electron.store`).
+    try {
+      const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+      const probeDir = path.join(os.tmpdir(), `idbots-sleepguard-config-check-${process.pid}`);
+      const probeStore = await SqliteStore.create(probeDir);
+      check(
+        'config: fresh kv store has NO key and resolves OFF',
+        probeStore.get(PREVENT_DEVICE_SLEEP_SETTING_KEY) === undefined &&
+          resolvePreventDeviceSleepEnabled(probeStore.get(PREVENT_DEVICE_SLEEP_SETTING_KEY)) === false,
+        `key=${PREVENT_DEVICE_SLEEP_SETTING_KEY} value=${JSON.stringify(
+          probeStore.get(PREVENT_DEVICE_SLEEP_SETTING_KEY),
+        )}`,
+      );
+      probeStore.set(PREVENT_DEVICE_SLEEP_SETTING_KEY, true);
+      check(
+        'config: stored true resolves ON and survives a reopen',
+        resolvePreventDeviceSleepEnabled(probeStore.get(PREVENT_DEVICE_SLEEP_SETTING_KEY)) === true,
+        `value=${JSON.stringify(probeStore.get(PREVENT_DEVICE_SLEEP_SETTING_KEY))}`,
+      );
+      probeStore.set(PREVENT_DEVICE_SLEEP_SETTING_KEY, false);
+      check(
+        'config: stored false resolves OFF',
+        resolvePreventDeviceSleepEnabled(probeStore.get(PREVENT_DEVICE_SLEEP_SETTING_KEY)) === false,
+        `value=${JSON.stringify(probeStore.get(PREVENT_DEVICE_SLEEP_SETTING_KEY))}`,
+      );
+    } catch (error) {
+      check('config: app kv store round-trip', false, `store probe failed: ${error.message}`);
+    }
+
+    // NOTE: guardOptions carries no `enabled` — i.e. exactly the fresh-install
+    // path (missing config key).
+    const guard = new SleepGuard(guardOptions);
+    check(
+      'setting default: a guard built without the key reports OFF',
+      guard.getState().preventDeviceSleepEnabled === false,
+      JSON.stringify(guard.getState()),
+    );
+
+    // 2. Idle -> guard must NOT engage.
     let state = guard.apply(evaluateSleepGuardWork(idle));
     check(
       'idle keeps guard disengaged',
@@ -221,9 +288,33 @@ app
       JSON.stringify(state),
     );
 
-    // 2. Work -> guard engages through the platform mechanism.
+    // 3. Work active but the setting is OFF -> truthful `active`, zero
+    //    engagement, and (macOS) provably no OS assertion.
     state = guard.apply(evaluateSleepGuardWork({ ...idle, coworkSessionIds: ['real-host-check-1'] }));
-    check('work engages guard', state.active === true && state.engaged === true, JSON.stringify(state));
+    check(
+      'setting OFF: work keeps the guard disengaged',
+      state.active === true &&
+        state.engaged === false &&
+        state.engagedBy === null &&
+        state.preventDeviceSleepEnabled === false,
+      JSON.stringify(state),
+    );
+    if (isDarwin) {
+      await sleep(700);
+      const offEntries = parseOwnedAssertions(readAssertions());
+      const offOwned =
+        caffeinateAssertionFor(offEntries, process.pid) ?? ownedBlockerAssertionFor(offEntries, process.pid);
+      console.log(`  pmset (setting OFF, work active): ${formatEntry(offOwned)}`);
+      check('OS: setting OFF leaves NO assertion for this pid', offOwned === null, formatEntry(offOwned));
+    }
+
+    // 4. Flip the setting ON -> immediate engagement, no app restart.
+    state = guard.setEnabled(true);
+    check(
+      'setting ON: engages immediately (no restart)',
+      state.engaged === true && state.preventDeviceSleepEnabled === true,
+      JSON.stringify(state),
+    );
     const expectedMechanism = isDarwin ? 'caffeinate' : 'powerSaveBlocker';
     check(
       `mechanism: engaged via ${expectedMechanism}`,
@@ -299,7 +390,32 @@ app
       check('OS: guard assertion re-appears after re-engage', owned !== null, formatEntry(owned));
     }
 
-    // 7. dispose -> released at the OS level too.
+    // 7. Switch OFF while work is still active -> assertion released right away.
+    state = guard.setEnabled(false);
+    check(
+      'setting OFF mid-work releases the guard',
+      state.engaged === false && state.engagedBy === null && state.preventDeviceSleepEnabled === false,
+      JSON.stringify(state),
+    );
+    if (isDarwin) {
+      await sleep(700);
+      const entries = parseOwnedAssertions(readAssertions());
+      const stillThere = caffeinateAssertionFor(entries, process.pid) ?? ownedBlockerAssertionFor(entries, process.pid);
+      console.log(`  pmset (setting OFF mid-work): ${formatEntry(stillThere)}`);
+      check('OS: assertion gone after switching OFF', stillThere === null, formatEntry(stillThere));
+    }
+
+    // 8. Switch back ON with work still active -> assertion returns.
+    state = guard.setEnabled(true);
+    check('setting ON again re-engages', state.engaged === true, JSON.stringify(state));
+    if (isDarwin) {
+      await sleep(700);
+      const back = caffeinateAssertionFor(parseOwnedAssertions(readAssertions()), process.pid);
+      console.log(`  pmset (setting ON again): ${formatEntry(back)}`);
+      check('OS: assertion returns after switching ON again', back !== null, formatEntry(back));
+    }
+
+    // 9. dispose -> released at the OS level too.
     guard.dispose();
     check('dispose releases guard', guard.isEngaged() === false, `engaged=${guard.isEngaged()}`);
     if (isDarwin) {
@@ -318,6 +434,7 @@ app
       const fallbackGuard = new SleepGuard({
         powerSaveBlocker: ASSERTIONS_DISABLED ? inertBlocker : powerSaveBlocker,
         platform: process.platform,
+        enabled: true,
         spawnHelper: () => {
           throw new Error('forced fallback: caffeinate disabled by the check');
         },

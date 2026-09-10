@@ -25,10 +25,12 @@ contextBridge.exposeInMainWorld('electron', {
   },
   powerGuard: {
     getStatus: () => ipcRenderer.invoke('powerGuard:status'),
-    onChanged: (callback: (state: { active: boolean; sources: string[]; engaged: boolean }) => void) => {
+    getPreventDeviceSleep: () => ipcRenderer.invoke('powerGuard:getPreventDeviceSleep'),
+    setPreventDeviceSleep: (enabled: boolean) => ipcRenderer.invoke('powerGuard:setPreventDeviceSleep', enabled),
+    onChanged: (callback: (state: { active: boolean; sources: string[]; engaged: boolean; engagedBy: 'caffeinate' | 'powerSaveBlocker' | null; preventDeviceSleepEnabled: boolean }) => void) => {
       const handler = (
         _event: Electron.IpcRendererEvent,
-        state: { active: boolean; sources: string[]; engaged: boolean },
+        state: { active: boolean; sources: string[]; engaged: boolean; engagedBy: 'caffeinate' | 'powerSaveBlocker' | null; preventDeviceSleepEnabled: boolean },
       ) => callback(state);
       ipcRenderer.on('powerGuard:changed', handler);
       return () => ipcRenderer.removeListener('powerGuard:changed', handler);

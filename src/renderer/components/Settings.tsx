@@ -471,6 +471,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   const [language, setLanguage] = useState<LanguageType>(i18nService.getLanguage());
   const [autoLaunch, setAutoLaunchState] = useState(false);
   const [isUpdatingAutoLaunch, setIsUpdatingAutoLaunch] = useState(false);
+  const [preventDeviceSleep, setPreventDeviceSleepState] = useState(false);
+  const [isUpdatingPreventDeviceSleep, setIsUpdatingPreventDeviceSleep] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [noticeMessage, setNoticeMessage] = useState<string | null>(notice ?? null);
@@ -659,6 +661,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         setAutoLaunchState(enabled);
       }).catch(err => {
         console.error('Failed to load auto-launch setting:', err);
+      });
+
+      // Load prevent-device-sleep setting (missing key = OFF)
+      window.electron.powerGuard.getPreventDeviceSleep().then(({ enabled }) => {
+        setPreventDeviceSleepState(enabled);
+      }).catch(err => {
+        console.error('Failed to load prevent-device-sleep setting:', err);
       });
       
       // Set up providers based on saved config
@@ -2041,6 +2050,55 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   <span
                     className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
                       autoLaunch ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </label>
+            </div>
+
+            {/* Prevent Device Sleep Section */}
+            <div>
+              <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-3">
+                {i18nService.t('preventDeviceSleep')}
+              </h4>
+              <label className="flex items-center justify-between cursor-pointer">
+                <span className="text-sm dark:text-claude-darkSecondaryText text-claude-secondaryText">
+                  {i18nService.t('preventDeviceSleepDescription')}
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={preventDeviceSleep}
+                  onClick={async () => {
+                    if (isUpdatingPreventDeviceSleep) return;
+                    const next = !preventDeviceSleep;
+                    setIsUpdatingPreventDeviceSleep(true);
+                    try {
+                      const result = await window.electron.powerGuard.setPreventDeviceSleep(next);
+                      if (result.success) {
+                        setPreventDeviceSleepState(next);
+                      } else {
+                        setError(result.error || 'Failed to update prevent-device-sleep setting');
+                      }
+                    } catch (err) {
+                      console.error('Failed to set prevent-device-sleep:', err);
+                      setError('Failed to update prevent-device-sleep setting');
+                    } finally {
+                      setIsUpdatingPreventDeviceSleep(false);
+                    }
+                  }}
+                  disabled={isUpdatingPreventDeviceSleep}
+                  className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+                    isUpdatingPreventDeviceSleep ? 'opacity-50 cursor-not-allowed' : ''
+                  } ${
+                    preventDeviceSleep
+                      ? 'bg-claude-accent'
+                      : 'bg-gray-300 dark:bg-gray-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      preventDeviceSleep ? 'translate-x-6' : 'translate-x-1'
                     }`}
                   />
                 </button>

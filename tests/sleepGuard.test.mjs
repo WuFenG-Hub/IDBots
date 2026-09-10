@@ -2,11 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 let evaluateSleepGuardWork;
+let resolvePreventDeviceSleepEnabled;
+let PREVENT_DEVICE_SLEEP_SETTING_KEY;
 let SleepGuard;
 try {
-  ({ evaluateSleepGuardWork, SleepGuard } = await import('../dist-electron/main/sleepGuard.js'));
+  ({ evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, SleepGuard } =
+    await import('../dist-electron/main/sleepGuard.js'));
 } catch {
-  ({ evaluateSleepGuardWork, SleepGuard } = await import('../dist-electron/sleepGuard.js'));
+  ({ evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, SleepGuard } =
+    await import('../dist-electron/sleepGuard.js'));
+}
+
+/**
+ * Test guard factory for the "setting is ON" scenarios: sleep prevention is
+ * opt-in, so every legacy behaviour test has to opt in explicitly. Tests for the
+ * default-OFF gate construct `new SleepGuard(...)` directly.
+ */
+function createGuard(options) {
+  return new SleepGuard({ enabled: true, ...options });
 }
 
 /**
@@ -129,7 +142,7 @@ test('evaluateSleepGuardWork: multiple active sources are all reported', () => {
 test('SleepGuard (linux): engages prevent-app-suspension and releases when idle', () => {
   const blocker = createFakeBlocker('prevent-app-suspension');
   const spawnHelper = createFakeSpawn();
-  const guard = new SleepGuard({ powerSaveBlocker: blocker, platform: 'linux', spawnHelper });
+  const guard = createGuard({ powerSaveBlocker: blocker, platform: 'linux', spawnHelper });
 
   const engaged = guard.apply(evaluateSleepGuardWork(working));
   assert.equal(engaged.active, true);
@@ -148,7 +161,7 @@ test('SleepGuard (linux): engages prevent-app-suspension and releases when idle'
 
 test('SleepGuard (win32): keeps the legacy blocker type', () => {
   const blocker = createFakeBlocker('prevent-app-suspension');
-  const guard = new SleepGuard({ powerSaveBlocker: blocker, platform: 'win32' });
+  const guard = createGuard({ powerSaveBlocker: blocker, platform: 'win32' });
   const state = guard.apply(evaluateSleepGuardWork(working));
   assert.equal(state.engagedBy, 'powerSaveBlocker');
   assert.deepEqual(blocker.startCalls(), ['prevent-app-suspension']);
@@ -160,7 +173,7 @@ test('SleepGuard (darwin): spawns caffeinate -i -w <pid> and kills it on release
   const blocker = createFakeBlocker();
   const helper = createFakeHelper(9001);
   const spawnHelper = createFakeSpawn(() => helper);
-  const guard = new SleepGuard({
+  const guard = createGuard({
     powerSaveBlocker: blocker,
     platform: 'darwin',
     spawnHelper,
@@ -201,7 +214,7 @@ test('SleepGuard (darwin): spawns caffeinate -i -w <pid> and kills it on release
 test('SleepGuard (darwin): apply is idempotent — one helper for many applies', () => {
   const blocker = createFakeBlocker();
   const spawnHelper = createFakeSpawn();
-  const guard = new SleepGuard({ powerSaveBlocker: blocker, platform: 'darwin', spawnHelper });
+  const guard = createGuard({ powerSaveBlocker: blocker, platform: 'darwin', spawnHelper });
 
   guard.apply(evaluateSleepGuardWork(working));
   guard.apply(evaluateSleepGuardWork({ ...idle, coworkSessionIds: ['s1', 's2'] }));
@@ -218,7 +231,7 @@ test('SleepGuard (darwin): spawn failure falls back to prevent-display-sleep', (
   const spawnHelper = createFakeSpawn(() => {
     throw new Error('ENOENT /usr/bin/caffeinate');
   });
-  const guard = new SleepGuard({
+  const guard = createGuard({
     powerSaveBlocker: blocker,
     platform: 'darwin',
     spawnHelper,
@@ -242,7 +255,7 @@ test('SleepGuard (darwin): spawn without a pid falls back to prevent-display-sle
   const helper = createFakeHelper();
   delete helper.pid;
   const spawnHelper = createFakeSpawn(() => helper);
-  const guard = new SleepGuard({
+  const guard = createGuard({
     powerSaveBlocker: blocker,
     platform: 'darwin',
     spawnHelper,
@@ -260,7 +273,7 @@ test('SleepGuard (darwin): helper exiting mid-work swaps to the display-sleep bl
   const helper = createFakeHelper();
   const spawnHelper = createFakeSpawn(() => helper);
   const changes = [];
-  const guard = new SleepGuard({
+  const guard = createGuard({
     powerSaveBlocker: blocker,
     platform: 'darwin',
     spawnHelper,
@@ -288,7 +301,7 @@ test('SleepGuard (darwin): a late helper exit after release does not re-engage',
   const blocker = createFakeBlocker();
   const helper = createFakeHelper();
   const spawnHelper = createFakeSpawn(() => helper);
-  const guard = new SleepGuard({ powerSaveBlocker: blocker, platform: 'darwin', spawnHelper });
+  const guard = createGuard({ powerSaveBlocker: blocker, platform: 'darwin', spawnHelper });
 
   guard.apply(evaluateSleepGuardWork(working));
   guard.apply(evaluateSleepGuardWork(idle));
@@ -307,7 +320,7 @@ test('SleepGuard (darwin): a late helper exit after release does not re-engage',
 test('SleepGuard: onChanged fires only when the state actually changes', () => {
   const blocker = createFakeBlocker('prevent-app-suspension');
   const changes = [];
-  const guard = new SleepGuard({
+  const guard = createGuard({
     powerSaveBlocker: blocker,
     platform: 'linux',
     onChanged: (state) => changes.push(state),
@@ -326,7 +339,7 @@ test('SleepGuard: onChanged fires only when the state actually changes', () => {
 test('SleepGuard: dispose releases the helper/blocker and resets state', () => {
   const darwinHelper = createFakeHelper();
   const darwinSpawn = createFakeSpawn(() => darwinHelper);
-  const darwinGuard = new SleepGuard({
+  const darwinGuard = createGuard({
     powerSaveBlocker: createFakeBlocker(),
     platform: 'darwin',
     spawnHelper: darwinSpawn,
@@ -341,10 +354,11 @@ test('SleepGuard: dispose releases the helper/blocker and resets state', () => {
     sources: [],
     engaged: false,
     engagedBy: null,
+    preventDeviceSleepEnabled: true,
   });
 
   const blocker = createFakeBlocker('prevent-app-suspension');
-  const guard = new SleepGuard({ powerSaveBlocker: blocker, platform: 'linux' });
+  const guard = createGuard({ powerSaveBlocker: blocker, platform: 'linux' });
   guard.apply(evaluateSleepGuardWork({ ...idle, dreamingMetabotIds: [7] }));
   assert.equal(guard.isEngaged(), true);
   guard.dispose();
@@ -355,6 +369,7 @@ test('SleepGuard: dispose releases the helper/blocker and resets state', () => {
     sources: [],
     engaged: false,
     engagedBy: null,
+    preventDeviceSleepEnabled: true,
   });
 });
 
@@ -368,7 +383,7 @@ test('SleepGuard: blocker start failure degrades gracefully', () => {
       return false;
     },
   };
-  const guard = new SleepGuard({ powerSaveBlocker: failingBlocker, platform: 'linux', warn: silentWarn });
+  const guard = createGuard({ powerSaveBlocker: failingBlocker, platform: 'linux', warn: silentWarn });
   const state = guard.apply(evaluateSleepGuardWork(working));
   assert.equal(state.active, true, 'work state stays truthful');
   assert.equal(state.engaged, false, 'blocker engagement reports failure honestly');
@@ -388,7 +403,7 @@ test('SleepGuard (darwin): both mechanisms failing reports honest disengagement'
   const spawnHelper = createFakeSpawn(() => {
     throw new Error('spawn blocked');
   });
-  const guard = new SleepGuard({
+  const guard = createGuard({
     powerSaveBlocker: failingBlocker,
     platform: 'darwin',
     spawnHelper,
@@ -399,4 +414,142 @@ test('SleepGuard (darwin): both mechanisms failing reports honest disengagement'
   assert.equal(state.engaged, false);
   assert.equal(state.engagedBy, null);
   assert.equal(spawnHelper.calls().length, 1, 'caffeinate attempted before falling back');
+});
+
+// ── host-level setting: 「阻止设备休眠」 (default OFF) ─────────────────────────
+
+test('resolvePreventDeviceSleepEnabled: missing/odd config values default to OFF', () => {
+  assert.equal(resolvePreventDeviceSleepEnabled(undefined), false, 'missing key -> off');
+  assert.equal(resolvePreventDeviceSleepEnabled(null), false, 'null -> off');
+  assert.equal(resolvePreventDeviceSleepEnabled(false), false, 'explicit false -> off');
+  assert.equal(resolvePreventDeviceSleepEnabled('true'), false, 'string "true" -> off');
+  assert.equal(resolvePreventDeviceSleepEnabled(1), false, 'number 1 -> off');
+  assert.equal(resolvePreventDeviceSleepEnabled({}), false, 'object -> off');
+  assert.equal(resolvePreventDeviceSleepEnabled(true), true, 'explicit boolean true -> on');
+});
+
+test('SleepGuard: default (no setting) never engages — no spawn, no blocker call', () => {
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const blocker = createFakeBlocker();
+    const spawnHelper = createFakeSpawn();
+    const guard = new SleepGuard({ powerSaveBlocker: blocker, platform, spawnHelper });
+
+    const state = guard.apply(evaluateSleepGuardWork(working));
+    assert.equal(state.active, true, 'work is still reported truthfully');
+    assert.equal(state.engaged, false, 'nothing is engaged while the setting is off');
+    assert.equal(state.engagedBy, null);
+    assert.equal(state.preventDeviceSleepEnabled, false);
+    assert.equal(spawnHelper.calls().length, 0, `${platform}: no caffeinate spawn`);
+    assert.deepEqual(blocker.startCalls(), [], `${platform}: no powerSaveBlocker.start`);
+  }
+});
+
+test('SleepGuard: setting OFF keeps work unguarded across repeated applies', () => {
+  const blocker = createFakeBlocker();
+  const spawnHelper = createFakeSpawn();
+  const guard = new SleepGuard({
+    powerSaveBlocker: blocker,
+    platform: 'darwin',
+    spawnHelper,
+    enabled: false,
+  });
+
+  guard.apply(evaluateSleepGuardWork(working));
+  guard.apply(evaluateSleepGuardWork({ ...idle, scheduledTaskIds: ['t1'] }));
+  guard.apply(evaluateSleepGuardWork({ ...idle, dreamingMetabotIds: [3] }));
+
+  assert.equal(spawnHelper.calls().length, 0);
+  assert.deepEqual(blocker.startCalls(), []);
+  assert.equal(guard.getState().engaged, false);
+});
+
+test('SleepGuard: setEnabled(true) engages immediately while work is active', () => {
+  const blocker = createFakeBlocker();
+  const helper = createFakeHelper(7777);
+  const spawnHelper = createFakeSpawn(() => helper);
+  const changes = [];
+  const guard = new SleepGuard({
+    powerSaveBlocker: blocker,
+    platform: 'darwin',
+    spawnHelper,
+    parentPid: 4242,
+    onChanged: (state) => changes.push(state),
+  });
+
+  // Work starts while the setting is still off -> nothing happens.
+  let state = guard.apply(evaluateSleepGuardWork(working));
+  assert.equal(state.engaged, false);
+  assert.equal(spawnHelper.calls().length, 0);
+
+  // Flip the setting on -> immediate engagement, no extra apply() needed.
+  state = guard.setEnabled(true);
+  assert.equal(state.preventDeviceSleepEnabled, true);
+  assert.equal(state.engaged, true);
+  assert.equal(state.engagedBy, 'caffeinate');
+  assert.deepEqual(spawnHelper.calls()[0].args, ['-i', '-w', '4242']);
+  assert.equal(changes.at(-1).engaged, true, 'mechanism change is broadcast');
+
+  // Idempotent: applying again does not spawn a second helper.
+  guard.apply(evaluateSleepGuardWork(working));
+  assert.equal(spawnHelper.calls().length, 1);
+});
+
+test('SleepGuard: setEnabled(false) releases immediately and stops further engagement', () => {
+  const blocker = createFakeBlocker();
+  const helper = createFakeHelper();
+  const spawnHelper = createFakeSpawn(() => helper);
+  const changes = [];
+  const guard = new SleepGuard({
+    powerSaveBlocker: blocker,
+    platform: 'darwin',
+    spawnHelper,
+    enabled: true,
+    onChanged: (state) => changes.push(state),
+  });
+
+  let state = guard.apply(evaluateSleepGuardWork(working));
+  assert.equal(state.engagedBy, 'caffeinate');
+
+  state = guard.setEnabled(false);
+  assert.equal(state.preventDeviceSleepEnabled, false);
+  assert.equal(state.engaged, false);
+  assert.equal(state.engagedBy, null);
+  assert.equal(helper.killCalls, 1, 'helper reaped immediately');
+  assert.equal(changes.at(-1).engaged, false);
+
+  // Work continues, but the guard stays a no-op.
+  guard.apply(evaluateSleepGuardWork(working));
+  guard.apply(evaluateSleepGuardWork({ ...idle, coworkSessionIds: ['s1', 's2'] }));
+  assert.equal(spawnHelper.calls().length, 1, 'no re-spawn while the setting is off');
+  assert.deepEqual(blocker.startCalls(), [], 'no blocker started while the setting is off');
+});
+
+test('SleepGuard: toggling off then on with work active releases and re-engages', () => {
+  const blocker = createFakeBlocker();
+  const spawnHelper = createFakeSpawn();
+  const guard = new SleepGuard({
+    powerSaveBlocker: blocker,
+    platform: 'linux',
+    spawnHelper,
+    enabled: true,
+  });
+
+  guard.apply(evaluateSleepGuardWork(working));
+  assert.equal(guard.getState().engagedBy, 'powerSaveBlocker');
+
+  guard.setEnabled(false);
+  assert.deepEqual(blocker.startCalls(), ['prevent-app-suspension']);
+  assert.equal(blocker.startedCount(), 0, 'blocker released when switched off');
+
+  guard.setEnabled(true);
+  assert.deepEqual(
+    blocker.startCalls(),
+    ['prevent-app-suspension', 'prevent-app-suspension'],
+    'blocker restarted when switched back on',
+  );
+  assert.equal(guard.getState().engagedBy, 'powerSaveBlocker');
+});
+
+test('config key contract is stable (renaming it would silently reset users to OFF)', () => {
+  assert.equal(PREVENT_DEVICE_SLEEP_SETTING_KEY, 'sleep_guard_prevent_device_sleep');
 });
