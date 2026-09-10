@@ -278,6 +278,12 @@ export function generateRuntimeConfig(input) {
     // idbots/usage RPC reads them for the host's usage panel. agent-loop also
     // hard-requires ctx.sessionProjections (turnBoundary fold) since 0.1.2.
     { id: 'token-meter', name: '@deepseek-ai/dsh-token-meter' },
+    // 0.1.5 whole-log projections: conversation totals (turns/steps, llm/tool
+    // wall time, ttft/decode) and the per-turn outline (prompt/response
+    // previews). Zero-config units on the same registry; they surface through
+    // idbots/usage alongside the token-meter values.
+    { id: 'session-stats', name: '@deepseek-ai/dsh-session-stats' },
+    { id: 'session-turn-outline', name: '@deepseek-ai/dsh-session-turn-outline' },
     {
       id: 'compaction-basic',
       name: '@deepseek-ai/dsh-compaction-basic',

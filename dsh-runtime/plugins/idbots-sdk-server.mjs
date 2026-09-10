@@ -832,6 +832,10 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       tokenUsage: snapshot.values.tokenUsage ?? null,
       contextPressure: snapshot.values.contextPressure ?? null,
       contextBreakdown: snapshot.values.contextBreakdown ?? null,
+      // 0.1.5 whole-log units (dsh-session-stats / dsh-session-turn-outline):
+      // null when the composition omits them, same graceful-absence contract.
+      sessionStats: snapshot.values.sessionStats ?? null,
+      turnOutline: snapshot.values.turnOutline ?? null,
     }
   }
 

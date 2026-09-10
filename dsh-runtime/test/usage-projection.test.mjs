@@ -105,6 +105,15 @@ const main = async () => {
   // asOfSeq advances with the log.
   assert.ok(afterTwo.asOfSeq > afterOne.asOfSeq, 'asOfSeq advanced between turns')
 
+  // 0.1.5 whole-log units ride the same snapshot: conversation totals and the
+  // per-turn outline (prompt/response previews for the history UI).
+  assert.ok(afterTwo.sessionStats, 'sessionStats projection present')
+  assert.equal(afterTwo.sessionStats.turns, 2, 'two closed turns counted')
+  assert.ok(afterTwo.sessionStats.steps >= 2, 'closed steps counted')
+  assert.ok(Array.isArray(afterTwo.turnOutline), 'turnOutline projection present')
+  assert.equal(afterTwo.turnOutline.length, 2, 'outline has one entry per turn')
+  assert.ok(afterTwo.turnOutline[0].prompt.includes('usage panel'), 'outline carries the first prompt preview')
+
   await client.close()
   await new Promise((resolve) => server.close(resolve))
   fs.rmSync(sessionRoot, { recursive: true, force: true })
