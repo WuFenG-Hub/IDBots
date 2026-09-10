@@ -40,7 +40,9 @@ export const AGENTPEDIA_PROTOCOL_VERSION = '1.0';
 const PIN_ID_PATTERN = '^[0-9a-f]{64}i0$';
 const HEX_64_PATTERN = '^[0-9a-f]{64}$';
 const GLOBAL_META_ID_PATTERN = '^idq1[0-9a-z]{38}$';
-const SLUG_PATTERN = '^[a-z0-9_\\-\\u4E00-\\u9FFF\\u3400-\\u4DBF]+$';
+const SLUG_CHARSET = '[a-z0-9_\\-\\u4E00-\\u9FFF\\u3400-\\u4DBF]';
+const SLUG_PATTERN = `^${SLUG_CHARSET}+$`;
+const SLUG_REDIRECT_TARGET_PATTERN = `^${SLUG_CHARSET}{1,96}$`; // v0.1 §3.1 redirectTo — quantifier on the char class, never `+{1,96}`
 const LANG_PATTERN = '^[a-z]{2,8}$'; // v0.1.1 X1: lowercase-normalized, rejects zh-Hans style tags
 
 export type AgentpediaSchema = Record<string, unknown>;
@@ -63,7 +65,7 @@ export const agentpediaRevSchema: AgentpediaSchema = {
     contentRef: { type: ['string', 'null'], pattern: '^metafile://[0-9a-f]{64}i0$' },
     contentHash: { type: ['string', 'null'], pattern: HEX_64_PATTERN },
     revertTo: { type: ['string', 'null'], pattern: PIN_ID_PATTERN },
-    redirectTo: { type: ['string', 'null'], pattern: `^${SLUG_PATTERN.slice(1, -1)}{1,96}$` },
+    redirectTo: { type: ['string', 'null'], pattern: SLUG_REDIRECT_TARGET_PATTERN },
     summary: { type: ['string', 'null'], maxLength: 256 },
     claim: {
       type: ['object', 'null'],

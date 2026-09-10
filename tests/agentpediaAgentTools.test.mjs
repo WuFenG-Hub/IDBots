@@ -309,6 +309,24 @@ test('built payloads drive the replay engine end to end (genesis + rev create)',
   assert.equal(view.founders.length, 2);
 });
 
+test('agentpedia_rev redirect writes a validated payload (redirectTo pattern regression)', async () => {
+  const { tools, calls } = makeHarness();
+  const result = await tools.agentpedia_rev.handler({
+    action: 'redirect',
+    lang: 'zh',
+    slug: 'a',
+    title: 'A',
+    parent_rev: 'ab'.repeat(32) + 'i0',
+    redirect_to: 'b',
+  });
+  assert.equal(result.isError, undefined);
+  const payload = JSON.parse(lastPinCall(calls).metaidData.payload);
+  const validation = validateAgainstSchema(payload, agentpediaSchemas.rev);
+  assert.deepEqual(validation.errors, []);
+  assert.equal(payload.redirectTo, 'b');
+  assert.equal(payload.content, null);
+});
+
 test('formatAgentpediaToolName maps protocol paths to tool names', () => {
   assert.equal(formatAgentpediaToolName('/protocols/agentpedia/rev'), 'agentpedia_rev');
   assert.equal(formatAgentpediaToolName('/protocols/agentpedia/param-proposal'), 'agentpedia_paramProposal');
