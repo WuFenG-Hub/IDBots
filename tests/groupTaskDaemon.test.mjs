@@ -1900,15 +1900,17 @@ test('task #52 self-heal guard: a directive older than the last transition must 
 // ---------------------------------------------------------------------------
 
 test('GT-04 adjudication: pure verdicts across the historical message shapes', () => {
-  // Task #56 (msg 2815): standalone EXECUTING mid-body, descriptive REVIEW on
-  // the end line — the end-line tag no longer sinks the real instruction.
+  // Task #56 (msg 2815): standalone EXECUTING mid-body, REVIEW cited after
+  // prose on the end line — the end-line tag no longer sinks the real
+  // instruction. GT#72: the embedded citation is descriptive (it was never an
+  // instruction), not a rejected candidate — citations earn no audit noise.
   const v56 = adjudicateStatusDirectives(
     '分工如上，请 @Coder Bot 开工。\n[STATUS:EXECUTING]\n交付齐了之后我再 [STATUS:REVIEW]。',
     'planning',
   );
   assert.equal(v56.instruction, 'executing');
-  assert.deepEqual(v56.rejected, ['review']);
-  assert.deepEqual(v56.descriptive, []);
+  assert.deepEqual(v56.rejected, []);
+  assert.deepEqual(v56.descriptive, ['review']);
 
   // Task #52: end-line tag with trailing prose stays the instruction.
   const v52 = adjudicateStatusDirectives(
@@ -1961,12 +1963,22 @@ test('GT-04 adjudication: pure verdicts across the historical message shapes', (
   // Mixed: a legal instruction plus a same-status sibling — the sibling is a
   // no-op, not a "rejected" tag the group gets scolded about.
   const mixed = adjudicateStatusDirectives(
-    '重派说明如上。\n[STATUS:EXECUTING]\n此前误发的 [STATUS:REVIEW] 作废。',
+    '重派说明如上。\n[STATUS:EXECUTING]\n[STATUS:REVIEW]（前值，已作废）',
     'review',
   );
   assert.equal(mixed.instruction, 'executing');
   assert.deepEqual(mixed.rejected, []);
   assert.deepEqual(mixed.noOp, ['review']);
+
+  // GT#72: the same sibling cited MID-LINE (words on both sides) is a
+  // descriptive citation, not a no-op candidate.
+  const mixedCited = adjudicateStatusDirectives(
+    '重派说明如上。\n[STATUS:EXECUTING]\n此前误发的 [STATUS:REVIEW] 作废。',
+    'review',
+  );
+  assert.equal(mixedCited.instruction, 'executing');
+  assert.deepEqual(mixedCited.noOp, []);
+  assert.deepEqual(mixedCited.descriptive, ['review']);
 });
 
 test('Task #63: markdown-emphasis-wrapped standalone tag lines are instructions; quotes and prose stay descriptive', () => {
@@ -2008,6 +2020,71 @@ test('Task #63: markdown-emphasis-wrapped standalone tag lines are instructions;
   assert.deepEqual(vProse.descriptive, ['review']);
 });
 
+test('GT#72: a status tag EMBEDDED after prose on the end line is a citation, never the instruction', () => {
+  // The literal #4399 shape: a clock/plan line whose last token is the tag
+  // being cited as a FUTURE step ("release → [STATUS:REVIEW]。") — pre-GT#72
+  // this flipped the task to review 45 minutes early (mid-assembly) and
+  // suppressed three dispatches until dispatch_held notes reopened it.
+  const vClock = adjudicateStatusDirectives(
+    '两份关键交付同时核验完毕，全过。\n时钟：v1.0 ~02:30 → 小明复核 ~02:45 → 我实读放行 → [STATUS:REVIEW]。全组最后两棒。',
+    'executing',
+  );
+  assert.equal(vClock.instruction, null, 'the embedded end-line citation must NOT instruct');
+  assert.deepEqual(vClock.descriptive, ['review']);
+
+  // Task #70 shape: a quoted promise ending the message.
+  const v70 = adjudicateStatusDirectives(
+    '等我核完这批交付，然后我发 [STATUS:REVIEW]。',
+    'executing',
+  );
+  assert.equal(v70.instruction, null);
+  assert.deepEqual(v70.descriptive, ['review']);
+
+  // A tag that LEADS the final line (with explanation after it) stays the
+  // task #52 verdict shape — the GT#72 fix must not regress it.
+  const vLead = adjudicateStatusDirectives(
+    '✅ 全部交付核验完成。\n[STATUS:REVIEW] — 本任务全部完成，现等待验收。',
+    'executing',
+  );
+  assert.equal(vLead.instruction, 'review');
+
+  // Arrows before a LEADING tag are prose too — lead is judged on prefix
+  // emptiness, not punctuation flavor.
+  const vArrowLead = adjudicateStatusDirectives('汇总如上。\n[STATUS:EXECUTING] → 复工，按新分工。', 'review');
+  assert.equal(vArrowLead.instruction, 'executing');
+});
+
+test('GT#72 replay: the premature-flip clock line keeps the task in executing and records the citation note', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing, mid-assembly — the #72 state
+    insertGroupMessage(h.db, {
+      pinId: 'clock-line-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '两条裁决收到，chair 确认全部采纳。\n'
+        + '@Coder Bot v1.0 组装全部解锁，开工，[DEADLINE: 20m]。\n'
+        + '时钟：v1.0 ~02:30 → 复核 ~02:45 → 我实读放行 → [STATUS:REVIEW]。全组最后两棒。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'a cited future step must not flip the task — #72 never re-runs the premature flip',
+    );
+    // The chair learns immediately: the descriptive-citation note (task #63
+    // heritage) rides the parse channel so a REAL verdict mis-formatted this
+    // way re-sends a bare tag on its next turn instead of stalling.
+    const citeNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'parse' && note.target === 'status citation');
+    assert.equal(citeNotes.length, 1, 'the demoted end-line citation is reported to the chair');
+    assert.match(citeNotes[0].body, /not applied; task stays executing/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-line REVIEW, and the group hears why', async () => {
   const h = await createHarness();
   try {
@@ -2035,12 +2112,13 @@ test('GT-04 (task #56 replay): a standalone EXECUTING line beats an illegal end-
       'applied transition is audited',
     );
     // Single-commander: the parse verdict is a host environment note for the
-    // chair (never an in-group post wearing the chair identity).
+    // chair (never an in-group post wearing the chair identity). GT#72: the
+    // end-line REVIEW sits after prose (a future promise), so it is
+    // descriptive — not a rejected sibling — and an applied instruction plus
+    // a descriptive citation records no correction note.
     const parseNotes = h.groupTaskStore.listPendingHostNotes(task.id)
       .filter((note) => note.kind === 'parse' && note.body.includes('message #'));
-    assert.equal(parseNotes.length, 1, 'the parse verdict was recorded for the chair');
-    assert.ok(parseNotes[0].body.includes('applied [STATUS:EXECUTING]'), 'note names the applied tag');
-    assert.ok(parseNotes[0].body.toLowerCase().includes('review'), 'note cites the rejected tag');
+    assert.equal(parseNotes.length, 0, 'an applied instruction plus a descriptive citation records no note');
   } finally {
     h.cleanup();
   }
@@ -7114,7 +7192,14 @@ test('G-03: a chair body tag with no message-end instruction never transitions a
   }
 });
 
-test('task #52: a tag mid-line on the LAST line is the instruction even with prose around it', async () => {
+test('GT#72: a tag mid-line with words on BOTH sides is a citation — the note asks for a bare re-send', async () => {
+  // The old task #52 ruling accepted the whole last line as the instruction
+  // field ("终检完成 [STATUS:REVIEW] 请 owner 验收" applied). GT#72 withdrew
+  // that for tags EMBEDDED mid-line: the shape is indistinguishable from the
+  // #4399 clock-line citation that flipped a task to review 45 minutes early.
+  // Chairs still have two end shapes (leading the line, capping the line);
+  // an intended verdict written mid-line self-heals through the citation
+  // note on the next chair turn.
   const h = await createHarness();
   try {
     const task = h.createTask([2]);
@@ -7127,9 +7212,12 @@ test('task #52: a tag mid-line on the LAST line is the instruction even with pro
     await h.loop.runTick();
     assert.equal(
       h.groupTaskStore.getTaskById(task.id).status,
-      'review',
-      'the message-END field is the whole last line — G-03\'s absolute-trailing form rejected this real verdict shape (task #52)',
+      'executing',
+      'an embedded mid-line tag never flips the task (GT#72 premature-flip lesson)',
     );
+    const citeNotes = h.groupTaskStore.listPendingHostNotes(task.id)
+      .filter((note) => note.kind === 'parse' && note.target === 'status citation');
+    assert.equal(citeNotes.length, 1, 'the citation note tells the chair to re-send a bare tag');
   } finally {
     h.cleanup();
   }
@@ -9041,7 +9129,9 @@ test('GT#70 ①: the chair playbook mandates backtick-wrapped status-tag citatio
     botRole: 'chair',
   });
   assert.match(prompt, /CITATIONS of status tags must be backtick-wrapped/);
-  assert.match(prompt, /A BARE tag landing at the end of your last line is parsed as an instruction and flips the task IMMEDIATELY/);
+  assert.match(prompt, /A bare end-positioned tag is parsed as an instruction and flips the task IMMEDIATELY/);
+  // GT#72: the tag-lead rule is taught in the same breath as the citation rule.
+  assert.match(prompt, /the tag must sit at an END of its line/);
 });
 
 test('GT#70 ③: a chair dispatch landing WHILE the planning LLM runs is success, not a burned attempt', async () => {

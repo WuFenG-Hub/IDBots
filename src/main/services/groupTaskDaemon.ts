@@ -198,8 +198,14 @@ const MD_EMPHASIS_RESIDUE = /^[\s*_]*$/;
  * GT-04 (task #56): legality-aware status-directive adjudication.
  *
  * Candidate tags, in priority order:
- *  a) the LAST tag on the last non-empty line (the protocol instruction field —
- *     G-03/task #52 semantics unchanged, mid-line on that line still counts);
+ *  a) the LAST tag on the last non-empty line, when the tag LEADS the line
+ *     ("[STATUS:REVIEW] — 说明文字", empty or emphasis-only prefix) or CAPS it
+ *     ("终检完成，进入验收 [STATUS:REVIEW]", empty or emphasis-only suffix —
+ *     the task #52/#47 verdict shapes keep working). GT#72: a tag EMBEDDED
+ *     mid-line with words on BOTH sides — a clock/plan line like "时钟：… →
+ *     我实读放行 → [STATUS:REVIEW]。全组最后两棒。" (task #72) or the task
+ *     #70 promise "…then I post [STATUS:REVIEW]。" — is a CITATION of a
+ *     future step, not the verdict, and stays descriptive;
  *  b) STANDALONE tag lines elsewhere in the body (a tag alone on its own line
  *     is unambiguous protocol formatting — this is what saved task #56, whose
  *     real [STATUS:EXECUTING] instruction sat on its own line mid-message while
@@ -207,8 +213,8 @@ const MD_EMPHASIS_RESIDUE = /^[\s*_]*$/;
  *     emphasis-wrapped own-line tags (`**[STATUS:REVIEW]**`) count too — a
  *     chair's wrap-up routinely bolds the verdict line.
  *
- * Everything else — prose-embedded tags on earlier lines, non-final tags on the
- * last line, and anything inside code quotes — is descriptive text.
+ * Everything else — prose-embedded tags on earlier lines, mid-line tags with
+ * prose on both sides, and anything inside code quotes — is descriptive text.
  *
  * The FIRST candidate whose transition is legal from the current status is the
  * instruction; remaining candidates are rejected (illegal). Previously the
@@ -242,7 +248,16 @@ export function adjudicateStatusDirectives(
       break;
     }
   }
-  type Occurrence = { tag: 'executing' | 'review'; lineIndex: number; standalone: boolean };
+  type Occurrence = {
+    tag: 'executing' | 'review';
+    lineIndex: number;
+    standalone: boolean;
+    /** GT#72: the tag occupies an END of the instruction field — it LEADS its
+     * line (empty/emphasis-only prefix, the task #52/#63 verdict shapes) or
+     * CAPS the line (empty/emphasis-only suffix, the task #52 short-verdict
+     * shape "终检完成，进入验收 [STATUS:REVIEW]"). */
+    leadOrEnd: boolean;
+  };
   const occurrences: Occurrence[] = [];
   lines.forEach((rawLine, lineIndex) => {
     const line = rawLine.trim();
@@ -254,12 +269,20 @@ export function adjudicateStatusDirectives(
       // Task #63: `**[STATUS:REVIEW]**` on its own line counts as standalone —
       // emphasis residue never carries sentence meaning (see MD_EMPHASIS_RESIDUE).
       const standalone = MD_EMPHASIS_RESIDUE.test(prefix) && MD_EMPHASIS_RESIDUE.test(suffix);
-      occurrences.push({ tag, lineIndex, standalone });
+      const leadOrEnd = MD_EMPHASIS_RESIDUE.test(prefix) || MD_EMPHASIS_RESIDUE.test(suffix);
+      occurrences.push({ tag, lineIndex, standalone, leadOrEnd });
     }
   });
   // (a) the end-line instruction field: the LAST tag on the last non-empty
-  // line (any position on that line — the task #52 verdict shape).
-  const endLineOccurrences = occurrences.filter((occ) => occ.lineIndex === endLineIndex);
+  // line, but only when it LEADS the line ("[STATUS:REVIEW] — 说明文字") or
+  // CAPS it ("终检完成，进入验收 [STATUS:REVIEW]" — the task #52/#47 verdict
+  // shapes keep working). GT#72: a tag EMBEDDED mid-line with words on BOTH
+  // sides — a clock/plan line like "时钟：… → 我实读放行 → [STATUS:REVIEW]。
+  // 全组最后两棒。" (task #72) or the task #70 promise "…then I post
+  // [STATUS:REVIEW]。" — is a CITATION of a future step, never the verdict
+  // itself; it stays descriptive and the rate-limited descriptive note tells
+  // the chair to re-send a bare tag if a move was intended.
+  const endLineOccurrences = occurrences.filter((occ) => occ.lineIndex === endLineIndex && occ.leadOrEnd);
   const candidates: Occurrence[] = [];
   if (endLineOccurrences.length > 0) candidates.push(endLineOccurrences[endLineOccurrences.length - 1]);
   // (b) standalone tag lines elsewhere, in message order.
