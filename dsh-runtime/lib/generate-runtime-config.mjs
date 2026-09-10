@@ -286,6 +286,22 @@ export function generateRuntimeConfig(input) {
     // idbots/usage alongside the token-meter values.
     { id: 'session-stats', name: '@deepseek-ai/dsh-session-stats' },
     { id: 'session-turn-outline', name: '@deepseek-ai/dsh-session-turn-outline' },
+    // 0.1.5 session titles (stock harness pair, stock config): a deterministic
+    // fallback lands on the first human message, then the first-prompt provider
+    // refines it through an auxiliary LLM call that inherits the session's own
+    // logged request route (provider/model omitted on purpose). The resulting
+    // log-only session/title events ride the stock session.event mirror; the
+    // host applies them to the sidebar title (guarded against manual renames).
+    {
+      id: 'session-title',
+      name: '@deepseek-ai/dsh-session-title',
+      config: { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 },
+    },
+    {
+      id: 'session-title-first-prompt-llm',
+      name: '@deepseek-ai/dsh-session-title-first-prompt-llm',
+      config: { targetWords: 5, targetCjkCharacters: 10, maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 60000 },
+    },
     {
       id: 'compaction-basic',
       name: '@deepseek-ai/dsh-compaction-basic',

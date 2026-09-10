@@ -6048,6 +6048,25 @@ const getCoworkRunner = () => {
       });
     });
 
+    // Kernel-owned session titles (dsh-session-title): the runner already
+    // wrote the store row and applied the rename guard; this just keeps the
+    // sidebar/detail header in sync without a session reload.
+    coworkRunner.on('sessionTitle', (sessionId: string, title: string) => {
+      if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
+        return;
+      }
+      const windows = BrowserWindow.getAllWindows();
+      windows.forEach(win => {
+        if (!win.isDestroyed()) {
+          try {
+            win.webContents.send('cowork:stream:sessionTitle', { sessionId, title });
+          } catch (error) {
+            console.error('Failed to forward cowork session title:', error);
+          }
+        }
+      });
+    });
+
     // Handle delegation requests from the LLM
     coworkRunner.on('delegation:requested', (sessionId: string, delegation: DelegationRequest) => {
       // Execute the full delegation pipeline asynchronously.

@@ -274,6 +274,16 @@ class CoworkService {
     });
     this.streamListenerCleanups.push(errorCleanup);
 
+    // Kernel-owned session title (dsh-session-title): fallback first, then the
+    // first-prompt LLM refinement. The main process already guarded against
+    // manual renames and wrote the store row; mirror it into redux.
+    const sessionTitleCleanup = cowork.onStreamSessionTitle?.(({ sessionId, title }) => {
+      store.dispatch(updateSessionTitle({ sessionId, title }));
+    });
+    if (typeof sessionTitleCleanup === 'function') {
+      this.streamListenerCleanups.push(sessionTitleCleanup);
+    }
+
     // A2A peer profile (name/avatar) was refreshed from latest chain data in
     // the main process; reload so the session list and open detail show it.
     const profileRefreshedCleanup = cowork.onSessionProfileRefreshed?.(async ({ sessionId }) => {

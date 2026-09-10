@@ -470,21 +470,19 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
       const combinedSystemPrompt = await buildCombinedSystemPrompt(skillPrompt);
 
-      // Generate title in background while starting session
-      const [generatedTitle] = await Promise.all([
-        coworkService.generateSessionTitle(prompt).catch(error => {
-          console.error('Failed to generate cowork session title:', error);
-          return null;
-        }),
-        // Small delay to ensure UI updates before heavy operations
-        new Promise(resolve => setTimeout(resolve, 0)),
-      ]);
+      // Session titles are kernel-owned (dsh-session-title, 0.1.5): the DSH
+      // runtime logs a deterministic fallback from the first human message and
+      // refines it with an auxiliary LLM call, and the main process mirrors
+      // those session/title events into the store + sidebar. Start with the
+      // placeholder title; pre-generating one app-side would double the LLM
+      // call and be overwritten by the kernel's refinement anyway.
+      await new Promise(resolve => setTimeout(resolve, 0));
 
       if (isPendingStartCancelled()) {
         return;
       }
 
-      const title = generatedTitle?.trim() || fallbackTitle;
+      const title = fallbackTitle;
 
       // Start the actual session - this will replace the temp session via addSession
       const startedSession = await coworkService.startSession({

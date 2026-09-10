@@ -682,6 +682,11 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('cowork:stream:error', handler);
       return () => ipcRenderer.removeListener('cowork:stream:error', handler);
     },
+    onStreamSessionTitle: (callback: (data: { sessionId: string; title: string }) => void) => {
+      const handler = (_event: any, data: { sessionId: string; title: string }) => callback(data);
+      ipcRenderer.on('cowork:stream:sessionTitle', handler);
+      return () => ipcRenderer.removeListener('cowork:stream:sessionTitle', handler);
+    },
     onDelegationStateChange: (callback: (data: { sessionId: string; blocking: boolean; orderId?: string; message?: string }) => void) => {
       const handler = (_event: any, data: { sessionId: string; blocking: boolean; orderId?: string; message?: string }) => callback(data);
       ipcRenderer.on('cowork:delegation:stateChange', handler);

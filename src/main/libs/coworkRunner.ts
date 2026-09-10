@@ -1969,6 +1969,17 @@ export class CoworkRunner extends EventEmitter {
   });
   /** Cowork session ids with an active DSH turn (native steer path). */
   private dshActiveTurns = new Set<string>();
+  /**
+   * Kernel-title guard (dsh-session-title, 0.1.5): cowork session id → the
+   * title the kernel flow last saw on the row — the start-time placeholder at
+   * seed time, then each auto-applied kernel title. A kernel title is applied
+   * only while the stored title still equals this baseline, so a manual rename
+   * (which makes the row diverge) permanently detaches the session from
+   * automatic retitling. Sessions only ever seed when their stored title is
+   * still the renderer's first-line placeholder; titles generated up-front by
+   * other flows (IM chats, service orders, peer names) never opt in.
+   */
+  private dshAutoTitles = new Map<string, string>();
   /** Test seam: extra runtime composition entries (fixture tools). */
   dshRuntimeExtraEntries?: Array<Record<string, unknown>>;
   /** cowork session id → (tool name → { parameters, execute }) for that session's current DSH turn. */
@@ -7275,10 +7286,65 @@ export class CoworkRunner extends EventEmitter {
           this.emit('message', coworkSessionId, stored);
           return stored.id;
         },
+        onSessionTitle: (coworkSessionId, title) => this.applyDshSessionTitle(coworkSessionId, title),
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
     return this.dshTurnHub;
+  }
+
+  /**
+   * Opt a session into kernel-owned titles, once, when its stored title is
+   * still the renderer's start-time placeholder (first line of the first user
+   * message, 50 chars — CoworkView's fallbackTitle). Any richer start title
+   * (app-generated LLM titles for IM/service sessions, peer names) keeps
+   * ownership and is never retitled by the kernel.
+   */
+  private seedDshAutoTitle(sessionId: string, record: { title?: string; sessionType?: string | null; messages?: Array<{ type: string; content?: string }> } | null | undefined): void {
+    if (this.dshAutoTitles.has(sessionId)) return;
+    if (!record || (record.sessionType && record.sessionType !== 'standard')) return;
+    const title = (record.title ?? '').trim();
+    if (!title) return;
+    const firstUserText = (record.messages ?? []).find((message) => message.type === 'user')?.content ?? '';
+    const placeholder = firstUserText.split('\n')[0].slice(0, 50).trim();
+    if (placeholder && title === placeholder) this.dshAutoTitles.set(sessionId, title);
+  }
+
+  /**
+   * Mirror one kernel session/title event into the store + renderer. Applies
+   * only while the stored title still equals the guard baseline (see
+   * dshAutoTitles), so a manual rename detaches the session from automatic
+   * retitling for good.
+   */
+  private applyDshSessionTitle(sessionId: string, title: string): void {
+    const baseline = this.dshAutoTitles.get(sessionId);
+    if (!baseline) return;
+    const next = title.trim().slice(0, 120);
+    if (!next) return;
+    let currentTitle: string | undefined;
+    let sessionType: string | null | undefined;
+    try {
+      const record = this.store.getSessionWithoutMessages?.(sessionId) ?? this.store.getSession(sessionId);
+      currentTitle = record?.title;
+      sessionType = record?.sessionType;
+    } catch {
+      return;
+    }
+    if (sessionType && sessionType !== 'standard') return;
+    if ((currentTitle ?? '').trim() !== baseline) return;
+    if (next === baseline) return;
+    try {
+      this.store.updateSession(sessionId, { title: next });
+    } catch (error) {
+      coworkLog('WARN', 'applyDshSessionTitle', 'Kernel title update failed', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    this.dshAutoTitles.set(sessionId, next);
+    this.emit('sessionTitle', sessionId, next);
+    coworkLog('INFO', 'applyDshSessionTitle', 'Applied kernel session title', { sessionId, title: next });
   }
 
   /**
@@ -7373,6 +7439,9 @@ export class CoworkRunner extends EventEmitter {
     const sessionRecord = this.store.getSession(sessionId);
     const sessionMessages = sessionRecord?.messages ?? [];
     const sessionParentId = sessionRecord?.parentSessionId ?? null;
+    // Kernel-title opt-in check (no-op once seeded, and only ever seeds while
+    // the stored title is still the start-time placeholder).
+    this.seedDshAutoTitle(sessionId, sessionRecord);
     // A stored handle without the `dsh:` prefix predates the unified kernel,
     // so this turn starts a fresh transcript — bridge the UI history over.
     const migratingFromLegacyHandle = Boolean(activeSession.claudeSessionId)

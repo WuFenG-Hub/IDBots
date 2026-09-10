@@ -390,7 +390,17 @@ export class DshKernel {
           // One bad handler must never kill the whole event stream: contain
           // per-event failures and keep the pump alive.
           try {
-            this.applyEvent(params.sessionId, params.event as DshSessionEventEnvelope)
+            const envelope = params.event as DshSessionEventEnvelope
+            // Log-only title events bypass the mapper (it drops unknown types
+            // by design) — surface them raw to the host's sidebar-title mirror.
+            if (envelope?.type === 'session/title') {
+              const title = typeof envelope.data?.title === 'string' ? envelope.data.title.trim() : ''
+              const kind = envelope.data?.source?.kind
+              if (title && (kind === 'fallback' || kind === 'provider' || kind === 'user')) {
+                this.opts.handlers.onSessionTitle?.(params.sessionId, title, kind)
+              }
+            }
+            this.applyEvent(params.sessionId, envelope)
           } catch (error) {
             // Contained per-event failure: log and keep pumping. onError is
             // the FATAL channel (transport death) that settles in-flight turns.

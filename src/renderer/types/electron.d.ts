@@ -1298,6 +1298,7 @@ interface IElectronAPI {
     onStreamPermission: (callback: (data: { sessionId: string; request: CoworkPermissionRequest }) => void) => () => void;
     onStreamComplete: (callback: (data: { sessionId: string; claudeSessionId: string | null }) => void) => () => void;
     onStreamError: (callback: (data: { sessionId: string; error: string }) => void) => () => void;
+    onStreamSessionTitle: (callback: (data: { sessionId: string; title: string }) => void) => () => void;
     isDelegationBlocking: (sessionId: string) => Promise<boolean>;
     getDelegationInfo: (sessionId: string) => Promise<{ orderId: string } | null>;
     onDelegationStateChange: (callback: (data: { sessionId: string; blocking: boolean; orderId?: string; message?: string }) => void) => () => void;
