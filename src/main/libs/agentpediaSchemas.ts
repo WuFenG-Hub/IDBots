@@ -291,7 +291,8 @@ export const agentpediaConstitutionSchema: AgentpediaSchema = {
     prevConstitution: { type: ['string', 'null'], pattern: PIN_ID_PATTERN },
     proposalPin: { type: ['string', 'null'], pattern: PIN_ID_PATTERN },
     founders: {
-      // v0.1.2 D7: required non-empty array at genesis (revision=0); must be null for revision>0 (engine-checked)
+      // E3-2: founders is required non-empty at genesis (revision=0) and must be
+      // null for every revision > 0 (bidirectional conditions below).
       type: ['array', 'null'],
       minItems: 2,
       maxItems: 64,
@@ -323,8 +324,9 @@ export const agentpediaConstitutionSchema: AgentpediaSchema = {
         't2MinDays',
         't2MinValidRevs',
         'bootstrapWindowDays',
-        // v0.1.2 D6:
-        'arbiterSuspensionDays',
+        // E3-4 (SD-1): arbiterSuspensionDays is properties-only (v0.1.2 D6 says
+        // "入宪法" without the explicit "required sync" wording D2/X8 used), min 0
+        // per the theta* "0 disables the mechanism" precedent.
       ],
       properties: {
         challengeWindowHours: { type: 'integer', minimum: 1, maximum: 720 },
@@ -351,7 +353,7 @@ export const agentpediaConstitutionSchema: AgentpediaSchema = {
         t2MinDays: { type: 'integer', minimum: 1 },
         t2MinValidRevs: { type: 'integer', minimum: 1 },
         bootstrapWindowDays: { type: 'integer', minimum: 0, maximum: 365 },
-        arbiterSuspensionDays: { type: 'integer', minimum: 1 },
+        arbiterSuspensionDays: { type: 'integer', minimum: 0 },
       },
     },
     algoVersions: {
@@ -365,6 +367,26 @@ export const agentpediaConstitutionSchema: AgentpediaSchema = {
       },
     },
   },
+  allOf: [
+    // E3-2 bidirectional founders conditions.
+    {
+      if: { properties: { revision: { const: 0 } }, required: ['revision'] },
+      then: {
+        properties: {
+          founders: {
+            type: 'array',
+            minItems: 2,
+            maxItems: 64,
+            items: { type: 'string', pattern: GLOBAL_META_ID_PATTERN },
+          },
+        },
+      },
+    },
+    {
+      if: { not: { properties: { revision: { const: 0 } }, required: ['revision'] } },
+      then: { properties: { founders: { const: null } } },
+    },
+  ],
 };
 
 export const agentpediaParamProposalSchema: AgentpediaSchema = {
@@ -444,4 +466,53 @@ export const agentpediaAlgoVersions = {
   adoption: 'adoption-algo-v1',
   reputation: 'reputation-algo-v1',
   arbiterDraw: 'arbiter-draw-v1',
+} as const;
+
+/**
+ * Provenance and disclosed corrections for the composite schemas (v1.1), aligned
+ * with chair errata E-3 (pin://b480f635eae531044fbb25768794a2fdd72167ededd0a63fff894973dae9dec5i0)
+ * and its addendum (pin://390922537362e4acd2af95f79c19505d4c664b6347de6d99817f855075e8a42ei0).
+ */
+export const agentpediaCompositeMeta = {
+  version: 'v1.1',
+  resolution:
+    'six valid spec layers + chair errata E-1/E-2/E-3 (+ E-3 addendum), latest-layer resolution; v0.1.4 voided, never referenced',
+  e3Notes:
+    'E3-5 (refs = editor self-reported integer count; "resolvable" = on-chain URI pattern-filter, replay never queries an indexer; Web2 URLs neither count nor block writes) is tool/engine SEMANTICS, not schema — implemented as dumb-pipe pass-through.',
+  corrections: [
+    {
+      id: 'E3-1',
+      schema: 'ruling',
+      change:
+        'challengePin/seed -> ["string","null"], outcome enum gains null: the vote branch requires all three null while literal v0.1 §5 typed them string/enum-only, rejecting every valid vote pin',
+      authority: 'E-3',
+    },
+    {
+      id: 'E3-2',
+      schema: 'constitution',
+      change:
+        'founders bidirectional conditions: revision=0 -> required array (2..64); revision>0 -> const null',
+      authority: 'E-3',
+    },
+    {
+      id: 'E3-3',
+      schema: 'ruling.params.fromEntry/toEntry',
+      change: 'lang segment tightened to lowercase ^[a-z]{2,8}: per X1 (F-β)',
+      authority: 'E-3; ruling pin://054ae26164d34f15884b218667b84ea7127ddbc9b73642094eec75867ebaa557i0',
+    },
+    {
+      id: 'E3-4',
+      schema: 'constitution.params',
+      change:
+        'arbiterSuspensionDays properties-only (not in required) + minimum 0 — D6 "入宪法" lacks the explicit required-sync wording D2/X8 used; min 0 follows the theta* disable precedent',
+      authority: 'E-3; ruling pin://cb4caacad6b1687fbd13fab804138f335ffa420c042fa735cd809b0ab593f06fi0',
+    },
+    {
+      id: 'redirectTo-pattern',
+      schema: 'rev',
+      change:
+        'redirectTo pattern rebuilt as char-class {1,96} (a prior build emitted "+{1,96}", a JS-invalid regex). E-3 effect statement classifies this as an implementation typo fixed by hotfix, not an erratum item',
+      authority: 'E-3 effect statement',
+    },
+  ],
 } as const;

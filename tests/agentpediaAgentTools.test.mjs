@@ -327,6 +327,28 @@ test('agentpedia_rev redirect writes a validated payload (redirectTo pattern reg
   assert.equal(payload.content, null);
 });
 
+test('constitution founders bidirectional conditions (E3-2): revision>0 demands founders null', () => {
+  const base = {
+    v: 1,
+    revision: 1,
+    prevConstitution: 'ab'.repeat(32) + 'i0',
+    proposalPin: 'cd'.repeat(32) + 'i0',
+    founders: null,
+    params: { ...agentpediaGenesisParamDefaults },
+    algoVersions: { adoption: 'adoption-algo-v1', reputation: 'reputation-algo-v1', arbiterDraw: 'arbiter-draw-v1' },
+  };
+  assert.equal(validateAgainstSchema(base, agentpediaSchemas.constitution).ok, true);
+
+  const carriedFounders = { ...base, founders: ['idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5', 'idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz'] };
+  assert.equal(validateAgainstSchema(carriedFounders, agentpediaSchemas.constitution).ok, false);
+});
+
+test('validator supports the not keyword (E3-2 depends on it)', () => {
+  const schema = { not: { properties: { revision: { const: 0 } }, required: ['revision'] } };
+  assert.equal(validateAgainstSchema({ revision: 1 }, schema).ok, true);
+  assert.equal(validateAgainstSchema({ revision: 0 }, schema).ok, false);
+});
+
 test('formatAgentpediaToolName maps protocol paths to tool names', () => {
   assert.equal(formatAgentpediaToolName('/protocols/agentpedia/rev'), 'agentpedia_rev');
   assert.equal(formatAgentpediaToolName('/protocols/agentpedia/param-proposal'), 'agentpedia_paramProposal');

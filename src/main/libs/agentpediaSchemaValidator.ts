@@ -119,6 +119,14 @@ function checkValue(value: unknown, schema: Schema, path: string, errors: Schema
     }
   }
 
+  if (schema.not !== undefined && schema.not !== null && typeof schema.not === 'object') {
+    const probe: SchemaValidationIssue[] = [];
+    checkValue(value, schema.not as Schema, path, probe);
+    if (probe.length === 0) {
+      fail(`value must NOT match the "not" schema`);
+    }
+  }
+
   // Combinators (applied after base checks; if/then/else per draft-07)
   if (Array.isArray(schema.allOf)) {
     for (const subschema of schema.allOf as Schema[]) {
