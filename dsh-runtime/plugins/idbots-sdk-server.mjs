@@ -43,6 +43,11 @@
 //   idbots/ask/request        { id, sessionId, questions } (ask_user_question)
 //   idbots/ask/cancelled      { id }
 //
+// Plus synthetic 'assistant/chunk' session.event notifications: 0.1.5 moved
+// live streaming off the durable feed onto the process-local
+// 'agent/assistant-stream' dispatch, so we bridge chunk frames back onto the
+// wire in the retired event's shape (see constructor).
+//
 // Approval bridging: the dsh-user-approval service owns the `approval` seam,
 // audit events (approval/asked + approval/decided ride the session feed), and
 // the scope-filtered `approval/request` answerer waterfall (default answer
@@ -53,7 +58,6 @@
 // races the turn's AbortSignal against our answer and discards late replies.
 
 import { isAbsolute, resolve } from 'node:path'
-import { admitPromptContent } from '@deepseek-ai/dsh-attachment'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '@deepseek-ai/dsh-sdk-jsonrpc-server'
 import * as dshToolSubagent from '@deepseek-ai/dsh-tool-subagent'
@@ -194,6 +198,23 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     ctx.on('agent/disposed', ({ agent }) => {
       this.idbotsAgents.delete(String(agent.id))
       this.idbotsRoute.delete(String(agent.id))
+    }, { global: true })
+
+    // 0.1.5 live streaming bridge: 'assistant/chunk' left the durable session
+    // event feed (streams now persist embedded in the settled assistant/message
+    // or assistant/attempt), and the loop publishes TRANSIENT frames on the
+    // agent-scoped 'agent/assistant-stream' dispatch — which the stock server
+    // never puts on the wire. Forward chunk frames as synthetic assistant/chunk
+    // session.event notifications so the host mapper keeps its token-level
+    // text/reasoning deltas: frame.chunk is the same StreamChunk the retired
+    // durable event carried. Global listener because dispatch is
+    // scope-filtered (same lesson as the approval waterfall above).
+    ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+      if (frame?.type !== 'chunk') return
+      this.idbotsTransport.notify('session.event', {
+        sessionId: String(agent.id),
+        event: { type: 'assistant/chunk', data: { chunk: frame.chunk } },
+      })
     }, { global: true })
 
     ctx.on('approval/request', (req, next) => this.idbotsBridgeApproval(req, next), { global: true })
@@ -420,8 +441,9 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   // message as [text, ...image blocks] via the stock prompt path. Same route
   // gate as tool-result images: a user message is durable history, so a
   // text-only route never receives image blocks — an omission note rides the
-  // text instead. Admission goes through the kernel's shared
-  // attachment store's admitPromptContent service, so the batch count and
+  // text instead. Admission goes through the attachment store's
+  // admitPromptContent method (0.1.5: formerly a standalone export), so the
+  // batch count and
   // aggregate-byte limits plus the canonical-base64 check apply exactly as
   // they do to the harness's own browser uploads; a refused batch throws to
   // the RPC caller instead of partially committing.
@@ -434,7 +456,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       const attachments = this.ctx.get('attachments')
       const imageCapable = attachments !== undefined && await this.idbotsRouteAcceptsImages(agent)
       if (imageCapable) {
-        content = await admitPromptContent(attachments, [
+        content = await attachments.admitPromptContent([
           ...content,
           ...imageList.map((image) => ({
             type: 'image',
