@@ -650,18 +650,57 @@ export class DshTurnHub {
   }
 
   /** Subagent panel (cowork session id in, DSH routing inside). */
-  async listSubagents(coworkSessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
-    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
-    const kernel = this.kernelForDsh(dshId)
-    if (!kernel || !dshId) return []
+  /**
+   * Any running runtime process. The session root is shared across provider
+   * slots, so read-only, persistence-backed RPCs (subagent catalog, child
+   * transcripts) can be served by whichever runtime is up — the session's own
+   * provider process is not required.
+   */
+  private anyRunningKernel(): DshKernel | null {
+    for (const slot of this.slots.values()) {
+      if (slot.kernel.running) return slot.kernel
+    }
+    return null
+  }
+
+  async listSubagents(
+    coworkSessionId: string,
+    opts?: { dshSessionId?: string; provider?: DshTurnProviderRoute },
+  ): Promise<Array<{ agentId: string; status: string; startedAt: number; mode?: string; label?: string }>> {
+    // Resolution order: live turn mapping → pinned mapping → the host's
+    // persisted handle hint (post-restart, every in-memory map is empty).
+    const dshId = this.dshByCowork.get(coworkSessionId)
+      ?? this.pinnedDshIds.get(coworkSessionId)
+      ?? opts?.dshSessionId
+    if (!dshId) return []
+    let kernel = this.kernelForDsh(dshId) ?? this.anyRunningKernel()
+    if (!kernel && opts?.provider) {
+      // No runtime at all (app restart / idle reap): boot one so the
+      // persistence-backed list can answer. Best-effort — no API config, no read.
+      await this.prewarm({ provider: opts.provider }).catch(() => undefined)
+      kernel = this.anyRunningKernel()
+    }
+    if (!kernel) return []
     const result = await kernel.listSubagents(dshId)
     return result.agents ?? []
   }
 
-  async getSubagentMessages(coworkSessionId: string, agentId: string, limit?: number): Promise<Array<{ id: string; type: string; content: string; timestamp: number }>> {
-    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
-    const kernel = this.kernelForDsh(dshId)
-    if (!kernel || !dshId) return []
+  async getSubagentMessages(
+    coworkSessionId: string,
+    agentId: string,
+    limit?: number,
+    opts?: { dshSessionId?: string; provider?: DshTurnProviderRoute },
+  ): Promise<Array<{ id: string; type: string; content: string; timestamp: number }>> {
+    const dshId = this.dshByCowork.get(coworkSessionId)
+      ?? this.pinnedDshIds.get(coworkSessionId)
+      ?? opts?.dshSessionId
+    if (!dshId) return []
+    let kernel = this.kernelForDsh(dshId) ?? this.anyRunningKernel()
+    if (!kernel && opts?.provider) {
+      await this.prewarm({ provider: opts.provider }).catch(() => undefined)
+      kernel = this.anyRunningKernel()
+    }
+    if (!kernel) return []
     const result = await kernel.getSubagentMessages(dshId, agentId, limit)
     return result.messages ?? []
   }

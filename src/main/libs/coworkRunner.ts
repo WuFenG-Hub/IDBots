@@ -7385,14 +7385,42 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /** Subagent panel: child agent ids of a DSH session (post-hoc safe). */
-  dshListSubagents(sessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
+  /**
+   * Panel-read plumbing shared by the subagent list/transcript RPCs: the
+   * kernel-facing dsh id plus a bootable provider when the session's route
+   * resolves. Post-restart every hub mapping is empty, so the dsh id comes
+   * from the stored `dsh:` handle (or the cw-<id> convention for sessions
+   * whose first turn never settled a handle write). A null provider skips
+   * the runtime boot — read-only queries must never fail hard on API config.
+   */
+  private dshPanelReadOptions(sessionId: string): { dshSessionId: string; provider?: DshTurnProviderRoute } {
+    let storedHandle: string | null = null;
+    try {
+      storedHandle = (this.store.getSessionWithoutMessages?.(sessionId) ?? this.store.getSession(sessionId))?.claudeSessionId ?? null;
+    } catch {
+      storedHandle = null;
+    }
+    const dshSessionId = dshSessionIdOf(storedHandle) ?? `cw-${sessionId}`;
+    try {
+      const route = this.resolveSessionDshRoute(sessionId);
+      if (route?.baseUrl && route.apiKey) {
+        return { dshSessionId, provider: this.dshTurnProviderFromRoute(route) };
+      }
+    } catch {
+      // Route resolution is best-effort here; the durable read works without it.
+    }
+    return { dshSessionId };
+  }
+
+  /** Subagent panel: child agent ids of a DSH session (durable catalog backed). */
+  dshListSubagents(sessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number; mode?: string; label?: string }>> {
     if (!this.dshTurnHub) return Promise.resolve([])
-    return this.dshTurnHub.listSubagents(sessionId)
+    return this.dshTurnHub.listSubagents(sessionId, this.dshPanelReadOptions(sessionId))
   }
 
   dshGetSubagentMessages(sessionId: string, agentId: string, limit?: number): Promise<Array<{ id: string; type: string; content: string; timestamp: number }>> {
     if (!this.dshTurnHub) return Promise.resolve([])
-    return this.dshTurnHub.getSubagentMessages(sessionId, agentId, limit)
+    return this.dshTurnHub.getSubagentMessages(sessionId, agentId, limit, this.dshPanelReadOptions(sessionId))
   }
 
   /** Subagent panel stop for DSH sessions (kernel user-authority interrupt). */
