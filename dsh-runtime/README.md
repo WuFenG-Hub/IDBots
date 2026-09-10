@@ -2,14 +2,19 @@
 
 IDBots' DSH agent runtime: a standalone process spawned and supervised by the
 Electron main process, speaking newline-delimited JSON-RPC on stdio through
-`@deepseek-ai/dsh-sdk-client`. Consumes the DeepSeek Harness `0.1.2-rc.1` npm release line. No forks.
+`@deepseek-ai/dsh-sdk-client`. Consumes the DeepSeek Harness `0.1.5-rc.2` npm release line. No forks.
 
 ## Published DSH dependency line
 
-The runtime is pinned to `0.1.2-rc.1`, the newest DSH version currently
-published for the npm packages used here. The GitHub `0.1.3-alpha.1` tag is
-tracked separately and will be evaluated after its complete package set reaches
-npm.
+The runtime is pinned to `0.1.5-rc.2`. Since `0.1.5` the session persistence
+backend writes format-generation v3 artifacts (`session.v3.jsonl.zstd`) and
+migrates legacy v0 logs (`session.jsonl[.zstd]`) in place on first write-open —
+the source v0 file stays byte-identical, and reads always pick the highest
+canonical generation, so pre-upgrade session roots keep working with no host
+migration. Live token streaming no longer rides the durable session feed: the
+loop publishes transient `agent/assistant-stream` frames, which
+`plugins/idbots-sdk-server.mjs` bridges back onto the wire as synthetic
+`assistant/chunk` session events.
 
 ## Layout
 
