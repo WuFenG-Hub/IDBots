@@ -2,8 +2,6 @@ import type { BrowserPageDefinition } from '@openagentinternet/agent-browser-ui/
 
 export const BROWSER_INIT_MARKER = "if (document.readyState === 'loading') {";
 
-const METAAPP_IFRAME_SANDBOX_RE = /(<iframe\b(?=[^>]*\bclass=["']browser-html-frame["'])(?=[^>]*\bsandbox=["'])[^>]*\bsandbox=["'])allow-scripts(["'][^>]*>)/gu;
-
 export function buildBrowserIframeBridgeScript(): string {
   return `
 (function installIdbotsBrowserIframeBridge() {
@@ -426,10 +424,15 @@ export function buildBrowserIframeBridgeScript(): string {
 `;
 }
 
-export function relaxMetaAppIframeSandbox(html: string): string {
-  return html.replace(METAAPP_IFRAME_SANDBOX_RE, '$1allow-scripts allow-same-origin$2');
-}
-
+/**
+ * The MetaApp preview iframe sandbox is decided upstream by ABC's
+ * htmlFrameSandbox(url) (see @openagentinternet/agent-browser-ui), which the
+ * served page concatenates at runtime. IDBots therefore must not post-process
+ * the rendered HTML to re-add allow-same-origin: it would contradict the
+ * upstream "same-origin frames stay opaque" design and cannot reach the
+ * runtime-built attribute anyway. The token list is extended with allow-forms
+ * via patches/@openagentinternet+agent-browser-ui+0.5.5.patch.
+ */
 export function injectBrowserIframeBridge(
   definition: BrowserPageDefinition,
 ): BrowserPageDefinition {

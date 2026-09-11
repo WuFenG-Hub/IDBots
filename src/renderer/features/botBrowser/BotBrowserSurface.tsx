@@ -15,7 +15,7 @@ import { i18nService } from '../../services/i18n';
 import { themeService } from '../../services/theme';
 import { createBrowserEndpointShim, type BrowserEndpointShimResponse } from './browserEndpointShim';
 import { createIdbotsBrowserHostAdapter } from './idbotsBrowserHostAdapter';
-import { injectBrowserIframeBridge, relaxMetaAppIframeSandbox } from './browserIframeBridge';
+import { injectBrowserIframeBridge } from './browserIframeBridge';
 import { useBotBrowserCapture } from './useBotBrowserCapture';
 import type {
   BotBrowserConversationRequest,
@@ -280,12 +280,15 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
           const definition = injectBrowserIframeBridge(
             buildBrowserPageDefinition(),
           );
-          const html = relaxMetaAppIframeSandbox(
-            await renderBrowserPageHtml(
-              definition,
-              getBrowserLanguagePreference(),
-              { theme: themeService.getEffectiveTheme() },
-            ),
+          // Do NOT post-process the rendered HTML to widen the MetaApp iframe
+          // sandbox: the iframe (and its sandbox attribute) is built at runtime
+          // by the ABC browser client from htmlFrameSandbox(url), so a string
+          // rewrite here cannot reach it. The allow-forms token is added at the
+          // source via patches/@openagentinternet+agent-browser-ui+0.5.5.patch.
+          const html = await renderBrowserPageHtml(
+            definition,
+            getBrowserLanguagePreference(),
+            { theme: themeService.getEffectiveTheme() },
           );
           readyRef.current = false;
           srcDocRef.current = html;

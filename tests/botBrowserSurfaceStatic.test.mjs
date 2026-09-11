@@ -71,18 +71,59 @@ test('surface wires Bot Browser MetaApp cache IPC into the host adapter', () => 
   assert.match(adapterSection, /clearMetaAppCache:\s*\(input\) => window\.electron\.botBrowser\.clearMetaAppCache\(input\)/);
 });
 
-test('surface relaxes MetaAPP iframe sandbox after rendering the packaged Browser HTML', () => {
+// The MetaApp iframe (and its sandbox attribute) is built at runtime by the ABC
+// browser client from htmlFrameSandbox(url); the rendered HTML we hand to srcDoc
+// does not contain that element yet. Post-processing it to re-add
+// allow-same-origin (the retired relaxMetaAppIframeSandbox) was therefore both
+// ineffective and contrary to the upstream opaque-frame contract. allow-forms
+// is added at the dependency source via
+// patches/@openagentinternet+agent-browser-ui+0.5.5.patch.
+const SANDBOX_RELAXATION_RE = /relaxMetaAppIframeSandbox/;
+
+test('surface renders the packaged Browser HTML without rewriting the iframe sandbox', () => {
   assert.match(
     source,
-    /import \{ injectBrowserIframeBridge,\s*patchBrowserNavButtonSync,\s*relaxMetaAppIframeSandbox \} from '\.\/browserIframeBridge';/,
+    /import \{ injectBrowserIframeBridge \} from '\.\/browserIframeBridge';/,
   );
-  assert.match(source, /const html = relaxMetaAppIframeSandbox\(\s*await renderBrowserPageHtml\(\s*definition,\s*getBrowserLanguagePreference\(\),\s*\{ theme: themeService\.getEffectiveTheme\(\) \},\s*\),\s*\);/);
+  assert.match(
+    source,
+    /const html = await renderBrowserPageHtml\(\s*definition,\s*getBrowserLanguagePreference\(\),\s*\{ theme: themeService\.getEffectiveTheme\(\) \},\s*\);/,
+  );
+  assert.doesNotMatch(source, SANDBOX_RELAXATION_RE);
 });
 
-test('surface patches the ABC page so back/forward buttons re-sync after in-tab navigation', () => {
+test('negative control: the sandbox-relaxation guard flags the retired relaxation call', () => {
+  const retiredSource = [
+    "import { injectBrowserIframeBridge, relaxMetaAppIframeSandbox } from './browserIframeBridge';",
+    'const html = relaxMetaAppIframeSandbox(',
+    '  await renderBrowserPageHtml(definition, getBrowserLanguagePreference(), { theme: themeService.getEffectiveTheme() }),',
+    ');',
+  ].join('\n');
+  assert.match(
+    retiredSource,
+    SANDBOX_RELAXATION_RE,
+    'the guard must have teeth: it has to detect the retired rewrite when present',
+  );
+});
+
+// Pre-existing stale expectation, repaired here: patchBrowserNavButtonSync was
+// retired when ABC 0.5.4 shipped the toolbar re-sync upstream (see the sentinel
+// in tests/browserNavButtonSync.test.ts). The surface now injects the bridge
+// straight into buildBrowserPageDefinition().
+test('surface builds the ABC page definition without the retired nav-button sync patch', () => {
   assert.match(
     source,
-    /const definition = injectBrowserIframeBridge\(\s*patchBrowserNavButtonSync\(buildBrowserPageDefinition\(\)\),?\s*\);/,
+    /const definition = injectBrowserIframeBridge\(\s*buildBrowserPageDefinition\(\),\s*\);/,
+  );
+  assert.doesNotMatch(source, /patchBrowserNavButtonSync/);
+});
+
+test('negative control: the retired nav-button sync guard flags the old wiring', () => {
+  const retiredSource = 'const definition = injectBrowserIframeBridge(\n  patchBrowserNavButtonSync(buildBrowserPageDefinition()),\n);';
+  assert.match(
+    retiredSource,
+    /patchBrowserNavButtonSync/,
+    'the guard must have teeth: it has to detect the old wiring when present',
   );
 });
 
