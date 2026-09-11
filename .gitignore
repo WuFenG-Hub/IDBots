@@ -181,6 +181,8 @@ tests/*
 !tests/metabotGroupTaskSkill.test.mjs
 !tests/metabotInfoPayload.test.mjs
 !tests/metabotInfoSyncSteps.test.mjs
+!tests/metabotAvatarAgentTool.test.mjs
+!tests/avatarNormalize.test.mjs
 !tests/metabotRestoreProtocol.test.mjs
 !tests/metabotDeleteWithMemories.test.mjs
 !tests/sqliteRecoveryLifecycle.test.mjs
