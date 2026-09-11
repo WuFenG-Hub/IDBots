@@ -61,6 +61,7 @@ tests/*
 !tests/dshKernelRuntime.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/dshRuntimeGlmResponsesBoot.test.mjs
+!tests/dshRuntimeOpencodeSessionHeaders.test.mjs
 !tests/dshKernelBootFailure.test.mjs
 !tests/coworkKernelRouting.test.mjs
 !tests/coworkForkSession.test.mjs
@@ -394,5 +395,7 @@ man_base_data_pebble/
 !tests/agentpediaAgentTools.test.mjs
 
 # Local extracted skill packages and tool output artifacts (runtime-generated)
+/.proposal-demo-data/
+/dist-proposal-demo/
 /.idbots-extract/
 /output/
