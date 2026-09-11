@@ -58,6 +58,7 @@ function makeHarness() {
       },
     ],
     listProviders: () => [{ id: 'deepseek', label: 'Deepseek' }],
+    getOwnerGlobalMetaId: () => 'gmid-owner-1',
   };
   const tools = buildMetabotManageAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
