@@ -5,6 +5,7 @@ import type {
   CoworkSession,
   CoworkSessionStatus,
 } from '../../types/cowork';
+import { deleteSession } from './coworkSlice';
 
 /**
  * State for the Bot Browser side-panel Co-Work surface.
@@ -79,6 +80,16 @@ const browserCoworkSlice = createSlice({
       state.currentSession = null;
       state.isStreaming = false;
     },
+  },
+  extraReducers: (builder) => {
+    // Archiving a session from any surface (Bot Home list, batch archive, the
+    // home cowork view) removes it everywhere; the Bot Browser panel must not
+    // keep pointing at a session that no longer exists.
+    builder.addCase(deleteSession, (state, action) => {
+      if (state.currentSession?.id !== action.payload) return;
+      state.currentSession = null;
+      state.isStreaming = false;
+    });
   },
 });
 
