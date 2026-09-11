@@ -1225,6 +1225,34 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         ])
       ) as ProvidersConfig;
 
+      // Reconcile the persisted default model against the edited catalogs: a
+      // Fetch Models sync or a manual delete may have removed the model the
+      // global default points at. Fall back so the composer never references
+      // an id that no longer exists — prefer the same provider's first model,
+      // then the first enabled provider's first model overall.
+      const persistedModelConfig = configService.getConfig().model;
+      const persistedDefaultProvider = persistedModelConfig.defaultProvider ?? '';
+      let reconciledDefault: { id: string; providerKey: string } | null = null;
+      const defaultModelSurvives = Object.entries(normalizedProviders).some(([providerKey, providerConfig]) =>
+        providerKey === persistedDefaultProvider
+        && providerConfig.enabled
+        && (providerConfig.models ?? []).some((model) => model.id === persistedModelConfig.defaultModel));
+      if (!defaultModelSurvives) {
+        const sameProvider = normalizedProviders[persistedDefaultProvider];
+        const sameProviderFirst = sameProvider?.enabled ? (sameProvider.models ?? [])[0] : undefined;
+        if (sameProviderFirst) {
+          reconciledDefault = { id: sameProviderFirst.id, providerKey: persistedDefaultProvider };
+        } else {
+          for (const [providerKey, providerConfig] of Object.entries(normalizedProviders)) {
+            const first = providerConfig.enabled ? (providerConfig.models ?? [])[0] : undefined;
+            if (first) {
+              reconciledDefault = { id: first.id, providerKey };
+              break;
+            }
+          }
+        }
+      }
+
       // Find the first enabled provider to use as the primary API
       const firstEnabledProvider = Object.entries(normalizedProviders).find(
         ([_, config]) => config.enabled
@@ -1243,6 +1271,15 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         theme,
         language,
         shortcuts,
+        ...(reconciledDefault
+          ? {
+              model: {
+                ...persistedModelConfig,
+                defaultModel: reconciledDefault.id,
+                defaultProvider: reconciledDefault.providerKey,
+              },
+            }
+          : {}),
       });
 
       // 应用主题
@@ -1274,6 +1311,17 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         }
       });
       dispatch(setAvailableModels(allModels));
+
+      // Keep the redux selection on a model that exists in the saved catalogs
+      // when the default was reconciled above.
+      if (reconciledDefault) {
+        const preferred = allModels.find(
+          (model) => model.id === reconciledDefault.id && model.providerKey === reconciledDefault.providerKey
+        );
+        if (preferred) {
+          dispatch(setSelectedModel(preferred));
+        }
+      }
 
       if (hasCoworkConfigChanges) {
         await coworkService.updateConfig({
