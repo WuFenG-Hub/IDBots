@@ -146,6 +146,18 @@ export class DshKernel {
     await migrateSessionRootToZstd(config.sessionRoot, {
       log: (level, event, data) => this.opts.log?.(level, `dshKernel.${event}`, data),
     })
+    // 0.1.x M1 wire wrote turn/end aborts with a bare-string cause ("steer",
+    // "cancel"); the 0.1.5 v0→v1 format migration requires an object cause
+    // and refuses the WHOLE Session otherwise ("abort cause must be a JSON
+    // object"), leaving upgraded users unable to open any session where a
+    // turn was steered/cancelled on an old kernel. Sanitize those events in
+    // place (original bytes backed up, one-time marker-gated sweep) before
+    // the runtime's persistence layer ever opens the root.
+    const sanitizerUrl = pathToFileURL(join(runtimeDir, 'lib', 'sanitize-v0-abort-cause.mjs')).href
+    const { sanitizeV0AbortCauses } = await dynamicImport(sanitizerUrl)
+    await sanitizeV0AbortCauses(config.sessionRoot, {
+      log: (level, event, data) => this.opts.log?.(level, `dshKernel.${event}`, data),
+    })
     const configPath = join(config.sessionRoot, dshRuntimeConfigFileName(config.runtimeId))
     writeFileSync(configPath, JSON.stringify(generateRuntimeConfig(config), null, 2))
     this.runtimeConfig = config
