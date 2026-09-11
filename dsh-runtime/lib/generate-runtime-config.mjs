@@ -328,6 +328,17 @@ export function generateRuntimeConfig(input) {
         ].join('\n'),
       },
     },
+    // 0.1.5 stock guard rails: repeat-tool-reminder appends a model-visible
+    // advisory when the agent re-issues the exact same tool call (canonical
+    // arguments) at thresholds 3/5/8 — pure prompt hygiene, never blocks.
+    // timeout-policy enforces each tool's own declared timeoutMs as a
+    // cooperative deadline (mainly the web_search 60s budget we configure).
+    {
+      id: 'repeat-tool-reminder',
+      name: '@deepseek-ai/dsh-repeat-tool-reminder',
+      config: { thresholds: [3, 5, 8], argumentsPreviewChars: 500 },
+    },
+    { id: 'timeout-policy', name: '@deepseek-ai/dsh-tool-call-timeout-policy' },
     {
       id: 'compaction-basic',
       name: '@deepseek-ai/dsh-compaction-basic',
