@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {
-  buildBrowserIframeBridgeScript,
-  relaxMetaAppIframeSandbox,
-} from '../src/renderer/features/botBrowser/browserIframeBridge.ts';
+import * as bridgeModule from '../src/renderer/features/botBrowser/browserIframeBridge.ts';
+
+const { buildBrowserIframeBridgeScript } = bridgeModule;
 
 test('bridge gates browser-ready on runtime readiness without DOM timer readiness', () => {
   const script = buildBrowserIframeBridgeScript();
@@ -61,14 +60,28 @@ test('bridge refresh-runtime forceReload bypasses cached runtimeReadyPromise', (
   );
 });
 
-test('relaxes only MetaAPP preview iframe sandbox to preserve local preview same-origin behavior', () => {
-  const html = [
-    '<iframe class="browser-html-frame" sandbox="allow-scripts" src="http://127.0.0.1:23456/browser-cache/metaapp-preview/session/index.html"></iframe>',
-    '<iframe class="browser-pdf" sandbox="" src="http://127.0.0.1:23456/file.pdf"></iframe>',
-  ].join('\n');
+// The MetaApp iframe sandbox is decided upstream by ABC's htmlFrameSandbox(url)
+// and concatenated into the served page at runtime. A client-side string
+// rewrite of the rendered HTML (the retired relaxMetaAppIframeSandbox) could
+// never reach that attribute and re-adding allow-same-origin to a same-origin
+// frame reverses the upstream "same-origin frames stay opaque" contract. The
+// module must therefore not expose such a helper; allow-forms is added at the
+// source via patches/@openagentinternet+agent-browser-ui+0.5.5.patch.
+const SANDBOX_RELAXATION_EXPORT = 'relaxMetaAppIframeSandbox';
 
-  const relaxed = relaxMetaAppIframeSandbox(html);
+function exposesSandboxRelaxation(module) {
+  return typeof module[SANDBOX_RELAXATION_EXPORT] === 'function';
+}
 
-  assert.match(relaxed, /class="browser-html-frame" sandbox="allow-scripts allow-same-origin"/);
-  assert.match(relaxed, /class="browser-pdf" sandbox=""/);
+test('bridge module no longer exposes a MetaApp sandbox relaxation helper', () => {
+  assert.equal(exposesSandboxRelaxation(bridgeModule), false);
+});
+
+test('negative control: the sandbox-relaxation guard flags a module that still exposes it', () => {
+  const legacyModule = { [SANDBOX_RELAXATION_EXPORT]: (html) => html };
+  assert.equal(
+    exposesSandboxRelaxation(legacyModule),
+    true,
+    'the guard must have teeth: it has to detect the retired helper when present',
+  );
 });

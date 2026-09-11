@@ -1,0 +1,102 @@
+diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js
+index c09c18d..4aefd4c 100644
+--- a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js
++++ b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js
+@@ -7497,12 +7497,12 @@ function htmlFrameSandbox(url) {
+   // safe only because it is NOT the Browser page origin, so the app can never
+   // script the UI or call its same-origin API — plus downloads. Frames served
+   // same-origin with the page stay fully opaque (no allow-same-origin).
+-  var base = 'allow-scripts allow-downloads';
++  var base = 'allow-scripts allow-downloads allow-forms';
+   var origin = window.location && window.location.origin ? window.location.origin : '';
+   if (!origin) return base;
+   try {
+     var frameOrigin = new URL(url, window.location.href || undefined).origin;
+-    return frameOrigin === origin ? base : 'allow-scripts allow-same-origin allow-downloads';
++    return frameOrigin === origin ? base : 'allow-scripts allow-same-origin allow-downloads allow-forms';
+   } catch (error) {
+     return base;
+   }
+diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browserClientScript.js b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browserClientScript.js
+index ccf4238..70caa30 100644
+--- a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browserClientScript.js
++++ b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browserClientScript.js
+@@ -86,12 +86,12 @@ function buildBrowserClientScript(input) {
+     // safe only because it is NOT the Browser page origin, so the app can never
+     // script the UI or call its same-origin API — plus downloads. Frames served
+     // same-origin with the page stay fully opaque (no allow-same-origin).
+-    const base = 'allow-scripts allow-downloads';
++    const base = 'allow-scripts allow-downloads allow-forms';
+     const origin = window.location && window.location.origin ? window.location.origin : '';
+     if (!origin) return base;
+     try {
+       const frameOrigin = new URL(url, window.location.href || undefined).origin;
+-      return frameOrigin === origin ? base : 'allow-scripts allow-same-origin allow-downloads';
++      return frameOrigin === origin ? base : 'allow-scripts allow-same-origin allow-downloads allow-forms';
+     } catch {
+       return base;
+     }
+diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/renderers.js b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/renderers.js
+index 876aaa6..5f37eaf 100644
+--- a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/renderers.js
++++ b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/renderers.js
+@@ -97,7 +97,7 @@ function renderUrlRenderer(renderer, className, tag) {
+         return '<section class="browser-empty-state"><h2>Renderer URL blocked</h2></section>';
+     }
+     if (tag === 'iframe' && className === 'browser-html-frame') {
+-        return `<iframe class="${className}" sandbox="allow-scripts allow-downloads" src="${escapeHtml(url)}" title="MetaApp preview"></iframe>`;
++        return `<iframe class="${className}" sandbox="allow-scripts allow-downloads allow-forms" src="${escapeHtml(url)}" title="MetaApp preview"></iframe>`;
+     }
+     if (tag === 'iframe' && className === 'browser-pdf') {
+         return `<iframe class="${className}" sandbox="" src="${escapeHtml(url)}" title="Document preview"></iframe>`;
+diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist/browser/app.js b/node_modules/@openagentinternet/agent-browser-ui/dist/browser/app.js
+index 21c3599..a245bed 100644
+--- a/node_modules/@openagentinternet/agent-browser-ui/dist/browser/app.js
++++ b/node_modules/@openagentinternet/agent-browser-ui/dist/browser/app.js
+@@ -7494,12 +7494,12 @@ function htmlFrameSandbox(url) {
+   // safe only because it is NOT the Browser page origin, so the app can never
+   // script the UI or call its same-origin API — plus downloads. Frames served
+   // same-origin with the page stay fully opaque (no allow-same-origin).
+-  var base = 'allow-scripts allow-downloads';
++  var base = 'allow-scripts allow-downloads allow-forms';
+   var origin = window.location && window.location.origin ? window.location.origin : '';
+   if (!origin) return base;
+   try {
+     var frameOrigin = new URL(url, window.location.href || undefined).origin;
+-    return frameOrigin === origin ? base : 'allow-scripts allow-same-origin allow-downloads';
++    return frameOrigin === origin ? base : 'allow-scripts allow-same-origin allow-downloads allow-forms';
+   } catch (error) {
+     return base;
+   }
+diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist/browserClientScript.js b/node_modules/@openagentinternet/agent-browser-ui/dist/browserClientScript.js
+index 916a4e2..d17d324 100644
+--- a/node_modules/@openagentinternet/agent-browser-ui/dist/browserClientScript.js
++++ b/node_modules/@openagentinternet/agent-browser-ui/dist/browserClientScript.js
+@@ -83,12 +83,12 @@ export function buildBrowserClientScript(input) {
+     // safe only because it is NOT the Browser page origin, so the app can never
+     // script the UI or call its same-origin API — plus downloads. Frames served
+     // same-origin with the page stay fully opaque (no allow-same-origin).
+-    const base = 'allow-scripts allow-downloads';
++    const base = 'allow-scripts allow-downloads allow-forms';
+     const origin = window.location && window.location.origin ? window.location.origin : '';
+     if (!origin) return base;
+     try {
+       const frameOrigin = new URL(url, window.location.href || undefined).origin;
+-      return frameOrigin === origin ? base : 'allow-scripts allow-same-origin allow-downloads';
++      return frameOrigin === origin ? base : 'allow-scripts allow-same-origin allow-downloads allow-forms';
+     } catch {
+       return base;
+     }
+diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist/renderers.js b/node_modules/@openagentinternet/agent-browser-ui/dist/renderers.js
+index 20b9e0a..18b65bf 100644
+--- a/node_modules/@openagentinternet/agent-browser-ui/dist/renderers.js
++++ b/node_modules/@openagentinternet/agent-browser-ui/dist/renderers.js
+@@ -90,7 +90,7 @@ function renderUrlRenderer(renderer, className, tag) {
+         return '<section class="browser-empty-state"><h2>Renderer URL blocked</h2></section>';
+     }
+     if (tag === 'iframe' && className === 'browser-html-frame') {
+-        return `<iframe class="${className}" sandbox="allow-scripts allow-downloads" src="${escapeHtml(url)}" title="MetaApp preview"></iframe>`;
++        return `<iframe class="${className}" sandbox="allow-scripts allow-downloads allow-forms" src="${escapeHtml(url)}" title="MetaApp preview"></iframe>`;
+     }
+     if (tag === 'iframe' && className === 'browser-pdf') {
+         return `<iframe class="${className}" sandbox="" src="${escapeHtml(url)}" title="Document preview"></iframe>`;
