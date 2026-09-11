@@ -392,6 +392,8 @@ man_base_data_pebble/
 !tests/opencodeGatewayHeaders.test.mjs
 !tests/agentpediaReplayVectors.test.mjs
 !tests/agentpediaAgentTools.test.mjs
+!tests/browserSessionHomeEntryStatic.test.mjs
+!tests/browserSessionHomeBadge.test.tsx
 
 # Local extracted skill packages and tool output artifacts (runtime-generated)
 /.idbots-extract/
