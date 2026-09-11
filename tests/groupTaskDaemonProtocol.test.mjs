@@ -649,6 +649,14 @@ test('P5 (v1.2): a worker silent past the engaged window still gets the real mis
       pinId: 'stale-work-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot', content: '[WORKING] 早期进度', chainTimestamp: spokeAtSec,
     });
+    // GT#72 retroactive satisfaction judges ACK freshness by the row's
+    // created_at (wall-clock DB default), not the mocked daemon clock — pin
+    // it to the simulated instant so "30 minutes before the assignment" is
+    // representable and stays OUTSIDE the ACK window.
+    h.db.run(
+      "UPDATE group_chat_messages SET created_at = datetime(?, 'unixepoch') WHERE pin_id = 'stale-work-i0'",
+      [spokeAtSec],
+    );
     await h.loop.runTick();
     insertGroupMessage(h.db, {
       pinId: 'assign2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
@@ -1124,11 +1132,14 @@ test('ledger fix: a correction to a REJECTED deliverable re-opens it to pending 
     h.groupTaskStore.updateDeliverableStatus(row.id, 'rejected');
     assert.equal(h.groupTaskStore.listDeliverables(task.id)[0].status, 'rejected');
 
-    // The worker re-delivers the SAME object with a correction tag.
+    // The worker re-delivers the SAME object with an explicit [CORRECTION]
+    // tag line — GT#72 replaced the prose keyword detector (更正/以…为准)
+    // with line-leading protocol tags; the supersede-in-place aggregation
+    // is driven by the tag, not by prose.
     insertGroupMessage(h.db, {
       pinId: 'correction-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot',
-      content: `[DELIVERABLE] 更正：修正版已重新发布，以 metaapp://${pinA} 为准`,
+      content: `[CORRECTION] 更正：修正版已重新发布，以 metaapp://${pinA} 为准\n[DELIVERABLE] metaapp://${pinA}`,
     });
     await h.loop.runTick();
 
