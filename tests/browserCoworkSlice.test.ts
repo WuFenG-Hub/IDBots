@@ -9,6 +9,7 @@ import reducer, {
   setBrowserStreaming,
   clearBrowserSession,
 } from '../src/renderer/store/slices/browserCoworkSlice';
+import { deleteSession } from '../src/renderer/store/slices/coworkSlice';
 import type { CoworkSession } from '../src/renderer/types/cowork';
 
 const makeSession = (overrides: Partial<CoworkSession> = {}): CoworkSession => ({
@@ -111,4 +112,20 @@ test('setBrowserStreaming and clearBrowserSession control the stream flag and re
   state = reducer(state, clearBrowserSession());
   assert.equal(state.currentSession, null);
   assert.equal(state.isStreaming, false);
+});
+
+test('deleteSession clears the panel when its open session is archived from any surface', () => {
+  // Bot Home list / batch archive / the home cowork view all archive through
+  // coworkService, which only dispatches the cowork slice's deleteSession.
+  let state = reducer(undefined, setBrowserSession(makeSession()));
+  state = reducer(state, deleteSession('session-1'));
+  assert.equal(state.currentSession, null);
+  assert.equal(state.isStreaming, false);
+});
+
+test('deleteSession for another session leaves the panel session untouched', () => {
+  let state = reducer(undefined, setBrowserSession(makeSession()));
+  state = reducer(state, deleteSession('other-session'));
+  assert.equal(state.currentSession?.id, 'session-1');
+  assert.equal(state.isStreaming, true);
 });
