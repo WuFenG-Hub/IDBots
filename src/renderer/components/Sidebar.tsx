@@ -51,6 +51,11 @@ interface SidebarProps {
   onSelectHome: () => void;
   onSelectBrowser: () => void;
   onSelectInternetPane: (pane: BotInternetPane) => void;
+  /** Open a browser-type session back in the Bot Browser co-work surface.
+   * Browser sessions are listed in the Bot Home history (one list, no dead
+   * ends), but they run in the Bot Browser panel — selecting one must return
+   * the user there instead of the home chat view. */
+  onSelectBrowserSession?: (sessionId: string) => void | Promise<void>;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   /** Expanded sidebar width in px (resizable by the user). */
@@ -125,6 +130,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   onSelectHome,
   onSelectBrowser,
   onSelectInternetPane,
+  onSelectBrowserSession,
   isCollapsed,
   onToggleCollapse,
   width = defaultSidebarWidth('home'),
@@ -132,12 +138,15 @@ const Sidebar: React.FC<SidebarProps> = ({
   updateBadge,
 }) => {
   const sessions = useSelector((state: RootState) => state.cowork.sessions);
-  // Bot Browser panel sessions live in their own surface; keep them out of the
-  // home history list and the search modal.
-  const homeSessions = useMemo(
-    () => sessions.filter((session) => session.sessionType !== 'browser'),
-    [sessions],
-  );
+  // Bot Home history lists EVERY cowork session, including the Bot Browser
+  // co-work sessions (session_type = 'browser'). They are ordinary cowork
+  // sessions the user can come back to; the browser surface only supplies the
+  // panel they were started from. Hiding them here left a browser chat with no
+  // entry point once the user switched away from Bot Browser. They are shown
+  // in the "local chats" tab and carry a type badge (see CoworkSessionItem),
+  // and selecting one routes back to the Bot Browser surface (see
+  // handleSelectSession below).
+  const homeSessions = sessions;
   const currentSessionId = useSelector((state: RootState) => state.cowork.currentSessionId);
   const unreadSessionIds = useSelector((state: RootState) => state.cowork.unreadSessionIds);
   const groupTasks = useSelector((state: RootState) => state.groupTasks.tasks);
@@ -187,8 +196,11 @@ const Sidebar: React.FC<SidebarProps> = ({
       // localStorage unavailable; the tab still switches for this session.
     }
   };
-  // Sessions grouped by category: local (human↔MetaBot), a2a (MetaBot↔MetaBot),
-  // group (group-task chat channels).
+  // Sessions grouped by category: local (human↔MetaBot, including browser
+  // sessions started from the Bot Browser panel), a2a (MetaBot↔MetaBot), group
+  // (group-task chat channels). a2a / group_task keep their dedicated tabs and
+  // are matched by their own session type, so browser sessions can never leak
+  // into them.
   const sessionGroups = useMemo(() => {
     const isLocal = (session: CoworkSessionSummary) =>
       session.sessionType !== 'a2a' && session.sessionType !== 'group_task';
@@ -293,6 +305,15 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, [mode]);
 
   const handleSelectSession = async (sessionId: string) => {
+    // Browser sessions run in the Bot Browser co-work panel, so "coming back"
+    // to one means returning to that surface with the session loaded there —
+    // not the home chat view. Fall back to the home view when the host did not
+    // wire the browser route (keeps the row usable either way).
+    const target = sessions.find((session) => session.id === sessionId);
+    if (target?.sessionType === 'browser' && onSelectBrowserSession) {
+      await onSelectBrowserSession(sessionId);
+      return;
+    }
     onShowCowork();
     await coworkService.loadSession(sessionId);
   };
