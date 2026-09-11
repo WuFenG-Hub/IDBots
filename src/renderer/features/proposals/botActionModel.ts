@@ -43,7 +43,7 @@ export function acceptConfirmation(
   value: BotActionConfirmation,
 ): BotActionConfirmation {
   if (previous) return previous;
-  if (!validateConfirmation(request, value)) throw new Error('操作确认无效或版本已经过期');
+  if (!validateConfirmation(request, value)) throw new Error('Invalid or outdated action confirmation');
   return { ...value, instruction: value.instruction.trim() };
 }
 
@@ -60,17 +60,17 @@ export function validateReceipt(request: BotActionRequest, receipt: BotActionRec
 export const exampleBotAction: BotActionRequest = {
   id: 'metaapp-homepage-preview',
   version: 1,
-  actor: { name: '屌丝', role: 'Twin Bot · 当前 Cowork 会话' },
+  actor: { name: 'Demo Bot', role: 'Twin Bot · current Cowork session' },
   action: {
     kind: 'metaapp.preview',
-    title: '生成 MetaApp Bot 首页预览',
-    description: '按照已选的画廊方案，生成一份可以在 BotBrowser 审阅的 MetaApp 预览。',
+    title: 'Generate a MetaApp bot homepage preview',
+    description: 'Generate a MetaApp preview from the selected gallery direction for review in BotBrowser.',
   },
-  target: { label: '屌丝 · Bot 首页' },
+  target: { label: 'Demo Bot · Bot homepage' },
   impact: {
     risk: 'local',
-    writes: ['一个可清理的本地预览产物', '本次会话的操作回执'],
-    doesNotWrite: ['不会发布上链', '不会修改身份或正式首页', '不会发送 A2A 消息'],
+    writes: ['A disposable local preview artifact', 'An action receipt for this session'],
+    doesNotWrite: ['Will not publish on-chain', 'Will not modify identity or the live homepage', 'Will not send A2A messages'],
   },
-  output: { label: '在 BotBrowser 中打开预览', expectedUriScheme: 'preview-metaapp' },
+  output: { label: 'Open preview in BotBrowser', expectedUriScheme: 'preview-metaapp' },
 };
