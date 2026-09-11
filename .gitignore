@@ -63,6 +63,9 @@ tests/*
 !tests/dshRuntimeGlmResponsesBoot.test.mjs
 !tests/dshRuntimeOpencodeSessionHeaders.test.mjs
 !tests/dshKernelBootFailure.test.mjs
+!tests/botActionModel.test.ts
+!tests/proposalDecision.test.ts
+!tests/sleepGuard.test.mjs
 !tests/coworkKernelRouting.test.mjs
 !tests/coworkForkSession.test.mjs
 !tests/coworkDshIntegration.test.mjs
