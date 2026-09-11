@@ -142,6 +142,7 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'web_search'
         : lastUserText.includes('CALL_ASK_TOOL') ? 'ask_user_question'
         : lastUserText.includes('CALL_WEB_SEARCH') ? 'web_search'
+        : lastUserText.includes('LOOP_GREP') ? 'grep'
         : lastUserText.includes('CALL_GREP') ? 'grep'
         : lastUserText.includes('CALL_GLOB') ? 'glob'
         : lastUserText.includes('CALL_EXIT_PLAN') ? 'exit_plan_mode'
@@ -163,7 +164,12 @@ export function startMockServer(port = 48787) {
         return
       }
       let reply = ''
-      if (toolCallFor !== null && !alreadyHasToolResult) {
+      // LOOP_GREP keeps re-issuing the identical grep call so the
+      // repeat-tool-reminder guard fires; stop after four results so the
+      // turn terminates.
+      const loopRepeating = lastUserText.includes('LOOP_GREP')
+        && (parsed.messages ?? []).filter((m) => m?.role === 'tool').length < 4
+      if (toolCallFor !== null && (!alreadyHasToolResult || loopRepeating)) {
         const writeMatch = /RUN_BASH_WRITE:([A-Za-z0-9_-]+)/.exec(lastUserText)
         const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
           : toolCallFor === 'ask_user_question' ? { questions: [{ id: 'q1', question: 'Pick a color', header: 'auto-confirm', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
