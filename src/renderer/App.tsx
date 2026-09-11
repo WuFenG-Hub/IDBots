@@ -18,6 +18,7 @@ import { ensureFreeQuotaProvisioning } from './services/llmFreeQuotaBootstrap';
 import { apiService } from './services/api';
 import { themeService } from './services/theme';
 import { coworkService } from './services/cowork';
+import { browserCoworkService } from './services/browserCowork';
 import { agentGameService } from './services/agentGame';
 import { enqueuePendingConsent, dequeuePendingConsent } from './store/slices/agentGameSlice';
 import { scheduledTaskService } from './services/scheduledTask';
@@ -891,6 +892,15 @@ const App: React.FC = () => {
     });
   }, [botBrowserShell.switchToHome, handleShowCowork, showToast]);
 
+  // A browser-type session listed in the Bot Home history opens back in the Bot
+  // Browser co-work panel: switch to that surface first, then point the panel at
+  // the selected session. (Home history shows browser chats so they always have
+  // an entry point; the panel is still where they run.)
+  const handleSelectBrowserSession = useCallback(async (sessionId: string) => {
+    await botBrowserShell.openBrowserHome();
+    await browserCoworkService.loadSession(sessionId);
+  }, [botBrowserShell.openBrowserHome]);
+
   const handleCloseSettings = () => {
     setShowSettings(false);
     window.dispatchEvent(new CustomEvent('app:settingsClosed'));
@@ -1246,6 +1256,7 @@ const App: React.FC = () => {
           void botBrowserShell.openBrowserHome();
         }}
         onSelectInternetPane={botBrowserShell.selectInternetPane}
+        onSelectBrowserSession={handleSelectBrowserSession}
         isCollapsed={isSidebarCollapsed}
         onToggleCollapse={handleToggleSidebar}
         width={sidebarWidth}
