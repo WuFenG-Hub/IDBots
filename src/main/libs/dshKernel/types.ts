@@ -97,6 +97,8 @@ export interface DshUsageProjectionResult {
     toolsTokens: number
     messageTokens: number
   } | null
+  /** 0.1.5 plan-mode wire view (dsh-plan-mode); null when not composed. */
+  plan?: { active: boolean; pending?: boolean } | null
 }
 
 /** Loose envelope of the wire `session.event` notification payload. */

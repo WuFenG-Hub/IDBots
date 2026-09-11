@@ -9848,6 +9848,23 @@ if (!gotTheLock) {
     });
   });
 
+  // Read-only plan-mode view for the sidebar chip's initial state (the
+  // kernel-side mode survives on the session log). Best-effort: ok:true
+  // with plan:null when no runtime currently hosts the session.
+  ipcMain.handle('cowork:plan-mode:get', async (_event, options: { sessionId: string }) => {
+    return withSqliteRecovery('cowork:plan-mode:get', async () => {
+      try {
+        return await getCoworkRunner().dshGetPlanMode(options.sessionId);
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          ok: false,
+          reason: error instanceof Error ? error.message : 'Failed to get plan mode',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:get', async (_event, sessionId: string) => {
     return withSqliteRecovery('cowork:session:get', async () => {
       try {
