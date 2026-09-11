@@ -5817,6 +5817,12 @@ const getCoworkRunner = () => {
         update: (id, input) => updateMetaBotCore(id, input, getMetabotManageDeps()),
         delete: (id) => deleteMetaBotCore(id, getMetabotManageDeps()),
         list: () => listMetabotsForManagement(getMetabotStore()),
+        // Trusted owner source for the Twin/Welcome metabot_create tool: the
+        // tool injects this as the created bot's boss_global_metaid (never a
+        // model argument). Same identity the My Bots > Edit UI uses, and the
+        // signer (signOwnerBindingForLocalUser) re-validates it against the
+        // local user identity before any on-chain owner pin is published.
+        getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
         listProviders: () => {
           const appConfig = getStore().get<{ providers?: Record<string, { enabled?: boolean; apiKey?: string } | undefined> }>('app_config');
           return listConfiguredLlmProviders(appConfig?.providers);

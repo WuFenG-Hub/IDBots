@@ -75,10 +75,13 @@ function makeHarness(controlOverrides = {}, options = {}) {
         { id: 'openai', label: 'Openai' },
       ];
     },
+    // Host-trusted owner identity (main.ts wires this to the local user
+    // identity). Default null = no identity configured yet.
+    getOwnerGlobalMetaId: () => controlOverrides.ownerGlobalMetaId ?? null,
     ...controlOverrides.control,
   };
   const tools = buildMetabotManageAgentTools({
-    tool: (name, description, schema, handler) => ({ name, description, handler }),
+    tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
     control,
     ...(options.viewer ? { viewer: options.viewer } : {}),
   });
@@ -181,6 +184,56 @@ test('metabot_create: core failure is an error result', async () => {
   const res = await byName.metabot_create.handler({ name: 'X', llm_id: 'openai' });
   assert.equal(res.isError, true);
   assert.match(textOf(res), /boom/);
+});
+
+// ---------------------------------------------------------------------------
+// metabot_create — owner binding (host-trusted source, never a model arg)
+// ---------------------------------------------------------------------------
+
+test('metabot_create: binds the HOST owner identity onto createInput', async () => {
+  const { byName, calls } = makeHarness({ ownerGlobalMetaId: 'idq1owner' });
+  const res = await byName.metabot_create.handler({ name: 'Bob', llm_id: 'deepseek' });
+  assert.equal(res.isError, undefined);
+  // The created bot carries the host identity so the DB row lands with
+  // boss_global_metaid set — no My Bots > Edit backfill needed.
+  assert.equal(calls.create[0].boss_global_metaid, 'idq1owner');
+});
+
+test('metabot_create: a model-supplied owner argument is ignored (no self-set master)', async () => {
+  const { byName, calls } = makeHarness({ ownerGlobalMetaId: 'idq1owner' });
+  const res = await byName.metabot_create.handler({
+    name: 'Bob',
+    llm_id: 'deepseek',
+    // Malicious/confused model attempts to name its own owner:
+    boss_global_metaid: 'idq1attacker',
+  });
+  assert.equal(res.isError, undefined);
+  // Host value wins; the arg is dropped entirely.
+  assert.equal(calls.create[0].boss_global_metaid, 'idq1owner');
+});
+
+test('metabot_create: no host owner identity means no binding is written', async () => {
+  const { byName, calls } = makeHarness({ ownerGlobalMetaId: null });
+  await byName.metabot_create.handler({
+    name: 'Bob',
+    llm_id: 'deepseek',
+    boss_global_metaid: 'idq1attacker',
+  });
+  // No owner field is forwarded at all (core then writes NULL), and the model
+  // still cannot inject one.
+  assert.equal('boss_global_metaid' in calls.create[0], false);
+});
+
+test('metabot_create: a blank host owner identity is treated as unset', async () => {
+  const { byName, calls } = makeHarness({ ownerGlobalMetaId: '   ' });
+  await byName.metabot_create.handler({ name: 'Bob', llm_id: 'deepseek' });
+  assert.equal('boss_global_metaid' in calls.create[0], false);
+});
+
+test('metabot_create: the tool schema exposes NO owner field (B-model cannot set it)', () => {
+  const { byName } = makeHarness();
+  // The schema is the first line of defense: a model cannot even name an owner.
+  assert.equal('boss_global_metaid' in byName.metabot_create.schema, false);
 });
 
 // ---------------------------------------------------------------------------
