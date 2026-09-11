@@ -260,6 +260,44 @@ test('createMetaBotOnChainCore: success persists bot, refreshes P2P, returns sub
   assert.equal(found.metabot_type, 'worker');
 });
 
+test('createMetaBotOnChainCore: persists a host-supplied owner binding and signs it at creation', async () => {
+  const store = await openStore();
+  // Fresh wallet per create: two creations in one store must not reuse a
+  // mnemonic (the wallet row is unique on it).
+  let walletN = 2000;
+  let signedBoss = null;
+  let ownerPayloadSeen = null;
+  const deps = mockDeps(store, {
+    createWallet: async () => fakeWallet(walletN++),
+    signOwnerBinding: async (boss, botGmid) => {
+      signedBoss = boss;
+      return { payload: `sig:${boss}:${botGmid}` };
+    },
+    syncToChain: async (_store, _id, options) => {
+      ownerPayloadSeen = options?.ownerBindingPayload ?? null;
+      return { success: true, txids: ['tx-create-owner'] };
+    },
+  });
+
+  // WITH the host owner (the fixed metabot_create payload): the identity is
+  // signed and its binding is queued for the on-chain publish.
+  const withOwner = await createMetaBotOnChainCore(
+    { name: 'OwnedByHost', llm_id: 'deepseek', boss_global_metaid: 'idq1owner' },
+    deps,
+  );
+  assert.equal(withOwner.success, true);
+  assert.equal(signedBoss, 'idq1owner');
+  assert.equal(ownerPayloadSeen, 'sig:idq1owner:gmid-2000');
+  // And it is persisted on the DB row (what My Bots > Edit used to backfill).
+  assert.equal(store.getMetabotById(withOwner.metabot.id).boss_global_metaid, 'idq1owner');
+
+  // CONTRAST — the pre-fix tool payload carried no owner: the row lands NULL,
+  // proving the tool-side host injection is what closes the gap.
+  const noOwner = await createMetaBotOnChainCore({ name: 'Unbound', llm_id: 'deepseek' }, deps);
+  assert.equal(noOwner.success, true);
+  assert.equal(store.getMetabotById(noOwner.metabot.id).boss_global_metaid, null);
+});
+
 test('createMetaBotOnChainCore: mandatory chain failure keeps the bot locally with a pending plan (create fallback)', async () => {
   const store = await openStore();
   const deps = mockDeps(store, {

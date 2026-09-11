@@ -14,6 +14,10 @@
 //     apiFormat: 'openai' | 'responses' | 'anthropic',
 //     baseUrl: string,
 //     apiKeyEnv: string,               // env var name the app fills when spawning (never the key)
+//                                      // baseUrl on the opencode.ai/zen gateway → the route
+//                                      //   profile carries a stable x-opencode-session header
+//                                      //   (the gateway 400s header-less requests; see the
+//                                      //   isOpenCodeGoBaseUrl helper below)
 //     native?: true,                   // official DeepSeek: rides the first-party
 //                                      // dsh-llm-deepseek adapter (chat-completions wire,
 //                                      // native off/low/high/max effort ladder) instead
@@ -166,9 +170,54 @@ const mcpEntryConfig = (server) => {
 
 // Absolute plugin paths so the generated config is location-independent: the
 // Electron main process writes it into userData, not next to the runtime dir.
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const plugin = (file) => fileURLToPath(new URL(`../plugins/${file}`, import.meta.url))
+
+// OpenCode Go ("Console Go") gateway session headers — mirror of the app-side
+// src/main/libs/opencodeGatewayHeaders.ts predicate (this generator is a
+// standalone ESM loaded straight from Resources, so it cannot import TS).
+// The gateway refuses header-less requests (400 MissingSessionID, see
+// https://opencode.ai/docs/go/#where-can-i-use-it), and pi-ai routes only
+// send headers configured ON the provider profile — so gateway-bound routes
+// carry a `headers` entry with an x-opencode-session id here. The id is a
+// deterministic RFC 4122 v5 uuid per route key, NOT a random one: the
+// serialized config feeds dshConfigChangedKeys() restart comparisons, and a
+// fresh uuid on every generation would flap the shared runtime (the DSH
+// CLI's settings-layer fix made the same trade with its fixed uuid).
+const OPENCODE_GO_HOST = 'opencode.ai'
+// Fixed v5 namespace for IDBots runtime session ids (any 16 bytes work; this
+// one is carved in stone so ids stay stable across app updates).
+const OPENCODE_SESSION_NAMESPACE = '3d2f6a58-9c41-5b7e-8a26-d4f0c1e95b73'
+
+const isOpenCodeGoBaseUrl = (baseUrl) => {
+  if (!baseUrl || typeof baseUrl !== 'string') return false
+  const lower = baseUrl.toLowerCase()
+  if (!lower.includes(OPENCODE_GO_HOST)) return false
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase()
+    return host === OPENCODE_GO_HOST || host.endsWith(`.${OPENCODE_GO_HOST}`)
+  } catch {
+    return lower.startsWith(`${OPENCODE_GO_HOST}`) || lower.startsWith(`://${OPENCODE_GO_HOST}`)
+  }
+}
+
+/** RFC 4122 v5 uuid (SHA-1, namespace + name) — deterministic, valid shape. */
+const uuidV5 = (name, namespace) => {
+  const digest = createHash('sha1')
+    .update(Buffer.from(namespace.replace(/-/g, ''), 'hex'))
+    .update(name)
+    .digest()
+  digest[6] = (digest[6] & 0x0f) | 0x50 // version 5
+  digest[8] = (digest[8] & 0x3f) | 0x80 // RFC 4122 variant
+  const hex = digest.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+}
+
+const opencodeSessionHeaders = (routeKey) => ({
+  'x-opencode-session': uuidV5(`idbots:dsh-runtime:opencode-session:${routeKey}`, OPENCODE_SESSION_NAMESPACE),
+})
 
 /** Deduped dsh-mcp-client composition entries for the user's MCP servers. */
 const mcpEntries = (servers) => {
@@ -218,6 +267,13 @@ export function generateRuntimeConfig(input) {
       api: protocol,
       retryPolicy: TRANSIENT_OUTAGE_RETRY_POLICY,
       baseURL: provider.baseUrl,
+      // OpenCode Go gateway requires a stable x-opencode-session header on
+      // every request (400 MissingSessionID otherwise); pi-ai only sends
+      // profile headers, so gateway-bound routes carry one here. Keyed by
+      // route (see isOpenCodeGoBaseUrl above) and deterministic per route.
+      ...(isOpenCodeGoBaseUrl(provider.baseUrl)
+        ? { headers: opencodeSessionHeaders(sanitizeRouteKey(provider.key)) }
+        : {}),
       models: provider.models.map((model) => ({
         id: model.id,
         name: model.id,

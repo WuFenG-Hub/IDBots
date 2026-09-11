@@ -407,6 +407,10 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
   const showUnreadIndicator = !showRunningIndicator && hasUnread;
   const showStatusIndicator = showRunningIndicator || showUnreadIndicator;
   const isA2A = session.sessionType === 'a2a';
+  // Bot Browser co-work sessions are listed in the same home history as local
+  // chats; a small type badge keeps them identifiable at a glance (clicking
+  // one returns to the Bot Browser surface).
+  const isBrowser = session.sessionType === 'browser';
   const showA2ADot = shouldShowCoworkA2ADot({ sessionType: session.sessionType, showStatusIndicator });
   const displayTitle = session.title?.trim()
     || session.peerName
@@ -512,6 +516,14 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
             <span className="text-[10px] uppercase tracking-wider whitespace-nowrap">
               {i18nService.t(statusLabels[session.status])}
             </span>
+            {isBrowser && (
+              <span
+                className="shrink-0 rounded px-1 py-px text-[9px] font-medium uppercase leading-none tracking-wider bg-claude-accent/10 text-claude-accent"
+                title={i18nService.t('coworkSessionTypeBrowser')}
+              >
+                {i18nService.t('coworkSessionTypeBrowser')}
+              </span>
+            )}
           </div>
         </div>
       </div>

@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react';
 import { useSelector } from 'react-redux';
+import { MessageExtensionContext } from './MessageExtensionContext';
 import { RootState } from '../../store';
 import { i18nService } from '../../services/i18n';
 import type { ModelEffortValue } from '../ModelEffortPicker';
@@ -1657,6 +1658,7 @@ const AssistantMessageItem: React.FC<{
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
   const gigSquareCard = renderGigSquareCard(message.content);
   const thinkSplit = splitThinkTaggedContent(displayContent);
+  const renderExtension = React.useContext(MessageExtensionContext);
 
   if (gigSquareCard) {
     return (
@@ -1700,6 +1702,7 @@ const AssistantMessageItem: React.FC<{
           />
         </div>
       ) : null}
+      {renderExtension?.(message)}
       {showCopyButton && (
         <div className="flex items-center gap-1.5 mt-1">
           <CopyButton

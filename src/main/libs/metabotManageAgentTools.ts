@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
+import { describeAvatarFailure, isAvatarNormalizeFailure, normalizeAvatarToDataUrl } from '../utils/avatarNormalize';
 import {
   applyChatSkillOp,
   type CreateMetaBotOnChainResult,
@@ -29,11 +30,24 @@ export type MetabotManageControl = {
     bio?: string | null;
     avatar?: string | null;
     metabot_type?: 'twin' | 'worker';
+    /**
+     * Owner binding written at creation. HOST-INJECTED only: the tool fills it
+     * from control.getOwnerGlobalMetaId() (the local user identity), never from
+     * the model's tool arguments — a bot must not be able to name its own
+     * master. Kept off the tool schema below for the same reason.
+     */
+    boss_global_metaid?: string | null;
   }): Promise<CreateMetaBotOnChainResult>;
   update(id: number, input: UpdateMetaBotInput): Promise<UpdateMetaBotResult>;
   delete(id: number): Promise<DeleteMetaBotResult>;
   list(): ManagedMetabotSummary[];
   listProviders(): LlmProviderOption[];
+  /**
+   * Active local owner identity (My MetaID globalMetaID), or null when the
+   * local user identity is not set up yet. The host (main.ts) wires this to
+   * getUserIdentityStore() — a trusted, non-model source.
+   */
+  getOwnerGlobalMetaId(): string | null;
 };
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
@@ -265,12 +279,12 @@ export function buildMetabotManageAgentTools(deps: {
       ? [
           `Create the user's first local MetaBot: on-chain wallet + identity, My Bots entry. ${audience}`,
           'Use when the user asks to create/set up their first Bot or Twin. While no Twin exists it becomes the first Twin Bot, else a Worker.',
-          'Ask for a name if none given. llm_id must come from metabot_list — never invent one (confirm if several providers; just use the free MetaID one if alone). Other fields optional (persona later in My Bots). Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, partial/subsidy notes.',
+          'Ask for a name if none given. llm_id must come from metabot_list — never invent one (confirm if several providers; just use the free MetaID one if alone). Other fields optional (persona later in My Bots). The local owner binding is applied automatically by the host — there is no owner field to pass. Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, partial/subsidy notes.',
         ].join(' ')
       : [
           'Create ONE new local MetaBot (always a Worker) end-to-end: wallet, on-chain identity, My Bots entry. Twin Bot only.',
           'Use when the user asks to create/add a bot, assistant, employee, or agent. Not for editing an existing bot (use metabot_update) or restoring from a mnemonic.',
-          'Rules: name and llm_id required; never invent llm_id — pick a model id from metabot_list (add llm_provider if listed under several providers). Other fields optional, settable later via metabot_update. Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, and partial/subsidy notes.',
+          'Rules: name and llm_id required; never invent llm_id — pick a model id from metabot_list (add llm_provider if listed under several providers). Other fields optional, settable later via metabot_update. The local owner binding is applied automatically by the host — there is no owner field to pass. Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, and partial/subsidy notes.',
         ].join(' '),
     {
       name: z.string().min(1).describe('Display name for the new bot (required).'),
@@ -305,7 +319,7 @@ export function buildMetabotManageAgentTools(deps: {
       avatar: z
         .string()
         .optional()
-        .describe('Optional avatar as a data URL or http(s) URL. Omit to use the default avatar.'),
+        .describe('Optional avatar: a supported image data URL (data:image/png|jpeg|webp|gif;base64,...), an http(s) image URL, or an absolute local image path. Non-data-URL sources are fetched/read (timeout 8s, size cap 200KB) and normalized to a data URL before saving; if that fails the avatar is skipped with a note and the bot is still created. Omit to use the default avatar.'),
     },
     async (args: {
       name: string;
@@ -331,6 +345,23 @@ export function buildMetabotManageAgentTools(deps: {
           true,
         );
       }
+      // Normalize a non-data-URL avatar (http(s) image URL or absolute local
+      // image path) to a data URL BEFORE it reaches the strict sync validator:
+      // metaidCore's buildEditAvatarSyncStep throws "Invalid avatar data URL"
+      // on anything that is not a supported image data URL, and the create plan
+      // silently drops it. A source that cannot be normalized is skipped — the
+      // bot is still created — and the reason is reported back to the caller.
+      let avatarForCreate: string | undefined = args.avatar;
+      let avatarNotice = '';
+      if (typeof args.avatar === 'string' && args.avatar.trim()) {
+        const normalized = await normalizeAvatarToDataUrl(args.avatar);
+        if (isAvatarNormalizeFailure(normalized)) {
+          avatarForCreate = undefined;
+          avatarNotice = `\nNote: avatar was skipped (${describeAvatarFailure(normalized)}). The bot was created without an avatar; pass a valid image data URL, a reachable http(s) image URL, or an absolute local image path to set one.`;
+        } else {
+          avatarForCreate = normalized.dataUrl;
+        }
+      }
       const createInput: {
         name: string;
         llm_id: string;
@@ -345,6 +376,7 @@ export function buildMetabotManageAgentTools(deps: {
         bio?: string;
         avatar?: string;
         metabot_type?: 'twin' | 'worker';
+        boss_global_metaid?: string | null;
       } = {
         name,
         llm_id: llmId,
@@ -357,8 +389,16 @@ export function buildMetabotManageAgentTools(deps: {
         soul: args.soul,
         goal: args.goal,
         bio: args.bio,
-        avatar: args.avatar,
+        avatar: avatarForCreate,
       };
+      // Owner binding: read from the HOST (control.getOwnerGlobalMetaId — the
+      // local user identity wired in main.ts), never from `args`. The schema
+      // above has no owner field, so a model cannot request or spoof one; this
+      // assignment is the only place boss_global_metaid can enter createInput.
+      // Without it a Twin-created bot landed with boss_global_metaid=null and
+      // the owner had to backfill via My Bots > Edit (metabot_update forbids it).
+      const ownerGlobalMetaId = asString(control.getOwnerGlobalMetaId() ?? '');
+      if (ownerGlobalMetaId) createInput.boss_global_metaid = ownerGlobalMetaId;
       if (isWelcomeViewer) {
         // Bootstrap invariant: while the machine has no Twin, the bot the
         // Welcome Bot creates becomes the user's first Twin Bot; afterwards
@@ -368,7 +408,7 @@ export function buildMetabotManageAgentTools(deps: {
           : 'twin';
       }
       const result = await control.create(createInput);
-      return textResult(formatCreateResult(result), !result.success);
+      return textResult(`${formatCreateResult(result)}${avatarNotice}`, !result.success);
     },
   );
 
@@ -383,7 +423,7 @@ export function buildMetabotManageAgentTools(deps: {
     {
       metabot_id: z.number().int().positive().describe('id of the bot to update (from metabot_list, or the current bot\'s id).'),
       name: z.string().optional().describe('New display name.'),
-      avatar: z.string().optional().describe('New avatar (data URL or http(s) URL), or empty string to clear.'),
+      avatar: z.string().optional().describe('New avatar: a supported image data URL (data:image/png|jpeg|webp|gif;base64,...), an http(s) image URL, or an absolute local image path (non-data-URL sources are fetched/read with an 8s timeout and a 200KB cap, then normalized to a data URL). Empty string clears the avatar. If normalization fails the avatar is left unchanged and the note reports why.'),
       bio: z.string().optional().describe('New public bio.'),
       enabled: z.boolean().optional().describe('Enable or disable the bot.'),
       metabot_type: z
@@ -468,10 +508,34 @@ export function buildMetabotManageAgentTools(deps: {
           true,
         );
       }
+      // Normalize a non-data-URL avatar (http(s) image URL or absolute local
+      // image path) to a data URL before it reaches the strict sync validator:
+      // metaidCore's buildEditAvatarSyncStep throws "Invalid avatar data URL"
+      // on anything else, which aborts the whole update. A failed normalization
+      // never blocks the rest of the update — the avatar is left unchanged and
+      // the reason is reported back.
+      let avatarValue: string | null | undefined;
+      let avatarNotice = '';
+      if (args.avatar !== undefined) {
+        if (typeof args.avatar !== 'string') {
+          // Defensive: args is Record<string, unknown> — never let a non-string
+          // value be mistaken for an explicit clear.
+          avatarNotice = 'Note: avatar was NOT changed (unsupported value — expected a string).';
+        } else if (!args.avatar.trim()) {
+          avatarValue = ''; // explicit clear
+        } else {
+          const normalized = await normalizeAvatarToDataUrl(args.avatar);
+          if (isAvatarNormalizeFailure(normalized)) {
+            avatarNotice = `Note: avatar was NOT changed (${describeAvatarFailure(normalized)}).`;
+          } else {
+            avatarValue = normalized.dataUrl;
+          }
+        }
+      }
+
       const input: UpdateMetaBotInput = {};
       const passthrough: Array<keyof UpdateMetaBotInput> = [
         'name',
-        'avatar',
         'bio',
         'enabled',
         'metabot_type',
@@ -495,6 +559,10 @@ export function buildMetabotManageAgentTools(deps: {
           (input as Record<string, unknown>)[key as string] = args[key];
           provided += 1;
         }
+      }
+      if (avatarValue !== undefined) {
+        input.avatar = avatarValue;
+        provided += 1;
       }
       if (chatSkillOp) {
         const action = chatSkillOp.action === 'remove' ? 'remove' : 'add';
@@ -523,12 +591,15 @@ export function buildMetabotManageAgentTools(deps: {
       }
       if (provided === 0) {
         return textResult(
-          'metabot_update received no fields to change. Pass at least one editable field (name, bio, role, llm_id, enabled, homepage, chat_skill_op, ...).',
+          avatarNotice
+            ? `metabot_update applied nothing. ${avatarNotice}`
+            : 'metabot_update received no fields to change. Pass at least one editable field (name, bio, role, llm_id, enabled, homepage, chat_skill_op, ...).',
           true,
         );
       }
       const result = await control.update(id, input);
-      return textResult(formatUpdateResult(result), !result.success);
+      const text = formatUpdateResult(result);
+      return textResult(avatarNotice ? `${text}\n${avatarNotice}` : text, !result.success);
     },
   );
 

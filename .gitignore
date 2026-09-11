@@ -61,7 +61,11 @@ tests/*
 !tests/dshKernelRuntime.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/dshRuntimeGlmResponsesBoot.test.mjs
+!tests/dshRuntimeOpencodeSessionHeaders.test.mjs
 !tests/dshKernelBootFailure.test.mjs
+!tests/botActionModel.test.ts
+!tests/proposalDecision.test.ts
+!tests/sleepGuard.test.mjs
 !tests/coworkKernelRouting.test.mjs
 !tests/coworkForkSession.test.mjs
 !tests/coworkDshIntegration.test.mjs
@@ -180,6 +184,8 @@ tests/*
 !tests/metabotGroupTaskSkill.test.mjs
 !tests/metabotInfoPayload.test.mjs
 !tests/metabotInfoSyncSteps.test.mjs
+!tests/metabotAvatarAgentTool.test.mjs
+!tests/avatarNormalize.test.mjs
 !tests/metabotRestoreProtocol.test.mjs
 !tests/metabotDeleteWithMemories.test.mjs
 !tests/sqliteRecoveryLifecycle.test.mjs
@@ -393,7 +399,11 @@ man_base_data_pebble/
 !tests/opencodeGatewayHeaders.test.mjs
 !tests/agentpediaReplayVectors.test.mjs
 !tests/agentpediaAgentTools.test.mjs
+!tests/browserSessionHomeEntryStatic.test.mjs
+!tests/browserSessionHomeBadge.test.tsx
 
 # Local extracted skill packages and tool output artifacts (runtime-generated)
+/.proposal-demo-data/
+/dist-proposal-demo/
 /.idbots-extract/
 /output/

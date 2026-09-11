@@ -170,6 +170,18 @@ let orchestratorActiveTickPromise: Promise<void> | null = null;
 /** Task IDs currently in LLM/broadcast pipeline; skip them in tick to avoid duplicate triggers */
 const thinkingTasks = new Set<number>();
 
+/**
+ * Task keys of group-chat auto-reply pipelines currently in flight.
+ *
+ * Consumed by the sleep guard (src/main/sleepGuardWorkSources.ts): the skill
+ * branch of a reply runs inside a cowork session, but the plain branch is a
+ * session-less reasoning completion, so the pipeline itself must count as work
+ * for as long as it runs. Always empty while the orchestrator is stopped.
+ */
+export function getActiveGroupChatReplyTaskIds(): string[] {
+  return Array.from(thinkingTasks, (taskId) => String(taskId));
+}
+
 function parseMentionArray(mentionJson: string | null): string[] {
   if (mentionJson == null || mentionJson === '') return [];
   try {
