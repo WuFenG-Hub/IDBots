@@ -4049,6 +4049,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 disableControls={resolvedExecutionMode === 'sandbox'}
               />
               <TodoPanel messages={currentSession.messages} />
+              {/* Plan-mode chip: standard (human-driven) sessions only. On
+                  A2A/order/group sessions a bot-to-bot conversation could flip
+                  kernel plan mode with no human watching, and the mandatory
+                  exit review would wedge the unattended turn. */}
+              {(!currentSession.sessionType || currentSession.sessionType === 'standard') && (
               <button
                 type="button"
                 onClick={() => { void handlePlanModeToggle(); }}
@@ -4065,6 +4070,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   {i18nService.t('coworkPlanMode')}{planModeState.pending ? '…' : ''}
                 </span>
               </button>
+              )}
               <PermissionModeSelector
                 sessionId={currentSession.id}
                 currentMode={currentSession.permissionMode ?? 'default'}

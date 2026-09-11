@@ -7605,7 +7605,8 @@ export class CoworkRunner extends EventEmitter {
       // go missing while a worker turn ran, and vice versa).
       this.dshHostToolRegistry.set(sessionId, new Map(hostTools.map((tool) => [tool.name, tool])))
       // Volatile context (memory projections, time, browser tabs, remote
-      // services) rides the user-message tail on DSH turns.
+      // services) rides inside the user message on DSH turns — at the head by
+      // default (620d2850), with one first-turn exception below.
       const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId)
       const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId)
       const volatileBlocks = await this.buildVolatileContextPrompt(
@@ -7618,7 +7619,18 @@ export class CoworkRunner extends EventEmitter {
       const volatileHead = [localTimePrompt, volatileBlocks]
         .filter((section) => section?.trim())
         .join('\n\n')
-      const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${dshUserPrompt}` : dshUserPrompt
+      // Kernel-owned session titles derive from the FIRST human message in
+      // the kernel log (dsh-session-title fallback + first-prompt-llm both
+      // read it). When this prompt opens a fresh kernel transcript (no dsh:
+      // handle yet), lead with the user's own text and trail the volatile
+      // context — head placement here titled every new session
+      // '## Local Time Context -'.
+      const opensKernelTranscript = !isDshSessionHandle(activeSession.claudeSessionId)
+      const effectiveDshPrompt = !volatileHead
+        ? dshUserPrompt
+        : opensKernelTranscript
+          ? `${dshUserPrompt}\n\n${volatileHead}`
+          : `${volatileHead}\n\n${dshUserPrompt}`
       // Prompt attachments: collected from the ORIGINAL prompt (marker lines
       // reference user files, not the volatile context head).
       const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
@@ -8000,7 +8012,18 @@ export class CoworkRunner extends EventEmitter {
             // marker first, schema-mandated first option as the default) so
             // the bot keeps working; questions without options count as
             // unanswered.
-            askTimeout = setTimeout(() => {
+            // EXEMPTION: plan-mode exit reviews (intent.kind 'plan-review').
+            // There the recommended pick is "Approve", but the appended
+            // custom note makes the kernel treat the answer as keep-planning,
+            // so an unattended review re-presented forever — burning a full
+            // plan's tokens per 60s cycle. Plan mode is only ever entered by
+            // a watching human (sidebar chip / /plan), so the review simply
+            // stays pending; session cancel cleans it up.
+            const isPlanReviewAsk = (ask.questions ?? []).some(
+              (q) => (q.intent as { kind?: string } | undefined)?.kind === 'plan-review'
+            );
+            if (!isPlanReviewAsk) {
+              askTimeout = setTimeout(() => {
               askTimeout = null;
               if (!this.pendingPermissions.delete(ask.id)) return;
               if (activeSession.pendingPermission?.requestId === ask.id) {
@@ -8017,6 +8040,7 @@ export class CoworkRunner extends EventEmitter {
                 .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask timeout respond failed', { error: String(error) }));
             }, PERMISSION_RESPONSE_TIMEOUT_MS);
             askTimeout.unref?.();
+            }
             activeSession.pendingPermission = request;
             this.emit('permissionRequest', sessionId, request);
             coworkLog('INFO', 'runDshSessionLocal', 'ask_user_question awaiting user answer', { sessionId, askId: ask.id, questionCount: modalQuestions.length });
