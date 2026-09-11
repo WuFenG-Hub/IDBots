@@ -450,6 +450,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:setModel', options),
     renameSession: (options: { sessionId: string; title: string }) =>
       ipcRenderer.invoke('cowork:session:rename', options),
+    setPlanMode: (options: { sessionId: string; active: boolean }) =>
+      ipcRenderer.invoke('cowork:plan-mode:set', options),
     getSession: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:get', sessionId),
     refreshPeerProfile: (input: { sessionId: string; force?: boolean }) =>
@@ -681,6 +683,11 @@ contextBridge.exposeInMainWorld('electron', {
       const handler = (_event: any, data: { sessionId: string; error: string }) => callback(data);
       ipcRenderer.on('cowork:stream:error', handler);
       return () => ipcRenderer.removeListener('cowork:stream:error', handler);
+    },
+    onStreamSessionTitle: (callback: (data: { sessionId: string; title: string }) => void) => {
+      const handler = (_event: any, data: { sessionId: string; title: string }) => callback(data);
+      ipcRenderer.on('cowork:stream:sessionTitle', handler);
+      return () => ipcRenderer.removeListener('cowork:stream:sessionTitle', handler);
     },
     onDelegationStateChange: (callback: (data: { sessionId: string; blocking: boolean; orderId?: string; message?: string }) => void) => {
       const handler = (_event: any, data: { sessionId: string; blocking: boolean; orderId?: string; message?: string }) => callback(data);

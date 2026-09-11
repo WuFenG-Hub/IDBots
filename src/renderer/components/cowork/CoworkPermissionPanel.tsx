@@ -25,6 +25,8 @@ type QuestionItem = {
   header?: string;
   options: QuestionOption[];
   multiSelect?: boolean;
+  /** Long-form body shown between the question and the options (plan review). */
+  detail?: string;
 };
 
 type SafetyContext = {
@@ -67,6 +69,7 @@ const parseQuestions = (permission: CoworkPermissionRequest): QuestionItem[] => 
         header: typeof record.header === 'string' ? record.header : undefined,
         options,
         multiSelect: record.multiSelect === true,
+        detail: typeof record.detail === 'string' && record.detail.trim() ? record.detail : undefined,
       } as QuestionItem;
     })
     .filter(Boolean) as QuestionItem[];
@@ -315,6 +318,12 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
           <h2 id={`cowork-question-${permission.requestId}`} className="m-0 text-[15px] leading-6 font-semibold text-claude-text dark:text-claude-darkText">
             {currentQuestion.question}
           </h2>
+
+          {currentQuestion.detail && (
+            <div className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-xl border border-claude-border/70 dark:border-claude-darkBorder/70 bg-claude-bg/60 dark:bg-claude-darkBg/60 px-3 py-2 text-xs leading-5 text-claude-text dark:text-claude-darkText">
+              {currentQuestion.detail}
+            </div>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3" role={currentQuestion.multiSelect ? 'group' : 'radiogroup'}>
             {currentQuestion.options.map((option) => {

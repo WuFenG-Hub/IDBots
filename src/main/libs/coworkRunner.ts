@@ -1970,6 +1970,17 @@ export class CoworkRunner extends EventEmitter {
   });
   /** Cowork session ids with an active DSH turn (native steer path). */
   private dshActiveTurns = new Set<string>();
+  /**
+   * Kernel-title guard (dsh-session-title, 0.1.5): cowork session id → the
+   * title the kernel flow last saw on the row — the start-time placeholder at
+   * seed time, then each auto-applied kernel title. A kernel title is applied
+   * only while the stored title still equals this baseline, so a manual rename
+   * (which makes the row diverge) permanently detaches the session from
+   * automatic retitling. Sessions only ever seed when their stored title is
+   * still the renderer's first-line placeholder; titles generated up-front by
+   * other flows (IM chats, service orders, peer names) never opt in.
+   */
+  private dshAutoTitles = new Map<string, string>();
   /** Test seam: extra runtime composition entries (fixture tools). */
   dshRuntimeExtraEntries?: Array<Record<string, unknown>>;
   /** cowork session id → (tool name → { parameters, execute }) for that session's current DSH turn. */
@@ -7276,10 +7287,65 @@ export class CoworkRunner extends EventEmitter {
           this.emit('message', coworkSessionId, stored);
           return stored.id;
         },
+        onSessionTitle: (coworkSessionId, title) => this.applyDshSessionTitle(coworkSessionId, title),
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
     return this.dshTurnHub;
+  }
+
+  /**
+   * Opt a session into kernel-owned titles, once, when its stored title is
+   * still the renderer's start-time placeholder (first line of the first user
+   * message, 50 chars — CoworkView's fallbackTitle). Any richer start title
+   * (app-generated LLM titles for IM/service sessions, peer names) keeps
+   * ownership and is never retitled by the kernel.
+   */
+  private seedDshAutoTitle(sessionId: string, record: { title?: string; sessionType?: string | null; messages?: Array<{ type: string; content?: string }> } | null | undefined): void {
+    if (this.dshAutoTitles.has(sessionId)) return;
+    if (!record || (record.sessionType && record.sessionType !== 'standard')) return;
+    const title = (record.title ?? '').trim();
+    if (!title) return;
+    const firstUserText = (record.messages ?? []).find((message) => message.type === 'user')?.content ?? '';
+    const placeholder = firstUserText.split('\n')[0].slice(0, 50).trim();
+    if (placeholder && title === placeholder) this.dshAutoTitles.set(sessionId, title);
+  }
+
+  /**
+   * Mirror one kernel session/title event into the store + renderer. Applies
+   * only while the stored title still equals the guard baseline (see
+   * dshAutoTitles), so a manual rename detaches the session from automatic
+   * retitling for good.
+   */
+  private applyDshSessionTitle(sessionId: string, title: string): void {
+    const baseline = this.dshAutoTitles.get(sessionId);
+    if (!baseline) return;
+    const next = title.trim().slice(0, 120);
+    if (!next) return;
+    let currentTitle: string | undefined;
+    let sessionType: string | null | undefined;
+    try {
+      const record = this.store.getSessionWithoutMessages?.(sessionId) ?? this.store.getSession(sessionId);
+      currentTitle = record?.title;
+      sessionType = record?.sessionType;
+    } catch {
+      return;
+    }
+    if (sessionType && sessionType !== 'standard') return;
+    if ((currentTitle ?? '').trim() !== baseline) return;
+    if (next === baseline) return;
+    try {
+      this.store.updateSession(sessionId, { title: next });
+    } catch (error) {
+      coworkLog('WARN', 'applyDshSessionTitle', 'Kernel title update failed', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    this.dshAutoTitles.set(sessionId, next);
+    this.emit('sessionTitle', sessionId, next);
+    coworkLog('INFO', 'applyDshSessionTitle', 'Applied kernel session title', { sessionId, title: next });
   }
 
   /**
@@ -7320,20 +7386,59 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /** Subagent panel: child agent ids of a DSH session (post-hoc safe). */
-  dshListSubagents(sessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
+  /**
+   * Panel-read plumbing shared by the subagent list/transcript RPCs: the
+   * kernel-facing dsh id plus a bootable provider when the session's route
+   * resolves. Post-restart every hub mapping is empty, so the dsh id comes
+   * from the stored `dsh:` handle (or the cw-<id> convention for sessions
+   * whose first turn never settled a handle write). A null provider skips
+   * the runtime boot — read-only queries must never fail hard on API config.
+   */
+  private dshPanelReadOptions(sessionId: string): { dshSessionId: string; provider?: DshTurnProviderRoute } {
+    let storedHandle: string | null = null;
+    try {
+      storedHandle = (this.store.getSessionWithoutMessages?.(sessionId) ?? this.store.getSession(sessionId))?.claudeSessionId ?? null;
+    } catch {
+      storedHandle = null;
+    }
+    const dshSessionId = dshSessionIdOf(storedHandle) ?? `cw-${sessionId}`;
+    try {
+      const route = this.resolveSessionDshRoute(sessionId);
+      if (route?.baseUrl && route.apiKey) {
+        return { dshSessionId, provider: this.dshTurnProviderFromRoute(route) };
+      }
+    } catch {
+      // Route resolution is best-effort here; the durable read works without it.
+    }
+    return { dshSessionId };
+  }
+
+  /** Subagent panel: child agent ids of a DSH session (durable catalog backed). */
+  dshListSubagents(sessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number; mode?: string; label?: string }>> {
     if (!this.dshTurnHub) return Promise.resolve([])
-    return this.dshTurnHub.listSubagents(sessionId)
+    return this.dshTurnHub.listSubagents(sessionId, this.dshPanelReadOptions(sessionId))
   }
 
   dshGetSubagentMessages(sessionId: string, agentId: string, limit?: number): Promise<Array<{ id: string; type: string; content: string; timestamp: number }>> {
     if (!this.dshTurnHub) return Promise.resolve([])
-    return this.dshTurnHub.getSubagentMessages(sessionId, agentId, limit)
+    return this.dshTurnHub.getSubagentMessages(sessionId, agentId, limit, this.dshPanelReadOptions(sessionId))
   }
 
   /** Subagent panel stop for DSH sessions (kernel user-authority interrupt). */
   dshInterruptSubagent(sessionId: string, agentId: string): Promise<{ accepted: boolean; reason?: string }> {
     if (!this.dshTurnHub) return Promise.resolve({ accepted: false, reason: 'DSH turn hub unavailable' })
     return this.dshTurnHub.interruptSubagent(sessionId, agentId)
+  }
+
+  /**
+   * Plan-mode toggle for DSH sessions (sidebar Plan chip). Resolves the
+   * kernel-facing dsh id the same way the read-only panel queries do, then
+   * switches through the hub — which must reach the kernel owning the live
+   * agent, so a session whose runtime was reaped reports ok:false.
+   */
+  dshSetPlanMode(sessionId: string, active: boolean): Promise<{ ok: boolean; result?: string; plan?: { active: boolean; pending?: boolean }; reason?: string }> {
+    if (!this.dshTurnHub) return Promise.resolve({ ok: false, reason: 'DSH turn hub unavailable' })
+    return this.dshTurnHub.planModeSet(sessionId, active, this.dshPanelReadOptions(sessionId))
   }
 
   /**
@@ -7374,6 +7479,9 @@ export class CoworkRunner extends EventEmitter {
     const sessionRecord = this.store.getSession(sessionId);
     const sessionMessages = sessionRecord?.messages ?? [];
     const sessionParentId = sessionRecord?.parentSessionId ?? null;
+    // Kernel-title opt-in check (no-op once seeded, and only ever seeds while
+    // the stored title is still the start-time placeholder).
+    this.seedDshAutoTitle(sessionId, sessionRecord);
     // A stored handle without the `dsh:` prefix predates the unified kernel,
     // so this turn starts a fresh transcript — bridge the UI history over.
     const migratingFromLegacyHandle = Boolean(activeSession.claudeSessionId)
@@ -7806,6 +7914,10 @@ export class CoworkRunner extends EventEmitter {
               ...(q.header !== undefined ? { header: q.header } : {}),
               ...(Array.isArray(q.options) ? { options: q.options } : { options: [] }),
               ...(q.multiSelect !== undefined ? { multiSelect: q.multiSelect } : {}),
+              // 0.1.5 plan review: exit_plan_mode carries the full plan
+              // markdown on question.detail; the modal renders it above the
+              // options so the user can read what they are approving.
+              ...(typeof q.detail === 'string' && q.detail.length > 0 ? { detail: q.detail } : {}),
             }));
             const wireAnswersFromModal = (modalAnswers: Record<string, unknown> | undefined) =>
               (ask.questions ?? []).map((q) => {
@@ -7813,10 +7925,20 @@ export class CoworkRunner extends EventEmitter {
                 if (typeof raw !== 'string' || raw.trim().length === 0) {
                   return { id: q.id, selected: [], custom: 'The user declined to answer.' };
                 }
-                return {
-                  id: q.id,
-                  selected: raw.split('|||').map((v) => v.trim()).filter(Boolean),
-                };
+                // Segments matching one of the question's option labels go to
+                // selected; anything else is free-form feedback (the plan-mode
+                // review loop relies on custom carrying the user's revision
+                // notes back to the model).
+                const labels = new Set((Array.isArray(q.options) ? q.options : []).map((o) => o?.label).filter((v) => typeof v === 'string'));
+                const selected: string[] = [];
+                const customParts: string[] = [];
+                for (const segment of raw.split('|||').map((v) => v.trim()).filter(Boolean)) {
+                  if (labels.has(segment)) selected.push(segment);
+                  else customParts.push(segment);
+                }
+                return customParts.length > 0
+                  ? { id: q.id, selected, custom: customParts.join(' ') }
+                  : { id: q.id, selected };
               });
             // Full-trust parity: questions explicitly marked low-risk
             // (single-select, header 'auto-confirm') answer themselves with

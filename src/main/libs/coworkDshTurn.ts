@@ -276,6 +276,10 @@ export interface DshHubOptions {
   extraEntriesProvider?: () => Array<Record<string, unknown>>
   /** Idle-session events (native compact checkpoints) when no turn controller is live. */
   onIdleSessionMessage?: (coworkSessionId: string, message: { type: string; content: string; metadata?: Record<string, unknown> }) => string
+  /** Kernel-owned session titles (dsh-session-title, 0.1.5): fallback on the
+   *  first human message, then the first-prompt LLM refinement. Fires for live
+   *  appends only; the host decides whether the sidebar title may follow. */
+  onSessionTitle?: (coworkSessionId: string, title: string) => void
   /** Global skill-script host env (IDBOTS_API_BASE_URL, SKILLS_ROOT, BASH_ENV, …).
    *  Re-read every ensure. Per-session identity cannot live here (shared
    *  runtime); those values are written to a DSH_SESSION_ID-keyed env file
@@ -646,18 +650,57 @@ export class DshTurnHub {
   }
 
   /** Subagent panel (cowork session id in, DSH routing inside). */
-  async listSubagents(coworkSessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
-    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
-    const kernel = this.kernelForDsh(dshId)
-    if (!kernel || !dshId) return []
+  /**
+   * Any running runtime process. The session root is shared across provider
+   * slots, so read-only, persistence-backed RPCs (subagent catalog, child
+   * transcripts) can be served by whichever runtime is up — the session's own
+   * provider process is not required.
+   */
+  private anyRunningKernel(): DshKernel | null {
+    for (const slot of this.slots.values()) {
+      if (slot.kernel.running) return slot.kernel
+    }
+    return null
+  }
+
+  async listSubagents(
+    coworkSessionId: string,
+    opts?: { dshSessionId?: string; provider?: DshTurnProviderRoute },
+  ): Promise<Array<{ agentId: string; status: string; startedAt: number; mode?: string; label?: string }>> {
+    // Resolution order: live turn mapping → pinned mapping → the host's
+    // persisted handle hint (post-restart, every in-memory map is empty).
+    const dshId = this.dshByCowork.get(coworkSessionId)
+      ?? this.pinnedDshIds.get(coworkSessionId)
+      ?? opts?.dshSessionId
+    if (!dshId) return []
+    let kernel = this.kernelForDsh(dshId) ?? this.anyRunningKernel()
+    if (!kernel && opts?.provider) {
+      // No runtime at all (app restart / idle reap): boot one so the
+      // persistence-backed list can answer. Best-effort — no API config, no read.
+      await this.prewarm({ provider: opts.provider }).catch(() => undefined)
+      kernel = this.anyRunningKernel()
+    }
+    if (!kernel) return []
     const result = await kernel.listSubagents(dshId)
     return result.agents ?? []
   }
 
-  async getSubagentMessages(coworkSessionId: string, agentId: string, limit?: number): Promise<Array<{ id: string; type: string; content: string; timestamp: number }>> {
-    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
-    const kernel = this.kernelForDsh(dshId)
-    if (!kernel || !dshId) return []
+  async getSubagentMessages(
+    coworkSessionId: string,
+    agentId: string,
+    limit?: number,
+    opts?: { dshSessionId?: string; provider?: DshTurnProviderRoute },
+  ): Promise<Array<{ id: string; type: string; content: string; timestamp: number }>> {
+    const dshId = this.dshByCowork.get(coworkSessionId)
+      ?? this.pinnedDshIds.get(coworkSessionId)
+      ?? opts?.dshSessionId
+    if (!dshId) return []
+    let kernel = this.kernelForDsh(dshId) ?? this.anyRunningKernel()
+    if (!kernel && opts?.provider) {
+      await this.prewarm({ provider: opts.provider }).catch(() => undefined)
+      kernel = this.anyRunningKernel()
+    }
+    if (!kernel) return []
     const result = await kernel.getSubagentMessages(dshId, agentId, limit)
     return result.messages ?? []
   }
@@ -680,6 +723,26 @@ export class DshTurnHub {
     const kernel = this.kernelForDsh(dshId)
     if (!kernel || !dshId) return null
     return kernel.usageProjection(dshId)
+  }
+
+  /**
+   * Plan-mode switch for a cowork session. Unlike the read-only
+   * persistence-backed RPCs this must reach the kernel that owns the live
+   * agent (ctx.planMode.set mutates session state), so there is no
+   * anyRunningKernel fallback and no prewarm — a session whose runtime was
+   * reaped has no live mode to switch.
+   */
+  async planModeSet(
+    coworkSessionId: string,
+    active: boolean,
+    opts?: { dshSessionId?: string },
+  ): Promise<{ ok: boolean; result?: string; plan?: { active: boolean; pending?: boolean }; reason?: string }> {
+    const dshId = this.dshByCowork.get(coworkSessionId)
+      ?? this.pinnedDshIds.get(coworkSessionId)
+      ?? opts?.dshSessionId
+    const kernel = this.kernelForDsh(dshId)
+    if (!kernel || !dshId) return { ok: false, reason: 'DSH kernel not running for this session' }
+    return kernel.planModeSet(dshId, active)
   }
 
   async respondApproval(id: string, outcome: 'allowed-once' | 'rejected'): Promise<void> {
@@ -1065,6 +1128,13 @@ export class DshTurnHub {
       },
       onSubagentEvent: (event) => {
         controllerOf(event.sessionId)?.cb.onSubagentEvent?.(event)
+      },
+      onSessionTitle: (sessionId, title) => {
+        // Title events arrive outside the turn-controller lifecycle (the
+        // provider's auxiliary LLM call can settle after turn end), so resolve
+        // through the pinned mapping rather than the live controller.
+        const coworkId = this.coworkOfDsh(sessionId)
+        if (coworkId) this.opts.onSessionTitle?.(coworkId, title)
       },
       onError: (error) => {
         this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message, runtime: slot.key })

@@ -8,7 +8,7 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "test": "node test/wire-extension.test.mjs && node test/attachment-store.test.mjs && node test/approval-channel.test.mjs && node test/m3-config.test.mjs && node test/host-tool-bridge.test.mjs && node test/mcp-bridge.test.mjs && node test/ask-bridge.test.mjs && node test/plugin-mount.test.mjs && node test/llm-retry.test.mjs && node test/policy-bridge.test.mjs && node test/compaction.test.mjs && node test/subagent.test.mjs && node test/usage-projection.test.mjs && node test/session-model-switch.test.mjs && node test/session-workspace-cwd.test.mjs && node test/workspace-instructions.test.mjs && node test/win32-spawn-shim.test.mjs"
+    "test": "node test/wire-extension.test.mjs && node test/attachment-store.test.mjs && node test/approval-channel.test.mjs && node test/m3-config.test.mjs && node test/host-tool-bridge.test.mjs && node test/mcp-bridge.test.mjs && node test/ask-bridge.test.mjs && node test/plugin-mount.test.mjs && node test/llm-retry.test.mjs && node test/policy-bridge.test.mjs && node test/compaction.test.mjs && node test/subagent.test.mjs && node test/usage-projection.test.mjs && node test/session-model-switch.test.mjs && node test/session-workspace-cwd.test.mjs && node test/workspace-instructions.test.mjs && node test/spill-policy.test.mjs && node test/session-title.test.mjs && node test/subagent-catalog.test.mjs && node test/fs-search.test.mjs && node test/plan-mode.test.mjs && node test/win32-spawn-shim.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-agent": "0.1.5-rc.2",
@@ -19,6 +19,7 @@
     "@deepseek-ai/dsh-attachment-local": "0.1.5-rc.2",
     "@deepseek-ai/dsh-bash-local": "0.1.5-rc.2",
     "@deepseek-ai/dsh-compaction-basic": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.1.5-rc.2",
     "@deepseek-ai/dsh-fs-local": "0.1.5-rc.2",
     "@deepseek-ai/dsh-fs-observation-policy": "0.1.5-rc.2",
     "@deepseek-ai/dsh-launch-environment": "0.1.5-rc.2",
@@ -27,6 +28,7 @@
     "@deepseek-ai/dsh-llm-pi-ai": "0.1.5-rc.2",
     "@deepseek-ai/dsh-llm-retry": "0.1.5-rc.2",
     "@deepseek-ai/dsh-mcp-client": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-plan-mode": "0.1.5-rc.2",
     "@deepseek-ai/dsh-sdk-client": "0.1.5-rc.2",
     "@deepseek-ai/dsh-sdk-jsonrpc-server": "0.1.5-rc.2",
     "@deepseek-ai/dsh-sdk-protocol": "0.1.5-rc.2",
@@ -34,7 +36,14 @@
     "@deepseek-ai/dsh-session-checkpoint-policy": "0.1.5-rc.2",
     "@deepseek-ai/dsh-session-persistence-jsonl": "0.1.5-rc.2",
     "@deepseek-ai/dsh-session-projection": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-stats": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-title": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-title-first-prompt-llm": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-turn-outline": "0.1.5-rc.2",
     "@deepseek-ai/dsh-shell-env": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-spill": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-spill-local": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-spill-policy": "0.1.5-rc.2",
     "@deepseek-ai/dsh-subagent": "0.1.5-rc.2",
     "@deepseek-ai/dsh-subagent-spawn-in-process": "0.1.5-rc.2",
     "@deepseek-ai/dsh-subprocess-local": "0.1.5-rc.2",
@@ -43,6 +52,7 @@
     "@deepseek-ai/dsh-tool-ask-user": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tool-bash": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tool-fs": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-tool-fs-search": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tool-subagent": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tool-subagent-control": "0.1.5-rc.2",
     "@deepseek-ai/dsh-tool-todo": "0.1.5-rc.2",

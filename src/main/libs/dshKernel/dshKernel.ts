@@ -322,6 +322,20 @@ export class DshKernel {
     return this.client.request('idbots/compact', { sessionId: dshSessionId })
   }
 
+  /**
+   * Plan-mode switch (dsh-plan-mode ctx.planMode.set). Must land on the
+   * kernel that owns the live agent — the result reports the controller
+   * outcome ('committed' | 'queued' | 'cancelled' | 'noop') plus the
+   * controller's current { active, pending? } view.
+   */
+  async planModeSet(
+    dshSessionId: string,
+    active: boolean,
+  ): Promise<{ ok: boolean; result?: string; plan?: { active: boolean; pending?: boolean } }> {
+    this.requireClient()
+    return this.client.request('idbots/plan-mode/set', { sessionId: dshSessionId, active })
+  }
+
   /** Answer a pending ask_user_question bridged from the runtime. */
   async respondAsk(
     id: string,
@@ -390,7 +404,17 @@ export class DshKernel {
           // One bad handler must never kill the whole event stream: contain
           // per-event failures and keep the pump alive.
           try {
-            this.applyEvent(params.sessionId, params.event as DshSessionEventEnvelope)
+            const envelope = params.event as DshSessionEventEnvelope
+            // Log-only title events bypass the mapper (it drops unknown types
+            // by design) — surface them raw to the host's sidebar-title mirror.
+            if (envelope?.type === 'session/title') {
+              const title = typeof envelope.data?.title === 'string' ? envelope.data.title.trim() : ''
+              const kind = envelope.data?.source?.kind
+              if (title && (kind === 'fallback' || kind === 'provider' || kind === 'user')) {
+                this.opts.handlers.onSessionTitle?.(params.sessionId, title, kind)
+              }
+            }
+            this.applyEvent(params.sessionId, envelope)
           } catch (error) {
             // Contained per-event failure: log and keep pumping. onError is
             // the FATAL channel (transport death) that settles in-flight turns.

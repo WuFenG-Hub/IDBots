@@ -6048,6 +6048,25 @@ const getCoworkRunner = () => {
       });
     });
 
+    // Kernel-owned session titles (dsh-session-title): the runner already
+    // wrote the store row and applied the rename guard; this just keeps the
+    // sidebar/detail header in sync without a session reload.
+    coworkRunner.on('sessionTitle', (sessionId: string, title: string) => {
+      if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
+        return;
+      }
+      const windows = BrowserWindow.getAllWindows();
+      windows.forEach(win => {
+        if (!win.isDestroyed()) {
+          try {
+            win.webContents.send('cowork:stream:sessionTitle', { sessionId, title });
+          } catch (error) {
+            console.error('Failed to forward cowork session title:', error);
+          }
+        }
+      });
+    });
+
     // Handle delegation requests from the LLM
     coworkRunner.on('delegation:requested', (sessionId: string, delegation: DelegationRequest) => {
       // Execute the full delegation pipeline asynchronously.
@@ -9806,6 +9825,24 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to rename session',
+        };
+      }
+    });
+  });
+
+  // 0.1.5 plan mode: sidebar Plan chip toggles the DSH session's plan mode
+  // (dsh-plan-mode ctx.planMode.set via idbots/plan-mode/set). Returns the
+  // controller outcome plus the current { active, pending? } view; ok:false
+  // when no live kernel owns the session.
+  ipcMain.handle('cowork:plan-mode:set', async (_event, options: { sessionId: string; active: boolean }) => {
+    return withSqliteRecovery('cowork:plan-mode:set', async () => {
+      try {
+        return await getCoworkRunner().dshSetPlanMode(options.sessionId, options.active === true);
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          ok: false,
+          reason: error instanceof Error ? error.message : 'Failed to set plan mode',
         };
       }
     });

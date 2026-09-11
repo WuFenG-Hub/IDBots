@@ -249,6 +249,22 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       this.idbotsSubagents = subagentCtx.subagents
       return () => { this.idbotsSubagents = null }
     })
+    // Persistence service (dsh-session-persistence-jsonl): read-only session
+    // opens back the durable subagent catalog + child transcripts, so the
+    // panel survives runtime reaps and app restarts (in-memory rows do not).
+    this.idbotsPersistence = null
+    ctx.inject(['sessionPersistence'], (persistenceCtx) => {
+      this.idbotsPersistence = persistenceCtx.sessionPersistence
+      return () => { this.idbotsPersistence = null }
+    })
+    // Plan-mode controller (dsh-plan-mode): the host flips session mode
+    // through ctx.planMode.set(...). Reactive inject keeps compositions
+    // without plan-mode mountable; the RPC reports unavailable then.
+    this.idbotsPlanMode = null
+    ctx.inject(['planMode'], (planModeCtx) => {
+      this.idbotsPlanMode = planModeCtx.planMode
+      return () => { this.idbotsPlanMode = null }
+    })
   }
 
   liveAgent(sessionId) {
@@ -275,10 +291,11 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'idbots/subagent/interrupt': return this.idbotsSubagentInterrupt(params)
       case 'idbots/usage': return this.idbotsUsage(params)
       case 'idbots/compact': return this.idbotsCompact(params)
+      case 'idbots/plan-mode/set': return this.idbotsPlanModeSet(params)
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'session/dispose', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/subagent/interrupt', 'idbots/usage', 'idbots/compact'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'session/dispose', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/subagent/interrupt', 'idbots/usage', 'idbots/compact', 'idbots/plan-mode/set'],
         }
       }
       default: return super.handleRequest(method, params)
@@ -800,9 +817,80 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }, { global: true })
   }
 
-  idbotsSubagentsList({ sessionId }) {
-    const children = this.idbotsSubagentChildren.get(String(sessionId ?? '')) ?? []
-    return { agents: children.map((c) => ({ ...c })) }
+  /**
+   * Read one session's own durable events: the live in-memory log when an
+   * agent holds it, otherwise a read-only persistence open (never takes write
+   * ownership, so it works under a live writer and after restarts). Events
+   * inherited from a fork parent are excluded — the same cut the official
+   * projections apply (seq < inheritedEventCount belongs to the fork parent).
+   */
+  async idbotsReadSessionEvents(sessionId) {
+    const id = String(sessionId ?? '')
+    if (id.length === 0) return []
+    const live = this.idbotsAgents.get(id)
+    if (live?.session !== undefined) return [...live.session.ownEvents()]
+    if (this.idbotsPersistence === null) return []
+    let handle
+    try {
+      handle = await this.idbotsPersistence.open(id, 'read')
+    } catch {
+      // Never persisted (or pruned): no durable rows for this session.
+      return []
+    }
+    try {
+      const inherited = Number.isFinite(handle.inheritedEventCount) ? handle.inheritedEventCount : 0
+      const events = []
+      let offset = 0
+      for (;;) {
+        const slice = await handle.read(offset, 1000)
+        const batch = slice?.events ?? []
+        for (const event of batch) {
+          if (typeof event?.seq === 'number' && event.seq < inherited) continue
+          events.push(event)
+        }
+        if (batch.length < 1000) break
+        offset += batch.length
+      }
+      return events
+    } finally {
+      await handle.close().catch(() => undefined)
+    }
+  }
+
+  /**
+   * Direct-child lineage for the panel. The durable `subagent/catalog` events
+   * on the parent's log (0.1.5 dsh-subagent) make this restart- and reap-safe:
+   * live in-memory rows still win on status, but a catalog-only child lists
+   * as 'done' with its creation facts instead of vanishing.
+   */
+  async idbotsSubagentsList({ sessionId }) {
+    const parent = String(sessionId ?? '')
+    const live = this.idbotsSubagentChildren.get(parent) ?? []
+    const liveById = new Map(live.map((row) => [row.agentId, row]))
+    const catalogByChild = new Map()
+    for (const event of await this.idbotsReadSessionEvents(parent)) {
+      if (event?.type !== 'subagent/catalog') continue
+      const data = event.data
+      if (!data || typeof data.childId !== 'string' || typeof data.childCreatedAt !== 'number') continue
+      if (data.mode !== 'one-shot' && data.mode !== 'continuable') continue
+      catalogByChild.set(data.childId, data)
+    }
+    const rows = []
+    for (const [childId, entry] of catalogByChild) {
+      const liveRow = liveById.get(childId)
+      rows.push({
+        agentId: childId,
+        status: liveRow?.status ?? 'done',
+        startedAt: liveRow?.startedAt ?? entry.childCreatedAt,
+        mode: entry.mode,
+        ...(typeof entry.label === 'string' ? { label: entry.label } : {}),
+      })
+    }
+    // Live rows whose catalog event has not landed yet (creation window).
+    for (const row of live) {
+      if (!catalogByChild.has(row.agentId)) rows.push({ ...row })
+    }
+    return { agents: rows }
   }
 
   // ---- usage projections ------------------------------------------------------
@@ -832,7 +920,29 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       tokenUsage: snapshot.values.tokenUsage ?? null,
       contextPressure: snapshot.values.contextPressure ?? null,
       contextBreakdown: snapshot.values.contextBreakdown ?? null,
+      // 0.1.5 whole-log units (dsh-session-stats / dsh-session-turn-outline):
+      // null when the composition omits them, same graceful-absence contract.
+      sessionStats: snapshot.values.sessionStats ?? null,
+      turnOutline: snapshot.values.turnOutline ?? null,
+      // 0.1.5 plan-mode wire view ({ active, pending }) for the sidebar
+      // mode chip; null when the composition omits dsh-plan-mode.
+      plan: snapshot.values.plan ?? null,
     }
+  }
+
+  /**
+   * Host-driven plan-mode switch (dsh-plan-mode ctx.planMode.set). Returns
+   * { ok, result } where result is the controller outcome: 'committed'
+   * (logged now), 'queued' (applies at the next in-turn pre-step),
+   * 'cancelled' (opposite pending selection cleared), or 'noop'.
+   */
+  idbotsPlanModeSet({ sessionId, active } = {}) {
+    if (this.idbotsPlanMode === null) {
+      throw new Error('idbots-sdk-server: plan-mode service not composed in this runtime')
+    }
+    const agent = this.liveAgent(sessionId)
+    const result = this.idbotsPlanMode.set(agent, active === true)
+    return { ok: true, result, plan: this.idbotsPlanMode.get(agent) }
   }
 
   /**
@@ -875,11 +985,14 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }
   }
 
-  idbotsSubagentsMessages({ sessionId, agentId, limit }) {
+  async idbotsSubagentsMessages({ sessionId, agentId, limit }) {
     void sessionId
-    const buffer = this.idbotsChildEvents.get(String(agentId ?? '')) ?? []
+    const childId = String(agentId ?? '')
+    // Live ring buffer first; a child from before this process's lifetime
+    // (restart / runtime reap) reads its transcript back from persistence.
+    const events = this.idbotsChildEvents.get(childId) ?? await this.idbotsReadSessionEvents(childId)
     const messages = []
-    for (const event of buffer) {
+    for (const event of events) {
       const data = event.data ?? {}
       if (event.type === 'user/message' && (data.source ?? data.message?.source)?.kind === 'user') {
         const text = (data.content ?? data.message?.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('')

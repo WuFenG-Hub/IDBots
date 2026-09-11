@@ -31,6 +31,8 @@
 //     model: string,                     //   model for the auxiliary search call
 //   },                                   //   mounted once the host has seen a DeepSeek provider
 //   workspace?: { cwd: string },       // mounts DSH-native bash/fs tools at cwd
+//   spill?: { maxInlineBytes?: number }, // 0.1.5 spill-policy cap (default 8192;
+//                                        // workspace compositions only)
 //   subagentModelSelection?: {          // child-delegation model choice (0.1.2):
 //     enabled?: boolean,                //   default true; allowlist = every configured
 //   },                                  //   provider/model route (the provider table is
@@ -278,11 +280,63 @@ export function generateRuntimeConfig(input) {
     // idbots/usage RPC reads them for the host's usage panel. agent-loop also
     // hard-requires ctx.sessionProjections (turnBoundary fold) since 0.1.2.
     { id: 'token-meter', name: '@deepseek-ai/dsh-token-meter' },
+    // 0.1.5 whole-log projections: conversation totals (turns/steps, llm/tool
+    // wall time, ttft/decode) and the per-turn outline (prompt/response
+    // previews). Zero-config units on the same registry; they surface through
+    // idbots/usage alongside the token-meter values.
+    { id: 'session-stats', name: '@deepseek-ai/dsh-session-stats' },
+    { id: 'session-turn-outline', name: '@deepseek-ai/dsh-session-turn-outline' },
+    // 0.1.5 session titles (stock harness pair, stock config): a deterministic
+    // fallback lands on the first human message, then the first-prompt provider
+    // refines it through an auxiliary LLM call that inherits the session's own
+    // logged request route (provider/model omitted on purpose). The resulting
+    // log-only session/title events ride the stock session.event mirror; the
+    // host applies them to the sidebar title (guarded against manual renames).
+    {
+      id: 'session-title',
+      name: '@deepseek-ai/dsh-session-title',
+      config: { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 },
+    },
+    {
+      id: 'session-title-first-prompt-llm',
+      name: '@deepseek-ai/dsh-session-title-first-prompt-llm',
+      config: { targetWords: 5, targetCjkCharacters: 10, maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 60000 },
+    },
+    // 0.1.5 plan mode (stock section text, copied verbatim from the stock
+    // cordis.patch.yml mount): a plan:policy prompt section plus a persistent
+    // exit_plan_mode tool, a /plan command, and a `plan` wire projection
+    // ({active, pending}). Mode flips are host-driven through
+    // ctx.planMode.set(...) — the SDK server exposes that as
+    // idbots/plan-mode/set. exit_plan_mode review rides the user-questions
+    // bridge, with the full plan markdown carried on question.detail.
+    {
+      id: 'plan-mode',
+      name: '@deepseek-ai/dsh-plan-mode',
+      config: {
+        section: [
+          'You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user\'s conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.',
+          '',
+          'Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.',
+          '',
+          'The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed only to keep the request shape stable. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.',
+          '',
+          'Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.',
+          '',
+          'Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.',
+          '',
+          'When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.',
+        ].join('\n'),
+      },
+    },
     {
       id: 'compaction-basic',
       name: '@deepseek-ai/dsh-compaction-basic',
       config: { thresholdRatio: 0.8, retainRatio: 0.16, maxTokens: 8192, compactionRetries: 1 },
     },
+    // 0.1.5 tool-result pruner: model-free head/middle/tail pruning of
+    // tool-result surface nodes during compaction (defaults 8192/4096/1024
+    // chars). compaction-basic picks the service up via ctx.get when mounted.
+    { id: 'tool-result-pruner', name: '@deepseek-ai/dsh-compaction-tool-result-pruner' },
     {
       id: 'persistence',
       name: '@deepseek-ai/dsh-session-persistence-jsonl',
@@ -379,6 +433,27 @@ export function generateRuntimeConfig(input) {
     ...(input.workspace ? [
       { id: 'shell-env', name: '@deepseek-ai/dsh-shell-env' },
       { id: 'subprocess', name: '@deepseek-ai/dsh-subprocess-local' },
+      // 0.1.5 spill trio (workspace compositions only — the model reads a
+      // spill file back through the fs/bash tools mounted below). All-text
+      // tool results over maxInlineBytes land in a session-scoped spill file
+      // with a bounded head/tail preview + path in history; the policy's
+      // cap sits UNDER idbots-tool-result-shaping's 20K so mid-size results
+      // spill recoverably while shaping stays the hard backstop for mixed
+      // content and pathological sizes.
+      {
+        id: 'spill-local',
+        name: '@deepseek-ai/dsh-spill-local',
+        config: { root: join(input.sessionRoot, 'spill') },
+      },
+      {
+        id: 'spill-policy',
+        name: '@deepseek-ai/dsh-spill-policy',
+        config: {
+          maxInlineBytes: Number.isFinite(input.spill?.maxInlineBytes) && input.spill.maxInlineBytes > 0
+            ? input.spill.maxInlineBytes
+            : 8192,
+        },
+      },
       {
         id: 'bash',
         name: '@deepseek-ai/dsh-bash-local',
@@ -408,6 +483,11 @@ export function generateRuntimeConfig(input) {
       },
       { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
       { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' },
+      // 0.1.5 model-facing glob/grep over the packaged ripgrep binary: no
+      // system rg, no shell layer (fixed argv through ctx.subprocess), and
+      // formatted-result spill rides the trio mounted above. Stock config —
+      // over-cap glob pages take the modification-time head, not sampling.
+      { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
       { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
     ] : []),
     ...(input.extraEntries ?? []),
