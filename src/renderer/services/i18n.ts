@@ -919,6 +919,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     sleepGuardSourceCowork: '活跃会话',
     sleepGuardSourceScheduledTask: '定时任务',
     sleepGuardSourceDream: '夜间梦境',
+    sleepGuardSourceGroupTask: '群任务回合',
+    sleepGuardSourceGroupChat: '群聊回复',
+    sleepGuardSourceA2aChat: '线上私聊回复',
     coworkBackgroundedLabel: '后台',
     coworkUsageStatsTitle: '用量与成本',
     coworkUsageStatsEstimated: '估算（标准费率）',
@@ -1865,6 +1868,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // 通用设置
     autoLaunch: '开机自启动',
     autoLaunchDescription: '系统启动时自动运行应用',
+    preventDeviceSleep: '阻止设备休眠',
+    preventDeviceSleepDescription: 'IDBots 工作期间保持设备唤醒',
 
     // 定时任务
     // Group Tasks (群任务)
@@ -3355,6 +3360,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     sleepGuardSourceCowork: 'active session',
     sleepGuardSourceScheduledTask: 'scheduled task',
     sleepGuardSourceDream: 'dream',
+    sleepGuardSourceGroupTask: 'group-task turn',
+    sleepGuardSourceGroupChat: 'group-chat reply',
+    sleepGuardSourceA2aChat: 'online chat reply',
     coworkBackgroundedLabel: 'Background',
     coworkUsageStatsTitle: 'Usage & Cost',
     coworkUsageStatsEstimated: 'estimate (standard rates)',
@@ -4301,6 +4309,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // General Settings
     autoLaunch: 'Launch at Login',
     autoLaunchDescription: 'Automatically start the app when you log in',
+    preventDeviceSleep: 'Prevent Device Sleep',
+    preventDeviceSleepDescription: 'Keep your device awake while IDBots is working',
 
     // Group Tasks
     groupTasks: 'Group Tasks',

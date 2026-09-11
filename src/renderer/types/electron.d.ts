@@ -791,8 +791,24 @@ interface IElectronAPI {
     onChanged: (callback: (payload: { key: string }) => void) => () => void;
   };
   powerGuard: {
-    getStatus: () => Promise<{ active: boolean; sources: string[]; engaged: boolean }>;
-    onChanged: (callback: (state: { active: boolean; sources: string[]; engaged: boolean }) => void) => () => void;
+    getStatus: () => Promise<{
+      active: boolean;
+      sources: string[];
+      engaged: boolean;
+      engagedBy: 'caffeinate' | 'powerSaveBlocker' | null;
+      preventDeviceSleepEnabled: boolean;
+    }>;
+    getPreventDeviceSleep: () => Promise<{ enabled: boolean }>;
+    setPreventDeviceSleep: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+    onChanged: (
+      callback: (state: {
+        active: boolean;
+        sources: string[];
+        engaged: boolean;
+        engagedBy: 'caffeinate' | 'powerSaveBlocker' | null;
+        preventDeviceSleepEnabled: boolean;
+      }) => void,
+    ) => () => void;
   };
   skills: {
     list: () => Promise<{ success: boolean; skills?: Skill[]; error?: string }>;
