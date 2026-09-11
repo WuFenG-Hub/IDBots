@@ -8012,7 +8012,18 @@ export class CoworkRunner extends EventEmitter {
             // marker first, schema-mandated first option as the default) so
             // the bot keeps working; questions without options count as
             // unanswered.
-            askTimeout = setTimeout(() => {
+            // EXEMPTION: plan-mode exit reviews (intent.kind 'plan-review').
+            // There the recommended pick is "Approve", but the appended
+            // custom note makes the kernel treat the answer as keep-planning,
+            // so an unattended review re-presented forever — burning a full
+            // plan's tokens per 60s cycle. Plan mode is only ever entered by
+            // a watching human (sidebar chip / /plan), so the review simply
+            // stays pending; session cancel cleans it up.
+            const isPlanReviewAsk = (ask.questions ?? []).some(
+              (q) => (q.intent as { kind?: string } | undefined)?.kind === 'plan-review'
+            );
+            if (!isPlanReviewAsk) {
+              askTimeout = setTimeout(() => {
               askTimeout = null;
               if (!this.pendingPermissions.delete(ask.id)) return;
               if (activeSession.pendingPermission?.requestId === ask.id) {
@@ -8029,6 +8040,7 @@ export class CoworkRunner extends EventEmitter {
                 .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask timeout respond failed', { error: String(error) }));
             }, PERMISSION_RESPONSE_TIMEOUT_MS);
             askTimeout.unref?.();
+            }
             activeSession.pendingPermission = request;
             this.emit('permissionRequest', sessionId, request);
             coworkLog('INFO', 'runDshSessionLocal', 'ask_user_question awaiting user answer', { sessionId, askId: ask.id, questionCount: modalQuestions.length });
