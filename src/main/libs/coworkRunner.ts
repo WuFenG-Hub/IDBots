@@ -7605,7 +7605,8 @@ export class CoworkRunner extends EventEmitter {
       // go missing while a worker turn ran, and vice versa).
       this.dshHostToolRegistry.set(sessionId, new Map(hostTools.map((tool) => [tool.name, tool])))
       // Volatile context (memory projections, time, browser tabs, remote
-      // services) rides the user-message tail on DSH turns.
+      // services) rides inside the user message on DSH turns — at the head by
+      // default (620d2850), with one first-turn exception below.
       const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId)
       const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId)
       const volatileBlocks = await this.buildVolatileContextPrompt(
@@ -7618,7 +7619,18 @@ export class CoworkRunner extends EventEmitter {
       const volatileHead = [localTimePrompt, volatileBlocks]
         .filter((section) => section?.trim())
         .join('\n\n')
-      const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${dshUserPrompt}` : dshUserPrompt
+      // Kernel-owned session titles derive from the FIRST human message in
+      // the kernel log (dsh-session-title fallback + first-prompt-llm both
+      // read it). When this prompt opens a fresh kernel transcript (no dsh:
+      // handle yet), lead with the user's own text and trail the volatile
+      // context — head placement here titled every new session
+      // '## Local Time Context -'.
+      const opensKernelTranscript = !isDshSessionHandle(activeSession.claudeSessionId)
+      const effectiveDshPrompt = !volatileHead
+        ? dshUserPrompt
+        : opensKernelTranscript
+          ? `${dshUserPrompt}\n\n${volatileHead}`
+          : `${volatileHead}\n\n${dshUserPrompt}`
       // Prompt attachments: collected from the ORIGINAL prompt (marker lines
       // reference user files, not the volatile context head).
       const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
