@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
+import { describeAvatarFailure, isAvatarNormalizeFailure, normalizeAvatarToDataUrl } from '../utils/avatarNormalize';
 import {
   applyChatSkillOp,
   type CreateMetaBotOnChainResult,
@@ -305,7 +306,7 @@ export function buildMetabotManageAgentTools(deps: {
       avatar: z
         .string()
         .optional()
-        .describe('Optional avatar as a data URL or http(s) URL. Omit to use the default avatar.'),
+        .describe('Optional avatar: a supported image data URL (data:image/png|jpeg|webp|gif;base64,...), an http(s) image URL, or an absolute local image path. Non-data-URL sources are fetched/read (timeout 8s, size cap 200KB) and normalized to a data URL before saving; if that fails the avatar is skipped with a note and the bot is still created. Omit to use the default avatar.'),
     },
     async (args: {
       name: string;
@@ -330,6 +331,23 @@ export function buildMetabotManageAgentTools(deps: {
           `metabot_create requires an \`llm_id\`. ${formatProviders(providers)}`,
           true,
         );
+      }
+      // Normalize a non-data-URL avatar (http(s) image URL or absolute local
+      // image path) to a data URL BEFORE it reaches the strict sync validator:
+      // metaidCore's buildEditAvatarSyncStep throws "Invalid avatar data URL"
+      // on anything that is not a supported image data URL, and the create plan
+      // silently drops it. A source that cannot be normalized is skipped — the
+      // bot is still created — and the reason is reported back to the caller.
+      let avatarForCreate: string | undefined = args.avatar;
+      let avatarNotice = '';
+      if (typeof args.avatar === 'string' && args.avatar.trim()) {
+        const normalized = await normalizeAvatarToDataUrl(args.avatar);
+        if (isAvatarNormalizeFailure(normalized)) {
+          avatarForCreate = undefined;
+          avatarNotice = `\nNote: avatar was skipped (${describeAvatarFailure(normalized)}). The bot was created without an avatar; pass a valid image data URL, a reachable http(s) image URL, or an absolute local image path to set one.`;
+        } else {
+          avatarForCreate = normalized.dataUrl;
+        }
       }
       const createInput: {
         name: string;
@@ -357,7 +375,7 @@ export function buildMetabotManageAgentTools(deps: {
         soul: args.soul,
         goal: args.goal,
         bio: args.bio,
-        avatar: args.avatar,
+        avatar: avatarForCreate,
       };
       if (isWelcomeViewer) {
         // Bootstrap invariant: while the machine has no Twin, the bot the
@@ -368,7 +386,7 @@ export function buildMetabotManageAgentTools(deps: {
           : 'twin';
       }
       const result = await control.create(createInput);
-      return textResult(formatCreateResult(result), !result.success);
+      return textResult(`${formatCreateResult(result)}${avatarNotice}`, !result.success);
     },
   );
 
@@ -383,7 +401,7 @@ export function buildMetabotManageAgentTools(deps: {
     {
       metabot_id: z.number().int().positive().describe('id of the bot to update (from metabot_list, or the current bot\'s id).'),
       name: z.string().optional().describe('New display name.'),
-      avatar: z.string().optional().describe('New avatar (data URL or http(s) URL), or empty string to clear.'),
+      avatar: z.string().optional().describe('New avatar: a supported image data URL (data:image/png|jpeg|webp|gif;base64,...), an http(s) image URL, or an absolute local image path (non-data-URL sources are fetched/read with an 8s timeout and a 200KB cap, then normalized to a data URL). Empty string clears the avatar. If normalization fails the avatar is left unchanged and the note reports why.'),
       bio: z.string().optional().describe('New public bio.'),
       enabled: z.boolean().optional().describe('Enable or disable the bot.'),
       metabot_type: z
@@ -468,10 +486,34 @@ export function buildMetabotManageAgentTools(deps: {
           true,
         );
       }
+      // Normalize a non-data-URL avatar (http(s) image URL or absolute local
+      // image path) to a data URL before it reaches the strict sync validator:
+      // metaidCore's buildEditAvatarSyncStep throws "Invalid avatar data URL"
+      // on anything else, which aborts the whole update. A failed normalization
+      // never blocks the rest of the update — the avatar is left unchanged and
+      // the reason is reported back.
+      let avatarValue: string | null | undefined;
+      let avatarNotice = '';
+      if (args.avatar !== undefined) {
+        if (typeof args.avatar !== 'string') {
+          // Defensive: args is Record<string, unknown> — never let a non-string
+          // value be mistaken for an explicit clear.
+          avatarNotice = 'Note: avatar was NOT changed (unsupported value — expected a string).';
+        } else if (!args.avatar.trim()) {
+          avatarValue = ''; // explicit clear
+        } else {
+          const normalized = await normalizeAvatarToDataUrl(args.avatar);
+          if (isAvatarNormalizeFailure(normalized)) {
+            avatarNotice = `Note: avatar was NOT changed (${describeAvatarFailure(normalized)}).`;
+          } else {
+            avatarValue = normalized.dataUrl;
+          }
+        }
+      }
+
       const input: UpdateMetaBotInput = {};
       const passthrough: Array<keyof UpdateMetaBotInput> = [
         'name',
-        'avatar',
         'bio',
         'enabled',
         'metabot_type',
@@ -495,6 +537,10 @@ export function buildMetabotManageAgentTools(deps: {
           (input as Record<string, unknown>)[key as string] = args[key];
           provided += 1;
         }
+      }
+      if (avatarValue !== undefined) {
+        input.avatar = avatarValue;
+        provided += 1;
       }
       if (chatSkillOp) {
         const action = chatSkillOp.action === 'remove' ? 'remove' : 'add';
@@ -523,12 +569,15 @@ export function buildMetabotManageAgentTools(deps: {
       }
       if (provided === 0) {
         return textResult(
-          'metabot_update received no fields to change. Pass at least one editable field (name, bio, role, llm_id, enabled, homepage, chat_skill_op, ...).',
+          avatarNotice
+            ? `metabot_update applied nothing. ${avatarNotice}`
+            : 'metabot_update received no fields to change. Pass at least one editable field (name, bio, role, llm_id, enabled, homepage, chat_skill_op, ...).',
           true,
         );
       }
       const result = await control.update(id, input);
-      return textResult(formatUpdateResult(result), !result.success);
+      const text = formatUpdateResult(result);
+      return textResult(avatarNotice ? `${text}\n${avatarNotice}` : text, !result.success);
     },
   );
 
