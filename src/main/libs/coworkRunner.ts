@@ -7431,6 +7431,18 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Read-only plan-mode view for the sidebar chip's initial state (kernel
+   * state survives on the session log, so a reopened session may already be
+   * in plan mode). Best-effort: idbots/usage needs a live agent, so ok:true
+   * with plan:null when no runtime currently hosts the session.
+   */
+  dshGetPlanMode(sessionId: string): Promise<{ ok: boolean; plan?: { active: boolean; pending?: boolean } | null; reason?: string }> {
+    if (!this.dshTurnHub) return Promise.resolve({ ok: false, reason: 'DSH turn hub unavailable' })
+    return this.dshTurnHub.planModeGet(sessionId, this.dshPanelReadOptions(sessionId))
+      .then((plan) => ({ ok: true, plan }))
+  }
+
+  /**
    * Plan-mode toggle for DSH sessions (sidebar Plan chip). Resolves the
    * kernel-facing dsh id the same way the read-only panel queries do, then
    * switches through the hub — which must reach the kernel owning the live

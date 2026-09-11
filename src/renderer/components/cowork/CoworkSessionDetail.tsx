@@ -2618,15 +2618,26 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [isRetiringWelcome, setIsRetiringWelcome] = useState(false);
   const [retireWelcomeError, setRetireWelcomeError] = useState<string | null>(null);
   // 0.1.5 plan mode chip: local mirror of the DSH session's plan state.
-  // The kernel-side value is not yet pushed to the renderer, so the chip
-  // initializes inactive and syncs from the toggle RPC's returned
-  // { active, pending } view (kernel state survives on the session log).
+  // Kernel state survives on the session log, so on session open we sync
+  // best-effort from the idbots/usage wire view — which needs a live agent,
+  // so a session whose runtime is down reports null and the chip keeps the
+  // inactive default until a toggle response resyncs it.
   const [planModeState, setPlanModeState] = useState<{ active: boolean; pending: boolean }>({ active: false, pending: false });
   const [planModeBusy, setPlanModeBusy] = useState(false);
   const planModeSessionId = currentSession?.id ?? null;
   useEffect(() => {
     setPlanModeState({ active: false, pending: false });
     setPlanModeBusy(false);
+    if (!planModeSessionId) return;
+    let cancelled = false;
+    void window.electron.cowork.getPlanMode({ sessionId: planModeSessionId }).then((response) => {
+      if (!cancelled && response?.ok && response.plan) {
+        setPlanModeState({ active: response.plan.active === true, pending: response.plan.pending === true });
+      }
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [planModeSessionId]);
   const handlePlanModeToggle = useCallback(async () => {
     if (!planModeSessionId || planModeBusy) return;
@@ -2638,7 +2649,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       });
       if (response?.ok && response.plan) {
         const effective = response.plan.pending ?? response.plan.active;
-        setPlanModeState({ active: effective === true, pending: response.result === 'queued' });
+        setPlanModeState({ active: effective === true, pending: response.plan.pending ?? (response.result === 'queued') });
       }
     } catch {
       // Keep the prior chip state; the next toggle retries the RPC.

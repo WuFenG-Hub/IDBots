@@ -726,6 +726,26 @@ export class DshTurnHub {
   }
 
   /**
+   * Read-only plan-mode view backing the sidebar chip's initial state.
+   * Served by the idbots/usage wire view, which needs a live agent — null
+   * when the session's runtime is down (the chip then keeps its inactive
+   * default and resyncs from the next toggle response).
+   */
+  async planModeGet(
+    coworkSessionId: string,
+    opts?: { dshSessionId?: string },
+  ): Promise<{ active: boolean; pending?: boolean } | null> {
+    const dshId = this.dshByCowork.get(coworkSessionId)
+      ?? this.pinnedDshIds.get(coworkSessionId)
+      ?? opts?.dshSessionId
+    if (!dshId) return null
+    const kernel = this.kernelForDsh(dshId)
+    if (!kernel) return null
+    const projection = await kernel.usageProjection(dshId).catch(() => null)
+    return projection?.plan ?? null
+  }
+
+  /**
    * Plan-mode switch for a cowork session. Unlike the read-only
    * persistence-backed RPCs this must reach the kernel that owns the live
    * agent (ctx.planMode.set mutates session state), so there is no
