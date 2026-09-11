@@ -23,7 +23,10 @@ function withAppConfig(appConfig, fn) {
   }
 }
 
-test('DeepSeek provider key resolves to V4 Flash for MetaBot automation', () => {
+test('DeepSeek provider key resolves to the DeepSeek Flash automation model', () => {
+  // e85eefe9 synced the automation model to the official rename: V4.1 Flash
+  // is 'deepseek-flash' (renamed from deepseek-v4-flash). The provider
+  // catalog below carries the current official ids.
   const result = withAppConfig({
     model: {
       defaultModel: 'deepseek-v4-pro',
@@ -36,7 +39,7 @@ test('DeepSeek provider key resolves to V4 Flash for MetaBot automation', () => 
         baseUrl: 'https://api.deepseek.com/anthropic',
         apiFormat: 'anthropic',
         models: [
-          { id: 'deepseek-v4-flash' },
+          { id: 'deepseek-flash' },
           { id: 'deepseek-v4-pro' },
         ],
       },
@@ -44,7 +47,7 @@ test('DeepSeek provider key resolves to V4 Flash for MetaBot automation', () => 
   }, () => resolveApiConfigForModel('deepseek'));
 
   assert.equal(result.error, undefined);
-  assert.equal(result.config?.model, 'deepseek-v4-flash');
+  assert.equal(result.config?.model, 'deepseek-flash');
 });
 
 test('non-DeepSeek provider key keeps existing provider-default resolution', () => {
