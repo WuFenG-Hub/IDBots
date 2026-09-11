@@ -29,11 +29,24 @@ export type MetabotManageControl = {
     bio?: string | null;
     avatar?: string | null;
     metabot_type?: 'twin' | 'worker';
+    /**
+     * Owner binding written at creation. HOST-INJECTED only: the tool fills it
+     * from control.getOwnerGlobalMetaId() (the local user identity), never from
+     * the model's tool arguments — a bot must not be able to name its own
+     * master. Kept off the tool schema below for the same reason.
+     */
+    boss_global_metaid?: string | null;
   }): Promise<CreateMetaBotOnChainResult>;
   update(id: number, input: UpdateMetaBotInput): Promise<UpdateMetaBotResult>;
   delete(id: number): Promise<DeleteMetaBotResult>;
   list(): ManagedMetabotSummary[];
   listProviders(): LlmProviderOption[];
+  /**
+   * Active local owner identity (My MetaID globalMetaID), or null when the
+   * local user identity is not set up yet. The host (main.ts) wires this to
+   * getUserIdentityStore() — a trusted, non-model source.
+   */
+  getOwnerGlobalMetaId(): string | null;
 };
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
@@ -265,12 +278,12 @@ export function buildMetabotManageAgentTools(deps: {
       ? [
           `Create the user's first local MetaBot: on-chain wallet + identity, My Bots entry. ${audience}`,
           'Use when the user asks to create/set up their first Bot or Twin. While no Twin exists it becomes the first Twin Bot, else a Worker.',
-          'Ask for a name if none given. llm_id must come from metabot_list — never invent one (confirm if several providers; just use the free MetaID one if alone). Other fields optional (persona later in My Bots). Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, partial/subsidy notes.',
+          'Ask for a name if none given. llm_id must come from metabot_list — never invent one (confirm if several providers; just use the free MetaID one if alone). Other fields optional (persona later in My Bots). The local owner binding is applied automatically by the host — there is no owner field to pass. Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, partial/subsidy notes.',
         ].join(' ')
       : [
           'Create ONE new local MetaBot (always a Worker) end-to-end: wallet, on-chain identity, My Bots entry. Twin Bot only.',
           'Use when the user asks to create/add a bot, assistant, employee, or agent. Not for editing an existing bot (use metabot_update) or restoring from a mnemonic.',
-          'Rules: name and llm_id required; never invent llm_id — pick a model id from metabot_list (add llm_provider if listed under several providers). Other fields optional, settable later via metabot_update. Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, and partial/subsidy notes.',
+          'Rules: name and llm_id required; never invent llm_id — pick a model id from metabot_list (add llm_provider if listed under several providers). Other fields optional, settable later via metabot_update. The local owner binding is applied automatically by the host — there is no owner field to pass. Chain-first: may take seconds; result reports id/name/type, globalMetaID, txids, and partial/subsidy notes.',
         ].join(' '),
     {
       name: z.string().min(1).describe('Display name for the new bot (required).'),
@@ -345,6 +358,7 @@ export function buildMetabotManageAgentTools(deps: {
         bio?: string;
         avatar?: string;
         metabot_type?: 'twin' | 'worker';
+        boss_global_metaid?: string | null;
       } = {
         name,
         llm_id: llmId,
@@ -359,6 +373,14 @@ export function buildMetabotManageAgentTools(deps: {
         bio: args.bio,
         avatar: args.avatar,
       };
+      // Owner binding: read from the HOST (control.getOwnerGlobalMetaId — the
+      // local user identity wired in main.ts), never from `args`. The schema
+      // above has no owner field, so a model cannot request or spoof one; this
+      // assignment is the only place boss_global_metaid can enter createInput.
+      // Without it a Twin-created bot landed with boss_global_metaid=null and
+      // the owner had to backfill via My Bots > Edit (metabot_update forbids it).
+      const ownerGlobalMetaId = asString(control.getOwnerGlobalMetaId() ?? '');
+      if (ownerGlobalMetaId) createInput.boss_global_metaid = ownerGlobalMetaId;
       if (isWelcomeViewer) {
         // Bootstrap invariant: while the machine has no Twin, the bot the
         // Welcome Bot creates becomes the user's first Twin Bot; afterwards
