@@ -58,7 +58,6 @@ import {
   XMarkIcon,
   PaperAirplaneIcon,
   SparklesIcon,
-  ClipboardDocumentListIcon,
 } from '@heroicons/react/24/outline';
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
@@ -2620,46 +2619,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [hasTwinBot, setHasTwinBot] = useState<boolean | null>(null);
   const [isRetiringWelcome, setIsRetiringWelcome] = useState(false);
   const [retireWelcomeError, setRetireWelcomeError] = useState<string | null>(null);
-  // 0.1.5 plan mode chip: local mirror of the DSH session's plan state.
-  // Kernel state survives on the session log, so on session open we sync
-  // best-effort from the idbots/usage wire view — which needs a live agent,
-  // so a session whose runtime is down reports null and the chip keeps the
-  // inactive default until a toggle response resyncs it.
-  const [planModeState, setPlanModeState] = useState<{ active: boolean; pending: boolean }>({ active: false, pending: false });
-  const [planModeBusy, setPlanModeBusy] = useState(false);
-  const planModeSessionId = currentSession?.id ?? null;
-  useEffect(() => {
-    setPlanModeState({ active: false, pending: false });
-    setPlanModeBusy(false);
-    if (!planModeSessionId) return;
-    let cancelled = false;
-    void window.electron.cowork.getPlanMode({ sessionId: planModeSessionId }).then((response) => {
-      if (!cancelled && response?.ok && response.plan) {
-        setPlanModeState({ active: response.plan.active === true, pending: response.plan.pending === true });
-      }
-    }).catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [planModeSessionId]);
-  const handlePlanModeToggle = useCallback(async () => {
-    if (!planModeSessionId || planModeBusy) return;
-    setPlanModeBusy(true);
-    try {
-      const response = await window.electron.cowork.setPlanMode({
-        sessionId: planModeSessionId,
-        active: !planModeState.active,
-      });
-      if (response?.ok && response.plan) {
-        const effective = response.plan.pending ?? response.plan.active;
-        setPlanModeState({ active: effective === true, pending: response.plan.pending ?? (response.result === 'queued') });
-      }
-    } catch {
-      // Keep the prior chip state; the next toggle retries the RPC.
-    } finally {
-      setPlanModeBusy(false);
-    }
-  }, [planModeSessionId, planModeBusy, planModeState.active]);
   const [fetchedPeerAvatar, setFetchedPeerAvatar] = useState<string | null>(null);
   const [isProcessingRefund, setIsProcessingRefund] = useState(false);
   const [refundActionError, setRefundActionError] = useState<string | null>(null);
@@ -4049,28 +4008,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 disableControls={resolvedExecutionMode === 'sandbox'}
               />
               <TodoPanel messages={currentSession.messages} />
-              {/* Plan-mode chip: standard (human-driven) sessions only. On
-                  A2A/order/group sessions a bot-to-bot conversation could flip
-                  kernel plan mode with no human watching, and the mandatory
-                  exit review would wedge the unattended turn. */}
-              {(!currentSession.sessionType || currentSession.sessionType === 'standard') && (
-              <button
-                type="button"
-                onClick={() => { void handlePlanModeToggle(); }}
-                disabled={planModeBusy}
-                title={i18nService.t('coworkPlanModeHint')}
-                className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                  planModeState.active
-                    ? 'border-blue-400/70 dark:border-blue-500/60 bg-blue-500/10 text-blue-600 dark:text-blue-400'
-                    : 'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset'
-                }`}
-              >
-                <ClipboardDocumentListIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                <span className="font-medium">
-                  {i18nService.t('coworkPlanMode')}{planModeState.pending ? '…' : ''}
-                </span>
-              </button>
-              )}
+              {/* Plan mode is entered through the composer /plan command
+                  (kernel dsh-plan-mode), not a toolbar chip — one control,
+                  one source of truth. */}
               <PermissionModeSelector
                 sessionId={currentSession.id}
                 currentMode={currentSession.permissionMode ?? 'default'}
