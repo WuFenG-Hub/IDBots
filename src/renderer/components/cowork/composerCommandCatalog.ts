@@ -33,18 +33,15 @@ export function buildNewTaskComposerCommands(
       description: i18nService.t('composerCommandPlanDesc'),
       hint: i18nService.t('composerCommandPlanHint'),
       run: async (args, ctx) => {
-        const text = args.trim();
-        if (text.toLowerCase() === 'off') {
-          options.setPermissionMode('default');
-          return i18nService.t('composerNoticePlanOff');
+        // Kernel plan mode is session-scoped and needs a live kernel, which
+        // does not exist before the first turn. Point at the in-session
+        // command instead of flipping a permission pref that no longer
+        // drives any plan behavior.
+        if (args.trim()) {
+          const sent = await ctx.submitMessage(args.trim());
+          if (!sent) return undefined;
         }
-        if (text) {
-          options.setPermissionMode('plan');
-          const sent = await ctx.submitMessage(text);
-          return sent ? i18nService.t('composerNoticePlanTaskSent') : undefined;
-        }
-        options.setPermissionMode('plan');
-        return i18nService.t('composerNoticePlanOn');
+        return i18nService.t('composerNoticePlanSessionScoped');
       },
     },
     {
@@ -116,17 +113,31 @@ export function buildSessionComposerCommands(
       hint: i18nService.t('composerCommandPlanHint'),
       run: async (args, ctx) => {
         const text = args.trim();
-        if (text.toLowerCase() === 'off') {
-          await coworkService.setPermissionMode(options.sessionId, 'default');
+        const off = text.toLowerCase() === 'off';
+        // Kernel plan mode (dsh-plan-mode): the Bot explores, submits a plan
+        // through exit_plan_mode, and implements only after your approval.
+        // The old host permissionMode 'plan' gate is gone — /plan here drives
+        // the kernel state through the same RPC the removed toolbar chip used.
+        const switchResult = await window.electron.cowork.setPlanMode({
+          sessionId: options.sessionId,
+          active: !off,
+        });
+        if (!switchResult?.ok) {
+          const reason = (switchResult?.reason ?? '').trim();
+          return reason
+            ? `${i18nService.t('composerNoticePlanFailed')}: ${reason}`
+            : i18nService.t('composerNoticePlanFailed');
+        }
+        if (off) {
           return i18nService.t('composerNoticePlanOff');
         }
         if (text) {
-          await coworkService.setPermissionMode(options.sessionId, 'plan');
           const sent = await ctx.submitMessage(text);
           return sent ? i18nService.t('composerNoticePlanTaskSent') : undefined;
         }
-        await coworkService.setPermissionMode(options.sessionId, 'plan');
-        return i18nService.t('composerNoticePlanOn');
+        return switchResult.result === 'queued'
+          ? i18nService.t('composerNoticePlanQueued')
+          : i18nService.t('composerNoticePlanOn');
       },
     },
     {
