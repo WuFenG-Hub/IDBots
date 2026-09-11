@@ -43,9 +43,11 @@ const CHECKSUM_OPTIONS = { params: { [zstdConstants.ZSTD_c_checksumFlag]: 1 } }
  * Encode plaintext as the backend's concatenated-frame container: frame 1 is
  * exactly the header line, frame 2 the remaining event lines. The reader
  * asserts the first frame decodes to one header line (assertZstdHeaderFrame),
- * and later appends concatenate whole frames after ours.
+ * and later appends concatenate whole frames after ours. Exported for the
+ * v0 abort-cause sanitizer (lib/sanitize-v0-abort-cause.mjs), which rewrites
+ * artifacts through the same container.
  */
-async function encodeZstdArtifact(plaintext) {
+export async function encodeZstdArtifact(plaintext) {
   const newline = plaintext.indexOf(10)
   if (newline === -1) throw new Error('session log has no header line')
   const headerFrame = await compress(plaintext.subarray(0, newline + 1), CHECKSUM_OPTIONS)
