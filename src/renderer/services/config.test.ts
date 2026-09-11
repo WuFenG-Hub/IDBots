@@ -196,19 +196,19 @@ test('mergeProvidersConfig rewrites free-provider model names to display names',
   const merged = mergeProvidersConfig(undefined, stored.providers);
   const freeModels = merged!['metaid-free']!.models!;
   assert.equal(freeModels[0].id, 'deepseek-chat');
-  assert.equal(freeModels[0].name, 'deepseek-v4-flash');
+  assert.equal(freeModels[0].name, 'deepseek-flash');
   // A user-configured provider with the same model id keeps its stored name.
   const deepseekModels = merged!.deepseek!.models!;
   assert.equal(deepseekModels[0].name, 'deepseek-chat');
 });
 
-test('mergeProvidersConfig rewrites known free-provider models to the canonical deepseek-v4-flash preset', () => {
+test('mergeProvidersConfig rewrites known free-provider models to the canonical deepseek-flash preset', () => {
   // Installs provisioned while the relay reported the legacy DeepSeek V3 wire
   // values store contextWindow 64000 / maxOutputTokens 4096; normalization
-  // must rewrite the known id to the canonical deepseek-v4-flash preset (1M
+  // must rewrite the known id to the canonical deepseek-flash preset (1M
   // context, 32K output, thinking on at max effort) so the cowork context
   // ring and effort selector behave exactly like the deepseek provider's
-  // deepseek-v4-flash.
+  // deepseek-flash.
   const stored = makeConfig({
     'metaid-free': {
       enabled: true,

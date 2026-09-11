@@ -115,7 +115,8 @@ test('deepseek-v4-flash declares a 32K output ceiling instead of the 8192 fallba
  * (provider model migration v1).
  */
 const PRESET_MODEL_IDS = [
-  // DeepSeek (default engine) — deepseek-v4-flash drives cowork/A2A automation
+  // DeepSeek (default engine) — deepseek-flash drives cowork/A2A automation
+  'deepseek-flash',
   'deepseek-v4-pro',
   'deepseek-v4-flash',
   'deepseek-v4-flash-vision-exp',
@@ -171,6 +172,7 @@ const PRESET_MODEL_IDS = [
 
 /** Expected context window per model family (mirrors KNOWN_MODEL_LIMITS). */
 const EXPECTED_CONTEXT_WINDOWS = {
+  'deepseek-flash': 1_000_000,
   'deepseek-v4-pro': 1_000_000,
   'deepseek-v4-flash': 1_000_000,
   'deepseek-v4-flash-vision-exp': 1_000_000,
@@ -468,6 +470,20 @@ test('gateway-prefixed v4.1 ids match on the last path segment', async () => {
 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek/deepseek-v4.1-flash');
   assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.source, 'family-model');
+});
+
+test('gateway-prefixed deepseek-flash ids inherit the multimodal V4.1 family limits', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  // The renamed V4.1 line (deepseek-v4-flash → deepseek-flash, 2026-09-10) is
+  // natively multimodal, so its family fallback marks vision true — unlike
+  // the legacy v4-* line, which stays fail-safe false unless the SKU says so.
+  const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek/deepseek-flash');
+  assert.equal(limits.contextWindow, 1_000_000);
+  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.supportsVision, true);
   assert.equal(limits.source, 'family-model');
 });
 

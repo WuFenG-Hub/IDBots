@@ -10,9 +10,10 @@ import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
 import FreeQuotaCard from './FreeQuotaCard';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, CommandCodeIcon, OpenCodeIcon } from './icons/providers';
+import { fetchProviderModelList, providerSupportsModelListSync } from '../services/providerModels';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels, setSelectedModel } from '../store/slices/modelSlice';
 import { RootState } from '../store';
@@ -477,6 +478,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   const [appVersion, setAppVersion] = useState<string>('');
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
+  const [fetchModelsResult, setFetchModelsResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [isImportingProviders, setIsImportingProviders] = useState(false);
   const [isExportingProviders, setIsExportingProviders] = useState(false);
   const initialThemeRef = useRef<'light' | 'dark' | 'system'>(themeService.getTheme());
@@ -876,6 +879,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setActiveProvider(provider);
     // 切换 provider 时清除测试结果
     setTestResult(null);
+    setFetchModelsResult(null);
   };
 
   // Handle provider configuration change
@@ -1672,6 +1676,49 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       });
     } finally {
       setIsTesting(false);
+    }
+  };
+
+  const handleFetchProviderModels = async () => {
+    setIsFetchingModels(true);
+    setFetchModelsResult(null);
+
+    const providerConfig = providers[activeProvider];
+
+    if (providerRequiresApiKey(activeProvider) && !providerConfig.apiKey) {
+      setFetchModelsResult({ success: false, message: i18nService.t('apiKeyRequired') });
+      setIsFetchingModels(false);
+      return;
+    }
+
+    try {
+      // Replace the catalog with the provider's official list; per-model
+      // local settings survive for ids present in both lists (see
+      // mergeSyncedProviderModels).
+      const syncedModels = await fetchProviderModelList({
+        providerKey: activeProvider,
+        apiKey: providerConfig.apiKey,
+        baseUrl: providerConfig.baseUrl,
+        existingModels: providerConfig.models ?? [],
+      });
+      setProviders(prev => ({
+        ...prev,
+        [activeProvider]: {
+          ...prev[activeProvider],
+          models: syncedModels,
+        },
+      }));
+      setFetchModelsResult({
+        success: true,
+        message: `${i18nService.t('fetchModelsSuccess')} (${syncedModels.length})`,
+      });
+    } catch (err) {
+      setFetchModelsResult({
+        success: false,
+        message: err instanceof Error ? err.message : i18nService.t('fetchModelsFailed'),
+      });
+    } finally {
+      setIsFetchingModels(false);
     }
   };
 
@@ -2915,15 +2962,39 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   <h3 className="text-xs font-medium dark:text-claude-darkText text-claude-text">
                     {i18nService.t('availableModels')}
                   </h3>
-                  <button
-                    type="button"
-                    onClick={handleAddModel}
-                    className="inline-flex items-center text-xs text-claude-accent hover:text-claude-accentHover"
-                  >
-                    <PlusCircleIcon className="h-3.5 w-3.5 mr-1" />
-                    {i18nService.t('addModel')}
-                  </button>
+                  <div className="flex items-center space-x-3">
+                    {providerSupportsModelListSync(activeProvider) && (
+                      <button
+                        type="button"
+                        onClick={handleFetchProviderModels}
+                        disabled={isFetchingModels || (providerRequiresApiKey(activeProvider) && !providers[activeProvider].apiKey)}
+                        title={i18nService.t('fetchModelsHint')}
+                        className="inline-flex items-center text-xs text-claude-accent hover:text-claude-accentHover disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <ArrowPathIcon className={`h-3.5 w-3.5 mr-1 ${isFetchingModels ? 'animate-spin' : ''}`} />
+                        {isFetchingModels ? i18nService.t('fetchingModels') : i18nService.t('fetchModels')}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleAddModel}
+                      className="inline-flex items-center text-xs text-claude-accent hover:text-claude-accentHover"
+                    >
+                      <PlusCircleIcon className="h-3.5 w-3.5 mr-1" />
+                      {i18nService.t('addModel')}
+                    </button>
+                  </div>
                 </div>
+                {fetchModelsResult && (
+                  <div className={`flex items-center text-xs mb-1.5 ${fetchModelsResult.success ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                    {fetchModelsResult.success ? (
+                      <CheckCircleIcon className="h-4 w-4 mr-1 shrink-0" />
+                    ) : (
+                      <XCircleIcon className="h-4 w-4 mr-1 shrink-0" />
+                    )}
+                    <span className="truncate max-w-[280px]">{fetchModelsResult.message}</span>
+                  </div>
+                )}
 
                 {/* Models List */}
                 <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">

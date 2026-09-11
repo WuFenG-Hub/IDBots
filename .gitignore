@@ -384,6 +384,7 @@ man_base_data_pebble/
 !tests/skillAssignmentStore.test.mjs
 !tests/coworkMemoryTurnExtraction.test.mjs
 !tests/commandCodeProvider.test.ts
+!tests/providerModels.test.ts
 !tests/dshModelReasoning.test.mjs
 !tests/groupTaskDeliverableBackfill.test.mjs
 !tests/coworkPermissionForwarding.test.mjs

@@ -139,7 +139,7 @@ function providerRequiresApiKey(providerName: string): boolean {
 }
 
 const DEEPSEEK_PROVIDER_KEY = 'deepseek';
-const DEEPSEEK_AUTOMATION_MODEL_ID = 'deepseek-v4-flash';
+const DEEPSEEK_AUTOMATION_MODEL_ID = 'deepseek-flash';
 /** Built-in free-quota relay. Must not silently substitute for a paid bot brain. */
 export const LLM_FREE_PROVIDER_KEY = 'metaid-free';
 

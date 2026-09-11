@@ -56,10 +56,18 @@ type AppConfigLike = {
 };
 
 const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>>> = {
-  // DeepSeek V4 Flash / Pro have no vision (2026-08-09 diagnosis:
-  // deepseek-v4-pro session ballooned to 60% context from Read image base64
-  // the model could never interpret). 0.1.1 adds flash-vision-exp as the
-  // official vision SKU. Read/View image guards key off this.
+  // DeepSeek V4.1 Flash (`deepseek-flash`, renamed from deepseek-v4-flash at
+  // the 2026-09-10 V4.1 launch) is natively multimodal; V4 Pro stays
+  // text-only (2026-08-09 diagnosis: a deepseek-v4-pro session ballooned to
+  // 60% context from Read image base64 the model could never interpret).
+  // The retired v4-flash / vision-exp aliases keep their entries: upstream
+  // still accepts those ids, and stored sessions resolve their limits here.
+  // Read/View image guards key off this.
+  'deepseek-flash': {
+    contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+    maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
+    supportsVision: true,
+  },
   'deepseek-v4-pro': {
     contextWindow: DEEPSEEK_V4_PRO_CONTEXT_WINDOW,
     maxOutputTokens: DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS,
@@ -143,11 +151,20 @@ function normalizeModelId(value: unknown): string {
  * stall). The whole V4 family shares one API contract (1M context, the
  * 32K-declared output ceiling), so any id whose last path segment (gateways
  * prefix vendor ids: 'deepseek/deepseek-v4.1-flash') starts with
- * 'deepseek-v4' inherits the family limits. Vision stays fail-safe false
- * unless the SKU name says 'vision'.
+ * 'deepseek-v4' inherits the family limits. The renamed V4.1+ line
+ * ('deepseek-flash', e.g. gateway ids like 'deepseek/deepseek-flash') gets
+ * the same treatment; those SKUs are natively multimodal, while the legacy
+ * v4-* line stays fail-safe false unless the SKU name says 'vision'.
  */
 function deepseekV4FamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>> | undefined {
   const segment = (modelId.split('/').pop() ?? modelId).toLowerCase();
+  if (segment.startsWith('deepseek-flash')) {
+    return {
+      contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+      maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
+      supportsVision: true,
+    };
+  }
   if (!segment.startsWith('deepseek-v4')) return undefined;
   return {
     contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
