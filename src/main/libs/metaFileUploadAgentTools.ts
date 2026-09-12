@@ -10,8 +10,10 @@ export type MetaFileUploadResult = Record<string, unknown>;
  * by uploadMetaFile() in services/metaFileUploadService.ts — the same function
  * the RPC endpoint and several IPC handlers call. The service already decides
  * direct vs chunked mode (5 MiB threshold), resolves network/contentType, and
- * runs MVC sponsor-first direct upload with a self-paid fallback when the
- * sponsor balance is insufficient. No routing logic lives here.
+ * routes MVC direct uploads by the global traffic.mode setting: account-quota
+ * mode runs the sponsor-first upload (self-paid fallback when the sponsor
+ * cannot deliver); MetaBot self-pay mode goes straight to the bot-wallet
+ * createPin path. No routing logic lives here.
  */
 export type MetaFileUploadControl = {
   upload(params: {

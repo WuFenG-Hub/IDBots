@@ -28,6 +28,7 @@ import {
   getTrafficSettings,
   readTrafficApiBase,
   setTrafficSettings,
+  type TrafficPinMode,
   type TrafficSettingsReader,
   type TrafficSettingsSnapshot,
 } from './trafficSettings';
@@ -39,6 +40,8 @@ const DEFAULT_TRAFFIC_API_BASE_URL = 'https://www.metaso.network/assist-open-api
 const DEFAULT_WALLET_PATH = "m/44'/10001'/0'/0/0";
 const DEFAULT_REQUEST_TIMEOUT_MS = 8_000;
 const BALANCE_CACHE_TTL_MS = 30_000;
+/** Backoff before the single ensure/bind retry inside the sponsor-pre resolver. */
+const RESOLVER_RETRY_BACKOFF_MS = 300;
 
 /** kvStore keys (traffic.apiBase lives in trafficSettings.ts). */
 const TRAFFIC_ACCOUNT_KEY = 'traffic.account';
@@ -251,6 +254,10 @@ function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * The configured assist-service base URL override (kvStore traffic.apiBase),
  * or undefined when unset — callers then fall back to their own production
@@ -260,6 +267,21 @@ function nowSeconds(): number {
 export function getConfiguredTrafficApiBase(): string | undefined {
   const configured = readTrafficApiBase(getKvStore());
   return configured || undefined;
+}
+
+/**
+ * The global traffic.mode setting ('traffic' account quota | 'selfpay'
+ * MetaBot wallet; default 'traffic'), read through the same injected store.
+ * Every on-chain write path that can choose between the sponsor
+ * (account-quota) flow and the bot-wallet flow must gate on this so the
+ * settings-panel toggle governs all of them uniformly. Never throws.
+ */
+export function getConfiguredTrafficPinMode(): TrafficPinMode {
+  try {
+    return getTrafficPinMode(getKvStore());
+  } catch {
+    return 'traffic';
+  }
 }
 
 function resolveApiBaseUrl(): string {
@@ -578,6 +600,25 @@ async function createTrafficAccount(): Promise<TrafficAccountRecord> {
   persistLocalAccount(account);
   balanceCache = { ...account, fetchedAt: Date.now() };
   return account;
+}
+
+/**
+ * ensureTrafficAccount with one retry (2026-09-12): the POST is get-or-create
+ * on the backend (idempotent), so a single transient timeout/5xx deserves a
+ * second shot before the sponsor-pre resolver degrades a pin to legacy quota
+ * billing. A 404 (feature off) is deterministic and is not retried.
+ */
+async function ensureTrafficAccountWithRetry(): Promise<TrafficAccountRecord> {
+  try {
+    return await ensureTrafficAccount();
+  } catch (error) {
+    if (error instanceof TrafficApiError && error.featureUnavailable) {
+      throw error;
+    }
+    console.warn('[TrafficAccount] ensure traffic account failed; retrying once:', error instanceof Error ? error.message : error);
+    await delayMs(RESOLVER_RETRY_BACKOFF_MS);
+    return ensureTrafficAccount();
+  }
 }
 
 async function bindOneBot(
@@ -1197,6 +1238,10 @@ export function listLocalTrafficJournal(input: {
  * to keep the legacy quota path. Never throws: traffic mode off, no identity,
  * no account (backend 404 / offline), or an unbindable bot all degrade to
  * undefined. Lazily ensures the account and binds the bot on first use.
+ * Degradation is never silent (2026-09-12): while traffic mode is ON, every
+ * drop to the legacy quota path is WARN-logged with its cause, and the
+ * idempotent ensure/bind steps retry once after a short backoff so a single
+ * transient network blip no longer flips a pin to legacy quota billing.
  */
 export async function resolveSponsorTrafficAccount(input: {
   botAddress: string;
@@ -1204,33 +1249,42 @@ export async function resolveSponsorTrafficAccount(input: {
   botMnemonic?: string;
   botWalletPath?: string;
 }): Promise<MvcSponsorTrafficAccount | undefined> {
+  const botAddress = normalizeText(input.botAddress);
   try {
     if (!depsRef) return undefined;
     if (getTrafficPinMode(getKvStore()) !== 'traffic') return undefined;
-    const botAddress = normalizeText(input.botAddress);
     if (!botAddress || !normalizeText(input.challengeId)) return undefined;
 
     const identity = requireIdentity();
     let account = readLocalAccount();
     if (!account) {
-      account = await ensureTrafficAccount();
+      account = await ensureTrafficAccountWithRetry();
     }
     if (!isBotBoundLocally(botAddress, account.accountId)) {
       const botMnemonic = normalizeText(input.botMnemonic);
       if (!botMnemonic) return undefined;
-      const bindResult = await bindOneBot(account, identity, {
+      const target = {
         botAddress,
         mnemonic: botMnemonic,
         path: normalizeText(input.botWalletPath) || DEFAULT_WALLET_PATH,
-      });
-      if (bindResult.status !== 'bound') return undefined;
+      };
+      let bindResult = await bindOneBot(account, identity, target);
+      if (bindResult.status === 'failed') {
+        await delayMs(RESOLVER_RETRY_BACKOFF_MS);
+        bindResult = await bindOneBot(account, identity, target);
+      }
+      if (bindResult.status !== 'bound') {
+        console.warn(`[TrafficAccount] bot ${botAddress} could not be bound to the traffic account (${bindResult.status}${bindResult.error ? `: ${bindResult.error}` : ''}); this pin bills the legacy sponsor quota`);
+        return undefined;
+      }
     }
 
     const timestamp = nowSeconds();
     const message = buildTrafficPreMessage(account.accountId, normalizeText(input.challengeId));
     const { signature } = await signWithKey({ mnemonic: identity.mnemonic, path: identity.path, message });
     return { accountId: account.accountId, authSignature: signature, timestamp };
-  } catch {
+  } catch (error) {
+    console.warn(`[TrafficAccount] traffic-account resolution failed for bot ${botAddress || 'unknown'}; this pin bills the legacy sponsor quota:`, error instanceof Error ? error.message : error);
     return undefined;
   }
 }

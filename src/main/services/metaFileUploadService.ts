@@ -13,7 +13,7 @@ import {
   uploadMvcSponsorDirectFile,
   type MvcSponsorFeeAssistMetadata,
 } from './mvcSponsorUpload';
-import { getConfiguredTrafficApiBase } from './trafficAccountService';
+import { getConfiguredTrafficApiBase, getConfiguredTrafficPinMode } from './trafficAccountService';
 import { resolveMetaFileUploadSharedModulePath } from './metaFileUploadSharedResolver';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
@@ -328,7 +328,13 @@ export async function uploadMetaFile(
       return normalized;
     };
 
-    if (network === 'mvc' && !useData && metabot && isMvcSponsorUploadEnabled(metabotStore, params.metabotId)) {
+    // Route by the global traffic billing mode (2026-09-12): the dedicated
+    // sponsor upload only runs in 'traffic' (account-quota) mode. In
+    // 'selfpay' mode it previously ran anyway and billed the shared legacy
+    // sponsor quota, bypassing both the bot wallet and the settings toggle —
+    // self-pay now goes straight to the bot-wallet createPin path below.
+    const sponsorUploadAllowed = getConfiguredTrafficPinMode() === 'traffic';
+    if (network === 'mvc' && !useData && metabot && sponsorUploadAllowed && isMvcSponsorUploadEnabled(metabotStore, params.metabotId)) {
       const sponsorWallet = metabotStore.getMetabotWalletByMetabotId(params.metabotId);
       if (sponsorWallet?.mnemonic?.trim() && metabot.mvc_address?.trim()) {
         const sponsorResult = await attachVerificationIfRequested(
