@@ -197,6 +197,7 @@ import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
 import { buildAgentpediaAgentTools } from './agentpediaAgentTools';
 import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
 import { buildLikePinAgentTools } from './likePinAgentTools';
+import { buildCommentPinAgentTools } from './commentPinAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
@@ -1211,6 +1212,16 @@ interface ActiveSession {
    * answer/react) while keeping the same KB budget wrapper.
    */
   metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
+  /**
+   * MetaWeb surf session marker: when set, the inline tool surface is
+   * restricted to the surf allowlist (read/search/learn + the persona-driven
+   * interaction tools like_pin / comment_pin / post_simple* / post_buzz /
+   * post_simplenote / agentpedia_challenge) and EVERY chain write funnels
+   * through a counting createPin wrapper that hard-stops at interactionBudget
+   * (the 20/run default is a ceiling, never a target). kbBudget caps
+   * metaweb-source KB adds through the same wrapper the study session uses.
+   */
+  metawebSurfSession?: { interactionBudget: number; kbBudget: number };
   /** Permission mode controlling tool gating (default/plan/acceptEdits/bypassPermissions). */
   permissionMode: CoworkPermissionMode;
   /** Runtime effort override from the UI picker; a canonical rung, the 'default' sentinel (model default, skipping brain/global), or null = tiered defaults (brain → global → per-model). */
@@ -1876,6 +1887,30 @@ const METAWEB_QA_SURF_TOOL_ALLOWLIST = new Set([
   'get_question_answers',
   'post_simpleanswer',
   'like_pin',
+]);
+
+/**
+ * The inline-tool allowlist for MetaWeb surf sessions
+ * (ActiveSession.metawebSurfSession). The full autonomous surf surface:
+ * read/search the chain across protocols, save/distill into knowledge stores,
+ * and the persona-driven interaction tools. On-chain writes are present here
+ * BY DESIGN (engagement is the feature's purpose) but every one of them
+ * funnels through the budget-counting createPin wrapper, so the run's
+ * interaction budget is a hard ceiling. Wallet, file, omni_cast (arbitrary
+ * protocol writes), install, social-messaging and metabot-manage tools are
+ * not registered at all (absence beats a deny rule).
+ */
+const METAWEB_SURF_TOOL_ALLOWLIST = new Set([
+  ...METAWEB_QA_SURF_TOOL_ALLOWLIST,
+  'search_social_posts',
+  'social_post_detail',
+  'social_post_comments',
+  'omni_read',
+  'comment_pin',
+  'post_simplequestion',
+  'post_buzz',
+  'post_simplenote',
+  'agentpedia_challenge',
 ]);
 
 export class CoworkRunner extends EventEmitter {
@@ -6242,6 +6277,16 @@ export class CoworkRunner extends EventEmitter {
       disableMemoryUpdates?: boolean;
       /** M4 nightly study session: restrict inline tools to the learning allowlist and cap metaweb-source KB adds at pinBudget. */
       metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
+  /**
+   * MetaWeb surf session marker: when set, the inline tool surface is
+   * restricted to the surf allowlist (read/search/learn + the persona-driven
+   * interaction tools like_pin / comment_pin / post_simple* / post_buzz /
+   * post_simplenote / agentpedia_challenge) and EVERY chain write funnels
+   * through a counting createPin wrapper that hard-stops at interactionBudget
+   * (the 20/run default is a ceiling, never a target). kbBudget caps
+   * metaweb-source KB adds through the same wrapper the study session uses.
+   */
+  metawebSurfSession?: { interactionBudget: number; kbBudget: number };
       disableRemoteServicesPrompt?: boolean;
       workspaceRoot?: string;
       confirmationMode?: 'modal' | 'text';
@@ -6351,6 +6396,7 @@ export class CoworkRunner extends EventEmitter {
       autoApprove: options.autoApprove ?? false,
       disableMemoryUpdates: Boolean(options.disableMemoryUpdates),
       metawebStudySession: options.metawebStudySession,
+      metawebSurfSession: options.metawebSurfSession,
       permissionMode: options.permissionMode ?? session.permissionMode ?? 'default',
       // Caller-provided seed (picker pick / global default) wins; otherwise
       // hydrate the session's persisted effort so restarts keep the choice.
@@ -9427,12 +9473,20 @@ export class CoworkRunner extends EventEmitter {
       // the upload control is present.
       const uploadGate = this.buildChainUploadGate(sessionId);
       const gateLocalFile = (filePath: string) => checkUploadAllowed(filePath, uploadGate);
+      // MetaWeb surf sessions: every chain write below (like/comment/answer/
+      // ask/buzz/note/agentpedia challenge — omni_cast excluded by allowlist)
+      // funnels through ONE counting wrapper, so the run's interaction budget
+      // is a hard ceiling no matter which tool the persona picks.
+      const surfSession = this.activeSessions.get(sessionId)?.metawebSurfSession;
+      const createPinForSession: ChainWriteCreatePin = surfSession
+        ? this.wrapCreatePinForSurf(this.metabotChainWrite.createPin, surfSession.interactionBudget)
+        : this.metabotChainWrite.createPin;
       if (this.metaFileUpload) {
         const gatedUpload = wrapUploadWithGate(this.metaFileUpload.upload.bind(this.metaFileUpload), uploadGate);
         memoryTools.push(
           ...buildPostBuzzAgentTools({
             tool,
-            createPin: this.metabotChainWrite.createPin,
+            createPin: createPinForSession,
             uploadFile: gatedUpload,
             sessionId,
             resolveMetabotId,
@@ -9441,7 +9495,7 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           ...buildPostSimpleNoteAgentTools({
             tool,
-            createPin: this.metabotChainWrite.createPin,
+            createPin: createPinForSession,
             uploadFile: gatedUpload,
             sessionId,
             resolveMetabotId,
@@ -9454,7 +9508,7 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           ...buildAgentpediaAgentTools({
             tool,
-            createPin: this.metabotChainWrite.createPin,
+            createPin: createPinForSession,
             sessionId,
             resolveMetabotId,
           })
@@ -9467,7 +9521,7 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           ...buildPostSimpleQaAgentTools({
             tool,
-            createPin: this.metabotChainWrite.createPin,
+            createPin: createPinForSession,
             uploadFile: gatedUpload,
             sessionId,
             resolveMetabotId,
@@ -9490,7 +9544,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         ...buildOmniCasterAgentTools({
           tool,
-          createPin: this.metabotChainWrite.createPin,
+          createPin: createPinForSession,
           encryptGroupMessage: this.metabotChainWrite.encryptGroupMessage,
           getMetabotDisplayName: this.metabotChainWrite.getMetabotDisplayName,
           sessionId,
@@ -9500,11 +9554,21 @@ export class CoworkRunner extends EventEmitter {
       );
       // Reactions on any pin (PayLike): Q&A answers and questions today, buzz
       // and notes alike. No upload dependency, so it registers whenever the
-      // chain-write control exists.
+      // chain-write control exists. comment_pin (PayComment) is the equally
+      // narrow thread-reply companion — and the ONLY comment surface
+      // allowlisted for unattended surf sessions (raw omni_cast is not).
       memoryTools.push(
         ...buildLikePinAgentTools({
           tool,
-          createPin: this.metabotChainWrite.createPin,
+          createPin: createPinForSession,
+          sessionId,
+          resolveMetabotId,
+        })
+      );
+      memoryTools.push(
+        ...buildCommentPinAgentTools({
+          tool,
+          createPin: createPinForSession,
           sessionId,
           resolveMetabotId,
         })
@@ -9675,11 +9739,13 @@ export class CoworkRunner extends EventEmitter {
     // not a budget).
     if (sessionMemoryEnabled && this.knowledgeBase) {
       const studySession = this.activeSessions.get(sessionId)?.metawebStudySession;
+      const surfKbSession = this.activeSessions.get(sessionId)?.metawebSurfSession;
+      const kbBudget = studySession?.pinBudget ?? surfKbSession?.kbBudget;
       memoryTools.push(
         ...buildKnowledgeBaseAgentTools({
           tool,
-          knowledgeBase: studySession
-            ? this.wrapKnowledgeBaseForStudy(this.knowledgeBase, studySession.pinBudget)
+          knowledgeBase: kbBudget != null
+            ? this.wrapKnowledgeBaseForStudy(this.knowledgeBase, kbBudget)
             : this.knowledgeBase,
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
@@ -9783,6 +9849,11 @@ export class CoworkRunner extends EventEmitter {
         : METAWEB_STUDY_TOOL_ALLOWLIST;
       return memoryTools.filter((item) => allowlist.has(String(item?.name ?? '')));
     }
+    // MetaWeb surf sessions: the surf allowlist — read/learn across protocols
+    // plus the budget-wrapped interaction tools, nothing else.
+    if (this.activeSessions.get(sessionId)?.metawebSurfSession) {
+      return memoryTools.filter((item) => METAWEB_SURF_TOOL_ALLOWLIST.has(String(item?.name ?? '')));
+    }
     return memoryTools;
   }
 
@@ -9811,6 +9882,27 @@ export class CoworkRunner extends EventEmitter {
       },
       learnKnowledgeBase: (metabotId, kbId, options) => control.learnKnowledgeBase(metabotId, kbId, options),
       learnAllKnowledgeBases: (metabotId, options) => control.learnAllKnowledgeBases(metabotId, options),
+    };
+  }
+
+  /**
+   * Surf-session createPin wrapper: counts EVERY chain write the session's
+   * tools attempt and rejects once the run's interaction budget is spent.
+   * Budget 0 means "no interactions" — learning still works, every write is
+   * refused. The error text doubles as prompt guidance: the model is told to
+   * stop interacting and finish its report.
+   */
+  private wrapCreatePinForSurf(createPin: ChainWriteCreatePin, interactionBudget: number): ChainWriteCreatePin {
+    const budget = Math.max(0, Math.floor(interactionBudget) || 0);
+    let writes = 0;
+    return async (metabotId, metaidData, options) => {
+      if (writes >= budget) {
+        throw new Error(
+          `MetaWeb surf interaction budget exhausted for this run (${budget} chain writes allowed). Stop interacting and write the final surf report now.`
+        );
+      }
+      writes += 1;
+      return createPin(metabotId, metaidData, options);
     };
   }
 

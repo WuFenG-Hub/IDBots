@@ -49,6 +49,8 @@ export interface SurfSessionResult {
   stats?: Partial<MetawebSurfRunStats>;
   reportMarkdown?: string | null;
   reportJson?: string | null;
+  /** Per-pin actions reported by the session, folded into the seen ledger. */
+  seenActions?: Array<{ pinId: string; action: import('../metawebSurfStore').MetawebSurfSeenAction }>;
 }
 
 export interface SurfServiceDeps {
@@ -158,6 +160,9 @@ export class SurfService {
         Object.assign(stats, session.stats ?? {});
         reportMarkdown = session.reportMarkdown ?? null;
         reportJson = session.reportJson ?? null;
+        for (const seen of session.seenActions ?? []) {
+          this.store.markSeen(metabotId, seen.pinId, seen.action, new Date(this.nowMs()).toISOString());
+        }
       }
 
       // Watermarks advance only after the run body completed, and only for

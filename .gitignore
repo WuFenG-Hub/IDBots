@@ -419,3 +419,5 @@ man_base_data_pebble/
 !tests/metawebSurfStore.test.mjs
 !tests/surfBriefing.test.mjs
 !tests/surfService.test.mjs
+!tests/commentPinAgentTools.test.mjs
+!tests/surfPrompt.test.mjs

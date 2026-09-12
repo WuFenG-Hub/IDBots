@@ -269,6 +269,7 @@ import {
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { MetawebSurfStore } from './metawebSurfStore';
 import { SurfService, SURF_STATUS_CHANNEL } from './services/surfService';
+import { buildSurfSessionPrompt, parseSurfRunReport, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
 import { SleepGuard, evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, type SleepGuardSource, type SleepGuardState } from './sleepGuard';
@@ -6964,9 +6965,10 @@ const getMetawebStudyService = (): MetawebStudyService => {
 };
 
 /**
- * MetaWeb surf ("AI 冲浪"): the autonomous surf loop. Phase-2 wiring has no
- * LLM session yet — runs write a digest report and advance watermarks; the
- * persona-driven session is injected here in the next phase.
+ * MetaWeb surf ("AI 冲浪"): the autonomous surf loop. The persona-driven LLM
+ * session is injected here — one bounded background cowork session per run
+ * whose tool surface and budgets are restricted by the metawebSurfSession
+ * marker (surf allowlist + counting createPin/KB wrappers in coworkRunner).
  */
 const getSurfService = (): SurfService => {
   if (!surfService) {
@@ -6979,6 +6981,35 @@ const getSurfService = (): SurfService => {
             try { win.webContents.send(SURF_STATUS_CHANNEL, payload); } catch { /* ignore */ }
           }
         });
+      },
+      runSurfSession: async (context) => {
+        const coworkStore = getCoworkStore();
+        const cwd = resolveSessionWorkingDirectory(
+          coworkStore.getConfig().workingDirectory,
+          context.metabotId,
+        );
+        const replyText = await runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
+          systemPrompt: '',
+          userMessage: buildSurfSessionPrompt(context),
+          cwd,
+          metabotId: context.metabotId,
+          activeSkillIds: [],
+          disableRemoteServicesPrompt: true,
+          sourceChannel: 'orchestrator',
+          // Unattended like the study sessions: no owner is watching, stray
+          // prompts auto-reject, memory updates stay enabled so procedure_save
+          // and knowledge_upsert keep working.
+          autoApprove: true,
+          permissionMode: 'acceptEdits',
+          disableMemoryUpdates: false,
+          metawebSurfSession: {
+            interactionBudget: context.briefing.interactionBudget,
+            kbBudget: SURF_KB_ADD_BUDGET,
+          },
+          skillTurnTimeoutMs: 30 * 60 * 1000,
+          onSessionCreated: (sessionId) => coworkStore.setSessionHiddenFromList(sessionId, true),
+        });
+        return parseSurfRunReport(replyText);
       },
     });
   }
