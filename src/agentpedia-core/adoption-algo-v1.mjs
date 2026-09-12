@@ -111,6 +111,24 @@ export function replay(inputEvents, options = {}) {
 
   const graveyardIt = (pin, reason) => graveyard.push({ pin, reason });
 
+  // E-5 candidate (JS twin of the Go rule): entryKey attribution is a write-time
+  // fact — every rev records the entryKey it was written under (version.entryKey).
+  // Never resolve by Map iteration order.
+  const entryKeyOfRev = (rev) => {
+    if (!rev) return null;
+    let recorded = null;
+    for (const en of entries.values()) {
+      const v = en.versions.get(rev);
+      if (v) { recorded = v.entryKey; break; }
+    }
+    if (recorded && entries.get(recorded)?.versions.has(rev)) return recorded;
+    const keys = [];
+    for (const [k, en] of entries.entries()) if (en.versions.has(rev)) keys.push(k);
+    if (keys.length === 0) return null;
+    keys.sort();
+    return keys[0];
+  };
+
   const tierOf = (id, h) => {
     const ed = editors.get(id);
     if (!ed || ed.revoked || ed.banned || ed.registeredAt == null) return null;
@@ -305,14 +323,38 @@ export function replay(inputEvents, options = {}) {
           if (!rc || rc.applicant !== ev.sender || !rc.pocOk) { graveyardIt(ev.pin, 'register-invalid'); break; }
           if (!payload.stake || payload.stake.amountSat < params.stakeAmountSat) { graveyardIt(ev.pin, 'stake-insufficient'); break; }
           rc.stakeOk = true; rc.registerH = h;
+          rc.registerTxIndex = ev.txIndex ?? 0; // E-4 R2: chain position for the deterministic fallback
+          rc.registerPin = ev.pin;              // E-4 R1: the register this challenge's endorse names
           const ed = editorOf(ev.sender);
           ed.registerH = h; // age counts from register pin (v0.1.2 D2 "注册起")
           break;
         }
         case 'endorse': {
           if (!isActive(ev.sender, h) || tierOf(ev.sender, h) !== 'T2') { graveyardIt(ev.pin, 'endorser-not-t2'); break; }
-          const target = [...regChallenges.values()].find((rc) => rc.applicant === applicant && rc.stakeOk);
-          // locate via registerPin when provided; the vector stream pins one register per applicant
+          // E-4 R1: the target register is named by the event's own registerPin
+          // (schema-required, v0.1 §7). Only when it is absent or does not resolve
+          // do we fall back to a deterministic total order — never to Map
+          // insertion order.
+          const declared = payload.registerPin ?? null;
+          let target = null;
+          if (declared) {
+            for (const rc of regChallenges.values()) {
+              if (rc.applicant === applicant && rc.stakeOk && rc.registerPin === declared) { target = rc; break; }
+            }
+          }
+          if (!target) {
+            // E-4 R2 fallback: earliest (registerH, registerTxIndex), then the
+            // lexicographically smallest register pin. Total order — no container
+            // iteration order.
+            for (const rc of regChallenges.values()) {
+              if (rc.applicant !== applicant || !rc.stakeOk) continue;
+              const better = target == null
+                || rc.registerH < target.registerH
+                || (rc.registerH === target.registerH && (rc.registerTxIndex ?? 0) < (target.registerTxIndex ?? 0))
+                || (rc.registerH === target.registerH && (rc.registerTxIndex ?? 0) === (target.registerTxIndex ?? 0) && rc.registerPin < target.registerPin);
+              if (better) target = rc;
+            }
+          }
           if (!target) { graveyardIt(ev.pin, 'endorse-no-register'); break; }
           if (ev.sender === applicant) { graveyardIt(ev.pin, 'self-endorse'); break; }
           const ed = editorOf(applicant);
@@ -321,7 +363,9 @@ export function replay(inputEvents, options = {}) {
           if (ed.endorsements.size === before) { graveyardIt(ev.pin, 'duplicate-endorse'); break; }
           const threshold = h < bootstrapEndH ? 4 : 2; // v0.1.2 D7.2
           if (ed.endorsements.size >= threshold && ed.registeredAt == null) {
-            ed.registeredAt = target.registerH ?? h;
+            // E-4 §四.2: aligned with the Go engine — registeredAt is the declared
+            // (or fallback-selected) register's height, unconditionally.
+            ed.registeredAt = target.registerH;
           }
           break;
         }
@@ -346,8 +390,8 @@ export function replay(inputEvents, options = {}) {
       // No registered-reviewer gate here: the registration PoC is itself a review pinned
       // by the NOT-yet-registered applicant (v0.1 §7.2), so membership enforcement
       // belongs at consumption points (featured scoring), not at record time.
-      let targetEntry = null;
-      for (const en of entries.values()) if (en.versions.has(payload.targetRev)) { targetEntry = en; break; }
+      const revKey = entryKeyOfRev(payload.targetRev);
+      const targetEntry = revKey ? entries.get(revKey) : null;
       if (!targetEntry) { graveyardIt(ev.pin, 'review-target-unresolvable'); continue; }
       if (targetEntry.versions.get(payload.targetRev).author === ev.sender) { graveyardIt(ev.pin, 'self-review'); continue; }
       const list = reviewsByTarget.get(payload.targetRev) ?? [];
@@ -361,8 +405,8 @@ export function replay(inputEvents, options = {}) {
 
     if (path === '/protocols/agentpedia/challenge') {
       const entryKey = `${payload.lang ?? ''}`;
-      let targetEntry = null; let targetKey = null;
-      for (const [k, en] of entries.entries()) if (en.versions.has(payload.targetRev)) { targetEntry = en; targetKey = k; break; }
+      const targetKey = entryKeyOfRev(payload.targetRev);
+      const targetEntry = targetKey ? entries.get(targetKey) : null;
       if (!targetEntry) { graveyardIt(ev.pin, 'challenge-target-unresolvable'); continue; }
       if (!isActive(ev.sender, h)) { graveyardIt(ev.pin, 'unregistered'); continue; }
       if (targetEntry.versions.get(payload.targetRev).author === ev.sender) { graveyardIt(ev.pin, 'self-challenge'); continue; }
