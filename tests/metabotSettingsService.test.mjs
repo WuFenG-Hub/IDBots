@@ -16,6 +16,9 @@ const {
 const {
   OPENTEAM_ALLOW_REMOTE_COLLAB_KEY,
 } = require('../dist-electron/main/services/openTeamGuestService.js');
+const {
+  COWORK_MOUNT_MCP_TOOLS_KEY,
+} = require('../dist-electron/main/services/coworkMcpToolsPreference.js');
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-metabot-settings-service-test-'));
@@ -47,9 +50,13 @@ function seedMetabot(db) {
   );
 }
 
-test('whitelist exposes exactly the OpenTeam remote-collab key', () => {
-  assert.deepEqual(RENDERER_METABOT_SETTING_KEYS, ['openteam.allowRemoteCollab']);
-  assert.equal(RENDERER_METABOT_SETTING_KEYS[0], OPENTEAM_ALLOW_REMOTE_COLLAB_KEY);
+test('whitelist exposes the OpenTeam remote-collab and cowork MCP-mount keys', () => {
+  // cowork.mountMcpTools joined the whitelist with the per-bot MCP-tools
+  // opt-in (commit 123267a9).
+  assert.deepEqual(RENDERER_METABOT_SETTING_KEYS, [
+    OPENTEAM_ALLOW_REMOTE_COLLAB_KEY,
+    COWORK_MOUNT_MCP_TOOLS_KEY,
+  ]);
 });
 
 test('renderer setting bridge rejects keys outside the whitelist', async () => {

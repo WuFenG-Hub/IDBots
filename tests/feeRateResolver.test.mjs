@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 
 const {
   getRate,
@@ -80,29 +81,18 @@ test('metaidCore createPin routes omitted feeRate through resolveCreatePinFeeRat
 
 test('every main.ts createPin call site passes an explicit feeRate option', () => {
   const source = read('src/main/main.ts');
-  // Extract each top-level `createPin(...)` call by balancing parens from the
-  // call start; word-boundary guard skips identifiers like createPinForIdentity.
+  // Parse with the real TypeScript compiler: occurrences inside comments,
+  // string literals, or template labels (e.g. the chain-write budget label)
+  // must not be mistaken for actual createPin calls.
+  const sourceFile = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true);
   const calls = [];
-  let idx = source.indexOf('createPin(');
-  while (idx !== -1) {
-    const before = idx > 0 ? source[idx - 1] : '';
-    if (!/[A-Za-z0-9_$]/.test(before)) {
-      let depth = 0;
-      let end = idx + 'createPin'.length;
-      for (; end < source.length; end += 1) {
-        const ch = source[end];
-        if (ch === '(') depth += 1;
-        else if (ch === ')') {
-          depth -= 1;
-          if (depth === 0) break;
-        }
-      }
-      calls.push(source.slice(idx, end + 1));
-      idx = source.indexOf('createPin(', end);
-    } else {
-      idx = source.indexOf('createPin(', idx + 1);
+  const walk = (node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(sourceFile) === 'createPin') {
+      calls.push(node.getText(sourceFile));
     }
-  }
+    ts.forEachChild(node, walk);
+  };
+  walk(sourceFile);
   assert.ok(calls.length > 0, 'expected to find createPin call sites in main.ts');
   const violations = calls.filter((call) => !call.includes('feeRate'));
   assert.deepEqual(violations, []);

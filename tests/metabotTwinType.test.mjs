@@ -88,7 +88,7 @@ const openStores = async (tempDir) => {
 const countTwins = (db) =>
   db.exec("SELECT COUNT(*) FROM metabots WHERE metabot_type = 'twin'")[0].values[0][0];
 
-test('updateMetabot promoting a worker to twin demotes the previous twin', async () => {
+test('updateMetabot promoting a worker to twin while a twin exists is refused', async () => {
   const tempDir = makeTempDir();
   const { store, metabotStore, db } = await openStores(tempDir);
   try {
@@ -96,10 +96,14 @@ test('updateMetabot promoting a worker to twin demotes the previous twin', async
     insertMetabot(db, { id: 1, walletId: 1, name: 'First Twin', type: 'twin', createdAt: 1000 });
     insertMetabot(db, { id: 2, walletId: 1, name: 'Worker Bot', type: 'worker', createdAt: 2000 });
 
-    metabotStore.updateMetabot(2, { metabot_type: 'twin' });
+    // Steal-by-promotion is refused: the twin seat must be vacant first.
+    assert.throws(
+      () => metabotStore.updateMetabot(2, { metabot_type: 'twin' }),
+      /TWIN_ALREADY_EXISTS/
+    );
 
-    assert.equal(metabotStore.getMetabotById(2)?.metabot_type, 'twin');
-    assert.equal(metabotStore.getMetabotById(1)?.metabot_type, 'worker');
+    assert.equal(metabotStore.getMetabotById(1)?.metabot_type, 'twin');
+    assert.equal(metabotStore.getMetabotById(2)?.metabot_type, 'worker');
     assert.equal(countTwins(db), 1);
   } finally {
     store.close();
@@ -124,7 +128,7 @@ test('createMetabot inserting a twin demotes the existing twin', async () => {
   }
 });
 
-test('worker to twin to another bot twin keeps exactly one twin', async () => {
+test('worker cannot steal the twin seat from the current twin', async () => {
   const tempDir = makeTempDir();
   const { store, metabotStore, db } = await openStores(tempDir);
   try {
@@ -136,6 +140,17 @@ test('worker to twin to another bot twin keeps exactly one twin', async () => {
     assert.equal(metabotStore.getMetabotById(1)?.metabot_type, 'twin');
     assert.equal(countTwins(db), 1);
 
+    // Direct steal-by-promotion is refused; the twin must demote itself first.
+    assert.throws(
+      () => metabotStore.updateMetabot(2, { metabot_type: 'twin' }),
+      /TWIN_ALREADY_EXISTS/
+    );
+    assert.equal(metabotStore.getMetabotById(2)?.metabot_type, 'worker');
+    assert.equal(metabotStore.getMetabotById(1)?.metabot_type, 'twin');
+    assert.equal(countTwins(db), 1);
+
+    // Legitimate handoff: current twin steps down, then the worker is promoted.
+    metabotStore.updateMetabot(1, { metabot_type: 'worker' });
     metabotStore.updateMetabot(2, { metabot_type: 'twin' });
     assert.equal(metabotStore.getMetabotById(2)?.metabot_type, 'twin');
     assert.equal(metabotStore.getMetabotById(1)?.metabot_type, 'worker');
@@ -239,7 +254,9 @@ test('migration does not re-run after the user transfers the twin manually', asy
   const migrated = await openStores(tempDir);
   try {
     assert.equal(migrated.metabotStore.getMetabotById(1)?.metabot_type, 'twin');
-    // The user then transfers the Twin role to Bot Two.
+    // The user then transfers the Twin role to Bot Two: the current twin
+    // steps down first (steal-by-promotion is refused), then Bot Two is promoted.
+    migrated.metabotStore.updateMetabot(1, { metabot_type: 'worker' });
     migrated.metabotStore.updateMetabot(2, { metabot_type: 'twin' });
     assert.equal(migrated.metabotStore.getMetabotById(2)?.metabot_type, 'twin');
     assert.equal(migrated.metabotStore.getMetabotById(1)?.metabot_type, 'worker');

@@ -218,7 +218,7 @@ test('daemon wiring: maybeSendOwnerReport also notifies the source session; rewo
     /sendReviewReportToSourceSession\?: \(input: \{\s*taskId: number;\s*report: string;\s*conclusion: string \| null;\s*\}\) => void/,
   );
   // Improvement #1: the conclusion is extracted and stamped onto the summary
-  // record BEFORE the group summary message is rendered from that record.
+  // record BEFORE any downstream surface renders from that record.
   assert.ok(
     source.includes('extractChairConclusion(report)'),
     'the 【结论】 verdict is extracted from the owner report',
@@ -227,10 +227,24 @@ test('daemon wiring: maybeSendOwnerReport also notifies the source session; rewo
     source.includes('store.updateAcceptanceSummaryConclusion(task.id, conclusion)'),
     'the conclusion is persisted onto the latest summary version',
   );
+  // Single-commander refactor (74340c1c): the host no longer renders/posts a
+  // group acceptance summary — the chair's own review message closes the
+  // thread. What must still hold: the review entry awaits the owner report
+  // (conclusion capture + source-session notice inside it), the conclusion is
+  // persisted BEFORE the notice receives it, and no host group summary post
+  // exists anymore.
   assert.ok(
-    source.indexOf('await maybeSendOwnerReport(task, members, botsById, promptMembers)')
-      < source.indexOf('buildAcceptanceSummaryMessageText(summarized, task.title)'),
-    'owner report (conclusion capture) runs before the group summary is rendered',
+    source.includes('await maybeSendOwnerReport(task, members, botsById, promptMembers)'),
+    'review entry awaits the owner report (conclusion capture + source-session notice)',
+  );
+  assert.ok(
+    source.indexOf('store.updateAcceptanceSummaryConclusion(task.id, conclusion)')
+      < source.indexOf('deps.sendReviewReportToSourceSession({ taskId: task.id, report, conclusion })'),
+    'conclusion persisted before the source-session notice receives it',
+  );
+  assert.ok(
+    !source.includes('buildAcceptanceSummaryMessageText('),
+    'single-commander: the host no longer renders a group acceptance summary post',
   );
   assert.ok(
     source.includes('clearGroupTaskReviewDeliveryGuards(deps.getStore(), task.id)'),

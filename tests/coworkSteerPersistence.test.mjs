@@ -51,6 +51,9 @@ async function createTestCoworkStore() {
       updated_at INTEGER NOT NULL
     );
   `);
+  // project_id is added by SqliteStore's migration (sqliteStore.js), which this
+  // fake DB bypasses; CoworkStore.createSession now writes it directly.
+  db.run('ALTER TABLE cowork_sessions ADD COLUMN project_id TEXT;');
   const { CoworkStore } = loadCompiledModule('../dist-electron/main/coworkStore.js');
   return {
     store: new CoworkStore(db, () => {}),

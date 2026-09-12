@@ -13,6 +13,29 @@ const {
   resetMvcSpendSessionStateForTests,
 } = await import('../dist-electron/main/services/mvcSpendSessionState.js');
 
+// buildMvcCreatePinSessionSnapshot cross-references recovered candidates against
+// the live provider via global fetch (Metalet utxo-list); stub it so recovered
+// outpoints survive the provider filter deterministically.
+const stubProviderUtxoFetch = (utxos) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    json: async () => ({
+      code: 0,
+      data: {
+        list: utxos.map((utxo) => ({
+          txid: utxo.txId,
+          outIndex: utxo.outputIndex,
+          value: utxo.satoshis,
+          height: utxo.height,
+        })),
+      },
+    }),
+  });
+  return () => {
+    globalThis.fetch = originalFetch;
+  };
+};
+
 test('buildMvcCreatePinSessionSnapshot does not recover pin funding when there are no stale exclusions', async () => {
   assert.equal(typeof buildMvcCreatePinSessionSnapshot, 'function');
   resetMvcSpendSessionStateForTests();
@@ -102,20 +125,26 @@ test('buildMvcCreatePinSessionSnapshot recovers address-history funding when loc
 
   recordMvcSpentOutpoints(metabotId, [staleOutpoint]);
 
-  const snapshot = await buildMvcCreatePinSessionSnapshot(
-    {
-      getMetabotById: () => ({ mvc_address: '1AxUdSkVdDyDreYSYVoDRFeyS1pvQdvcJx' }),
-      listRecentPinTransactionsByAddress: () => [],
-    },
-    metabotId,
-    {
-      recoverMvcAddressHistoryFundingCandidates: async (params) => {
-        assert.equal(params.address, '1AxUdSkVdDyDreYSYVoDRFeyS1pvQdvcJx');
-        assert.deepEqual(params.excludedOutpoints, [staleOutpoint]);
-        return [historyUtxo];
+  const restoreFetch = stubProviderUtxoFetch([historyUtxo]);
+  let snapshot;
+  try {
+    snapshot = await buildMvcCreatePinSessionSnapshot(
+      {
+        getMetabotById: () => ({ mvc_address: '1AxUdSkVdDyDreYSYVoDRFeyS1pvQdvcJx' }),
+        listRecentPinTransactionsByAddress: () => [],
       },
-    },
-  );
+      metabotId,
+      {
+        recoverMvcAddressHistoryFundingCandidates: async (params) => {
+          assert.equal(params.address, '1AxUdSkVdDyDreYSYVoDRFeyS1pvQdvcJx');
+          assert.deepEqual(params.excludedOutpoints, [staleOutpoint]);
+          return [historyUtxo];
+        },
+      },
+    );
+  } finally {
+    restoreFetch();
+  }
 
   assert.deepEqual(snapshot, {
     excludeOutpoints: [staleOutpoint],
@@ -326,7 +355,10 @@ test('runMvcCreatePinWorkerWithSessionRecovery reports terminal stale funding wh
     }),
     (error) => {
       assert.match(error.message, /所有已知 MVC 手续费输入都已失效/);
-      assert.deepEqual(error.staleOutpoints, [providerStaleOutpoint, recoveredStaleOutpoint]);
+      // Terminal failure resets the session exclusions (29ab7710), so the
+      // error carries no stale outpoints and the session snapshot is cleared.
+      assert.deepEqual(error.staleOutpoints, []);
+      assert.deepEqual(getMvcSpendSessionSnapshot(metabotId).excludeOutpoints, []);
       return true;
     },
   );
