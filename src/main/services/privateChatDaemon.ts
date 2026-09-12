@@ -17,6 +17,7 @@ import {
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import type { CoworkRunner } from '../libs/coworkRunner';
+import { isDshShutdownError } from '../libs/dshShutdownError';
 import { PrivateChatOrderCowork, type OrderCoworkRequest } from './privateChatOrderCowork';
 import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
 import { buildOrderPrompts } from './orderPromptBuilder';
@@ -4814,6 +4815,13 @@ async function processOne(
       } catch (e) {
         rethrowSqliteWasmBoundsError(e);
         const errorMessage = e instanceof Error ? e.message : String(e);
+        if (isDshShutdownError(e)) {
+          // App/host shutdown closed the DSH runtime mid-turn. Leave the row
+          // UNPROCESSED and do not burn a retry attempt: the daemon picks the
+          // message up again after the next boot and answers it for real.
+          emitLog(`[PrivateChat] Message ${row.id} aborted: DSH runtime is shutting down; will retry after restart.`);
+          return;
+        }
         if (guidanceTurn.abortController.signal.aborted) {
           emitLog(`[PrivateChat] Restarting message ${row.id} so queued A2A guidance can be applied before assistant output.`);
           return;

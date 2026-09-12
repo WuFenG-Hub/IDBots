@@ -12,6 +12,7 @@ import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
+import { isDshShutdownError } from '../libs/dshShutdownError';
 import {
   buildNeedsRatingMessage,
   buildOrderStatusMessage,
@@ -215,6 +216,12 @@ export class PrivateChatOrderCowork extends EventEmitter {
     });
     this.setAccumulatorRunPromise(sessionId, startPromise);
     startPromise.catch((error) => {
+      if (isDshShutdownError(error)) {
+        // App shutdown aborted the run: do not fail the paid order — the
+        // next boot's order recovery re-drives or times it out honestly.
+        console.log(`[OrderCowork] Session ${sessionId} aborted: DSH runtime is shutting down.`);
+        return;
+      }
       this.rejectAccumulator(sessionId, error instanceof Error ? error : new Error(String(error)));
     });
 
@@ -671,6 +678,10 @@ export class PrivateChatOrderCowork extends EventEmitter {
       }
       accumulator.activeRunPromise = continuationPromise;
       continuationPromise.catch((error) => {
+        if (isDshShutdownError(error)) {
+          console.log(`[OrderCowork] Continuation for session ${sessionId} aborted: DSH runtime is shutting down.`);
+          return;
+        }
         this.rejectAccumulator(sessionId, error instanceof Error ? error : new Error(String(error)));
       });
     };

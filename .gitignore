@@ -412,3 +412,4 @@ man_base_data_pebble/
 /.idbots-extract/
 /output/
 !tests/privateChatCompletedTurnPickup.test.mjs
+!tests/dshShutdownSoftFail.test.mjs

@@ -11,6 +11,7 @@ import type { CoworkRunner, PermissionRequest } from '../libs/coworkRunner';
 import type { CoworkStore, CoworkMessage } from '../coworkStore';
 import type { IMStore } from './imStore';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
+import { isDshShutdownError } from '../libs/dshShutdownError';
 import type { IMMessage, IMPlatform, IMMediaAttachment } from './types';
 import { tApp } from '../libs/appLanguage';
 
@@ -172,6 +173,12 @@ export class IMCoworkHandler extends EventEmitter {
     }, null, 2));
 
     const onSessionStartError = (error: unknown) => {
+      if (isDshShutdownError(error)) {
+        // App shutdown aborted the turn: do not push a spurious error reply
+        // into the IM conversation — the next boot re-drives the message.
+        console.log(`[IMCoworkHandler] Session ${coworkSessionId} aborted: DSH runtime is shutting down.`);
+        return;
+      }
       this.rejectAccumulator(
         coworkSessionId,
         error instanceof Error ? error : new Error(String(error))

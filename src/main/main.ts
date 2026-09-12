@@ -15152,6 +15152,13 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
           coworkRunner.stopAllSessions('app shutdown');
         }
       },
+      // No waitForTick: an in-flight skill turn can run for tens of minutes;
+      // quit must not block on it. The generation bump stops new ticks and
+      // new rows immediately, and the in-flight turn fails soft
+      // (DshShutdownError) once closeDshRuntime runs.
+      stopPrivateChatDaemon: () => stopPrivateChatDaemon(),
+      stopGroupTaskDaemon,
+      stopOpenTeamGuestDaemon,
       closeDshRuntime: async () => {
         if (coworkRunner) {
           console.log('[Main] Closing DSH runtime...');
@@ -15316,6 +15323,15 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       console.log(`[Main] Reset ${resetCount} stuck cowork session(s) from running -> idle`);
     }
     startupLog(`reset running sessions done (count=${resetCount})`);
+
+    // Heal A2A conversations parked on 'error' solely by a shutdown abort
+    // (latest transcript message is the DSH shutdown marker). Runs before the
+    // private-chat daemon restarts so the UI never shows the stale banner.
+    const healedShutdownErrors = getCoworkStore().healDshShutdownA2AErrorSessions();
+    if (healedShutdownErrors > 0) {
+      console.log(`[Main] Healed ${healedShutdownErrors} A2A session(s) left in error by a DSH shutdown abort`);
+    }
+    startupLog(`heal dsh shutdown a2a errors done (count=${healedShutdownErrors})`);
 
     // Inject store getter into claudeSettings
     startupLog('setStoreGetter begin');
