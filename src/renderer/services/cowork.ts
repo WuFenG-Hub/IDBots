@@ -242,6 +242,13 @@ class CoworkService {
     });
     this.streamListenerCleanups.push(permissionCleanup);
 
+    // Permission resolution listener: requests finalized on any path (text
+    // relay, watchdog timeout, auto-allow, abort) leave no stale overlay.
+    const permissionResolvedCleanup = cowork.onStreamPermissionResolved(({ requestId }) => {
+      store.dispatch(dequeuePendingPermission({ requestId }));
+    });
+    this.streamListenerCleanups.push(permissionResolvedCleanup);
+
     // Complete listener
     const completeCleanup = cowork.onStreamComplete(({ sessionId }) => {
       store.dispatch(updateSessionStatus({ sessionId, status: 'completed' }));

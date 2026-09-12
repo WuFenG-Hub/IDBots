@@ -6895,6 +6895,7 @@ export class CoworkRunner extends EventEmitter {
       if (activeSession) {
         activeSession.pendingPermission = null;
       }
+      this.emit('permissionResolved', sandboxPermission.sessionId, requestId);
       return;
     }
 
@@ -8222,6 +8223,10 @@ export class CoworkRunner extends EventEmitter {
                   clearTimeout(askTimeout);
                   askTimeout = null;
                 }
+                // Mirror waitForPermissionResponse's permissionResolved
+                // broadcast so the renderer queue never keeps a stale entry
+                // for an ask answered outside its own respond call.
+                this.emit('permissionResolved', sessionId, ask.id);
                 if (result.behavior !== 'allow') {
                   void hub.respondAsk(ask.id, (ask.questions ?? []).map((q) => ({
                     id: q.id,
@@ -8262,6 +8267,7 @@ export class CoworkRunner extends EventEmitter {
               if (activeSession.pendingPermission?.requestId === ask.id) {
                 activeSession.pendingPermission = null;
               }
+              this.emit('permissionResolved', sessionId, ask.id);
               const timeoutAnswers = (ask.questions ?? []).map((q) => {
                 const recommended = pickRecommendedOptionLabel(q.options);
                 return recommended
@@ -8780,22 +8786,32 @@ export class CoworkRunner extends EventEmitter {
     if (policy.decision === 'deny') return { ok: false, error: policy.reason ?? 'denied by permission policy' }
     if (policy.decision === 'ask') {
       // Surface the confirmation through the same pendingPermissions dialog
-      // the renderer already knows.
+      // the renderer already knows — and route it through the shared 60s
+      // watchdog, so an unanswered ask auto-denies instead of wedging the
+      // session forever (the stall watchdog re-arms through pendingPermission,
+      // so the bare pendingPermissions.set this replaces made the hang
+      // permanent).
+      const activeSession = this.activeSessions.get(coworkSessionId)
       const request: PermissionRequest = {
         requestId: `dsh-policy-${Date.now().toString(36)}`,
         toolName: name,
         toolInput: { reason: policy.reason ?? '' },
       }
-      const approved = await new Promise<boolean>((resolve) => {
-        this.pendingPermissions.set(request.requestId, {
-          sessionId: coworkSessionId,
-          resolve: (result) => resolve(result.behavior === 'allow'),
-        })
-        const activeSession = this.activeSessions.get(coworkSessionId)
-        if (activeSession) activeSession.pendingPermission = request
-        this.emit('permissionRequest', coworkSessionId, request)
-      })
-      if (!approved) return { ok: false, error: 'Delete operation denied by user.' }
+      if (activeSession) activeSession.pendingPermission = request
+      // waitForPermissionResponse registers requestId synchronously in its
+      // executor — construct it before emitting so an instant reply cannot
+      // arrive ahead of the registration.
+      const resultPromise = this.waitForPermissionResponse(
+        coworkSessionId,
+        request.requestId,
+        activeSession?.abortController.signal
+      )
+      this.emit('permissionRequest', coworkSessionId, request)
+      const result = await resultPromise
+      if (activeSession) activeSession.pendingPermission = null
+      if (result.behavior !== 'allow') {
+        return { ok: false, error: result.message ?? 'Delete operation denied by user.' }
+      }
     }
     try {
       const result = await tool.execute(args)
@@ -12007,6 +12023,12 @@ export class CoworkRunner extends EventEmitter {
           signal.removeEventListener('abort', abortHandler);
         }
         this.pendingPermissions.delete(requestId);
+        // Let every listener (renderer queue, relays) drop their copy of the
+        // prompt regardless of which path answered it — renderer reply, text
+        // relay, auto-allow, the 60s watchdog, or an abort. Without this the
+        // renderer's pendingPermissions keeps a stale entry whose overlay can
+        // never be answered or dismissed.
+        this.emit('permissionResolved', sessionId, requestId);
         resolve(result);
       };
 
@@ -12041,6 +12063,7 @@ export class CoworkRunner extends EventEmitter {
     for (const [requestId, pending] of this.sandboxPermissions.entries()) {
       if (pending.sessionId === sessionId) {
         this.sandboxPermissions.delete(requestId);
+        this.emit('permissionResolved', sessionId, requestId);
       }
     }
   }

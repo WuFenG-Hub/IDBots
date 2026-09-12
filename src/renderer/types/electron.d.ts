@@ -1314,6 +1314,7 @@ interface IElectronAPI {
     onStreamMessage: (callback: (data: { sessionId: string; message: CoworkMessage }) => void) => () => void;
     onStreamMessageUpdate: (callback: (data: { sessionId: string; messageId: string; content?: string; metadata?: CoworkMessage['metadata'] }) => void) => () => void;
     onStreamPermission: (callback: (data: { sessionId: string; request: CoworkPermissionRequest }) => void) => () => void;
+    onStreamPermissionResolved: (callback: (data: { sessionId: string; requestId: string }) => void) => () => void;
     onStreamComplete: (callback: (data: { sessionId: string; claudeSessionId: string | null }) => void) => () => void;
     onStreamError: (callback: (data: { sessionId: string; error: string }) => void) => () => void;
     onStreamSessionTitle: (callback: (data: { sessionId: string; title: string }) => void) => () => void;

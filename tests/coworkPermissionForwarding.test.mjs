@@ -49,6 +49,26 @@ test('permissionRequest forwarding ignores session-list visibility', () => {
   assert.match(handler, /webContents\.send\('cowork:stream:permission', \{ sessionId, request: safeRequest \}/);
 });
 
+/**
+ * The renderer's pendingPermissions queue only dequeues on its own respond
+ * call, so a prompt finalized main-side (text relay, 60s watchdog, auto-allow,
+ * abort, session stop) used to leave a stale entry the global overlay rendered
+ * forever. The permissionResolved bridge is what clears those copies.
+ */
+test('permissionResolved forwarding reaches every window', () => {
+  const source = read('src/main/main.ts');
+  const handler = extractRunnerHandler(source, 'permissionResolved');
+
+  assert.match(handler, /webContents\.send\('cowork:stream:permissionResolved', \{ sessionId, requestId \}/);
+  // Resolved events must not be gated on session-list visibility either —
+  // a hidden session's stale prompt needs clearing just the same.
+  assert.equal(
+    /shouldForwardCoworkStreamEvent/.test(handler),
+    false,
+    'permissionResolved handler must not gate on session-list visibility',
+  );
+});
+
 test('stream events keep their session-visibility gate (only permissions are exempt)', () => {
   const source = read('src/main/main.ts');
 
