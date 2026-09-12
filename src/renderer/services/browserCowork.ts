@@ -2,8 +2,8 @@ import { store } from '../store';
 import {
   setBrowserSession,
   setBrowserStreaming,
-  clearBrowserSession,
 } from '../store/slices/browserCoworkSlice';
+import { setBrowserOpenSessionId } from '../store/slices/coworkSlice';
 import { coworkService } from './cowork';
 import type { CoworkSession } from '../types/cowork';
 
@@ -31,6 +31,17 @@ export interface BrowserCoworkSkills {
 
 class BrowserCoworkService {
   private starting = false;
+
+  /**
+   * Every transition of the panel's open session goes through here so the
+   * browserCowork pointer and the shared unread bookkeeping (coworkSlice)
+   * never drift apart: opening a browser conversation clears its notification
+   * dot and live turns while it stays open do not re-mark it unread.
+   */
+  private applySession(session: CoworkSession | null): void {
+    store.dispatch(setBrowserSession(session));
+    store.dispatch(setBrowserOpenSessionId(session?.id ?? null));
+  }
 
   private async buildCombinedSystemPrompt(skillPrompt?: string): Promise<string | undefined> {
     const config = store.getState().cowork.config;
@@ -82,7 +93,7 @@ class BrowserCoworkService {
         ...(modelEffort && modelEffort.effort !== undefined ? { effort: modelEffort.effort } : {}),
       });
       if (result?.success && result.session) {
-        store.dispatch(setBrowserSession(result.session));
+        this.applySession(result.session);
         // Refresh the shared session list so the panel history sees the new session.
         await coworkService.loadSessions();
         return result.session;
@@ -124,19 +135,19 @@ class BrowserCoworkService {
   async loadSession(sessionId: string): Promise<void> {
     const result = await window.electron?.cowork?.getSession(sessionId);
     if (result?.success && result.session) {
-      store.dispatch(setBrowserSession(result.session));
+      this.applySession(result.session);
     }
   }
 
   async archiveSession(sessionId: string): Promise<void> {
     await coworkService.archiveSession(sessionId);
     if (store.getState().browserCowork.currentSession?.id === sessionId) {
-      store.dispatch(clearBrowserSession());
+      this.applySession(null);
     }
   }
 
   startNewDraft(): void {
-    store.dispatch(clearBrowserSession());
+    this.applySession(null);
   }
 }
 

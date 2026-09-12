@@ -32,6 +32,14 @@ interface CoworkState {
    */
   sessionDrafts: Record<string, { value: string; attachments: Array<{ path: string; name: string }> }>;
   unreadSessionIds: string[];
+  /**
+   * Session currently open in the Bot Browser co-work panel (mirror of
+   * browserCowork.currentSession.id). The unread bookkeeping treats it like
+   * currentSessionId: opening the session there clears its notification dot,
+   * and live messages while it stays open never re-mark it unread — the same
+   * semantics the home view already gives standard cowork sessions.
+   */
+  browserOpenSessionId: string | null;
   isCoworkActive: boolean;
   isStreaming: boolean;
   pendingPermissions: CoworkPermissionRequest[];
@@ -53,6 +61,7 @@ const initialState: CoworkState = {
   draftPrompt: '',
   sessionDrafts: {},
   unreadSessionIds: [],
+  browserOpenSessionId: null,
   isCoworkActive: false,
   isStreaming: false,
   pendingPermissions: [],
@@ -80,6 +89,7 @@ const markSessionRead = (state: CoworkState, sessionId: string | null) => {
 
 const markSessionUnread = (state: CoworkState, sessionId: string) => {
   if (state.currentSessionId === sessionId) return;
+  if (state.browserOpenSessionId === sessionId) return;
   if (state.unreadSessionIds.includes(sessionId)) return;
   state.unreadSessionIds.push(sessionId);
 };
@@ -92,12 +102,29 @@ const coworkSlice = createSlice({
       state.isCoworkActive = action.payload;
     },
 
+    /**
+     * Mirror the Bot Browser panel's current-session pointer (dispatched by
+     * browserCoworkService alongside its own setBrowserSession /
+     * clearBrowserSession). Setting it marks that session read immediately —
+     * clicking a browser conversation in the home history must clear its
+     * notification dot, exactly like opening a standard cowork session does.
+     */
+    setBrowserOpenSessionId(state, action: PayloadAction<string | null>) {
+      state.browserOpenSessionId = action.payload;
+      markSessionRead(state, action.payload);
+    },
+
     setSessions(state, action: PayloadAction<CoworkSessionSummary[]>) {
       state.sessions = action.payload;
       const validSessionIds = new Set(action.payload.map((session) => session.id));
       state.unreadSessionIds = state.unreadSessionIds.filter((id) => {
         return validSessionIds.has(id) && id !== state.currentSessionId;
       });
+      // A session gone from the full list (archived) can no longer be the
+      // browser panel's open conversation.
+      if (state.browserOpenSessionId && !validSessionIds.has(state.browserOpenSessionId)) {
+        state.browserOpenSessionId = null;
+      }
     },
 
     setCurrentSessionId(state, action: PayloadAction<string | null>) {
@@ -239,6 +266,9 @@ const coworkSlice = createSlice({
       const sessionId = action.payload;
       state.sessions = state.sessions.filter(s => s.id !== sessionId);
       state.unreadSessionIds = state.unreadSessionIds.filter((id) => id !== sessionId);
+      if (state.browserOpenSessionId === sessionId) {
+        state.browserOpenSessionId = null;
+      }
       // A deleted session can never be reopened, so its composer draft is gone too.
       delete state.sessionDrafts[sessionId];
 
@@ -457,6 +487,7 @@ const coworkSlice = createSlice({
 
 export const {
   setCoworkActive,
+  setBrowserOpenSessionId,
   setSessions,
   setCurrentSessionId,
   setCurrentSession,
