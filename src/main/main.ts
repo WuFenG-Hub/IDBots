@@ -267,6 +267,7 @@ import {
   OrchestratorSummarizerProvider,
 } from './services/contentSummaryService';
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
+import { MetawebSurfStore } from './metawebSurfStore';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
 import { SleepGuard, evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, type SleepGuardSource, type SleepGuardState } from './sleepGuard';
@@ -2669,6 +2670,7 @@ let teamCultureStore: TeamCultureStore | null = null;
 let knowledgeBaseStore: KnowledgeBaseStore | null = null;
 let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
+let metawebSurfStore: MetawebSurfStore | null = null;
 let metawebStudyService: MetawebStudyService | null = null;
 let chainContentHistoryStore: ChainContentHistoryStore | null = null;
 let contentSummaryService: ContentSummaryService | null = null;
@@ -3133,6 +3135,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   knowledgeBaseStore = null;
   knowledgeBaseService = null;
   metawebStudyJobStore = null;
+  metawebSurfStore = null;
   metawebStudyService = null;
   chainContentHistoryStore = null;
   setChainContentHistoryStore(null);
@@ -6867,6 +6870,17 @@ const getMetawebStudyJobStore = (): MetawebStudyJobStore => {
     );
   }
   return metawebStudyJobStore;
+};
+
+const getMetawebSurfStore = (): MetawebSurfStore => {
+  if (!metawebSurfStore) {
+    const sqliteStore = getStore();
+    metawebSurfStore = new MetawebSurfStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return metawebSurfStore;
 };
 
 /**
@@ -11765,6 +11779,38 @@ if (!gotTheLock) {
         return { success: false, error: error instanceof Error ? error.message : 'Failed to list study jobs' };
       }
     }));
+
+  // ==================== MetaWeb Surf IPC Handlers ====================
+
+  ipcMain.handle('surf:listRuns', async (_event, metabotId: number, limit?: number) =>
+    withSqliteRecovery('surf:listRuns', async () => {
+      try {
+        const runs = getMetawebSurfStore().listRunsByMetabot(Number(metabotId), limit);
+        return { success: true, runs };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to list surf runs' };
+      }
+    }));
+
+  ipcMain.handle('surf:getRun', async (_event, runId: string) =>
+    withSqliteRecovery('surf:getRun', async () => {
+      try {
+        const run = getMetawebSurfStore().getRun(String(runId || ''));
+        if (!run) return { success: false, error: 'Surf run not found' };
+        return { success: true, run };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to load surf run' };
+      }
+    }));
+
+  // Engine lands with the SurfService phase; the surface is stable already so
+  // the renderer can be wired against it.
+  ipcMain.handle('surf:runNow', async () => ({
+    success: false,
+    error: 'MetaWeb surf engine is not available yet',
+  }));
 
   ipcMain.handle('metabot:checkNameExists', async (_event, options: { name: string; excludeId?: number }) => {
     try {

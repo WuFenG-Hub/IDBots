@@ -1,0 +1,469 @@
+import type { SqliteDatabase as Database } from './sqliteTypes';
+
+/**
+ * MetaWeb surf ("AI 冲浪") persistence — three tables behind the autonomous
+ * surf loop:
+ *
+ * - `metaweb_surf_runs`: one row per surf run, including the structured surf
+ *   report shown in the UI (like dream records) and fed into the same night's
+ *   dream prompt. This table is run history only; learned content lives in the
+ *   bot's knowledge bases / MetaID knowledge store, never duplicated here.
+ * - `metaweb_surf_protocol_state`: per-bot per-protocol watermark
+ *   (last-seen chain timestamp + pin id) so each surf fetches only content
+ *   published after the previous surf.
+ * - `metaweb_surf_seen_pins`: per-bot seen-pin ledger with the strongest
+ *   action taken so far — briefing de-dup and the "never interact with the
+ *   same pin twice" rule both read from here.
+ */
+
+export type MetawebSurfTrigger = 'manual-chat' | 'manual-ui' | 'pre-dream';
+export type MetawebSurfRunStatus = 'running' | 'done' | 'failed';
+
+/**
+ * Strongest action the bot has taken on a seen pin, ranked: briefing-only
+ * actions first, then read/save, then chain-writing interactions. A later
+ * markSeen with a lower rank must not downgrade the recorded action.
+ */
+export type MetawebSurfSeenAction =
+  | 'presented'
+  | 'skipped'
+  | 'read'
+  | 'saved'
+  | 'liked'
+  | 'commented'
+  | 'answered'
+  | 'posted'
+  | 'challenged';
+
+const SEEN_ACTION_RANK: Record<MetawebSurfSeenAction, number> = {
+  presented: 0,
+  skipped: 1,
+  read: 2,
+  saved: 3,
+  liked: 4,
+  commented: 5,
+  answered: 6,
+  posted: 7,
+  challenged: 8,
+};
+
+export const SURF_SEEN_RETENTION_DAYS = 90;
+export const SURF_SEEN_MAX_ROWS_PER_BOT = 5000;
+/** A run row keeps at most this many characters of rendered report. */
+const MAX_REPORT_MARKDOWN_CHARS = 20000;
+const MAX_REPORT_JSON_CHARS = 40000;
+
+export interface MetawebSurfRunStats {
+  fetched: number;
+  deepRead: number;
+  savedToKb: number;
+  knowledgePoints: number;
+  liked: number;
+  commented: number;
+  answered: number;
+  posted: number;
+  challenged: number;
+  inboxHandled: number;
+  discoveredProtocols: number;
+}
+
+export const emptySurfRunStats = (): MetawebSurfRunStats => ({
+  fetched: 0,
+  deepRead: 0,
+  savedToKb: 0,
+  knowledgePoints: 0,
+  liked: 0,
+  commented: 0,
+  answered: 0,
+  posted: 0,
+  challenged: 0,
+  inboxHandled: 0,
+  discoveredProtocols: 0,
+});
+
+export interface MetawebSurfRunRecord {
+  id: string;
+  metabotId: number;
+  trigger: MetawebSurfTrigger;
+  status: MetawebSurfRunStatus;
+  stats: MetawebSurfRunStats;
+  reportMarkdown: string | null;
+  reportJson: string | null;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MetawebSurfProtocolState {
+  metabotId: number;
+  protocolKey: string;
+  /** Unix seconds of the newest chain item seen last run; null = never surfed. */
+  lastSeenTs: number | null;
+  lastPinId: string | null;
+  updatedAt: string;
+}
+
+interface MetawebSurfRunRow {
+  id: string;
+  metabot_id: number;
+  trigger: string;
+  status: MetawebSurfRunStatus;
+  stats_json: string;
+  report_markdown: string | null;
+  report_json: string | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MetawebSurfProtocolStateRow {
+  metabot_id: number;
+  protocol_key: string;
+  last_seen_ts: number | null;
+  last_pin_id: string | null;
+  updated_at: string;
+}
+
+const parseStats = (raw: string | null): MetawebSurfRunStats => {
+  const empty = emptySurfRunStats();
+  if (!raw) return empty;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return empty;
+    const out = emptySurfRunStats();
+    for (const key of Object.keys(out) as Array<keyof MetawebSurfRunStats>) {
+      const value = Number((parsed as Record<string, unknown>)[key]);
+      if (Number.isFinite(value) && value >= 0) out[key] = Math.floor(value);
+    }
+    return out;
+  } catch {
+    return empty;
+  }
+};
+
+const rowToRunRecord = (row: MetawebSurfRunRow): MetawebSurfRunRecord => ({
+  id: row.id,
+  metabotId: row.metabot_id,
+  trigger: (['manual-chat', 'manual-ui', 'pre-dream'] as const).includes(row.trigger as MetawebSurfTrigger)
+    ? (row.trigger as MetawebSurfTrigger)
+    : 'manual-ui',
+  status: row.status,
+  stats: parseStats(row.stats_json),
+  reportMarkdown: row.report_markdown || null,
+  reportJson: row.report_json || null,
+  error: row.error || null,
+  startedAt: row.started_at,
+  finishedAt: row.finished_at || null,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const rowToProtocolState = (row: MetawebSurfProtocolStateRow): MetawebSurfProtocolState => ({
+  metabotId: row.metabot_id,
+  protocolKey: row.protocol_key,
+  lastSeenTs: row.last_seen_ts === null || row.last_seen_ts === undefined ? null : Number(row.last_seen_ts),
+  lastPinId: row.last_pin_id || null,
+  updatedAt: row.updated_at,
+});
+
+/** Create the surf tables without changing existing user data. */
+export function ensureMetawebSurfSchema(db: Database): void {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS metaweb_surf_runs (
+      id TEXT PRIMARY KEY,
+      metabot_id INTEGER NOT NULL,
+      trigger TEXT NOT NULL DEFAULT 'manual-ui'
+        CHECK (trigger IN ('manual-chat', 'manual-ui', 'pre-dream')),
+      status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'done', 'failed')),
+      stats_json TEXT NOT NULL DEFAULT '{}',
+      report_markdown TEXT,
+      report_json TEXT,
+      error TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_metaweb_surf_runs_metabot
+      ON metaweb_surf_runs(metabot_id, created_at DESC);
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS metaweb_surf_protocol_state (
+      metabot_id INTEGER NOT NULL,
+      protocol_key TEXT NOT NULL,
+      last_seen_ts INTEGER,
+      last_pin_id TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (metabot_id, protocol_key)
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS metaweb_surf_seen_pins (
+      metabot_id INTEGER NOT NULL,
+      pin_id TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      action TEXT NOT NULL DEFAULT 'presented'
+        CHECK (action IN ('presented', 'skipped', 'read', 'saved',
+                          'liked', 'commented', 'answered', 'posted', 'challenged')),
+      PRIMARY KEY (metabot_id, pin_id)
+    );
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_metaweb_surf_seen_pins_first_seen
+      ON metaweb_surf_seen_pins(metabot_id, first_seen_at);
+  `);
+}
+
+export class MetawebSurfStore {
+  constructor(
+    private readonly db: Database,
+    private readonly saveDb: () => void,
+  ) {
+    ensureMetawebSurfSchema(db);
+  }
+
+  private getOne<T>(sql: string, params: unknown[] = []): T | null {
+    const result = this.db.exec(sql, params);
+    const columns = result[0]?.columns ?? [];
+    const values = result[0]?.values?.[0];
+    if (!values) return null;
+    return Object.fromEntries(columns.map((column, index) => [column, values[index]])) as T;
+  }
+
+  private getAll<T>(sql: string, params: unknown[] = []): T[] {
+    const result = this.db.exec(sql, params);
+    const columns = result[0]?.columns ?? [];
+    return (result[0]?.values ?? []).map((values) =>
+      Object.fromEntries(columns.map((column, index) => [column, values[index]])) as T
+    );
+  }
+
+  // ---------------- runs ----------------
+
+  createRun(input: {
+    id: string;
+    metabotId: number;
+    trigger: MetawebSurfTrigger;
+    nowIso: string;
+  }): MetawebSurfRunRecord {
+    this.db.run(
+      `INSERT INTO metaweb_surf_runs
+        (id, metabot_id, trigger, status, stats_json, started_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'running', '{}', ?, ?, ?)`,
+      [input.id, input.metabotId, input.trigger, input.nowIso, input.nowIso, input.nowIso],
+    );
+    this.saveDb();
+    const created = this.getRun(input.id);
+    if (!created) throw new Error('Failed to create surf run');
+    return created;
+  }
+
+  finishRun(
+    id: string,
+    outcome: {
+      status: Exclude<MetawebSurfRunStatus, 'running'>;
+      stats: MetawebSurfRunStats;
+      reportMarkdown?: string | null;
+      reportJson?: string | null;
+      error?: string | null;
+      finishedAtIso: string;
+    },
+  ): void {
+    this.db.run(
+      `UPDATE metaweb_surf_runs
+       SET status = ?, stats_json = ?, report_markdown = ?, report_json = ?,
+           error = ?, finished_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        outcome.status,
+        JSON.stringify(outcome.stats),
+        outcome.reportMarkdown ? outcome.reportMarkdown.slice(0, MAX_REPORT_MARKDOWN_CHARS) : null,
+        outcome.reportJson ? outcome.reportJson.slice(0, MAX_REPORT_JSON_CHARS) : null,
+        outcome.error ?? null,
+        outcome.finishedAtIso,
+        outcome.finishedAtIso,
+        id,
+      ],
+    );
+    this.saveDb();
+  }
+
+  getRun(id: string): MetawebSurfRunRecord | null {
+    const row = this.getOne<MetawebSurfRunRow>(
+      'SELECT * FROM metaweb_surf_runs WHERE id = ? LIMIT 1',
+      [id],
+    );
+    return row ? rowToRunRecord(row) : null;
+  }
+
+  /** Newest first, for the UI report list. */
+  listRunsByMetabot(metabotId: number, limit = 50): MetawebSurfRunRecord[] {
+    const capped = Math.max(1, Math.min(200, Math.floor(limit) || 50));
+    return this.getAll<MetawebSurfRunRow>(
+      'SELECT * FROM metaweb_surf_runs WHERE metabot_id = ? ORDER BY created_at DESC LIMIT ?',
+      [metabotId, capped],
+    ).map(rowToRunRecord);
+  }
+
+  /** Latest finished run regardless of trigger — the "surfed within 20h" check. */
+  getLatestFinishedRun(metabotId: number): MetawebSurfRunRecord | null {
+    const row = this.getOne<MetawebSurfRunRow>(
+      `SELECT * FROM metaweb_surf_runs
+       WHERE metabot_id = ? AND status = 'done'
+       ORDER BY finished_at DESC LIMIT 1`,
+      [metabotId],
+    );
+    return row ? rowToRunRecord(row) : null;
+  }
+
+  /**
+   * Crash recovery: runs left 'running' by a killed process become failed —
+   * a surf run has no queue to rejoin, the next trigger starts a fresh one.
+   */
+  failStaleRunningRuns(input: { error: string; nowIso: string; excludeId?: string }): number {
+    if (input.excludeId) {
+      this.db.run(
+        `UPDATE metaweb_surf_runs
+         SET status = 'failed', error = ?, finished_at = ?, updated_at = ?
+         WHERE status = 'running' AND id <> ?`,
+        [input.error, input.nowIso, input.nowIso, input.excludeId],
+      );
+    } else {
+      this.db.run(
+        `UPDATE metaweb_surf_runs
+         SET status = 'failed', error = ?, finished_at = ?, updated_at = ?
+         WHERE status = 'running'`,
+        [input.error, input.nowIso, input.nowIso],
+      );
+    }
+    this.saveDb();
+    return this.db.getRowsModified?.() ?? 0;
+  }
+
+  // ---------------- protocol watermarks ----------------
+
+  getProtocolState(metabotId: number, protocolKey: string): MetawebSurfProtocolState | null {
+    const row = this.getOne<MetawebSurfProtocolStateRow>(
+      'SELECT * FROM metaweb_surf_protocol_state WHERE metabot_id = ? AND protocol_key = ? LIMIT 1',
+      [metabotId, protocolKey],
+    );
+    return row ? rowToProtocolState(row) : null;
+  }
+
+  listProtocolStates(metabotId: number): MetawebSurfProtocolState[] {
+    return this.getAll<MetawebSurfProtocolStateRow>(
+      'SELECT * FROM metaweb_surf_protocol_state WHERE metabot_id = ? ORDER BY protocol_key ASC',
+      [metabotId],
+    ).map(rowToProtocolState);
+  }
+
+  /** Advance the watermark after a successful run; never rewinds. */
+  advanceProtocolState(
+    metabotId: number,
+    protocolKey: string,
+    input: { lastSeenTs: number; lastPinId: string | null; nowIso: string },
+  ): void {
+    const existing = this.getProtocolState(metabotId, protocolKey);
+    const nextTs = existing?.lastSeenTs != null
+      ? Math.max(existing.lastSeenTs, Math.floor(input.lastSeenTs))
+      : Math.floor(input.lastSeenTs);
+    this.db.run(
+      `INSERT INTO metaweb_surf_protocol_state
+        (metabot_id, protocol_key, last_seen_ts, last_pin_id, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (metabot_id, protocol_key)
+       DO UPDATE SET last_seen_ts = excluded.last_seen_ts,
+                     last_pin_id = excluded.last_pin_id,
+                     updated_at = excluded.updated_at`,
+      [metabotId, protocolKey, nextTs, input.lastPinId, input.nowIso],
+    );
+    this.saveDb();
+  }
+
+  // ---------------- seen-pin ledger ----------------
+
+  getSeenAction(metabotId: number, pinId: string): MetawebSurfSeenAction | null {
+    const row = this.getOne<{ action: MetawebSurfSeenAction }>(
+      'SELECT action FROM metaweb_surf_seen_pins WHERE metabot_id = ? AND pin_id = ? LIMIT 1',
+      [metabotId, pinId],
+    );
+    return row?.action ?? null;
+  }
+
+  /**
+   * Record that the bot saw a pin, upgrading to the strongest action so far.
+   * first_seen_at stays at the original sighting.
+   */
+  markSeen(metabotId: number, pinId: string, action: MetawebSurfSeenAction, nowIso: string): void {
+    const normalizedPinId = String(pinId || '').trim();
+    if (!normalizedPinId) return;
+    const existing = this.getSeenAction(metabotId, normalizedPinId);
+    if (!existing) {
+      this.db.run(
+        `INSERT INTO metaweb_surf_seen_pins (metabot_id, pin_id, first_seen_at, action)
+         VALUES (?, ?, ?, ?)`,
+        [metabotId, normalizedPinId, nowIso, action],
+      );
+      this.saveDb();
+      return;
+    }
+    if (SEEN_ACTION_RANK[action] > SEEN_ACTION_RANK[existing]) {
+      this.db.run(
+        'UPDATE metaweb_surf_seen_pins SET action = ? WHERE metabot_id = ? AND pin_id = ?',
+        [action, metabotId, normalizedPinId],
+      );
+      this.saveDb();
+    }
+  }
+
+  /** Return the subset of candidate pin ids the bot has never seen. */
+  filterUnseen(metabotId: number, pinIds: string[]): string[] {
+    const candidates = pinIds.map((id) => String(id || '').trim()).filter(Boolean);
+    if (candidates.length === 0) return [];
+    const placeholders = candidates.map(() => '?').join(', ');
+    const seenRows = this.getAll<{ pin_id: string }>(
+      `SELECT pin_id FROM metaweb_surf_seen_pins
+       WHERE metabot_id = ? AND pin_id IN (${placeholders})`,
+      [metabotId, ...candidates],
+    );
+    const seen = new Set(seenRows.map((row) => row.pin_id));
+    return candidates.filter((id) => !seen.has(id));
+  }
+
+  /**
+   * Bound ledger growth: drop entries older than the retention window, then
+   * (if still oversized) the oldest entries beyond the per-bot cap.
+   */
+  pruneSeenPins(metabotId: number, nowIso: string): void {
+    const cutoffMs = Date.parse(nowIso) - SURF_SEEN_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    if (Number.isFinite(cutoffMs)) {
+      this.db.run(
+        'DELETE FROM metaweb_surf_seen_pins WHERE metabot_id = ? AND first_seen_at < ?',
+        [metabotId, new Date(cutoffMs).toISOString()],
+      );
+    }
+    const countRow = this.getOne<{ n: number }>(
+      'SELECT COUNT(*) AS n FROM metaweb_surf_seen_pins WHERE metabot_id = ?',
+      [metabotId],
+    );
+    const excess = (Number(countRow?.n) || 0) - SURF_SEEN_MAX_ROWS_PER_BOT;
+    if (excess > 0) {
+      this.db.run(
+        `DELETE FROM metaweb_surf_seen_pins
+         WHERE rowid IN (
+           SELECT rowid FROM metaweb_surf_seen_pins
+           WHERE metabot_id = ? ORDER BY first_seen_at ASC LIMIT ?
+         )`,
+        [metabotId, excess],
+      );
+    }
+    this.saveDb();
+  }
+}

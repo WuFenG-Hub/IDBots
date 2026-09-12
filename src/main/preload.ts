@@ -1134,6 +1134,12 @@ contextBridge.exposeInMainWorld('electron', {
   metawebStudy: {
     list: (metabotId: number) => ipcRenderer.invoke('metawebStudy:list', metabotId),
   },
+  surf: {
+    listRuns: (metabotId: number, limit?: number) =>
+      ipcRenderer.invoke('surf:listRuns', metabotId, limit),
+    getRun: (runId: string) => ipcRenderer.invoke('surf:getRun', runId),
+    runNow: (metabotId: number) => ipcRenderer.invoke('surf:runNow', metabotId),
+  },
   networkStatus: {
     send: (status: 'online' | 'offline') => ipcRenderer.send('network:status-change', status),
   },
