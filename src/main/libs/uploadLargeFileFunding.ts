@@ -4,6 +4,33 @@ export interface ChunkedUploadFundingUtxo extends SpendableMvcUtxo {
   flag: string;
 }
 
+export const CHUNKED_UPLOAD_CHUNK_SIZE_BYTES = 1024 * 1024;
+// Per-chunk on-chain tx carries the chunk bytes plus metafile/envelope overhead.
+// Calibrated against the uploader estimate endpoint (2000 B file -> chunkFee
+// 11270 sats at feeRate 5, i.e. ~254 overhead bytes per chunk tx).
+export const CHUNKED_UPLOAD_CHUNK_OVERHEAD_BYTES = 320;
+// Index tx + merge-tx outputs/pre-tx margins, expressed as virtual bytes.
+export const CHUNKED_UPLOAD_FIXED_OVERHEAD_BYTES = 1500;
+
+export function estimateChunkedUploadFundingSats(sizeBytes: number, feeRate: number, chunkSizeBytes?: number): number {
+  const size = Math.max(0, Math.floor(Number(sizeBytes) || 0));
+  const rate = Math.max(1, Math.floor(Number(feeRate) || 0));
+  if (size <= 0) return 0;
+  const chunkSize = Number.isFinite(chunkSizeBytes) && Number(chunkSizeBytes) > 0
+    ? Math.floor(Number(chunkSizeBytes))
+    : CHUNKED_UPLOAD_CHUNK_SIZE_BYTES;
+  const chunkCount = Math.ceil(size / chunkSize);
+  const lastChunkSize = size - (chunkCount - 1) * chunkSize;
+  const dataBytes = (chunkCount - 1) * (chunkSize + CHUNKED_UPLOAD_CHUNK_OVERHEAD_BYTES)
+    + lastChunkSize + CHUNKED_UPLOAD_CHUNK_OVERHEAD_BYTES;
+  return Math.ceil((dataBytes + CHUNKED_UPLOAD_FIXED_OVERHEAD_BYTES) * rate);
+}
+
+export function formatSatsAsSpace(sats: number): string {
+  const value = Math.max(0, Number(sats) || 0) / 100_000_000;
+  return `${Number(value.toFixed(8))} SPACE`;
+}
+
 export function normalizeChunkedUploadUtxos(input: unknown, address: string): ChunkedUploadFundingUtxo[] {
   if (!Array.isArray(input)) return [];
   return input
@@ -45,7 +72,9 @@ export function pickChunkedUploadFundingUtxos(
     }
   }
 
-  throw new Error('Insufficient MVC balance for chunked upload');
+  throw new Error(
+    `Insufficient MVC balance for chunked upload: requires ~${requiredAmount} sats (${formatSatsAsSpace(requiredAmount)}), only ${current} sats (${formatSatsAsSpace(current)}) spendable`,
+  );
 }
 
 export function isRetryableChunkedUploadError(message: string): boolean {

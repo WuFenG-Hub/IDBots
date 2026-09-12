@@ -3,6 +3,8 @@ import { TxComposer, mvc } from 'meta-contract';
 import { getMvcWallet, parseAddressIndexFromPath } from '../services/metabotWalletService';
 import { getUtxoOutpointKey } from './mvcSpend';
 import {
+  CHUNKED_UPLOAD_CHUNK_SIZE_BYTES,
+  estimateChunkedUploadFundingSats,
   isRetryableChunkedUploadError,
   normalizeChunkedUploadUtxos,
   pickChunkedUploadFundingUtxos,
@@ -173,12 +175,14 @@ async function uploadToMultipartStorage(
   return String(complete?.key || initiate.key).trim();
 }
 
-async function fetchUploaderLimits(uploaderBaseUrl: string): Promise<{ maxFileSize: number; feeRate: number }> {
+async function fetchUploaderLimits(uploaderBaseUrl: string): Promise<{ maxFileSize: number; feeRate: number; chunkSize: number }> {
   const config = await readJson<UploaderConfigData>(`${uploaderBaseUrl}/api/v1/config`);
   const mvcConfig = config?.chains?.mvc ?? {};
+  const chunkSize = Number(mvcConfig.chunkSize ?? 0);
   return {
     maxFileSize: Number(mvcConfig.maxFileSize ?? config?.maxFileSize ?? 0),
     feeRate: Number(mvcConfig.feeRate ?? 0),
+    chunkSize: Number.isFinite(chunkSize) && chunkSize > 0 ? Math.floor(chunkSize) : CHUNKED_UPLOAD_CHUNK_SIZE_BYTES,
   };
 }
 
@@ -328,6 +332,19 @@ async function main(): Promise<void> {
       ? Math.floor(uploaderLimits.feeRate)
       : 1;
   const uploadPath = buildChunkedMetaFilePath(fileName);
+
+  // Funding preflight: a chunked upload is paid from the bot wallet, and the
+  // multipart storage upload below is the expensive step. Verify the wallet
+  // can fund the estimated on-chain cost BEFORE streaming the file, so an
+  // underfunded wallet fails fast instead of after a wasted upload.
+  const preflightUtxos = await fetchMvcFundingUtxos(address);
+  const estimatedFundingSats = estimateChunkedUploadFundingSats(fileBuffer.length, feeRate, uploaderLimits.chunkSize);
+  pickChunkedUploadFundingUtxos(preflightUtxos, estimatedFundingSats, feeRate);
+  logStep('Funding preflight passed', {
+    estimatedFundingSats,
+    spendableUtxos: preflightUtxos.length,
+  });
+
   const storageKey = await uploadToMultipartStorage(
     uploaderBaseUrl,
     fileBuffer,

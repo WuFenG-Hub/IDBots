@@ -6,8 +6,10 @@ import path from 'node:path';
 
 import {
   buildMetafileDeliverySummary,
+  isRetryableDeliveryUploadError,
   resolveServiceDeliveryArtifact,
   resolveServiceDeliveryArtifactForOrder,
+  uploadVerifiedDeliveryArtifact,
   verifyDeliveryArtifactUpload,
 } from '../src/main/services/serviceDeliveryArtifacts.js';
 
@@ -439,4 +441,79 @@ test('verifyDeliveryArtifactUpload ignores temporary indexer network failures af
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('isRetryableDeliveryUploadError treats funding and size failures as permanent', () => {
+  assert.equal(
+    isRetryableDeliveryUploadError(new Error('Insufficient MVC balance for chunked upload: requires ~24000000 sats (0.24 SPACE), only 1000000 sats (0.01 SPACE) spendable')),
+    false,
+  );
+  assert.equal(
+    isRetryableDeliveryUploadError(new Error('File size exceeds the effective chunked-upload limit of 50.0 MiB')),
+    false,
+  );
+  assert.equal(
+    isRetryableDeliveryUploadError(new Error('File exceeds maximum upload size of 52428800 bytes.')),
+    false,
+  );
+  assert.equal(isRetryableDeliveryUploadError(new Error('Large file upload currently supports MVC only.')), false);
+  assert.equal(isRetryableDeliveryUploadError(new Error('MetaBot 2 wallet not found')), false);
+  assert.equal(isRetryableDeliveryUploadError(new Error('File not found: /tmp/x.mp4')), false);
+});
+
+test('isRetryableDeliveryUploadError treats transient failures as retryable', () => {
+  assert.equal(isRetryableDeliveryUploadError(new Error('network request failed')), true);
+  assert.equal(isRetryableDeliveryUploadError(new Error('HTTP 502')), true);
+  assert.equal(isRetryableDeliveryUploadError(new Error('Upload returned empty pinId')), true);
+  assert.equal(isRetryableDeliveryUploadError(new Error('Delivery artifact PINID abc could not be verified')), true);
+  assert.equal(isRetryableDeliveryUploadError(new Error('failed to broadcast merge transaction: 258: txn-mempool-conflict')), true);
+});
+
+test('uploadVerifiedDeliveryArtifact does not retry permanent upload failures', async () => {
+  let uploadCalls = 0;
+  let retryNotices = 0;
+  const result = await uploadVerifiedDeliveryArtifact({
+    artifact: { filePath: '/tmp/video.mp4', fileName: 'video.mp4' },
+    request: {},
+    maxAttempts: 2,
+    uploadDeliveryArtifact: async () => {
+      uploadCalls += 1;
+      throw new Error('Insufficient MVC balance for chunked upload: requires ~24000000 sats, only 1000000 sats spendable');
+    },
+    onRetry: async () => {
+      retryNotices += 1;
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(uploadCalls, 1);
+  assert.equal(retryNotices, 0);
+  assert.match(result.error.message, /Insufficient MVC balance/);
+});
+
+test('uploadVerifiedDeliveryArtifact retries transient upload failures once', async () => {
+  let uploadCalls = 0;
+  let retryNotices = 0;
+  const result = await uploadVerifiedDeliveryArtifact({
+    artifact: { filePath: '/tmp/video.mp4', fileName: 'video.mp4' },
+    request: {},
+    maxAttempts: 2,
+    uploadDeliveryArtifact: async () => {
+      uploadCalls += 1;
+      if (uploadCalls === 1) {
+        throw new Error('HTTP 502');
+      }
+      return { pinId: 'abc123i0' };
+    },
+    verifyDeliveryArtifactUpload: async () => true,
+    onRetry: async ({ error }) => {
+      retryNotices += 1;
+      assert.match(String(error?.message || ''), /HTTP 502/);
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(uploadCalls, 2);
+  assert.equal(retryNotices, 1);
+  assert.equal(result.upload.pinId, 'abc123i0');
 });

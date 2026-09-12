@@ -116,3 +116,89 @@ test('buildOrderPrompts includes local guidance without removing order constrain
   assert.match(prompts.systemPrompt, /Return only the substantive deliverable/);
   assert.match(prompts.userPrompt, /A paid service order is ready for execution/);
 });
+
+test('buildOrderPrompts injects self-paid delivery budget guidance for video outputs', () => {
+  const prompts = buildOrderPrompts({
+    plaintext: [
+      '[ORDER] 请生成一段航拍短视频。',
+      '<raw_request>',
+      '请生成一段航拍短视频。',
+      '</raw_request>',
+      `txid: ${'d'.repeat(64)}`,
+      'service id: svc-video',
+      'skill name: seedance',
+      'output type: video',
+    ].join('\n'),
+    source: 'metaweb_private',
+    metabotName: 'Provider Bot',
+    skillName: 'seedance',
+    expectedOutputType: 'video',
+    deliveryBudget: {
+      sponsorCoversDirectUpload: false,
+      spendableSats: 3_000_000,
+      feeRate: 1,
+      fundableBytes: 2_977_271,
+      recommendedMaxBytes: 2_381_816,
+    },
+  });
+
+  assert.match(prompts.systemPrompt, /Delivery budget/);
+  assert.match(prompts.systemPrompt, /your own MVC wallet/);
+  assert.match(prompts.systemPrompt, /roughly 2\.8 MB/);
+  assert.match(prompts.systemPrompt, /under 2\.3 MB/);
+  assert.match(prompts.systemPrompt, /compress/i);
+  assert.match(prompts.systemPrompt, /state the delivery budget limit as the failure reason/i);
+  assert.match(prompts.systemPrompt, /50MB/);
+});
+
+test('buildOrderPrompts describes platform-covered direct upload when sponsor mode is active', () => {
+  const prompts = buildOrderPrompts({
+    plaintext: [
+      '[ORDER] Generate a product photo.',
+      '<raw_request>',
+      'Generate a product photo.',
+      '</raw_request>',
+      `txid: ${'e'.repeat(64)}`,
+      'service id: svc-image',
+      'skill name: seedream',
+      'output type: image',
+    ].join('\n'),
+    source: 'metaweb_private',
+    metabotName: 'Provider Bot',
+    skillName: 'seedream',
+    expectedOutputType: 'image',
+    deliveryBudget: {
+      sponsorCoversDirectUpload: true,
+      spendableSats: 500_000,
+      feeRate: 1,
+      fundableBytes: 477_336,
+      recommendedMaxBytes: 4_194_304,
+    },
+  });
+
+  assert.match(prompts.systemPrompt, /Delivery budget/);
+  assert.match(prompts.systemPrompt, /platform-covered direct pin/i);
+  assert.match(prompts.systemPrompt, /under 5MB/i);
+  assert.match(prompts.systemPrompt, /chunked on-chain upload paid from your own MVC wallet/i);
+});
+
+test('buildOrderPrompts omits delivery budget guidance when no budget is provided', () => {
+  const prompts = buildOrderPrompts({
+    plaintext: [
+      '[ORDER] 请生成火箭发射图片。',
+      '<raw_request>',
+      '请生成火箭发射图片。',
+      '</raw_request>',
+      `txid: ${'f'.repeat(64)}`,
+      'service id: svc-image',
+      'skill name: seedream',
+      'output type: image',
+    ].join('\n'),
+    source: 'metaweb_private',
+    metabotName: 'Provider Bot',
+    skillName: 'seedream',
+    expectedOutputType: 'image',
+  });
+
+  assert.doesNotMatch(prompts.systemPrompt, /Delivery budget/);
+});

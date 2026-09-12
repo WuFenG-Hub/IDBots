@@ -794,8 +794,11 @@ export class PrivateChatOrderCowork extends EventEmitter {
         uploadDeliveryArtifact: this.uploadDeliveryArtifact,
         verifyDeliveryArtifactUpload: this.verifyDeliveryArtifactUpload,
         maxAttempts: 2,
-        onRetry: async () => {
-          const retryNotice = this.formatOrderStatusText(request, 'On-chain upload verification failed, so the digital artifact is being uploaded one more time.');
+        onRetry: async ({ error }: { error?: unknown }) => {
+          const reason = error instanceof Error && error.message.trim()
+            ? ` (${error.message.trim()})`
+            : '';
+          const retryNotice = this.formatOrderStatusText(request, `On-chain upload failed${reason}. The digital artifact is being uploaded one more time.`);
           const retryNoticeMessage = this.addOrderDeliveryStatusMessage(displaySessionId, retryNotice, {
             orderDeliveryUploadRetryNotice: true,
           }, request);

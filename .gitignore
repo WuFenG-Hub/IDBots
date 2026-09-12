@@ -150,10 +150,12 @@ tests/*
 !tests/a2aStaleErrorHeal.test.mjs
 !tests/orchestratorSessionTitle.test.ts
 !tests/orderPromptBuilder.test.ts
+!tests/orderDeliveryBudgetService.test.ts
 !tests/privateChatOrderCoworkDeliveryArtifacts.test.mjs
 !tests/privateChatRatingPrompt.test.ts
 !tests/encryptedSimplemsg.test.ts
 !tests/serviceDeliveryArtifacts.test.mjs
+!tests/uploadLargeFileFunding.test.mjs
 !tests/coworkAnthropicDirectRouting.test.mjs
 !tests/coworkProxySessionUpstream.test.mjs
 !tests/coworkProxyScheduledTasksApi.test.mjs
