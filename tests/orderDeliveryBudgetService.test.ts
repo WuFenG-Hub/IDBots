@@ -62,7 +62,7 @@ test('resolveOrderDeliveryBudget skips text orders and fails open on query error
     metabotId: 1,
     mvcAddress: '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
     outputType: 'text',
-    fetchConfirmedSats: async () => {
+    fetchSpendableSats: async () => {
       throw new Error('must not be called for text orders');
     },
   });
@@ -73,7 +73,7 @@ test('resolveOrderDeliveryBudget skips text orders and fails open on query error
     metabotId: 1,
     mvcAddress: '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
     outputType: 'video',
-    fetchConfirmedSats: async () => {
+    fetchSpendableSats: async () => {
       throw new Error('metalet api down');
     },
   });
@@ -86,7 +86,7 @@ test('resolveOrderDeliveryBudget builds a budget from injected deps', async () =
     metabotId: 1,
     mvcAddress: ' 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa ',
     outputType: 'video',
-    fetchConfirmedSats: async () => 3_000_000,
+    fetchSpendableSats: async () => 3_000_000,
     getFeeRate: () => 1,
     getTrafficPinMode: () => 'selfpay',
   });

@@ -53,8 +53,8 @@ const SATOSHI_PER_UNIT = 100_000_000;
 function formatSnapshot(snapshot: WalletBalanceSnapshot): string {
   const total = (snapshot.total_sats / SATOSHI_PER_UNIT).toFixed(8);
   return (
-    `- ${snapshot.chain}: confirmed ${snapshot.confirmed_sats} sats / unconfirmed ${snapshot.unconfirmed_sats} sats / ` +
-    `total ${snapshot.total_sats} sats (${total} ${snapshot.unit}), ${snapshot.utxo_count} UTXOs`
+    `- ${snapshot.chain}: balance ${snapshot.total_sats} sats (${total} ${snapshot.unit}), ${snapshot.utxo_count} UTXOs ` +
+    `[spendable = confirmed ${snapshot.confirmed_sats} + unconfirmed ${snapshot.unconfirmed_sats}]`
   );
 }
 
@@ -114,7 +114,7 @@ export function buildWalletAgentTools(deps: {
     [
       'Query wallet balances (UTXO sums) for local MetaBots by id, name, or raw address, optionally per chain.',
       'Use when the user asks for a bot wallet balance, "全班余额一览", or before planning on-chain work that costs fees. Batch multiple metabot_ids in ONE call (add names for name-based lookup).',
-      'Read-only public chain data: MVC/DOGE walk the Metalet utxo-list (flag pagination), BTC uses the v3 btc-utxo endpoint. Returns confirmed / unconfirmed / total in sats per chain plus the query time.',
+      'Read-only public chain data: MVC/DOGE walk the Metalet utxo-list (flag pagination), BTC uses the v3 btc-utxo endpoint. Balance is the spendable total in sats (confirmed + unconfirmed — unconfirmed funds are usable on these chains) plus the query time.',
       'Batch queries cover the LOCAL metabot roster plus explicitly passed addresses only.',
     ].join(' '),
     {

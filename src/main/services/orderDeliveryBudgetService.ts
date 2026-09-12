@@ -54,7 +54,7 @@ export interface ResolveOrderDeliveryBudgetDeps {
   metabotId: number;
   mvcAddress?: string | null;
   outputType?: string | null;
-  fetchConfirmedSats?: (address: string) => Promise<number>;
+  fetchSpendableSats?: (address: string) => Promise<number>;
   getFeeRate?: (chain: string) => number;
   getTrafficPinMode?: () => string;
   isSponsorUploadEnabledForMetabot?: (metabotStore: MetabotStore, metabotId: number) => boolean;
@@ -121,13 +121,15 @@ export async function resolveOrderDeliveryBudget(
   const address = String(deps.mvcAddress || '').trim();
   if (!address) return null;
 
-  const fetchConfirmedSats = deps.fetchConfirmedSats ?? (async (target: string) => {
+  const fetchSpendableSats = deps.fetchSpendableSats ?? (async (target: string) => {
     const snapshot = await getWalletBalanceSnapshot('mvc', target);
-    return snapshot.confirmed_sats;
+    // Spendable = confirmed + unconfirmed: the chunked-upload worker funds
+    // from any UTXO regardless of confirmation height.
+    return snapshot.total_sats;
   });
   let spendableSats: number;
   try {
-    spendableSats = await fetchConfirmedSats(address);
+    spendableSats = await fetchSpendableSats(address);
   } catch {
     return null;
   }

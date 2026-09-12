@@ -108,7 +108,7 @@ test('wallet_balance batches ids and names into one readable sheet', async () =>
   assert.equal(result.isError, undefined);
   const text = result.content[0].text;
   assert.match(text, /# AI_Sunny \(metabot_id 1\)/);
-  assert.match(text, /confirmed 1220650491 sats \/ unconfirmed 0 sats \/ total 1220650491 sats/);
+  assert.match(text, /mvc: balance 1220650491 sats \(12\.20650491 SPACE\), 12 UTXOs \[spendable = confirmed 1220650491 \+ unconfirmed 0\]/);
   assert.match(text, /# Worker \(metabot_id 2\)/);
   assert.match(text, /btc: lookup failed: provider timeout/);
 });
@@ -132,7 +132,7 @@ test('wallet_balance explicit address queries all chains when unspecified', asyn
   buildWalletAgentTools({ tool, control, sessionId: 's1', resolveMetabotId: () => 15 });
   const result = await handlers.wallet_balance.handler({ address: '1SomeAddress' });
   const text = result.content[0].text;
-  assert.match(text, /- mvc: confirmed 7 sats \/ unconfirmed 3 sats \/ total 10 sats/);
+  assert.match(text, /- mvc: balance 10 sats \(0\.00000010 SPACE\), 2 UTXOs \[spendable = confirmed 7 \+ unconfirmed 3\]/);
   assert.match(text, /- btc: /);
   assert.match(text, /- doge: /);
 });
