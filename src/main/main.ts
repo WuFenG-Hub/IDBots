@@ -6649,10 +6649,11 @@ function getMetabotManageDeps(): MetabotManageDeps {
     createWallet: () => createMetaBotWallet({}),
     requestSubsidy: requestMvcGasSubsidy,
     // Spendable = confirmed + unconfirmed: MVC subsidy payouts stay
-    // unconfirmed forever (see addressBalanceService header note).
+    // unconfirmed forever, and getAddressBalance already returns the
+    // spendable total in `satoshis` (see addressBalanceService).
     readSpendableBalance: async (mvcAddress) => {
       const balance = await getAddressBalance('mvc', mvcAddress);
-      return (balance.satoshis ?? 0) + (balance.unconfirmedSatoshis ?? 0);
+      return balance.satoshis ?? 0;
     },
     signOwnerBinding: signOwnerBindingForLocalUser,
     syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
