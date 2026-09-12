@@ -16,6 +16,7 @@ const {
   createRechargeOrder,
   ensureTrafficAccount,
   getConfiguredTrafficApiBase,
+  getConfiguredTrafficPinMode,
   getFreeGrantCampaignStatus,
   getLocalTrafficAccount,
   getRechargeOrder,
@@ -995,4 +996,145 @@ test('sponsored createPin journals the pin path as kind', async () => {
   assert.equal(journal[0].kind, '/protocols/simplemsg');
   assert.equal(journal[0].txId, COMMIT_TXID);
   assert.equal(journal[0].billedBy, 'traffic');
+});
+
+test('getConfiguredTrafficPinMode reflects the stored mode and defaults to traffic', async () => {
+  resetTrafficAccountServiceForTests();
+  // Uninitialized service: safe default, never throws.
+  assert.equal(getConfiguredTrafficPinMode(), 'traffic');
+
+  const { store } = await makeServiceFixture({});
+  assert.equal(getConfiguredTrafficPinMode(), 'traffic');
+  store.set('traffic.mode', 'selfpay');
+  assert.equal(getConfiguredTrafficPinMode(), 'selfpay');
+  store.set('traffic.mode', 'garbage');
+  assert.equal(getConfiguredTrafficPinMode(), 'traffic');
+});
+
+test('resolveSponsorTrafficAccount retries a transient ensure-account failure once', async () => {
+  let accountPosts = 0;
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/accounts/bindings', (init) => {
+      const body = JSON.parse(init.body);
+      return { botAddress: body.botAddress, accountId: SERVER_ACCOUNT_ID, status: 1, createdAt: 1 };
+    }],
+    ['/v1/traffic/accounts', () => {
+      accountPosts += 1;
+      if (accountPosts === 1) {
+        return httpError(500, { code: 1, message: 'temporary backend boom' });
+      }
+      return accountPayload();
+    }],
+  ]);
+  await makeServiceFixture({ fetchImpl, trafficMode: 'traffic' });
+
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const result = await resolveSponsorTrafficAccount({
+      botAddress: BOT1_ADDRESS,
+      challengeId: 'challenge-ensure-retry',
+      botMnemonic: BOT1_MNEMONIC,
+      botWalletPath: WALLET_PATH,
+    });
+    assert.ok(result);
+    assert.equal(result.accountId, SERVER_ACCOUNT_ID);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(callsToPath(fetchImpl, '/v1/traffic/accounts').length, 2);
+});
+
+test('resolveSponsorTrafficAccount retries a transient bind failure once', async () => {
+  let bindPosts = 0;
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/accounts/bindings', (init) => {
+      bindPosts += 1;
+      if (bindPosts === 1) {
+        return httpError(500, { code: 1, message: 'temporary bind boom' });
+      }
+      const body = JSON.parse(init.body);
+      return { botAddress: body.botAddress, accountId: SERVER_ACCOUNT_ID, status: 1, createdAt: 1 };
+    }],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl, trafficMode: 'traffic' });
+
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const result = await resolveSponsorTrafficAccount({
+      botAddress: BOT1_ADDRESS,
+      challengeId: 'challenge-bind-retry',
+      botMnemonic: BOT1_MNEMONIC,
+      botWalletPath: WALLET_PATH,
+    });
+    assert.ok(result);
+    assert.equal(result.accountId, SERVER_ACCOUNT_ID);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(callsToPath(fetchImpl, '/v1/traffic/accounts/bindings').length, 2);
+});
+
+test('resolveSponsorTrafficAccount does not retry a 404 (feature off) and WARN-logs the degradation', async () => {
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/accounts', httpError(404, { code: 1, message: 'traffic disabled' })],
+  ]);
+  await makeServiceFixture({ fetchImpl, trafficMode: 'traffic' });
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+    warnings.push(args.map((item) => String(item)).join(' '));
+  };
+  try {
+    const result = await resolveSponsorTrafficAccount({
+      botAddress: BOT1_ADDRESS,
+      challengeId: 'challenge-404',
+      botMnemonic: BOT1_MNEMONIC,
+      botWalletPath: WALLET_PATH,
+    });
+    assert.equal(result, undefined);
+  } finally {
+    console.warn = originalWarn;
+  }
+  // 404 is deterministic: exactly one account POST, no retry.
+  assert.equal(callsToPath(fetchImpl, '/v1/traffic/accounts').length, 1);
+  // The drop to legacy quota billing must be visible in the logs.
+  assert.ok(
+    warnings.some((line) => line.includes('[TrafficAccount]') && line.includes('legacy sponsor quota')),
+    `expected a degradation WARN log, got: ${JSON.stringify(warnings)}`,
+  );
+});
+
+test('resolveSponsorTrafficAccount WARN-logs when a bot stays unbindable', async () => {
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/accounts/bindings', httpError(500, { code: 1, message: 'bind always broken' })],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl, trafficMode: 'traffic' });
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+    warnings.push(args.map((item) => String(item)).join(' '));
+  };
+  try {
+    const result = await resolveSponsorTrafficAccount({
+      botAddress: BOT1_ADDRESS,
+      challengeId: 'challenge-bind-dead',
+      botMnemonic: BOT1_MNEMONIC,
+      botWalletPath: WALLET_PATH,
+    });
+    assert.equal(result, undefined);
+  } finally {
+    console.warn = originalWarn;
+  }
+  // One initial attempt + one retry, then degradation.
+  assert.equal(callsToPath(fetchImpl, '/v1/traffic/accounts/bindings').length, 2);
+  assert.ok(
+    warnings.some((line) => line.includes('[TrafficAccount]') && line.includes('could not be bound')),
+    `expected a bind-failure WARN log, got: ${JSON.stringify(warnings)}`,
+  );
 });

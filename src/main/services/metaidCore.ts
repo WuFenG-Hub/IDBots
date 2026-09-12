@@ -495,6 +495,47 @@ export function resolveCreatePinNetwork(network?: CreatePinNetwork | string): Cr
   ) as CreatePinNetwork;
 }
 
+/**
+ * Unified empty-wallet rescue for governed MVC createPin (2026-09-12). The
+ * sponsored (traffic-mode) flow still drafts the pin from the bot wallet's
+ * own UTXOs — the sponsor only covers the miner fee — so a bot with an empty
+ * wallet failed BOTH the sponsored draft and the self-paid fallback with
+ * "MetaBot 余额不足", even with a funded traffic account. Any governed MVC
+ * pin that fails for insufficient bot-wallet funds now requests the Metaso
+ * gas subsidy once, clears stale UTXO exclusions, and retries the whole
+ * dispatch a single time, for every createPin caller (bot edit sync,
+ * simplemsg, buzz, MetaApp publish, RPC writes) without per-callsite
+ * wrappers. The original error is rethrown when the subsidy request fails.
+ */
+export async function runMvcCreatePinWithInsufficientFundsRescue<T>(params: {
+  metabotId: number;
+  operation: string;
+  path: string;
+  requestFreshFunding: (trigger?: string) => Promise<boolean>;
+  run: () => Promise<T>;
+}): Promise<T> {
+  try {
+    return await params.run();
+  } catch (error) {
+    const message = getErrorMessage(error);
+    if (!isMvcInsufficientBalanceMessage(message)) {
+      throw error;
+    }
+    appendMetaidLog('WARN', 'MVC createPin failed for insufficient bot-wallet funds — requesting gas subsidy and retrying once', {
+      metabot_id: params.metabotId,
+      operation: params.operation,
+      path: params.path,
+      error: message,
+    });
+    const funded = await params.requestFreshFunding('insufficient bot-wallet funds');
+    if (!funded) {
+      throw error;
+    }
+    clearMvcExcludedOutpoints(params.metabotId);
+    return params.run();
+  }
+}
+
 /** Global kv reader for traffic settings; unset outside the app runtime => safe defaults. */
 function getMetaidCoreKvReader(): TrafficSettingsReader | null {
   try {
@@ -663,7 +704,10 @@ export async function createPinForIdentity(params: {
  * Create Pin for a MetaBot: spawn skill worker with mnemonic, returns txids.
  * @param options.network - Target network: 'mvc' (default), 'doge', 'btc', 'opcat'. Omit or empty defaults to 'mvc'.
  * @param options.sponsorMode - MVC only: 'traffic' runs the sponsor-paid flow (draft -> pre -> sign -> commit),
- *   'selfpay' (default) keeps the regular self-paid broadcast. Falls back per traffic.fallbackPolicy.
+ *   'selfpay' keeps the regular self-paid broadcast. Defaults to the global traffic.mode setting
+ *   ('traffic' unless the user switched to MetaBot self-pay). Falls back per traffic.fallbackPolicy.
+ *   Either way, a first insufficient-funds failure triggers one gas-subsidy rescue + retry
+ *   (runMvcCreatePinWithInsufficientFundsRescue).
  */
 export async function createPin(
   metabotStore: MetabotStore,
@@ -694,13 +738,13 @@ export async function createPin(
       metabotId: metabot_id,
       action: `createPin:${metaidData.path || metaidData.operation}`,
       execute: async () => {
-        const requestFreshFunding = async () => {
+        const requestFreshFunding = async (trigger = 'stale createPin inputs') => {
           const metabot = metabotStore.getMetabotById(metabot_id);
           const mvcAddress = String(metabot?.mvc_address || '').trim();
           if (!mvcAddress) {
             return false;
           }
-          appendMetaidLog('INFO', 'Requesting fresh MVC funding after stale createPin inputs', {
+          appendMetaidLog('INFO', `Requesting fresh MVC funding after ${trigger}`, {
             metabot_id,
             mvcAddress,
             operation: metaidData.operation,
@@ -712,14 +756,14 @@ export async function createPin(
             path: wallet.path || "m/44'/10001'/0'/0/0",
           });
           if (!subsidy.success) {
-            appendMetaidLog('WARN', 'Fresh MVC funding request after stale createPin inputs failed', {
+            appendMetaidLog('WARN', `Fresh MVC funding request after ${trigger} failed`, {
               metabot_id,
               mvcAddress,
               error: subsidy.error || 'MVC gas subsidy request failed',
             });
             return false;
           }
-          appendMetaidLog('INFO', 'Fresh MVC funding request after stale createPin inputs succeeded', {
+          appendMetaidLog('INFO', `Fresh MVC funding request after ${trigger} succeeded`, {
             metabot_id,
             mvcAddress,
           });
@@ -771,62 +815,72 @@ export async function createPin(
           }
         };
 
-        const sponsorMode = options?.sponsorMode ?? getTrafficPinMode(getMetaidCoreKvReader());
-        if (sponsorMode !== 'traffic') {
-          return runBroadcastWorker();
-        }
+        const runModeDispatch = async (): Promise<CreatePinResult> => {
+          const sponsorMode = options?.sponsorMode ?? getTrafficPinMode(getMetaidCoreKvReader());
+          if (sponsorMode !== 'traffic') {
+            return runBroadcastWorker();
+          }
 
-        const sponsorMetabot = metabotStore.getMetabotById(metabot_id);
-        const sponsorMvcAddress = String(sponsorMetabot?.mvc_address || '').trim();
-        appendMetaidLog('INFO', 'Attempting sponsored MVC createPin (traffic mode)', {
-          metabot_id,
-          mvcAddress: sponsorMvcAddress,
+          const sponsorMetabot = metabotStore.getMetabotById(metabot_id);
+          const sponsorMvcAddress = String(sponsorMetabot?.mvc_address || '').trim();
+          appendMetaidLog('INFO', 'Attempting sponsored MVC createPin (traffic mode)', {
+            metabot_id,
+            mvcAddress: sponsorMvcAddress,
+            operation: metaidData.operation,
+            path: metaidData.path || '',
+          });
+          return runMvcSponsorCreatePin(
+            {
+              metabotId: metabot_id,
+              mnemonic,
+              walletPath,
+              mvcAddress: sponsorMvcAddress,
+              feeRate: resolveCreatePinFeeRate('mvc', options?.feeRate),
+              fallbackPolicy: options?.sponsorFallbackPolicy ?? getTrafficFallbackPolicy(getMetaidCoreKvReader()),
+              baseUrl: options?.sponsorBaseUrl ?? getConfiguredTrafficApiBase(),
+              fetchImpl: options?.sponsorFetchImpl,
+              trafficAccount: options?.sponsorTrafficAccount,
+              journalKind: metaidData.path || undefined,
+            },
+            {
+              runDraftWorker: async () => {
+                const workerSessionResult = await runMvcCreatePinWorkerWithSessionRecovery({
+                  metabotStore,
+                  metabotId: metabot_id,
+                  requestFreshFunding,
+                  runWorkerForSession: (sessionSnapshot) =>
+                    spawnCreatePinWorker({
+                      mnemonic,
+                      walletPath,
+                      metaidData,
+                      options: { ...options, mode: 'draft' },
+                      sessionSnapshot,
+                    }),
+                });
+                return workerSessionResult.workerResult;
+              },
+              runBroadcastWorker,
+              recordSpentOutpoints: (outpoints) => recordMvcSpentOutpoints(metabot_id, outpoints),
+              replacePendingFundingUtxos: (utxo) => replaceMvcPendingFundingUtxos(metabot_id, utxo),
+              // Traffic-account billing (Phase D): resolves to undefined and keeps
+              // the legacy quota path whenever the feature is off or unbound.
+              resolveTrafficAccount: ({ challengeId }) => resolveSponsorTrafficAccount({
+                botAddress: sponsorMvcAddress,
+                challengeId,
+                botMnemonic: mnemonic,
+                botWalletPath: walletPath,
+              }),
+            },
+          );
+        };
+
+        return runMvcCreatePinWithInsufficientFundsRescue<CreatePinResult>({
+          metabotId: metabot_id,
           operation: metaidData.operation,
           path: metaidData.path || '',
+          requestFreshFunding,
+          run: runModeDispatch,
         });
-        return runMvcSponsorCreatePin(
-          {
-            metabotId: metabot_id,
-            mnemonic,
-            walletPath,
-            mvcAddress: sponsorMvcAddress,
-            feeRate: resolveCreatePinFeeRate('mvc', options?.feeRate),
-            fallbackPolicy: options?.sponsorFallbackPolicy ?? getTrafficFallbackPolicy(getMetaidCoreKvReader()),
-            baseUrl: options?.sponsorBaseUrl ?? getConfiguredTrafficApiBase(),
-            fetchImpl: options?.sponsorFetchImpl,
-            trafficAccount: options?.sponsorTrafficAccount,
-            journalKind: metaidData.path || undefined,
-          },
-          {
-            runDraftWorker: async () => {
-              const workerSessionResult = await runMvcCreatePinWorkerWithSessionRecovery({
-                metabotStore,
-                metabotId: metabot_id,
-                requestFreshFunding,
-                runWorkerForSession: (sessionSnapshot) =>
-                  spawnCreatePinWorker({
-                    mnemonic,
-                    walletPath,
-                    metaidData,
-                    options: { ...options, mode: 'draft' },
-                    sessionSnapshot,
-                  }),
-              });
-              return workerSessionResult.workerResult;
-            },
-            runBroadcastWorker,
-            recordSpentOutpoints: (outpoints) => recordMvcSpentOutpoints(metabot_id, outpoints),
-            replacePendingFundingUtxos: (utxo) => replaceMvcPendingFundingUtxos(metabot_id, utxo),
-            // Traffic-account billing (Phase D): resolves to undefined and keeps
-            // the legacy quota path whenever the feature is off or unbound.
-            resolveTrafficAccount: ({ challengeId }) => resolveSponsorTrafficAccount({
-              botAddress: sponsorMvcAddress,
-              challengeId,
-              botMnemonic: mnemonic,
-              botWalletPath: walletPath,
-            }),
-          },
-        );
       },
     });
     // Ledger: record the broadcast pin (no-op for draft-phase results, chat
