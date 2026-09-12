@@ -13,11 +13,20 @@
  *   (default: current platform when natively buildable, all three under --required)
  * - Offline archive support via IDBOTS_FFMPEG_ARCHIVE (single binary file)
  * - Mirror URL override via IDBOTS_FFMPEG_URL ({{platform}} placeholder)
+ * - Machine-level cache (v0.8.0): the version tag pins immutable binaries, so
+ *   they are cached outside the workspace and self-hosted runners never
+ *   re-download them — the workspace copy becomes a local file copy after the
+ *   first fill. Cache root: FFMPEG_CACHE_DIR env override, default
+ *   ~/.idbots-ffmpeg-cache/<version>/. GitHub-hosted ephemeral runners simply
+ *   re-fill once per run (no regression); the persistent win-sign signer
+ *   keeps its cache across runs (2026-09-12: slow-link re-downloads cost
+ *   44-84 min per release before this cache).
  */
 
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
@@ -28,6 +37,10 @@ const DEFAULT_FFMPEG_BASE_URL =
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const OUTPUT_DIR = path.join(PROJECT_ROOT, 'resources', 'ffmpeg');
+/** Version-scoped machine cache; survives workspace clean on self-hosted runners. */
+const CACHE_DIR = process.env.FFMPEG_CACHE_DIR && process.env.FFMPEG_CACHE_DIR.trim()
+  ? path.join(path.resolve(process.env.FFMPEG_CACHE_DIR.trim()), FFMPEG_VERSION)
+  : path.join(os.homedir(), '.idbots-ffmpeg-cache', FFMPEG_VERSION);
 
 /** Asset name -> local file name inside resources/ffmpeg. */
 const PLATFORM_ASSETS = {
@@ -155,24 +168,36 @@ async function ensureFfmpeg(options = {}) {
       console.log(`[setup-ffmpeg] ${platform}: copying from IDBOTS_FFMPEG_ARCHIVE`);
       fs.copyFileSync(envArchive, target);
     } else {
-      const urlFromEnv = typeof process.env.IDBOTS_FFMPEG_URL === 'string'
-        ? process.env.IDBOTS_FFMPEG_URL.trim()
-        : '';
-      const url = urlFromEnv
-        ? urlFromEnv.replace('{{platform}}', platform)
-        : `${DEFAULT_FFMPEG_BASE_URL}/${REMOTE_ASSETS[platform] || asset}`;
-      try {
-        console.log(`[setup-ffmpeg] ${platform}: downloading from ${url}`);
-        await downloadBinary(url, target);
-      } catch (error) {
-        if (!required) {
-          console.warn(
-            `[setup-ffmpeg] ${platform}: download failed and --required is not set; skipping. `
-            + `Reason: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          continue;
+      // Machine-level cache first (v0.8.0): the version tag is immutable, so a
+      // cached copy is byte-identical to a fresh download. Local copy on hit;
+      // download-into-cache then copy on miss.
+      const cachedPath = path.join(CACHE_DIR, asset);
+      if (isNonEmptyFile(cachedPath)) {
+        console.log(`[setup-ffmpeg] ${platform}: cache hit, copying ${cachedPath} -> ${target}`);
+        fs.copyFileSync(cachedPath, target);
+      } else {
+        const urlFromEnv = typeof process.env.IDBOTS_FFMPEG_URL === 'string'
+          ? process.env.IDBOTS_FFMPEG_URL.trim()
+          : '';
+        const url = urlFromEnv
+          ? urlFromEnv.replace('{{platform}}', platform)
+          : `${DEFAULT_FFMPEG_BASE_URL}/${REMOTE_ASSETS[platform] || asset}`;
+        try {
+          fs.mkdirSync(CACHE_DIR, { recursive: true });
+          console.log(`[setup-ffmpeg] ${platform}: downloading from ${url} (caching at ${cachedPath})`);
+          await downloadBinary(url, cachedPath);
+          fs.copyFileSync(cachedPath, target);
+          console.log(`[setup-ffmpeg] ${platform}: cache filled for future runs`);
+        } catch (error) {
+          if (!required) {
+            console.warn(
+              `[setup-ffmpeg] ${platform}: download failed and --required is not set; skipping. `
+              + `Reason: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            continue;
+          }
+          throw error;
         }
-        throw error;
       }
     }
     if (process.platform !== 'win32') {
