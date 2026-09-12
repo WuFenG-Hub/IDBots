@@ -144,7 +144,7 @@ export interface RunExistingSessionSkillTurnResult {
  * real text output) from being reported as a successful completion with
  * `[reasoning unavailable]` as its "reply".
  */
-function extractFinalAssistantReply(
+export function extractFinalAssistantReply(
   messages: Array<{ id: string; type: string; content: string; metadata?: Record<string, unknown> }>
 ): { replyText: string; assistantMessageId: string | null } {
   let sawToolAfter = false;

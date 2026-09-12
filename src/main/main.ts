@@ -3556,6 +3556,12 @@ const startSqliteDaemons = (): void => {
         cwd,
         activeSkillIds: params.activeSkillIds,
         onSkillExecutionStart: params.onSkillExecutionStart,
+        // A2A research turns routinely run 25+ minutes; align with the
+        // group-task budget so the watchdog does not detach mid-work. Even
+        // when the watchdog does fire, the daemon keeps the row unprocessed
+        // and picks up the runner's eventual reply (see
+        // findDeliverableCompletedTurnReply in privateChatDaemon).
+        skillTurnTimeoutMs: 30 * 60_000,
       });
     },
     undefined,

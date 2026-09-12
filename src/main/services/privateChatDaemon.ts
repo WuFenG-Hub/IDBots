@@ -113,6 +113,7 @@ import {
   PRIVATE_CHAT_SKILL_TURN_MAX_ATTEMPTS,
   shouldRetryPrivateChatSkillTurn,
 } from './privateChatSkillTurnPolicy';
+import { extractFinalAssistantReply } from './orchestratorCoworkBridge';
 
 const POLL_INTERVAL_MS = 5_000;
 /** Max recent messages of the active segment sent to the model per A2A private-chat turn. */
@@ -252,6 +253,97 @@ export function getActiveA2AReplyTaskIds(): string[] {
 }
 /** Backoff state for chat-skill turns that failed with a retryable error. */
 const privateChatSkillTurnRetries = new Map<string, { attempts: number; nextRetryAt: number }>();
+
+/**
+ * How long a row may be deferred because its A2A session still has an active
+ * runner turn. A turn that outlives this cap is treated as wedged: the row
+ * falls through to the normal flow (pickup or a fresh turn) so one leaked
+ * turn cannot mute a conversation forever.
+ */
+const PRIVATE_CHAT_BUSY_DEFER_MAX_MS = 45 * 60_000;
+const privateChatBusyDeferredSince = new Map<string, number>();
+
+export function shouldDeferForBusyRunnerSession(
+  isSessionTurnActive: ((sessionId: string) => boolean) | undefined,
+  sessionId: string,
+  emitLog: (msg: string) => void,
+  now: number = Date.now(),
+): boolean {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId || typeof isSessionTurnActive !== 'function') return false;
+  if (!isSessionTurnActive(normalizedSessionId)) {
+    privateChatBusyDeferredSince.delete(normalizedSessionId);
+    return false;
+  }
+  const firstSeenAt = privateChatBusyDeferredSince.get(normalizedSessionId);
+  if (firstSeenAt == null) {
+    privateChatBusyDeferredSince.set(normalizedSessionId, now);
+    return true;
+  }
+  if (now - firstSeenAt < PRIVATE_CHAT_BUSY_DEFER_MAX_MS) return true;
+  privateChatBusyDeferredSince.delete(normalizedSessionId);
+  emitLog(
+    `[PrivateChat] Session ${normalizedSessionId} turn stayed active for over ` +
+    `${Math.round(PRIVATE_CHAT_BUSY_DEFER_MAX_MS / 60000)}min; proceeding despite the busy session.`
+  );
+  return false;
+}
+
+/**
+ * Recover the final reply of a skill turn that completed after the daemon
+ * stopped waiting for it (watchdog timeout / restart). The daemon detaches
+ * from an over-budget turn but the runner keeps it alive and persists its
+ * final assistant message into the session; without this pickup that reply
+ * stays a local-only "internal status" bubble and the peer never gets it.
+ *
+ * Scans the session window AFTER the trigger message, stopping at the next
+ * inbound peer user message (a newer turn boundary). Assistant bubbles that
+ * were already delivered (chain-stamped outgoing) are skipped; bubbles whose
+ * broadcast failed are picked up again so the send is retried without
+ * re-running the whole LLM turn.
+ */
+export function findDeliverableCompletedTurnReply(input: {
+  coworkStore: Pick<CoworkStore, 'getSession'>;
+  sessionId: string;
+  triggerMessageId: string;
+}): { replyText: string; assistantMessageId: string } | null {
+  const session = input.coworkStore.getSession(input.sessionId);
+  const messages = session?.messages ?? [];
+  const triggerIndex = messages.findIndex((message) => message.id === input.triggerMessageId);
+  if (triggerIndex < 0) return null;
+  const window: CoworkMessage[] = [];
+  for (let i = triggerIndex + 1; i < messages.length; i += 1) {
+    const message = messages[i];
+    if (!message) continue;
+    if (message.type === 'user') break;
+    if (
+      message.type === 'assistant'
+      && message.metadata?.direction === 'outgoing'
+      && message.metadata?.privateChatDeliveryStatus !== 'failed'
+    ) {
+      continue;
+    }
+    window.push(message);
+  }
+  const { replyText, assistantMessageId } = extractFinalAssistantReply(window);
+  if (!replyText || !assistantMessageId) return null;
+  return { replyText, assistantMessageId };
+}
+
+/** Publish of the on-chain reply pin must not wedge the serial poll loop. */
+const PRIVATE_CHAT_REPLY_PIN_PUBLISH_TIMEOUT_MS = 120_000;
+
+function withPrivateChatPublishTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
 const interruptibleA2AGuidanceTurns = new Map<string, {
   sessionId: string;
   metabotId: number;
@@ -3177,6 +3269,7 @@ async function processOne(
   refreshA2APeerProfile?: (sessionId: string) => void,
   experienceStore?: MetaIDExperienceStore,
   getMetaIDCognitionPromptBlock?: GetMetaIDCognitionPromptBlockFn,
+  isSessionTurnActive?: (sessionId: string) => boolean,
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -4299,6 +4392,16 @@ async function processOne(
 
     // Human-ended conversations stay closed. Auto-bye conversations can restart after the cooldown.
     const existingMapping = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id);
+    const mappedSessionId = String(existingMapping?.coworkSessionId ?? '').trim();
+    // A previous reply turn for this conversation is still running in the
+    // runner (it can outlive the skill-turn watchdog). Starting another turn
+    // now would clobber the live one — CoworkRunner.startSession has no
+    // active-turn guard — so defer the row; the running turn's reply is
+    // picked up and delivered once the session goes idle again.
+    if (mappedSessionId && shouldDeferForBusyRunnerSession(isSessionTurnActive, mappedSessionId, emitLog)) {
+      emitLog(`[PrivateChat] Deferring message ${row.id}: session ${mappedSessionId} still has an active reply turn.`);
+      return;
+    }
     let currentExperienceEvidenceId: string | null = null;
     try {
       const recordedExperience = recordMetaIDPrivateA2AExperience({
@@ -4329,9 +4432,35 @@ async function processOne(
       toGlobalMetaId: row.to_global_metaid,
       toMetaId: row.to_metaid,
     })) {
-      emitLog(`[PrivateChat] Skip stale private chat message ${row.id}; a newer peer message is queued.`);
-      markProcessed(db, row.id, saveDb);
-      return;
+      // A stale row normally gets no reply of its own — the newer peer
+      // message carries the conversation. But when an earlier turn already
+      // completed and its reply was never delivered (watchdog detachment,
+      // app restart), dropping this row would strand that reply forever as a
+      // local-only "internal status" bubble. Fall through so the pickup
+      // below delivers it before the newer message is answered.
+      const pendingCompletedReply = mappedSessionId
+        ? (() => {
+          const trigger = findPrivateChatA2AInboundMessage({
+            coworkStore,
+            sessionId: mappedSessionId,
+            externalConversationId,
+            row,
+          });
+          return trigger
+            ? findDeliverableCompletedTurnReply({
+              coworkStore,
+              sessionId: mappedSessionId,
+              triggerMessageId: trigger.id,
+            })
+            : null;
+        })()
+        : null;
+      if (!pendingCompletedReply) {
+        emitLog(`[PrivateChat] Skip stale private chat message ${row.id}; a newer peer message is queued.`);
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+      emitLog(`[PrivateChat] Message ${row.id} has a newer peer message queued, but a completed reply turn was never delivered; delivering it first.`);
     }
 
     const mappingMeta = parseConversationMappingMetadata(existingMapping?.metadataJson);
@@ -4445,6 +4574,19 @@ async function processOne(
       },
       emitToRenderer,
     });
+
+    // A previous reply turn for this conversation may have completed after
+    // the daemon stopped waiting for it (skill-turn watchdog, app restart).
+    // If its final reply was never delivered, deliver that reply now instead
+    // of re-running an expensive LLM turn for the same trigger.
+    const completedTurnReply = findDeliverableCompletedTurnReply({
+      coworkStore,
+      sessionId,
+      triggerMessageId: userMessage.id,
+    });
+    if (completedTurnReply) {
+      emitLog(`[PrivateChat] Picking up the completed reply turn for message ${row.id} instead of starting a new turn.`);
+    }
 
     const memoryBackend = coworkStore.getMemoryBackend();
     const memoryPolicy = memoryBackend.getEffectiveMemoryPolicyForMetabot(metabot.id);
@@ -4586,7 +4728,7 @@ async function processOne(
       }
       skillWaitNoticeAlreadySent = true;
     };
-    const operatorGuidance = conversationAnalysis.shouldForceBye
+    const operatorGuidance = conversationAnalysis.shouldForceBye || completedTurnReply
       ? null
       : consumeA2AGuidance?.(sessionId, metabot.id) ?? null;
     const systemPrompt = buildPrivateChatA2ASystemPrompt({
@@ -4643,6 +4785,9 @@ async function processOne(
         if (conversationAnalysis.shouldForceBye) {
           await waitBeforePrivateChatReply(conversationAnalysis.incomingTurnCount);
           reply = 'bye';
+        } else if (completedTurnReply) {
+          reply = completedTurnReply.replyText;
+          skillAssistantMessageId = completedTurnReply.assistantMessageId;
         } else if (canRunChatSkills && runPrivateChatSkillTurn) {
           const skillTurnResult = await runPrivateChatSkillTurn({
             sessionId,
@@ -4831,7 +4976,11 @@ async function processOne(
     emitLog(`[PrivateChat] Encrypt reply: plaintextLen=${trimmed.length} sharedSecretLen=${sharedSecretForReply.length} encryptedLen=${encryptedReply.length} encryptedPrefix=${encryptedReply.slice(0, 40)}...`);
     const payloadStr = buildPrivateMsgPayload(fromGlobalMetaId, encryptedReply, row.reply_pin ?? '');
     try {
-      const sentResult = await createSimpleMsgPin(payloadStr);
+      const sentResult = await withPrivateChatPublishTimeout(
+        createSimpleMsgPin(payloadStr),
+        PRIVATE_CHAT_REPLY_PIN_PUBLISH_TIMEOUT_MS,
+        '[PrivateChat] reply pin publish',
+      );
       const chainMetadata = buildPrivateChatA2AChainMetadata({
         txids: sentResult.txids,
         pinId: sentResult.pinId,
@@ -4954,6 +5103,11 @@ export function startPrivateChatDaemon(
   });
   const experienceStore = new MetaIDExperienceStore(db, saveDb);
   const performChat = performChatCompletionForOrchestrator;
+  // Older harnesses inject a minimal runner stub; only real CoworkRunner
+  // instances expose isSessionActive.
+  const isSessionTurnActive = typeof (coworkRunner as Partial<CoworkRunner> | undefined)?.isSessionActive === 'function'
+    ? (sessionId: string) => coworkRunner.isSessionActive(sessionId)
+    : undefined;
   const runPollTick = async (): Promise<void> => {
     if (daemonGeneration !== privateChatDaemonGeneration) return;
     if (privateChatPollTickRunning) return;
@@ -5001,6 +5155,7 @@ export function startPrivateChatDaemon(
               refreshA2APeerProfile,
               experienceStore,
               getMetaIDCognitionPromptBlock,
+              isSessionTurnActive,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);
@@ -5047,6 +5202,7 @@ export async function stopPrivateChatDaemon(options?: { waitForTick?: boolean })
   orderCowork = null;
   thinkingTasks.clear();
   privateChatSkillTurnRetries.clear();
+  privateChatBusyDeferredSince.clear();
   if (options?.waitForTick) {
     await activeTickPromise?.catch(() => undefined);
     await Promise.allSettled(detachedWork);

@@ -411,3 +411,4 @@ man_base_data_pebble/
 /dist-proposal-demo/
 /.idbots-extract/
 /output/
+!tests/privateChatCompletedTurnPickup.test.mjs
