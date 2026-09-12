@@ -74,6 +74,7 @@ class RecordingStore {
     this.sessions = new Map()
   }
   getSession(id) { return this.sessions.get(id) ?? null }
+  getSessionWithoutMessages(id) { return this.sessions.get(id) ?? null }
   getConfig() { return {} }
   updateSession(id, updates) {
     const existing = this.sessions.get(id) ?? { id }

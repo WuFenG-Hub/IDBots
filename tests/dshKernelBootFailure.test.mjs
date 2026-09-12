@@ -30,6 +30,8 @@ test('ensureRuntime names the provider when the runtime process dies at boot', {
     'export const generateRuntimeConfig = () => [];\n')
   fs.writeFileSync(path.join(fakeRuntimeDir, 'lib', 'migrate-session-root-zstd.mjs'),
     'export const migrateSessionRootToZstd = async () => undefined;\n')
+  fs.writeFileSync(path.join(fakeRuntimeDir, 'lib', 'sanitize-v0-abort-cause.mjs'),
+    'export const sanitizeV0AbortCauses = async () => undefined;\n')
   fs.symlinkSync(path.join(realRuntimeDir, 'node_modules'), path.join(fakeRuntimeDir, 'node_modules'))
 
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-boot-fail-root-'))

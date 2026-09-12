@@ -104,7 +104,7 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
       assert.ok(search, 'web-search-deepseek entry mounted')
       assert.equal(search.config.apiKeyEnv, 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY')
       assert.equal(search.config.baseURL, `http://127.0.0.1:${PORT}/anthropic/v1`)
-      assert.equal(search.config.model, 'deepseek-v4-flash')
+      assert.equal(search.config.model, 'deepseek-flash')
       const toolWeb = cfg.find((e) => e.name === '@deepseek-ai/dsh-tool-web')
       assert.ok(toolWeb, 'tool-web entry mounted')
       assert.equal(toolWeb.config.fetch, false)
@@ -116,7 +116,7 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
       assert.ok(aux, 'aux anthropic search request seen')
       assert.equal(aux.body?.tools?.[0]?.type, 'web_search_20250305')
       assert.equal(aux.body?.tools?.[0]?.name, 'web_search')
-      assert.equal(aux.body?.model, 'deepseek-v4-flash')
+      assert.equal(aux.body?.model, 'deepseek-flash')
       assert.equal(aux.auth, 'Bearer sk-web-test')
 
       // The model saw the tool and the formatted sources landed in history.

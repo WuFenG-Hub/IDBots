@@ -160,13 +160,22 @@ test('live DSH session switches provider/model on the next turn', {
 
     const completionCalls = seen.filter((r) => r.method === 'POST' && r.url.endsWith('/chat/completions'))
     assert.ok(completionCalls.length >= 3, `expected >=3 completion calls, got ${completionCalls.length}`)
-    const models = completionCalls.map((r) => r.body?.model)
+    // The kernel fires an auxiliary title-generation completion
+    // (dsh-session-title-first-prompt-llm, 77fed06c) on the first prompt; it
+    // rides the same route, so pick the actual turns by their prompt tokens.
+    const turnTokens = ['TOKEN_TURN_ONE', 'TOKEN_TURN_TWO', 'TOKEN_TURN_THREE']
+    const turnCalls = turnTokens.map((token) =>
+      completionCalls.find((r) => JSON.stringify(r.body?.messages ?? []).includes(token)))
+    for (const [index, token] of turnTokens.entries()) {
+      assert.ok(turnCalls[index], `expected a completion call carrying ${token}`)
+    }
+    const models = turnCalls.map((r) => r.body?.model)
     assert.equal(models[0], 'mock-1', `first turn must use mock-1, got ${models[0]}`)
     assert.equal(models[1], 'mock-2', `second turn must switch to mock-2 (pre-fix this stayed mock-1), got ${models[1]}`)
     assert.equal(models[2], 'mock-1', `third turn must switch back to mock-1, got ${models[2]}`)
     // A→B→A must resume B's persisted history on A, not A's stale in-memory
     // agent that never saw turn 2 (split-brain after per-provider split).
-    const turn3Text = JSON.stringify(completionCalls[2].body?.messages ?? [])
+    const turn3Text = JSON.stringify(turnCalls[2].body?.messages ?? [])
     assert.match(turn3Text, /TOKEN_TURN_TWO/, 'turn 3 must carry turn 2 in the resumed transcript')
     assert.match(turn3Text, /TOKEN_TURN_ONE/, 'turn 3 must still carry turn 1')
   } finally {

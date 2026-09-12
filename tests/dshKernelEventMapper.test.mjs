@@ -509,15 +509,25 @@ test('native DeepSeek finalizes one Think row per tool round (interleaved timeli
   assert.equal(textDone.metadata, undefined)
 })
 
-test('reasoning-chunks stream into the thinking slot like the DSH web UI', () => {
+test('reasoning-chunks is dead vocabulary post-0.1.5; live reasoning streams via assistant/chunk deltas', () => {
   const mapper = new DshEventMapper()
+  // DSH 0.1.5 deleted the v0 packed chunk rows (187c31e2), so these envelopes
+  // no longer exist on the wire and the mapper drops them.
+  const dead = mapper.consume({
+    type: 'reasoning-chunks',
+    data: { turn: 1, step: 1, index: 0, texts: ['The', ' user', ' wants'] },
+  })
+  assert.deepEqual(dead, [])
+
+  // The DSH web stream now arrives through the bridged assistant/chunk feed:
+  // a native reasoning block opens the thinking slot, deltas accumulate there.
   mapper.consume({
     type: 'assistant/chunk',
     data: { chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
   })
   const first = mapper.consume({
-    type: 'reasoning-chunks',
-    data: { turn: 1, step: 1, index: 0, texts: ['The', ' user', ' wants'] },
+    type: 'assistant/chunk',
+    data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'The user wants' } },
   })
   assert.equal(first.some((a) => a.kind === 'message' && a.slot === 'thinking'), false, 'block-start already opened the slot')
   assert.equal(first[0].kind, 'messageUpdate')
@@ -525,16 +535,10 @@ test('reasoning-chunks stream into the thinking slot like the DSH web UI', () =>
   assert.equal(first[0].content, 'The user wants')
 
   const more = mapper.consume({
-    type: 'reasoning-chunks',
-    data: { turn: 1, step: 1, index: 0, texts: [' a', ' tool'] },
+    type: 'assistant/chunk',
+    data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: ' a tool' } },
   })
   assert.equal(more[0].content, 'The user wants a tool')
-
-  const echoed = mapper.consume({
-    type: 'assistant/chunk',
-    data: { chunk: { type: 'reasoning-delta', index: 0, text: ' a' } },
-  })
-  assert.deepEqual(echoed, [], 'sparse reasoning-delta must not double-count after chunks')
 })
 
 test('text-delta after a native reasoning block does not open a body bubble', () => {
@@ -736,15 +740,23 @@ test('conversion is skipped while a native reasoning block keeps text held', () 
   assert.deepEqual(atTool, [])
 })
 
-test('tool-call-chunks (DSH web stream) also triggers the conversion', () => {
+test('tool-call-chunks is dead vocabulary post-0.1.5; block-start tool-call triggers the conversion', () => {
   const mapper = new DshEventMapper()
   mapper.consume({
     type: 'assistant/chunk',
     data: { chunk: { type: 'text-delta', index: 0, text: '先看' } },
   })
-  const converted = mapper.consume({
+  // The packed tool-call-chunks row went away with DSH 0.1.5 (187c31e2): the
+  // envelope is inert now.
+  const dead = mapper.consume({
     type: 'tool-call-chunks',
     data: { turn: 1, step: 1, index: 1, id: 'call_1', name: 'bash', args: [''] },
+  })
+  assert.deepEqual(dead, [])
+  // The conversion still fires through the bridged assistant/chunk feed.
+  const converted = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
   })
   const finalize = converted.find((a) => a.kind === 'messageFinalize')
   assert.equal(finalize.slot, 'text')
