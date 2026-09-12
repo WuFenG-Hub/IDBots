@@ -18,10 +18,10 @@
 //    the assembled replay state; commentary ("thinking out loud" around tool
 //    calls) is reclassified into the thinking slot at finalize
 //  - Official DeepSeek on dsh-llm-deepseek has no phase tags: text that
-//    accompanies tool calls is treated as commentary. Live tokens arrive as
-//    `reasoning-chunks` (the DSH web UI stream); assistant/chunk
-//    reasoning-delta is a sparse echo and must not double-count once chunks
-//    have started. A native reasoning block already live this step must not
+//    accompanies tool calls is treated as commentary. Live reasoning tokens
+//    arrive as `reasoning-delta` on assistant/chunk (the pre-0.1.5
+//    `reasoning-chunks` web-UI stream no longer exists). A native reasoning
+//    block already live this step must not
 //    open the visible text slot — that is the "thinking flashes as body
 //    copy, then folds into a Think row" failure. The same failure shows on
 //    the reasoning-disabled route (effort "off"), where tool-call commentary
@@ -105,11 +105,9 @@ export class DshEventMapper {
   private rawTextBuf = ''
   /** True once a native reasoning-delta opened the thinking slot this step. */
   private reasoningFromDeltas = false
-  /** True once `reasoning-chunks` streamed this step (skip sparse deltas). */
-  private reasoningFromChunks = false
   /**
-   * Native reasoning block is in flight this step (block-start / chunks /
-   * deltas). Distinct from think-tag splits inside text-delta.
+   * Native reasoning block is in flight this step (block-start /
+   * reasoning-delta). Distinct from think-tag splits inside text-delta.
    */
   private reasoningBlockLive = false
   /**
@@ -189,11 +187,9 @@ export class DshEventMapper {
             actions.push({ kind: 'messageUpdate', slot: 'text', content: this.textBuf })
           }
         } else if (chunk?.type === 'reasoning-delta') {
-          if (!this.reasoningFromChunks) {
-            this.reasoningBlockLive = true
-            this.reasoningFromDeltas = true
-            this.appendReasoning(actions, chunk.text ?? '')
-          }
+          this.reasoningBlockLive = true
+          this.reasoningFromDeltas = true
+          this.appendReasoning(actions, chunk.text ?? '')
         } else if (chunk?.type === 'block-end' && chunk.block?.type === 'reasoning') {
           const assembled = typeof chunk.block.text === 'string' ? chunk.block.text : ''
           if (assembled.length > 0) {
@@ -400,7 +396,6 @@ export class DshEventMapper {
       this.textBuf = ''
     }
     this.reasoningFromDeltas = false
-    this.reasoningFromChunks = false
     this.reasoningBlockLive = false
   }
 
@@ -416,7 +411,6 @@ export class DshEventMapper {
       this.finalizeRidingText(actions, blocks, visibleText, reasoning)
       this.rawTextBuf = ''
       this.reasoningFromDeltas = false
-      this.reasoningFromChunks = false
       this.reasoningBlockLive = false
       this.turnSawStreamedText = false
       return
@@ -510,7 +504,6 @@ export class DshEventMapper {
 
     this.rawTextBuf = ''
     this.reasoningFromDeltas = false
-    this.reasoningFromChunks = false
     this.reasoningBlockLive = false
     this.turnSawStreamedText = false
   }
