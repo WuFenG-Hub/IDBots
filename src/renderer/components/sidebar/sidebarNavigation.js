@@ -3,6 +3,11 @@
 // `false` to hide the link on the Bot home page before a public release.
 const GROUP_TASKS_NAV_ENABLED = true;
 
+// Feature flag: the Bot Hub (gigSquare) nav entry and everything behind it
+// stay implemented; Bot Hub is just not a promoted column for now. Set to
+// `true` to restore the entry on the Bot Internet page.
+const BOT_HUB_NAV_ENABLED = false;
+
 export function getSidebarPrimaryNavModel({ t, hasRunningScheduledTask }) {
   return [
     {
@@ -37,6 +42,7 @@ export function getSidebarInternetNavModel({ t }) {
       label: t('gigSquare'),
       icon: 'shoppingBag',
       badge: t('gigSquareAlphaBadge'),
+      hidden: !BOT_HUB_NAV_ENABLED,
     },
     {
       id: 'metaapps',

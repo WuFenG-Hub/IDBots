@@ -237,7 +237,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   }).filter((item) => !item.hidden);
   const internetNavItems = getSidebarInternetNavModel({
     t: (key) => i18nService.t(key),
-  });
+  }).filter((item) => !item.hidden);
 
   useEffect(() => {
     const handleSearch = () => {

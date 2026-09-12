@@ -21,7 +21,7 @@ test('Bot Home primary nav keeps tasks and bots, without Bot Hub or Meta Apps', 
   assert.deepEqual(ids, ['scheduledTasks', 'groupTasks', 'metabots']);
 });
 
-test('Bot Internet nav is Bot Browser, then Bot Hub and Meta Apps', () => {
+test('Bot Internet nav model keeps Bot Hub implemented but hidden behind its flag', () => {
   const items = getSidebarInternetNavModel({ t });
 
   assert.deepEqual(items.map((item) => item.id), ['browser', 'gigSquare', 'metaapps']);
@@ -29,6 +29,14 @@ test('Bot Internet nav is Bot Browser, then Bot Hub and Meta Apps', () => {
   assert.equal(items[1].icon, 'shoppingBag');
   assert.equal(items[1].badge, 'gigSquareAlphaBadge');
   assert.equal(items[2].icon, 'squares2x2');
+
+  // Bot Hub is not a promoted column for now: its entry stays implemented but
+  // hidden, so the sidebar only lists Bot Browser and Meta Apps.
+  assert.equal(items[1].hidden, true);
+  assert.deepEqual(
+    items.filter((item) => !item.hidden).map((item) => item.id),
+    ['browser', 'metaapps'],
+  );
 });
 
 test('Bot Browser pane stays the visible internet destination only when selected', () => {
