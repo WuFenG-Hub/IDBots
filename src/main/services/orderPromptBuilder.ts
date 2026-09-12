@@ -12,6 +12,14 @@ export interface OrderPromptBuildResult {
   userPrompt: string;
 }
 
+export interface OrderDeliveryBudgetPromptInput {
+  sponsorCoversDirectUpload: boolean;
+  spendableSats: number;
+  feeRate: number;
+  fundableBytes: number;
+  recommendedMaxBytes: number;
+}
+
 const REMOTE_SERVICES_BLOCK_RE = /\n?<available_remote_services>[\s\S]*?<\/available_remote_services>\n?/gi;
 
 export function stripRemoteDelegationInstructions(skillsPrompt?: string | null): string {
@@ -21,6 +29,30 @@ export function stripRemoteDelegationInstructions(skillsPrompt?: string | null):
     .replace(REMOTE_SERVICES_BLOCK_RE, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function formatBudgetMb(bytes: number): string {
+  const mb = Math.max(0, Number(bytes) || 0) / (1024 * 1024);
+  return mb >= 10 ? String(Math.round(mb)) : mb.toFixed(1);
+}
+
+export function buildDeliveryBudgetGuidanceLines(
+  budget: OrderDeliveryBudgetPromptInput,
+  outputType: string,
+): string[] {
+  const type = String(outputType || '').trim() || 'file';
+  const fundableMb = formatBudgetMb(budget.fundableBytes);
+  const recommendedMb = formatBudgetMb(budget.recommendedMaxBytes);
+  if (budget.sponsorCoversDirectUpload) {
+    return [
+      `- Delivery budget: files up to 5MB are delivered through a platform-covered direct pin at no wallet cost. Larger files require chunked on-chain upload paid from your own MVC wallet (~${budget.feeRate} sats/byte; current balance funds roughly ${fundableMb} MB).`,
+      `- Keep the generated ${type} file under 5MB whenever the request allows it (shorter duration, lower resolution/bitrate, or compression). Only exceed 5MB when the request genuinely requires it, and never beyond what the wallet can fund (~${fundableMb} MB).`,
+    ];
+  }
+  return [
+    `- Delivery budget: on-chain delivery of the ${type} file is paid from your own MVC wallet (~${budget.feeRate} sats/byte of file data; the current balance funds roughly ${fundableMb} MB of upload). Files up to 5MB use a cheaper direct pin; larger files need a chunked upload.`,
+    `- You MUST keep the generated ${type} file under ${recommendedMb} MB so the wallet can pay for delivery — shorten duration, lower resolution/bitrate, or compress the file before finishing. If the request cannot be fulfilled within this budget, state the delivery budget limit as the failure reason instead of generating an undeliverable file.`,
+  ];
 }
 
 export function buildOrderPrompts(params: {
@@ -35,6 +67,7 @@ export function buildOrderPrompts(params: {
   executionReminder?: string | null;
   expectedOutputType?: string | null;
   operatorGuidance?: string | null;
+  deliveryBudget?: OrderDeliveryBudgetPromptInput | null;
 }): OrderPromptBuildResult {
   const clientName = params.peerName?.trim() || 'the client';
   const allowedSkillNames = Array.from(new Set(
@@ -78,6 +111,9 @@ export function buildOrderPrompts(params: {
     expectedOutputType !== 'text'
       ? `- The digital deliverable must be ${expectedOutputType}. Keep the generated file under ${deliveryMaxSizeLabel} so IDBots can upload it to MVC for delivery. If the generated file is over ${deliveryMaxSizeLabel}, regenerate or compress it until it is under ${deliveryMaxSizeLabel}.`
       : null,
+    ...(expectedOutputType !== 'text' && params.deliveryBudget
+      ? buildDeliveryBudgetGuidanceLines(params.deliveryBudget, expectedOutputType)
+      : []),
     expectedOutputType !== 'text'
       ? `- After generation, include the local file path in your final result. IDBots will upload that file on-chain after your skill finishes.`
       : null,

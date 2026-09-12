@@ -59,6 +59,7 @@ import {
 } from '../libs/experiencePromptBlocks';
 import {
   SERVICE_ORDER_DELIVERY_ARTIFACT_FAILED_REASON,
+  SERVICE_ORDER_DELIVERY_FUNDING_INSUFFICIENT_REASON,
   SERVICE_ORDER_SKILL_SCOPE_UNRESOLVED_REASON,
   type ServiceOrderLifecycleService,
 } from './serviceOrderLifecycleService';
@@ -114,6 +115,7 @@ import {
   shouldRetryPrivateChatSkillTurn,
 } from './privateChatSkillTurnPolicy';
 import { extractFinalAssistantReply } from './orchestratorCoworkBridge';
+import { resolveOrderDeliveryBudget, type OrderDeliveryBudget } from './orderDeliveryBudgetService';
 
 const POLL_INTERVAL_MS = 5_000;
 /** Max recent messages of the active segment sent to the model per A2A private-chat turn. */
@@ -1330,6 +1332,16 @@ function buildOrderSkillScopeFailureNotice(scope: SellerOrderSkillScopeResolutio
     missing ? `Missing local skills: ${missing}.` : '',
     'To stay within the order authorization, no unapproved local skills will be used.',
   ].filter(Boolean).join('\n');
+}
+
+function buildOrderDeliveryFundingFailureNotice(budget: OrderDeliveryBudget): string {
+  const fundableMb = (budget.fundableBytes / (1024 * 1024)).toFixed(1);
+  return [
+    'The service provider cannot accept this order right now: the provider wallet balance is too low to pay the on-chain delivery fee for the result file.',
+    `Current delivery capacity is about ${fundableMb} MB of on-chain upload, which is below the minimum a deliverable file requires.`,
+    'The order was rejected before any skill execution, so no work was started.',
+    'The system will start the refund process automatically. Do not submit a positive rating for this service.',
+  ].join('\n');
 }
 
 export async function sendSellerOrderAcknowledgement(params: {
@@ -3813,6 +3825,83 @@ async function processOne(
         return;
       }
 
+      // Delivery funding gate: a file deliverable is only complete once it is
+      // pinned on-chain, and that upload is paid from this bot's MVC wallet.
+      // Measure the wallet's delivery capacity up front so the executor can
+      // size the artifact to fit — and reject orders the wallet cannot
+      // possibly deliver before any skill work (or third-party API quota) is
+      // burned. Fails open: a balance-query error yields no budget and the
+      // order proceeds without guidance.
+      let deliveryBudget: OrderDeliveryBudget | null = null;
+      try {
+        deliveryBudget = await resolveOrderDeliveryBudget({
+          metabotStore,
+          metabotId: metabot.id,
+          mvcAddress: metabot.mvc_address,
+          outputType: serviceOutputType,
+        });
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        emitLog(`[Order] Delivery budget resolution failed; continuing without it: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (deliveryBudget?.shouldRejectOrder) {
+        const fundingFailureNotice = buildOrderDeliveryFundingFailureNotice(deliveryBudget);
+        const transmittedFundingFailureNotice = orderMessageTxid || orderPinId
+          ? buildOrderStatusMessage(orderMessageTxid, fundingFailureNotice, orderPinId)
+          : fundingFailureNotice;
+        emitLog(
+          `[Order] Rejecting order: delivery funding insufficient (capacity ${deliveryBudget.fundableBytes} bytes).`
+        );
+        if (source === 'metaweb_private' && fromGlobalMetaId) {
+          try {
+            const failureResult = await sendEncryptedMsg(transmittedFundingFailureNotice);
+            if (sellerOrderSessionId) {
+              const failureMsg = coworkStore.addMessage(sellerOrderSessionId, {
+                type: 'assistant',
+                content: transmittedFundingFailureNotice,
+                metadata: buildOrderA2ADisplayMetadata({
+                  peerGlobalMetaId: orderPeerGlobalMetaId,
+                  direction: 'outgoing',
+                  content: transmittedFundingFailureNotice,
+                  fallbackTag: 'ORDER_STATUS',
+                  orderTxid: orderMessageTxid,
+                  orderRole: 'seller',
+                  orderPinId,
+                  paymentTxid,
+                  orderMappingExternalConversationId: sellerOrderConversationId,
+                  extra: {
+                    orderExecutionFailed: true,
+                    orderDeliveryFundingInsufficient: true,
+                    deliveryFundableBytes: deliveryBudget.fundableBytes,
+                    ...buildPrivateChatA2AChainMetadata({
+                      txids: failureResult.txids,
+                      pinId: failureResult.pinId,
+                    }),
+                  },
+                }),
+              });
+              if (emitToRenderer) {
+                emitToRenderer('cowork:stream:message', { sessionId: sellerOrderSessionId, message: failureMsg });
+              }
+            }
+          } catch (sendError) {
+            rethrowSqliteWasmBoundsError(sendError);
+            emitLog(`[Order] Funding failure notice broadcast failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`);
+          }
+        }
+        serviceOrderLifecycle?.markSellerOrderFailed({
+          localMetabotId: metabot.id,
+          counterpartyGlobalMetaId: orderPeerGlobalMetaId,
+          orderPinId,
+          paymentTxid,
+          orderMessageTxid,
+          failureReason: SERVICE_ORDER_DELIVERY_FUNDING_INSUFFICIENT_REASON,
+          failedAt: Date.now(),
+        });
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+
       const prompts = buildOrderPrompts({
         plaintext,
         source,
@@ -3824,6 +3913,7 @@ async function processOne(
         allowedSkillNames: skillScope.allowedSkillNames,
         executionReminder,
         expectedOutputType: serviceOutputType,
+        deliveryBudget,
       });
       const externalConversationId = sellerOrderConversationId || buildOrderExternalConversationId(row, source, orderTrackingId);
       const orderDispatchKey = orderTrackingId
