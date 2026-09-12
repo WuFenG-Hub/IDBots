@@ -9,6 +9,11 @@
 
 import type { MetabotStore } from '../metabotStore';
 
+/** Structural subset of MetabotStore the surf settings need (test-friendly). */
+export interface SurfSettingsReader {
+  getMetabotSetting(metabotId: number, key: string): string | null;
+}
+
 /** '1'/'0' toggle; unset means ON (default). */
 export const SURF_BEFORE_DREAM_ENABLED_KEY = 'surf_before_dream_enabled';
 /** Integer string; chain-writing interactions allowed per surf run. */
@@ -26,11 +31,14 @@ export const normalizeSurfBudgetValue = (value: unknown): string | null => {
 };
 
 /** Default ON: only an explicit '0' disables pre-dream surfing. */
-export const isSurfBeforeDreamEnabled = (metabotStore: MetabotStore, metabotId: number): boolean =>
-  metabotStore.getMetabotSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY) !== '0';
+export const isSurfBeforeDreamEnabled = (reader: SurfSettingsReader, metabotId: number): boolean =>
+  reader.getMetabotSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY) !== '0';
 
-export const getSurfInteractionBudget = (metabotStore: MetabotStore, metabotId: number): number => {
-  const raw = metabotStore.getMetabotSetting(metabotId, SURF_INTERACTION_BUDGET_KEY);
+export const getSurfInteractionBudget = (reader: SurfSettingsReader, metabotId: number): number => {
+  const raw = reader.getMetabotSetting(metabotId, SURF_INTERACTION_BUDGET_KEY);
   const normalized = raw === null ? null : normalizeSurfBudgetValue(raw);
   return normalized === null ? DEFAULT_SURF_INTERACTION_BUDGET : Number(normalized);
 };
+
+/** Compile-time check: the real store satisfies the structural reader. */
+export const __metabotStoreIsSurfSettingsReader = (store: MetabotStore): SurfSettingsReader => store;

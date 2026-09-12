@@ -268,6 +268,7 @@ import {
 } from './services/contentSummaryService';
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { MetawebSurfStore } from './metawebSurfStore';
+import { SurfService, SURF_STATUS_CHANNEL } from './services/surfService';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
 import { SleepGuard, evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, type SleepGuardSource, type SleepGuardState } from './sleepGuard';
@@ -2671,6 +2672,7 @@ let knowledgeBaseStore: KnowledgeBaseStore | null = null;
 let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
 let metawebSurfStore: MetawebSurfStore | null = null;
+let surfService: SurfService | null = null;
 let metawebStudyService: MetawebStudyService | null = null;
 let chainContentHistoryStore: ChainContentHistoryStore | null = null;
 let contentSummaryService: ContentSummaryService | null = null;
@@ -3136,6 +3138,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   knowledgeBaseService = null;
   metawebStudyJobStore = null;
   metawebSurfStore = null;
+  surfService = null;
   metawebStudyService = null;
   chainContentHistoryStore = null;
   setChainContentHistoryStore(null);
@@ -4124,6 +4127,11 @@ const startSqliteDaemons = (): void => {
   // cowork sessions (search → read pins → save into the bot's knowledge
   // bases). One session at a time; no proactive reporting.
   getMetawebStudyService().startSchedule();
+
+  // MetaWeb surf ("AI 冲浪"): no nightly schedule of its own — pre-dream
+  // surfing hooks into DreamService, manual triggers come via IPC/chat tools.
+  // Startup work is crash recovery for runs orphaned by a killed process.
+  getSurfService().recoverAfterRestart();
 
   // Chain content summaries: asynchronously fills LLM gists for the chain
   // write/read ledger's pending rows on a slow tick, cost-gated per tick and
@@ -6953,6 +6961,28 @@ const getMetawebStudyService = (): MetawebStudyService => {
     });
   }
   return metawebStudyService;
+};
+
+/**
+ * MetaWeb surf ("AI 冲浪"): the autonomous surf loop. Phase-2 wiring has no
+ * LLM session yet — runs write a digest report and advance watermarks; the
+ * persona-driven session is injected here in the next phase.
+ */
+const getSurfService = (): SurfService => {
+  if (!surfService) {
+    surfService = new SurfService({
+      store: getMetawebSurfStore(),
+      metabotStore: getMetabotStore(),
+      broadcast: (payload) => {
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) {
+            try { win.webContents.send(SURF_STATUS_CHANNEL, payload); } catch { /* ignore */ }
+          }
+        });
+      },
+    });
+  }
+  return surfService;
 };
 
 /**
@@ -11805,12 +11835,16 @@ if (!gotTheLock) {
       }
     }));
 
-  // Engine lands with the SurfService phase; the surface is stable already so
-  // the renderer can be wired against it.
-  ipcMain.handle('surf:runNow', async () => ({
-    success: false,
-    error: 'MetaWeb surf engine is not available yet',
-  }));
+  ipcMain.handle('surf:runNow', async (_event, metabotId: number) =>
+    withSqliteRecovery('surf:runNow', async () => {
+      try {
+        const run = getSurfService().startSurf(Number(metabotId), 'manual-ui');
+        return { success: true, runId: run.id };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to start surf run' };
+      }
+    }));
 
   ipcMain.handle('metabot:checkNameExists', async (_event, options: { name: string; excludeId?: number }) => {
     try {
