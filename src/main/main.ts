@@ -5620,6 +5620,17 @@ const getCoworkRunner = () => {
       // topics, drained nightly into the bot's knowledge bases). The service
       // instance matches the MetawebStudyControl shape method-for-method.
       metawebStudy: getMetawebStudyService(),
+      // metaweb_surf_* tool backends: the autonomous surf loop. The adapter
+      // matches the MetawebSurfControl shape; runs are fire-and-forget from
+      // the tool's perspective.
+      metawebSurf: {
+        startSurfForMetabot: (metabotId: number) => ({
+          runId: getSurfService().startSurf(metabotId, 'manual-chat').id,
+        }),
+        isSurfRunning: (metabotId: number) => getSurfService().isRunning(metabotId),
+        listSurfRuns: (metabotId: number, limit?: number) =>
+          getMetawebSurfStore().listRunsByMetabot(metabotId, limit ?? 5),
+      },
       // upload_file tool backend. Delegates to the shared uploadMetaFile()
       // service so the tool, the RPC endpoint, and the IPC handlers all share
       // one on-chain path (direct/chunked, MVC sponsor-first with self-paid

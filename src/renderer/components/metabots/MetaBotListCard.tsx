@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { ArrowPathIcon, CpuChipIcon, DocumentDuplicateIcon, MoonIcon } from '@heroicons/react/24/outline';
+import { ArrowPathIcon, CpuChipIcon, DocumentDuplicateIcon, GlobeAltIcon, MoonIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { Metabot } from '../../types/metabot';
 import TwinBadge from './TwinBadge';
@@ -137,6 +137,15 @@ const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
             aria-label={i18nService.t('metabotDreaming')}
           >
             <MoonIcon className="h-5 w-5 animate-pulse" aria-hidden />
+          </span>
+        )}
+        {metabot.surfing && (
+          <span
+            className="inline-flex items-center justify-center text-sky-600 dark:text-sky-400 shrink-0"
+            title={i18nService.t('surfBadgeLabel')}
+            aria-label={i18nService.t('surfBadgeLabel')}
+          >
+            <GlobeAltIcon className="h-5 w-5 animate-pulse" aria-hidden />
           </span>
         )}
         <div

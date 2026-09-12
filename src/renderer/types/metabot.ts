@@ -47,6 +47,8 @@ export interface Metabot {
   homepage?: string | null;
   /** Runtime flag merged by main: this bot is currently running its dream consolidation. */
   dreaming?: boolean;
+  /** Runtime flag tracked renderer-side via surf:onStatusChanged: this bot currently has a surf run in progress. */
+  surfing?: boolean;
   /**
    * Runtime flag merged by main: chain-honest on-chain sync state.
    * 'partial' = identity registered but some info pins unpublished (or a

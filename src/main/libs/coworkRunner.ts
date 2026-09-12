@@ -173,6 +173,10 @@ import {
   type MetawebStudyControl,
 } from './metawebStudyAgentTools';
 import {
+  buildSurfAgentTools,
+  type MetawebSurfControl,
+} from './surfAgentTools';
+import {
   buildMetaFileUploadAgentTools,
   type MetaFileUploadControl,
 } from './metaFileUploadAgentTools';
@@ -1742,6 +1746,15 @@ export interface CoworkRunnerOptions {
    */
   metawebStudy?: MetawebStudyControl;
   /**
+   * When set, every cowork session gets the MetaWeb surf tools
+   * (metaweb_surf_start / metaweb_surf_status) backed by SurfService
+   * (services/surfService.ts; main.ts wires the control). The runs themselves
+   * are unattended background sessions driven by that service, not by these
+   * tools. Surf sessions themselves never see these tools (not allowlisted):
+   * no nested surfing.
+   */
+  metawebSurf?: MetawebSurfControl;
+  /**
    * When set, every cowork session gets the upload_file tool backed by
    * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
    * on-chain semantics: direct vs chunked mode, MVC sponsor-first direct upload
@@ -1950,6 +1963,7 @@ export class CoworkRunner extends EventEmitter {
   private qaRecall?: QaRecallControl;
   private knowledgeBase?: KnowledgeBaseControl;
   private metawebStudy?: MetawebStudyControl;
+  private metawebSurf?: MetawebSurfControl;
   private metaFileUpload?: MetaFileUploadControl;
   private walletTools?: WalletToolsControl;
   private visionRelay?: VisionRelayControl;
@@ -9763,6 +9777,20 @@ export class CoworkRunner extends EventEmitter {
         ...buildMetawebStudyAgentTools({
           tool,
           metawebStudy: this.metawebStudy,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
+        })
+      );
+    }
+    // MetaWeb surf ("AI 冲浪"): metaweb_surf_start is the chat trigger ("去
+    // 冲浪"), metaweb_surf_status is how the bot answers "what did you learn".
+    // Same memory gate as the study tools — a surf whose whole point is
+    // feeding the KB makes no sense with memory off.
+    if (sessionMemoryEnabled && this.metawebSurf) {
+      memoryTools.push(
+        ...buildSurfAgentTools({
+          tool,
+          metawebSurf: this.metawebSurf,
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })
