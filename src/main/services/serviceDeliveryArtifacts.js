@@ -463,6 +463,37 @@ export async function verifyDeliveryArtifactUpload(upload) {
   return Boolean(pinId);
 }
 
+const PERMANENT_DELIVERY_UPLOAD_ERROR_PATTERNS = [
+  /insufficient\s+\w*\s*balance/i,
+  /file\s+(size\s+)?exceeds/i,
+  /exceeds\s+the\s+effective/i,
+  /exceeds\s+maximum\s+upload\s+size/i,
+  /file\s+not\s+found/i,
+  /not\s+a\s+file/i,
+  /file\s+changed\s+while\s+preparing/i,
+  /supports\s+MVC\s+only/i,
+  /wallet\s+not\s+found/i,
+  /has\s+no\s+metaid/i,
+  /has\s+no\s+mvc\s+address/i,
+  /worker\s+not\s+found/i,
+  /Electron\s+executable\s+not\s+found/i,
+  /metabot_id\s+must\s+be/i,
+  /invalid\s+worker\s+payload/i,
+];
+
+export function getDeliveryUploadErrorMessage(error) {
+  if (error != null && typeof error === 'object' && typeof error.message === 'string') {
+    return error.message;
+  }
+  return String(error || '');
+}
+
+export function isRetryableDeliveryUploadError(error) {
+  const message = getDeliveryUploadErrorMessage(error);
+  if (!message.trim()) return false;
+  return !PERMANENT_DELIVERY_UPLOAD_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
 export async function uploadVerifiedDeliveryArtifact(input) {
   const artifact = input?.artifact;
   const request = input?.request || {};
@@ -474,7 +505,9 @@ export async function uploadVerifiedDeliveryArtifact(input) {
   }
 
   let lastError = null;
+  let attempts = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    attempts = attempt;
     try {
       const upload = await uploadDeliveryArtifact(artifact, request);
       const pinId = getDeliveryArtifactPinId(upload);
@@ -494,15 +527,19 @@ export async function uploadVerifiedDeliveryArtifact(input) {
       };
     } catch (error) {
       lastError = error;
-      if (attempt < maxAttempts && typeof input?.onRetry === 'function') {
+      const retryable = isRetryableDeliveryUploadError(error);
+      if (attempt < maxAttempts && retryable && typeof input?.onRetry === 'function') {
         await input.onRetry({ attempt, error });
+      }
+      if (!retryable) {
+        break;
       }
     }
   }
 
   return {
     ok: false,
-    attempts: maxAttempts,
+    attempts,
     error: lastError instanceof Error ? lastError : new Error(String(lastError || 'Delivery artifact upload failed')),
   };
 }

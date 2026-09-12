@@ -39,6 +39,8 @@ class FakeCoworkRunner extends EventEmitter {
   }
 
   respondToPermission() {}
+
+  registerTextPermissionRelay() {}
 }
 
 class FakeCoworkStore {
