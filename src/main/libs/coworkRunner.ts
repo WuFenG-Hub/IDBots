@@ -3,6 +3,7 @@ import { type ChildProcessByStdio } from 'child_process';
 import { createHash } from 'crypto';
 import { app } from 'electron';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import type { Readable } from 'stream';
 import { StringDecoder } from 'string_decoder';
@@ -419,6 +420,9 @@ const SAFETY_APPROVAL_DENY_OPTION_EN = 'Deny this operation';
 const DELETE_COMMAND_RE = /\b(rm|rmdir|unlink|del|erase|remove-item)\b/i;
 const FIND_DELETE_COMMAND_RE = /\bfind\b[\s\S]*\s-delete\b/i;
 const GIT_CLEAN_COMMAND_RE = /\bgit\s+clean\b/i;
+// Deleter executables the unattended-delete policy can attribute targets to.
+// Mirrors the DELETE_COMMAND_RE vocabulary plus the delete-named host tools.
+const UNATTENDED_DELETE_EXECUTABLES = new Set(['rm', 'rmdir', 'unlink', 'del', 'erase', 'remove-item', 'delete', 'remove']);
 const MEMORY_REQUEST_TAIL_SPLIT_RE = /[,，。]\s*(?:请|麻烦)?你(?:帮我|帮忙|给我|为我|看下|看一下|查下|查一下)|[,，。]\s*帮我|[,，。]\s*请帮我|[,，。]\s*(?:能|可以)不能?\s*帮我|[,，。]\s*你看|[,，。]\s*请你/i;
 const MEMORY_PROCEDURAL_TEXT_RE = /(执行以下命令|run\s+(?:the\s+)?following\s+command|\b(?:cd|npm|pnpm|yarn|node|python|bash|sh|git|curl|wget)\b|\$[A-Z_][A-Z0-9_]*|&&|--[a-z0-9-]+|\/tmp\/|\.sh\b|\.bat\b|\.ps1\b)/i;
 const MEMORY_ASSISTANT_STYLE_TEXT_RE = /^(?:使用|use)\s+[A-Za-z0-9._-]+\s*(?:技能|skill)/i;
@@ -5501,6 +5505,235 @@ export class CoworkRunner extends EventEmitter {
       || GIT_CLEAN_COMMAND_RE.test(command);
   }
 
+  private tokenizeShellSegment(segment: string): string[] {
+    const tokens: string[] = [];
+    const tokenRe = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = tokenRe.exec(segment)) !== null) {
+      tokens.push(match[1] ?? match[2] ?? match[3]);
+    }
+    return tokens;
+  }
+
+  /**
+   * Statically attribute the delete targets of a bash command and judge them
+   * against the workspace root. Tracks `cd` across chained segments and
+   * recurses into `bash -c`/`sh -c` payloads (bounded depth). Returns:
+   * - 'no-delete': the delete keyword only appears inside quoted text (e.g.
+   *   echo output), so the command is not a deletion at all;
+   * - 'safe': every attributed target resolves inside the workspace;
+   * - 'unsafe': a target is outside the workspace, cannot be resolved
+   *   statically ($VAR, command substitution), or the matched keyword could
+   *   not be attributed to a concrete deleter invocation (xargs, aliases) —
+   *   all fail closed.
+   */
+  private analyzeBashDeleteCommand(
+    command: string,
+    workspaceRoot: string,
+    depth = 0
+  ): { kind: 'no-delete' } | { kind: 'safe' } | { kind: 'unsafe'; reason: string } {
+    const unquoted = command.replace(/"[^"]*"|'[^']*'/g, '');
+    const looksLikeDelete = DELETE_COMMAND_RE.test(unquoted)
+      || FIND_DELETE_COMMAND_RE.test(unquoted)
+      || GIT_CLEAN_COMMAND_RE.test(unquoted);
+
+    let currentDir: string | null = workspaceRoot;
+    let invoked = false;
+
+    const resolveTarget = (rawTarget: string): string | null => {
+      const target = rawTarget.trim();
+      if (!target || /[$`]/.test(target)) return null;
+      const expandedHome = target === '~' || target.startsWith('~/') || target.startsWith('~\\')
+        ? path.join(os.homedir(), target.slice(1))
+        : target;
+      if (path.isAbsolute(expandedHome)) return path.normalize(expandedHome);
+      if (!currentDir) return null;
+      return path.resolve(currentDir, expandedHome);
+    };
+
+    const segmentHead = (segment: string): { executable: string; args: string[] } | null => {
+      const tokens = this.tokenizeShellSegment(segment);
+      if (tokens.length === 0) return null;
+      let head = 0;
+      while (head < tokens.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[head]) || tokens[head] === 'sudo')) {
+        head += 1;
+      }
+      return { executable: path.basename(tokens[head] ?? '').toLowerCase(), args: tokens.slice(head + 1) };
+    };
+
+    // The unquoted pre-check clears keywords that only appear inside quoted
+    // output text (echo "rm -rf done") — but quotes can also hide a real
+    // deletion inside a shell `-c` payload, so those are analyzed first.
+    if (!looksLikeDelete) {
+      if (depth >= 2) return { kind: 'no-delete' };
+      let nestedDelete = false;
+      for (const segment of command.split(/&&|\|\||[;\n|]/)) {
+        const parsed = segmentHead(segment);
+        if (!parsed) continue;
+        if (parsed.executable === 'cd') {
+          const cdTarget = parsed.args.find((token) => !token.startsWith('-'));
+          currentDir = cdTarget ? resolveTarget(cdTarget) : os.homedir();
+          continue;
+        }
+        if (!['bash', 'sh', 'zsh'].includes(parsed.executable)) continue;
+        const payloadIndex = parsed.args.findIndex((token) => token === '-c');
+        const payload = payloadIndex >= 0 ? parsed.args[payloadIndex + 1] : undefined;
+        if (typeof payload !== 'string' || !payload.trim()) continue;
+        const nested = this.analyzeBashDeleteCommand(payload, currentDir ?? workspaceRoot, depth + 1);
+        if (nested.kind === 'unsafe') return nested;
+        if (nested.kind === 'safe') nestedDelete = true;
+      }
+      return nestedDelete ? { kind: 'safe' } : { kind: 'no-delete' };
+    }
+
+    for (const segment of command.split(/&&|\|\||[;\n|]/)) {
+      const parsed = segmentHead(segment);
+      if (!parsed) continue;
+      const { executable, args } = parsed;
+
+      if (executable === 'cd') {
+        const cdTarget = args.find((token) => !token.startsWith('-'));
+        currentDir = cdTarget ? resolveTarget(cdTarget) : os.homedir();
+        continue;
+      }
+
+      if (['bash', 'sh', 'zsh'].includes(executable) && depth < 2) {
+        const payloadIndex = args.findIndex((token) => token === '-c');
+        const payload = payloadIndex >= 0 ? args[payloadIndex + 1] : undefined;
+        if (typeof payload === 'string' && payload.trim()) {
+          const nested = this.analyzeBashDeleteCommand(payload, currentDir ?? workspaceRoot, depth + 1);
+          if (nested.kind === 'unsafe') return nested;
+          if (nested.kind === 'safe') invoked = true;
+        }
+        continue;
+      }
+
+      const targetTokens: string[] = [];
+      if (UNATTENDED_DELETE_EXECUTABLES.has(executable)) {
+        invoked = true;
+        for (const token of args) {
+          if (token === '--' || token.startsWith('-')) continue;
+          targetTokens.push(token);
+        }
+      } else if (executable === 'find' && args.some((token) => token === '-delete')) {
+        invoked = true;
+        const searchRoot = args.find((token) => !token.startsWith('-'));
+        if (searchRoot) targetTokens.push(searchRoot);
+      } else if (executable === 'git' && args[0] === 'clean') {
+        invoked = true;
+        targetTokens.push('.');
+      }
+
+      for (const token of targetTokens) {
+        const resolved = resolveTarget(token);
+        if (!resolved) {
+          return {
+            kind: 'unsafe',
+            reason: tApp(
+              `删除目标 "${this.truncateCommandPreview(token, 80)}" 含有无法静态解析的变量或展开`,
+              `delete target "${this.truncateCommandPreview(token, 80)}" contains variables or expansions that cannot be resolved statically`
+            ),
+          };
+        }
+        if (!isPathWithin(workspaceRoot, resolved)) {
+          return {
+            kind: 'unsafe',
+            reason: tApp(
+              `删除目标 "${resolved}" 位于会话工作区之外`,
+              `delete target "${resolved}" is outside the session workspace`
+            ),
+          };
+        }
+      }
+    }
+
+    if (!invoked) {
+      return {
+        kind: 'unsafe',
+        reason: tApp(
+          '无法将命令中的删除关键字归属到具体的删除调用（可能经过 xargs、命令替换或别名），无法静态确认删除目标',
+          'the delete keyword in the command could not be attributed to a concrete deleter invocation (xargs, command substitution, or alias), so delete targets cannot be verified statically'
+        ),
+      };
+    }
+    return { kind: 'safe' };
+  }
+
+  /**
+   * Unattended-delete policy for autoApprove sessions (A2A conversations,
+   * orchestrator/worker turns, group-task workers): nobody attends these
+   * sessions, so a delete must never become a blocking human prompt. Targets
+   * provably inside the session workspace are allowed; anything outside — or
+   * not provably inside — is auto-denied with an instructive reason the agent
+   * can route around. Returns null when the call is allowed to proceed.
+   */
+  private evaluateUnattendedDeletePolicy(
+    sessionId: string,
+    activeSession: ActiveSession,
+    toolName: string,
+    toolInput: Record<string, unknown>
+  ): { decision: 'deny'; reason: string } | null {
+    if (!this.isDeleteOperation(toolName, toolInput)) return null;
+    const workspaceRoot = path.resolve(
+      activeSession.workspaceRoot?.trim()
+        ? activeSession.workspaceRoot
+        : this.store.getSession(sessionId)?.cwd ?? process.cwd()
+    );
+
+    let unsafeReason: string | null = null;
+    if (toolName.toLowerCase() === 'bash') {
+      const analysis = this.analyzeBashDeleteCommand(this.extractToolCommand(toolInput), workspaceRoot);
+      if (analysis.kind !== 'unsafe') return null;
+      unsafeReason = analysis.reason;
+    } else {
+      const rawTargets: string[] = [];
+      for (const key of ['path', 'file_path', 'filePath', 'target', 'notebook_path']) {
+        const value = toolInput[key];
+        if (typeof value === 'string' && value.trim()) rawTargets.push(value.trim());
+      }
+      if (Array.isArray(toolInput.paths)) {
+        for (const value of toolInput.paths) {
+          if (typeof value === 'string' && value.trim()) rawTargets.push(value.trim());
+        }
+      }
+      if (rawTargets.length === 0) {
+        unsafeReason = tApp('无法确定删除目标路径', 'the delete target path could not be determined');
+      } else {
+        for (const rawTarget of rawTargets) {
+          if (/[$`]/.test(rawTarget)) {
+            unsafeReason = tApp(
+              `删除目标 "${this.truncateCommandPreview(rawTarget, 80)}" 含有无法静态解析的变量或展开`,
+              `delete target "${this.truncateCommandPreview(rawTarget, 80)}" contains variables or expansions that cannot be resolved statically`
+            );
+            break;
+          }
+          const resolved = path.isAbsolute(rawTarget)
+            ? path.normalize(rawTarget)
+            : path.resolve(workspaceRoot, rawTarget);
+          if (!isPathWithin(workspaceRoot, resolved)) {
+            unsafeReason = tApp(
+              `删除目标 "${resolved}" 位于会话工作区之外`,
+              `delete target "${resolved}" is outside the session workspace`
+            );
+            break;
+          }
+        }
+      }
+    }
+
+    if (!unsafeReason) return null;
+    coworkLog('WARN', 'evaluateUnattendedDeletePolicy', 'Auto-denied delete in unattended session', {
+      sessionId, toolName, reason: unsafeReason,
+    });
+    return {
+      decision: 'deny',
+      reason: tApp(
+        `删除操作已被自动拒绝（无人值守会话，不问人、不阻塞）：${unsafeReason}。autoApprove 会话只允许删除会话工作区（${workspaceRoot}）内的文件；请改用工作区内的路径重试，或跳过删除并在回复中向用户说明。`,
+        `Delete operation auto-denied (unattended session — no human is asked and nothing blocks): ${unsafeReason}. autoApprove sessions may only delete inside the session workspace (${workspaceRoot}); retry with an in-workspace path, or skip the deletion and note it in your reply.`
+      ),
+    };
+  }
+
   /**
    * Whether a tool call is read-only under 'plan' permission mode. Read-only
    * tools never mutate the filesystem or execute side effects. Bash is treated
@@ -8440,9 +8673,18 @@ export class CoworkRunner extends EventEmitter {
       // Claude-path workspace-safety: canUseTool calls enforceToolSafetyPolicy
       // after plan/read-image. Same skip as Claude — acceptEdits/bypassPermissions
       // do not ask, so unattended workers are not blocked on a human. Default
-      // mode prompts through the shared AskUserQuestion confirmation.
+      // mode prompts through the shared AskUserQuestion confirmation — EXCEPT
+      // autoApprove (unattended: A2A, orchestrator/worker) sessions: nobody
+      // attends them, so deletes are auto-decided by workspace scope (inside →
+      // allow, outside → auto-deny) instead of blocking on a confirmation no
+      // human will answer.
       const permissionMode = activeSession?.permissionMode ?? 'default'
-      if (permissionMode === 'default' && activeSession?.abortController) {
+      if (permissionMode === 'default' && activeSession?.autoApprove === true) {
+        const unattendedDecision = this.evaluateUnattendedDeletePolicy(sessionId, activeSession, normalized, toolInput)
+        if (unattendedDecision) {
+          return unattendedDecision
+        }
+      } else if (permissionMode === 'default' && activeSession?.abortController) {
         const policyResult = await this.enforceToolSafetyPolicy(
           sessionId,
           activeSession.abortController.signal,
