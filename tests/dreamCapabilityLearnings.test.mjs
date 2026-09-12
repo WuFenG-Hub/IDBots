@@ -22,7 +22,7 @@ import { createCoworkStore, createSqliteStore } from './memoryTestUtils.mjs';
 const require = createRequire(import.meta.url);
 
 function loadCompiledModule(relative) {
-  const candidates = [`../dist-electron/main/${relative}`, `../dist-electron/${relative}`];
+  const candidates = [`../dist-electron/main/${relative}`, `../dist-electron/main/${relative}`];
   for (const candidate of candidates) {
     try {
       return require(candidate);
@@ -53,7 +53,7 @@ function loadDreamServiceModule() {
     const compiledRoot = require.resolve('../dist-electron/main/services/dreamService.js');
     return require(compiledRoot);
   } catch {
-    return require('../dist-electron/services/dreamService.js');
+    return require('../dist-electron/main/services/dreamService.js');
   } finally {
     Module._load = originalLoad;
   }

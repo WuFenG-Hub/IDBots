@@ -10,7 +10,7 @@ const {
   buildBuyerOrderObserverConversationId,
   ensureBuyerOrderObserverSession,
   reindexBuyerOrderObserverSessionByOrderTxid,
-} = await import('../dist-electron/services/buyerOrderObserverSession.js');
+} = await import('../dist-electron/main/services/buyerOrderObserverSession.js');
 
 test('buildBuyerOrderObserverConversationId scopes observer sessions by buyer, seller, and txid', () => {
   const conversationId = buildBuyerOrderObserverConversationId({

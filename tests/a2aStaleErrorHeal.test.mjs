@@ -17,7 +17,7 @@ try {
   ({
     recordOutgoingPrivateChatA2ADisplay,
     appendPrivateChatA2AMessage,
-  } = await import('../dist-electron/services/privateChatDaemon.js'));
+  } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 }
 
 const LOCAL_METABOT_ID = 11;

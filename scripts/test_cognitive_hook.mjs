@@ -16,7 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
 const initSqlJs = require('sql.js');
-const { runTickOnce } = require(path.join(__dirname, '../dist-electron/services/cognitiveOrchestrator.js'));
+const { runTickOnce } = require(path.join(__dirname, '../dist-electron/main/services/cognitiveOrchestrator.js'));
 
 const TEST_GROUP_ID = 'hook-test-group';
 const MOCK_METABOT_ID = 999;

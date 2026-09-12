@@ -19,7 +19,7 @@ function loadSchedulerWithElectronStub() {
   };
 
   try {
-    const schedulerPath = require.resolve('../dist-electron/libs/scheduler.js');
+    const schedulerPath = require.resolve('../dist-electron/main/libs/scheduler.js');
     delete require.cache[schedulerPath];
     return require(schedulerPath);
   } finally {

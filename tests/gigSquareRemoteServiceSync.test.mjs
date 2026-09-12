@@ -11,7 +11,7 @@ const {
   syncRemoteSkillServicesWithCursor,
   parseRemoteSkillServiceItem,
   parseRemoteSkillServiceRow,
-} = require('../dist-electron/services/gigSquareRemoteServiceSync.js');
+} = require('../dist-electron/main/services/gigSquareRemoteServiceSync.js');
 
 const makeRemoteItem = (id, overrides = {}) => ({
   id,

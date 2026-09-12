@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
-  .catch(() => import('../dist-electron/nativeSqliteDatabase.js'));
+  .catch(() => import('../dist-electron/main/nativeSqliteDatabase.js'));
 const {
   MetawebStudyJobStore,
   ensureMetawebStudyJobSchema,
@@ -10,7 +10,7 @@ const {
   studyTopicFingerprintOf,
   DEFAULT_STUDY_PIN_BUDGET_PER_NIGHT,
 } = await import('../dist-electron/main/metawebStudyJobStore.js')
-  .catch(() => import('../dist-electron/metawebStudyJobStore.js'));
+  .catch(() => import('../dist-electron/main/metawebStudyJobStore.js'));
 
 const setup = () => {
   const db = createNativeSqliteDatabase(':memory:');

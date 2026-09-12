@@ -27,8 +27,8 @@ function loadRuntimePathsWithElectronStub() {
   };
 
   try {
-    delete require.cache[require.resolve('../dist-electron/libs/runtimePaths.js')];
-    return require('../dist-electron/libs/runtimePaths.js');
+    delete require.cache[require.resolve('../dist-electron/main/libs/runtimePaths.js')];
+    return require('../dist-electron/main/libs/runtimePaths.js');
   } finally {
     Module._load = originalLoad;
   }

@@ -29,7 +29,7 @@ const loadPromptModule = () => {
   try {
     return loadCompiled('../dist-electron/main/libs/deepConsolidationPrompt.js');
   } catch {
-    return loadCompiled('../dist-electron/libs/deepConsolidationPrompt.js');
+    return loadCompiled('../dist-electron/main/libs/deepConsolidationPrompt.js');
   }
 };
 

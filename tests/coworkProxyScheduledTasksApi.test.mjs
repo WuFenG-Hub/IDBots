@@ -15,7 +15,7 @@ let proxy;
 try {
   proxy = await import('../dist-electron/main/libs/coworkOpenAICompatProxy.js');
 } catch {
-  proxy = await import('../dist-electron/libs/coworkOpenAICompatProxy.js');
+  proxy = await import('../dist-electron/main/libs/coworkOpenAICompatProxy.js');
 }
 
 const {

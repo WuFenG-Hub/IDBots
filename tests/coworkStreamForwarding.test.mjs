@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 // since the src/main+src/renderer split). Probe the current layout first and
 // fall back to the legacy flat path for older checkouts.
 const forwardingModule = await import('../dist-electron/main/services/coworkStreamForwarding.js')
-  .catch(() => import('../dist-electron/services/coworkStreamForwarding.js'));
+  .catch(() => import('../dist-electron/main/services/coworkStreamForwarding.js'));
 const { shouldForwardCoworkStreamEvent } = forwardingModule;
 
 test('shouldForwardCoworkStreamEvent suppresses hidden internal sessions', () => {

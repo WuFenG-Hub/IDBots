@@ -11,7 +11,7 @@ let getGitBranch;
 try {
   ({ getGitBranch } = await import('../dist-electron/main/libs/gitWorkspace.js'));
 } catch {
-  ({ getGitBranch } = await import('../dist-electron/libs/gitWorkspace.js'));
+  ({ getGitBranch } = await import('../dist-electron/main/libs/gitWorkspace.js'));
 }
 
 test('cowork_sessions carries a project_id column via the first-run migration', async () => {

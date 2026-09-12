@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 let walletIpc;
 try {
-  walletIpc = require('../dist-electron/services/metabotWalletIpc.js');
+  walletIpc = require('../dist-electron/main/services/metabotWalletIpc.js');
 } catch {
   walletIpc = null;
 }

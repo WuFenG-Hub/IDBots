@@ -24,7 +24,7 @@ function loadRunnerModule() {
     try {
       return require('../dist-electron/main/libs/coworkRunner.js');
     } catch {
-      return require('../dist-electron/libs/coworkRunner.js');
+      return require('../dist-electron/main/libs/coworkRunner.js');
     }
   } finally {
     Module._load = originalLoad;
@@ -34,11 +34,11 @@ function loadRunnerModule() {
 const { CoworkRunner } = loadRunnerModule();
 const { buildKnowledgeBasesPromptBlock } = require('../dist-electron/main/libs/knowledgeBasePromptBlocks.js');
 const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
-  .catch(() => import('../dist-electron/nativeSqliteDatabase.js'));
+  .catch(() => import('../dist-electron/main/nativeSqliteDatabase.js'));
 const { KnowledgeBaseStore } = await import('../dist-electron/main/knowledgeBaseStore.js')
-  .catch(() => import('../dist-electron/knowledgeBaseStore.js'));
+  .catch(() => import('../dist-electron/main/knowledgeBaseStore.js'));
 const { KnowledgeBaseService } = await import('../dist-electron/main/services/knowledgeBaseService.js')
-  .catch(() => import('../dist-electron/services/knowledgeBaseService.js'));
+  .catch(() => import('../dist-electron/main/services/knowledgeBaseService.js'));
 
 const KB_TOOL_NAMES = [
   'knowledge_base_list',

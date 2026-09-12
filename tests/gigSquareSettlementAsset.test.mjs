@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const {
   normalizeGigSquareSettlementDraft,
   parseGigSquareSettlementAsset,
-} = require('../dist-electron/shared/gigSquareSettlementAsset.js');
+} = require('../dist-electron/main/shared/gigSquareSettlementAsset.js');
 
 test('normalizeGigSquareSettlementDraft serializes MRC20 as <TICKER>-MRC20', () => {
   const asset = normalizeGigSquareSettlementDraft({

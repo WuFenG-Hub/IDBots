@@ -7,9 +7,9 @@ const {
   DEFAULT_CHAIN_HISTORY_RECALL_LIMIT,
   MAX_CHAIN_HISTORY_RECALL_LIMIT,
 } = await import('../dist-electron/main/libs/chainHistoryRecallBlocks.js')
-  .catch(() => import('../dist-electron/libs/chainHistoryRecallBlocks.js'));
+  .catch(() => import('../dist-electron/main/libs/chainHistoryRecallBlocks.js'));
 const { getDayBoundsMs } = await import('../dist-electron/main/libs/dreamPrompt.js')
-  .catch(() => import('../dist-electron/libs/dreamPrompt.js'));
+  .catch(() => import('../dist-electron/main/libs/dreamPrompt.js'));
 
 test('resolveChainHistoryRecallQuery applies defaults and clamps', () => {
   const resolved = resolveChainHistoryRecallQuery({});

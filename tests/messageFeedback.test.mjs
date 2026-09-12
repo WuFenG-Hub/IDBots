@@ -7,7 +7,7 @@ let MessageFeedbackStore;
 try {
   ({ MessageFeedbackStore } = await import('../dist-electron/main/messageFeedbackStore.js'));
 } catch {
-  ({ MessageFeedbackStore } = await import('../dist-electron/messageFeedbackStore.js'));
+  ({ MessageFeedbackStore } = await import('../dist-electron/main/messageFeedbackStore.js'));
 }
 
 const DAY = new Date(2026, 7, 10, 12).getTime();

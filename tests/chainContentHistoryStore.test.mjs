@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
-  .catch(() => import('../dist-electron/nativeSqliteDatabase.js'));
+  .catch(() => import('../dist-electron/main/nativeSqliteDatabase.js'));
 const {
   ChainContentHistoryStore,
   ensureChainContentHistorySchema,
@@ -12,7 +12,7 @@ const {
   MAX_SUMMARY_ATTEMPTS,
   MAX_LEDGER_ROWS_PER_BOT,
 } = await import('../dist-electron/main/chainContentHistoryStore.js')
-  .catch(() => import('../dist-electron/chainContentHistoryStore.js'));
+  .catch(() => import('../dist-electron/main/chainContentHistoryStore.js'));
 
 const setup = () => {
   const db = createNativeSqliteDatabase(':memory:');

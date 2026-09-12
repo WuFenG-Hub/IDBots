@@ -18,12 +18,12 @@ try {
     parseDreamOutput,
     buildDreamPrompt,
     MAX_KNOWLEDGE_UPDATES,
-  } = await import('../dist-electron/dreamPrompt.js'));
+  } = await import('../dist-electron/main/dreamPrompt.js'));
 }
 try {
   ({ MetaIDKnowledgeStore } = await import('../dist-electron/main/metaidKnowledgeStore.js'));
 } catch {
-  ({ MetaIDKnowledgeStore } = await import('../dist-electron/metaidKnowledgeStore.js'));
+  ({ MetaIDKnowledgeStore } = await import('../dist-electron/main/metaidKnowledgeStore.js'));
 }
 
 const baseActivity = () => ({

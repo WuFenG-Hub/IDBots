@@ -29,7 +29,7 @@ const loadModule = (modulePath) => {
   try {
     return loadCompiled(`../dist-electron/main/${modulePath}`);
   } catch {
-    return loadCompiled(`../dist-electron/${modulePath}`);
+    return loadCompiled(`../dist-electron/main/${modulePath}`);
   }
 };
 

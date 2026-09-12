@@ -8,7 +8,7 @@ let llmEffort;
 try {
   llmEffort = await import('../dist-electron/main/libs/llmEffort.js');
 } catch {
-  llmEffort = await import('../dist-electron/libs/llmEffort.js');
+  llmEffort = await import('../dist-electron/main/libs/llmEffort.js');
 }
 
 const {

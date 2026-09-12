@@ -182,7 +182,7 @@ test('dream memories are tagged with dream_date and replaced per date', async ()
   const { db, cleanup } = await createSqliteStore();
   try {
     const store = createCoworkStore(db);
-    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
     new DreamStore(db, () => {}); // ensures the dream_date column exists
 
     const dreamSource = (dreamDate) => ({ sourceType: 'dream', sourceChannel: 'dream', dreamDate });
@@ -262,7 +262,7 @@ test('identity dream-date tag tracks the newest producing dream', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
     const store = createCoworkStore(db);
-    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
     new DreamStore(db, () => {});
 
     assert.equal(store.getDreamIdentityLatestDate(5), null, 'untagged legacy identity reads as null');
@@ -288,7 +288,7 @@ test('legacy untagged dream memories are attributed to a dream date on store ini
   const { db, cleanup } = await createSqliteStore();
   try {
     const store = createCoworkStore(db);
-    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
     const dreamStore = new DreamStore(db, () => {});
 
     dreamStore.beginRun(5, '2026-07-30', null, 0);

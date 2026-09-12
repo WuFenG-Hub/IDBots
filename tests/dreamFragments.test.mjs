@@ -7,7 +7,7 @@ let summariesToActivity;
 try {
   ({ chunkDreamActivity, estimateDreamActivityTokens, summariesToActivity } = await import('../dist-electron/main/libs/dreamFragments.js'));
 } catch {
-  ({ chunkDreamActivity, estimateDreamActivityTokens, summariesToActivity } = await import('../dist-electron/libs/dreamFragments.js'));
+  ({ chunkDreamActivity, estimateDreamActivityTokens, summariesToActivity } = await import('../dist-electron/main/libs/dreamFragments.js'));
 }
 
 test('chunkDreamActivity preserves chronological message content and coverage', () => {

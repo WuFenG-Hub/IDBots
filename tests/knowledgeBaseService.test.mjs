@@ -5,11 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
-  .catch(() => import('../dist-electron/nativeSqliteDatabase.js'));
+  .catch(() => import('../dist-electron/main/nativeSqliteDatabase.js'));
 const { KnowledgeBaseStore } = await import('../dist-electron/main/knowledgeBaseStore.js')
-  .catch(() => import('../dist-electron/knowledgeBaseStore.js'));
+  .catch(() => import('../dist-electron/main/knowledgeBaseStore.js'));
 const { KnowledgeBaseService } = await import('../dist-electron/main/services/knowledgeBaseService.js')
-  .catch(() => import('../dist-electron/services/knowledgeBaseService.js'));
+  .catch(() => import('../dist-electron/main/services/knowledgeBaseService.js'));
 
 const setup = () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-service-test-'));

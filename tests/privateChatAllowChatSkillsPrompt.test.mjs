@@ -7,7 +7,7 @@ const privateChatDaemonPath = (() => {
   try {
     return require.resolve('../dist-electron/main/services/privateChatDaemon.js');
   } catch {
-    return require.resolve('../dist-electron/services/privateChatDaemon.js');
+    return require.resolve('../dist-electron/main/services/privateChatDaemon.js');
   }
 })();
 const {

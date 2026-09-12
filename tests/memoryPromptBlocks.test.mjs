@@ -5,7 +5,7 @@ let buildScopedMemoryPromptBlocks;
 try {
   ({ buildScopedMemoryPromptBlocks } = await import('../dist-electron/main/memory/memoryPromptBlocks.js'));
 } catch {
-  ({ buildScopedMemoryPromptBlocks } = await import('../dist-electron/memory/memoryPromptBlocks.js'));
+  ({ buildScopedMemoryPromptBlocks } = await import('../dist-electron/main/memory/memoryPromptBlocks.js'));
 }
 
 test('external sessions do not include owner profile facts', () => {

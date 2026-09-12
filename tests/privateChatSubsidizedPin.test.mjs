@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 test('createPinWithMvcSubsidyRetry retries once after a successful subsidy request', async () => {
-  const { createPinWithMvcSubsidyRetry } = await import('../dist-electron/services/privateChatSubsidizedPin.js');
+  const { createPinWithMvcSubsidyRetry } = await import('../dist-electron/main/services/privateChatSubsidizedPin.js');
 
   const calls = [];
   let attempts = 0;
@@ -35,7 +35,7 @@ test('createPinWithMvcSubsidyRetry retries once after a successful subsidy reque
 });
 
 test('createPinWithMvcSubsidyRetry does not request subsidy for unrelated failures', async () => {
-  const { createPinWithMvcSubsidyRetry } = await import('../dist-electron/services/privateChatSubsidizedPin.js');
+  const { createPinWithMvcSubsidyRetry } = await import('../dist-electron/main/services/privateChatSubsidizedPin.js');
 
   let subsidyCalls = 0;
 

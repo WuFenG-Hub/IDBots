@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   it('detects delegation control prefix anywhere in assistant content', async () => {
-    const { containsDelegationControlPrefix } = await import('../dist-electron/libs/coworkRunner.js');
+    const { containsDelegationControlPrefix } = await import('../dist-electron/main/libs/coworkRunner.js');
     assert.equal(containsDelegationControlPrefix('normal reply'), false);
     assert.equal(
       containsDelegationControlPrefix('I will hand this off now.\n[DELEGATE_REMOTE_SERVICE]\n{"servicePinId":"p1"}'),
@@ -15,7 +15,7 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('parses valid delegation message', async () => {
-    const { parseDelegationMessage } = await import('../dist-electron/libs/coworkRunner.js');
+    const { parseDelegationMessage } = await import('../dist-electron/main/libs/coworkRunner.js');
     const content = `[DELEGATE_REMOTE_SERVICE]\n{"servicePinId":"pin123","serviceName":"Test Service","providerGlobalMetaid":"gm456","price":"200","currency":"SPACE","userTask":"translate article","taskContext":"article text","rawRequest":"translate the full article and keep the tone intact"}`;
     const result = parseDelegationMessage(content);
     assert.ok(result);
@@ -28,7 +28,7 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('normalizes decorated price strings before payment', async () => {
-    const { parseDelegationMessage } = await import('../dist-electron/libs/coworkRunner.js');
+    const { parseDelegationMessage } = await import('../dist-electron/main/libs/coworkRunner.js');
     const content = `[DELEGATE_REMOTE_SERVICE]\n{"servicePinId":"pin123","serviceName":"Test Service","providerGlobalMetaid":"gm456","price":"0.00001 SPACE","currency":"SPACE","userTask":"translate article","taskContext":"article text"}`;
     const result = parseDelegationMessage(content);
     assert.ok(result);
@@ -37,7 +37,7 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('backfills currency from decorated price when currency field is blank', async () => {
-    const { parseDelegationMessage } = await import('../dist-electron/libs/coworkRunner.js');
+    const { parseDelegationMessage } = await import('../dist-electron/main/libs/coworkRunner.js');
     const content = `[DELEGATE_REMOTE_SERVICE]\n{"servicePinId":"pin123","serviceName":"Test Service","providerGlobalMetaid":"gm456","price":"0.01 DOGE","currency":"","userTask":"translate article","taskContext":"article text"}`;
     const result = parseDelegationMessage(content);
     assert.ok(result);
@@ -46,13 +46,13 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('returns null for non-delegation messages', async () => {
-    const { parseDelegationMessage } = await import('../dist-electron/libs/coworkRunner.js');
+    const { parseDelegationMessage } = await import('../dist-electron/main/libs/coworkRunner.js');
     assert.equal(parseDelegationMessage('Hello, how are you?'), null);
     assert.equal(parseDelegationMessage('[ORDER] some order'), null);
   });
 
   it('handles JSON embedded in surrounding text', async () => {
-    const { parseDelegationMessage } = await import('../dist-electron/libs/coworkRunner.js');
+    const { parseDelegationMessage } = await import('../dist-electron/main/libs/coworkRunner.js');
     const content = `I will delegate this task.\n[DELEGATE_REMOTE_SERVICE]\n{"servicePinId":"p1","serviceName":"Svc","providerGlobalMetaid":"gm","price":"100","currency":"SPACE","userTask":"task","taskContext":"ctx"}`;
     const result = parseDelegationMessage(content);
     assert.ok(result);
@@ -60,19 +60,19 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('returns null for malformed JSON', async () => {
-    const { parseDelegationMessage } = await import('../dist-electron/libs/coworkRunner.js');
+    const { parseDelegationMessage } = await import('../dist-electron/main/libs/coworkRunner.js');
     const content = `[DELEGATE_REMOTE_SERVICE]\n{not valid json}`;
     assert.equal(parseDelegationMessage(content), null);
   });
 
   it('returns null when required fields are missing', async () => {
-    const { parseDelegationMessage } = await import('../dist-electron/libs/coworkRunner.js');
+    const { parseDelegationMessage } = await import('../dist-electron/main/libs/coworkRunner.js');
     const content = `[DELEGATE_REMOTE_SERVICE]\n{"price":"200","currency":"SPACE"}`;
     assert.equal(parseDelegationMessage(content), null);
   });
 
   it('hides a trailing partial delegation control prefix from the displayed assistant text', async () => {
-    const { getDelegationDisplayText } = await import('../dist-electron/libs/coworkRunner.js');
+    const { getDelegationDisplayText } = await import('../dist-electron/main/libs/coworkRunner.js');
     const content = '好的，我现在为你委托这个塔罗牌占卜服务。\n\n[DELEGATE_REMOTE_S';
     assert.equal(
       getDelegationDisplayText(content),
@@ -81,13 +81,13 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('hides very short delegation prefix fragments before they reach the UI', async () => {
-    const { getDelegationDisplayText } = await import('../dist-electron/libs/coworkRunner.js');
+    const { getDelegationDisplayText } = await import('../dist-electron/main/libs/coworkRunner.js');
     assert.equal(getDelegationDisplayText('['), '');
     assert.equal(getDelegationDisplayText('[DELE'), '');
   });
 
   it('keeps only the natural-language preamble when the full delegation control block is present', async () => {
-    const { getDelegationDisplayText } = await import('../dist-electron/libs/coworkRunner.js');
+    const { getDelegationDisplayText } = await import('../dist-electron/main/libs/coworkRunner.js');
     const content = '好的，我现在为你委托这个塔罗牌占卜服务。\n\n[DELEGATE_REMOTE_SERVICE]\n{"servicePinId":"p1","serviceName":"塔罗牌占卜","providerGlobalMetaid":"gm","price":"0.00005","currency":"SPACE","userTask":"塔罗牌占卜","taskContext":"塔罗牌占卜"}';
     assert.equal(
       getDelegationDisplayText(content),
@@ -96,21 +96,21 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('treats generic confirmations as non-metaapp requests', async () => {
-    const { isExplicitMetaAppUserRequest } = await import('../dist-electron/libs/coworkRunner.js');
+    const { isExplicitMetaAppUserRequest } = await import('../dist-electron/main/libs/coworkRunner.js');
     assert.equal(isExplicitMetaAppUserRequest('好的', 'buzz'), false);
     assert.equal(isExplicitMetaAppUserRequest('确定', 'buzz'), false);
     assert.equal(isExplicitMetaAppUserRequest('继续', 'buzz'), false);
   });
 
   it('allows metaapp routing only for explicit app-opening requests', async () => {
-    const { isExplicitMetaAppUserRequest } = await import('../dist-electron/libs/coworkRunner.js');
+    const { isExplicitMetaAppUserRequest } = await import('../dist-electron/main/libs/coworkRunner.js');
     assert.equal(isExplicitMetaAppUserRequest('打开 buzz app', 'buzz'), true);
     assert.equal(isExplicitMetaAppUserRequest('请使用 buzz 这个 MetaApp', 'buzz'), true);
     assert.equal(isExplicitMetaAppUserRequest('帮我查一下东京天气', 'buzz'), false);
   });
 
   it('treats a service missing from availableServices as offline even when it still exists in the DB list', () => {
-    const { resolveDelegationOrderability } = require('../dist-electron/services/providerPingService.js');
+    const { resolveDelegationOrderability } = require('../dist-electron/main/services/providerPingService.js');
     const result = resolveDelegationOrderability({
       availableServices: [
         { pinId: 'other-pin', providerGlobalMetaId: 'idq1other' },
@@ -129,7 +129,7 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('matches providerGlobalMetaId case-insensitively for orderability checks', () => {
-    const { resolveDelegationOrderability } = require('../dist-electron/services/providerPingService.js');
+    const { resolveDelegationOrderability } = require('../dist-electron/main/services/providerPingService.js');
     const result = resolveDelegationOrderability({
       availableServices: [
         { pinId: 'pin123', providerGlobalMetaId: ' IDQ1Provider ', serviceName: 'Test Service' },
@@ -144,7 +144,7 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('matches a delegated currentPinId when the resolved service chain keeps a historical source pin', () => {
-    const { resolveDelegationOrderability } = require('../dist-electron/services/providerPingService.js');
+    const { resolveDelegationOrderability } = require('../dist-electron/main/services/providerPingService.js');
     const result = resolveDelegationOrderability({
       availableServices: [
         {
@@ -165,7 +165,7 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
   });
 
   it('matches a delegated historical chain pin when the current service exposes chainPinIds', () => {
-    const { resolveDelegationOrderability } = require('../dist-electron/services/providerPingService.js');
+    const { resolveDelegationOrderability } = require('../dist-electron/main/services/providerPingService.js');
     const result = resolveDelegationOrderability({
       availableServices: [
         {

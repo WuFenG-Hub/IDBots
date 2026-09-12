@@ -2,19 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
-  .catch(() => import('../dist-electron/nativeSqliteDatabase.js'));
+  .catch(() => import('../dist-electron/main/nativeSqliteDatabase.js'));
 const {
   MetawebStudyJobStore,
   MAX_STUDY_RUNS_PER_JOB,
   MAX_STUDY_CONSECUTIVE_FAILURES,
 } = await import('../dist-electron/main/metawebStudyJobStore.js')
-  .catch(() => import('../dist-electron/metawebStudyJobStore.js'));
+  .catch(() => import('../dist-electron/main/metawebStudyJobStore.js'));
 const {
   MetawebStudyService,
   buildMetawebStudySessionPrompt,
   parseMetawebStudyRunReport,
 } = await import('../dist-electron/main/services/metawebStudyService.js')
-  .catch(() => import('../dist-electron/services/metawebStudyService.js'));
+  .catch(() => import('../dist-electron/main/services/metawebStudyService.js'));
 
 const NIGHT = new Date('2026-08-24T02:00:00'); // local 02:00 — inside [00:00, 06:00)
 const DAY = new Date('2026-08-24T12:00:00'); // local noon — outside

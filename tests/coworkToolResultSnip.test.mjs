@@ -11,7 +11,7 @@ async function importSnip() {
   try {
     return await import('../dist-electron/main/libs/coworkToolResultSnip.js');
   } catch {
-    return await import('../dist-electron/libs/coworkToolResultSnip.js');
+    return await import('../dist-electron/main/libs/coworkToolResultSnip.js');
   }
 }
 

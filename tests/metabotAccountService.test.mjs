@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 let accountService;
 try {
-  accountService = require('../dist-electron/services/metabotAccountService.js');
+  accountService = require('../dist-electron/main/services/metabotAccountService.js');
 } catch {
   accountService = null;
 }

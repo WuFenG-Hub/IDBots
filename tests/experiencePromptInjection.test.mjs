@@ -13,11 +13,11 @@ try {
     RECENT_SUMMARIES_PROMPT_DAYS,
   } = await import('../dist-electron/main/libs/experiencePromptBlocks.js'));
 } catch {
-  ({ DreamStore } = await import('../dist-electron/dreamStore.js'));
+  ({ DreamStore } = await import('../dist-electron/main/dreamStore.js'));
   ({
     buildExperiencePromptBlocksXml: composeExperiencePromptBlocks,
     RECENT_SUMMARIES_PROMPT_DAYS,
-  } = await import('../dist-electron/libs/experiencePromptBlocks.js'));
+  } = await import('../dist-electron/main/libs/experiencePromptBlocks.js'));
 }
 
 /**

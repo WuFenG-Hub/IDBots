@@ -12,7 +12,7 @@ async function importFold() {
   try {
     return await import('../dist-electron/main/libs/coworkToolResultFold.js');
   } catch {
-    return await import('../dist-electron/libs/coworkToolResultFold.js');
+    return await import('../dist-electron/main/libs/coworkToolResultFold.js');
   }
 }
 

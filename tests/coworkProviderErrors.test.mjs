@@ -5,7 +5,7 @@ test('DeepSeek reasoning_content classifier uses proxy lastError when SDK only r
   const {
     buildCoworkProviderErrorSignal,
     isDeepSeekMissingReasoningContentError,
-  } = await import('../dist-electron/libs/coworkProviderErrors.js');
+  } = await import('../dist-electron/main/libs/coworkProviderErrors.js');
 
   const sdkExitError = 'Claude Code process exited with code 1';
   const proxyLastError = 'DeepSeek thinking request is missing reasoning_content for 1 assistant tool-call message(s). Tool call ids: call_00_example.';
@@ -23,7 +23,7 @@ test('DeepSeek reasoning_content classifier uses proxy lastError when SDK only r
 test('provider error signal de-duplicates repeated details', async () => {
   const {
     buildCoworkProviderErrorSignal,
-  } = await import('../dist-electron/libs/coworkProviderErrors.js');
+  } = await import('../dist-electron/main/libs/coworkProviderErrors.js');
 
   const signal = buildCoworkProviderErrorSignal('same error', {
     proxyLastError: 'same error',

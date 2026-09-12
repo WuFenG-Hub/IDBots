@@ -2,17 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
-  .catch(() => import('../dist-electron/nativeSqliteDatabase.js'));
+  .catch(() => import('../dist-electron/main/nativeSqliteDatabase.js'));
 const {
   ChainContentHistoryStore,
 } = await import('../dist-electron/main/chainContentHistoryStore.js')
-  .catch(() => import('../dist-electron/chainContentHistoryStore.js'));
+  .catch(() => import('../dist-electron/main/chainContentHistoryStore.js'));
 const {
   ContentSummaryService,
   OrchestratorSummarizerProvider,
   CONTENT_SUMMARY_MAX_PER_TICK,
 } = await import('../dist-electron/main/services/contentSummaryService.js')
-  .catch(() => import('../dist-electron/services/contentSummaryService.js'));
+  .catch(() => import('../dist-electron/main/services/contentSummaryService.js'));
 
 const T_NOW = new Date(2026, 8, 3, 10, 0, 0); // local 2026-09-03 10:00
 const T_NOW_MS = T_NOW.getTime();

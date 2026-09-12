@@ -5,7 +5,7 @@ let rankScopedMemoryEntries;
 try {
   ({ rankScopedMemoryEntries } = await import('../dist-electron/main/memory/memoryPromptBlocks.js'));
 } catch {
-  ({ rankScopedMemoryEntries } = await import('../dist-electron/memory/memoryPromptBlocks.js'));
+  ({ rankScopedMemoryEntries } = await import('../dist-electron/main/memory/memoryPromptBlocks.js'));
 }
 
 test('scoped recall excludes owner profile facts from external memory sets', () => {

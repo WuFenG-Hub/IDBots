@@ -15,7 +15,7 @@ try {
     await import('../dist-electron/main/metaidExperienceStore.js'));
 } catch {
   ({ MetaIDExperienceStore, ensureMetaIDExperienceSchema } =
-    await import('../dist-electron/metaidExperienceStore.js'));
+    await import('../dist-electron/main/metaidExperienceStore.js'));
 }
 
 const OWNER = 'idq1owner';

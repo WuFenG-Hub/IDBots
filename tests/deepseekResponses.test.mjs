@@ -12,7 +12,7 @@ async function importCompiled(modulePath) {
   try {
     return await import(`../dist-electron/main/libs/${modulePath}.js`);
   } catch {
-    return await import(`../dist-electron/libs/${modulePath}.js`);
+    return await import(`../dist-electron/main/libs/${modulePath}.js`);
   }
 }
 
@@ -20,7 +20,7 @@ async function importCompiledService(modulePath) {
   try {
     return await import(`../dist-electron/main/services/${modulePath}.js`);
   } catch {
-    return await import(`../dist-electron/services/${modulePath}.js`);
+    return await import(`../dist-electron/main/services/${modulePath}.js`);
   }
 }
 

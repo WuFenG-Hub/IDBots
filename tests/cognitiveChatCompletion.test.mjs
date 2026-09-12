@@ -24,7 +24,7 @@ function loadTestUtils() {
     const compiledRoot = require.resolve('../dist-electron/main/services/cognitiveChatCompletion.js');
     return require(compiledRoot).__cognitiveChatCompletionTestUtils;
   } catch {
-    return require('../dist-electron/services/cognitiveChatCompletion.js').__cognitiveChatCompletionTestUtils;
+    return require('../dist-electron/main/services/cognitiveChatCompletion.js').__cognitiveChatCompletionTestUtils;
   } finally {
     Module._load = originalLoad;
   }
@@ -138,7 +138,7 @@ test('one-shot attempts pin their upstream under a throwaway key and clear it af
     try {
       resolved = require.resolve('../dist-electron/main/services/cognitiveChatCompletion.js');
     } catch {
-      resolved = require.resolve('../dist-electron/services/cognitiveChatCompletion.js');
+      resolved = require.resolve('../dist-electron/main/services/cognitiveChatCompletion.js');
     }
     delete require.cache[resolved];
     mod = require(resolved);

@@ -9,7 +9,7 @@ function loadProviderDiscoveryService() {
     return require('../dist-electron/main/services/providerDiscoveryService.js');
   } catch (error) {
     if (error.code !== 'MODULE_NOT_FOUND') throw error;
-    return require('../dist-electron/services/providerDiscoveryService.js');
+    return require('../dist-electron/main/services/providerDiscoveryService.js');
   }
 }
 

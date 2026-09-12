@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 const {
   resolveGigSquareServiceExecutionReminderFromRows,
-} = require('../dist-electron/services/gigSquareExecutionReminderResolver.js');
+} = require('../dist-electron/main/services/gigSquareExecutionReminderResolver.js');
 
 test('resolveGigSquareServiceExecutionReminderFromRows lets local empty reminder suppress stale remote cache', () => {
   const reminder = resolveGigSquareServiceExecutionReminderFromRows({

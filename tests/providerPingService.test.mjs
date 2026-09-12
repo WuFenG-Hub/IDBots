@@ -5,11 +5,11 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 function loadProviderPingService() {
-  return require('../dist-electron/services/providerPingService.js');
+  return require('../dist-electron/main/services/providerPingService.js');
 }
 
 function loadMetaWebListenerReadiness() {
-  return require('../dist-electron/services/metaWebListenerReadiness.js');
+  return require('../dist-electron/main/services/metaWebListenerReadiness.js');
 }
 
 function createClock() {

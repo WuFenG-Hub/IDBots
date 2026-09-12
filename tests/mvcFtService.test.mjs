@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 let mvcFtService;
 try {
-  mvcFtService = require('../dist-electron/services/mvcFtService.js');
+  mvcFtService = require('../dist-electron/main/services/mvcFtService.js');
 } catch {
   mvcFtService = null;
 }

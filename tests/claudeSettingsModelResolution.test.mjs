@@ -5,7 +5,7 @@ let claudeSettings;
 try {
   claudeSettings = await import('../dist-electron/main/libs/claudeSettings.js');
 } catch {
-  claudeSettings = await import('../dist-electron/libs/claudeSettings.js');
+  claudeSettings = await import('../dist-electron/main/libs/claudeSettings.js');
 }
 
 const { resolveApiConfigForModel, resolveDshProviderRoute, setStoreGetter } = claudeSettings;
@@ -416,7 +416,7 @@ test('proxy-routed resolution pins the session upstream and scopes the base URL'
   try {
     proxy = await import('../dist-electron/main/libs/coworkOpenAICompatProxy.js');
   } catch {
-    proxy = await import('../dist-electron/libs/coworkOpenAICompatProxy.js');
+    proxy = await import('../dist-electron/main/libs/coworkOpenAICompatProxy.js');
   }
   const {
     startCoworkOpenAICompatProxy,

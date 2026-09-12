@@ -14,7 +14,7 @@ import {
 const require = Module.createRequire(import.meta.url);
 
 function getScheduledTaskStoreClass() {
-  return require('../dist-electron/scheduledTaskStore.js').ScheduledTaskStore;
+  return require('../dist-electron/main/scheduledTaskStore.js').ScheduledTaskStore;
 }
 
 function createTaskInput(overrides = {}) {

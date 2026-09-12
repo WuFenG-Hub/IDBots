@@ -14,7 +14,7 @@ try {
 } catch {
   ({
     recordOutgoingPrivateChatA2ADisplay,
-  } = await import('../dist-electron/services/privateChatDaemon.js'));
+  } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 }
 
 const LOCAL_METABOT_ID = 7;

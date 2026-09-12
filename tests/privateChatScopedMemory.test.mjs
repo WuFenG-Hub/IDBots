@@ -19,9 +19,9 @@ try {
     buildPrivateReplyMemoryPromptBlocks,
     sendSellerOrderAcknowledgement,
     sendSellerOrderImmediateAcknowledgement,
-  } = await import('../dist-electron/services/privateChatDaemon.js'));
-  ({ buildOrderPrompts } = await import('../dist-electron/services/orderPromptBuilder.js'));
-  ({ CoworkRunner } = await import('../dist-electron/libs/coworkRunner.js'));
+  } = await import('../dist-electron/main/services/privateChatDaemon.js'));
+  ({ buildOrderPrompts } = await import('../dist-electron/main/services/orderPromptBuilder.js'));
+  ({ CoworkRunner } = await import('../dist-electron/main/libs/coworkRunner.js'));
 }
 
 function createCoworkRunnerPromptHarness({

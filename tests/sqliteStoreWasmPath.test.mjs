@@ -24,7 +24,7 @@ function resolveRepoRoot() {
 const repoRoot = resolveRepoRoot();
 
 test('resolveSqlJsWasmPath walks upward from a nested worktree app path to the nearest installed sql-wasm.wasm', () => {
-  const sqliteStore = require('../dist-electron/sqliteStore.js');
+  const sqliteStore = require('../dist-electron/main/sqliteStore.js');
   assert.equal(typeof sqliteStore.resolveSqlJsWasmPath, 'function');
 
   const nestedWorktreeAppPath = path.join(repoRoot, '.worktrees', 'simulated-fresh-worktree');

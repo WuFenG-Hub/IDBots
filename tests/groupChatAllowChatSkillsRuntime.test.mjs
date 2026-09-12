@@ -7,7 +7,7 @@ const cognitiveOrchestratorPath = (() => {
   try {
     return require.resolve('../dist-electron/main/services/cognitiveOrchestrator.js');
   } catch {
-    return require.resolve('../dist-electron/services/cognitiveOrchestrator.js');
+    return require.resolve('../dist-electron/main/services/cognitiveOrchestrator.js');
   }
 })();
 const { runTickOnce } = require(cognitiveOrchestratorPath);

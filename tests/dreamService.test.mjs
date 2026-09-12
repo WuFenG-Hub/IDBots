@@ -24,7 +24,7 @@ function loadDreamServiceModule() {
     const compiledRoot = require.resolve('../dist-electron/main/services/dreamService.js');
     return require(compiledRoot);
   } catch {
-    return require('../dist-electron/services/dreamService.js');
+    return require('../dist-electron/main/services/dreamService.js');
   } finally {
     Module._load = originalLoad;
   }
@@ -76,7 +76,7 @@ const makePayload = (overrides = {}) => JSON.stringify({
 const setup = async (performChat) => {
   const { db, cleanup } = await createSqliteStore();
   const coworkStore = createCoworkStore(db);
-  const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+  const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
   const dreamStore = new DreamStore(db, () => {});
   seedActivity(coworkStore, db);
   const events = [];
@@ -388,7 +388,7 @@ test('a completed run that started mid-day is re-dreamed in the next nightly win
   const { db, cleanup } = await createSqliteStore();
   try {
     const coworkStore = createCoworkStore(db);
-    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
     const dreamStore = new DreamStore(db, () => {});
     seedActivity(coworkStore, db);
 
@@ -431,7 +431,7 @@ test('nightly tick repairs stale-version dates one per night, never touching ide
   const { db, cleanup } = await createSqliteStore();
   try {
     const coworkStore = createCoworkStore(db);
-    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
     const dreamStore = new DreamStore(db, () => {});
     seedActivity(coworkStore, db);
     seedMessagesForDate(db, firstSessionId(db), '2026-07-29', 90);

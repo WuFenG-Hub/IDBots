@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 test('SQLiteRecoveryCoordinator stops services and clears old store before closing and reopening', async () => {
-  const { SQLiteRecoveryCoordinator } = require('../dist-electron/sqliteRecoveryLifecycle.js');
+  const { SQLiteRecoveryCoordinator } = require('../dist-electron/main/sqliteRecoveryLifecycle.js');
   const order = [];
   const oldStore = { id: 'old', closed: false };
   const newStore = { id: 'new', closed: false };
@@ -51,7 +51,7 @@ test('SQLiteRecoveryCoordinator stops services and clears old store before closi
 });
 
 test('SQLiteRecoveryCoordinator leaves services stopped and store unpublished when reopen fails', async () => {
-  const { SQLiteRecoveryCoordinator, SqliteDatabaseUnavailableError } = require('../dist-electron/sqliteRecoveryLifecycle.js');
+  const { SQLiteRecoveryCoordinator, SqliteDatabaseUnavailableError } = require('../dist-electron/main/sqliteRecoveryLifecycle.js');
   const order = [];
   const oldStore = { id: 'old', closed: false };
   let currentStore = oldStore;
@@ -98,7 +98,7 @@ test('SQLiteRecoveryCoordinator leaves services stopped and store unpublished wh
 });
 
 test('SQLiteRecoveryCoordinator coalesces concurrent recovery requests', async () => {
-  const { SQLiteRecoveryCoordinator } = require('../dist-electron/sqliteRecoveryLifecycle.js');
+  const { SQLiteRecoveryCoordinator } = require('../dist-electron/main/sqliteRecoveryLifecycle.js');
   let currentStore = { id: 'old' };
   let openStoreResolve;
   let openCount = 0;

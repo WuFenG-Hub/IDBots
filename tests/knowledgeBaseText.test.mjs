@@ -20,7 +20,7 @@ const {
   sha256File,
   sha256FileAsync,
 } = await import('../dist-electron/main/libs/knowledgeBaseText.js')
-  .catch(() => import('../dist-electron/libs/knowledgeBaseText.js'));
+  .catch(() => import('../dist-electron/main/libs/knowledgeBaseText.js'));
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-text-test-'));
 

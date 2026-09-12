@@ -8,7 +8,7 @@ const storeLibPath = (() => {
   try {
     return require.resolve('../dist-electron/main/libs/skillAssignmentStore.js');
   } catch {
-    return require.resolve('../dist-electron/libs/skillAssignmentStore.js');
+    return require.resolve('../dist-electron/main/libs/skillAssignmentStore.js');
   }
 })();
 const {

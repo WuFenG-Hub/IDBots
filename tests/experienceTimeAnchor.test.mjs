@@ -21,7 +21,7 @@ function loadRunnerModule() {
     try {
       return require('../dist-electron/main/libs/coworkRunner.js');
     } catch {
-      return require('../dist-electron/libs/coworkRunner.js');
+      return require('../dist-electron/main/libs/coworkRunner.js');
     }
   } finally {
     Module._load = originalLoad;
@@ -44,7 +44,7 @@ try {
     formatExperienceRecallResults,
     formatExperienceTimelineFallback,
     resolveExperienceRecallQuery,
-  } = await import('../dist-electron/experiencePromptBlocks.js'));
+  } = await import('../dist-electron/main/experiencePromptBlocks.js'));
 }
 
 const summaries = (dates) => dates.map((date, index) => ({
@@ -116,7 +116,7 @@ test('resolveExperienceRecallQuery normalizes granularity and defaults to day', 
 const setup = async ({ episodeTimelineProvider } = {}) => {
   const { db, cleanup } = await createSqliteStore();
   const coworkStore = createCoworkStore(db);
-  const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+  const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
   const dreamStore = new DreamStore(db, () => {});
   // Seed a June and an August summary (no July), so July is a gap.
   dreamStore.upsertDailySummary({ metabotId: 5, summaryDate: '2026-06-10', summaryText: '六月做了选型', sections: {}, stats: {}, llmId: null });

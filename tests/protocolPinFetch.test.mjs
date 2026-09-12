@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 let fetchProtocolPinsFromIndexer;
 
 test.before(async () => {
-  ({ fetchProtocolPinsFromIndexer } = require('../dist-electron/services/protocolPinFetch.js'));
+  ({ fetchProtocolPinsFromIndexer } = require('../dist-electron/main/services/protocolPinFetch.js'));
 });
 
 function jsonResponse(payload, status = 200) {

@@ -7,7 +7,7 @@ const {
   checkOrderPaymentStatus,
   extractOrderReferenceId,
   extractOrderTxid,
-} = require('../dist-electron/services/orderPayment.js');
+} = require('../dist-electron/main/services/orderPayment.js');
 
 function createMetabotStore() {
   return {

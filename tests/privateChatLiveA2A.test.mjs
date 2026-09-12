@@ -54,14 +54,14 @@ try {
     buildPrivateChatA2AChainMetadata,
     isPrivateChatHandshakePlaintext,
     shouldContinuePrivateChatInboundAfterOutgoingSync,
-  } = await import('../dist-electron/services/privateChatDaemon.js'));
+  } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 }
 
 let a2aChatLimits;
 try {
   a2aChatLimits = await import('../dist-electron/main/services/a2aChatLimits.js');
 } catch {
-  a2aChatLimits = await import('../dist-electron/services/a2aChatLimits.js');
+  a2aChatLimits = await import('../dist-electron/main/services/a2aChatLimits.js');
 }
 const {
   normalizeA2AMaxIncomingTurns,

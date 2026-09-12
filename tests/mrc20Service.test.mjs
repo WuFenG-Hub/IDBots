@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 let mrc20Service;
 try {
-  mrc20Service = require('../dist-electron/services/mrc20Service.js');
+  mrc20Service = require('../dist-electron/main/services/mrc20Service.js');
 } catch {
   mrc20Service = null;
 }

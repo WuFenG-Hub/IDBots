@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 let btcApi;
 try {
-  btcApi = require('../dist-electron/libs/btcApi.js');
+  btcApi = require('../dist-electron/main/libs/btcApi.js');
 } catch {
   btcApi = null;
 }

@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 function loadMetaWebListenerReadiness() {
-  return require('../dist-electron/services/metaWebListenerReadiness.js');
+  return require('../dist-electron/main/services/metaWebListenerReadiness.js');
 }
 
 test('listener readiness restarts an existing socket when it is disconnected', () => {

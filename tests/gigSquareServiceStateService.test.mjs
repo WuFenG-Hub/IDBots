@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const {
   resolveServiceActionAvailability,
   applyLocalServiceState,
-} = require('../dist-electron/services/gigSquareServiceStateService.js');
+} = require('../dist-electron/main/services/gigSquareServiceStateService.js');
 
 const BASE_CURRENT_SERVICE = {
   currentPinId: 'svc-pin-1',

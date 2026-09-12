@@ -31,7 +31,7 @@ const loadHygieneModule = () => {
   try {
     return loadCompiled('../dist-electron/main/services/memoryHygieneService.js');
   } catch {
-    return loadCompiled('../dist-electron/services/memoryHygieneService.js');
+    return loadCompiled('../dist-electron/main/services/memoryHygieneService.js');
   }
 };
 
@@ -204,7 +204,7 @@ const loadImpressionStoreModule = async () => {
   try {
     return await import('../dist-electron/main/metaidImpressionStore.js');
   } catch {
-    return import('../dist-electron/metaidImpressionStore.js');
+    return import('../dist-electron/main/metaidImpressionStore.js');
   }
 };
 
@@ -212,7 +212,7 @@ const loadExperienceStoreModule = async () => {
   try {
     return await import('../dist-electron/main/metaidExperienceStore.js');
   } catch {
-    return import('../dist-electron/metaidExperienceStore.js');
+    return import('../dist-electron/main/metaidExperienceStore.js');
   }
 };
 
@@ -575,7 +575,7 @@ const loadKnowledgeStoreModule = async () => {
   try {
     return await import('../dist-electron/main/metaidKnowledgeStore.js');
   } catch {
-    return import('../dist-electron/metaidKnowledgeStore.js');
+    return import('../dist-electron/main/metaidKnowledgeStore.js');
   }
 };
 
