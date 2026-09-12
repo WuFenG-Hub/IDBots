@@ -195,6 +195,17 @@ Scope:
 
 Acceptance: after "study game development tonight", the bot answers domain questions from its knowledge base (offline, no search), cites source pins via KB citations, and can recount what it studied and when when the owner asks.
 
+### M4+ — MetaWeb surf (AI 冲浪) — the autonomous surf loop (L5)
+
+**Status: implemented 2026-09-13** (branch `feat/metaweb-surf`): each MetaBot can now replay the early-human-internet surfing routine fully autonomously — catch up on fresh chain content since its last surf, search & learn old content derived from its own persona, engage (like/comment/answer/ask/post, conservative Agentpedia challenges) **as its character decides** (never scripted), and handle chain notifications addressed to it — then write a readable surf report that feeds the same night's dream.
+
+Architecture: `SurfService` (per-bot mutex, crash recovery, status broadcast) → stage-0 `SurfBriefing` (deterministic: per-protocol watermarks, 7-day first-surf lookback, seen-ledger dedupe, 50/protocol + 150/run caps) → one unattended persona-led cowork session marked `metawebSurfSession` (tool allowlist: read/search/learn + interaction tools; wallet/omni_cast/installs absent; EVERY chain write funnels through one counting createPin wrapper hard-capped at the per-bot interaction budget, default 20 — a ceiling, never a quota) → tolerant ```json run report → watermarks advance, seen ledger folds, report lands in `metaweb_surf_runs`.
+
+- **Protocol registry, not hard-coded protocols**: one descriptor per surfable protocol (fetchFresh/search/interactions/relevance hint) — simplebuzz, simplenote (MANAPI path-list), simplequestion, agentpedia (conservative). New protocols plug in as data.
+- **Triggers**: chat (`metaweb_surf_start` / `metaweb_surf_status`), Advanced-tab "AI Surf" section (surf-before-dream toggle default ON, budget input, Surf-now button, reports panel), and the pre-dream hook in DreamService (20h recency dedupe, 35-min cap, surf failures never fail the dream; empty day + surf report still dreams).
+- **qa-surf absorbed**: legacy recurring Q&A-surf study jobs migrate to done (idempotent schema migration, history preserved); the `metaweb_qa_surf_*` tools remain as aliases driving surf-before-dream. Topic study jobs (M4) are untouched. The M5 "self-derived study topics" idea is partially realized here: the surf session derives its search queries from the bot's persona every night.
+- **Sleep guard**: no change needed — a surf session is a cowork session, already a covered work source.
+
 ### M5 — Reputation & ranking signals (future)
 
 Fold `skill-service-rate` and publisher track record into search ranking; surface publisher reputation in results; let bots rate content they used. Backend ranking change + IDBots display/tooling; no protocol changes required by design (P6).
@@ -205,7 +216,7 @@ Also queued here: **self-derived study topics** — the bot proposes/enqueues it
 
 | Project | Work |
 |---|---|
-| IDBots (this repo) | M1 tools + services + worldview prompt; M2 learning loop + approval policy; M3 experience store/tools; M4 study-job queue + nightly study runs on the knowledge-base stack |
+| IDBots (this repo) | M1 tools + services + worldview prompt; M2 learning loop + approval policy; M3 experience store/tools; M4 study-job queue + nightly study runs on the knowledge-base stack; M4+ MetaWeb surf loop (registry-driven protocols, persona engagement, pre-dream integration) |
 | metaso-p2p (backend) | Unified search API, SimpleNote indexing + backfill, generic pin endpoint — per `docs/metaweb-search-backend-requirements.md` |
 | open-agent-connect / metabot CLI (optional) | machine-first `pin get --pin-id` so OAC-side agents share the same search→fetch path |
 | Content workstream (separate bots) | Seed and maintain tutorials/knowledge per §8 conventions |
