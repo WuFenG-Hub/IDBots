@@ -13,7 +13,7 @@ try {
   ({
     startPrivateChatDaemon,
     stopPrivateChatDaemon,
-  } = await import('../dist-electron/services/privateChatDaemon.js'));
+  } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 }
 
 const TEST_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
@@ -112,6 +112,89 @@ function createCoworkStoreHarness() {
       },
       getSession(sessionId) {
         return sessionId === session.id ? session : null;
+      },
+      getSessionWithoutMessages(sessionId) {
+        return sessionId === session.id ? session : null;
+      },
+      getSessionMessagesMatchingMetadataValues(sessionId, values, limit = 50) {
+        assert.equal(sessionId, session.id);
+        const needles = (Array.isArray(values) ? values : [values])
+          .map((value) => String(value ?? '').trim())
+          .filter(Boolean);
+        if (needles.length === 0) return [];
+        return session.messages
+          .filter((message) => {
+            const haystack = JSON.stringify(message.metadata ?? {});
+            return needles.some((needle) => haystack.includes(needle));
+          })
+          .reverse()
+          .slice(0, limit);
+      },
+      getRecentPrivateA2AMessages(sessionId, requestedLimit = 100) {
+        assert.equal(sessionId, session.id);
+        const limit = Number.isFinite(requestedLimit)
+          ? Math.max(1, Math.min(1000, Math.floor(requestedLimit)))
+          : 100;
+        return session.messages
+          .filter((message) => (
+            (message.type === 'user' || message.type === 'assistant')
+            && message.metadata?.sourceChannel === 'metaweb_private'
+            && message.metadata?.orderExecutionTrace !== true
+          ))
+          .slice(-limit);
+      },
+      getMessageById(sessionId, messageId) {
+        assert.equal(sessionId, session.id);
+        return session.messages.find((message) => message.id === messageId) ?? null;
+      },
+      getConversationSourceContextBySession() {
+        return { sourceChannel: 'metaweb_private', externalConversationId };
+      },
+      isSessionArchived() {
+        return false;
+      },
+      unarchiveSession() {},
+      registerA2AEpisode() {},
+      isDelegationBlocking() {
+        return false;
+      },
+      setDelegationBlocking() {},
+      updateSession(sessionId, updates) {
+        if (sessionId === session.id && updates && typeof updates === 'object') {
+          Object.assign(session, updates);
+        }
+      },
+      upsertConversationMapping() {},
+      createSession(title, cwd, systemPrompt, executionMode, activeSkillIds, metabotId, sessionType, peerGlobalMetaId) {
+        return {
+          id: `session-created-${session.messages.length + 1}`,
+          title,
+          cwd,
+          metabotId: metabotId ?? null,
+          sessionType: sessionType ?? 'standard',
+          peerGlobalMetaId: peerGlobalMetaId ?? null,
+          messages: [],
+        };
+      },
+      findOrderSessionByOrderPinId() {
+        return null;
+      },
+      findOrderSessionByOrderTxid() {
+        return null;
+      },
+      findOrderSessionByPeer() {
+        return null;
+      },
+      hasPriorPrivateA2AOutboundMessage(sessionId) {
+        assert.equal(sessionId, session.id);
+        return session.messages.some((message) => {
+          if (message.type !== 'assistant') return false;
+          const metadata = message.metadata ?? {};
+          if (metadata.sourceChannel !== 'metaweb_private') return false;
+          if (metadata.orderExecutionTrace === true) return false;
+          const content = String(message.content ?? '').trim();
+          return content !== '' && content.toLowerCase() !== 'ping' && content.toLowerCase() !== 'pong';
+        });
       },
       ensureCanonicalPeerSessionShape() {
         return true;

@@ -1,15 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import path from 'node:path';
 import Module from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const require = Module.createRequire(import.meta.url);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const compiledPath = fs.existsSync(path.join(projectRoot, 'dist-electron/main/services/privateChatSkillTurnPolicy.js'))
-  ? path.join(projectRoot, 'dist-electron/main/services/privateChatSkillTurnPolicy.js')
-  : path.join(projectRoot, 'dist-electron/services/privateChatSkillTurnPolicy.js');
+const compiledPath = path.join(projectRoot, 'dist-electron/main/services/privateChatSkillTurnPolicy.js');
 
 const {
   classifyPrivateChatSkillTurnError,
