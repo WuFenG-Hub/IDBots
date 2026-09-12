@@ -80,3 +80,57 @@ test('evaluateDshToolPolicy asks for deletes only under default permission mode'
   assert.equal((await policy('delete', { path: '/tmp/x' }, 'default')).decision, 'ask', 'delete tool asks under default')
   assert.equal((await policy('delete', { path: '/tmp/x' }, 'acceptEdits')).decision, 'allow', 'delete tool allowed under acceptEdits')
 })
+
+// autoApprove (unattended: A2A conversations, orchestrator/worker turns) must
+// NEVER block on a human confirmation — deletes are auto-decided by workspace
+// scope instead: provably-inside targets are allowed, anything outside or not
+// statically verifiable is auto-denied so the agent routes around it.
+test('autoApprove sessions auto-decide deletes by workspace scope (never ask)', async () => {
+  const { CoworkRunner } = loadRunner()
+  const runner = new CoworkRunner(new MinimalStore(), { localTurnStallTimeoutMs: 0 })
+  runner.activeSessions.set('s1', {
+    sessionId: 's1',
+    permissionMode: 'default',
+    autoApprove: true,
+    workspaceRoot: '/workspace',
+  })
+  const policy = (toolName, toolInput) => runner.evaluateDshToolPolicy('s1', toolName, toolInput)
+  const ALLOW = [
+    ['bash', { command: 'rm -rf ./dist' }],
+    ['bash', { command: 'rm -rf sub/dir && echo done' }],
+    ['bash', { command: 'cd sub && rm -rf x' }],
+    ['bash', { command: 'rm -rf "quoted dir"' }],
+    ['bash', { command: 'find . -name "*.log" -delete' }],
+    ['bash', { command: 'git clean -fd' }],
+    // The delete keyword inside quoted output text is not a deletion.
+    ['bash', { command: 'echo "rm -rf done"' }],
+    ['bash', { command: 'bash -c "rm -rf ./x"' }],
+    ['bash', { command: 'ls -la' }],
+    ['delete', { path: 'sub/file.txt' }],
+    ['delete', { path: './cache' }],
+  ]
+  for (const [toolName, toolInput] of ALLOW) {
+    const result = await policy(toolName, toolInput)
+    assert.equal(result.decision, 'allow', `autoApprove allows in-workspace: ${JSON.stringify(toolInput)}`)
+  }
+  const DENY = [
+    ['bash', { command: 'rm -rf /tmp/some-dir' }],
+    ['bash', { command: 'rm -rf ../outside' }],
+    ['bash', { command: 'rm -rf ~/some-dir' }],
+    ['bash', { command: 'rm -rf $CACHE_DIR/x' }],
+    ['bash', { command: 'cd /tmp && rm -rf x' }],
+    ['bash', { command: 'find /tmp -delete' }],
+    ['bash', { command: 'bash -c "rm -rf /tmp/x"' }],
+    // Unattributable delete keyword (xargs) fails closed.
+    ['bash', { command: 'echo x | xargs rm -rf' }],
+    ['delete', { path: '/tmp/x' }],
+    ['delete', { path: '../outside.txt' }],
+  ]
+  for (const [toolName, toolInput] of DENY) {
+    const result = await policy(toolName, toolInput)
+    assert.equal(result.decision, 'deny', `autoApprove denies outside/unverifiable: ${JSON.stringify(toolInput)}`)
+    assert.match(result.reason ?? '', /workspace|工作区/i, 'deny reason explains the workspace boundary')
+  }
+  // An autoApprove delete decision never produces an interactive ask.
+  assert.equal((await policy('bash', { command: 'rm -rf /tmp/some-dir' })).decision !== 'ask', true)
+})

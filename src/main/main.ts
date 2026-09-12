@@ -6043,6 +6043,23 @@ const getCoworkRunner = () => {
       });
     });
 
+    // A permission finalized on ANY path (renderer reply, text relay,
+    // auto-allow, the 60s watchdog, abort, session stop) must dequeue the
+    // renderer's pendingPermissions copy — otherwise the global overlay keeps
+    // rendering a stale, unanswerable prompt forever.
+    coworkRunner.on('permissionResolved', (sessionId: string, requestId: string) => {
+      const windows = BrowserWindow.getAllWindows();
+      windows.forEach(win => {
+        if (!win.isDestroyed()) {
+          try {
+            win.webContents.send('cowork:stream:permissionResolved', { sessionId, requestId });
+          } catch (error) {
+            console.error('Failed to forward cowork permission resolved:', error);
+          }
+        }
+      });
+    });
+
     coworkRunner.on('complete', (sessionId: string, claudeSessionId: string | null) => {
       // A session finished: recompute the sleep guard so the blocker is
       // released as soon as no other work source is active.
