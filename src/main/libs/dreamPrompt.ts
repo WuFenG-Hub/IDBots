@@ -401,6 +401,8 @@ export function buildDreamPrompt(input: {
   sourceMode?: 'raw_activity' | 'fragment_summaries' | 'fragment';
   impressionSubjects?: DreamImpressionPromptSubject[];
   existingKnowledge?: DreamKnowledgeExisting[];
+  /** Pre-dream surf report markdown ("做梦前自动冲浪"); rendered as its own section. */
+  surfReport?: string | null;
 }): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const activityTokenBudget = Math.max(
@@ -487,6 +489,9 @@ export function buildDreamPrompt(input: {
   if (sourceMode !== 'fragment' && (input.activity.chainReads ?? []).length > 0) {
     const readLines = (input.activity.chainReads ?? []).map(formatChainReadActivity).join('\n');
     sections.push(`## 当日阅读的链上内容(完整读过的文章/帖子,读过即有印象)\n${readLines}`);
+  }
+  if (sourceMode !== 'fragment' && input.surfReport?.trim()) {
+    sections.push(`## 今夜做梦前的 AI 互联网冲浪报告(你睡前的上网冲浪:新看到的内容、学到的知识、参与的互动——把它当作今晚 freshest 的一段经历来消化)\n${truncateText(input.surfReport.trim(), 2000)}`);
   }
   if (input.activity.taskRuns.length > 0) {
     const taskLines = input.activity.taskRuns

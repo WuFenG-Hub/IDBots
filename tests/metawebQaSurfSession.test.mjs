@@ -33,23 +33,33 @@ function surfJobFixture(overrides = {}) {
 }
 
 function makeHarness(overrides = {}) {
-  const calls = { enqueueSurf: [], disableSurf: [] };
+  const calls = { setEnabled: [], startSurf: [], legacyDisable: [] };
   const metawebStudy = {
     enqueueStudyJob: async () => { throw new Error('not used here'); },
-    enqueueQaSurfJob: (metabotId, input) => {
-      calls.enqueueSurf.push({ metabotId, input });
-      if (overrides.enqueueSurfError) throw overrides.enqueueSurfError;
-      return overrides.enqueueSurfResult ?? { job: surfJobFixture(), created: true };
-    },
+    enqueueQaSurfJob: () => { throw new Error('legacy path must not be used'); },
     disableQaSurfJob: (metabotId) => {
-      calls.disableSurf.push(metabotId);
-      return overrides.disableResult ?? true;
+      calls.legacyDisable.push(metabotId);
+      return true;
     },
     listStudyJobs: (metabotId) => overrides.jobs ?? [surfJobFixture()],
+  };
+  const metawebSurf = {
+    setSurfBeforeDreamEnabled: (metabotId, enabled) => {
+      calls.setEnabled.push({ metabotId, enabled });
+      if (overrides.setEnabledError) throw overrides.setEnabledError;
+    },
+    isSurfBeforeDreamEnabled: () => true,
+    startSurfForMetabot: (metabotId) => {
+      calls.startSurf.push(metabotId);
+      if (overrides.startSurfError) throw overrides.startSurfError;
+      return { runId: 'surf-run-1' };
+    },
+    isSurfRunning: () => overrides.running ?? false,
   };
   const tools = buildMetawebStudyAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
     metawebStudy,
+    metawebSurf,
     sessionId: SESSION_ID,
     resolveMetabotId: (sessionId) => ('metabotId' in overrides ? overrides.metabotId : METABOT_ID),
   });
@@ -67,43 +77,46 @@ test('registers the surf enable/disable tools beside the study tools', () => {
   ]);
 });
 
-test('metaweb_qa_surf_enqueue passes the budget through and explains the recurring contract', async () => {
+test('metaweb_qa_surf_enqueue aliases to MetaWeb surf: enables pre-dream surf, retires the legacy job, starts one run now', async () => {
   const { calls, byName } = makeHarness();
-  const result = await byName.metaweb_qa_surf_enqueue.handler({ nightly_budget: 15 });
+  const result = await byName.metaweb_qa_surf_enqueue.handler({});
   assert.equal(result.isError, undefined);
-  assert.deepEqual(calls.enqueueSurf, [{ metabotId: METABOT_ID, input: { budgetPins: 15 } }]);
+  assert.deepEqual(calls.setEnabled, [{ metabotId: METABOT_ID, enabled: true }]);
+  assert.deepEqual(calls.legacyDisable, [METABOT_ID], 'legacy qa-surf row retired so it cannot double-run');
+  assert.deepEqual(calls.startSurf, [METABOT_ID]);
   const text = result.content[0].text;
-  assert.match(text, /Nightly Q&A surfing enabled/);
-  assert.match(text, /recurring|recurs/i);
+  assert.match(text, /Nightly MetaWeb surf enabled/);
+  assert.match(text, /run id: surf-run-1/);
+  assert.match(text, /recurs every night before dreaming/);
   assert.match(text, /metaweb_qa_surf_disable/);
-  // Already-active is a no-op message, not an error.
-  const active = makeHarness({ enqueueSurfResult: { job: surfJobFixture({ status: 'running', runCount: 5 }), created: false } });
-  const activeResult = await active.byName.metaweb_qa_surf_enqueue.handler({});
-  assert.equal(activeResult.isError, undefined);
-  assert.match(activeResult.content[0].text, /already running/);
 });
 
-test('metaweb_qa_surf_enqueue fails honestly without a bot or on service errors', async () => {
+test('metaweb_qa_surf_enqueue while a surf is running skips the duplicate start', async () => {
+  const { calls, byName } = makeHarness({ running: true });
+  const result = await byName.metaweb_qa_surf_enqueue.handler({});
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.startSurf.length, 0);
+  assert.match(result.content[0].text, /already in progress/);
+});
+
+test('metaweb_qa_surf_enqueue fails honestly without a bot or on errors', async () => {
   const noBot = makeHarness({ metabotId: undefined });
   const noBotResult = await noBot.byName.metaweb_qa_surf_enqueue.handler({});
   assert.equal(noBotResult.isError, true);
   assert.match(noBotResult.content[0].text, /could not resolve which MetaBot/);
-  const failing = makeHarness({ enqueueSurfError: new Error('db locked') });
+  const failing = makeHarness({ setEnabledError: new Error('db locked') });
   const failingResult = await failing.byName.metaweb_qa_surf_enqueue.handler({});
   assert.equal(failingResult.isError, true);
   assert.match(failingResult.content[0].text, /failed: db locked/);
 });
 
-test('metaweb_qa_surf_disable distinguishes stopped vs nothing-active', async () => {
+test('metaweb_qa_surf_disable turns pre-dream surf off and retires the legacy job', async () => {
   const { calls, byName } = makeHarness();
-  const stopped = await byName.metaweb_qa_surf_disable.handler({});
-  assert.equal(stopped.isError, undefined);
-  assert.deepEqual(calls.disableSurf, [METABOT_ID]);
-  assert.match(stopped.content[0].text, /disabled/i);
-  const none = makeHarness({ disableResult: false });
-  const noneResult = await none.byName.metaweb_qa_surf_disable.handler({});
-  assert.equal(noneResult.isError, undefined);
-  assert.match(noneResult.content[0].text, /not active/);
+  const result = await byName.metaweb_qa_surf_disable.handler({});
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(calls.setEnabled, [{ metabotId: METABOT_ID, enabled: false }]);
+  assert.deepEqual(calls.legacyDisable, [METABOT_ID]);
+  assert.match(result.content[0].text, /Nightly MetaWeb surf disabled/);
 });
 
 test('study status renders surf jobs as recurring with handled-pins wording', () => {
@@ -157,8 +170,44 @@ test('coworkRunner has a qa-surf allowlist: learning tools + answer/react, nothi
   assert.match(runnerSource, /kind === 'qa-surf'/);
 });
 
+test('coworkRunner has a MetaWeb surf allowlist: participation tools present, dangerous tools absent', () => {
+  const runnerSource = require('node:fs')
+    .readFileSync(new URL('../dist-electron/main/libs/coworkRunner.js', import.meta.url), 'utf8');
+  const match = runnerSource.match(/METAWEB_SURF_TOOL_ALLOWLIST = new Set\(\[([\s\S]*?)\]\)/);
+  assert.ok(match, 'MetaWeb surf allowlist exists');
+  const allowlist = match[1];
+  assert.match(allowlist, /\.\.\.METAWEB_QA_SURF_TOOL_ALLOWLIST/);
+  // The full surf surface: social reads, generic reader, the narrow comment
+  // tool, persona-driven publishing, and conservative agentpedia challenges.
+  for (const expected of [
+    "'search_social_posts'",
+    "'social_post_detail'",
+    "'social_post_comments'",
+    "'omni_read'",
+    "'comment_pin'",
+    "'post_simplequestion'",
+    "'post_buzz'",
+    "'post_simplenote'",
+    "'agentpedia_challenge'",
+  ]) {
+    assert.ok(allowlist.includes(expected), `surf allowlist contains ${expected}`);
+  }
+  // Absence beats deny: no arbitrary protocol writes, no wallet, no uploads.
+  assert.doesNotMatch(allowlist, /omni_cast/);
+  assert.doesNotMatch(allowlist, /wallet_/);
+  assert.doesNotMatch(allowlist, /upload_file/);
+  // Surf sessions never see the surf triggers (no nested surfing).
+  assert.doesNotMatch(allowlist, /metaweb_surf_start/);
+});
+
 test('main.ts passes the job kind into the study session', () => {
   const mainSource = require('node:fs')
     .readFileSync(new URL('../dist-electron/main/main.js', import.meta.url), 'utf8');
   assert.match(mainSource, /metawebStudySession:\s*\{\s*pinBudget:\s*job\.budgetPins,\s*kind:\s*job\.kind\s*\}/);
+});
+
+test('main.ts wires the surf session budgets from the briefing', () => {
+  const mainSource = require('node:fs')
+    .readFileSync(new URL('../dist-electron/main/main.js', import.meta.url), 'utf8');
+  assert.match(mainSource, /metawebSurfSession:\s*\{\s*interactionBudget:\s*context\.briefing\.interactionBudget/);
 });

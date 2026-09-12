@@ -26,6 +26,17 @@ export type MetawebStudyControl = {
   listStudyJobs(metabotId: number): MetawebStudyJobRecord[];
 };
 
+/**
+ * The surf-side surface the legacy qa-surf tools alias to (feat/metaweb-surf).
+ * Q&A-only nightly surfing grew into full MetaWeb surfing; the old tool names
+ * stay registered so existing skills/docs keep working, but they now drive
+ * the bot's surf-before-dream setting and kick an immediate surf run.
+ */
+export type MetawebSurfAliasControl = Pick<
+  import('./surfAgentTools').MetawebSurfControl,
+  'setSurfBeforeDreamEnabled' | 'isSurfBeforeDreamEnabled' | 'startSurfForMetabot' | 'isSurfRunning'
+>;
+
 /** Minimal shape of the claude-agent-sdk `tool()` helper we depend on. */
 type SdkToolFactory = (
   name: string,
@@ -88,10 +99,11 @@ export function formatStudyJobList(jobs: MetawebStudyJobRecord[]): string {
 export function buildMetawebStudyAgentTools(deps: {
   tool: SdkToolFactory;
   metawebStudy: MetawebStudyControl;
+  metawebSurf: MetawebSurfAliasControl;
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | null | undefined;
 }): unknown[] {
-  const { tool, metawebStudy, sessionId, resolveMetabotId } = deps;
+  const { tool, metawebStudy, metawebSurf, sessionId, resolveMetabotId } = deps;
 
   /** Strict per-session bot attribution; null means "do not guess". */
   const requireMetabotId = (toolName: string): number | { isError: true; text: string } => {
@@ -170,33 +182,35 @@ export function buildMetawebStudyAgentTools(deps: {
   const qaSurfEnqueue = tool(
     'metaweb_qa_surf_enqueue',
     [
-      'Enable RECURRING nightly on-chain Q&A surfing for yourself — use when the owner asks you to spend your nights on the MetaWeb Q&A (e.g. "晚上去链上问答看看，会的就答", "surf the on-chain Q&A at night and learn from it").',
-      'Every night (00:00–06:00) a background session then: browses the unanswered question queue, answers the ones squarely in your role (a few per night — answers are on-chain writes that cost sats), likes genuinely good answers, and saves Q&A valuable to your role into your knowledge bases.',
-      'It recurs until the owner disables it (metaweb_qa_surf_disable); it never completes on its own. Re-enabling while active is a no-op returning the existing job. nightly_budget caps the NEW pins handled per run (questions answered + pins saved), default 10, max 50.',
-      'Confirm to the owner what was enabled and that progress is visible via metaweb_study_status.',
+      'Enable your nightly MetaWeb surf for yourself — use when the owner asks you to spend your nights on the AI internet (e.g. "晚上去链上问答看看，会的就答", "surf MetaWeb at night and learn from it", "晚上去 AI 互联网冲浪").',
+      'This legacy Q&A-surf tool now drives the FULL MetaWeb surf: every night before dreaming you catch up on new buzz/notes/Q&A/Agentpedia entries since your last surf, search & learn old content matching your role, engage (like/comment/answer) as your persona decides within the interaction budget, and handle chain notifications addressed to you — then the surf report feeds tonight\'s dream.',
+      'It recurs every night until the owner disables it (metaweb_qa_surf_disable). Re-enabling while active is a no-op. One surf also starts RIGHT NOW when this tool runs.',
+      'Confirm to the owner what was enabled and that surf reports are visible via metaweb_surf_status and the bot editor\'s advanced tab.',
     ].join(' '),
-    {
-      nightly_budget: z.number().int().min(1).max(50).optional().describe('New pins handled per night (answered + saved). Default 10.'),
-    },
-    async (args: { nightly_budget?: number }) => {
+    {},
+    async () => {
       const metabotId = requireMetabotId('metaweb_qa_surf_enqueue');
       if (typeof metabotId !== 'number') {
         return textResult(metabotId.text, true);
       }
       try {
-        const { job, created } = metawebStudy.enqueueQaSurfJob(metabotId, {
-          budgetPins: args.nightly_budget,
-        });
-        if (!created) {
-          return textResult(
-            `Nightly Q&A surfing is already ${job.status} for this bot (${job.runCount} run(s) so far, ${job.processedPinIds.length} pin(s) handled). It continues every night — no duplicate was created.`
-          );
+        metawebSurf.setSurfBeforeDreamEnabled(metabotId, true);
+        // Legacy cleanup: retire any pre-migration Q&A-surf job row still
+        // active so it cannot double-run beside the surf loop.
+        metawebStudy.disableQaSurfJob(metabotId);
+        let startedLine: string;
+        if (metawebSurf.isSurfRunning(metabotId)) {
+          startedLine = 'A surf run is already in progress right now — tonight and every night it recurs before dreaming.';
+        } else {
+          const { runId } = metawebSurf.startSurfForMetabot(metabotId);
+          startedLine = `One surf run started immediately (run id: ${runId}); it also recurs every night before dreaming.`;
         }
         return textResult(
           [
-            `Nightly Q&A surfing enabled (nightly budget: ${job.budgetPins} pins/run).`,
-            'Each night (00:00–06:00) a background session browses the unanswered on-chain questions, answers the ones squarely in your role, reacts honestly, and saves valuable Q&A into your knowledge bases.',
-            'Tell the owner it recurs until disabled (metaweb_qa_surf_disable) and that progress shows in metaweb_study_status.',
+            'Nightly MetaWeb surf enabled (this replaces the old Q&A-only nightly surfing with the full AI-internet surf).',
+            startedLine,
+            'Each surf: fresh digest across protocols → search & learn → persona-driven engagement → your chain inbox → a readable surf report that feeds the dream.',
+            'Tell the owner it recurs until disabled (metaweb_qa_surf_disable) and that reports show in metaweb_surf_status.',
           ].join('\n')
         );
       } catch (error) {
@@ -207,7 +221,7 @@ export function buildMetawebStudyAgentTools(deps: {
 
   const qaSurfDisable = tool(
     'metaweb_qa_surf_disable',
-    'Stop YOUR recurring nightly on-chain Q&A surfing — use when the owner asks to stop/disable the nightly surfing ("别晚上去问答了", "stop the nightly Q&A surfing"). Answers and knowledge already saved stay; only future nightly runs stop. Re-enable anytime with metaweb_qa_surf_enqueue. Bare call, no arguments.',
+    'Stop YOUR recurring nightly MetaWeb surf — use when the owner asks to stop/disable the nightly surfing ("别晚上去冲浪了", "stop the nightly Q&A surfing / MetaWeb surf"). Knowledge and interactions already gathered stay; only future nightly runs stop. Re-enable anytime with metaweb_qa_surf_enqueue. Bare call, no arguments.',
     {},
     async () => {
       const metabotId = requireMetabotId('metaweb_qa_surf_disable');
@@ -215,12 +229,10 @@ export function buildMetawebStudyAgentTools(deps: {
         return textResult(metabotId.text, true);
       }
       try {
-        const disabled = metawebStudy.disableQaSurfJob(metabotId);
-        if (!disabled) {
-          return textResult('Nightly Q&A surfing is not active for this bot — nothing to disable.');
-        }
+        metawebSurf.setSurfBeforeDreamEnabled(metabotId, false);
+        metawebStudy.disableQaSurfJob(metabotId);
         return textResult(
-          'Nightly Q&A surfing disabled. Everything already answered and saved stays with you; future nightly runs are stopped. Re-enable anytime with metaweb_qa_surf_enqueue.'
+          'Nightly MetaWeb surf disabled. Everything already learned and published stays with you; future nightly surf runs are stopped. Re-enable anytime with metaweb_qa_surf_enqueue.'
         );
       } catch (error) {
         return textResult(`metaweb_qa_surf_disable failed: ${error instanceof Error ? error.message : String(error)}`, true);

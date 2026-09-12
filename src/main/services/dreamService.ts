@@ -118,6 +118,14 @@ export interface DreamServiceDeps {
   metaidExperienceStore?: MetaIDExperienceStore;
   metaidImpressionStore?: MetaIDImpressionStore;
   metaidKnowledgeStore?: MetaIDKnowledgeStore;
+  /**
+   * Pre-dream MetaWeb surf ("做梦前自动冲浪"): called once per dream run
+   * before the prompt is built; the host wiring owns the enable check, the
+   * recency dedupe, the timeout, and failure isolation (a surf failure must
+   * never fail the dream — it returns null). The returned report markdown is
+   * folded into the dream prompt as its own section.
+   */
+  surfBeforeDream?: (metabotId: number) => Promise<{ reportMarkdown: string | null } | null>;
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
   now?: () => Date;
@@ -516,6 +524,7 @@ export class DreamService {
     brain: DreamBrainPair,
     impressionSubjects: ReturnType<DreamService['buildDreamImpressionSubjects']>,
     existingKnowledge: DreamKnowledgeExisting[],
+    surfReport?: string | null,
   ): Promise<{ prompt: { system: string; user: string }; output: DreamOutput }> {
     const budgets = this.resolveDreamBudgets(brain.llmId);
     const estimatedTokens = estimateDreamActivityTokens(activity);
@@ -529,6 +538,7 @@ export class DreamService {
         activityTokenBudget: budgets.fastPathInputTokens,
         impressionSubjects,
         existingKnowledge,
+        surfReport,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -550,6 +560,7 @@ export class DreamService {
         activityTokenBudget: budgets.fastPathInputTokens,
         impressionSubjects,
         existingKnowledge,
+        surfReport,
       });
       const output = await this.generateAndParse(prompt.system, prompt.user, brain, budgets.maxOutputTokens);
       return { prompt, output };
@@ -584,6 +595,7 @@ export class DreamService {
       sourceMode: 'fragment_summaries',
       impressionSubjects,
       existingKnowledge,
+      surfReport,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -607,6 +619,21 @@ export class DreamService {
     const brain = this.resolveDreamBrain(metabot);
     this.deps.dreamStore.beginRun(metabotId, date, brain.llmId, DREAM_VERSION);
     try {
+      // Pre-dream surf ("做梦前自动冲浪"): the bot browses MetaWeb first so
+      // tonight's dream can fold what it learned into long-term memory. The
+      // wiring owns enable/recency/timeout/failure isolation; a null or
+      // throwing surf never blocks the dream.
+      let surfReport: string | null = null;
+      if (this.deps.surfBeforeDream) {
+        try {
+          const surf = await this.deps.surfBeforeDream(metabotId);
+          surfReport = surf?.reportMarkdown?.trim() || null;
+        } catch (error) {
+          console.warn(
+            `[DreamService] Pre-dream surf failed for metabot ${metabotId}; dreaming without it: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       const { startMs, endMs } = getDayBoundsMs(date);
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
       const impressionSubjects = this.buildDreamImpressionSubjects(metabot, date);
@@ -619,6 +646,7 @@ export class DreamService {
         && (activity.chainWrites?.length ?? 0) === 0
         && (activity.chainReads?.length ?? 0) === 0
         && impressionSubjects.length === 0
+        && !surfReport
       ) {
         // Nothing happened that day — no LLM call, no summary, still recorded.
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
@@ -632,6 +660,7 @@ export class DreamService {
         brain,
         impressionSubjects,
         existingKnowledge,
+        surfReport,
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the

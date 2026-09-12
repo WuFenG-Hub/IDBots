@@ -21,9 +21,11 @@ import {
 } from '../metawebSurfStore';
 import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing } from '../libs/surfBriefing';
 import { DEFAULT_SURF_PROTOCOLS, type SurfProtocolDescriptor } from '../libs/surfProtocols';
-import { getSurfInteractionBudget, type SurfSettingsReader } from './surfSettings';
+import { getSurfInteractionBudget, isSurfBeforeDreamEnabled, type SurfSettingsReader } from './surfSettings';
 
 export const SURF_STATUS_CHANNEL = 'metabot:surfStatusChanged';
+/** A finished surf younger than this makes the pre-dream surf redundant. */
+export const PRE_DREAM_SURF_RECENCY_MS = 20 * 60 * 60 * 1000;
 
 export interface SurfStatusEvent {
   metabotId: number;
@@ -92,6 +94,21 @@ export class SurfService {
 
   isRunning(metabotId: number): boolean {
     return this.runningByMetabot.has(metabotId);
+  }
+
+  /**
+   * Pre-dream gate: the bot's surf-before-dream toggle is on (default) and it
+   * has not finished a surf within the recency window (a manual evening surf
+   * makes the nightly one redundant).
+   */
+  shouldPreDreamSurf(metabotId: number): boolean {
+    if (!isSurfBeforeDreamEnabled(this.metabotStore, metabotId)) return false;
+    if (this.isRunning(metabotId)) return false;
+    const latest = this.store.getLatestFinishedRun(metabotId);
+    if (!latest?.finishedAt) return true;
+    const finishedMs = Date.parse(latest.finishedAt);
+    if (!Number.isFinite(finishedMs)) return true;
+    return this.nowMs() - finishedMs >= PRE_DREAM_SURF_RECENCY_MS;
   }
 
   /**

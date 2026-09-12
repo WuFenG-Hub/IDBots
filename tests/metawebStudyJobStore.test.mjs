@@ -163,3 +163,22 @@ test('malformed processed_pin_ids JSON degrades to an empty list', () => {
   db.run(`UPDATE metaweb_study_jobs SET processed_pin_ids = 'not-json' WHERE id = 'a'`);
   assert.deepEqual(store.getById('a').processedPinIds, []);
 });
+
+test('legacy qa-surf jobs migrate to done exactly once, idempotently', () => {
+  const { db, store } = setup();
+  store.insert(makeJob({ id: 'legacy-surf', kind: 'qa-surf', topic: 'On-chain Q&A surfing', topicFingerprint: 'qa-surf', status: 'pending' }));
+  store.insert(makeJob({ id: 'topic-alive', topic: 'video', topicFingerprint: 'video', status: 'pending' }));
+
+  // The migration lives in the schema ensure; re-running it retires the row.
+  ensureMetawebStudyJobSchema(db);
+  const migrated = store.getById('legacy-surf');
+  assert.equal(migrated.status, 'done');
+  assert.match(migrated.lastRunSummary, /Superseded by MetaWeb surf/);
+  assert.equal(migrated.lastError, null);
+  assert.equal(store.getById('topic-alive').status, 'pending', 'topic jobs are untouched');
+
+  // Idempotent: a second ensure does not resurrect or rewrite the row.
+  const before = store.getById('legacy-surf').updatedAt;
+  ensureMetawebStudyJobSchema(db);
+  assert.equal(store.getById('legacy-surf').updatedAt, before);
+});

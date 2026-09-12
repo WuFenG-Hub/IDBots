@@ -9772,11 +9772,12 @@ export class CoworkRunner extends EventEmitter {
     // "what have you been learning" — the deliberate substitute for a
     // proactive morning report. Same strict session attribution as above, and
     // the same memory gate: a study job's whole purpose is feeding the KB.
-    if (sessionMemoryEnabled && this.metawebStudy) {
+    if (sessionMemoryEnabled && this.metawebStudy && this.metawebSurf) {
       memoryTools.push(
         ...buildMetawebStudyAgentTools({
           tool,
           metawebStudy: this.metawebStudy,
+          metawebSurf: this.metawebSurf,
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })

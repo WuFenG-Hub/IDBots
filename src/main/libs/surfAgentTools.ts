@@ -13,12 +13,16 @@ type SdkToolFactory = (
  * Tool-facing surface of SurfService. startSurf is async by design: the run
  * proceeds unattended in the background; metaweb_surf_status is how the bot
  * answers "what did you learn on your last surf?" truthfully from the run
- * records — the deliberate substitute for proactive reporting.
+ * records — the deliberate substitute for proactive reporting. The
+ * before-dream setting accessors additionally serve the legacy
+ * metaweb_qa_surf_* tool aliases (see metawebStudyAgentTools).
  */
 export type MetawebSurfControl = {
   startSurfForMetabot(metabotId: number): { runId: string };
   isSurfRunning(metabotId: number): boolean;
   listSurfRuns(metabotId: number, limit?: number): MetawebSurfRunRecord[];
+  setSurfBeforeDreamEnabled(metabotId: number, enabled: boolean): void;
+  isSurfBeforeDreamEnabled(metabotId: number): boolean;
 };
 
 function textResult(text: string, isError = false) {

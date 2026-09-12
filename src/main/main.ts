@@ -270,6 +270,7 @@ import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { MetawebSurfStore } from './metawebSurfStore';
 import { SurfService, SURF_STATUS_CHANNEL } from './services/surfService';
 import { buildSurfSessionPrompt, parseSurfRunReport, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
+import { isSurfBeforeDreamEnabled, SURF_BEFORE_DREAM_ENABLED_KEY } from './services/surfSettings';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
 import { SleepGuard, evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, type SleepGuardSource, type SleepGuardState } from './sleepGuard';
@@ -4071,6 +4072,29 @@ const startSqliteDaemons = (): void => {
     metaidExperienceStore: dreamExperienceStore,
     metaidImpressionStore: dreamImpressionStore,
     metaidKnowledgeStore: dreamKnowledgeStore,
+    // Pre-dream surf ("做梦前自动冲浪"): default ON per bot; skipped when a
+    // surf finished within the recency window. Hard-capped so an overrunning
+    // surf can never stall the night's dream; failures degrade to no surf.
+    surfBeforeDream: async (metabotId) => {
+      const surf = getSurfService();
+      if (!surf.shouldPreDreamSurf(metabotId)) return null;
+      const PRE_DREAM_SURF_TIMEOUT_MS = 35 * 60 * 1000;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          surf.runSurfAndWait(metabotId, 'pre-dream').then((run) => ({
+            reportMarkdown: run.status === 'done' ? run.reportMarkdown : null,
+          })),
+          new Promise<null>((resolve) => {
+            timeout = setTimeout(() => resolve(null), PRE_DREAM_SURF_TIMEOUT_MS);
+          }),
+        ]);
+      } catch {
+        return null;
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+    },
     emitToRenderer: (channel, data) => {
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) {
@@ -5630,6 +5654,11 @@ const getCoworkRunner = () => {
         isSurfRunning: (metabotId: number) => getSurfService().isRunning(metabotId),
         listSurfRuns: (metabotId: number, limit?: number) =>
           getMetawebSurfStore().listRunsByMetabot(metabotId, limit ?? 5),
+        setSurfBeforeDreamEnabled: (metabotId: number, enabled: boolean) => {
+          getMetabotStore().setMetabotSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY, enabled ? '1' : '0');
+        },
+        isSurfBeforeDreamEnabled: (metabotId: number) =>
+          isSurfBeforeDreamEnabled(getMetabotStore(), metabotId),
       },
       // upload_file tool backend. Delegates to the shared uploadMetaFile()
       // service so the tool, the RPC endpoint, and the IPC handlers all share

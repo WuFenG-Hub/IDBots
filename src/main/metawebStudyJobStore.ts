@@ -151,6 +151,19 @@ export function ensureMetawebStudyJobSchema(db: Database): void {
   if (!names.includes('kind')) {
     db.run("ALTER TABLE metaweb_study_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'topic'");
   }
+  // qa-surf is superseded by MetaWeb surf (feat/metaweb-surf): retire legacy
+  // recurring Q&A-surf jobs once, idempotently. The Q&A browsing behavior
+  // lives on as the surf loop's simplequestion stage; the nightly Q&A toggle
+  // maps to the bot's surf-before-dream setting.
+  db.run(
+    `UPDATE metaweb_study_jobs
+     SET status = 'done',
+         last_run_summary = 'Superseded by MetaWeb surf: Q&A browsing now happens inside the nightly surf run.',
+         last_error = NULL,
+         updated_at = ?
+     WHERE kind = 'qa-surf' AND status IN ('pending', 'running')`,
+    [new Date().toISOString()],
+  );
 }
 
 export class MetawebStudyJobStore {
