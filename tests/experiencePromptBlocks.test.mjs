@@ -33,7 +33,7 @@ try {
     formatExperienceRecallResults,
     RECENT_SUMMARIES_MAX_CHARS,
     RECALL_WARM_DAYS,
-  } = await import('../dist-electron/libs/experiencePromptBlocks.js'));
+  } = await import('../dist-electron/main/libs/experiencePromptBlocks.js'));
 }
 
 test('buildSelfIdentityBlock renders the identity block with behavior-alignment guidance', () => {

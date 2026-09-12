@@ -7,7 +7,7 @@ let DreamStore;
 try {
   ({ DreamStore } = await import('../dist-electron/main/dreamStore.js'));
 } catch {
-  ({ DreamStore } = await import('../dist-electron/dreamStore.js'));
+  ({ DreamStore } = await import('../dist-electron/main/dreamStore.js'));
 }
 
 const seedSummaries = (store, metabotId, rows) => {

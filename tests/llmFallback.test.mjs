@@ -8,7 +8,7 @@ function loadFallback() {
   try {
     return require(require.resolve('../dist-electron/main/services/llmFallback.js'));
   } catch {
-    return require('../dist-electron/services/llmFallback.js');
+    return require('../dist-electron/main/services/llmFallback.js');
   }
 }
 

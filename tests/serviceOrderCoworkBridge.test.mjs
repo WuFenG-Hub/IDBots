@@ -8,7 +8,7 @@ import {
 
 const {
   publishServiceOrderEventToCowork,
-} = await import('../dist-electron/services/serviceOrderCoworkBridge.js');
+} = await import('../dist-electron/main/services/serviceOrderCoworkBridge.js');
 
 test('publishServiceOrderEventToCowork clears delegation blocking for buyer refund requests', async () => {
   const sqlite = await createSqliteStore();

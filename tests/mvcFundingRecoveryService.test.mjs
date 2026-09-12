@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const {
   recoverMvcFundingCandidatesFromPinHistory,
-} = await import('../dist-electron/services/mvcFundingRecoveryService.js');
+} = await import('../dist-electron/main/services/mvcFundingRecoveryService.js');
 
 const BOT15_ADDRESS = '1AxUdSkVdDyDreYSYVoDRFeyS1pvQdvcJx';
 const BOT15_LATEST_TXID = '578965df3148a3e08192a343942127d8ec4d61292ad43c3877259f30f7546ece';

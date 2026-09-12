@@ -4,13 +4,36 @@ import assert from 'node:assert/strict';
 const {
   buildMvcTransferSessionSnapshot,
   runMvcTransferWorkerWithSessionRecovery,
-} = await import('../dist-electron/services/transferService.js');
+} = await import('../dist-electron/main/services/transferService.js');
 
 const {
   getMvcSpendSessionSnapshot,
   recordMvcSpentOutpoints,
   resetMvcSpendSessionStateForTests,
-} = await import('../dist-electron/services/mvcSpendSessionState.js');
+} = await import('../dist-electron/main/services/mvcSpendSessionState.js');
+
+// buildMvcTransferSessionSnapshot cross-references recovered candidates against
+// the live provider via global fetch (Metalet utxo-list); stub it so the
+// recovered outpoints survive the filter deterministically.
+const stubProviderUtxoFetch = (utxos) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    json: async () => ({
+      code: 0,
+      data: {
+        list: utxos.map((utxo) => ({
+          txid: utxo.txId,
+          outIndex: utxo.outputIndex,
+          value: utxo.satoshis,
+          height: utxo.height,
+        })),
+      },
+    }),
+  });
+  return () => {
+    globalThis.fetch = originalFetch;
+  };
+};
 
 test('buildMvcTransferSessionSnapshot recovers local pin change outputs when provider funding is excluded as stale', async () => {
   assert.equal(typeof buildMvcTransferSessionSnapshot, 'function');
@@ -31,6 +54,7 @@ test('buildMvcTransferSessionSnapshot recovers local pin change outputs when pro
   const recoveryCalls = [];
   const originalLog = console.log;
   console.log = () => {};
+  const restoreFetch = stubProviderUtxoFetch([recoveredUtxo]);
 
   recordMvcSpentOutpoints(metabotId, [staleOutpoint]);
 
@@ -57,6 +81,7 @@ test('buildMvcTransferSessionSnapshot recovers local pin change outputs when pro
     );
   } finally {
     console.log = originalLog;
+    restoreFetch();
   }
 
   assert.deepEqual(snapshot.excludeOutpoints, [staleOutpoint]);
@@ -161,6 +186,7 @@ test('buildMvcTransferSessionSnapshot recovers from address history when local p
   const recoveryCalls = [];
   const originalLog = console.log;
   console.log = () => {};
+  const restoreFetch = stubProviderUtxoFetch([recoveredUtxo]);
 
   recordMvcSpentOutpoints(metabotId, [staleOutpoint]);
 
@@ -192,6 +218,7 @@ test('buildMvcTransferSessionSnapshot recovers from address history when local p
     );
   } finally {
     console.log = originalLog;
+    restoreFetch();
   }
 
   assert.deepEqual(snapshot.excludeOutpoints, [staleOutpoint]);

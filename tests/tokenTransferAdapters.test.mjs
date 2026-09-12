@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const {
   selectMvcFundingUtxos,
-} = await import('../dist-electron/services/tokenTransferAdapters.js');
+} = await import('../dist-electron/main/services/tokenTransferAdapters.js');
 
 test('selectMvcFundingUtxos preserves provider order instead of sorting by satoshis', () => {
   assert.equal(

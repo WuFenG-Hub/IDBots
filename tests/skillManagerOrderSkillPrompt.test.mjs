@@ -4,15 +4,46 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createRequire } from 'node:module';
+import { DatabaseSync } from 'node:sqlite';
 
 const require = createRequire(import.meta.url);
 const { SkillManager } = require('../dist-electron/main/skillManager.js');
 
 const BUILTIN_SKILLS_ROOT = path.resolve(process.cwd(), 'SKILLs');
 
+/** Minimal SqliteDatabase-shape adapter over node:sqlite (same as skillAssignmentStore.test). */
+class TestSqliteDb {
+  constructor() {
+    this.db = new DatabaseSync(':memory:');
+  }
+
+  exec(sql, params = []) {
+    if (/^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(sql)) {
+      this.db.exec(sql);
+      return [];
+    }
+    const stmt = this.db.prepare(sql);
+    if (/^\s*(SELECT|PRAGMA)/i.test(sql)) {
+      const rows = stmt.all(...params);
+      const columns = stmt.columns().map((column) => column.name || column.column || '');
+      return [{ columns, values: rows.map((row) => columns.map((column) => row[column])) }];
+    }
+    stmt.run(...params);
+    return [];
+  }
+
+  run(sql, params = []) {
+    this.exec(sql, params);
+  }
+}
+
 class MemoryStore {
   constructor(initial = {}) {
     this.values = { ...initial };
+    // Mirror writes into a real kv table so raw-row probes behave like the
+    // production SqliteStore (skillAssignmentStore.test.mjs pattern).
+    this.db = new TestSqliteDb();
+    this.db.run('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER)');
   }
 
   get(key) {
@@ -21,6 +52,14 @@ class MemoryStore {
 
   set(key, value) {
     this.values[key] = value;
+    this.db.run(
+      'INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, ?)',
+      [key, JSON.stringify(value), 1]
+    );
+  }
+
+  getDatabase() {
+    return this.db;
   }
 }
 

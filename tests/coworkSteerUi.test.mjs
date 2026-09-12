@@ -302,7 +302,10 @@ test('CoworkView submits one UUID and ignores settlement from a stale session sc
   assert.match(viewSource, /submissionId:\s*crypto\.randomUUID\(\)/);
   assert.match(viewSource, /coworkService\.submitInput/);
   assert.match(viewSource, /const sessionSkillIds = isStreaming \? \[\] : \[\.\.\.activeSkillIds\]/);
-  assert.match(viewSource, /const systemPrompt = isStreaming \? undefined : await buildCombinedSystemPrompt\(skillPrompt\)/);
+  // Source now only forwards a fresh system prompt when skills are picked for
+  // the turn; ordinary turns reuse the session's persisted prompt (catalog
+  // drift guard, commit 5219ad49).
+  assert.match(viewSource, /const systemPrompt = isStreaming \|\| sessionSkillIds\.length === 0\s*\? undefined\s*: await buildCombinedSystemPrompt\(skillPrompt\)/);
   assert.doesNotMatch(viewSource, /dispatch\(setDraftPrompt\(prompt\)\)/);
   assert.match(viewSource, /activeSessionIdRef\.current = currentSession\?\.id \?\? null/);
   assert.match(viewSource, /const submittedSessionId = currentSession\.id/);

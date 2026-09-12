@@ -26,7 +26,7 @@ try {
     resolveSessionWorkingDirectory,
     isWorkspaceMetabotId,
     shouldUseBotWorkspaceCwd,
-  } = await import('../dist-electron/libs/botWorkspace.js'));
+  } = await import('../dist-electron/main/libs/botWorkspace.js'));
 }
 
 const makeTempBase = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-bot-workspace-'));

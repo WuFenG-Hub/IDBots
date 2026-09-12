@@ -11,11 +11,11 @@ try {
     normalizeScopeIdentity,
   } = await import('../dist-electron/main/memory/memoryScope.js'));
 } catch {
-  ({ resolveMemoryScopes } = await import('../dist-electron/memory/memoryScopeResolver.js'));
+  ({ resolveMemoryScopes } = await import('../dist-electron/main/memory/memoryScopeResolver.js'));
   ({
     normalizeMemoryScopeSelector,
     normalizeScopeIdentity,
-  } = await import('../dist-electron/memory/memoryScope.js'));
+  } = await import('../dist-electron/main/memory/memoryScope.js'));
 }
 
 test('metaweb private sessions read contact scope and safe owner operational preferences only', () => {

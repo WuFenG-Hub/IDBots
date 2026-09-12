@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 test('writeFileAtomicSync replaces file contents through a temporary file', () => {
-  const { writeFileAtomicSync } = require('../dist-electron/libs/atomicFile.js');
+  const { writeFileAtomicSync } = require('../dist-electron/main/libs/atomicFile.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-atomic-'));
   const target = path.join(dir, 'idbots.sqlite');
   fs.writeFileSync(target, 'old');
@@ -22,7 +22,7 @@ test('writeFileAtomicSync replaces file contents through a temporary file', () =
   );
 });
 test('writeFileAtomicSync preserves the original file if rename fails', () => {
-  const { writeFileAtomicSync } = require('../dist-electron/libs/atomicFile.js');
+  const { writeFileAtomicSync } = require('../dist-electron/main/libs/atomicFile.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-atomic-fail-'));
   const target = path.join(dir, 'idbots.sqlite');
   fs.writeFileSync(target, 'old');

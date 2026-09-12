@@ -40,8 +40,12 @@ test('metabot brain override honors any llm_id, not just deepseek', () => {
     'llm_id must not be narrowed to deepseek only'
   );
   assert.ok(
-    body.includes('if (!modelId) return null'),
-    'any non-empty brain model id must be returned as the override'
+    body.includes('if (!modelId && !fallbackModelId) return null'),
+    'a brain must exist when either the primary or the fallback model id is configured'
+  );
+  assert.ok(
+    !body.includes('if (!modelId) return null'),
+    'must not drop the fallback brain when the primary llm_id is empty'
   );
   // Model-level brain: provider hint + effort ride along, plus the fallback
   // brain pair.

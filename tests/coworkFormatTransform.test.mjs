@@ -5,7 +5,7 @@ async function importCompiled(modulePath) {
   try {
     return await import(`../dist-electron/main/libs/${modulePath}.js`);
   } catch {
-    return import(`../dist-electron/libs/${modulePath}.js`);
+    return import(`../dist-electron/main/libs/${modulePath}.js`);
   }
 }
 

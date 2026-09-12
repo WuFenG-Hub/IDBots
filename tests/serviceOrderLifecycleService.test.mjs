@@ -4,13 +4,13 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const initSqlJs = require('sql.js');
-const { ServiceOrderStore } = require('../dist-electron/serviceOrderStore.js');
+const { ServiceOrderStore } = require('../dist-electron/main/serviceOrderStore.js');
 const {
   DEFAULT_REFUND_REQUEST_RETRY_DELAY_MS,
   SERVICE_ORDER_FREE_REFUND_SKIPPED_REASON,
   SERVICE_ORDER_SELF_ORDER_NOT_ALLOWED_ERROR_CODE,
   ServiceOrderLifecycleService,
-} = require('../dist-electron/services/serviceOrderLifecycleService.js');
+} = require('../dist-electron/main/services/serviceOrderLifecycleService.js');
 
 const sqlWasmPath = require.resolve('sql.js/dist/sql-wasm.wasm');
 

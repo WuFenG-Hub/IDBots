@@ -9,8 +9,8 @@ try {
   ({ ServiceOrderStore } = await import('../dist-electron/main/serviceOrderStore.js'));
   ({ ServiceOrderLifecycleService } = await import('../dist-electron/main/services/serviceOrderLifecycleService.js'));
 } catch {
-  ({ ServiceOrderStore } = await import('../dist-electron/serviceOrderStore.js'));
-  ({ ServiceOrderLifecycleService } = await import('../dist-electron/services/serviceOrderLifecycleService.js'));
+  ({ ServiceOrderStore } = await import('../dist-electron/main/serviceOrderStore.js'));
+  ({ ServiceOrderLifecycleService } = await import('../dist-electron/main/services/serviceOrderLifecycleService.js'));
 }
 
 const OWNER = 'idq1owner';

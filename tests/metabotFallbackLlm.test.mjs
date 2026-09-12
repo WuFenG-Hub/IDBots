@@ -81,7 +81,7 @@ test('runWithLlmFallback retries with fallback when the primary API call throws'
   assert.deepEqual(calls, ['primary', 'fallback']);
 });
 
-test('runWithLlmFallback rethrows the primary error when the fallback also fails', async () => {
+test('runWithLlmFallback throws a combined error naming both failures when the fallback also fails', async () => {
   const calls = [];
   const primaryError = new Error('primary exploded');
   await assert.rejects(
@@ -93,7 +93,11 @@ test('runWithLlmFallback rethrows the primary error when the fallback also fails
       },
       noopLog,
     ),
-    (err) => err === primaryError,
+    // Since fa79c4b5 the wrapper surfaces a combined error naming both brains
+    // instead of rethrowing the primary error object.
+    (err) =>
+      err instanceof Error &&
+      err.message === "primary exploded (fallback 'fallback' also failed: fallback exploded)",
   );
   assert.deepEqual(calls, ['primary', 'fallback']);
 });

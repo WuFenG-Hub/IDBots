@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const initSqlJs = require('sql.js');
-const { ServiceOrderStore } = require('../dist-electron/serviceOrderStore.js');
+const { ServiceOrderStore } = require('../dist-electron/main/serviceOrderStore.js');
 
 const sqlWasmPath = require.resolve('sql.js/dist/sql-wasm.wasm');
 

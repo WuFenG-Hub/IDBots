@@ -8,7 +8,7 @@ import {
 
 const {
   ensureServiceOrderObserverSession,
-} = await import('../dist-electron/services/serviceOrderObserverSession.js');
+} = await import('../dist-electron/main/services/serviceOrderObserverSession.js');
 
 test('ensureServiceOrderObserverSession indexes orders to the canonical peer private session', async () => {
   const sqlite = await createSqliteStore();

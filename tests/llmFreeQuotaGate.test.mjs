@@ -17,17 +17,16 @@ test('constants stay stable (backend + kv contracts)', () => {
 });
 
 test('getFreeProviderModelDisplayName maps relay wire ids to product names', () => {
-  assert.equal(getFreeProviderModelDisplayName('deepseek-chat'), 'deepseek-v4-flash');
+  assert.equal(getFreeProviderModelDisplayName('deepseek-chat'), 'deepseek-flash');
   assert.equal(getFreeProviderModelDisplayName('another-relay-model'), 'another-relay-model');
   assert.equal(getFreeProviderModelDisplayName(undefined), undefined);
 });
 
-test('getFreeProviderModelCanonical mirrors the deepseek-v4-flash preset for the relay wire id', () => {
+test('getFreeProviderModelCanonical mirrors the deepseek-flash preset for the relay wire id', () => {
   // The relay bootstrap payload still reports the legacy V3 wire values
   // (64K context / 4K output) for deepseek-chat while actually serving
-  // deepseek-v4-flash; the canonical config must match the deepseek
-  // provider's deepseek-v4-flash preset (1M context, 32K output, thinking on
-  // at max effort).
+  // deepseek-flash; the canonical config must match the deepseek provider's
+  // deepseek-flash preset (1M context, 32K output, thinking on at max effort).
   const canonical = getFreeProviderModelCanonical('deepseek-chat');
   assert.ok(canonical);
   assert.equal(canonical.contextWindow, 1_000_000);

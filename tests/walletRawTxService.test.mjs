@@ -10,7 +10,7 @@ const { mvc } = require('meta-contract');
 
 let walletRawTxService;
 try {
-  walletRawTxService = require('../dist-electron/services/walletRawTxService.js');
+  walletRawTxService = require('../dist-electron/main/services/walletRawTxService.js');
 } catch {
   walletRawTxService = null;
 }
@@ -89,8 +89,8 @@ function loadWalletRawTxServiceWithSpawnStub(spawnImpl) {
   };
 
   try {
-    delete require.cache[require.resolve('../dist-electron/services/walletRawTxService.js')];
-    return require('../dist-electron/services/walletRawTxService.js');
+    delete require.cache[require.resolve('../dist-electron/main/services/walletRawTxService.js')];
+    return require('../dist-electron/main/services/walletRawTxService.js');
   } finally {
     Module._load = originalLoad;
   }

@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 test('SqliteBackgroundJobRunner waits other active jobs without deadlocking on the recovery trigger', async () => {
-  const { SqliteBackgroundJobRunner } = require('../dist-electron/sqliteBackgroundJobs.js');
+  const { SqliteBackgroundJobRunner } = require('../dist-electron/main/sqliteBackgroundJobs.js');
   let releaseSlowJob;
   let waitForActiveJobsSettled = false;
   let recoveryRan = false;
@@ -51,7 +51,7 @@ test('SqliteBackgroundJobRunner waits other active jobs without deadlocking on t
 });
 
 test('SqliteBackgroundJobRunner logs ordinary failures without recovery', async () => {
-  const { SqliteBackgroundJobRunner } = require('../dist-electron/sqliteBackgroundJobs.js');
+  const { SqliteBackgroundJobRunner } = require('../dist-electron/main/sqliteBackgroundJobs.js');
   const warnings = [];
   let recoverCount = 0;
 

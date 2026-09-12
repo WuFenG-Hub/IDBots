@@ -10,7 +10,7 @@ try {
     await import('../dist-electron/main/teamCultureStore.js'));
 } catch {
   ({ TeamCultureStore, ensureTeamCultureSchema } =
-    await import('../dist-electron/teamCultureStore.js'));
+    await import('../dist-electron/main/teamCultureStore.js'));
 }
 
 test('team culture schema is additive and idempotent', async () => {
@@ -205,7 +205,7 @@ test('task comm stats: stamped at close and listed for the trend view', async ()
     try {
       ({ GroupTaskStore: GroupTaskStoreCtor } = await import('../dist-electron/main/groupTaskStore.js'));
     } catch {
-      ({ GroupTaskStore: GroupTaskStoreCtor } = await import('../dist-electron/groupTaskStore.js'));
+      ({ GroupTaskStore: GroupTaskStoreCtor } = await import('../dist-electron/main/groupTaskStore.js'));
     }
     const store = new GroupTaskStoreCtor(db, () => {});
     db.run(

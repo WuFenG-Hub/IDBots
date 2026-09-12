@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 function loadRuntimeConfigSync() {
-  return require('../dist-electron/services/p2pRuntimeConfigSync.js');
+  return require('../dist-electron/main/services/p2pRuntimeConfigSync.js');
 }
 
 function makeStore(config) {

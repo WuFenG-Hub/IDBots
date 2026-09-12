@@ -5,11 +5,11 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const initSqlJs = require('sql.js');
-const { ServiceOrderStore } = require('../dist-electron/serviceOrderStore.js');
+const { ServiceOrderStore } = require('../dist-electron/main/serviceOrderStore.js');
 
 let ServiceRefundSyncService;
 try {
-  ({ ServiceRefundSyncService } = require('../dist-electron/services/serviceRefundSyncService.js'));
+  ({ ServiceRefundSyncService } = require('../dist-electron/main/services/serviceRefundSyncService.js'));
 } catch {
   ServiceRefundSyncService = undefined;
 }

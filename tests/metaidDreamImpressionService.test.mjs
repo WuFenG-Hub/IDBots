@@ -23,7 +23,7 @@ function loadDreamService() {
   try {
     return require(require.resolve('../dist-electron/main/services/dreamService.js'));
   } catch {
-    return require('../dist-electron/services/dreamService.js');
+    return require('../dist-electron/main/services/dreamService.js');
   } finally {
     Module._load = originalLoad;
   }
@@ -38,13 +38,13 @@ try {
   } = await import('../dist-electron/main/services/metaidDreamImpressionService.js'));
   ({ buildDreamPrompt, parseDreamOutput } = await import('../dist-electron/main/libs/dreamPrompt.js'));
 } catch {
-  ({ MetaIDExperienceStore } = await import('../dist-electron/metaidExperienceStore.js'));
-  ({ MetaIDImpressionStore } = await import('../dist-electron/metaidImpressionStore.js'));
+  ({ MetaIDExperienceStore } = await import('../dist-electron/main/metaidExperienceStore.js'));
+  ({ MetaIDImpressionStore } = await import('../dist-electron/main/metaidImpressionStore.js'));
   ({
     buildMetaIDDreamImpressionContext,
     applyMetaIDDreamImpressionUpdates,
-  } = await import('../dist-electron/services/metaidDreamImpressionService.js'));
-  ({ buildDreamPrompt, parseDreamOutput } = await import('../dist-electron/libs/dreamPrompt.js'));
+  } = await import('../dist-electron/main/services/metaidDreamImpressionService.js'));
+  ({ buildDreamPrompt, parseDreamOutput } = await import('../dist-electron/main/libs/dreamPrompt.js'));
 }
 
 const OWNER = 'idq1observer';
@@ -177,7 +177,7 @@ test('DreamService applies validated impression updates at the completion bounda
   const harness = await createSqliteStore();
   try {
     const coworkStore = createCoworkStore(harness.db);
-    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
     const dreamStore = new DreamStore(harness.db, () => {});
     const experience = new MetaIDExperienceStore(harness.db, () => {});
     const impressions = new MetaIDImpressionStore(harness.db, () => {});

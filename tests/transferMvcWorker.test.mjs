@@ -5,7 +5,7 @@ const {
   ensureFreshMvcFundingCandidates,
   isRetryableMvcBroadcastError,
   pickUtxo,
-} = await import('../dist-electron/libs/mvcSpend.js');
+} = await import('../dist-electron/main/libs/mvcSpend.js');
 
 test('transfer MVC retries treat stale-input broadcast failures as retryable', () => {
   assert.equal(isRetryableMvcBroadcastError('[-25]Missing inputs'), true);

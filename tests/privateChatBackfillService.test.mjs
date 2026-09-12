@@ -17,7 +17,7 @@ try {
   ({
     computeUnprocessedAfterTimestampSec,
     createPrivateChatBackfillLoop,
-  } = await import('../dist-electron/services/privateChatBackfillService.js'));
+  } = await import('../dist-electron/main/services/privateChatBackfillService.js'));
 }
 
 const LOCAL_GLOBAL_META_ID = 'idq1local';

@@ -11,7 +11,7 @@ let privateChatOrderCoworkModule;
 try {
   privateChatOrderCoworkModule = require('../dist-electron/main/services/privateChatOrderCowork.js');
 } catch {
-  privateChatOrderCoworkModule = require('../dist-electron/services/privateChatOrderCowork.js');
+  privateChatOrderCoworkModule = require('../dist-electron/main/services/privateChatOrderCowork.js');
 }
 const {
   DEFAULT_ORDER_TIMEOUT_MS,

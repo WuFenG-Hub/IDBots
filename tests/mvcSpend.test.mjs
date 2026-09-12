@@ -11,13 +11,16 @@ try {
   mvcSpend = null;
 }
 
-test('pickUtxo prefers confirmed MVC funding inputs before unconfirmed inputs', () => {
+// pickUtxo no longer re-sorts confirmed first (removed in 9a0cba9b); ordering
+// is: explicitly preferred outpoints, then input order.
+test('pickUtxo prefers explicitly preferred funding inputs before other inputs', () => {
   assert.equal(
     typeof mvcSpend?.pickUtxo,
     'function',
     'pickUtxo() should be exported',
   );
 
+  const preferredOutpoint = `${'b'.repeat(64)}:1`;
   const selected = mvcSpend.pickUtxo(
     [
       {
@@ -38,11 +41,13 @@ test('pickUtxo prefers confirmed MVC funding inputs before unconfirmed inputs', 
     10_000,
     1,
     90,
+    new Set(),
+    new Set([preferredOutpoint]),
   );
 
   assert.deepEqual(
     selected.map((utxo) => `${utxo.txId}:${utxo.outputIndex}`),
-    [`${'b'.repeat(64)}:1`],
+    [preferredOutpoint],
   );
 });
 

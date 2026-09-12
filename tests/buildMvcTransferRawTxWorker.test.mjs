@@ -8,7 +8,7 @@ const { mvc } = require('meta-contract');
 const {
   buildMvcTransferRawTxLocally,
   normalizeMvcWalletUtxos,
-} = await import('../dist-electron/libs/buildMvcTransferRawTxWorker.js');
+} = await import('../dist-electron/main/libs/buildMvcTransferRawTxWorker.js');
 
 test('normalizeMvcWalletUtxos preserves provider order and filters malformed entries', () => {
   assert.equal(

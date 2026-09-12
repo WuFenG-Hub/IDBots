@@ -27,7 +27,7 @@ test('fetchLocalPresenceSnapshot keeps a peerless local presence healthy when on
   });
 
   try {
-    const { fetchLocalPresenceSnapshot } = await import('../dist-electron/services/p2pPresenceClient.js');
+    const { fetchLocalPresenceSnapshot } = await import('../dist-electron/main/services/p2pPresenceClient.js');
     const snapshot = await fetchLocalPresenceSnapshot('http://127.0.0.1:9527');
 
     assert.equal(snapshot.healthy, true);

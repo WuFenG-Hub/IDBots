@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const {
   buildModifyMetaidPayload,
   buildRevokeMetaidPayload,
-} = require('../dist-electron/services/metaidPinMutationService.js');
+} = require('../dist-electron/main/services/metaidPinMutationService.js');
 
 test('buildRevokeMetaidPayload creates a generic MetaID revoke tuple', () => {
   const payload = buildRevokeMetaidPayload('pin-1');

@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 function resolveCompiled(rel) {
-  const candidates = [`../dist-electron/${rel}`, `../dist-electron/main/${rel}`];
+  const candidates = [`../dist-electron/main/${rel}`, `../dist-electron/main/${rel}`];
   for (const candidate of candidates) {
     try {
       return require.resolve(candidate);

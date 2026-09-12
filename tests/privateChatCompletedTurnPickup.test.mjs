@@ -28,7 +28,7 @@ try {
   ({
     findDeliverableCompletedTurnReply,
     shouldDeferForBusyRunnerSession,
-  } = await import('../dist-electron/services/privateChatDaemon.js'));
+  } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 }
 
 const TRIGGER_ID = 'msg-trigger';

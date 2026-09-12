@@ -5,7 +5,7 @@ test('gig square online-state helpers treat provider ids case-insensitively for 
   const {
     isGigSquareProviderOnline,
     sortGigSquareServicesByOnline,
-  } = await import('../dist-electron/shared/gigSquareOnlineState.js');
+  } = await import('../dist-electron/main/shared/gigSquareOnlineState.js');
 
   const onlineBots = { idq1providera: 123 };
   const services = [
@@ -24,7 +24,7 @@ test('gig square online-state helpers preserve fallback matching for non-raw leg
   const {
     isGigSquareProviderOnline,
     sortGigSquareServicesByOnline,
-  } = await import('../dist-electron/shared/gigSquareOnlineState.js');
+  } = await import('../dist-electron/main/shared/gigSquareOnlineState.js');
 
   const onlineBots = { 'legacy-provider': 456 };
   const services = [

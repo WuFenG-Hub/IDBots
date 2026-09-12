@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { verifyMrc20Payment } = require('../dist-electron/services/mrc20PaymentVerification.js');
+const { verifyMrc20Payment } = require('../dist-electron/main/services/mrc20PaymentVerification.js');
 
 const TXID = 'a'.repeat(64);
 const RECIPIENT_ADDRESS = 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh';

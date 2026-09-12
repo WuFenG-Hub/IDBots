@@ -108,6 +108,10 @@ test('split A2A episodes are idempotently consolidated into the original session
     );
     const child = store.createSession('Child', '/tmp/a2a', '', 'local');
     db.run('UPDATE cowork_sessions SET parent_session_id = ? WHERE id = ?', [split.id, child.id]);
+    // Zero-message forks are swept as failed-fork orphans at store construction
+    // (commit 50e8d838), before episode consolidation repoints fork parents;
+    // a real fork always carries at least the fork-point message.
+    store.addMessage(child.id, { type: 'user', content: 'child fork message' });
     store.addMessage(original.id, { type: 'user', content: 'original history' });
     store.addMessage(split.id, { type: 'assistant', content: 'split history' });
     store.setSessionPinned(split.id, true);

@@ -16,12 +16,12 @@ try {
     recordMetaIDGroupTaskExperience,
   } = await import('../dist-electron/main/services/metaidExperienceRecorder.js'));
 } catch {
-  ({ MetaIDExperienceStore } = await import('../dist-electron/metaidExperienceStore.js'));
+  ({ MetaIDExperienceStore } = await import('../dist-electron/main/metaidExperienceStore.js'));
   ({
     recordMetaIDPrivateA2AExperience,
     recordMetaIDServiceOrderExperience,
     recordMetaIDGroupTaskExperience,
-  } = await import('../dist-electron/services/metaidExperienceRecorder.js'));
+  } = await import('../dist-electron/main/services/metaidExperienceRecorder.js'));
 }
 
 const OWNER = 'idq1owner';

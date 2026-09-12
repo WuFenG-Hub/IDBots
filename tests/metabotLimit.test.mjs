@@ -21,9 +21,17 @@ test('MetaBot creation limit is shared at 20 across renderer and main create pat
   assert.doesNotMatch(managerSource, /METABOT_LIMIT\s*=\s*10/);
 
   const mainSource = fs.readFileSync(mainPath, 'utf8');
-  const guardCalls = mainSource.match(/assertCanCreateMetabot\(store\)/g) ?? [];
+  const manageServicePath = path.join(projectRoot, 'src', 'main', 'services', 'metabotManageService.ts');
+  const manageServiceSource = fs.readFileSync(manageServicePath, 'utf8');
+  // The on-chain create IPC path was extracted into createMetaBotOnChainCore
+  // (refactor a5377040), so its guard call lives in metabotManageService.ts;
+  // main.ts keeps the direct guards on the mock/dev, wallet-create, and
+  // restore-mnemonic paths.
+  const guardCalls =
+    (mainSource.match(/assertCanCreateMetabot\(store\)/g) ?? []).length +
+    (manageServiceSource.match(/assertCanCreateMetabot\(store\)/g) ?? []).length;
   assert.ok(
-    guardCalls.length >= 4,
+    guardCalls >= 4,
     'main create/restore IPC paths should enforce the shared MetaBot limit',
   );
 });

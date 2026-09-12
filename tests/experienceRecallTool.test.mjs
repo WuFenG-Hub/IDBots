@@ -25,7 +25,7 @@ function loadRunnerModule() {
     try {
       return require('../dist-electron/main/libs/coworkRunner.js');
     } catch {
-      return require('../dist-electron/libs/coworkRunner.js');
+      return require('../dist-electron/main/libs/coworkRunner.js');
     }
   } finally {
     Module._load = originalLoad;
@@ -45,7 +45,7 @@ const dateDaysAgo = (days) => {
 const setup = async (withExperienceStore = true) => {
   const { db, cleanup } = await createSqliteStore();
   const coworkStore = createCoworkStore(db);
-  const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+  const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
   const dreamStore = new DreamStore(db, () => {});
 
   const recentDate = dateDaysAgo(5);

@@ -67,23 +67,19 @@ test('installCommunityMetaApp installs zip payload and writes APP.md + registry 
       manager,
       fetchList: async () => [
         {
-          id: 'pin-buzz',
-          globalMetaId: 'idq1creator',
-          timestamp: 1_777_777_777,
-          contentSummary: JSON.stringify({
-            title: 'Buzz',
-            appName: 'buzz',
-            intro: 'Buzz app from chain',
-            prompt: 'Build Buzz as an AI-generated social reader.',
-            runtime: 'browser/android',
-            version: '1.1.0',
-            icon: 'metafile://icon-buzz',
-            coverImg: 'metafile://cover-buzz',
-            code: 'metafile://zip-buzz',
-            codeType: 'application/zip',
-            indexFile: 'index.html',
-            disabled: false,
-          }),
+          pinId: 'pin-buzz',
+          title: 'Buzz',
+          appName: 'buzz',
+          intro: 'Buzz app from chain',
+          runtime: 'browser/android',
+          version: '1.1.0',
+          icon: 'metafile://icon-buzz',
+          coverImg: 'metafile://cover-buzz',
+          content: 'metafile://zip-buzz',
+          indexFile: 'index.html',
+          disabled: false,
+          publisherGlobalMetaId: 'idq1creator',
+          updatedAt: 1_777_777_777,
         },
       ],
       fetchAuthorInfo: async (creatorMetaId) => {
@@ -122,7 +118,8 @@ test('installCommunityMetaApp installs zip payload and writes APP.md + registry 
   assert.equal(config.defaults?.buzz?.cover, 'metafile://cover-buzz');
   assert.equal(config.defaults?.buzz?.['author-name'], 'Creator Bot');
   assert.equal(config.defaults?.buzz?.['author-avatar'], '/content/avatar-creator');
-  assert.equal(config.defaults?.buzz?.['ai-prompt'], 'Build Buzz as an AI-generated social reader.');
+  // MetaSo feed items carry no AI prompt, so chain installs no longer persist one.
+  assert.equal(config.defaults?.buzz?.['ai-prompt'], undefined);
   assert.equal(config.defaults?.buzz?.installedAt, 111);
   assert.equal(config.defaults?.buzz?.updatedAt, 111);
 
@@ -131,7 +128,7 @@ test('installCommunityMetaApp installs zip payload and writes APP.md + registry 
     const apps = manager.listMetaApps();
     assert.equal(apps[0]?.authorName, 'Creator Bot');
     assert.equal(apps[0]?.authorAvatar, '/content/avatar-creator');
-    assert.equal(apps[0]?.aiPrompt, 'Build Buzz as an AI-generated social reader.');
+    assert.equal(apps[0]?.aiPrompt, undefined);
   });
 });
 
@@ -149,24 +146,20 @@ test('installCommunityMetaApp installs zip from content metafile when code is em
       manager,
       fetchList: async () => [
         {
-          id: 'pin-iddisk',
-          createMetaId: 'idq1creator',
-          timestamp: 1_765_221_178,
-          contentSummary: JSON.stringify({
-            title: 'IDDisk',
-            appName: 'IDDisk',
-            intro: 'Chain file manager',
-            runtime: 'browser/ios/android',
-            version: 'v1.1.0',
-            code: '',
-            content: 'metafile://zip-iddisk',
-            contentType: 'application/zip',
-            codeType: 'application/zip',
-            indexFile: 'index.html',
-            disabled: false,
-          }),
+          pinId: 'pin-iddisk',
+          title: 'IDDisk',
+          appName: 'IDDisk',
+          intro: 'Chain file manager',
+          runtime: 'browser/ios/android',
+          version: 'v1.1.0',
+          content: 'metafile://zip-iddisk',
+          indexFile: 'index.html',
+          disabled: false,
+          publisherGlobalMetaId: 'idq1creator',
+          updatedAt: 1_765_221_178,
         },
       ],
+      fetchAuthorInfo: async () => null,
       fetchCodeZip: async (pinId) => {
         assert.equal(pinId, 'zip-iddisk');
         return createZipBuffer([{ name: 'index.html', content: '<html>iddisk</html>' }]);
@@ -201,22 +194,20 @@ test('installCommunityMetaApp strips optional file extension from metafile code 
       manager,
       fetchList: async () => [
         {
-          id: 'pin-eric-homepage',
-          globalMetaId: 'idq1creator',
-          timestamp: 1_781_447_240,
-          contentSummary: JSON.stringify({
-            title: 'Eric Homepage',
-            appName: 'eric-homepage',
-            intro: 'Homepage app from chain',
-            runtime: 'browser',
-            version: '1.0.0',
-            code: 'metafile://zip-eric-homepage.zip',
-            codeType: 'application/zip',
-            indexFile: 'index.html',
-            disabled: false,
-          }),
+          pinId: 'pin-eric-homepage',
+          title: 'Eric Homepage',
+          appName: 'eric-homepage',
+          intro: 'Homepage app from chain',
+          runtime: 'browser',
+          version: '1.0.0',
+          content: 'metafile://zip-eric-homepage.zip',
+          indexFile: 'index.html',
+          disabled: false,
+          publisherGlobalMetaId: 'idq1creator',
+          updatedAt: 1_781_447_240,
         },
       ],
+      fetchAuthorInfo: async () => null,
       fetchCodeZip: async (pinId) => {
         assert.equal(pinId, 'zip-eric-homepage');
         return createZipBuffer([{ name: 'index.html', content: '<html>eric</html>' }]);
@@ -252,22 +243,20 @@ test('installCommunityMetaApp blocks install on appId conflict with different cr
       manager,
       fetchList: async () => [
         {
-          id: 'pin-chat',
-          globalMetaId: 'idq1another',
-          timestamp: 1_777_777_777,
-          contentSummary: JSON.stringify({
-            title: 'Chat',
-            appName: 'chat',
-            intro: 'Chat app from chain',
-            runtime: 'browser',
-            version: '2.0.0',
-            code: 'metafile://zip-chat',
-            codeType: 'application/zip',
-            indexFile: 'index.html',
-            disabled: false,
-          }),
+          pinId: 'pin-chat',
+          title: 'Chat',
+          appName: 'chat',
+          intro: 'Chat app from chain',
+          runtime: 'browser',
+          version: '2.0.0',
+          content: 'metafile://zip-chat',
+          indexFile: 'index.html',
+          disabled: false,
+          publisherGlobalMetaId: 'idq1another',
+          updatedAt: 1_777_777_777,
         },
       ],
+      fetchAuthorInfo: async () => null,
       fetchCodeZip: async () => createZipBuffer([{ name: 'index.html', content: '<html>chain chat</html>' }]),
       now: () => 222,
     });
@@ -299,20 +288,17 @@ test('installCommunityMetaApp can locate a later-page record via nextCursor pagi
           return {
             list: [
               {
-                id: 'pin-buzz',
-                globalMetaId: 'idq1creator',
-                timestamp: 1_777_777_777,
-                contentSummary: JSON.stringify({
-                  title: 'Buzz',
-                  appName: 'buzz',
-                  intro: 'Buzz app from chain',
-                  runtime: 'browser',
-                  version: '1.0.0',
-                  code: 'metafile://zip-buzz',
-                  codeType: 'application/zip',
-                  indexFile: 'index.html',
-                  disabled: false,
-                }),
+                pinId: 'pin-buzz',
+                title: 'Buzz',
+                appName: 'buzz',
+                intro: 'Buzz app from chain',
+                runtime: 'browser',
+                version: '1.0.0',
+                content: 'metafile://zip-buzz',
+                indexFile: 'index.html',
+                disabled: false,
+                publisherGlobalMetaId: 'idq1creator',
+                updatedAt: 1_777_777_777,
               },
             ],
             nextCursor: 'cursor-2',
@@ -323,20 +309,17 @@ test('installCommunityMetaApp can locate a later-page record via nextCursor pagi
           return {
             list: [
               {
-                id: 'pin-simple-music-player',
-                globalMetaId: 'idq1music',
-                timestamp: 1_777_777_778,
-                contentSummary: JSON.stringify({
-                  title: '简单音乐播放器',
-                  appName: 'simple-music-player',
-                  intro: 'Play local music files',
-                  runtime: 'browser',
-                  version: '1.0.0',
-                  code: 'metafile://zip-simple-music-player',
-                  codeType: 'application/zip',
-                  indexFile: 'index.html',
-                  disabled: false,
-                }),
+                pinId: 'pin-simple-music-player',
+                title: '简单音乐播放器',
+                appName: 'simple-music-player',
+                intro: 'Play local music files',
+                runtime: 'browser',
+                version: '1.0.0',
+                content: 'metafile://zip-simple-music-player',
+                indexFile: 'index.html',
+                disabled: false,
+                publisherGlobalMetaId: 'idq1music',
+                updatedAt: 1_777_777_778,
               },
             ],
             nextCursor: null,
@@ -345,6 +328,7 @@ test('installCommunityMetaApp can locate a later-page record via nextCursor pagi
 
         return { list: [], nextCursor: null };
       },
+      fetchAuthorInfo: async () => null,
       fetchCodeZip: async (pinId) => {
         assert.equal(pinId, 'zip-simple-music-player');
         return createZipBuffer([{ name: 'index.html', content: '<html>music</html>' }]);
@@ -387,12 +371,12 @@ test('dev IDBOTS_METAAPPS_ROOT still receives bundled MetaApps for local testing
 
     assert.equal(Boolean(buzzApp), true);
     assert.equal(Boolean(chatApp), true);
-    assert.equal(buzzApp?.version, '1.1.1');
-    assert.equal(chatApp?.version, '1.1.1');
+    assert.equal(buzzApp?.version, '1.1.2');
+    assert.equal(chatApp?.version, '1.1.2');
     assert.equal(buzzApp?.cover, '/buzz/assets/cover.png');
     assert.equal(chatApp?.cover, '/chat/assets/cover.png');
-    assert.equal(config.defaults?.buzz?.version, '1.1.1');
-    assert.equal(config.defaults?.chat?.version, '1.1.1');
+    assert.equal(config.defaults?.buzz?.version, '1.1.2');
+    assert.equal(config.defaults?.chat?.version, '1.1.2');
     assert.equal(config.defaults?.buzz?.cover, '/buzz/assets/cover.png');
     assert.equal(config.defaults?.chat?.cover, '/chat/assets/cover.png');
     assert.equal(fs.existsSync(path.join(metaAppsRoot, 'buzz', 'APP.md')), true);

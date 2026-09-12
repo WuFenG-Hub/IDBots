@@ -15,11 +15,11 @@ try {
   ({ MetaIDCognitionContextService, renderMetaIDCognitionPromptBlock } =
     await import('../dist-electron/main/services/metaidCognitionContext.js'));
 } catch {
-  ({ MetaIDExperienceStore } = await import('../dist-electron/metaidExperienceStore.js'));
-  ({ MetaIDImpressionStore } = await import('../dist-electron/metaidImpressionStore.js'));
-  ({ MetaIDRelationshipResolver } = await import('../dist-electron/services/metaidRelationshipResolver.js'));
+  ({ MetaIDExperienceStore } = await import('../dist-electron/main/metaidExperienceStore.js'));
+  ({ MetaIDImpressionStore } = await import('../dist-electron/main/metaidImpressionStore.js'));
+  ({ MetaIDRelationshipResolver } = await import('../dist-electron/main/services/metaidRelationshipResolver.js'));
   ({ MetaIDCognitionContextService, renderMetaIDCognitionPromptBlock } =
-    await import('../dist-electron/services/metaidCognitionContext.js'));
+    await import('../dist-electron/main/services/metaidCognitionContext.js'));
 }
 
 const OWNER = 'idq1worker';

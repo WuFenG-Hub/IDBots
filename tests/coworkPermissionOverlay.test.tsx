@@ -65,8 +65,16 @@ test('overlay renders the prompt of a background session with its title and tool
   assert.ok(markup.includes(i18nService.t('coworkGlobalPermissionTitle')), 'fixed title rendered');
   assert.ok(markup.includes('Deploy the staging bot'), 'owning session title rendered');
   assert.ok(markup.includes('Bash'), 'requested tool name rendered');
-  assert.ok(markup.includes('npm install --save lodash'), 'tool input summary rendered');
   assert.ok(markup.includes(i18nService.t('coworkGlobalPermissionOpenSession')), 'open-session action rendered');
+
+  // Since 8b41467e the compact overlay renders the tool name as the summary;
+  // only AskUserQuestion prompts surface their tool input (first question).
+  const askMarkup = renderOverlay(
+    [permission({ toolName: 'AskUserQuestion', toolInput: { questions: [{ question: 'npm install --save lodash?' }] } })],
+    'sess-current',
+    [sessionSummary()],
+  );
+  assert.ok(askMarkup.includes('npm install --save lodash?'), 'tool input summary rendered');
 });
 
 test('overlay skips the prompt already rendered inline for the open chat', () => {
@@ -126,12 +134,12 @@ test('overlay renders the destructive allow label for safety approvals', () => {
 test('overlay shows the first prompt that has no inline seat when several queue up', () => {
   const markup = renderOverlay(
     [
-      permission({ sessionId: 'sess-open', requestId: 'req-open', toolInput: { command: 'echo inline' } }),
-      permission({ sessionId: 'sess-hidden-1', requestId: 'req-hidden', toolInput: { command: 'echo overlay' } }),
+      permission({ sessionId: 'sess-open', requestId: 'req-open', toolName: 'Read' }),
+      permission({ sessionId: 'sess-hidden-1', requestId: 'req-hidden', toolName: 'Write' }),
     ],
     'sess-open',
   );
 
-  assert.ok(markup.includes('echo overlay'), 'uncovered prompt rendered');
-  assert.ok(!markup.includes('echo inline'), 'inline-covered prompt not duplicated');
+  assert.ok(markup.includes('Write'), 'uncovered prompt rendered');
+  assert.ok(!markup.includes('Read'), 'inline-covered prompt not duplicated');
 });

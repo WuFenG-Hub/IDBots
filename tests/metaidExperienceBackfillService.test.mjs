@@ -22,14 +22,14 @@ try {
     runMetaIDExperienceBackfill,
   } = await import('../dist-electron/main/services/metaidExperienceBackfillService.js'));
 } catch {
-  ({ MetaIDExperienceStore } = await import('../dist-electron/metaidExperienceStore.js'));
-  ({ GroupTaskStore } = await import('../dist-electron/groupTaskStore.js'));
+  ({ MetaIDExperienceStore } = await import('../dist-electron/main/metaidExperienceStore.js'));
+  ({ GroupTaskStore } = await import('../dist-electron/main/groupTaskStore.js'));
   ({
     backfillMetaIDPrivateA2AExperiences,
     backfillMetaIDServiceOrderExperiences,
     backfillMetaIDGroupTaskExperiences,
     runMetaIDExperienceBackfill,
-  } = await import('../dist-electron/services/metaidExperienceBackfillService.js'));
+  } = await import('../dist-electron/main/services/metaidExperienceBackfillService.js'));
 }
 
 const OWNER = 'idq1owner';

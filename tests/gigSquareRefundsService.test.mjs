@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 let GigSquareRefundsService;
 
 test.before(async () => {
-  ({ GigSquareRefundsService } = require('../dist-electron/services/gigSquareRefundsService.js'));
+  ({ GigSquareRefundsService } = require('../dist-electron/main/services/gigSquareRefundsService.js'));
 });
 
 function createOrder(overrides = {}) {

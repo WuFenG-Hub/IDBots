@@ -11,7 +11,7 @@ const skillManagerPath = (() => {
   try {
     return require.resolve('../dist-electron/main/skillManager.js');
   } catch {
-    return require.resolve('../dist-electron/skillManager.js');
+    return require.resolve('../dist-electron/main/skillManager.js');
   }
 })();
 const { SkillManager } = require(skillManagerPath);

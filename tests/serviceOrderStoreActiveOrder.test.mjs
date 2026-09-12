@@ -7,7 +7,7 @@ import {
 } from './memoryTestUtils.mjs';
 
 const require = createRequire(import.meta.url);
-const { ServiceOrderStore } = require('../dist-electron/serviceOrderStore.js');
+const { ServiceOrderStore } = require('../dist-electron/main/serviceOrderStore.js');
 
 function createOrder(store, overrides = {}) {
   return store.createOrder({

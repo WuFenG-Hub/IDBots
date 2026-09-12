@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { GigSquareSkillPicker } from '../src/renderer/components/gigSquare/GigSquareSkillPicker';
+import { i18nService } from '../src/renderer/services/i18n';
 
 const createSkill = (overrides = {}) => ({
   id: 'skill-1',
@@ -31,7 +32,7 @@ test('GigSquareSkillPicker uses compact select-add controls instead of an expand
   );
 
   assert.match(markup, /<select[^>]*id="test-skill-picker"/);
-  assert.match(markup, />添加</);
+  assert.ok(markup.includes(`<span>${i18nService.t('metabotAdd')}</span>`), 'add button label rendered');
   assert.match(markup, /data-slot="gig-square-selected-skill-chips"[\s\S]*weather-skill/);
   assert.doesNotMatch(markup, /type="checkbox"/);
 });

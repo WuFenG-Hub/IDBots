@@ -14,10 +14,10 @@ try {
     distillTeamCultureFromTaskClose, setTeamCultureDistillationDeps } =
     await import('../dist-electron/main/services/teamCultureDistillation.js'));
 } catch {
-  ({ TeamCultureStore } = await import('../dist-electron/teamCultureStore.js'));
+  ({ TeamCultureStore } = await import('../dist-electron/main/teamCultureStore.js'));
   ({ runCultureDistillation, buildCultureDistillationPrompt,
     distillTeamCultureFromTaskClose, setTeamCultureDistillationDeps } =
-    await import('../dist-electron/services/teamCultureDistillation.js'));
+    await import('../dist-electron/main/services/teamCultureDistillation.js'));
 }
 
 const SUMMARY = {

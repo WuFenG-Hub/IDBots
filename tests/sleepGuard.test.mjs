@@ -12,7 +12,7 @@ try {
     await import('../dist-electron/main/sleepGuard.js'));
 } catch {
   ({ evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, SleepGuard } =
-    await import('../dist-electron/sleepGuard.js'));
+    await import('../dist-electron/main/sleepGuard.js'));
 }
 ({ collectSleepGuardWorkFrom, groupTaskTurnIdsOf } = await import('../dist-electron/main/sleepGuardWorkSources.js'));
 

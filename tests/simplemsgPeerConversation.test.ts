@@ -33,6 +33,7 @@ test('classifySimplemsgContent recognizes scoped order protocol tags', () => {
       kind: 'order_protocol',
       tag: 'ORDER_END',
       orderTxid,
+      orderPinId: null,
       reason: 'rated',
     },
   );

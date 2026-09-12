@@ -469,6 +469,7 @@ test('runTrustedAction forwards metaid-pin-write to the trusted host writer', as
   const result = await adapter.runTrustedAction({
     actorId: 'idbots-metabot-1',
     resourceUri: 'metaapp://app123i0',
+    sessionId: 'browser-session-1',
     kind: 'metaid-pin-write',
     payload: {
       operation: 'create',
@@ -500,6 +501,7 @@ test('runTrustedAction forwards metaid-pin-write to the trusted host writer', as
     {
       actorId: 'idbots-metabot-1',
       resourceUri: 'metaapp://app123i0',
+      sessionId: 'browser-session-1',
       payload: {
         operation: 'create',
         path: '/demo',
@@ -620,6 +622,7 @@ test('runTrustedAction forwards metafile-upload and returns stable unsupported e
     {
       actorId: 'idbots-metabot-1',
       resourceUri: '',
+      sessionId: undefined,
       payload: { source: { kind: 'host-picker' } },
     },
   ]);

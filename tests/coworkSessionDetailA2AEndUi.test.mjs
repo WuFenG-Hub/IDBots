@@ -246,7 +246,8 @@ test('A2A guidance queueing interrupts a current silent local bot turn', () => {
   assert.match(mainSource, /getCoworkRunner\(\)\.interruptActiveTurnBeforeAssistantOutput\(sessionId\)/);
   assert.match(runnerSource, /interruptActiveTurnBeforeAssistantOutput\(sessionId: string\): boolean/);
   assert.match(runnerSource, /!activeSession\.hasAssistantTextOutput/);
-  assert.match(runnerSource, /this\.emit\('stopped', sessionId\)/);
+  assert.match(runnerSource, /this\.stopSession\(sessionId, \{ reason: 'interrupted before assistant output \(queued guidance\)' \}\)/);
+  assert.match(runnerSource, /this\.emit\('stopped', sessionId, reason\)/);
   assert.match(bridgeSource, /runner\.on\('stopped', onStopped\)/);
   assert.match(bridgeSource, /runner\.off\('stopped', onStopped\)/);
 });

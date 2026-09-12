@@ -9,9 +9,16 @@ import {
   getRow,
 } from './memoryTestUtils.mjs';
 
-const { ServiceOrderStore } = await import('../dist-electron/serviceOrderStore.js');
+const { ServiceOrderStore } = await import('../dist-electron/main/serviceOrderStore.js');
 
 const makeTxid = (char) => char.repeat(64);
+
+// The store constructor runs the migration once and marks it completed in kv;
+// tests that seed legacy rows afterwards must clear the flag before calling
+// migrateMetawebOrderSessionsToPeerConversations() explicitly.
+const resetOrderSessionMigrationFlag = (db) => {
+  db.run("DELETE FROM kv WHERE key = 'cowork.metawebOrderSessionsToPeerConversations.v1.completed'");
+};
 
 test('schema and listSessions hide sessions marked hidden_from_session_list', async () => {
   const sqlite = await createSqliteStore();
@@ -194,6 +201,7 @@ test('migration repoints legacy order mapping to canonical peer session and hide
       status: 'in_progress',
     });
 
+    resetOrderSessionMigrationFlag(sqlite.db);
     const changed = store.migrateMetawebOrderSessionsToPeerConversations();
     assert.equal(changed > 0, true);
     assert.equal(store.migrateMetawebOrderSessionsToPeerConversations(), 0);
@@ -315,6 +323,7 @@ test('migration-created canonical peer sessions keep historical activity timesta
       }),
     });
 
+    resetOrderSessionMigrationFlag(sqlite.db);
     store.migrateMetawebOrderSessionsToPeerConversations();
 
     const privateMapping = store.getConversationMapping('metaweb_private', privateExternalConversationId, metabotId);
@@ -423,6 +432,7 @@ test('migration repairs legacy metaweb_private mappings that point at local stan
       }),
     });
 
+    resetOrderSessionMigrationFlag(sqlite.db);
     store.migrateMetawebOrderSessionsToPeerConversations();
 
     const repaired = store.getSession(legacyPrivateSession.id);

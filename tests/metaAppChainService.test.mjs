@@ -18,28 +18,29 @@ function jsonResponse(payload, status = 200) {
   });
 }
 
-function chainMetaAppItem(index, overrides = {}) {
+// The community feed is sourced from the MetaSo aggregator
+// (mapSearchItemToChainCandidate in metaAppChainService.ts): every item is one
+// already-folded app record, not a raw MAN pin with a contentSummary payload.
+function metaSoItem(index, overrides = {}) {
   const suffix = String(index).padStart(2, '0');
   return {
-    id: `pin-${suffix}`,
-    globalMetaId: `idq1creator${suffix}`,
-    timestamp: 1_888_888_000 + index,
-    contentSummary: JSON.stringify({
-      title: `Paged App ${suffix}`,
-      appName: `paged-app-${suffix}`,
-      intro: `Paged chain app ${suffix}`,
-      runtime: 'browser',
-      version: '1.0.0',
-      code: `metafile://zip-paged-app-${suffix}`,
-      codeType: 'application/zip',
-      indexFile: 'index.html',
-      disabled: false,
-      ...overrides,
-    }),
+    pinId: `pin-${suffix}`,
+    title: `Paged App ${suffix}`,
+    appName: `paged-app-${suffix}`,
+    intro: `Paged chain app ${suffix}`,
+    runtime: 'browser',
+    version: '1.0.0',
+    content: `metafile://zip-paged-app-${suffix}`,
+    indexFile: 'index.html',
+    disabled: false,
+    publisherGlobalMetaId: `idq1creator${suffix}`,
+    publisherName: `Publisher ${suffix}`,
+    updatedAt: 1_888_888_000 + index,
+    ...overrides,
   };
 }
 
-test('listCommunityMetaApps parses chain protocol items and computes install status', async () => {
+test('listCommunityMetaApps maps MetaSo feed items and computes install status', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
 
   const nowTs = 1_777_777_777;
@@ -62,59 +63,49 @@ test('listCommunityMetaApps parses chain protocol items and computes install sta
 
   const fetched = [
     {
-      id: 'pin-buzz-new',
-      globalMetaId: 'idq1creator',
-      timestamp: nowTs,
-      contentSummary: JSON.stringify({
-        title: 'Buzz',
-        appName: 'buzz',
-        intro: 'Buzz chain app',
-        prompt: 'Create a social feed MetaApp with a compact composer.',
-        runtime: 'browser/android',
-        version: '1.2.0',
-        icon: 'metafile://icon-buzz',
-        coverImg: 'metafile://cover-buzz',
-        code: 'metafile://zip-buzz',
-        codeType: 'application/zip',
-        indexFile: 'index.html',
-        disabled: false,
-      }),
+      pinId: 'pin-buzz-new',
+      title: 'Buzz',
+      appName: 'buzz',
+      intro: 'Buzz chain app',
+      runtime: 'browser/android',
+      version: '1.2.0',
+      icon: 'metafile://icon-buzz',
+      coverImg: 'metafile://cover-buzz',
+      content: 'metafile://zip-buzz',
+      indexFile: 'index.html',
+      disabled: false,
+      publisherGlobalMetaId: 'idq1creator',
+      updatedAt: nowTs,
     },
     {
-      id: 'pin-chat-conflict',
-      globalMetaId: 'idq1another',
-      timestamp: nowTs,
-      contentSummary: JSON.stringify({
-        title: 'Chat',
-        appName: 'chat',
-        intro: 'Chat chain app',
-        runtime: 'browser',
-        version: '2.1.0',
-        code: 'metafile://zip-chat',
-        codeType: 'application/zip',
-        indexFile: 'index.html',
-        disabled: false,
-      }),
+      pinId: 'pin-chat-conflict',
+      title: 'Chat',
+      appName: 'chat',
+      intro: 'Chat chain app',
+      runtime: 'browser',
+      version: '2.1.0',
+      content: 'metafile://zip-chat',
+      indexFile: 'index.html',
+      disabled: false,
+      publisherGlobalMetaId: 'idq1another',
+      updatedAt: nowTs,
     },
     {
-      id: 'pin-uninstallable',
-      globalMetaId: 'idq1native',
-      timestamp: nowTs,
-      contentSummary: JSON.stringify({
-        title: 'Native only',
-        appName: 'native-only',
-        runtime: 'android/ios',
-        version: '1.0.0',
-        code: 'metafile://zip-native',
-        codeType: 'application/zip',
-        disabled: false,
-      }),
+      pinId: 'pin-uninstallable',
+      title: 'Native only',
+      appName: 'native-only',
+      intro: '',
+      runtime: 'android/ios',
+      version: '1.0.0',
+      content: 'metafile://zip-native',
+      disabled: false,
+      publisherGlobalMetaId: 'idq1native',
+      updatedAt: nowTs,
     },
     {
-      id: 'pin-invalid',
-      globalMetaId: 'idq1creator',
-      timestamp: nowTs,
-      contentSummary: '{',
+      // No title/appName: not a mappable MetaApp item.
+      pinId: 'pin-invalid',
+      updatedAt: nowTs,
     },
   ];
 
@@ -148,7 +139,8 @@ test('listCommunityMetaApps parses chain protocol items and computes install sta
   assert.equal(buzz.cover, 'metafile://cover-buzz');
   assert.equal(buzz.authorName, 'Creator Bot');
   assert.equal(buzz.authorAvatar, '/content/avatar-creator');
-  assert.equal(buzz.aiPrompt, 'Create a social feed MetaApp with a compact composer.');
+  // MetaSo items carry no AI prompt; the list no longer surfaces one.
+  assert.equal(buzz.aiPrompt, undefined);
 
   const chat = result.apps.find((app) => app.appId === 'chat');
   assert.ok(chat);
@@ -176,7 +168,7 @@ test('listCommunityMetaApps forwards cursor and size, and returns nextCursor', a
     fetchList: async (params = {}) => {
       calls.push(params);
       return {
-        list: Array.from({ length: 30 }, (_, index) => chainMetaAppItem(index + 1)),
+        list: Array.from({ length: 30 }, (_, index) => metaSoItem(index + 1)),
         nextCursor: 'cursor-60',
       };
     },
@@ -189,66 +181,41 @@ test('listCommunityMetaApps forwards cursor and size, and returns nextCursor', a
   assert.equal(result.apps[0]?.appId, 'paged-app-30');
 });
 
-test('listCommunityMetaApps hides nextCursor when the current page is shorter than the requested page size', async () => {
+test('listCommunityMetaApps passes the aggregator nextCursor through unchanged', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
 
+  // The MetaSo feed owns pagination; a short page still reports the cursor the
+  // aggregator returned so the renderer can keep paging.
   const result = await listCommunityMetaApps({
     manager: { listMetaApps: () => [] },
     cursor: 'cursor-30',
     size: 30,
     fetchList: async () => ({
-      list: Array.from({ length: 12 }, (_, index) => chainMetaAppItem(index + 1)),
-      nextCursor: 'stale-cursor-after-short-page',
+      list: Array.from({ length: 12 }, (_, index) => metaSoItem(index + 1)),
+      nextCursor: 'cursor-after-short-page',
     }),
   });
 
   assert.equal(result.success, true);
   assert.equal(result.apps.length, 12);
-  assert.equal(result.nextCursor, null);
+  assert.equal(result.nextCursor, 'cursor-after-short-page');
 });
 
-test('listCommunityMetaApps uses the remote chain list when the local indexer is stale but non-empty', async () => {
+test('listCommunityMetaApps falls back to the MetaSo aggregator when no fetchList is injected', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
 
   const previousFetch = globalThis.fetch;
-  const previousLocalBase = process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
   const calls = [];
 
-  process.env.IDBOTS_MAN_P2P_LOCAL_BASE = 'http://127.0.0.1:19099';
   globalThis.fetch = async (url) => {
     const href = String(url);
     calls.push(href);
 
-    if (href.startsWith('http://127.0.0.1:19099')) {
+    if (href.startsWith('https://so.metaid.io/api/metaapp/list')) {
       return jsonResponse({
-        code: 1,
+        code: 0,
         data: {
-          list: [{
-            id: 'local-stale-pin',
-            globalMetaId: 'idq1local',
-            timestamp: 100,
-            contentSummary: JSON.stringify({
-              title: 'Local Stale App',
-              appName: 'local-stale-app',
-              intro: 'Only present in the stale local indexer page',
-              runtime: 'browser',
-              version: '1.0.0',
-              code: 'metafile://zip-local-stale',
-              codeType: 'application/zip',
-              indexFile: 'index.html',
-              disabled: false,
-            }),
-          }],
-          nextCursor: 'local-next',
-        },
-      });
-    }
-
-    if (href.startsWith('https://manapi.metaid.io')) {
-      return jsonResponse({
-        code: 1,
-        data: {
-          list: Array.from({ length: 30 }, (_, index) => chainMetaAppItem(index + 1, {
+          items: Array.from({ length: 30 }, (_, index) => metaSoItem(index + 1, {
             title: `Remote Current App ${index + 1}`,
             appName: `remote-current-app-${index + 1}`,
           })),
@@ -263,7 +230,6 @@ test('listCommunityMetaApps uses the remote chain list when the local indexer is
   try {
     const result = await listCommunityMetaApps({
       manager: { listMetaApps: () => [] },
-      fetchAuthorInfo: async () => null,
       cursor: '0',
       size: 30,
     });
@@ -272,17 +238,12 @@ test('listCommunityMetaApps uses the remote chain list when the local indexer is
     assert.equal(result.nextCursor, 'remote-next');
     assert.deepEqual(result.apps.map((app) => app.sourcePinId).slice(0, 2), ['pin-30', 'pin-29']);
     assert.equal(
-      calls.some((href) => href.startsWith('https://manapi.metaid.io/pin/path/list')),
+      calls.some((href) => href.startsWith('https://so.metaid.io/api/metaapp/list')),
       true,
-      'remote chain list should be queried even when the local indexer returns a non-empty stale page',
+      'the MetaSo aggregator should be queried when no fetchList override is provided',
     );
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousLocalBase === undefined) {
-      delete process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
-    } else {
-      process.env.IDBOTS_MAN_P2P_LOCAL_BASE = previousLocalBase;
-    }
   }
 });
 
@@ -293,22 +254,18 @@ test('listCommunityMetaApps accepts content metafile when code is empty', async 
     manager: { listMetaApps: () => [] },
     fetchList: async () => [
       {
-        id: 'pin-iddisk',
-        createMetaId: 'idq1creator',
-        timestamp: 1_765_221_178,
-        contentSummary: JSON.stringify({
-          title: 'IDDisk',
-          appName: 'IDDisk',
-          intro: 'Chain file manager',
-          runtime: 'browser/ios/android',
-          version: 'v1.1.0',
-          indexFile: 'index.html',
-          code: '',
-          content: 'metafile://zip-iddisk',
-          contentType: 'application/zip',
-          codeType: 'application/zip',
-          disabled: false,
-        }),
+        pinId: 'pin-iddisk',
+        title: 'IDDisk',
+        appName: 'IDDisk',
+        intro: 'Chain file manager',
+        runtime: 'browser/ios/android',
+        version: 'v1.1.0',
+        content: 'metafile://zip-iddisk',
+        indexFile: 'index.html',
+        disabled: false,
+        publisherGlobalMetaId: 'idq1creator',
+        publisherName: 'Creator Bot',
+        updatedAt: 1_765_221_178,
       },
     ],
   });
@@ -322,47 +279,32 @@ test('listCommunityMetaApps accepts content metafile when code is empty', async 
   assert.equal(result.apps[0]?.codePinId, 'zip-iddisk');
 });
 
-test('listCommunityMetaApps collapses edit versions into one record and keeps the newest', async () => {
+test('listCommunityMetaApps keeps the single folded record the aggregator returns per app', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
 
-  const contentFor = (version, codeSuffix) => JSON.stringify({
-    title: `Edit App ${version}`,
-    appName: 'edit-app',
-    intro: `Edit app v${version}`,
-    runtime: 'browser',
-    version,
-    code: `metafile://zip-edit-app-${codeSuffix}`,
-    codeType: 'application/zip',
-    indexFile: 'index.html',
-    disabled: false,
-  });
-
+  // MetaSo already folds edit versions to one latest record per app, so the
+  // client maps one item to one record and must not re-deduplicate anything.
   const result = await listCommunityMetaApps({
     manager: { listMetaApps: () => [] },
     fetchList: async () => [
       {
-        id: 'pin-edit-original',
-        operation: 'create',
-        globalMetaId: 'idq1creator',
-        timestamp: 1_777_777_700,
-        contentSummary: contentFor('1.0.0', 'original'),
-      },
-      {
-        id: 'pin-edit-modify',
-        operation: 'modify',
-        globalMetaId: 'idq1creator',
-        timestamp: 1_777_777_800,
-        contentSummary: contentFor('1.1.0', 'modified'),
-      },
-      {
-        id: 'pin-edit-revoked',
-        operation: 'revoke',
-        globalMetaId: 'idq1creator',
-        timestamp: 1_777_777_900,
-        contentSummary: contentFor('9.9.9', 'revoked'),
+        pinId: 'pin-edit-modify',
+        title: 'Edit App 1.1.0',
+        appName: 'edit-app',
+        intro: 'Edit app v1.1.0',
+        runtime: 'browser',
+        version: '1.1.0',
+        content: 'metafile://zip-edit-app-modified',
+        indexFile: 'index.html',
+        disabled: false,
+        publisherGlobalMetaId: 'idq1creator',
+        publisherName: 'Creator Bot',
+        updatedAt: 1_777_777_800,
       },
     ],
-    fetchAuthorInfo: async () => null,
+    fetchAuthorInfo: async () => {
+      throw new Error('fetchAuthorInfo should not run when the item already carries the author');
+    },
   });
 
   assert.equal(result.success, true);
@@ -372,10 +314,11 @@ test('listCommunityMetaApps collapses edit versions into one record and keeps th
   assert.equal(app.version, '1.1.0');
   assert.equal(app.sourcePinId, 'pin-edit-modify');
   assert.equal(app.codePinId, 'zip-edit-app-modified');
+  assert.equal(app.authorName, 'Creator Bot');
   assert.deepEqual(result.seen, ['idq1creator::edit-app']);
 });
 
-test('listCommunityMetaApps fills a full page of distinct apps across raw pages', async () => {
+test('listCommunityMetaApps fills a logical page from a single aggregator page without extra fetches', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
 
   const fetchCalls = [];
@@ -384,62 +327,54 @@ test('listCommunityMetaApps fills a full page of distinct apps across raw pages'
     size: 30,
     fetchList: async ({ cursor = '0' } = {}) => {
       fetchCalls.push(cursor);
-      if (cursor === '0') {
-        // 20 distinct apps, one duplicate edit version, one revoke pin.
-        const list = Array.from({ length: 20 }, (_, index) => chainMetaAppItem(index + 1));
-        list.push(chainMetaAppItem(3, { version: '2.0.0', title: 'Paged App 03 edited', intro: 'edited' }));
-        list.push({ id: 'pin-revoke', operation: 'revoke', globalMetaId: 'idq1x', timestamp: 9, contentSummary: '{}' });
-        return { list, nextCursor: 'cursor-b' };
-      }
-      // Second raw page supplies the remaining 10 distinct apps.
+      // One aggregator page already holds 30 distinct apps.
       return {
-        list: Array.from({ length: 10 }, (_, index) => chainMetaAppItem(30 - index)),
-        nextCursor: 'cursor-c',
+        list: Array.from({ length: 30 }, (_, index) => metaSoItem(index + 1)),
+        nextCursor: 'cursor-b',
       };
     },
   });
 
   assert.equal(result.success, true);
   assert.equal(result.apps.length, 30);
-  assert.equal(result.nextCursor, 'cursor-c');
-  assert.deepEqual(fetchCalls, ['0', 'cursor-b']);
+  assert.equal(result.nextCursor, 'cursor-b');
+  assert.deepEqual(fetchCalls, ['0'], 'one aggregator page is one logical page');
   const ids = new Set(result.apps.map((app) => app.sourcePinId));
   assert.equal(ids.size, 30, 'no duplicated app in a full page');
-  assert.equal(ids.has('pin-03'), true, 'duplicate edit version collapsed into the original pin');
 });
 
 test('listCommunityMetaApps honors the seen-set so stale versions never reappear across pages', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
-
-  const contentFor = (appName, version, suffix) => JSON.stringify({
-    title: `${appName} ${version}`,
-    appName,
-    intro: `${appName} v${version}`,
-    runtime: 'browser',
-    version,
-    code: `metafile://zip-${suffix}`,
-    codeType: 'application/zip',
-    indexFile: 'index.html',
-    disabled: false,
-  });
 
   const first = await listCommunityMetaApps({
     manager: { listMetaApps: () => [] },
     size: 5,
     fetchList: async () => [
       {
-        id: 'pin-a-head',
-        operation: 'create',
-        globalMetaId: 'idq1a',
-        timestamp: 2_000_000_000,
-        contentSummary: contentFor('app-a', '2.0.0', 'a-head'),
+        pinId: 'pin-a-head',
+        title: 'app-a 2.0.0',
+        appName: 'app-a',
+        intro: 'app-a v2.0.0',
+        runtime: 'browser',
+        version: '2.0.0',
+        content: 'metafile://zip-a-head',
+        indexFile: 'index.html',
+        disabled: false,
+        publisherGlobalMetaId: 'idq1a',
+        updatedAt: 2_000_000_000,
       },
       {
-        id: 'pin-b-head',
-        operation: 'create',
-        globalMetaId: 'idq1b',
-        timestamp: 1_999_999_999,
-        contentSummary: contentFor('app-b', '1.0.0', 'b-head'),
+        pinId: 'pin-b-head',
+        title: 'app-b 1.0.0',
+        appName: 'app-b',
+        intro: 'app-b v1.0.0',
+        runtime: 'browser',
+        version: '1.0.0',
+        content: 'metafile://zip-b-head',
+        indexFile: 'index.html',
+        disabled: false,
+        publisherGlobalMetaId: 'idq1b',
+        updatedAt: 1_999_999_999,
       },
     ],
     fetchAuthorInfo: async () => null,
@@ -455,20 +390,32 @@ test('listCommunityMetaApps honors the seen-set so stale versions never reappear
     size: 5,
     seen: first.seen,
     fetchList: async () => [
-      // Stale version of app-a plus one brand-new app.
+      // Stale re-listing of app-a plus one brand-new app.
       {
-        id: 'pin-a-stale',
-        operation: 'modify',
-        globalMetaId: 'idq1a',
-        timestamp: 1_000_000_000,
-        contentSummary: contentFor('app-a', '1.0.0', 'a-stale'),
+        pinId: 'pin-a-stale',
+        title: 'app-a 1.0.0',
+        appName: 'app-a',
+        intro: 'app-a v1.0.0',
+        runtime: 'browser',
+        version: '1.0.0',
+        content: 'metafile://zip-a-stale',
+        indexFile: 'index.html',
+        disabled: false,
+        publisherGlobalMetaId: 'idq1a',
+        updatedAt: 1_000_000_000,
       },
       {
-        id: 'pin-c-new',
-        operation: 'create',
-        globalMetaId: 'idq1c',
-        timestamp: 1_000_000_001,
-        contentSummary: contentFor('app-c', '1.0.0', 'c-new'),
+        pinId: 'pin-c-new',
+        title: 'app-c 1.0.0',
+        appName: 'app-c',
+        intro: 'app-c v1.0.0',
+        runtime: 'browser',
+        version: '1.0.0',
+        content: 'metafile://zip-c-new',
+        indexFile: 'index.html',
+        disabled: false,
+        publisherGlobalMetaId: 'idq1c',
+        updatedAt: 1_000_000_001,
       },
     ],
     fetchAuthorInfo: async () => null,
@@ -479,105 +426,76 @@ test('listCommunityMetaApps honors the seen-set so stale versions never reappear
   assert.deepEqual(second.seen, ['idq1a::app-a', 'idq1b::app-b', 'idq1c::app-c']);
 });
 
-test('listCommunityMetaApps hides MetaApps whose rows MAN marked as revoked (status < 0)', async () => {
+test('listCommunityMetaApps marks publisher-disabled MetaApps as uninstallable', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
 
-  const contentFor = (appName, version, suffix) => JSON.stringify({
-    title: `${appName} ${version}`,
-    appName,
-    intro: `${appName} v${version}`,
-    runtime: 'browser',
-    version,
-    code: `metafile://zip-${suffix}`,
-    codeType: 'application/zip',
-    indexFile: 'index.html',
-    disabled: false,
-  });
-
-  // Mirrors the real revoked-service shape: every row of a revoked app is marked
-  // status -1 by MAN (e.g. bottianya, zhuwei-fortune-service), while a re-published
-  // or untouched app keeps status 0.
   const result = await listCommunityMetaApps({
     manager: { listMetaApps: () => [] },
     size: 30,
     fetchList: async () => [
       {
-        id: 'pin-revoked-create',
-        operation: 'create',
-        globalMetaId: 'idq1a',
-        status: -1,
-        timestamp: 2_000_000_100,
-        contentSummary: contentFor('revoked-app', '1.0.0', 'revoked'),
+        pinId: 'pin-live',
+        title: 'live-app 1.0.0',
+        appName: 'live-app',
+        intro: 'live-app v1.0.0',
+        runtime: 'browser',
+        version: '1.0.0',
+        content: 'metafile://zip-live',
+        indexFile: 'index.html',
+        disabled: false,
+        publisherGlobalMetaId: 'idq1b',
+        updatedAt: 2_000_000_000,
       },
       {
-        id: 'pin-revoked-modify',
-        operation: 'modify',
-        globalMetaId: 'idq1a',
-        status: -1,
-        timestamp: 2_000_000_200,
-        contentSummary: contentFor('revoked-app', '1.1.0', 'revoked-modify'),
-      },
-      {
-        id: 'pin-revoked-declaration',
-        operation: 'revoke',
-        globalMetaId: 'idq1a',
-        status: 0,
-        timestamp: 2_000_000_300,
-        contentSummary: '{}',
-      },
-      {
-        id: 'pin-live',
-        operation: 'create',
-        globalMetaId: 'idq1b',
-        status: 0,
-        timestamp: 2_000_000_000,
-        contentSummary: contentFor('live-app', '1.0.0', 'live'),
+        pinId: 'pin-disabled',
+        title: 'disabled-app 1.0.0',
+        appName: 'disabled-app',
+        intro: 'disabled-app v1.0.0',
+        runtime: 'browser',
+        version: '1.0.0',
+        content: 'metafile://zip-disabled',
+        indexFile: 'index.html',
+        disabled: true,
+        publisherGlobalMetaId: 'idq1a',
+        updatedAt: 1_999_999_999,
       },
     ],
     fetchAuthorInfo: async () => null,
   });
 
   assert.equal(result.success, true);
-  assert.deepEqual(result.apps.map((app) => app.sourcePinId), ['pin-live']);
-  assert.deepEqual(result.seen, ['idq1b::live-app']);
+  const live = result.apps.find((app) => app.appId === 'live-app');
+  assert.ok(live);
+  assert.equal(live.status, 'install');
+  const disabled = result.apps.find((app) => app.appId === 'disabled-app');
+  assert.ok(disabled);
+  assert.equal(disabled.status, 'uninstallable');
+  assert.equal(disabled.installable, false);
+  assert.match(disabled.reason || '', /禁用|disabled/i);
+  assert.deepEqual(result.seen, ['idq1b::live-app', 'idq1a::disabled-app']);
 });
 
-test('listCommunityMetaApps keeps the newest visible row when an older version is revoked', async () => {
+test('listCommunityMetaApps maps the newest folded version returned by the aggregator', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
 
-  const contentFor = (appName, version, suffix) => JSON.stringify({
-    title: `${appName} ${version}`,
-    appName,
-    intro: `${appName} v${version}`,
-    runtime: 'browser',
-    version,
-    code: `metafile://zip-${suffix}`,
-    codeType: 'application/zip',
-    indexFile: 'index.html',
-    disabled: false,
-  });
-
-  // Mirrors bot-directory / cosset-li-space: the newest row is visible (status 0),
-  // older rows carry a negative status (revoked or superseded) and must not win.
+  // MetaSo excludes revoked/superseded rows upstream, so the feed only ever
+  // contains the newest visible version of each app.
   const result = await listCommunityMetaApps({
     manager: { listMetaApps: () => [] },
     size: 30,
     fetchList: async () => [
       {
-        id: 'pin-old-revoked',
-        operation: 'create',
-        globalMetaId: 'idq1x',
-        status: -1,
-        timestamp: 1_000_000_100,
-        contentSummary: contentFor('mixed-app', '1.0.0', 'old'),
-      },
-      {
-        id: 'pin-current',
-        operation: 'create',
-        globalMetaId: 'idq1x',
-        status: 0,
-        timestamp: 1_000_000_200,
-        contentSummary: contentFor('mixed-app', '2.0.0', 'current'),
+        pinId: 'pin-current',
+        title: 'mixed-app 2.0.0',
+        appName: 'mixed-app',
+        intro: 'mixed-app v2.0.0',
+        runtime: 'browser',
+        version: '2.0.0',
+        content: 'metafile://zip-current',
+        indexFile: 'index.html',
+        disabled: false,
+        publisherGlobalMetaId: 'idq1x',
+        updatedAt: 1_000_000_200,
       },
     ],
     fetchAuthorInfo: async () => null,

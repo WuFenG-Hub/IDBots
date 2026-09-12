@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
-const { IMCoworkHandler } = await import('../dist-electron/im/imCoworkHandler.js');
+const { IMCoworkHandler } = await import('../dist-electron/main/im/imCoworkHandler.js');
 
 const PLATFORM = 'telegram';
 const CONVERSATION_ID = 'telegram:chat:42';
@@ -126,6 +126,7 @@ class MockCoworkRunner extends EventEmitter {
   constructor(options = {}) {
     super();
     this.activeSessions = new Set();
+    this.textPermissionRelaySessions = new Set();
     this.startedCalls = [];
     this.continuedCalls = [];
     this.stoppedSessions = [];
@@ -136,6 +137,18 @@ class MockCoworkRunner extends EventEmitter {
 
   isSessionActive(sessionId) {
     return this.activeSessions.has(sessionId);
+  }
+
+  registerTextPermissionRelay(sessionId) {
+    this.textPermissionRelaySessions.add(sessionId);
+  }
+
+  unregisterTextPermissionRelay(sessionId) {
+    this.textPermissionRelaySessions.delete(sessionId);
+  }
+
+  hasTextPermissionRelay(sessionId) {
+    return this.textPermissionRelaySessions.has(sessionId);
   }
 
   _emitTurnOutcome(sessionId, replyContent) {

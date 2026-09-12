@@ -64,6 +64,8 @@ class RecordingStore {
     this.sessions = new Map()
   }
   getSession(id) { return this.sessions.get(id) ?? null }
+  // Runner reads the session goal through this lighter accessor every DSH turn.
+  getSessionWithoutMessages(id) { return this.sessions.get(id) ?? null }
   getConfig() { return {} }
   updateSession(id, updates) {
     const existing = this.sessions.get(id) ?? { id }

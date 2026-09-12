@@ -36,7 +36,7 @@ function createFakeSocket() {
 function loadSocketModuleWithFakeIo(fakeIo) {
   const socketIo = require('socket.io-client');
   const originalIo = socketIo.io;
-  const modulePath = require.resolve('../dist-electron/services/metaWebSocket.js');
+  const modulePath = require.resolve('../dist-electron/main/services/metaWebSocket.js');
 
   socketIo.io = fakeIo;
   delete require.cache[modulePath];

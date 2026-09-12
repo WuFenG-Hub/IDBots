@@ -18,11 +18,11 @@ try {
     ensureMetaIDImpressionSchema,
   } = await import('../dist-electron/main/metaidImpressionStore.js'));
 } catch {
-  ({ MetaIDExperienceStore } = await import('../dist-electron/metaidExperienceStore.js'));
+  ({ MetaIDExperienceStore } = await import('../dist-electron/main/metaidExperienceStore.js'));
   ({
     MetaIDImpressionStore,
     ensureMetaIDImpressionSchema,
-  } = await import('../dist-electron/metaidImpressionStore.js'));
+  } = await import('../dist-electron/main/metaidImpressionStore.js'));
 }
 
 const OWNER = 'idq1observer';

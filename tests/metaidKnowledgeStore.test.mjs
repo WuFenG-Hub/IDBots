@@ -15,7 +15,7 @@ try {
     await import('../dist-electron/main/metaidKnowledgeStore.js'));
 } catch {
   ({ MetaIDKnowledgeStore, ensureMetaIDKnowledgeSchema } =
-    await import('../dist-electron/metaidKnowledgeStore.js'));
+    await import('../dist-electron/main/metaidKnowledgeStore.js'));
 }
 
 const KNOWLEDGE_TABLES = [

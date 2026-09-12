@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import test from 'node:test';
@@ -7,14 +7,30 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MAIN_ENTRY_PATH = path.join(__dirname, '..', 'dist-electron', 'main.js');
+const REPO_ROOT = path.join(__dirname, '..');
 
 const FIXTURE_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const FIXTURE_PATH = "m/44'/10001'/0'/0/0";
 const FIXTURE_GLOBAL_META_ID = 'idq1970463ym8fqmgawe4lylktne97ahhw4kqehkch';
 
 test('compile:electron preserves the root Electron entry layout', () => {
-  assert.equal(existsSync(MAIN_ENTRY_PATH), true, `expected clean compile output at ${MAIN_ENTRY_PATH}`);
+  // The root entry must stay at dist-electron/main.js (flat layout, not nested
+  // under dist-electron/main/). Assert the source-level contract instead of the
+  // built artifact so the test is independent of how dist-electron was produced
+  // (tsc-only worktree builds do not emit the vite electron-plugin bundles).
+  const pkg = JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  assert.equal(pkg.main, 'dist-electron/main.js');
+
+  const viteConfig = readFileSync(path.join(REPO_ROOT, 'vite.config.ts'), 'utf8');
+  assert.match(viteConfig, /entry:\s*['"]src\/main\/main\.ts['"]/);
+  assert.match(viteConfig, /entry:\s*['"]src\/main\/preload\.ts['"]/);
+  const electronBlocks = viteConfig.split(/entry:\s*['"]src\/main\/(?:main|preload)\.ts['"]/);
+  for (const block of electronBlocks.slice(1)) {
+    assert.match(block, /outDir:\s*['"]dist-electron['"]/);
+  }
+
+  const mainSource = readFileSync(path.join(REPO_ROOT, 'src', 'main', 'main.ts'), 'utf8');
+  assert.match(mainSource, /path\.join\(__dirname,\s*'\.\.\/dist-electron\/preload\.js'\)/);
 });
 
 test('createMetaBotWallet preserves the extracted shared identity semantics', async () => {

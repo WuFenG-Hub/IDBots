@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 test('detects sql.js WebAssembly out-of-bounds errors including nested causes', () => {
-  const { isSqliteWasmBoundsError } = require('../dist-electron/sqliteRecovery.js');
+  const { isSqliteWasmBoundsError } = require('../dist-electron/main/sqliteRecovery.js');
 
   assert.equal(
     isSqliteWasmBoundsError(new WebAssembly.RuntimeError('memory access out of bounds')),
@@ -24,7 +24,7 @@ test('detects sql.js WebAssembly out-of-bounds errors including nested causes', 
 });
 
 test('retries an operation once after sqlite wasm recovery', async () => {
-  const { runWithSqliteWasmRecovery } = require('../dist-electron/sqliteRecovery.js');
+  const { runWithSqliteWasmRecovery } = require('../dist-electron/main/sqliteRecovery.js');
 
   let attempts = 0;
   let recoveries = 0;
@@ -49,7 +49,7 @@ test('retries an operation once after sqlite wasm recovery', async () => {
 });
 
 test('does not recover for non-wasm sqlite errors', async () => {
-  const { runWithSqliteWasmRecovery } = require('../dist-electron/sqliteRecovery.js');
+  const { runWithSqliteWasmRecovery } = require('../dist-electron/main/sqliteRecovery.js');
 
   let recoveries = 0;
   await assert.rejects(
@@ -68,7 +68,7 @@ test('does not recover for non-wasm sqlite errors', async () => {
 });
 
 test('SqliteStore exposes a runtime reset hook for rebuilding damaged sql.js wasm state', () => {
-  const { SqliteStore } = require('../dist-electron/sqliteStore.js');
+  const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 
   assert.equal(typeof SqliteStore.resetSqlJsRuntimeForRecovery, 'function');
 });

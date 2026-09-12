@@ -21,7 +21,7 @@ function loadRunnerModule() {
     try {
       return require('../dist-electron/main/libs/coworkRunner.js');
     } catch {
-      return require('../dist-electron/libs/coworkRunner.js');
+      return require('../dist-electron/main/libs/coworkRunner.js');
     }
   } finally {
     Module._load = originalLoad;
@@ -30,7 +30,7 @@ function loadRunnerModule() {
 
 const { CoworkRunner } = loadRunnerModule();
 const { MetaIDKnowledgeStore } = await import('../dist-electron/main/metaidKnowledgeStore.js')
-  .catch(() => import('../dist-electron/metaidKnowledgeStore.js'));
+  .catch(() => import('../dist-electron/main/metaidKnowledgeStore.js'));
 
 const setup = async (withKnowledgeStore = true) => {
   const { db, cleanup } = await createSqliteStore();

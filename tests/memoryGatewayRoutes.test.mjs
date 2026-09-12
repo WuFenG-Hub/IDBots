@@ -21,7 +21,7 @@ import { createCoworkStore, createSqliteStore, getRow } from './memoryTestUtils.
 const require = createRequire(import.meta.url);
 
 function resolveCompiledModulePath(relative) {
-  const candidates = [`../dist-electron/main/${relative}`, `../dist-electron/${relative}`];
+  const candidates = [`../dist-electron/main/${relative}`, `../dist-electron/main/${relative}`];
   for (const candidate of candidates) {
     try {
       return require.resolve(candidate);
@@ -37,6 +37,12 @@ const {
   handleMemoryListRoute,
 } = require(resolveCompiledModulePath('services/memoryGatewayRoutes.js'));
 
+// Pin the bearer token for this process: the RPC server mirrors its token
+// into <userData>/metaid-rpc-token (userData is mocked to os.tmpdir() here)
+// and ADOPTS a leftover mirror from a previous run — which then mismatches
+// this run's freshly generated client token and produces spurious 401s on
+// repeat runs. An env-pinned token always wins and is re-mirrored.
+process.env.IDBOTS_RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || 'test-rpc-token-memory-gateway';
 const { getMetaidRpcToken } = require(resolveCompiledModulePath('services/metaidRpcEndpoint.js'));
 const RPC_AUTH_HEADERS = {
   'Content-Type': 'application/json',

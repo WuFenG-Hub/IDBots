@@ -30,7 +30,7 @@ const {
   P2P_BOOTSTRAP_DEFAULTS_MIGRATION_KEY,
   buildRuntimeConfig,
   getConfig,
-} = require('../dist-electron/services/p2pConfigService.js');
+} = require('../dist-electron/main/services/p2pConfigService.js');
 
 function makeStore({
   p2pConfig,

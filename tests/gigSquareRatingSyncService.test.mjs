@@ -14,8 +14,8 @@ const {
   parseRatingPin,
   repairServiceRatingAggregate,
   syncGigSquareRatings,
-} = require('../dist-electron/services/gigSquareRatingSyncService.js');
-const { DB_FILENAME } = require('../dist-electron/appConstants.js');
+} = require('../dist-electron/main/services/gigSquareRatingSyncService.js');
+const { DB_FILENAME } = require('../dist-electron/main/appConstants.js');
 
 const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const sqlWasmPath = path.join(projectRoot, 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
@@ -442,7 +442,7 @@ test('SqliteStore.create() upgrades legacy rating detail cache schema before cre
   };
 
   try {
-    const { SqliteStore } = require('../dist-electron/sqliteStore.js');
+    const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
     const sqliteStore = await SqliteStore.create(userDataPath);
     const db = sqliteStore.getDatabase();
 

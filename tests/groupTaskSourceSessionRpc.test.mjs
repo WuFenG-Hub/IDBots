@@ -18,7 +18,7 @@ const require = createRequire(import.meta.url);
 
 function resolveCompiledMetaidRpcServerPath() {
   const candidates = [
-    '../dist-electron/services/metaidRpcServer.js',
+    '../dist-electron/main/services/metaidRpcServer.js',
     '../dist-electron/main/services/metaidRpcServer.js',
   ];
   for (const candidate of candidates) {
@@ -33,7 +33,7 @@ function resolveCompiledMetaidRpcServerPath() {
 
 function resolveCompiledMetaidRpcEndpointPath() {
   const candidates = [
-    '../dist-electron/services/metaidRpcEndpoint.js',
+    '../dist-electron/main/services/metaidRpcEndpoint.js',
     '../dist-electron/main/services/metaidRpcEndpoint.js',
   ];
   for (const candidate of candidates) {

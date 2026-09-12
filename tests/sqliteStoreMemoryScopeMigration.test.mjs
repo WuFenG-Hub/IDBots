@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const initSqlJs = require('sql.js');
 const Module = require('node:module');
-const { DB_FILENAME } = require('../dist-electron/appConstants.js');
+const { DB_FILENAME } = require('../dist-electron/main/appConstants.js');
 
 const worktreeRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 
@@ -101,7 +101,7 @@ test('SqliteStore.create() upgrades legacy user_memories scope columns before cr
   };
 
   try {
-    const { SqliteStore } = require('../dist-electron/sqliteStore.js');
+    const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
     const sqliteStore = await SqliteStore.create(userDataPath);
     const db = sqliteStore.getDatabase();
 

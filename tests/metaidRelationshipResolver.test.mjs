@@ -11,8 +11,8 @@ try {
   ({ MetaIDRelationshipResolver } = await import('../dist-electron/main/services/metaidRelationshipResolver.js'));
 } catch {
   ({ normalizeGlobalMetaID, isGlobalMetaID, requireGlobalMetaID } =
-    await import('../dist-electron/shared/globalMetaId.js'));
-  ({ MetaIDRelationshipResolver } = await import('../dist-electron/services/metaidRelationshipResolver.js'));
+    await import('../dist-electron/main/shared/globalMetaId.js'));
+  ({ MetaIDRelationshipResolver } = await import('../dist-electron/main/services/metaidRelationshipResolver.js'));
 }
 
 const TWIN = 'idq1twin';

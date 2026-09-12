@@ -5,12 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 const { openKnowledgeBaseIndex } = await import('../dist-electron/main/knowledgeBaseIndexStore.js')
-  .catch(() => import('../dist-electron/knowledgeBaseIndexStore.js'));
+  .catch(() => import('../dist-electron/main/knowledgeBaseIndexStore.js'));
 const {
   buildKbFtsQuery,
   toKnowledgeBaseFtsText,
 } = await import('../dist-electron/main/libs/knowledgeBaseText.js')
-  .catch(() => import('../dist-electron/libs/knowledgeBaseText.js'));
+  .catch(() => import('../dist-electron/main/libs/knowledgeBaseText.js'));
 
 const setup = () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-index-test-'));

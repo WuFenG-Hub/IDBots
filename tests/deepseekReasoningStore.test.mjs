@@ -8,7 +8,7 @@ let DeepSeekReasoningStore;
 try {
   ({ DeepSeekReasoningStore } = await import('../dist-electron/main/libs/deepseekReasoningStore.js'));
 } catch {
-  ({ DeepSeekReasoningStore } = await import('../dist-electron/libs/deepseekReasoningStore.js'));
+  ({ DeepSeekReasoningStore } = await import('../dist-electron/main/libs/deepseekReasoningStore.js'));
 }
 
 const makeTmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'deepseek-reasoning-store-'));

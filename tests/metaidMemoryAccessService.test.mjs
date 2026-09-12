@@ -25,14 +25,14 @@ try {
   ({ MetaIDRelationshipResolver } = await import('../dist-electron/main/services/metaidRelationshipResolver.js'));
   ({ MetaIDMemoryAccessService } = await import('../dist-electron/main/services/metaidMemoryAccessService.js'));
 } catch {
-  ({ MetaIDExperienceStore } = await import('../dist-electron/metaidExperienceStore.js'));
-  ({ MetaIDImpressionStore } = await import('../dist-electron/metaidImpressionStore.js'));
+  ({ MetaIDExperienceStore } = await import('../dist-electron/main/metaidExperienceStore.js'));
+  ({ MetaIDImpressionStore } = await import('../dist-electron/main/metaidImpressionStore.js'));
   ({
     MetaIDMemoryGrantStore,
     ensureMetaIDMemoryGrantSchema,
-  } = await import('../dist-electron/metaidMemoryGrantStore.js'));
-  ({ MetaIDRelationshipResolver } = await import('../dist-electron/services/metaidRelationshipResolver.js'));
-  ({ MetaIDMemoryAccessService } = await import('../dist-electron/services/metaidMemoryAccessService.js'));
+  } = await import('../dist-electron/main/metaidMemoryGrantStore.js'));
+  ({ MetaIDRelationshipResolver } = await import('../dist-electron/main/services/metaidRelationshipResolver.js'));
+  ({ MetaIDMemoryAccessService } = await import('../dist-electron/main/services/metaidMemoryAccessService.js'));
 }
 
 const OWNER = 'idq1observer';

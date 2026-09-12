@@ -2,19 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
-  .catch(() => import('../dist-electron/nativeSqliteDatabase.js'));
+  .catch(() => import('../dist-electron/main/nativeSqliteDatabase.js'));
 const { ChainContentHistoryStore } = await import('../dist-electron/main/chainContentHistoryStore.js')
-  .catch(() => import('../dist-electron/chainContentHistoryStore.js'));
+  .catch(() => import('../dist-electron/main/chainContentHistoryStore.js'));
 const {
   getChainContentHistoryStore,
   setChainContentHistoryStore,
 } = await import('../dist-electron/main/chainContentHistoryRuntime.js')
-  .catch(() => import('../dist-electron/chainContentHistoryRuntime.js'));
+  .catch(() => import('../dist-electron/main/chainContentHistoryRuntime.js'));
 const {
   shouldRecordChainWrite,
   recordChainWriteFromCreatePin,
 } = await import('../dist-electron/main/libs/chainWriteLedger.js')
-  .catch(() => import('../dist-electron/libs/chainWriteLedger.js'));
+  .catch(() => import('../dist-electron/main/libs/chainWriteLedger.js'));
 
 const setup = () => {
   const db = createNativeSqliteDatabase(':memory:');

@@ -12,6 +12,7 @@ import {
   type HomepageSectionValues,
 } from '../src/renderer/components/metabots/MetaBotHomepageSection';
 import { configService } from '../src/renderer/services/config';
+import { i18nService } from '../src/renderer/services/i18n';
 import type { AppConfig } from '../src/renderer/config';
 
 // The model+effort picker reads the live app_config; seed the in-memory
@@ -176,17 +177,21 @@ test('tab field and sync group mappings pin each editable field to its tab', () 
   assert.ok(!allSyncGroups.includes('a2a_bye_cooldown_ms'), 'a2a_bye_cooldown_ms must stay out of the chain sync groups');
 });
 
-test('Basic panel renders the Twin switch, locked on for the current Twin', () => {
+test('Basic panel renders the Twin switch, demote-confirm enabled for the current Twin', () => {
   const workerPanel = panelMarkup(renderTabsMarkup({ metabot_type: 'worker' }), 'basic');
   assert.match(workerPanel, /data-slot="metabot-twin-switch"/);
   assert.match(workerPanel, /role="switch"/);
   assert.match(workerPanel, /aria-checked="false"/);
   assert.doesNotMatch(workerPanel, /aria-disabled="true"/);
 
+  // Since 0569a147 the switch is never aria-disabled: for the current Twin it
+  // stays clickable and opens the demote-confirm dialog so the seat can be
+  // vacated (steal-by-promotion is refused with TWIN_ALREADY_EXISTS instead).
   const twinPanel = panelMarkup(renderTabsMarkup({ metabot_type: 'twin' }), 'basic');
   assert.match(twinPanel, /data-slot="metabot-twin-switch"/);
   assert.match(twinPanel, /aria-checked="true"/);
-  assert.match(twinPanel, /aria-disabled="true"/);
+  assert.doesNotMatch(twinPanel, /aria-disabled="true"/);
+  assert.ok(twinPanel.includes(i18nService.t('metabotTwinSwitchHintCurrent')), 'current-twin hint rendered');
 });
 
 test('composeHomepageForSave builds protocol JSON and rejects invalid pins', () => {

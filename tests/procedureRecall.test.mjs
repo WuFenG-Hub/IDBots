@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createLegacyMemoryDb } from './memoryTestUtils.mjs';
 
 const { MetaIDKnowledgeStore } = await import('../dist-electron/main/metaidKnowledgeStore.js')
-  .catch(() => import('../dist-electron/metaidKnowledgeStore.js'));
+  .catch(() => import('../dist-electron/main/metaidKnowledgeStore.js'));
 
 const setup = async () => {
   const db = await createLegacyMemoryDb();

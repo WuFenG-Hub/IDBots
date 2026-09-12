@@ -151,7 +151,12 @@ test('every provider route rides its own credential; A→B→A all succeed', { s
     const third = await turn(route('gw-a', 'key-a', 'mock-1'))
     assert.equal(third.kind, 'completed', `turn A (after B) must still complete — pre-fix it 401'd with B's key, got ${JSON.stringify(third)}`)
 
+    // Skip the kernel's auxiliary title-generation completions
+    // (dsh-session-title-first-prompt-llm, 77fed06c): they ride the same
+    // route and credential as the turn that triggered them, so they would
+    // shift the A→B→A auth sequence by one.
     const completionCalls = seen.filter((r) => r.method === 'POST' && r.url.endsWith('/chat/completions'))
+      .filter((r) => !JSON.stringify(r.body?.messages ?? []).includes('Create a concise title for an AI coding-assistant session'))
     assert.ok(completionCalls.length >= 3, `expected >=3 completion calls, got ${completionCalls.length}`)
     const auths = completionCalls.map((r) => r.auth)
     // Every request must carry the expected per-route key: A→B→A.

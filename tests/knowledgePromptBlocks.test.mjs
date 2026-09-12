@@ -18,7 +18,7 @@ try {
     formatKnowledgeRecallResults,
     formatKnowledgeUpsertResult,
     KNOWLEDGE_PROMPT_MAX_ITEMS,
-  } = await import('../dist-electron/knowledgePromptBlocks.js'));
+  } = await import('../dist-electron/main/knowledgePromptBlocks.js'));
 }
 
 const sampleEntries = () => [

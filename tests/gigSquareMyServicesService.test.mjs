@@ -8,7 +8,7 @@ const {
   buildMyServiceSummaries,
   buildMyServiceOrderDetails,
   clampPageSize,
-} = require('../dist-electron/services/gigSquareMyServicesService.js');
+} = require('../dist-electron/main/services/gigSquareMyServicesService.js');
 
 test('buildMyServiceSummaries filters services by owned globalmetaids and paginates 8 rows', () => {
   const services = Array.from({ length: 9 }, (_, index) => ({
