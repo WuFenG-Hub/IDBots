@@ -15,12 +15,12 @@ interface CoworkPermissionPanelProps {
   responding?: boolean;
 }
 
-type QuestionOption = {
+export type QuestionOption = {
   label: string;
   description?: string;
 };
 
-type QuestionItem = {
+export type QuestionItem = {
   question: string;
   header?: string;
   options: QuestionOption[];
@@ -29,7 +29,7 @@ type QuestionItem = {
   detail?: string;
 };
 
-type SafetyContext = {
+export type SafetyContext = {
   requestedToolName: string;
   requestedToolInput: Record<string, unknown>;
 };
@@ -40,7 +40,7 @@ const toRecord = (value: unknown): Record<string, unknown> | null => (
     : null
 );
 
-const parseQuestions = (permission: CoworkPermissionRequest): QuestionItem[] => {
+export const parseQuestions = (permission: CoworkPermissionRequest): QuestionItem[] => {
   if (permission.toolName !== 'AskUserQuestion') return [];
   const rawQuestions = permission.toolInput.questions;
   if (!Array.isArray(rawQuestions)) return [];
@@ -75,7 +75,7 @@ const parseQuestions = (permission: CoworkPermissionRequest): QuestionItem[] => 
     .filter(Boolean) as QuestionItem[];
 };
 
-const parseSafetyContext = (permission: CoworkPermissionRequest): SafetyContext | null => {
+export const parseSafetyContext = (permission: CoworkPermissionRequest): SafetyContext | null => {
   if (permission.toolName !== 'AskUserQuestion') return null;
   const context = toRecord(permission.toolInput.context);
   if (!context || typeof context.requestedToolName !== 'string') return null;
@@ -95,7 +95,7 @@ const stringifyInput = (input: Record<string, unknown>): string => {
   }
 };
 
-const summarizeToolInput = (toolName: string, input: Record<string, unknown>): string => {
+export const summarizeToolInput = (toolName: string, input: Record<string, unknown>): string => {
   const raw = toolName.toLowerCase() === 'bash'
     ? input.command
     : input.file_path ?? input.notebook_path ?? input.path ?? input.description ?? input.reason;

@@ -1,53 +1,124 @@
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import { i18nService } from '../../services/i18n';
+import { coworkService } from '../../services/cowork';
+import type { CoworkPermissionRequest, CoworkPermissionResult } from '../../types/cowork';
+import { parseQuestions, parseSafetyContext, summarizeToolInput } from './CoworkPermissionPanel';
 import { ArrowRightIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 
 interface CoworkPermissionOverlayProps {
   /**
    * Session whose permission prompt is already rendered inline by
    * CoworkSessionDetail (the open chat), or null when no inline seat is
-   * mounted. Prompts for any OTHER session surface in this overlay.
+   * mounted. Prompts for any OTHER session surface in this overlay. A2A
+   * conversations are the exception: their input area renders guidance
+   * controls instead of the composer takeover, so their prompts keep
+   * surfacing here even when the A2A session is the open one.
    */
   inlineSessionId: string | null;
 }
 
 /**
+ * Build the allow-answer for one-click approval, mirroring the inline
+ * panel's response semantics: safety approvals answer the confirmation
+ * question with its first (allow) option; plain question wizards answer
+ * every question with its first option — the same fallback the runner's
+ * 60s auto-answer applies.
+ */
+const buildAllowResult = (permission: CoworkPermissionRequest): CoworkPermissionResult => {
+  const questions = parseQuestions(permission);
+  const safetyContext = parseSafetyContext(permission);
+  if (safetyContext && questions.length > 0) {
+    const first = questions[0];
+    const allowOption = first.options[0];
+    return {
+      behavior: 'allow',
+      updatedInput: {
+        ...permission.toolInput,
+        answers: allowOption ? { [first.question]: allowOption.label } : {},
+      },
+    };
+  }
+  if (questions.length > 0) {
+    const answers: Record<string, string> = {};
+    for (const question of questions) {
+      const firstOption = question.options[0];
+      if (firstOption) answers[question.question] = firstOption.label;
+    }
+    return {
+      behavior: 'allow',
+      updatedInput: { ...permission.toolInput, answers },
+    };
+  }
+  return { behavior: 'allow', updatedInput: permission.toolInput };
+};
+
+/**
  * Global fallback seat for cowork permission prompts. CoworkSessionDetail only
- * renders prompts for the currently open chat, so prompts raised by background,
- * IM-automation or hidden sessions would otherwise queue with nowhere to
- * render and burn the runner's 60s watchdog into an automatic denial. This
- * overlay floats above every view and links back to the owning session. The
- * session's composer takeover remains the single place where users answer.
+ * renders prompts for the currently open chat (and never for A2A
+ * conversations), so prompts raised by background, IM-automation, A2A or
+ * hidden sessions would otherwise queue with nowhere to render and burn the
+ * runner's 60s watchdog into an automatic denial. This overlay floats above
+ * every view, answers prompts in place with allow/deny, and links back to the
+ * owning session.
  */
 const CoworkPermissionOverlay: React.FC<CoworkPermissionOverlayProps> = ({ inlineSessionId }) => {
   const pendingPermissions = useSelector((state: RootState) => state.cowork.pendingPermissions);
   const sessions = useSelector((state: RootState) => state.cowork.sessions);
+  const [respondingRequestId, setRespondingRequestId] = useState<string | null>(null);
+  const sessionsById = useMemo(
+    () => new Map(sessions.map((session) => [session.id, session])),
+    [sessions],
+  );
   const permission = useMemo(
-    () => pendingPermissions.find((entry) => entry.sessionId !== inlineSessionId) ?? null,
-    [pendingPermissions, inlineSessionId],
+    () => pendingPermissions.find((entry) => {
+      if (entry.sessionId !== inlineSessionId) return true;
+      // The open session is assumed to answer inline — but A2A conversations
+      // have no inline permission seat, so the overlay must keep covering
+      // their prompts instead of hiding them.
+      return sessionsById.get(entry.sessionId)?.sessionType === 'a2a';
+    }) ?? null,
+    [pendingPermissions, inlineSessionId, sessionsById],
   );
   const sessionTitle = useMemo(() => {
     if (!permission) return null;
-    return sessions.find((session) => session.id === permission.sessionId)?.title ?? null;
-  }, [permission, sessions]);
+    return sessionsById.get(permission.sessionId)?.title ?? null;
+  }, [permission, sessionsById]);
 
   const summary = useMemo(() => {
     if (!permission) return '';
-    if (permission.toolName !== 'AskUserQuestion') return permission.toolName;
+    if (permission.toolName !== 'AskUserQuestion') {
+      // "Bash" alone tells the owner nothing — show what actually runs.
+      const inputSummary = summarizeToolInput(permission.toolName, permission.toolInput ?? {});
+      return inputSummary ? `${permission.toolName}: ${inputSummary}` : permission.toolName;
+    }
     const questions = permission.toolInput?.questions;
     if (!Array.isArray(questions)) return permission.toolName;
     const first = questions.find((item) => item && typeof item === 'object' && typeof (item as Record<string, unknown>).question === 'string');
     return first ? String((first as Record<string, unknown>).question) : permission.toolName;
   }, [permission]);
 
+  const isSafetyApproval = useMemo(
+    () => (permission ? parseSafetyContext(permission) !== null && parseQuestions(permission).length > 0 : false),
+    [permission],
+  );
+
   const handleOpenSession = useCallback(() => {
     if (!permission) return;
     window.dispatchEvent(new CustomEvent('cowork:viewSession', { detail: { sessionId: permission.sessionId } }));
   }, [permission]);
 
+  const handleRespond = useCallback((result: CoworkPermissionResult) => {
+    if (!permission || respondingRequestId) return;
+    setRespondingRequestId(permission.requestId);
+    void coworkService.respondToPermission(permission.requestId, result).finally(() => {
+      setRespondingRequestId((current) => (current === permission.requestId ? null : current));
+    });
+  }, [permission, respondingRequestId]);
+
   if (!permission) return null;
+  const responding = respondingRequestId === permission.requestId;
 
   return (
     <div
@@ -72,6 +143,32 @@ const CoworkPermissionOverlay: React.FC<CoworkPermissionOverlayProps> = ({ inlin
         >
           {i18nService.t('coworkGlobalPermissionOpenSession')}
           <ArrowRightIcon className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <div className="flex items-center justify-end gap-2 border-t border-claude-border/70 px-3 py-2.5 dark:border-claude-darkBorder/70">
+        <button
+          type="button"
+          disabled={responding}
+          onClick={() => handleRespond({ behavior: 'deny', message: 'Permission denied' })}
+          className="rounded-lg border border-claude-border px-3 py-1.5 text-xs font-medium text-claude-textSecondary transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-60 dark:border-claude-darkBorder dark:text-claude-darkTextSecondary dark:hover:bg-red-900/20 dark:hover:text-red-300"
+        >
+          {i18nService.t('coworkDeny')}
+        </button>
+        <button
+          type="button"
+          disabled={responding}
+          onClick={() => handleRespond(buildAllowResult(permission))}
+          className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+            isSafetyApproval
+              ? 'border border-red-700 bg-red-600 text-white hover:bg-red-700'
+              : 'btn-idchat-primary-filled'
+          }`}
+        >
+          {responding
+            ? i18nService.t('processing')
+            : isSafetyApproval
+              ? i18nService.t('coworkApprovalAllowDelete')
+              : i18nService.t('coworkApprovalAllowOnce')}
         </button>
       </div>
     </div>

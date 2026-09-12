@@ -77,6 +77,52 @@ test('overlay skips the prompt already rendered inline for the open chat', () =>
   assert.equal(markup, '');
 });
 
+test('overlay keeps covering the open session when it is an A2A conversation (no inline seat)', () => {
+  const markup = renderOverlay(
+    [permission({ sessionId: 'sess-a2a', requestId: 'req-a2a' })],
+    'sess-a2a',
+    [sessionSummary({ id: 'sess-a2a', sessionType: 'a2a' })],
+  );
+
+  assert.ok(markup.includes('data-cowork-permission-overlay="true"'), 'A2A prompt stays answerable in the overlay');
+  assert.ok(markup.includes('npm install --save lodash'), 'A2A prompt summary rendered');
+});
+
+test('overlay renders inline allow and deny actions', () => {
+  const markup = renderOverlay(
+    [permission()],
+    'sess-current',
+    [sessionSummary()],
+  );
+
+  assert.ok(markup.includes(i18nService.t('coworkDeny')), 'deny action rendered');
+  assert.ok(markup.includes(i18nService.t('coworkApprovalAllowOnce')), 'allow-once action rendered for a plain tool prompt');
+});
+
+test('overlay renders the destructive allow label for safety approvals', () => {
+  const safetyPermission = permission({
+    toolName: 'AskUserQuestion',
+    toolInput: {
+      questions: [
+        {
+          header: '安全确认',
+          question: '工具 "bash" 将执行删除操作。是否允许本次操作？',
+          options: [
+            { label: '允许本次操作', description: '仅允许当前这一次操作继续执行。' },
+            { label: '拒绝本次操作', description: '拒绝当前操作。' },
+          ],
+        },
+      ],
+      answers: {},
+      context: { requestedToolName: 'bash', requestedToolInput: { command: 'rm -rf ./dist' } },
+    },
+  });
+  const markup = renderOverlay([safetyPermission], 'sess-current', [sessionSummary()]);
+
+  assert.ok(markup.includes(i18nService.t('coworkApprovalAllowDelete')), 'destructive allow action rendered');
+  assert.ok(markup.includes(i18nService.t('coworkDeny')), 'deny action rendered');
+});
+
 test('overlay shows the first prompt that has no inline seat when several queue up', () => {
   const markup = renderOverlay(
     [
