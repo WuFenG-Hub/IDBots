@@ -134,13 +134,48 @@ test('getAddressBalance exposes mempool satoshis for a freshly gas-subsidized MV
   try {
     const balance = await addressBalanceService.getAddressBalance('mvc', 'fresh-bot-wallet');
 
-    assert.equal(balance.satoshis, 0);
-    assert.equal(balance.unconfirmedSatoshis, 501800);
     assert.equal(
-      balance.satoshis + balance.unconfirmedSatoshis,
+      balance.satoshis,
       501800,
-      'spendable balance (confirmed + mempool) must cover the subsidy payout',
+      'satoshis must be the spendable total (confirmed + mempool), not the confirmed-only subset',
     );
+    assert.equal(balance.unconfirmedSatoshis, 501800, 'mempool portion is reported separately');
+    assert.equal(
+      balance.value,
+      0.005018,
+      'displayed value must include the unconfirmed-but-spendable subsidy payout',
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('getAddressBalance includes unconfirmed satoshis in the DOGE spendable total', async () => {
+  const originalFetch = global.fetch;
+
+  global.fetch = async (url) => {
+    const href = String(url);
+    if (href.includes('/wallet-api/v4/doge/address/balance-info')) {
+      return jsonResponse({
+        code: 0,
+        message: 'success',
+        data: {
+          address: 'test-doge-address',
+          confirmed: 100000,
+          unconfirmed: 2500,
+          utxoCount: 2,
+        },
+      });
+    }
+    throw new Error(`Unexpected fetch URL: ${href}`);
+  };
+
+  try {
+    const balance = await addressBalanceService.getAddressBalance('doge', 'test-doge-address');
+
+    assert.equal(balance.satoshis, 102500, 'satoshis must be confirmed + mempool');
+    assert.equal(balance.unconfirmedSatoshis, 2500, 'mempool portion is reported separately');
+    assert.equal(balance.value, 0.001025);
   } finally {
     global.fetch = originalFetch;
   }
