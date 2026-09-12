@@ -7,6 +7,7 @@ import GigSquareRefundsModal, {
   dispatchGigSquareRefundSessionView,
 } from '../src/renderer/components/gigSquare/GigSquareRefundsModal';
 import type { GigSquareRefundCollections } from '../src/renderer/types/gigSquare';
+import { i18nService } from '../src/renderer/services/i18n';
 
 function createRefunds(overrides?: Partial<GigSquareRefundCollections>): GigSquareRefundCollections {
   return {
@@ -74,16 +75,16 @@ test('seller tab renders refund workspace details, amount, process action, and s
     />
   );
 
-  assert.match(markup, /服务退款/);
-  assert.match(markup, /我需处理的退款/);
+  assert.ok(markup.includes(i18nService.t('gigSquareRefundsTitle')), 'refunds title rendered');
+  assert.ok(markup.includes(i18nService.t('gigSquareRefundsTabPending')), 'pending tab label rendered');
   assert.match(markup, /Alice Buyer/);
   assert.match(markup, /buyer-global-1/);
   assert.match(markup, /1\.5/);
   assert.match(markup, /SPACE/);
   assert.match(markup, /Weather Analyst/);
-  assert.match(markup, /处理退款/);
-  assert.match(markup, /查看会话/);
-  assert.match(markup, /复制到剪贴板/);
+  assert.ok(markup.includes(i18nService.t('gigSquareRefundsProcess')), 'process action rendered');
+  assert.ok(markup.includes(i18nService.t('gigSquareRefundsViewSession')), 'session action rendered');
+  assert.ok(markup.includes(i18nService.t('copyToClipboard')), 'copy control rendered');
 });
 
 test('buyer tab hides the process action and shows buyer-side refund content', () => {
@@ -99,12 +100,12 @@ test('buyer tab hides the process action and shows buyer-side refund content', (
     />
   );
 
-  assert.match(markup, /我发起的退款/);
+  assert.ok(markup.includes(i18nService.t('gigSquareRefundsTabInitiated')), 'initiated tab label rendered');
   assert.match(markup, /Seller Ops/);
   assert.match(markup, /seller-global-9/);
   assert.match(markup, /Translate Desk/);
-  assert.match(markup, /查看会话/);
-  assert.doesNotMatch(markup, /处理退款/);
+  assert.ok(markup.includes(i18nService.t('gigSquareRefundsViewSession')), 'session action rendered');
+  assert.ok(!markup.includes(i18nService.t('gigSquareRefundsProcess')), 'buyer tab hides the process action');
 });
 
 test('view session helper dispatches cowork:viewSession and closes the modal', () => {
@@ -179,7 +180,7 @@ test('seller processing state disables every refund action while the active row 
     />
   );
 
-  assert.match(markup, /处理中\.\.\./);
+  assert.ok(markup.includes(i18nService.t('gigSquareRefundsProcessing')), 'processing copy rendered');
   assert.equal((markup.match(/disabled=""/g) || []).length, 2);
 });
 
@@ -243,10 +244,10 @@ test('renders dates, failure reason labels, and tab-specific empty states', () =
     />
   );
 
-  assert.match(populatedMarkup, /失败原因/);
-  assert.match(populatedMarkup, /5 分钟内未首次响应/);
-  assert.match(populatedMarkup, /退款时间|完成时间/);
+  assert.ok(populatedMarkup.includes(i18nService.t('gigSquareRefundsFailureReason')), 'failure reason label rendered');
+  assert.ok(populatedMarkup.includes(i18nService.t('coworkRefundReasonFirstResponseTimeout')), 'failure reason text rendered');
+  assert.ok(populatedMarkup.includes(i18nService.t('gigSquareRefundsDateRefunded')), 'refunded date label rendered');
   assert.doesNotMatch(populatedMarkup, /1970/);
-  assert.match(emptySellerMarkup, /暂无需要你处理的退款/);
-  assert.match(emptyBuyerMarkup, /暂无你发起的退款/);
+  assert.ok(emptySellerMarkup.includes(i18nService.t('gigSquareRefundsEmptyPending')), 'seller empty state rendered');
+  assert.ok(emptyBuyerMarkup.includes(i18nService.t('gigSquareRefundsEmptyInitiated')), 'buyer empty state rendered');
 });

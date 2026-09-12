@@ -43,7 +43,8 @@ test('MetaBotListCard renders global meta id summary below the avatar with a cop
   );
 
   assert.match(markup, /metaid:idq14h\.\.\.\.g9xz/);
-  assert.match(markup, /title="复制 metaid"/);
+  assert.match(markup, /title="Copy metaid"/);
+  assert.match(markup, /aria-label="Copy metaid"/);
 });
 
 test('MetaBotListCard shows the Twin badge only on the Twin bot', () => {

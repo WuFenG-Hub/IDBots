@@ -6,6 +6,7 @@ import GigSquareMyServicesModal, {
   buildModifyDraftFromService,
   dispatchGigSquareMyServiceOrderSessionView,
 } from '../src/renderer/components/gigSquare/GigSquareMyServicesModal';
+import { i18nService } from '../src/renderer/services/i18n';
 
 test('empty-state modal renders go-publish CTA', () => {
   const markup = renderToStaticMarkup(
@@ -18,7 +19,7 @@ test('empty-state modal renders go-publish CTA', () => {
     />
   );
 
-  assert.match(markup, /去发布服务/);
+  assert.ok(markup.includes(i18nService.t('gigSquareMyServicesGoPublish')), 'go-publish CTA rendered');
 });
 
 test('list view shows plain rating score and renders second-based updatedAt as a real date', () => {
@@ -64,9 +65,9 @@ test('list view shows plain rating score and renders second-based updatedAt as a
 
   assert.doesNotMatch(markup, /1970/);
   assert.doesNotMatch(markup, /· 6/);
-  assert.match(markup, /平均评分/);
+  assert.ok(markup.includes(i18nService.t('gigSquareMyServicesRatingAvg')), 'avg rating label rendered');
   assert.match(markup, />5\.0</);
-  assert.match(markup, /创建 MetaBot[^<]*CreatorBot/);
+  assert.ok(markup.includes(`${i18nService.t('gigSquareMyServicesCreatorMetabot')} CreatorBot`), 'creator metabot rendered');
 });
 
 test('detail view renders completed\\/refunded order rows and a disabled session action when sessionId is missing', () => {
@@ -115,14 +116,14 @@ test('detail view renders completed\\/refunded order rows and a disabled session
     />
   );
 
-  assert.match(markup, /退款/);
+  assert.ok(markup.includes(i18nService.t('gigSquareMyServicesStatusRefunded')), 'refunded status label rendered');
   assert.match(markup, /Alice/);
   assert.match(markup, /idq14h\.\.\.9xz/);
   assert.doesNotMatch(markup, /idq14h123456789abcdef9xz/);
   assert.match(markup, /example\.com\/avatar\.png/);
-  assert.match(markup, /评价 Txid|Rating Txid/);
-  assert.match(markup, /复制到剪贴板/);
-  assert.match(markup, /本机无对应会话记录/);
+  assert.ok(markup.includes(i18nService.t('gigSquareMyServicesOrderRatingTxid')), 'rating txid label rendered');
+  assert.ok(markup.includes(i18nService.t('copyToClipboard')), 'copy control rendered');
+  assert.ok(markup.includes(i18nService.t('gigSquareMyServicesNoSession')), 'missing-session hint rendered');
 });
 
 test('my-service order session helper dispatches focused order view and closes the modal', () => {
