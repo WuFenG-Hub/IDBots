@@ -26,6 +26,19 @@ import {
   METAID_RPC_AUTHFILE_ENV,
 } from '../services/metaidRpcEndpoint'
 import { DshKernel, isSessionEncodingMismatchError } from './dshKernel/dshKernel'
+import { DshShutdownError } from './dshShutdownError'
+
+/**
+ * The runtime process died on its own (crash/OOM/kill) — as opposed to a
+ * deliberate close/restart. The SDK surfaces this as a closedError whose
+ * message names the exit; `DshKernel: closed` is deliberately excluded
+ * (that one means *we* closed it, e.g. app shutdown — see DshShutdownError).
+ */
+function isUnexpectedRuntimeExitError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error ?? '')
+  if (text.includes('DshKernel: closed') || text.includes('DshTurnHub: shutting down')) return false
+  return /runtime exited|stream closed/i.test(text)
+}
 import type { DshKernelOptions } from './dshKernel/dshKernel'
 import { dshModelReasoningDeclaration } from './dshModelReasoning'
 import type {
@@ -382,6 +395,9 @@ export class DshTurnHub {
    *  same stickiness as the pre-split single runtime. */
   private webSearchSeen: { apiKey: string; baseURL: string } | null = null
   private reapTimer: ReturnType<typeof setTimeout> | null = null
+  /** Set the moment close() begins: turns submitted afterwards fail soft
+   *  (DshShutdownError) instead of booting orphan runtimes during shutdown. */
+  private closed = false
   private readonly opts: DshHubOptions
 
   constructor(opts: DshHubOptions) {
@@ -434,6 +450,7 @@ export class DshTurnHub {
 
   /** Start (or reuse) the runtime and run one turn to completion. */
   async runTurn(input: DshTurnInput): Promise<DshTurnOutcome> {
+    if (this.closed) throw new DshShutdownError()
     const nextKey = dshRuntimeKeyOf(input.provider)
     const prevKey = this.runtimeKeyByDsh.get(input.dshSessionId)
     // Same dsh session id + a new provider key: the old process still holds
@@ -482,31 +499,72 @@ export class DshTurnHub {
         hostTools: input.hostTools,
         ...(input.workspace?.cwd ? { cwd: input.workspace.cwd } : {}),
       }
-      try {
-        await kernel.ensureSession(ensureSessionInput)
-      } catch (error) {
-        const slot = this.slots.get(nextKey)
-        // Heal only zstd compositions — a plaintext ('none') test composition
-        // must not have its artifacts migrated out from under it.
-        if (!slot || !isSessionEncodingMismatchError(error) || slot.lastConfigJson?.includes('"persistenceCompression":"none"')) {
-          throw error
+      let runtimeRespawnAttempted = false
+      for (;;) {
+        if (this.closed) throw new DshShutdownError()
+        try {
+          try {
+            await kernel.ensureSession(ensureSessionInput)
+          } catch (error) {
+            const slot = this.slots.get(nextKey)
+            // Heal only zstd compositions — a plaintext ('none') test composition
+            // must not have its artifacts migrated out from under it.
+            if (!slot || !isSessionEncodingMismatchError(error) || slot.lastConfigJson?.includes('"persistenceCompression":"none"')) {
+              throw error
+            }
+            this.opts.log?.('warn', 'dshTurnHub.encodingMismatchHeal', {
+              runtime: nextKey,
+              sessionId: input.sessionId,
+              message: error instanceof Error ? error.message : String(error),
+            })
+            await kernel.remigrateSessionRootToZstd()
+            // Never boot the successor into a closing hub — that would orphan
+            // a runtime process during app shutdown.
+            if (this.closed) throw new DshShutdownError()
+            const successor = this.supersedeKernel(slot)
+            const config = this.buildRuntimeConfig(slot, input)
+            await successor.ensureRuntime(config)
+            slot.lastConfigJson = JSON.stringify(config)
+            kernel = successor
+            this.kernelByDsh.set(input.dshSessionId, successor)
+            await successor.ensureSession(ensureSessionInput)
+          }
+          await kernel.prompt(input.dshSessionId, input.prompt, input.promptImages)
+          break
+        } catch (error) {
+          // A closing hub (app quit) kills in-flight session calls with raw
+          // transport errors ("DeepSeek Harness runtime closed", "exited"…)
+          // that name no shutdown — reclassify by state, not text, so every
+          // caller sees the one soft-fail type.
+          if (this.closed) throw new DshShutdownError()
+          // Unexpected runtime death (crash/OOM): the kernel keeps a stale
+          // client and every session call would fail the turn into session
+          // 'error'. Respawn the process once and retry the ensure+prompt;
+          // anything on the second failure propagates as before.
+          if (runtimeRespawnAttempted || !isUnexpectedRuntimeExitError(error)) {
+            throw error
+          }
+          runtimeRespawnAttempted = true
+          this.opts.log?.('warn', 'dshTurnHub.respawnAfterUnexpectedExit', {
+            runtime: nextKey,
+            sessionId: input.sessionId,
+            message: error instanceof Error ? error.message : String(error),
+          })
+          const slot = this.slots.get(nextKey) ?? this.getOrCreateSlot(nextKey)
+          const config = this.buildRuntimeConfig(slot, input)
+          await kernel.restart(config)
+          slot.lastConfigJson = JSON.stringify(config)
+          this.kernelByDsh.set(input.dshSessionId, kernel)
         }
-        this.opts.log?.('warn', 'dshTurnHub.encodingMismatchHeal', {
-          runtime: nextKey,
-          sessionId: input.sessionId,
-          message: error instanceof Error ? error.message : String(error),
-        })
-        await kernel.remigrateSessionRootToZstd()
-        const successor = this.supersedeKernel(slot)
-        const config = this.buildRuntimeConfig(slot, input)
-        await successor.ensureRuntime(config)
-        slot.lastConfigJson = JSON.stringify(config)
-        kernel = successor
-        this.kernelByDsh.set(input.dshSessionId, successor)
-        await successor.ensureSession(ensureSessionInput)
       }
-      await kernel.prompt(input.dshSessionId, input.prompt, input.promptImages)
-      return await controller.done()
+      try {
+        return await controller.done()
+      } catch (error) {
+        // Same reclassification for the streaming stage: the runtime was
+        // closed out from under the turn by app shutdown, not by the turn.
+        if (this.closed) throw new DshShutdownError()
+        throw error
+      }
     } finally {
       this.controllersByDsh.delete(input.dshSessionId)
       this.dshByCowork.delete(input.sessionId)
@@ -779,6 +837,7 @@ export class DshTurnHub {
   }
 
   async close(): Promise<void> {
+    this.closed = true
     if (this.reapTimer) {
       clearTimeout(this.reapTimer)
       this.reapTimer = null
@@ -1029,6 +1088,7 @@ export class DshTurnHub {
   }
 
   private async ensureKernel(input: DshTurnInput, options?: DshEnsureKernelOptions): Promise<DshKernel> {
+    if (this.closed) throw new DshShutdownError()
     // Apply this slot's route/MCP/workspace immediately so a racing first
     // turn can steer a still-booting warmup spawn (config is snapshotted
     // only after the per-slot serialize lock is acquired).

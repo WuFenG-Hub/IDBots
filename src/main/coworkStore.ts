@@ -3695,6 +3695,38 @@ export class CoworkStore implements MemoryBackend {
     return modified;
   }
 
+  /**
+   * Boot-time heal for shutdown-aborted A2A sessions (the 2026-09-12 mass
+   * 'error' incident): when the app quit closes the DSH runtime, in-flight
+   * A2A turns crashed with `DshKernel: closed` and CoworkRunner.handleError
+   * parked the conversation on 'error' with a persisted system marker. That
+   * was never a conversation failure — restore the healthy resting status
+   * 'completed' so the session list drops the error banner. Deliberately
+   * narrow: only a2a/agent_agent sessions still on 'error' whose LATEST
+   * transcript message is exactly that shutdown marker are touched; any
+   * later activity means the live heal (healStaleA2AErrorStatus) owns the
+   * session. The system message stays in the transcript as history.
+   */
+  healDshShutdownA2AErrorSessions(): number {
+    if (!this.tableExists('cowork_sessions') || !this.tableExists('cowork_messages')) {
+      return 0;
+    }
+    const candidates = this.getAll<{ id: string }>(`
+      SELECT id FROM cowork_sessions
+      WHERE status = 'error' AND session_type IN ('a2a', 'agent_agent')
+    `);
+    let healed = 0;
+    for (const candidate of candidates) {
+      const latest = this.getSessionMessagesPage(candidate.id, { limit: 1 });
+      const last = latest?.messages?.[latest.messages.length - 1];
+      if (last?.type !== 'system') continue;
+      if (!/^Error: (DshKernel: closed|DshTurnHub: shutting down)/.test(last.content ?? '')) continue;
+      this.updateSession(candidate.id, { status: 'completed' });
+      healed += 1;
+    }
+    return healed;
+  }
+
   markInterruptedSteersAfterRestart(now: number = Date.now()): number {
     if (!this.tableExists('cowork_messages')) {
       return 0;

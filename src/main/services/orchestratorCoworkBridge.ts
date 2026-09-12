@@ -9,6 +9,7 @@ import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { buildOrchestratorSessionTitle } from '../libs/orchestratorSessionTitle';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
+import { isDshShutdownError } from '../libs/dshShutdownError';
 import {
   claimManagedOrchestratorSession,
   resolveOrchestratorPermissionReply,
@@ -308,6 +309,17 @@ export async function runOrchestratorSkillTurn(
       reject(typeof err === 'string' ? new Error(err) : err);
     };
 
+    // Shutdown-abort path: app/host quit closed the DSH runtime mid-turn.
+    // That is not a session failure — reject the caller's promise but leave
+    // the session status alone (a 'running' remnant is normalized to 'idle'
+    // by the next boot's resetRunningSessions).
+    const cancelWithoutSessionError = (err: string | Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(typeof err === 'string' ? new Error(err) : err);
+    };
+
     const extractLastAssistantContent = (): string => {
       const messages = store.getSession(sessionId)?.messages ?? [];
       return extractFinalAssistantReply(messages).replyText;
@@ -368,6 +380,10 @@ export async function runOrchestratorSkillTurn(
       if (sid !== sessionId) return;
       if (recoveryActive) {
         reportLateTermination('error', errorMessage);
+        return;
+      }
+      if (isDshShutdownError(errorMessage)) {
+        cancelWithoutSessionError(errorMessage);
         return;
       }
       fail(errorMessage);
@@ -436,7 +452,12 @@ export async function runOrchestratorSkillTurn(
       })
       .catch((err) => {
         console.error('[Orchestrator] [Bridge] startSession rejected:', err instanceof Error ? err.message : String(err));
-        if (!settled) fail(err instanceof Error ? err : new Error(String(err)));
+        if (settled) return;
+        if (isDshShutdownError(err)) {
+          cancelWithoutSessionError(err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
+        fail(err instanceof Error ? err : new Error(String(err)));
       });
   });
 }
@@ -557,6 +578,10 @@ export async function runSkillTurnInExistingSession(
 
     const onError = (sid: string, errorMessage: string) => {
       if (sid !== sessionId) return;
+      if (isDshShutdownError(errorMessage)) {
+        cancelWithoutSessionError(errorMessage);
+        return;
+      }
       fail(errorMessage);
     };
 
@@ -613,7 +638,12 @@ export async function runSkillTurnInExistingSession(
       })
       .catch((err) => {
         console.error('[Orchestrator] [Bridge] start existing session rejected:', err instanceof Error ? err.message : String(err));
-        if (!settled) fail(err instanceof Error ? err : new Error(String(err)));
+        if (settled) return;
+        if (isDshShutdownError(err)) {
+          cancelWithoutSessionError(err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
+        fail(err instanceof Error ? err : new Error(String(err)));
       });
   });
 }

@@ -13,6 +13,7 @@ import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, ge
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
 import { DshTurnHub, dshSessionRootFor, isNativeDeepSeekChatRoute, type DshTurnProviderRoute } from './coworkDshTurn';
+import { isDshShutdownError } from './dshShutdownError';
 import { truncateUtf16Units } from './llmSafeText';
 import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
@@ -6175,6 +6176,7 @@ export class CoworkRunner extends EventEmitter {
       this.markCrossSessionTurnRunning(sessionId);
       await this.runClaudeCode(activeSession, prompt, sessionCwd, effectiveSystemPrompt);
     } catch (error) {
+      if (isDshShutdownError(error)) throw error;
       console.error('Cowork session error:', error);
     } finally {
       this.markCrossSessionTurnSettled(sessionId);
@@ -6296,6 +6298,7 @@ export class CoworkRunner extends EventEmitter {
       this.markCrossSessionTurnRunning(sessionId);
       await this.runClaudeCode(activeSession, prompt, sessionCwd, effectiveSystemPrompt);
     } catch (error) {
+      if (isDshShutdownError(error)) throw error;
       console.error('Cowork continue error:', error);
     } finally {
       this.markCrossSessionTurnSettled(sessionId);
@@ -8293,6 +8296,18 @@ export class CoworkRunner extends EventEmitter {
       this.settleDshSteerSubmissions(activeSession, 'settled');
       this.removeActiveSession(sessionId, activeSession);
     } catch (error) {
+      if (isDshShutdownError(error)) {
+        // App/host shutdown closed the runtime mid-turn. This is not a
+        // session failure: no 'error' status, no persisted Error bubble —
+        // rethrow so the caller's promise rejects and its own soft path
+        // (guidance-abort style) applies. The next boot re-drives the work.
+        coworkLog('INFO', 'runDshSessionLocal', 'turn aborted: DSH runtime is shutting down', { sessionId });
+        this.clearPendingPermissions(sessionId);
+        this.settleDshSteerSubmissions(activeSession, 'settled');
+        this.removeActiveSession(sessionId, activeSession);
+        this.dshActiveTurns.delete(sessionId);
+        throw error;
+      }
       coworkLog('ERROR', 'runDshSessionLocal', 'turn crashed', { sessionId, error: String(error) });
       this.handleError(sessionId, error instanceof Error ? error.message : String(error));
       this.clearPendingPermissions(sessionId);

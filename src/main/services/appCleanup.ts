@@ -6,6 +6,13 @@ export interface AppCleanupDeps {
   /** Drain every DSH runtime subprocess. Optional so older cleanup
    *  callers that only stop cowork sessions still type-check. */
   closeDshRuntime?: () => Promise<void>;
+  /** Polling daemons that keep launching cowork/LLM turns. They must stop
+   *  BEFORE the DSH runtime closes — otherwise their in-window turns crash
+   *  with `DshKernel: closed` (the 2026-09-12 mass A2A session 'error'
+   *  incident). Optional so older cleanup callers still type-check. */
+  stopPrivateChatDaemon?: () => Promise<void> | void;
+  stopGroupTaskDaemon?: () => void;
+  stopOpenTeamGuestDaemon?: () => void;
   stopOpenAICompatProxy: () => Promise<void>;
   stopSkillServices: () => Promise<void>;
   stopIMGateways: () => Promise<void>;
@@ -23,6 +30,15 @@ export interface AppCleanupDeps {
 
 export async function runAppCleanup(deps: AppCleanupDeps): Promise<void> {
   deps.log('[Main] App is quitting, starting cleanup...');
+  // Turn-generating loops first: no new scheduled/orchestrated/chat turns may
+  // start once cowork sessions and the DSH runtime begin tearing down.
+  await Promise.resolve(deps.stopPrivateChatDaemon?.()).catch((error: unknown) => {
+    deps.error('[PrivateChat] Error stopping daemon on quit:', error);
+  });
+  deps.stopGroupTaskDaemon?.();
+  deps.stopOpenTeamGuestDaemon?.();
+  deps.stopScheduler();
+  deps.stopCognitiveOrchestrator();
   deps.destroyTray();
   deps.stopSkillWatching();
   deps.closeMetaidRpcServer();
@@ -47,8 +63,6 @@ export async function runAppCleanup(deps: AppCleanupDeps): Promise<void> {
     deps.error('[p2p] Error stopping local indexer on quit:', error);
   });
 
-  deps.stopScheduler();
-  deps.stopCognitiveOrchestrator();
   deps.stopDreamService();
   deps.stopMemoryHygieneService?.();
   deps.stopProviderDiscovery();
