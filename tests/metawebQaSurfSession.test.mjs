@@ -36,7 +36,6 @@ function makeHarness(overrides = {}) {
   const calls = { setEnabled: [], startSurf: [], legacyDisable: [] };
   const metawebStudy = {
     enqueueStudyJob: async () => { throw new Error('not used here'); },
-    enqueueQaSurfJob: () => { throw new Error('legacy path must not be used'); },
     disableQaSurfJob: (metabotId) => {
       calls.legacyDisable.push(metabotId);
       return true;
@@ -71,10 +70,30 @@ test('registers the surf enable/disable tools beside the study tools', () => {
   const { byName } = makeHarness();
   assert.deepEqual(Object.keys(byName), [
     'metaweb_study_enqueue',
+    'metaweb_study_status',
     'metaweb_qa_surf_enqueue',
     'metaweb_qa_surf_disable',
-    'metaweb_study_status',
   ]);
+});
+
+test('study tools register without the surf control (controls are decoupled)', () => {
+  const metawebStudy = {
+    enqueueStudyJob: async () => { throw new Error('not used here'); },
+    disableQaSurfJob: () => true,
+    listStudyJobs: () => [],
+  };
+  const tools = buildMetawebStudyAgentTools({
+    tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
+    metawebStudy,
+    // no metawebSurf — a study-only embedding must keep the topic tools
+    sessionId: SESSION_ID,
+    resolveMetabotId: () => METABOT_ID,
+  });
+  assert.deepEqual(
+    tools.map((tool) => tool.name),
+    ['metaweb_study_enqueue', 'metaweb_study_status'],
+    'topic tools survive a missing surf control; legacy aliases drop out',
+  );
 });
 
 test('metaweb_qa_surf_enqueue aliases to MetaWeb surf: enables pre-dream surf, retires the legacy job, starts one run now', async () => {

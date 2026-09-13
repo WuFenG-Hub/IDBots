@@ -245,17 +245,6 @@ export class MetawebStudyJobStore {
     return row ? rowToRecord(row) : null;
   }
 
-  /** The active recurring Q&A-surf job for a bot — one per bot by design. */
-  findActiveQaSurf(metabotId: number): MetawebStudyJobRecord | null {
-    const row = this.getOne<MetawebStudyJobRow>(
-      `SELECT * FROM metaweb_study_jobs
-       WHERE metabot_id = ? AND kind = 'qa-surf' AND status IN ('pending', 'running')
-       LIMIT 1`,
-      [metabotId],
-    );
-    return row ? rowToRecord(row) : null;
-  }
-
   /**
    * Owner-disable path for the recurring Q&A-surf job: move the bot's active
    * surf job to 'done' with a note. Returns how many rows were disabled
