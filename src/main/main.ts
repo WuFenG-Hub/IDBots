@@ -7055,6 +7055,11 @@ const getSurfService = (): SurfService => {
       // manual triggers fail loudly, the pre-dream path skips quietly.
       isMemoryEnabled: (metabotId) =>
         getCoworkStore().getEffectiveMemoryPolicyForMetabot(metabotId).memoryEnabled,
+      // Pre-briefing seen-ledger reconciliation (round 3, live 小昆-2): the
+      // local writes ledger re-derives receipts lost to crashes/kills, so the
+      // duplicate-interaction guard never works off a stale ledger.
+      listChainWritesForSurf: (metabotId) =>
+        getChainContentHistoryStore().listWritesForSurfReconciliation(metabotId),
       broadcast: (payload) => {
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) {

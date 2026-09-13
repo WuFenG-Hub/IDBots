@@ -22,6 +22,7 @@ import {
 } from '../metawebSurfStore';
 import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing } from '../libs/surfBriefing';
 import { extractSurfNotesFromReportJson } from '../libs/surfPrompt';
+import { surfReceiptsFromChainWriteRecord } from '../libs/surfInteractionGuard';
 import { DEFAULT_SURF_PROTOCOLS, type SurfProtocolDescriptor } from '../libs/surfProtocols';
 import { getSurfInteractionBudget, isSurfBeforeDreamEnabled, type SurfSettingsReader } from './surfSettings';
 
@@ -83,6 +84,17 @@ export interface SurfServiceDeps {
    * no KB/memory tools and the prompt says so. Absent → gate off (tests).
    */
   isMemoryEnabled?: (metabotId: number) => boolean;
+  /**
+   * Local chain-writes ledger read for the pre-briefing reconciliation
+   * (round 3): receipts lost to a crash/kill mid-run (or a stopped orphan
+   * session) are re-derived before every run so the duplicate-interaction
+   * guard never works off a stale ledger. Absent → reconciliation skipped.
+   */
+  listChainWritesForSurf?: (metabotId: number) => Array<{
+    pinId: string;
+    path: string | null;
+    contentText: string | null;
+  }>;
   registry?: SurfProtocolDescriptor[];
   nowMs?: () => number;
 }
@@ -93,6 +105,7 @@ export class SurfService {
   private readonly broadcast: (payload: SurfStatusEvent) => void;
   private readonly runSurfSession?: (context: SurfSessionContext) => Promise<SurfSessionResult>;
   private readonly isMemoryEnabled?: (metabotId: number) => boolean;
+  private readonly listChainWritesForSurf?: SurfServiceDeps['listChainWritesForSurf'];
   private readonly registry: SurfProtocolDescriptor[];
   private readonly nowMs: () => number;
   private readonly runningByMetabot = new Map<number, string>();
@@ -103,6 +116,7 @@ export class SurfService {
     this.broadcast = deps.broadcast;
     this.runSurfSession = deps.runSurfSession;
     this.isMemoryEnabled = deps.isMemoryEnabled;
+    this.listChainWritesForSurf = deps.listChainWritesForSurf;
     this.registry = deps.registry ?? DEFAULT_SURF_PROTOCOLS;
     this.nowMs = deps.nowMs ?? (() => Date.now());
   }
@@ -131,6 +145,26 @@ export class SurfService {
       return extractSurfNotesFromReportJson(latest?.reportJson ?? null);
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Backfill the seen ledger from the local chain-writes ledger (round 3):
+   * every own write is a 'posted' receipt and every extractable interaction
+   * payload yields its target receipt. Strongest-wins batching makes this a
+   * no-op when the ledger is already current. Best-effort — a sick writes
+   * ledger must not block a surf run.
+   */
+  private reconcileSeenLedger(metabotId: number): void {
+    if (!this.listChainWritesForSurf) return;
+    try {
+      const rows = this.listChainWritesForSurf(metabotId);
+      const receipts = rows.flatMap((row) => surfReceiptsFromChainWriteRecord(row));
+      if (receipts.length > 0) {
+        this.store.markSeenBatch(metabotId, receipts, new Date(this.nowMs()).toISOString());
+      }
+    } catch {
+      // Reconciliation is insurance, never a run blocker.
     }
   }
 
@@ -207,6 +241,11 @@ export class SurfService {
     };
     let fetchedCount = 0;
     try {
+      // Reconcile the seen ledger against the local chain-writes ledger first
+      // (round 3): receipts lost to a crash/kill mid-run or a stopped orphan
+      // session are re-derived locally — the duplicate-interaction guard must
+      // never work off a stale ledger. Idempotent (strongest-wins batching).
+      this.reconcileSeenLedger(metabotId);
       const budget = getSurfInteractionBudget(this.metabotStore, metabotId);
       const briefing = await buildSurfBriefing({
         store: this.store,

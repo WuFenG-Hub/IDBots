@@ -311,3 +311,56 @@ test('the next run inherits the notes written by the previous DONE run (round 3)
   await service.runSurfAndWait(7, 'manual-ui');
   assert.equal(seenContext.previousNotes, 'E-4/E-5 errata still pending implementation — check again');
 });
+
+test('pre-briefing reconciliation backfills lost receipts and filters own posts (round 3)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([
+      makeItem('pin-orphan-liked', NOW_SEC - 100),
+      makeItem('pin-own-post', NOW_SEC - 90),
+      makeItem('pin-fresh', NOW_SEC - 80),
+    ])],
+    // A crash/orphan scenario: the bot DID like pin-orphan-liked and publish
+    // pin-own-post, but neither receipt ever reached the seen ledger.
+    listChainWritesForSurf: () => [
+      { pinId: 'reaction-1', path: '/protocols/paylike', contentText: JSON.stringify({ isLike: 1, likeTo: 'pin-orphan-liked' }) },
+      { pinId: 'pin-own-post', path: '/protocols/simplebuzz', contentText: '{"content":"mine"}' },
+    ],
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'done');
+  assert.equal(store.getSeenAction(7, 'pin-orphan-liked'), 'liked', 'lost like receipt restored locally');
+  assert.equal(store.getSeenAction(7, 'pin-own-post'), 'posted', 'own post marked posted');
+  assert.equal(store.getSeenAction(7, 'reaction-1'), 'posted', 'the reaction pin itself is own content');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(run.stats)).fetched,
+    1,
+    'only the genuinely fresh pin is presented — reconciled pins stay out of the digest',
+  );
+});
+
+test('a run with no reconciliation dep simply skips it', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'done');
+  assert.equal(run.stats.fetched, 1);
+});

@@ -502,6 +502,23 @@ export class ChainContentHistoryStore {
     return modified;
   }
 
+  /**
+   * One bot's writes (newest-bounded) for the surf seen-ledger reconciliation
+   * (round 3): receipts lost to a crash/kill mid-run or a stopped orphan
+   * session are re-derived locally from this ledger before each surf run —
+   * a duplicate interaction prevented here costs nothing, one that slips
+   * through costs gas.
+   */
+  listWritesForSurfReconciliation(metabotId: number, limit = 2000): MetabotChainWriteRecord[] {
+    const capped = Math.max(1, Math.min(5000, Math.floor(limit)));
+    return this.getAll<ChainWriteRow>(
+      `SELECT * FROM metabot_chain_writes
+       WHERE metabot_id = ?
+       ORDER BY occurred_at_ms DESC LIMIT ?`,
+      [metabotId, capped],
+    ).map(writeRowToRecord);
+  }
+
   /** Oldest first across ALL bots — the summary service drains this queue. */
   listPendingSummaries(kind: 'write' | 'read', limit: number): Array<MetabotChainWriteRecord | MetabotChainReadRecord> {
     const capped = Math.max(1, Math.min(200, Math.floor(limit)));

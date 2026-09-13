@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { createSurfCreatePinGuard, surfReceiptSeenActions, foldSurfReceiptsIntoSeenActions, recordSurfDeepRead, surfDeepReadReceiptSeenActions, surfSessionPartialStats } = await import('../dist-electron/main/libs/surfInteractionGuard.js');
+const { createSurfCreatePinGuard, surfReceiptSeenActions, foldSurfReceiptsIntoSeenActions, recordSurfDeepRead, surfDeepReadReceiptSeenActions, surfSessionPartialStats, surfReceiptsFromChainWriteRecord } = await import('../dist-electron/main/libs/surfInteractionGuard.js');
 
 const METABOT_ID = 7;
 
@@ -301,4 +301,35 @@ test('surfSessionPartialStats counts only what the host can vouch for (round 3)'
     liked: 1, commented: 1, answered: 1, challenged: 0, posted: 1,
     savedToKb: 3, deepRead: 2,
   });
+});
+
+test('surfReceiptsFromChainWriteRecord re-derives posted + interaction receipts (round 3 reconciliation)', () => {
+  const like = surfReceiptsFromChainWriteRecord({
+    pinId: 'reaction-pin',
+    path: '/protocols/paylike',
+    contentText: JSON.stringify({ isLike: 1, likeTo: 'target-a' }),
+  });
+  assert.deepEqual(like, [
+    { pinId: 'reaction-pin', action: 'posted' },
+    { pinId: 'target-a', action: 'liked' },
+  ]);
+  const answer = surfReceiptsFromChainWriteRecord({
+    pinId: 'answer-pin',
+    path: '/protocols/simpleanswer',
+    contentText: JSON.stringify({ answerTo: 'q-1', content: 'a' }),
+  });
+  assert.deepEqual(answer, [
+    { pinId: 'answer-pin', action: 'posted' },
+    { pinId: 'q-1', action: 'answered' },
+  ]);
+  // An original post has no target: posted receipt only.
+  assert.deepEqual(
+    surfReceiptsFromChainWriteRecord({ pinId: 'buzz-pin', path: '/protocols/simplebuzz', contentText: '{"content":"hi"}' }),
+    [{ pinId: 'buzz-pin', action: 'posted' }],
+  );
+  // Unparsable payload never blocks the own-pin receipt.
+  assert.deepEqual(
+    surfReceiptsFromChainWriteRecord({ pinId: 'odd-pin', path: '/protocols/paylike', contentText: 'not json' }),
+    [{ pinId: 'odd-pin', action: 'posted' }],
+  );
 });
