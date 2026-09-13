@@ -423,3 +423,4 @@ man_base_data_pebble/
 !tests/surfPrompt.test.mjs
 !tests/surfAgentTools.test.mjs
 !tests/surfInteractionGuard.test.mjs
+!tests/surfProtocols.test.mjs
