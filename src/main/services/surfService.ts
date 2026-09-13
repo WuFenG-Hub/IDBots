@@ -21,6 +21,7 @@ import {
   type MetawebSurfTrigger,
 } from '../metawebSurfStore';
 import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing } from '../libs/surfBriefing';
+import { extractSurfNotesFromReportJson } from '../libs/surfPrompt';
 import { DEFAULT_SURF_PROTOCOLS, type SurfProtocolDescriptor } from '../libs/surfProtocols';
 import { getSurfInteractionBudget, isSurfBeforeDreamEnabled, type SurfSettingsReader } from './surfSettings';
 
@@ -52,6 +53,12 @@ export interface SurfSessionContext {
    * allowed with memory off (review 2, item 9 option B). Absent → full prompt.
    */
   memoryEnabled?: boolean;
+  /**
+   * The "notes for next surf" the bot wrote in its last DONE run's report,
+   * read back out of reportJson (round 3: notes were a write-only channel).
+   * Absent/null → no notes section in the prompt.
+   */
+  previousNotes?: string | null;
 }
 
 export interface SurfSessionResult {
@@ -111,6 +118,20 @@ export class SurfService {
 
   isRunning(metabotId: number): boolean {
     return this.runningByMetabot.has(metabotId);
+  }
+
+  /**
+   * The notes the bot wrote to itself in its last DONE run (round 3): read
+   * back out of reportJson so the next surf inherits its hard-won lessons.
+   * Best-effort — a missing/malformed note must never block a run.
+   */
+  private latestSurfNotes(metabotId: number): string | null {
+    try {
+      const latest = this.store.getLatestFinishedRun(metabotId);
+      return extractSurfNotesFromReportJson(latest?.reportJson ?? null);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -207,6 +228,7 @@ export class SurfService {
           botName: bot?.name ?? `Bot ${metabotId}`,
           trigger,
           briefing,
+          previousNotes: this.latestSurfNotes(metabotId),
         });
         Object.assign(stats, session.stats ?? {});
         reportMarkdown = session.reportMarkdown ?? null;

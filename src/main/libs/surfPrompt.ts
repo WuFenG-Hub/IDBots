@@ -89,6 +89,16 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
           '',
         ].join('\n')
       : null,
+    context.previousNotes
+      ? [
+          '## Notes from your previous surf',
+          '',
+          'You wrote these notes to yourself at the end of your last surf — your own prior lessons. Follow them, but verify anything that sounds stale:',
+          '',
+          context.previousNotes,
+          '',
+        ].join('\n')
+      : null,
     '## Tonight\'s fresh digest (new since your last surf; you have NOT seen these yet)',
     '',
     sections,
@@ -133,6 +143,27 @@ export interface ParsedSurfRunReport extends SurfSessionResult {
   /** Reported per-pin actions for the seen ledger (best-effort, LLM-reported). */
   seenActions: Array<{ pinId: string; action: MetawebSurfSeenAction }>;
   summary: string;
+}
+
+/** Longest previous-surf notes carried into the next prompt (prompt-bloat cap). */
+export const SURF_PREVIOUS_NOTES_MAX_CHARS = 2000;
+
+/**
+ * Pull the "notes for next surf" field out of a stored reportJson — the
+ * channel that lets one run hand hard-won lessons to the next (round 3:
+ * until now the notes were a write-only channel).
+ */
+export function extractSurfNotesFromReportJson(reportJson: string | null | undefined): string | null {
+  if (!reportJson) return null;
+  try {
+    const parsed: unknown = JSON.parse(reportJson);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const notes = (parsed as Record<string, unknown>).notes;
+    if (typeof notes !== 'string' || !notes.trim()) return null;
+    return notes.trim().slice(0, SURF_PREVIOUS_NOTES_MAX_CHARS);
+  } catch {
+    return null;
+  }
 }
 
 const asPinIdList = (value: unknown): string[] =>

@@ -281,3 +281,33 @@ test('a failed run without attached partial stats reports fetched only', async (
   assert.equal(run.stats.deepRead, 0);
   assert.equal(run.stats.liked, 0);
 });
+
+test('the next run inherits the notes written by the previous DONE run (round 3)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  store.createRun({ id: 'done-1', metabotId: 7, trigger: 'manual-ui', nowIso: '2026-09-12T01:00:00.000Z' });
+  store.finishRun('done-1', {
+    status: 'done',
+    stats: {},
+    reportMarkdown: '# old report',
+    reportJson: JSON.stringify({ summary: 'old', notes: 'E-4/E-5 errata still pending implementation — check again' }),
+    finishedAtIso: '2026-09-12T01:30:00.000Z',
+  });
+  let seenContext = null;
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    runSurfSession: async (context) => {
+      seenContext = context;
+      return { stats: {}, reportMarkdown: null, reportJson: null };
+    },
+    nowMs: () => NOW_MS,
+  });
+  await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(seenContext.previousNotes, 'E-4/E-5 errata still pending implementation — check again');
+});

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { buildSurfSessionPrompt, parseSurfRunReport, SURF_KB_ADD_BUDGET } = await import('../dist-electron/main/libs/surfPrompt.js');
+const { buildSurfSessionPrompt, parseSurfRunReport, extractSurfNotesFromReportJson, SURF_KB_ADD_BUDGET, SURF_PREVIOUS_NOTES_MAX_CHARS } = await import('../dist-electron/main/libs/surfPrompt.js');
 
 const makeItem = (pinId, protocolKey, title = '') => ({
   pinId,
@@ -156,4 +156,22 @@ test('prompt marks items held back by the run cap (round 3)', () => {
   context.briefing.protocols[0].droppedByTotalCap = 8;
   const prompt = buildSurfSessionPrompt(context);
   assert.match(prompt, /Buzz \(on-chain microblog\): 1 new since last surf \(\+ 8 more held back by the run cap — they remain unseen and will be presented next surf\)/);
+});
+
+test('previous-surf notes render as their own section, absent otherwise (round 3)', () => {
+  const withNotes = buildSurfSessionPrompt(makeContext({ previousNotes: 'check paylike history before liking' }));
+  assert.match(withNotes, /## Notes from your previous surf/);
+  assert.match(withNotes, /check paylike history before liking/);
+  assert.match(withNotes, /your own prior lessons/);
+  const withoutNotes = buildSurfSessionPrompt(makeContext());
+  assert.doesNotMatch(withoutNotes, /## Notes from your previous surf/);
+});
+
+test('extractSurfNotesFromReportJson is tolerant and caps length (round 3)', () => {
+  assert.equal(extractSurfNotesFromReportJson(null), null);
+  assert.equal(extractSurfNotesFromReportJson('not json'), null);
+  assert.equal(extractSurfNotesFromReportJson('{"summary":"x"}'), null);
+  assert.equal(extractSurfNotesFromReportJson('{"notes":"  trim me  "}'), 'trim me');
+  const long = extractSurfNotesFromReportJson(JSON.stringify({ notes: 'x'.repeat(5000) }));
+  assert.equal(long.length, SURF_PREVIOUS_NOTES_MAX_CHARS);
 });
