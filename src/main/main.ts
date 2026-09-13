@@ -2676,6 +2676,13 @@ let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
 let metawebSurfStore: MetawebSurfStore | null = null;
 let surfService: SurfService | null = null;
+/**
+ * Live cowork session id behind each in-flight surf run (set when the bridge
+ * creates the session, cleared when it settles). The pre-dream race uses it
+ * to STOP an overrunning surf session instead of letting it linger past the
+ * dream inside the bridge's late-completion window (review 2, item 8).
+ */
+const activeSurfSessionByMetabot = new Map<number, string>();
 let metawebStudyService: MetawebStudyService | null = null;
 let chainContentHistoryStore: ChainContentHistoryStore | null = null;
 let contentSummaryService: ContentSummaryService | null = null;
@@ -4087,7 +4094,24 @@ const startSqliteDaemons = (): void => {
             reportMarkdown: run.status === 'done' ? run.reportMarkdown : null,
           })),
           new Promise<null>((resolve) => {
-            timeout = setTimeout(() => resolve(null), PRE_DREAM_SURF_TIMEOUT_MS);
+            timeout = setTimeout(() => {
+              // Review 2, item 8: an overrunning surf must not linger past
+              // the dream — stop the underlying cowork session. Its own
+              // 30-min watchdog normally beats this race; without the stop,
+              // the bridge's late-completion window would let it keep
+              // reading/writing for hours after the dream already happened.
+              const sessionId = activeSurfSessionByMetabot.get(metabotId);
+              if (sessionId) {
+                try {
+                  getCoworkRunner().stopSession(sessionId, {
+                    reason: 'Pre-dream surf exceeded the 35-min race budget; the dream proceeds and the surf session is stopped.',
+                  });
+                } catch {
+                  // Already settled between the map read and the stop — fine.
+                }
+              }
+              resolve(null);
+            }, PRE_DREAM_SURF_TIMEOUT_MS);
           }),
         ]);
       } catch {
@@ -7067,7 +7091,10 @@ const getSurfService = (): SurfService => {
             disableMemoryUpdates: false,
             metawebSurfSession: writeState,
             skillTurnTimeoutMs: 30 * 60 * 1000,
-            onSessionCreated: (sessionId) => coworkStore.setSessionHiddenFromList(sessionId, true),
+            onSessionCreated: (sessionId) => {
+              activeSurfSessionByMetabot.set(context.metabotId, sessionId);
+              coworkStore.setSessionHiddenFromList(sessionId, true);
+            },
           });
           const report = parseSurfRunReport(replyText);
           // Receipts over self-report: the model's liked/commented/answered/
@@ -7090,6 +7117,8 @@ const getSurfService = (): SurfService => {
             }
           }
           throw error;
+        } finally {
+          activeSurfSessionByMetabot.delete(context.metabotId);
         }
       },
     });
