@@ -66,6 +66,8 @@ export interface MetawebSurfRunStats {
   challenged: number;
   inboxHandled: number;
   discoveredProtocols: number;
+  /** Scheduled tasks created (surf→work handoff); ground truth from the session marker. */
+  tasksScheduled: number;
 }
 
 export const emptySurfRunStats = (): MetawebSurfRunStats => ({
@@ -80,6 +82,7 @@ export const emptySurfRunStats = (): MetawebSurfRunStats => ({
   challenged: 0,
   inboxHandled: 0,
   discoveredProtocols: 0,
+  tasksScheduled: 0,
 });
 
 export interface MetawebSurfRunRecord {

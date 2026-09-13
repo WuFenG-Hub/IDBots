@@ -203,6 +203,7 @@ import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
 import { buildLikePinAgentTools } from './likePinAgentTools';
 import { buildCommentPinAgentTools } from './commentPinAgentTools';
 import { createSurfCreatePinGuard, recordSurfDeepRead, type SurfSessionWriteState } from './surfInteractionGuard';
+import { buildScheduledTaskAgentTools, type ScheduledTaskAgentControl } from './scheduledTaskAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
@@ -1760,6 +1761,16 @@ export interface CoworkRunnerOptions {
    */
   metawebSurf?: MetawebSurfControl;
   /**
+   * When set, SURF sessions get the create_scheduled_task tool — the
+   * surf→work handoff (Step 1 of broadcast collaboration): work the bot
+   * undertakes while surfing is handed to a later full cowork session (the
+   * scheduled task fires with the complete tool surface, unlike the surf
+   * allowlist). Registered ONLY for surf sessions; interactive sessions
+   * already create tasks via the metabot-schedule skill + CLI over Bash.
+   * main.ts wires the control over scheduledTaskStore + Scheduler.
+   */
+  scheduledTaskTools?: ScheduledTaskAgentControl;
+  /**
    * When set, every cowork session gets the upload_file tool backed by
    * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
    * on-chain semantics: direct vs chunked mode, MVC sponsor-first direct upload
@@ -1929,6 +1940,7 @@ const METAWEB_SURF_TOOL_ALLOWLIST = new Set([
   'post_buzz',
   'post_simplenote',
   'agentpedia_challenge',
+  'create_scheduled_task',
 ]);
 
 export class CoworkRunner extends EventEmitter {
@@ -1969,6 +1981,7 @@ export class CoworkRunner extends EventEmitter {
   private knowledgeBase?: KnowledgeBaseControl;
   private metawebStudy?: MetawebStudyControl;
   private metawebSurf?: MetawebSurfControl;
+  private scheduledTaskTools?: ScheduledTaskAgentControl;
   private metaFileUpload?: MetaFileUploadControl;
   private walletTools?: WalletToolsControl;
   private visionRelay?: VisionRelayControl;
@@ -2096,6 +2109,7 @@ export class CoworkRunner extends EventEmitter {
     // and self-interaction block silently never fired, and the metaweb_surf_*
     // chat tools never registered. A duplicate like slipped through as proof.
     this.metawebSurf = options?.metawebSurf;
+    this.scheduledTaskTools = options?.scheduledTaskTools;
     this.metaFileUpload = options?.metaFileUpload;
     this.walletTools = options?.walletTools;
     this.visionRelay = options?.visionRelay;
@@ -9606,6 +9620,24 @@ export class CoworkRunner extends EventEmitter {
           createPin: createPinForSession,
           sessionId,
           resolveMetabotId,
+        })
+      );
+    }
+    // create_scheduled_task — the surf→work handoff (Step 1 of broadcast
+    // collaboration). Registered ONLY for surf sessions: interactive sessions
+    // already create tasks through the metabot-schedule skill + CLI over Bash,
+    // and an unattended surf is precisely the surface that lacks any other way
+    // to defer work it undertook. The per-run cap counter rides the session
+    // marker (SurfSessionWriteState), surviving per-turn surface rebuilds.
+    const surfSessionMarker = this.activeSessions.get(sessionId)?.metawebSurfSession;
+    if (this.scheduledTaskTools && surfSessionMarker) {
+      memoryTools.push(
+        ...buildScheduledTaskAgentTools({
+          tool,
+          control: this.scheduledTaskTools,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
+          surfState: surfSessionMarker,
         })
       );
     }

@@ -5695,6 +5695,37 @@ const getCoworkRunner = () => {
         isOwnPin: (metabotId: number, pinId: string) =>
           getChainContentHistoryStore().hasWritePin(metabotId, pinId),
       },
+      // create_scheduled_task tool backend — the surf→work handoff (Step 1 of
+      // broadcast collaboration). Only surf sessions see the tool (coworkRunner
+      // gates registration on the metawebSurfSession marker). The host owns
+      // workingDirectory/systemPrompt/defaults; the session supplies name,
+      // prompt and schedule. A schedule that never fires (past 'at' datetime,
+      // unparsable cron — the store computes nextRunAtMs=null for both) rolls
+      // back and throws: a silently dead task is the worst outcome.
+      scheduledTaskTools: {
+        createTask: (input) => {
+          const store = getScheduledTaskStore();
+          const task = store.createTask({
+            name: input.name,
+            description: input.description,
+            schedule: input.schedule,
+            prompt: input.prompt,
+            workingDirectory: resolveExistingTaskWorkingDirectory(getCoworkStore().getConfig().workingDirectory),
+            systemPrompt: '',
+            executionMode: 'auto',
+            metabotId: input.metabotId ?? null,
+            expiresAt: null,
+            notifyPlatforms: [],
+            enabled: true,
+          });
+          if (task.state.nextRunAtMs == null) {
+            store.deleteTask(task.id);
+            throw new Error('The schedule never fires (past datetime or unparsable cron expression) — fix it and create the task again.');
+          }
+          getScheduler().reschedule();
+          return { id: task.id, name: task.name, nextRunAtMs: task.state.nextRunAtMs };
+        },
+      },
       // upload_file tool backend. Delegates to the shared uploadMetaFile()
       // service so the tool, the RPC endpoint, and the IPC handlers all share
       // one on-chain path (direct/chunked, MVC sponsor-first with self-paid
@@ -7122,6 +7153,15 @@ const getSurfService = (): SurfService => {
           // challenged/posted lists are replaced by what the guard actually
           // published on-chain; read/saved stay self-reported.
           report.seenActions = foldSurfReceiptsIntoSeenActions(report.seenActions, writeState);
+          // Scheduled tasks (surf→work handoff): pure host ground truth — the
+          // report contract deliberately has no self-report field for this.
+          const tasksScheduled = writeState.tasksScheduled ?? 0;
+          if (tasksScheduled > 0) {
+            report.stats = { ...report.stats, tasksScheduled };
+            if (report.reportMarkdown) {
+              report.reportMarkdown += `\n- Scheduled tasks created: ${tasksScheduled}`;
+            }
+          }
           return report;
         } catch (error) {
           // Round 3 (live field failure): a skill-turn timeout must STOP the

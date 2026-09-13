@@ -36,6 +36,14 @@ export interface SurfSessionWriteState {
    * them (the run's saves are lost; the catch-up must get another chance).
    */
   readPinIds?: string[];
+  /**
+   * Scheduled tasks actually created this run (create_scheduled_task — the
+   * surf→work handoff, Step 1 of broadcast collaboration). Counter drives the
+   * per-run hard cap; ids are the ground-truth receipt for the run stats.
+   */
+  tasksScheduled?: number;
+  /** Ids of the scheduled tasks created this run (same order as created). */
+  scheduledTaskIds?: string[];
 }
 
 export type SurfSeenLedgerReader = (
@@ -126,6 +134,7 @@ export function surfSessionPartialStats(
   }
   if ((state.kbAddsUsed ?? 0) > 0) stats.savedToKb = state.kbAddsUsed;
   if ((state.readPinIds?.length ?? 0) > 0) stats.deepRead = state.readPinIds!.length;
+  if ((state.tasksScheduled ?? 0) > 0) stats.tasksScheduled = state.tasksScheduled;
   return stats;
 }
 

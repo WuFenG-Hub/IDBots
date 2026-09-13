@@ -58,3 +58,33 @@ test('runtime: a runner built with options.metawebSurf actually carries the cont
     'options.metawebSurf must reach the instance — the field was silently unassigned in production',
   );
 });
+
+/**
+ * Step-1 broadcast-collaboration wiring (create_scheduled_task — the
+ * surf→work handoff). Same failure mode as the round-3 bug above: declaring
+ * the option without assigning/registering it would silently kill the
+ * handoff, so every link gets a source anchor here.
+ */
+
+test('the CoworkRunner constructor assigns options.scheduledTaskTools', () => {
+  assert.match(
+    source,
+    /this\.scheduledTaskTools = options\?\.scheduledTaskTools;/,
+    'constructor must assign options.scheduledTaskTools — without it create_scheduled_task never registers',
+  );
+});
+
+test('create_scheduled_task is registered only for surf sessions, off the session marker', () => {
+  assert.match(source, /const surfSessionMarker = this\.activeSessions\.get\(sessionId\)\?\.metawebSurfSession;/);
+  assert.match(
+    source,
+    /if \(this\.scheduledTaskTools && surfSessionMarker\) \{[\s\S]*?buildScheduledTaskAgentTools\(\{/,
+    'the tool must be gated on BOTH the control and the surf session marker',
+  );
+});
+
+test('create_scheduled_task survives the surf allowlist filter', () => {
+  const allowlistIdx = source.indexOf('const METAWEB_SURF_TOOL_ALLOWLIST = new Set([');
+  const toolIdx = source.indexOf("'create_scheduled_task',", allowlistIdx);
+  assert.ok(allowlistIdx !== -1 && toolIdx > allowlistIdx, 'create_scheduled_task must be inside METAWEB_SURF_TOOL_ALLOWLIST');
+});
