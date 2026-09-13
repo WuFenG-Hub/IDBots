@@ -61,7 +61,7 @@ export class SkillServiceManager {
 
   private hasCommand(command: string, env: NodeJS.ProcessEnv): boolean {
     const checker = process.platform === 'win32' ? 'where' : 'which';
-    const result = spawnSync(checker, [command], { stdio: 'ignore', env });
+    const result = spawnSync(checker, [command], { stdio: 'ignore', env, windowsHide: true });
     return result.status === 0;
   }
 
@@ -247,6 +247,7 @@ export class SkillServiceManager {
         detached: true,
         stdio: ['ignore', logFd, logFd],
         env,
+        windowsHide: true,
       });
     } finally {
       fs.closeSync(logFd);

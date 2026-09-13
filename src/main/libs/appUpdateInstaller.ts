@@ -893,6 +893,7 @@ async function installWindowsNsis(exePath: string): Promise<void> {
   const launcher = spawn('wscript.exe', [vbsPath], {
     detached: true,
     stdio: 'ignore',
+    windowsHide: true,
   });
   launcher.unref();
 

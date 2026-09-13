@@ -245,7 +245,7 @@ export async function collectWorkspaceCommits(
   try {
     const args = ['log', '--oneline', '-n', '5'];
     if (since) args.push('--since', since);
-    const { stdout } = await execFileAsync('git', args, { cwd, timeout: 5000 });
+    const { stdout } = await execFileAsync('git', args, { cwd, timeout: 5000, windowsHide: true });
     return stdout
       .split('\n')
       .map((line) => line.trim())

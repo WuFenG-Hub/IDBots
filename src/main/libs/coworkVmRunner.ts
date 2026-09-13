@@ -328,7 +328,9 @@ export function spawnCoworkSandboxVm(options: {
       });
     }
   }
-  return spawn(options.runtime.runtimeBinary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // QEMU binaries are console-subsystem executables; without windowsHide each
+  // VM launch flashes a console window on Windows.
+  return spawn(options.runtime.runtimeBinary, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
 }
 
 // ---------------------------------------------------------------------------

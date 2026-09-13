@@ -309,7 +309,7 @@ async function verifySha256(filePath: string, expected?: string | null): Promise
 }
 
 function extractTarArchive(archivePath: string, destDir: string): void {
-  const result = spawnSync('tar', ['-xf', archivePath, '-C', destDir], { stdio: 'pipe' });
+  const result = spawnSync('tar', ['-xf', archivePath, '-C', destDir], { stdio: 'pipe', windowsHide: true });
   if (result.status !== 0) {
     throw new Error(result.stderr?.toString() || 'Failed to extract tar archive');
   }
@@ -321,13 +321,13 @@ function extractArchive(archivePath: string, destDir: string): void {
       const result = spawnSync(
         'powershell',
         ['-NoProfile', '-Command', `Expand-Archive -Force "${archivePath}" "${destDir}"`],
-        { stdio: 'pipe' }
+        { stdio: 'pipe', windowsHide: true }
       );
       if (result.status !== 0) {
         throw new Error(result.stderr?.toString() || 'Failed to extract zip archive');
       }
     } else {
-      const result = spawnSync('unzip', ['-q', archivePath, '-d', destDir], { stdio: 'pipe' });
+      const result = spawnSync('unzip', ['-q', archivePath, '-d', destDir], { stdio: 'pipe', windowsHide: true });
       if (result.status !== 0) {
         throw new Error(result.stderr?.toString() || 'Failed to extract zip archive');
       }
@@ -341,7 +341,7 @@ function extractArchive(archivePath: string, destDir: string): void {
   }
 
   if (archivePath.endsWith('.tar.gz') || archivePath.endsWith('.tgz')) {
-    const result = spawnSync('tar', ['-xzf', archivePath, '-C', destDir], { stdio: 'pipe' });
+    const result = spawnSync('tar', ['-xzf', archivePath, '-C', destDir], { stdio: 'pipe', windowsHide: true });
     if (result.status !== 0) {
       throw new Error(result.stderr?.toString() || 'Failed to extract tar archive');
     }
@@ -417,7 +417,7 @@ async function runNsisInstaller(installerPath: string, targetDir: string): Promi
   const result = spawnSync('powershell.exe', [
     '-NoProfile', '-Command',
     `Start-Process -FilePath '${installerPath}' -ArgumentList '/D=${targetDir}' -Wait`,
-  ], { stdio: 'pipe', timeout: 600000 }); // 10-minute timeout
+  ], { stdio: 'pipe', timeout: 600000, windowsHide: true }); // 10-minute timeout
 
   if (result.error) {
     throw new Error(`Failed to launch installer: ${result.error.message}`);
@@ -471,14 +471,14 @@ function findSystemQemu(): string | null {
   const qemuName = getRuntimeBinaryName();
 
   // Check if QEMU is in PATH
-  const result = spawnSync('where', [qemuName], { stdio: 'pipe' });
+  const result = spawnSync('where', [qemuName], { stdio: 'pipe', windowsHide: true });
   if (result.status === 0 && result.stdout) {
     const paths = result.stdout.toString().trim().split('\n');
     for (const qemuPath of paths) {
       const trimmedPath = qemuPath.trim();
       if (fs.existsSync(trimmedPath)) {
         // Verify it's executable by testing --version
-        const testResult = spawnSync(trimmedPath, ['--version'], { stdio: 'pipe', timeout: 5000 });
+        const testResult = spawnSync(trimmedPath, ['--version'], { stdio: 'pipe', timeout: 5000, windowsHide: true });
         if (testResult.status === 0 || testResult.status === 3221225781) {
           // Status 0 = success, 3221225781 = DLL issue but binary exists
           // For DLL issue, we still return the path but validation will fail later
@@ -514,7 +514,7 @@ function validateQemuBinary(binaryPath: string): { valid: boolean; error?: strin
   }
 
   // Try to run --version to verify the binary works
-  const result = spawnSync(binaryPath, ['--version'], { stdio: 'pipe', timeout: 5000 });
+  const result = spawnSync(binaryPath, ['--version'], { stdio: 'pipe', timeout: 5000, windowsHide: true });
 
   // Exit code 0 means success
   if (result.status === 0) {
@@ -563,7 +563,7 @@ function checkQemuVirtfsSupport(binaryPath: string): boolean {
     return true; // Return true to allow Windows QEMU to be used
   }
 
-  const result = spawnSync(binaryPath, ['-help'], { stdio: 'pipe', timeout: 5000 });
+  const result = spawnSync(binaryPath, ['-help'], { stdio: 'pipe', timeout: 5000, windowsHide: true });
   if (result.status === 0 && result.stdout) {
     return result.stdout.toString().includes('-virtfs');
   }
@@ -577,7 +577,7 @@ function hasHypervisorEntitlement(output: string): boolean {
 function ensureHypervisorEntitlement(binaryPath: string, runtimeDir: string): void {
   if (process.platform !== 'darwin') return;
 
-  const probe = spawnSync('codesign', ['-d', '--entitlements', ':-', binaryPath], { stdio: 'pipe' });
+  const probe = spawnSync('codesign', ['-d', '--entitlements', ':-', binaryPath], { stdio: 'pipe', windowsHide: true });
   if (probe.status === 0) {
     const stdout = probe.stdout?.toString() || '';
     const stderr = probe.stderr?.toString() || '';
@@ -608,7 +608,7 @@ function ensureHypervisorEntitlement(binaryPath: string, runtimeDir: string): vo
   const sign = spawnSync(
     'codesign',
     ['-s', '-', '--force', '--entitlements', entitlementsPath, binaryPath],
-    { stdio: 'pipe' }
+    { stdio: 'pipe', windowsHide: true }
   );
   if (sign.status !== 0) {
     const stderr = sign.stderr?.toString() || sign.stdout?.toString() || 'Unknown codesign error';
@@ -736,7 +736,7 @@ async function ensureRuntime(): Promise<string> {
       console.log(`[Sandbox] Decompressed PE file: ${fileStats.size} bytes`);
 
       // Quick check: try --version to see if it's already a QEMU binary
-      const versionProbe = spawnSync(tempPath, ['--version'], { stdio: 'pipe', timeout: 5000 });
+      const versionProbe = spawnSync(tempPath, ['--version'], { stdio: 'pipe', timeout: 5000, windowsHide: true });
       const versionOutput = versionProbe.stdout?.toString().trim() || '';
       console.log(`[Sandbox] PE --version probe: exit=${versionProbe.status}, stdout="${versionOutput.slice(0, 120)}"`);
 
