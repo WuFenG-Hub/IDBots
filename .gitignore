@@ -408,6 +408,7 @@ man_base_data_pebble/
 !tests/browserSessionHomeBadge.test.tsx
 !tests/metaidCoreInsufficientFundsRescue.test.mjs
 !tests/metaFileUploadTrafficModeGate.test.mjs
+!tests/coworkDshWarmupStaleSessionRoute.test.mjs
 
 # Local extracted skill packages and tool output artifacts (runtime-generated)
 /.proposal-demo-data/
