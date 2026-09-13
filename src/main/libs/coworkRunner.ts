@@ -2091,6 +2091,11 @@ export class CoworkRunner extends EventEmitter {
     this.qaRecall = options?.qaRecall;
     this.knowledgeBase = options?.knowledgeBase;
     this.metawebStudy = options?.metawebStudy;
+    // Field-trial catch (round 3, live run 小昆-2): this assignment was missing
+    // since the surf feature merged — the guard's cross-run duplicate check
+    // and self-interaction block silently never fired, and the metaweb_surf_*
+    // chat tools never registered. A duplicate like slipped through as proof.
+    this.metawebSurf = options?.metawebSurf;
     this.metaFileUpload = options?.metaFileUpload;
     this.walletTools = options?.walletTools;
     this.visionRelay = options?.visionRelay;

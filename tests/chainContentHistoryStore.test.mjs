@@ -304,3 +304,15 @@ test('release-review P2: retention prunes each bot to the newest MAX_LEDGER_ROWS
     'rows past the pruned head survive',
   );
 });
+
+test('listWritesForSurfReconciliation returns one bot\'s writes newest-first (round 3)', () => {
+  const { store } = setup();
+  store.recordWrite(makeWrite({ pinId: 'pin-old', occurredAtMs: T0 }));
+  store.recordWrite(makeWrite({ pinId: 'pin-new', path: '/protocols/paylike', contentText: '{"isLike":1,"likeTo":"x"}', occurredAtMs: T0 + 2000 }));
+  store.recordWrite(makeWrite({ metabotId: 8, pinId: 'pin-other-bot', occurredAtMs: T0 + 1000 }));
+  const rows = store.listWritesForSurfReconciliation(7);
+  assert.deepEqual(rows.map((r) => r.pinId), ['pin-new', 'pin-old'], 'bot 7 only, newest first');
+  assert.equal(rows[0].contentText, '{"isLike":1,"likeTo":"x"}');
+  const capped = store.listWritesForSurfReconciliation(7, 1);
+  assert.deepEqual(capped.map((r) => r.pinId), ['pin-new']);
+});

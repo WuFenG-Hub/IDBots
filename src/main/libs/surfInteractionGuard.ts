@@ -151,6 +151,30 @@ interface InteractionTarget {
 }
 
 /**
+ * Re-derive one bot's surf receipts from a local chain-writes ledger row
+ * (round 3 reconciliation): the row's own pin is always a 'posted' receipt
+ * (the bot published it), and an interaction payload yields its target
+ * receipt on top. Used to backfill the seen ledger before a surf run, so
+ * receipts lost to a crash/kill mid-run (or a stopped orphan session) can
+ * never cause a paid duplicate interaction.
+ */
+export function surfReceiptsFromChainWriteRecord(record: {
+  pinId: string;
+  path?: string | null;
+  contentText?: string | null;
+}): Array<{ pinId: string; action: MetawebSurfSeenAction }> {
+  const receipts: Array<{ pinId: string; action: MetawebSurfSeenAction }> = [];
+  const ownPinId = String(record.pinId ?? '').trim();
+  if (ownPinId) receipts.push({ pinId: ownPinId, action: 'posted' });
+  const target = extractInteractionTarget({
+    path: String(record.path ?? ''),
+    payload: String(record.contentText ?? ''),
+  });
+  if (target) receipts.push(target);
+  return receipts;
+}
+
+/**
  * Best-effort (target pinId, interaction action) extraction from a createPin
  * call. Returns null for original posts and for unparsable payloads — those
  * writes are budget-counted but never duplicate-blocked.
