@@ -270,6 +270,7 @@ import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { MetawebSurfStore } from './metawebSurfStore';
 import { SurfService, SURF_STATUS_CHANNEL } from './services/surfService';
 import { buildSurfSessionPrompt, parseSurfRunReport, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
+import { foldSurfReceiptsIntoSeenActions, surfReceiptSeenActions, type SurfSessionWriteState } from './libs/surfInteractionGuard';
 import { isSurfBeforeDreamEnabled, SURF_BEFORE_DREAM_ENABLED_KEY } from './services/surfSettings';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
@@ -7042,28 +7043,54 @@ const getSurfService = (): SurfService => {
           coworkStore.getConfig().workingDirectory,
           context.metabotId,
         );
-        const replyText = await runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
-          systemPrompt: '',
-          userMessage: buildSurfSessionPrompt(context),
-          cwd,
-          metabotId: context.metabotId,
-          activeSkillIds: [],
-          disableRemoteServicesPrompt: true,
-          sourceChannel: 'orchestrator',
-          // Unattended like the study sessions: no owner is watching, stray
-          // prompts auto-reject, memory updates stay enabled so procedure_save
-          // and knowledge_upsert keep working.
-          autoApprove: true,
-          permissionMode: 'acceptEdits',
-          disableMemoryUpdates: false,
-          metawebSurfSession: {
-            interactionBudget: context.briefing.interactionBudget,
-            kbBudget: SURF_KB_ADD_BUDGET,
-          },
-          skillTurnTimeoutMs: 30 * 60 * 1000,
-          onSessionCreated: (sessionId) => coworkStore.setSessionHiddenFromList(sessionId, true),
-        });
-        return parseSurfRunReport(replyText);
+        // Shared with the cowork session marker: the surf createPin guard
+        // mutates this object with every ACTUAL chain write, so after the
+        // session it doubles as the on-chain receipt record (review 2, item 6).
+        const writeState: SurfSessionWriteState = {
+          interactionBudget: context.briefing.interactionBudget,
+          kbBudget: SURF_KB_ADD_BUDGET,
+        };
+        try {
+          const replyText = await runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
+            systemPrompt: '',
+            userMessage: buildSurfSessionPrompt(context),
+            cwd,
+            metabotId: context.metabotId,
+            activeSkillIds: [],
+            disableRemoteServicesPrompt: true,
+            sourceChannel: 'orchestrator',
+            // Unattended like the study sessions: no owner is watching, stray
+            // prompts auto-reject, memory updates stay enabled so procedure_save
+            // and knowledge_upsert keep working.
+            autoApprove: true,
+            permissionMode: 'acceptEdits',
+            disableMemoryUpdates: false,
+            metawebSurfSession: writeState,
+            skillTurnTimeoutMs: 30 * 60 * 1000,
+            onSessionCreated: (sessionId) => coworkStore.setSessionHiddenFromList(sessionId, true),
+          });
+          const report = parseSurfRunReport(replyText);
+          // Receipts over self-report: the model's liked/commented/answered/
+          // challenged/posted lists are replaced by what the guard actually
+          // published on-chain; read/saved stay self-reported.
+          report.seenActions = foldSurfReceiptsIntoSeenActions(report.seenActions, writeState);
+          return report;
+        } catch (error) {
+          // A failed/timed-out session may still have PAID for interactions —
+          // bank those receipts immediately or the next surf would re-engage
+          // the same pins (cross-run duplicate protection). No 'presented'
+          // writes here: the failed window itself is still re-presented next
+          // run, so the P1 catch-up semantics stand.
+          const receipts = surfReceiptSeenActions(writeState);
+          if (receipts.length > 0) {
+            try {
+              getMetawebSurfStore().markSeenBatch(context.metabotId, receipts, new Date().toISOString());
+            } catch {
+              // A sick ledger must not mask the session's own failure.
+            }
+          }
+          throw error;
+        }
       },
     });
   }
