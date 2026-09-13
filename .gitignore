@@ -416,3 +416,4 @@ man_base_data_pebble/
 /output/
 !tests/privateChatCompletedTurnPickup.test.mjs
 !tests/dshShutdownSoftFail.test.mjs
+!tests/coworkSessionBrainProvider.test.ts
