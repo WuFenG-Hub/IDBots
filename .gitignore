@@ -43,6 +43,7 @@ docs/*
 !docs/metaweb-learning-roadmap.md
 !docs/metaweb-search-backend-requirements.md
 !docs/metaweb-search-quality-requirements.md
+!docs/metaweb-surf-backend-requirements.md
 !docs/metaweb-qa-backend-requirements.md
 !docs/metaweb-qa-backend-requirements-v2.md
 !docs/metaweb-qa-frontend-metaapp-guide.md
