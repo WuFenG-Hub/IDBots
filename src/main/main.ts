@@ -4086,9 +4086,10 @@ const startSqliteDaemons = (): void => {
     metaidExperienceStore: dreamExperienceStore,
     metaidImpressionStore: dreamImpressionStore,
     metaidKnowledgeStore: dreamKnowledgeStore,
-    // Pre-dream surf ("做梦前自动冲浪"): default ON per bot; skipped when a
-    // surf finished within the recency window. Hard-capped so an overrunning
-    // surf can never stall the night's dream; failures degrade to no surf.
+    // Pre-dream surf ("做梦前自动冲浪"): default OFF per bot (opt-in — every
+    // surf spends LLM tokens and gas); skipped when a surf finished within
+    // the recency window. Hard-capped so an overrunning surf can never stall
+    // the night's dream; failures degrade to no surf.
     surfBeforeDream: async (metabotId) => {
       const surf = getSurfService();
       if (!surf.shouldPreDreamSurf(metabotId)) return null;

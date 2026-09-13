@@ -190,7 +190,8 @@ export class SurfService {
   }
 
   /**
-   * Pre-dream gate: the bot's surf-before-dream toggle is on (default) and it
+   * Pre-dream gate: the bot's surf-before-dream toggle is explicitly enabled
+   * (default OFF — opt-in, since every surf spends LLM tokens and gas) and it
    * has not finished a surf within the recency window (a manual evening surf
    * makes the nightly one redundant).
    */

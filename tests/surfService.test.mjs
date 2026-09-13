@@ -112,6 +112,31 @@ test('unknown bot is rejected', async () => {
   await assert.rejects(() => service.runSurfAndWait(9, 'manual-ui'), /not found/);
 });
 
+test('pre-dream surf toggle is opt-in: unset means OFF, explicit 1 opts in, 0 stays off', () => {
+  // Owner decision (2026-09-14): nightly surfing spends LLM tokens and gas,
+  // so the DEFAULT flipped from ON to OFF. Every bot that never touched the
+  // toggle (the pre-upgrade state of the fleet) stops pre-dream surfing
+  // until the user opts in; an explicit '1'/'0' always wins.
+  const settings = new Map();
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: (id, key) => settings.get(key) ?? null,
+    },
+    broadcast: () => {},
+    registry: [],
+    nowMs: () => NOW_MS,
+  });
+  assert.equal(service.shouldPreDreamSurf(7), false, 'unset means OFF (opt-in default)');
+  settings.set('surf_before_dream_enabled', '1');
+  assert.equal(service.shouldPreDreamSurf(7), true, 'explicit 1 opts in');
+  settings.set('surf_before_dream_enabled', '0');
+  assert.equal(service.shouldPreDreamSurf(7), false, 'explicit 0 stays off');
+});
+
 test('memory-disabled bot: manual surf runs degraded, pre-dream stays gated (review 2, item 9B)', async () => {
   const db = createNativeSqliteDatabase(':memory:');
   const store = new MetawebSurfStore(db, () => {});
