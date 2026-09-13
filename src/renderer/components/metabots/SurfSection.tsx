@@ -40,8 +40,9 @@ interface SurfSectionProps {
 }
 
 const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
-  // Surf-before-dream toggle; the kv default (no record) means ON.
-  const [surfBeforeDream, setSurfBeforeDream] = useState(true);
+  // Surf-before-dream toggle; the kv default (no record) means OFF (opt-in —
+  // every nightly surf spends LLM tokens and gas).
+  const [surfBeforeDream, setSurfBeforeDream] = useState(false);
   const [surfBeforeDreamLoaded, setSurfBeforeDreamLoaded] = useState(false);
   // Interaction budget, kept as the raw input string while typing.
   const [surfBudget, setSurfBudget] = useState(String(DEFAULT_SURF_INTERACTION_BUDGET));
@@ -57,10 +58,10 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
   const [runVersion, setRunVersion] = useState(0);
 
   // Load both surf settings on mount / metabotId change. A missing or failed
-  // read falls back to the product defaults (ON, 20).
+  // read falls back to the product defaults (OFF, 20).
   useEffect(() => {
     let cancelled = false;
-    setSurfBeforeDream(true);
+    setSurfBeforeDream(false);
     setSurfBeforeDreamLoaded(false);
     setSurfBudget(String(DEFAULT_SURF_INTERACTION_BUDGET));
     setSettingsError('');
@@ -68,12 +69,12 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
     window.electron.metabot.getSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY)
       .then((result) => {
         if (cancelled) return;
-        setSurfBeforeDream(result.success ? result.value !== '0' : true);
+        setSurfBeforeDream(result.success ? result.value === '1' : false);
         setSurfBeforeDreamLoaded(true);
       })
       .catch(() => {
         if (cancelled) return;
-        setSurfBeforeDream(true);
+        setSurfBeforeDream(false);
         setSurfBeforeDreamLoaded(true);
       });
     window.electron.metabot.getSetting(metabotId, SURF_INTERACTION_BUDGET_KEY)
