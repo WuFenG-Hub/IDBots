@@ -1890,6 +1890,8 @@ export interface CoworkRunnerOptions {
 const METAWEB_STUDY_TOOL_ALLOWLIST = new Set([
   'search_metaweb',
   'read_metaweb_pin',
+  'read_metaweb_pins_batch',
+  'metaweb_pin_versions',
   'knowledge_base_list',
   'knowledge_base_query',
   'knowledge_base_add_document',
@@ -9990,10 +9992,11 @@ export class CoworkRunner extends EventEmitter {
 
   /**
    * Surf-session read-receipt wrapper: every readable pin returned by readPin
-   * is recorded on the session marker (deduped). Kept to explicit delegation
-   * like wrapKnowledgeBaseForStudy — the control may be a class instance.
-   * Only the readPin path is tracked; omni_read pin_content deep reads stay
-   * self-reported (their blast radius is one digest line, not gas).
+   * or readPinsBatch is recorded on the session marker (deduped). Kept to
+   * explicit delegation like wrapKnowledgeBaseForStudy — the control may be
+   * a class instance. Only the read paths are tracked; omni_read pin_content
+   * deep reads stay self-reported (their blast radius is one digest line,
+   * not gas).
    */
   private wrapMetawebLearningForSurf(
     control: MetawebLearningControl,
@@ -10006,6 +10009,16 @@ export class CoworkRunner extends EventEmitter {
         if (pin?.text != null) recordSurfDeepRead(marker, pinId);
         return pin;
       },
+      readPinsBatch: async (pinIds) => {
+        const entries = await control.readPinsBatch(pinIds);
+        for (const [requestedId, entry] of Object.entries(entries)) {
+          if (entry && !('error' in entry) && entry.text != null) {
+            recordSurfDeepRead(marker, requestedId);
+          }
+        }
+        return entries;
+      },
+      pinVersions: (pinId) => control.pinVersions(pinId),
     };
   }
 

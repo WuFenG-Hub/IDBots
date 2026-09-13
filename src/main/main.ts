@@ -384,6 +384,12 @@ import {
 import { searchMetaweb as searchMetawebRemote } from './services/metawebSearchService';
 import { readMetawebPin as readMetawebPinRemote } from './services/metawebPinService';
 import {
+  metawebPinsBatch as metawebPinsBatchRemote,
+  metawebPinVersions as metawebPinVersionsRemote,
+  metawebInteractions as metawebInteractionsRemote,
+  metawebProtocols as metawebProtocolsRemote,
+} from './services/metawebSurfReadsService';
+import {
   qaSearch as qaSearchRemote,
   qaLatestQuestions as qaLatestQuestionsRemote,
   qaQuestionDetail as qaQuestionDetailRemote,
@@ -5611,8 +5617,9 @@ const getCoworkRunner = () => {
           };
         },
       },
-      // MetaWeb learning tool backends (search_metaweb / read_metaweb_pin):
-      // thin pass-throughs to the metaso-p2p /api/metaweb/* aggregation APIs.
+      // MetaWeb learning tool backends (search_metaweb / read_metaweb_pin /
+      // read_metaweb_pins_batch / metaweb_pin_versions): thin pass-throughs
+      // to the metaso-p2p /api/metaweb/* aggregation APIs.
       // IDBOTS_METAWEB_API_BASE_URL overrides the default so.metaid.io base
       // for staging integration ahead of the production rollout.
       metawebLearning: {
@@ -5628,6 +5635,14 @@ const getCoworkRunner = () => {
         readPin: async (pinId) => {
           const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
           return readMetawebPinRemote(pinId, baseUrl ? { baseUrl } : undefined);
+        },
+        readPinsBatch: async (pinIds) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          return metawebPinsBatchRemote(pinIds, baseUrl ? { baseUrl } : undefined);
+        },
+        pinVersions: async (pinId) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          return metawebPinVersionsRemote(pinId, baseUrl ? { baseUrl } : undefined);
         },
       },
       // On-chain Q&A recall tool backends (search_qa / list_latest_questions /
@@ -7091,6 +7106,56 @@ const getSurfService = (): SurfService => {
       // duplicate-interaction guard never works off a stale ledger.
       listChainWritesForSurf: (metabotId) =>
         getChainContentHistoryStore().listWritesForSurfReconciliation(metabotId),
+      // Deterministic surf sections (surf-reads backend): the bot's on-chain
+      // identity drives the R3 interactions inbox (likes/comments on my pins
+      // + answers to my questions) and R6 fills the protocol radar. Both are
+      // best-effort by design — a missing identity or a sick backend degrades
+      // to an error line in the briefing, never a failed run.
+      getBotIdentity: (metabotId) => {
+        const metabot = getMetabotStore().getMetabotById(metabotId);
+        if (!metabot) return null;
+        return { address: metabot.mvc_address ?? null, globalMetaId: metabot.globalmetaid ?? null };
+      },
+      fetchSurfInbox: async ({ owner, sinceTs }) => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        const options = baseUrl ? { baseUrl } : undefined;
+        // Page at most 2 x 50: the briefing caps presentation at 30 items,
+        // so deeper inbox history stays for later runs (the baseline moves
+        // forward every finished run).
+        const items = [];
+        let cursor: string | undefined;
+        for (let pageIndex = 0; pageIndex < 2; pageIndex += 1) {
+          const page = await metawebInteractionsRemote({ owner, since: sinceTs, size: 50, cursor }, options);
+          items.push(...page.items);
+          if (!page.hasMore || !page.nextCursor) break;
+          cursor = page.nextCursor;
+        }
+        return items.map((item) => ({
+          type: item.type,
+          pinId: item.pinId,
+          targetPinId: item.targetPinId,
+          actorName: item.actor.name,
+          actorGlobalMetaId: item.actor.globalMetaId,
+          createdAt: item.createdAt,
+          excerpt: item.excerpt,
+        }));
+      },
+      fetchProtocolRadar: async () => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        const page = await metawebProtocolsRemote({ size: 50 }, baseUrl ? { baseUrl } : undefined);
+        return {
+          items: page.items.map((item) => ({
+            path: item.path,
+            title: item.title,
+            protocolName: item.protocolName,
+            intro: item.intro,
+            version: item.version,
+            authorName: item.author.name,
+            createdAt: item.createdAt,
+          })),
+          rejectedCount: page.rejected.length,
+        };
+      },
       broadcast: (payload) => {
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) {

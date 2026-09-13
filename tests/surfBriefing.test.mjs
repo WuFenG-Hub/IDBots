@@ -39,9 +39,14 @@ const makeDescriptor = (key, items, error = null) => ({
   paths: [`/protocols/${key}`],
   interactions: ['like'],
   relevanceHint: 'hint',
-  fetchFresh: async ({ sinceTs, limit }) => {
+  fetchFresh: async ({ sinceTs, limit, backlogCursor }) => {
     if (error) throw new Error(error);
-    return items.filter((item) => sinceTs === null || item.createdAt > sinceTs).slice(0, limit);
+    void backlogCursor;
+    return {
+      items: items.filter((item) => sinceTs === null || item.createdAt > sinceTs).slice(0, limit),
+      hasMore: false,
+      nextCursor: null,
+    };
   },
 });
 
@@ -153,4 +158,288 @@ test('digest markdown marks items held back by the run cap', async () => {
   assert.match(md, /Fake proto-old — 50 new/);
   assert.match(md, /plus 50 more held back by the run cap — they stay unseen and return next surf/);
   assert.doesNotMatch(md, /## Fake proto-old — 50 new\n\(nothing new\)/, 'a section with held-back items is not "nothing new"');
+});
+
+// ---------------------------------------------------------------------------
+// Surf-reads page contract + backlog catch-up
+// ---------------------------------------------------------------------------
+
+test('a window page with hasMore registers backlog debt (cursor store, watermark still advances)', async () => {
+  const store = setup();
+  const registry = [{
+    key: 'alpha',
+    displayName: 'Fake alpha',
+    paths: ['/protocols/alpha'],
+    interactions: ['like'],
+    relevanceHint: 'hint',
+    fetchFresh: async () => ({
+      items: [makeItem('pin-a', NOW_SEC - 100, 'alpha')],
+      hasMore: true,
+      nextCursor: 'opaque-cursor-2',
+    }),
+  }];
+  const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
+  const section = briefing.protocols[0];
+  assert.equal(section.backlogCursorAction, 'store');
+  assert.equal(section.backlogCursor, 'opaque-cursor-2');
+  assert.equal(section.nextWatermarkTs, NOW_SEC - 100, 'window debt does not stop the normal watermark advance');
+});
+
+test('a fully-scanned window clears any previously registered backlog debt', async () => {
+  const store = setup();
+  // Previous run left debt that no longer exists (e.g. refetch after a
+  // backend restore) — hasMore=false means the window is exhausted.
+  store.advanceProtocolState(7, 'alpha', {
+    lastSeenTs: NOW_SEC - 500,
+    lastPinId: null,
+    nowIso: new Date(NOW_MS).toISOString(),
+    backlogCursor: 'stale-cursor',
+  });
+  const briefing = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20,
+    registry: [makeDescriptor('alpha', [makeItem('pin-a', NOW_SEC - 100, 'alpha')])],
+    nowMs: NOW_MS,
+  });
+  assert.equal(briefing.protocols[0].backlogCursorAction, 'clear');
+  assert.equal(briefing.protocols[0].backlogCursor, null);
+});
+
+test('backlog page: cursor passed through verbatim, hasMore stores the next cursor, watermark untouched', async () => {
+  const store = setup();
+  store.advanceProtocolState(7, 'alpha', {
+    lastSeenTs: NOW_SEC - 500,
+    lastPinId: null,
+    nowIso: new Date(NOW_MS).toISOString(),
+    backlogCursor: 'opaque-cursor-2',
+  });
+  const calls = [];
+  const registry = [{
+    key: 'alpha',
+    displayName: 'Fake alpha',
+    paths: ['/protocols/alpha'],
+    interactions: ['like'],
+    relevanceHint: 'hint',
+    fetchFresh: async (input) => {
+      calls.push(input);
+      return {
+        items: [makeItem('pin-old-backlog', NOW_SEC - 800, 'alpha')],
+        hasMore: true,
+        nextCursor: 'opaque-cursor-3',
+      };
+    },
+  }];
+  const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].backlogCursor, 'opaque-cursor-2', 'the registered cursor is forwarded verbatim');
+  const section = briefing.protocols[0];
+  assert.equal(section.fetchedBacklog, true);
+  assert.equal(section.backlogCursorAction, 'store');
+  assert.equal(section.backlogCursor, 'opaque-cursor-3');
+  assert.equal(section.nextWatermarkTs, null, 'backlog pages NEVER advance the watermark');
+  assert.deepEqual(briefing.items.map((item) => item.pinId), ['pin-old-backlog']);
+});
+
+test('drained backlog (hasMore=false) clears the cursor and still never touches the watermark', async () => {
+  const store = setup();
+  store.advanceProtocolState(7, 'alpha', {
+    lastSeenTs: NOW_SEC - 500,
+    lastPinId: null,
+    nowIso: new Date(NOW_MS).toISOString(),
+    backlogCursor: 'opaque-cursor-3',
+  });
+  const registry = [{
+    key: 'alpha',
+    displayName: 'Fake alpha',
+    paths: ['/protocols/alpha'],
+    interactions: ['like'],
+    relevanceHint: 'hint',
+    fetchFresh: async () => ({ items: [], hasMore: false, nextCursor: null }),
+  }];
+  const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
+  const section = briefing.protocols[0];
+  assert.equal(section.fetchedBacklog, true);
+  assert.equal(section.backlogCursorAction, 'clear', 'debt drained');
+  assert.equal(section.nextWatermarkTs, null);
+});
+
+test('backlog items crowded out by the total cap PRESERVE the cursor (deferral, never drop)', async () => {
+  const store = setup();
+  store.advanceProtocolState(7, 'alpha', {
+    lastSeenTs: NOW_SEC - 500,
+    lastPinId: null,
+    nowIso: new Date(NOW_MS).toISOString(),
+    backlogCursor: 'opaque-cursor-3',
+  });
+  // Fill the 150 cap with newer protocols; the backlog protocol is crowded out.
+  const registry = [
+    makeDescriptor('proto-a', Array.from({ length: 50 }, (_, i) => makeItem(`a-${i}`, NOW_SEC - 100 + i, 'proto-a'))),
+    makeDescriptor('proto-b', Array.from({ length: 50 }, (_, i) => makeItem(`b-${i}`, NOW_SEC - 200 + i, 'proto-b'))),
+    makeDescriptor('proto-c', Array.from({ length: 50 }, (_, i) => makeItem(`c-${i}`, NOW_SEC - 300 + i, 'proto-c'))),
+    {
+      key: 'alpha',
+      displayName: 'Fake alpha',
+      paths: ['/protocols/alpha'],
+      interactions: ['like'],
+      relevanceHint: 'hint',
+      fetchFresh: async () => ({
+        items: [makeItem('pin-backlog', NOW_SEC - 800, 'alpha')],
+        hasMore: true,
+        nextCursor: 'opaque-cursor-4',
+      }),
+    },
+  ];
+  const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
+  const section = briefing.protocols.find((entry) => entry.key === 'alpha');
+  assert.equal(section.droppedByTotalCap, 1);
+  assert.equal(section.backlogCursorAction, 'preserve', 'do not page past unseen backlog items');
+  assert.equal(section.nextWatermarkTs, null);
+});
+
+test('a fetch error preserves the stored backlog cursor for retry', async () => {
+  const store = setup();
+  store.advanceProtocolState(7, 'alpha', {
+    lastSeenTs: NOW_SEC - 500,
+    lastPinId: null,
+    nowIso: new Date(NOW_MS).toISOString(),
+    backlogCursor: 'opaque-cursor-3',
+  });
+  const registry = [makeDescriptor('alpha', [], 'network down')];
+  const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
+  assert.equal(briefing.protocols[0].error, 'network down');
+  assert.equal(briefing.protocols[0].backlogCursorAction, 'preserve');
+});
+
+// ---------------------------------------------------------------------------
+// Deterministic inbox (R3)
+// ---------------------------------------------------------------------------
+
+const makeInboxItem = (pinId, createdAt, overrides = {}) => ({
+  type: 'simplebuzz_comment',
+  pinId,
+  targetPinId: 'own-pin-1',
+  actorName: 'Alice',
+  actorGlobalMetaId: 'idq-alice',
+  createdAt,
+  excerpt: 'great post',
+  ...overrides,
+});
+
+test('inbox: fetched with the baseline, ledger-filtered, newest-first, capped at 30', async () => {
+  const store = setup();
+  store.markSeen(7, 'inbox-old', 'presented', new Date(NOW_MS).toISOString());
+  const calls = [];
+  const many = Array.from({ length: 35 }, (_, i) =>
+    makeInboxItem(`inbox-${i}`, NOW_SEC - 300 + i, { excerpt: `excerpt ${i}` }));
+  many.push(makeInboxItem('inbox-old', NOW_SEC - 400));
+  const briefing = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20,
+    registry: [makeDescriptor('alpha', [])],
+    nowMs: NOW_MS,
+    inboxBaselineTs: NOW_SEC - 1000,
+    fetchInbox: async ({ sinceTs }) => {
+      calls.push(sinceTs);
+      return many;
+    },
+  });
+  assert.deepEqual(calls, [NOW_SEC - 1000]);
+  assert.equal(briefing.inbox.error, null);
+  assert.equal(briefing.inbox.items.length, 30, 'capped at 30 newest');
+  assert.equal(briefing.inbox.items[0].pinId, 'inbox-34', 'newest first');
+  assert.ok(briefing.inbox.items.every((item) => item.pinId !== 'inbox-old'), 'ledger-filtered for exactly-once');
+});
+
+test('inbox: fetch errors isolate into the section and never throw', async () => {
+  const store = setup();
+  const briefing = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20,
+    registry: [makeDescriptor('alpha', [makeItem('pin-a', NOW_SEC - 5, 'alpha')])],
+    nowMs: NOW_MS,
+    fetchInbox: async () => { throw new Error('inbox backend down'); },
+  });
+  assert.equal(briefing.inbox.error, 'inbox backend down');
+  assert.deepEqual(briefing.inbox.items, []);
+  assert.equal(briefing.items.length, 1, 'protocol sections still build');
+});
+
+test('inbox: absent without a fetcher; baseline defaults to the first lookback', async () => {
+  const store = setup();
+  const withoutFetcher = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20,
+    registry: [makeDescriptor('alpha', [])],
+    nowMs: NOW_MS,
+  });
+  assert.equal(withoutFetcher.inbox, undefined);
+
+  const withDefaultBaseline = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20,
+    registry: [makeDescriptor('alpha', [])],
+    nowMs: NOW_MS,
+    fetchInbox: async ({ sinceTs }) => {
+      assert.equal(sinceTs, NOW_SEC - SURF_FIRST_LOOKBACK_SECONDS);
+      return [];
+    },
+  });
+  assert.equal(withDefaultBaseline.inbox.sinceTs, NOW_SEC - SURF_FIRST_LOOKBACK_SECONDS);
+});
+
+// ---------------------------------------------------------------------------
+// Protocol radar (R6)
+// ---------------------------------------------------------------------------
+
+test('radar: items annotated with isNew against the baseline; rejectedCount passes through', async () => {
+  const store = setup();
+  const briefing = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20,
+    registry: [makeDescriptor('alpha', [])],
+    nowMs: NOW_MS,
+    inboxBaselineTs: NOW_SEC - 1000,
+    fetchProtocolRadar: async () => ({
+      items: [
+        { path: '/protocols/newproto', title: 'New Proto', protocolName: 'newproto', intro: 'i', version: '1', authorName: 'Bob', createdAt: NOW_SEC - 500 },
+        { path: '/protocols/oldproto', title: 'Old Proto', protocolName: 'oldproto', intro: 'i', version: '1', authorName: 'Cara', createdAt: NOW_SEC - 5000 },
+      ],
+      rejectedCount: 2,
+    }),
+  });
+  assert.equal(briefing.protocolRadar.error, null);
+  assert.equal(briefing.protocolRadar.rejectedCount, 2);
+  assert.deepEqual(
+    briefing.protocolRadar.items.map((item) => `${item.protocolName}:${item.isNew}`),
+    ['newproto:true', 'oldproto:false'],
+  );
+});
+
+test('radar: fetch errors isolate into the section and never throw', async () => {
+  const store = setup();
+  const briefing = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20,
+    registry: [makeDescriptor('alpha', [makeItem('pin-a', NOW_SEC - 5, 'alpha')])],
+    nowMs: NOW_MS,
+    fetchProtocolRadar: async () => { throw new Error('radar backend down'); },
+  });
+  assert.equal(briefing.protocolRadar.error, 'radar backend down');
+  assert.deepEqual(briefing.protocolRadar.items, []);
+});
+
+test('digest markdown renders inbox and radar appendix sections', async () => {
+  const store = setup();
+  const briefing = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20,
+    registry: [makeDescriptor('alpha', [makeItem('pin-a', NOW_SEC - 5, 'alpha')])],
+    nowMs: NOW_MS,
+    inboxBaselineTs: NOW_SEC - 1000,
+    fetchInbox: async () => [makeInboxItem('inbox-1', NOW_SEC - 100)],
+    fetchProtocolRadar: async () => ({
+      items: [
+        { path: '/protocols/newproto', title: 'New Proto', protocolName: 'newproto', intro: 'i', version: '1', authorName: 'Bob', createdAt: NOW_SEC - 500 },
+      ],
+      rejectedCount: 1,
+    }),
+  });
+  const md = renderSurfBriefingMarkdown(briefing);
+  assert.match(md, /## Your inbox — 1 new interaction\(s\)/);
+  assert.match(md, /\[simplebuzz_comment\] Alice → own-pin-1/);
+  assert.match(md, /## Protocol radar — 1 registered protocol\(s\)/);
+  assert.match(md, /\[NEW\] newproto \(\/protocols\/newproto/);
+  assert.match(md, /1 declaration\(s\) rejected by validation/);
 });

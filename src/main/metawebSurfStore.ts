@@ -106,6 +106,13 @@ export interface MetawebSurfProtocolState {
   /** Unix seconds of the newest chain item seen last run; null = never surfed. */
   lastSeenTs: number | null;
   lastPinId: string | null;
+  /**
+   * Opaque surf-reads R1 cursor of the unscanned backlog remainder (the
+   * window's first page reported hasMore, or a backlog page still in
+   * progress). null = no registered debt. Stored and forwarded verbatim,
+   * never parsed client-side.
+   */
+  backlogCursor: string | null;
   updatedAt: string;
 }
 
@@ -129,6 +136,7 @@ interface MetawebSurfProtocolStateRow {
   protocol_key: string;
   last_seen_ts: number | null;
   last_pin_id: string | null;
+  last_fresh_cursor: string | null;
   updated_at: string;
 }
 
@@ -171,6 +179,7 @@ const rowToProtocolState = (row: MetawebSurfProtocolStateRow): MetawebSurfProtoc
   protocolKey: row.protocol_key,
   lastSeenTs: row.last_seen_ts === null || row.last_seen_ts === undefined ? null : Number(row.last_seen_ts),
   lastPinId: row.last_pin_id || null,
+  backlogCursor: row.last_fresh_cursor || null,
   updatedAt: row.updated_at,
 });
 
@@ -204,10 +213,24 @@ export function ensureMetawebSurfSchema(db: Database): void {
       protocol_key TEXT NOT NULL,
       last_seen_ts INTEGER,
       last_pin_id TEXT,
+      last_fresh_cursor TEXT,
       updated_at TEXT NOT NULL,
       PRIMARY KEY (metabot_id, protocol_key)
     );
   `);
+  // First-run migration for existing user databases: the backlog-catch-up
+  // cursor column is added idempotently (PRAGMA check, same pattern as
+  // CoworkStore.ensureMemorySchemaCompatibility). Old rows start with no
+  // registered debt — exactly the state a pre-migration bot was in.
+  try {
+    const protocolStateCols = db.exec('PRAGMA table_info(metaweb_surf_protocol_state);');
+    const protocolStateColumns = (protocolStateCols[0]?.values ?? []).map((row) => String(row[1]));
+    if (!protocolStateColumns.includes('last_fresh_cursor')) {
+      db.run('ALTER TABLE metaweb_surf_protocol_state ADD COLUMN last_fresh_cursor TEXT;');
+    }
+  } catch (error) {
+    console.warn('[MetawebSurfStore] Failed to migrate metaweb_surf_protocol_state:', error);
+  }
   db.run(`
     CREATE TABLE IF NOT EXISTS metaweb_surf_seen_pins (
       metabot_id INTEGER NOT NULL,
@@ -368,25 +391,46 @@ export class MetawebSurfStore {
     ).map(rowToProtocolState);
   }
 
-  /** Advance the watermark after a successful run; never rewinds. */
+  /**
+   * Advance the watermark after a successful run; never rewinds.
+   *
+   * `lastSeenTs: null` leaves the watermark column untouched (backlog pages
+   * never advance it — their items are older than the watermark).
+   *
+   * `backlogCursor`: undefined leaves the stored cursor untouched, null
+   * CLEARS it (backlog debt drained), a string STORES it verbatim (opaque
+   * server token — the store never parses or validates it).
+   */
   advanceProtocolState(
     metabotId: number,
     protocolKey: string,
-    input: { lastSeenTs: number; lastPinId: string | null; nowIso: string },
+    input: {
+      lastSeenTs: number | null;
+      lastPinId?: string | null;
+      nowIso: string;
+      backlogCursor?: string | null;
+    },
   ): void {
     const existing = this.getProtocolState(metabotId, protocolKey);
-    const nextTs = existing?.lastSeenTs != null
-      ? Math.max(existing.lastSeenTs, Math.floor(input.lastSeenTs))
-      : Math.floor(input.lastSeenTs);
+    const nextTs = typeof input.lastSeenTs === 'number'
+      ? (existing?.lastSeenTs != null
+        ? Math.max(existing.lastSeenTs, Math.floor(input.lastSeenTs))
+        : Math.floor(input.lastSeenTs))
+      : (existing?.lastSeenTs ?? null);
+    const nextPinId = input.lastPinId !== undefined ? input.lastPinId : (existing?.lastPinId ?? null);
+    const nextCursor = input.backlogCursor !== undefined
+      ? input.backlogCursor
+      : (existing?.backlogCursor ?? null);
     this.db.run(
       `INSERT INTO metaweb_surf_protocol_state
-        (metabot_id, protocol_key, last_seen_ts, last_pin_id, updated_at)
-       VALUES (?, ?, ?, ?, ?)
+        (metabot_id, protocol_key, last_seen_ts, last_pin_id, last_fresh_cursor, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (metabot_id, protocol_key)
        DO UPDATE SET last_seen_ts = excluded.last_seen_ts,
                      last_pin_id = excluded.last_pin_id,
+                     last_fresh_cursor = excluded.last_fresh_cursor,
                      updated_at = excluded.updated_at`,
-      [metabotId, protocolKey, nextTs, input.lastPinId, input.nowIso],
+      [metabotId, protocolKey, nextTs, nextPinId, nextCursor, input.nowIso],
     );
     this.saveDb();
   }

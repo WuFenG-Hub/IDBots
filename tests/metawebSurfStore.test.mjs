@@ -90,6 +90,73 @@ test('protocol watermark advances but never rewinds', () => {
   assert.equal(store.listProtocolStates(7).length, 1);
 });
 
+test('protocol backlog cursor: store verbatim, clear, and leave-untouched semantics (surf-reads migration)', () => {
+  const { store } = setup();
+  // Old-code call shape (no cursor field) leaves the cursor untouched.
+  store.advanceProtocolState(7, 'simplebuzz', { lastSeenTs: 1000, lastPinId: 'pin-a', nowIso: NOW });
+  let state = store.getProtocolState(7, 'simplebuzz');
+  assert.equal(state.backlogCursor, null);
+
+  // Register debt (window page reported hasMore).
+  store.advanceProtocolState(7, 'simplebuzz', { lastSeenTs: 2000, lastPinId: null, nowIso: NOW, backlogCursor: 'opaque-cursor-2' });
+  state = store.getProtocolState(7, 'simplebuzz');
+  assert.equal(state.backlogCursor, 'opaque-cursor-2', 'cursor stored verbatim');
+  assert.equal(state.lastSeenTs, 2000, 'watermark still advances in the same write');
+
+  // Backlog page: watermark untouched, cursor updated.
+  store.advanceProtocolState(7, 'simplebuzz', { lastSeenTs: null, nowIso: NOW, backlogCursor: 'opaque-cursor-3' });
+  state = store.getProtocolState(7, 'simplebuzz');
+  assert.equal(state.lastSeenTs, 2000, 'lastSeenTs: null leaves the watermark unchanged');
+  assert.equal(state.backlogCursor, 'opaque-cursor-3');
+
+  // Drained: clear the cursor without touching the watermark.
+  store.advanceProtocolState(7, 'simplebuzz', { lastSeenTs: null, nowIso: NOW, backlogCursor: null });
+  state = store.getProtocolState(7, 'simplebuzz');
+  assert.equal(state.backlogCursor, null);
+  assert.equal(state.lastSeenTs, 2000);
+
+  // Preserve: a no-op cursor field (undefined) leaves whatever is stored.
+  store.advanceProtocolState(7, 'simplebuzz', { lastSeenTs: 3000, nowIso: NOW });
+  state = store.getProtocolState(7, 'simplebuzz');
+  assert.equal(state.backlogCursor, null);
+  assert.equal(state.lastSeenTs, 3000);
+});
+
+test('schema migration: an old protocol_state table gains last_fresh_cursor idempotently (user DB continuity)', () => {
+  const { db, store } = setup();
+  // Simulate a pre-migration user database: drop the new column, keep a row.
+  db.run('ALTER TABLE metaweb_surf_protocol_state RENAME TO _old_protocol_state;');
+  db.run(`
+    CREATE TABLE metaweb_surf_protocol_state (
+      metabot_id INTEGER NOT NULL,
+      protocol_key TEXT NOT NULL,
+      last_seen_ts INTEGER,
+      last_pin_id TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (metabot_id, protocol_key)
+    );
+  `);
+  db.run(`INSERT INTO metaweb_surf_protocol_state
+    (metabot_id, protocol_key, last_seen_ts, last_pin_id, updated_at)
+    VALUES (7, 'simplebuzz', 1000, 'pin-a', '2026-09-01T00:00:00.000Z');`);
+  db.run('DROP TABLE _old_protocol_state;');
+
+  // The idempotent schema run must add the column WITHOUT touching the row.
+  ensureMetawebSurfSchema(db);
+  const state = store.getProtocolState(7, 'simplebuzz');
+  assert.equal(state.lastSeenTs, 1000, 'existing watermark survives the migration');
+  assert.equal(state.lastPinId, 'pin-a');
+  assert.equal(state.backlogCursor, null, 'old rows start with no registered debt');
+
+  // And the new column is writable through the normal path.
+  store.advanceProtocolState(7, 'simplebuzz', { lastSeenTs: 2000, nowIso: NOW, backlogCursor: 'cursor-x' });
+  assert.equal(store.getProtocolState(7, 'simplebuzz').backlogCursor, 'cursor-x');
+
+  // Second run is a no-op (idempotent).
+  ensureMetawebSurfSchema(db);
+  assert.equal(store.getProtocolState(7, 'simplebuzz').backlogCursor, 'cursor-x');
+});
+
 test('seen ledger upgrades to the strongest action and filters unseen', () => {
   const { store } = setup();
   store.markSeen(7, 'pin-1', 'presented', NOW);
