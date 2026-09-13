@@ -163,6 +163,8 @@ test('coworkRunner has a qa-surf allowlist: learning tools + answer/react, nothi
   // The learning surface is inherited via the study allowlist spread…
   for (const expected of [
     "'read_metaweb_pin'",
+    "'read_metaweb_pins_batch'",
+    "'metaweb_pin_versions'",
     "'knowledge_base_add_document'",
     "'knowledge_base_learn'",
     "'procedure_save'",

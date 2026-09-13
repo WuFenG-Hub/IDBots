@@ -2,6 +2,12 @@ import { z } from 'zod';
 import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 import type { MetawebSearchItem, MetawebSearchProtocol } from '../services/metawebSearchService';
 import type { MetawebPin } from '../services/metawebPinService';
+import type {
+  MetawebBatchEntry,
+  MetawebBatchPin,
+  MetawebPinVersions,
+} from '../services/metawebSurfReadsService';
+import { isBatchErrorEntry } from '../services/metawebSurfReadsService';
 import { METAWEB_CITATION_RULE, buildPinBrowserUri, buildSearchItemBrowserUri, markdownSelfLink } from './metawebUri';
 import { readInputFromMetawebPin, recordChainReadSafe } from './chainReadLedger';
 
@@ -9,7 +15,8 @@ import { readInputFromMetawebPin, recordChainReadSafe } from './chainReadLedger'
  * Control surface the host (main.ts) provides for the MetaWeb learning tools.
  * Backed by the metaso-p2p /api/metaweb/* aggregation APIs
  * (so.metaid.io): unified cross-protocol search + generic pin read — the
- * bot's window into the Agent Internet knowledge base.
+ * bot's window into the Agent Internet knowledge base — plus the surf-reads
+ * family (batch pin read + modify-chain versions).
  */
 export type MetawebLearningControl = {
   search(input: {
@@ -23,6 +30,14 @@ export type MetawebLearningControl = {
     cursor?: string;
   }): Promise<{ items: MetawebSearchItem[]; hasMore: boolean; nextCursor?: string | null }>;
   readPin(pinId: string): Promise<MetawebPin>;
+  /**
+   * R2 batch read: up to 50 pins in one round trip, keyed by the requested
+   * pinId. Per-pin failures come back as isolated {pinId, error} entries —
+   * they never fail the whole batch.
+   */
+  readPinsBatch(pinIds: string[]): Promise<Record<string, MetawebBatchEntry>>;
+  /** R4 modify-chain versions with chain/local attribution. */
+  pinVersions(pinId: string): Promise<MetawebPinVersions>;
 };
 
 /** Minimal shape of the claude-agent-sdk `tool()` helper we depend on. */
@@ -258,5 +273,93 @@ export function buildMetawebLearningAgentTools(deps: {
     }
   );
 
-  return [searchMetaweb, readMetawebPin];
+  const readMetawebPinsBatch = tool(
+    'read_metaweb_pins_batch',
+    'Read up to 50 MetaWeb pins in ONE call — prefer this over looping read_metaweb_pin whenever you have a shortlist of pins to deep-read (digest keepers, answer candidates, a comment thread). Pass the pinIds as an array (1-50); the result maps each requested pinId to its full pin object (protocol, title/meta, author, normalized markdown body with truncated/totalLength when the server capped it) or an isolated error entry when that single pin failed — per-pin failures never fail the batch. The payload field is NEVER truncated server-side. When a returned entry has truncated:true and you need the rest of the body, follow up with read_metaweb_pin for that one pin. Pins with null content are encrypted or empty — skip them. Every readable pin counts as a full read.',
+    {
+      pinIds: z.array(z.string().min(1)).min(1).max(50),
+    },
+    async (args: { pinIds: string[] }) => {
+      const pinIds = (Array.isArray(args.pinIds) ? args.pinIds : [])
+        .map((id) => String(id ?? '').trim())
+        .filter(Boolean);
+      if (pinIds.length === 0) {
+        return textResult('read_metaweb_pins_batch requires at least one pinId.', true);
+      }
+      if (pinIds.length > 50) {
+        return textResult(`read_metaweb_pins_batch accepts at most 50 pinIds per call (got ${pinIds.length}) — split the list into smaller batches.`, true);
+      }
+      try {
+        const entries = await metawebLearning.readPinsBatch(pinIds);
+        const sections: string[] = [];
+        let readableCount = 0;
+        for (const requestedId of pinIds) {
+          const entry: MetawebBatchEntry | undefined = entries[requestedId];
+          if (!entry) {
+            sections.push(`## ${requestedId}\n(no entry returned for this pinId — treat it as unreadable and move on)`);
+            continue;
+          }
+          if (isBatchErrorEntry(entry)) {
+            sections.push(`## ${requestedId}\n- error: ${entry.error}`);
+            continue;
+          }
+          const pin = entry as MetawebBatchPin;
+          if (pin.text == null) {
+            sections.push(`## ${requestedId}\n- (${pin.protocol || 'unknown protocol'}) has no readable text content (encrypted, binary, or empty) — skip it; do NOT invent its content.`);
+            continue;
+          }
+          readableCount += 1;
+          // Same fire-and-forget chain-read ledger as the single-read tool:
+          // batch deep reads are full reads and recorded as such.
+          recordChainReadSafe(readInputFromMetawebPin(pin, resolveMetabotId?.(sessionId ?? ''), 'read_metaweb_pins_batch'));
+          sections.push(formatMetawebPinDetail(pin));
+        }
+        const header = `${readableCount}/${pinIds.length} pin(s) readable in this batch:`;
+        return textResult([header, ...sections, METAWEB_CITATION_RULE].join('\n\n'));
+      } catch (error) {
+        return textResult(`Failed to read the MetaWeb pin batch: ${error instanceof Error ? error.message : String(error)}. You can retry with fewer pinIds or fall back to single read_metaweb_pin calls.`, true);
+      }
+    }
+  );
+
+  const metawebPinVersions = tool(
+    'metaweb_pin_versions',
+    'List the modify-chain versions of one MetaWeb pin (oldest → newest) — who revised what and when, each with its version pinId. The response carries an attribution: "chain" is evidence-grade (matches the chain projection modify_history exactly); "local" comes from the node index and may be partial after indexer gaps — retry later (or re-check with a single read_metaweb_pin) when you need certainty, e.g. before citing a revision history or challenging an agentpedia entry.',
+    {
+      pinId: z.string().min(1),
+    },
+    async (args: { pinId: string }) => {
+      const pinId = (args.pinId ?? '').trim();
+      if (!pinId) {
+        return textResult('metaweb_pin_versions requires a non-empty pinId.', true);
+      }
+      try {
+        const versions = await metawebLearning.pinVersions(pinId);
+        const lines = [
+          `Version chain for pin ${versions.pinId || pinId} (latest: ${versions.latest || 'unknown'}):`,
+          `- attribution: ${versions.attribution}${versions.attribution === 'chain' ? ' (evidence-grade — matches the on-chain modify history)' : ' (from the local index — may be partial after indexer gaps; retry later if you need certainty)'}`,
+        ];
+        if (versions.versions.length === 0) {
+          lines.push('- (no versions listed)');
+        } else {
+          for (const entry of versions.versions) {
+            const author = entry.author.name || entry.author.globalMetaId || entry.author.address || 'unknown';
+            const date = entry.createdAt > 0
+              ? ` (${new Date(entry.createdAt * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC)`
+              : '';
+            lines.push(`- v${entry.version || '?'} ${entry.pinId} — ${entry.operation || 'create'} by ${author}${date}`);
+          }
+        }
+        lines.push(METAWEB_CITATION_RULE);
+        return textResult(lines.join('\n'));
+      } catch (error) {
+        if (error instanceof Error && error.name === 'MetawebPinVersionsNotFoundError') {
+          return textResult(`No MetaWeb pin matches "${pinId}" (it does not exist or was revoked), so it has no version chain.`);
+        }
+        return textResult(`Failed to read the MetaWeb pin versions: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    }
+  );
+
+  return [searchMetaweb, readMetawebPin, readMetawebPinsBatch, metawebPinVersions];
 }

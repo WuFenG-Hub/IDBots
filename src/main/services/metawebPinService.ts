@@ -116,7 +116,8 @@ function normalizeMeta(raw: unknown): MetawebPinMeta {
   };
 }
 
-function normalizePin(raw: unknown): MetawebPin {
+/** Exported for the surf-reads batch endpoint (same pin shape, plus version info). */
+export function normalizePin(raw: unknown): MetawebPin {
   const record = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const textValue = typeof record.text === 'string' ? record.text : null;
   return {

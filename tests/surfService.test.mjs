@@ -46,7 +46,7 @@ const alphaDescriptor = (items) => ({
   paths: ['/protocols/alpha'],
   interactions: ['like'],
   relevanceHint: 'hint',
-  fetchFresh: async () => items,
+  fetchFresh: async () => ({ items, hasMore: false, nextCursor: null }),
 });
 
 test('digest-only run: report written, watermark advanced, events broadcast', async () => {
@@ -97,7 +97,7 @@ test('per-bot mutex: a second start while running throws', async () => {
     paths: ['/protocols/slow'],
     interactions: ['like'],
     relevanceHint: 'hint',
-    fetchFresh: () => gate.then(() => []),
+    fetchFresh: () => gate.then(() => ({ items: [], hasMore: false, nextCursor: null })),
   };
   const { service } = setup([slow]);
   service.startSurf(7, 'manual-ui');
@@ -363,4 +363,247 @@ test('a run with no reconciliation dep simply skips it', async () => {
   const run = await service.runSurfAndWait(7, 'manual-ui');
   assert.equal(run.status, 'done');
   assert.equal(run.stats.fetched, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Surf-reads backend migration: backlog cursor lifecycle, deterministic inbox,
+// protocol radar (service level — what the success path persists)
+// ---------------------------------------------------------------------------
+
+const makeInboxItem = (pinId, createdAt) => ({
+  type: 'simpleanswer',
+  pinId,
+  targetPinId: 'own-question-1',
+  actorName: 'Alice',
+  actorGlobalMetaId: 'idq-alice',
+  createdAt,
+  excerpt: 'try the pipeline route',
+});
+
+test('backlog lifecycle: window debt registered → backlog page next run → drained clears; watermark untouched by backlog', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const metabotStore = {
+    getMetabotById: () => ({ id: 7, name: 'Tester' }),
+    getMetabotSetting: () => null,
+  };
+  const calls = [];
+  // Run 1: window fetch reports hasMore → debt registered. Run 2: backlog page
+  // (hasMore) → next cursor stored. Run 3: backlog drained → cursor cleared.
+  let runIndex = 0;
+  const pagedDescriptor = {
+    key: 'alpha',
+    displayName: 'Fake alpha',
+    paths: ['/protocols/alpha'],
+    interactions: ['like'],
+    relevanceHint: 'hint',
+    fetchFresh: async (input) => {
+      calls.push({ run: runIndex, ...input });
+      runIndex += 1;
+      if (runIndex === 1) {
+        return { items: [makeItem('pin-window', NOW_SEC - 100)], hasMore: true, nextCursor: 'cursor-page-2' };
+      }
+      if (runIndex === 2) {
+        assert.equal(input.backlogCursor, 'cursor-page-2', 'run 2 continues the registered backlog page');
+        return { items: [makeItem('pin-backlog', NOW_SEC - 900)], hasMore: true, nextCursor: 'cursor-page-3' };
+      }
+      assert.equal(input.backlogCursor, 'cursor-page-3');
+      return { items: [makeItem('pin-backlog-2', NOW_SEC - 950)], hasMore: false, nextCursor: null };
+    },
+  };
+  const service = new SurfService({
+    store,
+    metabotStore,
+    broadcast: () => {},
+    registry: [pagedDescriptor],
+    nowMs: () => NOW_MS,
+  });
+
+  const first = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(first.status, 'done');
+  let state = store.getProtocolState(7, 'alpha');
+  assert.equal(state.lastSeenTs, NOW_SEC - 100, 'window run advances the watermark normally');
+  assert.equal(state.backlogCursor, 'cursor-page-2', 'debt registered on the success path');
+
+  const second = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(second.status, 'done');
+  state = store.getProtocolState(7, 'alpha');
+  assert.equal(state.lastSeenTs, NOW_SEC - 100, 'backlog page NEVER moves the watermark');
+  assert.equal(state.backlogCursor, 'cursor-page-3', 'continued backlog debt stored verbatim');
+
+  const third = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(third.status, 'done');
+  state = store.getProtocolState(7, 'alpha');
+  assert.equal(state.lastSeenTs, NOW_SEC - 100);
+  assert.equal(state.backlogCursor, null, 'drained backlog clears the debt');
+  assert.equal(store.getSeenAction(7, 'pin-window'), 'presented');
+  assert.equal(store.getSeenAction(7, 'pin-backlog'), 'presented', 'backlog items are still marked presented');
+  assert.equal(store.getSeenAction(7, 'pin-backlog-2'), 'presented');
+});
+
+test('backlog cursor survives a failed run (side-effect discipline)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  store.advanceProtocolState(7, 'alpha', {
+    lastSeenTs: NOW_SEC - 500,
+    lastPinId: null,
+    nowIso: '2026-09-12T01:00:00.000Z',
+    backlogCursor: 'cursor-page-2',
+  });
+  const failing = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    runSurfSession: async () => { throw new Error('llm down'); },
+    nowMs: () => NOW_MS,
+  });
+  const run = await failing.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'failed');
+  const state = store.getProtocolState(7, 'alpha');
+  assert.equal(state.backlogCursor, 'cursor-page-2', 'failed run leaves the cursor untouched');
+  assert.equal(state.lastSeenTs, NOW_SEC - 500, 'failed run leaves the watermark untouched');
+});
+
+test('inbox: baseline is the previous run START (createdAt), owner from identity, items folded into the same markSeenBatch', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  store.createRun({ id: 'prev-run', metabotId: 7, trigger: 'manual-ui', nowIso: '2026-09-12T00:30:00.000Z' });
+  store.finishRun('prev-run', {
+    status: 'done',
+    stats: {},
+    finishedAtIso: '2026-09-12T01:30:00.000Z',
+  });
+  const inboxCalls = [];
+  let seenBriefing = null;
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    getBotIdentity: () => ({ address: '0xABC', globalMetaId: 'idq-tester' }),
+    fetchSurfInbox: async ({ owner, sinceTs }) => {
+      inboxCalls.push({ owner, sinceTs });
+      return [makeInboxItem('inbox-1', NOW_SEC - 200)];
+    },
+    runSurfSession: async (context) => {
+      seenBriefing = context.briefing;
+      return { stats: {}, reportMarkdown: null, reportJson: null };
+    },
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'done');
+  assert.deepEqual(inboxCalls, [
+    { owner: '0xABC', sinceTs: Math.floor(Date.parse('2026-09-12T00:30:00.000Z') / 1000) },
+  ], 'baseline = the previous run START (createdAt), NOT finishedAt; owner = identity address');
+  assert.equal(seenBriefing.inbox.items.length, 1);
+  assert.equal(seenBriefing.inbox.items[0].pinId, 'inbox-1');
+  assert.equal(store.getSeenAction(7, 'inbox-1'), 'presented', 'inbox pins fold into the same success-path batch');
+
+  // Next run: the same interaction is ledger-filtered (exactly-once) and the
+  // baseline moved to THIS run's start.
+  const secondCalls = [];
+  const secondService = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([])],
+    getBotIdentity: () => ({ address: null, globalMetaId: 'idq-tester' }),
+    fetchSurfInbox: async ({ owner, sinceTs }) => {
+      secondCalls.push({ owner, sinceTs });
+      return [makeInboxItem('inbox-1', NOW_SEC - 200), makeInboxItem('inbox-2', NOW_SEC - 50)];
+    },
+    runSurfSession: async (context) => {
+      seenBriefing = context.briefing;
+      return { stats: {}, reportMarkdown: null, reportJson: null };
+    },
+    nowMs: () => NOW_MS,
+  });
+  await secondService.runSurfAndWait(7, 'manual-ui');
+  assert.deepEqual(secondCalls[0].owner, 'idq-tester', 'globalMetaId fallback when the address is missing');
+  assert.deepEqual(
+    seenBriefing.inbox.items.map((item) => item.pinId),
+    ['inbox-2'],
+    'the already-presented interaction never surfaces twice',
+  );
+});
+
+test('inbox: no identity or no fetcher → no inbox section, run still succeeds', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  let seenBriefing = null;
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    getBotIdentity: () => ({ address: null, globalMetaId: null }),
+    fetchSurfInbox: async () => { throw new Error('must not be called without an owner'); },
+    runSurfSession: async (context) => {
+      seenBriefing = context.briefing;
+      return { stats: {}, reportMarkdown: null, reportJson: null };
+    },
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'done');
+  assert.equal(seenBriefing.inbox, undefined, 'no owner → no inbox fetch at all');
+});
+
+test('radar: fetchProtocolRadar flows into the briefing and a failure still finishes the run', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  let seenBriefing = null;
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    fetchProtocolRadar: async () => ({
+      items: [
+        { path: '/protocols/alpha', title: 'Alpha', protocolName: 'alpha', intro: 'i', version: '1', authorName: 'Bob', createdAt: NOW_SEC - 10 },
+      ],
+      rejectedCount: 0,
+    }),
+    runSurfSession: async (context) => {
+      seenBriefing = context.briefing;
+      return { stats: {}, reportMarkdown: null, reportJson: null };
+    },
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'done');
+  assert.equal(seenBriefing.protocolRadar.items.length, 1);
+  assert.match(run.reportMarkdown, /## Protocol radar — 1 registered protocol\(s\)/, 'radar lands in the digest appendix');
+
+  const failingRadar = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([])],
+    fetchProtocolRadar: async () => { throw new Error('radar down'); },
+    nowMs: () => NOW_MS,
+  });
+  const second = await failingRadar.runSurfAndWait(7, 'manual-ui');
+  assert.equal(second.status, 'done', 'a sick radar backend never fails the run');
+  assert.match(second.reportMarkdown, /radar fetch failed: radar down/);
 });

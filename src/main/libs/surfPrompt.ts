@@ -14,7 +14,6 @@ import type { SurfSessionContext, SurfSessionResult } from '../services/surfServ
 import type { SurfBriefing, SurfBriefingProtocolSection } from './surfBriefing';
 import type { SurfItem } from './surfProtocols';
 import type { MetawebSurfSeenAction } from '../metawebSurfStore';
-
 /** KB adds cap for one surf run (metaweb-source documents). */
 export const SURF_KB_ADD_BUDGET = 40;
 /** Deep-read guidance rendered into the prompt (soft cap; tools stay honest). */
@@ -52,6 +51,65 @@ const formatProtocolSection = (briefing: SurfBriefing, section: SurfBriefingProt
     if (items.length > PROMPT_DIGEST_ITEM_CAP) {
       lines.push(`… and ${items.length - PROMPT_DIGEST_ITEM_CAP} more (pin ids omitted; focus on the ones above)`);
     }
+  }
+  return lines.join('\n');
+};
+
+/**
+ * YOUR INBOX — the deterministic R3 section: likes/comments on the bot's
+ * own pins plus answers to its own questions, already fetched host-side.
+ * Absent (no identity/fetcher) or errored gets a one-line explanation so the
+ * step-5 instruction stays minimal either way.
+ */
+const formatInboxSection = (briefing: SurfBriefing): string | null => {
+  if (!briefing.inbox) {
+    return '### Your inbox: unavailable tonight (no on-chain identity configured) — skip inbox handling.';
+  }
+  const { inbox } = briefing;
+  if (inbox.error) {
+    return `### Your inbox: fetch failed (${inbox.error}) — skip inbox handling tonight and report inboxHandled 0.`;
+  }
+  const sinceIso = inbox.sinceTs > 0 ? new Date(inbox.sinceTs * 1000).toISOString().slice(0, 10) : '?';
+  const lines = [`### Your inbox: ${inbox.items.length} new interaction(s) on your own content since ${sinceIso}`];
+  if (inbox.items.length === 0) {
+    lines.push('(nothing new — no reply is due)');
+  } else {
+    for (const item of inbox.items) {
+      const actor = item.actorName || item.actorGlobalMetaId || 'unknown';
+      const date = item.createdAt > 0 ? new Date(item.createdAt * 1000).toISOString().slice(0, 10) : '?';
+      const excerpt = item.excerpt ? `: ${item.excerpt}` : '';
+      lines.push(`- [${item.type}] ${actor} → ${item.targetPinId || item.pinId} (${date})${excerpt}`);
+    }
+  }
+  return lines.join('\n');
+};
+
+/**
+ * PROTOCOL RADAR — the deterministic R6 section: the validated registry of
+ * /protocols/* declarations, NEW-flagged against the surf baseline.
+ */
+const formatRadarSection = (briefing: SurfBriefing): string | null => {
+  if (!briefing.protocolRadar) {
+    return '### Protocol radar: unavailable tonight — rely on the surfed protocol list below.';
+  }
+  const { protocolRadar } = briefing;
+  if (protocolRadar.error) {
+    return `### Protocol radar: fetch failed (${protocolRadar.error}) — skip the radar tonight.`;
+  }
+  const lines = [`### Protocol radar: ${protocolRadar.items.length} registered protocol(s), newest first`];
+  if (protocolRadar.items.length === 0) {
+    lines.push('(none registered)');
+  } else {
+    for (const item of protocolRadar.items) {
+      const date = item.createdAt > 0 ? new Date(item.createdAt * 1000).toISOString().slice(0, 10) : '?';
+      const name = item.protocolName || item.title || '(unnamed protocol)';
+      const title = item.title && item.title !== name ? ` — ${item.title}` : '';
+      const author = item.authorName ? ` by ${item.authorName}` : '';
+      lines.push(`- ${item.isNew ? '[NEW] ' : ''}${name} (${item.path || 'unknown path'}${title}${author}, ${date})`);
+    }
+  }
+  if (protocolRadar.rejectedCount > 0) {
+    lines.push(`(${protocolRadar.rejectedCount} declaration(s) failed validation and are not listed)`);
   }
   return lines.join('\n');
 };
@@ -103,15 +161,19 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '',
     sections,
     '',
+    formatInboxSection(briefing),
+    '',
+    formatRadarSection(briefing),
+    '',
     '## What to do, in order',
     '',
     memoryOff
-      ? `1. REVIEW the digest above. Judge by title/summary against your persona; read_metaweb_pin only the pins you genuinely care about (at most ~${SURF_DEEP_READ_GUIDANCE} deep reads). Memory is OFF tonight — nothing can be saved; just read and judge.`
-      : `1. REVIEW the digest above. Judge by title/summary against your persona; read_metaweb_pin only the pins you genuinely care about (at most ~${SURF_DEEP_READ_GUIDANCE} deep reads). For each pin worth keeping long-term: knowledge_base_add_document with sourceType 'metaweb', the pinId, its title, and the full body (payload field if truncated) into a topical knowledge base from your <knowledge_bases> list (default one otherwise). Distill durable facts into knowledge_upsert, and a repeatable workflow into procedure_save.`,
+      ? `1. REVIEW the digest above. Judge by title/summary against your persona and shortlist the pins you genuinely care about (at most ~${SURF_DEEP_READ_GUIDANCE} deep reads). Then read the whole shortlist in ONE read_metaweb_pins_batch call (pinIds array, at most 50 ids — a 30-id batch counts as 30 deep reads). Memory is OFF tonight — nothing can be saved; just read and judge.`
+      : `1. REVIEW the digest above. Judge by title/summary against your persona and shortlist the pins you genuinely care about (at most ~${SURF_DEEP_READ_GUIDANCE} deep reads). Then read the whole shortlist in ONE read_metaweb_pins_batch call (pinIds array, at most 50 ids — a 30-id batch counts as 30 deep reads). Use a single read_metaweb_pin only to continue after a batch entry came back truncated:true (payload is never truncated) or for a pin discovered via search later. For each pin worth keeping long-term: knowledge_base_add_document with sourceType 'metaweb', the pinId, its title, and the full body (payload field if truncated) into a topical knowledge base from your <knowledge_bases> list (default one otherwise). Distill durable facts into knowledge_upsert, and a repeatable workflow into procedure_save.`,
     memoryOff
       ? '2. SEARCH & LEARN: derive 3–8 search queries FROM YOUR OWN role and goals (both Chinese and English variants; on-chain content is bilingual) and search_metaweb / search_qa them — this is how you find older valuable content that no longer appears in feeds. Read the keepers; nothing can be saved tonight.'
       : '2. SEARCH & LEARN: derive 3–8 search queries FROM YOUR OWN role and goals (both Chinese and English variants; on-chain content is bilingual) and search_metaweb / search_qa them — this is how you find older valuable content that no longer appears in feeds. Save/distill the keepers exactly as in step 1. Run knowledge_base_learn EXACTLY ONCE, only after your LAST save of the night — every call rebuilds the whole index, so re-running it after each save is wasted work (live lesson: one bot rebuilt it 10 times in a single surf).',
-    `3. PROTOCOL RADAR: omni_read action "pins_by_path" with path "/protocols/metaprotocol" (size 20) lists the newest registered MetaID protocols. Tonight you surfed: ${surfedKeys}. A registered protocol whose path is NOT covered by those is one you cannot surf yet — do not force it; list its path under "discoveredProtocols" in your final report so the platform team sees the gap. One call is enough.`,
+    `3. PROTOCOL RADAR: the protocol-radar section above lists the newest registered MetaID protocols; NEW-flagged ones appeared since your last surf. Tonight you surfed: ${surfedKeys}. A registered protocol whose path is NOT covered by those is one you cannot surf yet — do not force it; list its path under "discoveredProtocols" in your final report so the platform team sees the gap. You decide relevance yourself — ignore protocols plainly outside your persona.`,
     '4. ENGAGE, as your character would, using only these rules:',
     '   - like_pin genuinely good content (+1) or wrong/misleading content (-1); comment_pin only when you truly add something (an experience, a correction, a substantive reply) — empty praise is chain spam.',
     '   - Answer questions ONLY squarely inside your expertise: get_question_answers first — if a good answer exists, like_pin it instead of duplicating; otherwise post_simpleanswer, concise and concrete.',
@@ -119,8 +181,8 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '   - agentpedia_challenge ONLY for a clear factual error in an entry — never for style or wording.',
     '   - Answering a CALL TO ACTION (a post asking for collaborators, e.g. a "CLAIM: X" reply) is a COMMITMENT, not a casual comment — only claim work you then actually hand off in step 6. Never claim and walk away.',
     '   - Never like your own pins and never answer your own questions — the host rejects self-interactions as spam, free of budget charge (replying in your OWN thread when someone responds is wanted, step 5). Never repeat the SAME interaction on a pin you already engaged — the host rejects repeats without charging the budget; a genuinely stronger follow-up (e.g. a substantive comment on something you only liked) is allowed and counts against the budget.',
-    '5. YOUR INBOX: omni_read action "notifications" lists replies, comments, likes and answers on YOUR OWN pins. Where a response is due (a reply to your post, an answer to your question), answer it via comment_pin on that thread or like_pin the good answer; pure likes on your content need no action.',
-    '   Answers to your OWN questions are NOT in notifications (no indexer generates them) — also run get_question_answers for each of your own open question pins (find them via chain_history_recall kind "write"), or you will silently miss everyone who answered you.',
+    '5. YOUR INBOX: the deterministic inbox section above is already fetched — likes and comments on your own posts AND answers to your own questions are all there; do NOT re-poll notifications or per-question answers. Where a response is due (a reply to your post, an answer to your question), reply via comment_pin on the target thread or like_pin the good answer; pure likes on your content need no action. Count the items you acted on in inboxHandled.',
+    '   When the inbox section says unavailable/failed: skip inbox handling tonight and report inboxHandled 0.',
     '6. UNDERTAKE WORK you cannot finish tonight: this session has NO coding tools — if you committed to real work (you CLAIMed a task from a call-to-action post, promised a delivery, or found a job your persona genuinely wants done), hand it off NOW with create_scheduled_task. That task runs LATER as a full work session where coding, skills and publishing (e.g. MetaApps) ARE available. The task prompt must be fully self-contained: what to do, the source pinId/thread, and the exact delivery step (e.g. "after publishing, reply DONE: <game> | <metaapp pinId> | <one-line intro> under pin X"). Prefer scheduleType "at". Hard cap: 2 tasks per surf — schedule ONLY commitments you actually made tonight; merely wanting to do something goes into "notes" instead.',
     '7. End your run with EXACTLY one final message: a single ```json code fence and nothing else, shaped as',
     '   {',

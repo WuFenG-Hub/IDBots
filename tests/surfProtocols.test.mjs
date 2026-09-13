@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { sinceFiltered } = await import('../dist-electron/main/libs/surfProtocols.js');
+const { sinceFiltered, applyFreshWindowFilter } = await import('../dist-electron/main/libs/surfProtocols.js');
 
 const makeItem = (pinId, createdAt) => ({
   pinId,
@@ -46,6 +46,32 @@ test('sinceFiltered drops id-less items and caps at the limit', () => {
   ];
   assert.deepEqual(
     sinceFiltered(items, 1000, 2).map((item) => item.pinId),
+    ['pin-a', 'pin-b'],
+  );
+});
+
+test('applyFreshWindowFilter on a BACKLOG page must NOT apply the since filter (regression: backlog items are older than the watermark)', () => {
+  // A backlog page is resumed by the server cursor alone; every item on it
+  // is OLDER than the watermark (sinceTs) by construction. Running the
+  // window filter on it empties the page while the cursor still advances —
+  // paging past unseen content forever (caught in review).
+  const items = [makeItem('pin-old-1', 100), makeItem('pin-old-2', 200)];
+  assert.deepEqual(
+    applyFreshWindowFilter(items, 1789000000, 50, true).map((item) => item.pinId),
+    ['pin-old-1', 'pin-old-2'],
+    'backlog mode keeps older-than-watermark items',
+  );
+  assert.deepEqual(
+    applyFreshWindowFilter(items, 1789000000, 50, false),
+    [],
+    'window mode still filters them out',
+  );
+});
+
+test('applyFreshWindowFilter in backlog mode still drops id-less items and caps at the limit', () => {
+  const items = [makeItem('', 100), makeItem('pin-a', 100), makeItem('pin-b', 200), makeItem('pin-c', 300)];
+  assert.deepEqual(
+    applyFreshWindowFilter(items, 1789000000, 2, true).map((item) => item.pinId),
     ['pin-a', 'pin-b'],
   );
 });

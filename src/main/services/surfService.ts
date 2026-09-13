@@ -20,7 +20,7 @@ import {
   type MetawebSurfStore,
   type MetawebSurfTrigger,
 } from '../metawebSurfStore';
-import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing } from '../libs/surfBriefing';
+import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing, type SurfInboxItem, type SurfProtocolRadarFetchResult } from '../libs/surfBriefing';
 import { extractSurfNotesFromReportJson } from '../libs/surfPrompt';
 import { surfReceiptsFromChainWriteRecord } from '../libs/surfInteractionGuard';
 import { DEFAULT_SURF_PROTOCOLS, type SurfProtocolDescriptor } from '../libs/surfProtocols';
@@ -97,6 +97,21 @@ export interface SurfServiceDeps {
   }>;
   registry?: SurfProtocolDescriptor[];
   nowMs?: () => number;
+  /**
+   * Bot identity for the deterministic inbox (R3): the interactions API
+   * accepts an address, metaId or globalMetaId as owner. Absent → no inbox
+   * section (the prompt degrades to one line).
+   */
+  getBotIdentity?: (metabotId: number) => { address?: string | null; globalMetaId?: string | null } | null;
+  /**
+   * Deterministic inbox fetcher (R3): likes/comments on the bot's pins plus
+   * answers to its questions since `sinceTs` (the previous run's START —
+   * an interaction arriving mid-run must surface next run, so the baseline
+   * is the run row's createdAt, NOT finishedAt).
+   */
+  fetchSurfInbox?: (input: { owner: string; sinceTs: number }) => Promise<SurfInboxItem[]>;
+  /** Protocol radar fetcher (R6): newest registered /protocols/* declarations. */
+  fetchProtocolRadar?: () => Promise<SurfProtocolRadarFetchResult>;
 }
 
 export class SurfService {
@@ -108,6 +123,9 @@ export class SurfService {
   private readonly listChainWritesForSurf?: SurfServiceDeps['listChainWritesForSurf'];
   private readonly registry: SurfProtocolDescriptor[];
   private readonly nowMs: () => number;
+  private readonly getBotIdentity?: SurfServiceDeps['getBotIdentity'];
+  private readonly fetchSurfInbox?: SurfServiceDeps['fetchSurfInbox'];
+  private readonly fetchProtocolRadar?: SurfServiceDeps['fetchProtocolRadar'];
   private readonly runningByMetabot = new Map<number, string>();
 
   constructor(deps: SurfServiceDeps) {
@@ -119,6 +137,9 @@ export class SurfService {
     this.listChainWritesForSurf = deps.listChainWritesForSurf;
     this.registry = deps.registry ?? DEFAULT_SURF_PROTOCOLS;
     this.nowMs = deps.nowMs ?? (() => Date.now());
+    this.getBotIdentity = deps.getBotIdentity;
+    this.fetchSurfInbox = deps.fetchSurfInbox;
+    this.fetchProtocolRadar = deps.fetchProtocolRadar;
   }
 
   /** Crash recovery at startup: runs orphaned by a killed process become failed. */
@@ -247,12 +268,29 @@ export class SurfService {
       // never work off a stale ledger. Idempotent (strongest-wins batching).
       this.reconcileSeenLedger(metabotId);
       const budget = getSurfInteractionBudget(this.metabotStore, metabotId);
+      // Inbox/radar baseline: the START of the latest finished run (its
+      // createdAt — NOT finishedAt: an interaction arriving mid-run must
+      // surface on the NEXT run). No finished run yet → the briefing's
+      // first-lookback default applies (inboxBaselineTs stays undefined).
+      let inboxBaselineTs: number | undefined;
+      const latestFinished = this.store.getLatestFinishedRun(metabotId);
+      if (latestFinished?.createdAt) {
+        const parsedMs = Date.parse(latestFinished.createdAt);
+        if (Number.isFinite(parsedMs)) inboxBaselineTs = Math.floor(parsedMs / 1000);
+      }
+      const identity = this.getBotIdentity?.(metabotId) ?? null;
+      const owner = (identity?.address ?? '').trim() || (identity?.globalMetaId ?? '').trim() || null;
       const briefing = await buildSurfBriefing({
         store: this.store,
         metabotId,
         interactionBudget: budget,
         registry: this.registry,
         nowMs: this.nowMs(),
+        inboxBaselineTs,
+        fetchInbox: this.fetchSurfInbox && owner
+          ? ({ sinceTs }) => this.fetchSurfInbox({ owner, sinceTs })
+          : undefined,
+        fetchProtocolRadar: this.fetchProtocolRadar,
       });
       fetchedCount = briefing.items.length;
 
@@ -277,25 +315,43 @@ export class SurfService {
 
       // Seen-ledger writes land ONLY on this success path: every briefed pin
       // becomes 'presented' and the session's self-reported actions fold on
-      // top (strongest action wins, one batched store write). A run that
-      // fails before this point leaves the ledger untouched, so the next
-      // surf re-presents the same window — one bad night (LLM timeout,
-      // outage) never silently drops that content (review P1).
+      // top (strongest action wins, one batched store write). Presented
+      // inbox items join the same batch — the ledger is what guarantees the
+      // deterministic inbox presents each interaction exactly once.
+      // A run that fails before this point leaves the ledger untouched, so
+      // the next surf re-presents the same window — one bad night (LLM
+      // timeout, outage) never silently drops that content (review P1).
       const nowIso = new Date(this.nowMs()).toISOString();
       this.store.markSeenBatch(metabotId, [
         ...briefing.items.map((item) => ({ pinId: item.pinId, action: 'presented' as const })),
+        ...(briefing.inbox && !briefing.inbox.error
+          ? briefing.inbox.items.map((item) => ({ pinId: item.pinId, action: 'presented' as const }))
+          : []),
         ...sessionSeenActions,
       ], nowIso);
 
-      // Watermarks advance only after the run body completed, and only for
-      // protocols with a usable cursor (fetch errors and fully crowded-out
-      // sections keep their old cursor so the next surf retries them).
+      // Watermarks/cursors advance only after the run body completed, and
+      // only for sections with a usable action (fetch errors preserve their
+      // old state so the next surf retries them). Backlog pages move ONLY
+      // the cursor — never the watermark.
       for (const section of briefing.protocols) {
-        if (!section.error && section.nextWatermarkTs !== null) {
+        if (section.error) continue;
+        if (section.nextWatermarkTs !== null) {
           this.store.advanceProtocolState(metabotId, section.key, {
             lastSeenTs: section.nextWatermarkTs,
             lastPinId: null,
             nowIso,
+            backlogCursor: section.backlogCursorAction === 'store'
+              ? section.backlogCursor
+              : section.backlogCursorAction === 'clear' ? null : undefined,
+          });
+        } else if (section.backlogCursorAction !== 'preserve') {
+          this.store.advanceProtocolState(metabotId, section.key, {
+            lastSeenTs: null,
+            nowIso,
+            backlogCursor: section.backlogCursorAction === 'store'
+              ? section.backlogCursor
+              : section.backlogCursorAction === 'clear' ? null : undefined,
           });
         }
       }

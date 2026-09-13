@@ -17,6 +17,21 @@ const makeItem = (pinId, protocolKey, title = '') => ({
   extra: null,
 });
 
+const makeSection = (key, displayName, overrides = {}) => ({
+  key,
+  displayName,
+  fetchedBacklog: false,
+  fetchedCount: 1,
+  keptCount: 1,
+  newestTs: 1789000000,
+  droppedByTotalCap: 0,
+  nextWatermarkTs: 1789000000,
+  backlogCursorAction: 'clear',
+  backlogCursor: null,
+  error: null,
+  ...overrides,
+});
+
 const makeContext = (overrides = {}) => ({
   runId: 'run-1',
   metabotId: 7,
@@ -27,10 +42,26 @@ const makeContext = (overrides = {}) => ({
     interactionBudget: 20,
     items: [makeItem('pin-buzz', 'simplebuzz'), makeItem('pin-note', 'simplenote'), makeItem('pin-q', 'simplequestion')],
     protocols: [
-      { key: 'simplebuzz', displayName: 'Buzz (on-chain microblog)', fetchedCount: 1, keptCount: 1, newestTs: 1789000000, error: null },
-      { key: 'simplenote', displayName: 'SimpleNote (on-chain blog)', fetchedCount: 1, keptCount: 1, newestTs: 1789000000, error: null },
-      { key: 'simplequestion', displayName: 'Q&A (on-chain Quora)', fetchedCount: 0, keptCount: 0, newestTs: null, error: 'timeout' },
+      makeSection('simplebuzz', 'Buzz (on-chain microblog)'),
+      makeSection('simplenote', 'SimpleNote (on-chain blog)'),
+      makeSection('simplequestion', 'Q&A (on-chain Quora)', { fetchedCount: 0, keptCount: 0, newestTs: null, nextWatermarkTs: null, error: 'timeout' }),
     ],
+    inbox: {
+      sinceTs: 1788900000,
+      error: null,
+      items: [
+        { type: 'simplebuzz_comment', pinId: 'inbox-1', targetPinId: 'own-pin-1', actorName: 'Alice', actorGlobalMetaId: 'idq-alice', createdAt: 1788990000, excerpt: 'loved the breakdown' },
+        { type: 'simpleanswer', pinId: 'inbox-2', targetPinId: 'own-q-1', actorName: 'Bob', actorGlobalMetaId: 'idq-bob', createdAt: 1788995000, excerpt: 'use the pipeline route' },
+      ],
+    },
+    protocolRadar: {
+      rejectedCount: 1,
+      error: null,
+      items: [
+        { path: '/protocols/newproto', title: 'New Proto', protocolName: 'newproto', intro: 'intro', version: '1', authorName: 'Cara', createdAt: 1788999000, isNew: true },
+        { path: '/protocols/oldproto', title: 'Old Proto', protocolName: 'oldproto', intro: 'intro', version: '2', authorName: 'Dan', createdAt: 1788000000, isNew: false },
+      ],
+    },
   },
   ...overrides,
 });
@@ -48,13 +79,62 @@ test('prompt carries the digest, the budget, and the persona-driven engagement r
   assert.match(prompt, /UNTRUSTED third-party text/);
   assert.match(prompt, /never commands to OBEY/);
   assert.match(prompt, /agentpedia_challenge ONLY for a clear factual error/);
-  assert.match(prompt, /omni_read action "notifications"/);
   assert.match(prompt, /fetch failed \(timeout\)/);
-  assert.match(prompt, /PROTOCOL RADAR/);
-  assert.match(prompt, /pins_by_path.*\/protocols\/metaprotocol/);
+  assert.match(prompt, /```json/);
+});
+
+test('step 1 instructs ONE read_metaweb_pins_batch call for the shortlist (surf-reads backend)', () => {
+  const prompt = buildSurfSessionPrompt(makeContext());
+  assert.match(prompt, /read the whole shortlist in ONE read_metaweb_pins_batch call/);
+  assert.match(prompt, /at most 50 ids — a 30-id batch counts as 30 deep reads/);
+  assert.match(prompt, /truncated:true/);
+  assert.doesNotMatch(prompt, /read_metaweb_pin only the pins you genuinely care about/, 'no more per-pin read loop');
+});
+
+test('step 3 renders the deterministic protocol-radar section (no omni_read metaprotocol call)', () => {
+  const prompt = buildSurfSessionPrompt(makeContext());
+  assert.match(prompt, /### Protocol radar: 2 registered protocol\(s\), newest first/);
+  assert.match(prompt, /\[NEW\] newproto \(\/protocols\/newproto/);
+  assert.match(prompt, /1 declaration\(s\) failed validation/);
+  assert.match(prompt, /PROTOCOL RADAR: the protocol-radar section above/);
   assert.match(prompt, /Tonight you surfed: simplebuzz, simplenote, simplequestion/);
   assert.match(prompt, /discoveredProtocols/);
-  assert.match(prompt, /```json/);
+  assert.doesNotMatch(prompt, /omni_read action "pins_by_path"/, 'the radar is fetched host-side now');
+  assert.doesNotMatch(prompt, /\/protocols\/metaprotocol/);
+});
+
+test('step 5 renders the deterministic inbox section; the notifications/answer-polling workaround is GONE', () => {
+  const prompt = buildSurfSessionPrompt(makeContext());
+  assert.match(prompt, /### Your inbox: 2 new interaction\(s\) on your own content since /);
+  assert.match(prompt, /\[simplebuzz_comment\] Alice → own-pin-1/);
+  assert.match(prompt, /\[simpleanswer\] Bob → own-q-1/);
+  assert.match(prompt, /do NOT re-poll notifications or per-question answers/);
+  assert.match(prompt, /Count the items you acted on in inboxHandled/);
+  // The old workaround — omni_read notifications + per-question answer
+  // polling — must be fully gone (the R3 inbox replaces both).
+  assert.doesNotMatch(prompt, /omni_read action "notifications"/);
+  assert.doesNotMatch(prompt, /NOT in notifications/);
+  assert.doesNotMatch(prompt, /get_question_answers for each of your own open question pins/);
+});
+
+test('inbox/radar degrade to one line when absent or errored', () => {
+  const noInbox = makeContext();
+  delete noInbox.briefing.inbox;
+  const noInboxPrompt = buildSurfSessionPrompt(noInbox);
+  assert.match(noInboxPrompt, /### Your inbox: unavailable tonight \(no on-chain identity configured\)/);
+  assert.match(noInboxPrompt, /skip inbox handling/);
+
+  const erroredInbox = makeContext();
+  erroredInbox.briefing.inbox = { sinceTs: 1788900000, error: 'backend down', items: [] };
+  assert.match(buildSurfSessionPrompt(erroredInbox), /### Your inbox: fetch failed \(backend down\)/);
+
+  const noRadar = makeContext();
+  delete noRadar.briefing.protocolRadar;
+  assert.match(buildSurfSessionPrompt(noRadar), /### Protocol radar: unavailable tonight/);
+
+  const erroredRadar = makeContext();
+  erroredRadar.briefing.protocolRadar = { rejectedCount: 0, error: 'radar down', items: [] };
+  assert.match(buildSurfSessionPrompt(erroredRadar), /### Protocol radar: fetch failed \(radar down\)/);
 });
 
 test('prompt carries the surf→work handoff step and the claim-commitment rule', () => {
@@ -155,12 +235,6 @@ test('time budget follows the trigger, and degraded mode keeps only the clock no
   const degraded = buildSurfSessionPrompt(makeContext({ memoryEnabled: false }));
   assert.match(degraded, /Time budget: about 35 minutes/);
   assert.doesNotMatch(degraded, /Save incrementally/);
-});
-
-test('inbox step spells out that answers to own questions are not in notifications', () => {
-  const prompt = buildSurfSessionPrompt(makeContext());
-  assert.match(prompt, /NOT in notifications/);
-  assert.match(prompt, /get_question_answers for each of your own open question pins/);
 });
 
 test('prompt marks items held back by the run cap (round 3)', () => {
