@@ -74,13 +74,14 @@ export interface RunOrchestratorSkillTurnParams {
    * M4 nightly study session: restricts the inline tool surface to the
    * learning allowlist and hard-caps metaweb-source KB adds at pinBudget.
    */
-  metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
+  metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf'; kbAddsUsed?: number };
   /**
    * MetaWeb surf session: restricts the inline tool surface to the surf
    * allowlist and hard-caps chain writes at interactionBudget (KB adds at
-   * kbBudget) through the counting wrappers in coworkRunner.
+   * kbBudget) through the guards in coworkRunner. Counters live on this
+   * object so a per-turn tool-surface rebuild cannot reset them (P2.1).
    */
-  metawebSurfSession?: { interactionBudget: number; kbBudget: number };
+  metawebSurfSession?: import('../libs/surfInteractionGuard').SurfSessionWriteState;
   permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   /** Overrides the skill-turn watchdog timeout (ms). Defaults to 300s. */
   skillTurnTimeoutMs?: number;

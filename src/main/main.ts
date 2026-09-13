@@ -5659,6 +5659,10 @@ const getCoworkRunner = () => {
         },
         isSurfBeforeDreamEnabled: (metabotId: number) =>
           isSurfBeforeDreamEnabled(getMetabotStore(), metabotId),
+        // Seen-ledger read for the surf createPin guard's duplicate-interaction
+        // check (review P2.3) — same store the surf reports/watermarks use.
+        getSurfSeenAction: (metabotId: number, pinId: string) =>
+          getMetawebSurfStore().getSeenAction(metabotId, pinId),
       },
       // upload_file tool backend. Delegates to the shared uploadMetaFile()
       // service so the tool, the RPC endpoint, and the IPC handlers all share

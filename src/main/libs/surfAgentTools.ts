@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { MetawebSurfRunRecord } from '../metawebSurfStore';
+import type { MetawebSurfRunRecord, MetawebSurfSeenAction } from '../metawebSurfStore';
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
 type SdkToolFactory = (
@@ -23,6 +23,12 @@ export type MetawebSurfControl = {
   listSurfRuns(metabotId: number, limit?: number): MetawebSurfRunRecord[];
   setSurfBeforeDreamEnabled(metabotId: number, enabled: boolean): void;
   isSurfBeforeDreamEnabled(metabotId: number): boolean;
+  /**
+   * Seen-ledger read backing the surf createPin guard's duplicate-interaction
+   * check (review P2.3). Not used by the tools themselves; optional so
+   * embedding/test controls can omit it — the in-run record still holds.
+   */
+  getSurfSeenAction?(metabotId: number, pinId: string): MetawebSurfSeenAction | null;
 };
 
 function textResult(text: string, isError = false) {
