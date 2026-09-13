@@ -130,3 +130,23 @@ test('default context (memoryEnabled unset) keeps the full prompt', () => {
   assert.doesNotMatch(prompt, /DEGRADED SURF/);
   assert.match(prompt, /knowledge_base_add_document with sourceType/);
 });
+
+test('time budget follows the trigger, and degraded mode keeps only the clock note', () => {
+  // makeContext triggers 'pre-dream' — bounded by the 35-min race.
+  assert.match(buildSurfSessionPrompt(makeContext()), /Time budget: about 35 minutes/);
+  // Manual triggers get the full 60-min session watchdog.
+  assert.match(buildSurfSessionPrompt(makeContext({ trigger: 'manual-ui' })), /Time budget: about 60 minutes/);
+  // Full prompt asks for incremental saves (live lesson: batching saves for
+  // the end loses them all when the watchdog fires).
+  assert.match(buildSurfSessionPrompt(makeContext()), /Save incrementally/);
+  // Degraded mode has nothing to save; the clock note survives.
+  const degraded = buildSurfSessionPrompt(makeContext({ memoryEnabled: false }));
+  assert.match(degraded, /Time budget: about 35 minutes/);
+  assert.doesNotMatch(degraded, /Save incrementally/);
+});
+
+test('inbox step spells out that answers to own questions are not in notifications', () => {
+  const prompt = buildSurfSessionPrompt(makeContext());
+  assert.match(prompt, /NOT in notifications/);
+  assert.match(prompt, /get_question_answers for each of your own open question pins/);
+});
