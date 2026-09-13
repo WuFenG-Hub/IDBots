@@ -202,7 +202,7 @@ import { buildAgentpediaAgentTools } from './agentpediaAgentTools';
 import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
 import { buildLikePinAgentTools } from './likePinAgentTools';
 import { buildCommentPinAgentTools } from './commentPinAgentTools';
-import { createSurfCreatePinGuard, type SurfSessionWriteState } from './surfInteractionGuard';
+import { createSurfCreatePinGuard, recordSurfDeepRead, type SurfSessionWriteState } from './surfInteractionGuard';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
@@ -9733,12 +9733,18 @@ export class CoworkRunner extends EventEmitter {
     }
     // MetaWeb learning tools (unified cross-protocol search + generic pin
     // read) carry the same always-on posture as social recall: they are the
-    // bot's window into the Agent Internet knowledge base.
+    // bot's window into the Agent Internet knowledge base. Surf sessions get
+    // a receipt-recording wrapper: every actual deep read lands on the
+    // session marker (ground truth for the seen ledger and for the real
+    // stats of a failed run — round 3).
     if (this.metawebLearning) {
+      const surfReadMarker = this.activeSessions.get(sessionId)?.metawebSurfSession;
       memoryTools.push(
         ...buildMetawebLearningAgentTools({
           tool,
-          metawebLearning: this.metawebLearning,
+          metawebLearning: surfReadMarker
+            ? this.wrapMetawebLearningForSurf(this.metawebLearning, surfReadMarker)
+            : this.metawebLearning,
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
         })
@@ -9942,6 +9948,27 @@ export class CoworkRunner extends EventEmitter {
       },
       learnKnowledgeBase: (metabotId, kbId, options) => control.learnKnowledgeBase(metabotId, kbId, options),
       learnAllKnowledgeBases: (metabotId, options) => control.learnAllKnowledgeBases(metabotId, options),
+    };
+  }
+
+  /**
+   * Surf-session read-receipt wrapper: every readable pin returned by readPin
+   * is recorded on the session marker (deduped). Kept to explicit delegation
+   * like wrapKnowledgeBaseForStudy — the control may be a class instance.
+   * Only the readPin path is tracked; omni_read pin_content deep reads stay
+   * self-reported (their blast radius is one digest line, not gas).
+   */
+  private wrapMetawebLearningForSurf(
+    control: MetawebLearningControl,
+    marker: SurfSessionWriteState,
+  ): MetawebLearningControl {
+    return {
+      search: (input) => control.search(input),
+      readPin: async (pinId) => {
+        const pin = await control.readPin(pinId);
+        if (pin?.text != null) recordSurfDeepRead(marker, pinId);
+        return pin;
+      },
     };
   }
 

@@ -59,7 +59,7 @@ test('digest-only run: report written, watermark advanced, events broadcast', as
   assert.match(run.reportMarkdown, /pin-a/);
 
   const state = store.getProtocolState(7, 'alpha');
-  assert.equal(state.lastSeenTs, NOW_SEC - 50, 'watermark advanced to newest fetched');
+  assert.equal(state.lastSeenTs, NOW_SEC - 100, 'watermark advances to the oldest kept item (cap defers, never drops)');
 
   assert.deepEqual(events.map((e) => e.status), ['running', 'done']);
   assert.equal(events[0].trigger, 'manual-ui');
@@ -214,7 +214,7 @@ test('a failed run re-presents the same window on the next surf (P1 regression)'
   assert.equal(retry.stats.fetched, 2, 'the lost window is presented again after the failure');
   assert.match(retry.reportMarkdown, /pin-a/);
   assert.equal(store.getSeenAction(7, 'pin-a'), 'presented', 'success path marks presented');
-  assert.equal(store.getProtocolState(7, 'alpha').lastSeenTs, NOW_SEC - 50);
+  assert.equal(store.getProtocolState(7, 'alpha').lastSeenTs, NOW_SEC - 100, 'watermark lands on the oldest kept item');
 });
 
 test('crash recovery fails stale running rows', () => {
@@ -230,4 +230,84 @@ test('crash recovery fails stale running rows', () => {
   });
   assert.equal(service.recoverAfterRestart(), 1);
   assert.equal(store.getRun('stale-1').status, 'failed');
+});
+
+test('a failed run keeps the real partial stats attached to the session error (round 3)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    runSurfSession: async () => {
+      const error = new Error('Skill turn timed out after 3600s');
+      error.surfPartialStats = { deepRead: 26, savedToKb: 2, liked: 6, commented: 1 };
+      throw error;
+    },
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'failed');
+  assert.equal(run.stats.fetched, 1, 'fetched comes from the briefing even on failure');
+  assert.equal(run.stats.deepRead, 26, 'host-vouched partial stats land on the failed row');
+  assert.equal(run.stats.savedToKb, 2);
+  assert.equal(run.stats.liked, 6);
+  assert.equal(run.stats.commented, 1);
+  assert.equal(run.stats.answered, 0, 'untouched classes stay zero');
+  assert.equal(store.getSeenAction(7, 'pin-a'), null, 'partial stats never touch the seen ledger');
+});
+
+test('a failed run without attached partial stats reports fetched only', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100), makeItem('pin-b', NOW_SEC - 50)])],
+    runSurfSession: async () => { throw new Error('llm down'); },
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'failed');
+  assert.equal(run.stats.fetched, 2);
+  assert.equal(run.stats.deepRead, 0);
+  assert.equal(run.stats.liked, 0);
+});
+
+test('the next run inherits the notes written by the previous DONE run (round 3)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  store.createRun({ id: 'done-1', metabotId: 7, trigger: 'manual-ui', nowIso: '2026-09-12T01:00:00.000Z' });
+  store.finishRun('done-1', {
+    status: 'done',
+    stats: {},
+    reportMarkdown: '# old report',
+    reportJson: JSON.stringify({ summary: 'old', notes: 'E-4/E-5 errata still pending implementation — check again' }),
+    finishedAtIso: '2026-09-12T01:30:00.000Z',
+  });
+  let seenContext = null;
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    runSurfSession: async (context) => {
+      seenContext = context;
+      return { stats: {}, reportMarkdown: null, reportJson: null };
+    },
+    nowMs: () => NOW_MS,
+  });
+  await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(seenContext.previousNotes, 'E-4/E-5 errata still pending implementation — check again');
 });

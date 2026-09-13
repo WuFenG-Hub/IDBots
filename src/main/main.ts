@@ -270,7 +270,7 @@ import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { MetawebSurfStore } from './metawebSurfStore';
 import { SurfService, SURF_STATUS_CHANNEL } from './services/surfService';
 import { buildSurfSessionPrompt, parseSurfRunReport, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
-import { foldSurfReceiptsIntoSeenActions, surfReceiptSeenActions, type SurfSessionWriteState } from './libs/surfInteractionGuard';
+import { foldSurfReceiptsIntoSeenActions, surfReceiptSeenActions, surfSessionPartialStats, type SurfSessionWriteState } from './libs/surfInteractionGuard';
 import { isSurfBeforeDreamEnabled, SURF_BEFORE_DREAM_ENABLED_KEY } from './services/surfSettings';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
@@ -279,7 +279,7 @@ import { collectSleepGuardWorkFrom } from './sleepGuardWorkSources';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
-import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
+import { runOrchestratorSkillTurn, runSkillTurnInExistingSession, SkillTurnTimeoutError } from './services/orchestratorCoworkBridge';
 import { withChainWriteBudget } from './libs/chainWriteBudget';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
@@ -4096,10 +4096,11 @@ const startSqliteDaemons = (): void => {
           new Promise<null>((resolve) => {
             timeout = setTimeout(() => {
               // Review 2, item 8: an overrunning surf must not linger past
-              // the dream — stop the underlying cowork session. Its own
-              // 30-min watchdog normally beats this race; without the stop,
-              // the bridge's late-completion window would let it keep
-              // reading/writing for hours after the dream already happened.
+              // the dream — stop the underlying cowork session. The session's
+              // own watchdog (60 min since round 3) never beats this race;
+              // without the stop, the bridge's late-completion window would
+              // let it keep reading/writing for hours after the dream already
+              // happened.
               const sessionId = activeSurfSessionByMetabot.get(metabotId);
               if (sessionId) {
                 try {
@@ -7100,7 +7101,12 @@ const getSurfService = (): SurfService => {
             permissionMode: 'acceptEdits',
             disableMemoryUpdates: false,
             metawebSurfSession: writeState,
-            skillTurnTimeoutMs: 30 * 60 * 1000,
+            // Live-run data (round 3): a first-surf backlog run takes ~30 min,
+            // so the old 30-min watchdog was a coin-flip (one live run finished
+            // 22s under it, the next timed out). Manual runs get 60 min; the
+            // pre-dream path stays bounded tighter by its own 35-min race +
+            // stopSession (see surfBeforeDream).
+            skillTurnTimeoutMs: 60 * 60 * 1000,
             onSessionCreated: (sessionId) => {
               activeSurfSessionByMetabot.set(context.metabotId, sessionId);
               coworkStore.setSessionHiddenFromList(sessionId, true);
@@ -7113,6 +7119,23 @@ const getSurfService = (): SurfService => {
           report.seenActions = foldSurfReceiptsIntoSeenActions(report.seenActions, writeState);
           return report;
         } catch (error) {
+          // Round 3 (live field failure): a skill-turn timeout must STOP the
+          // underlying session, not orphan it — an orphaned surf session keeps
+          // burning tokens for hours and can still write on-chain with
+          // receipts nobody banks (cross-run duplicate-interaction risk). The
+          // pre-dream race has its own stop; this covers the in-band watchdog.
+          if (error instanceof SkillTurnTimeoutError) {
+            const orphanId = activeSurfSessionByMetabot.get(context.metabotId);
+            if (orphanId) {
+              try {
+                getCoworkRunner().stopSession(orphanId, {
+                  reason: 'Surf session exceeded its 60-min watchdog; the run is recorded failed and the session is stopped.',
+                });
+              } catch {
+                // Already settled between the map read and the stop — fine.
+              }
+            }
+          }
           // A failed/timed-out session may still have PAID for interactions —
           // bank those receipts immediately or the next surf would re-engage
           // the same pins (cross-run duplicate protection). No 'presented'
@@ -7125,6 +7148,19 @@ const getSurfService = (): SurfService => {
             } catch {
               // A sick ledger must not mask the session's own failure.
             }
+          }
+          // Round 3: the failed run row deserves REAL numbers, not all-zero
+          // stats — attach what the host can vouch for (deep reads tracked by
+          // the readPin wrapper, KB adds and chain writes from the guard) so
+          // SurfService can store them. Deep reads stay OUT of the ledger:
+          // the run's saves are lost, so catch-up must re-present those pins.
+          try {
+            const partial = surfSessionPartialStats(writeState);
+            if (Object.keys(partial).length > 0) {
+              (error as { surfPartialStats?: unknown }).surfPartialStats = partial;
+            }
+          } catch {
+            // Stat attachment is best-effort; the original error stands.
           }
           throw error;
         } finally {

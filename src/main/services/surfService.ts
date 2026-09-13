@@ -21,6 +21,7 @@ import {
   type MetawebSurfTrigger,
 } from '../metawebSurfStore';
 import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing } from '../libs/surfBriefing';
+import { extractSurfNotesFromReportJson } from '../libs/surfPrompt';
 import { DEFAULT_SURF_PROTOCOLS, type SurfProtocolDescriptor } from '../libs/surfProtocols';
 import { getSurfInteractionBudget, isSurfBeforeDreamEnabled, type SurfSettingsReader } from './surfSettings';
 
@@ -52,6 +53,12 @@ export interface SurfSessionContext {
    * allowed with memory off (review 2, item 9 option B). Absent → full prompt.
    */
   memoryEnabled?: boolean;
+  /**
+   * The "notes for next surf" the bot wrote in its last DONE run's report,
+   * read back out of reportJson (round 3: notes were a write-only channel).
+   * Absent/null → no notes section in the prompt.
+   */
+  previousNotes?: string | null;
 }
 
 export interface SurfSessionResult {
@@ -111,6 +118,20 @@ export class SurfService {
 
   isRunning(metabotId: number): boolean {
     return this.runningByMetabot.has(metabotId);
+  }
+
+  /**
+   * The notes the bot wrote to itself in its last DONE run (round 3): read
+   * back out of reportJson so the next surf inherits its hard-won lessons.
+   * Best-effort — a missing/malformed note must never block a run.
+   */
+  private latestSurfNotes(metabotId: number): string | null {
+    try {
+      const latest = this.store.getLatestFinishedRun(metabotId);
+      return extractSurfNotesFromReportJson(latest?.reportJson ?? null);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -184,6 +205,7 @@ export class SurfService {
       this.broadcast({ metabotId, runId, trigger, status: outcome, error });
       this.runningByMetabot.delete(metabotId);
     };
+    let fetchedCount = 0;
     try {
       const budget = getSurfInteractionBudget(this.metabotStore, metabotId);
       const briefing = await buildSurfBriefing({
@@ -193,6 +215,7 @@ export class SurfService {
         registry: this.registry,
         nowMs: this.nowMs(),
       });
+      fetchedCount = briefing.items.length;
 
       const stats: MetawebSurfRunStats = { ...emptySurfRunStats(), fetched: briefing.items.length };
       let reportMarkdown: string | null = null;
@@ -205,6 +228,7 @@ export class SurfService {
           botName: bot?.name ?? `Bot ${metabotId}`,
           trigger,
           briefing,
+          previousNotes: this.latestSurfNotes(metabotId),
         });
         Object.assign(stats, session.stats ?? {});
         reportMarkdown = session.reportMarkdown ?? null;
@@ -225,12 +249,12 @@ export class SurfService {
       ], nowIso);
 
       // Watermarks advance only after the run body completed, and only for
-      // protocols whose fetch succeeded (error sections keep their cursor so
-      // the next surf retries them).
+      // protocols with a usable cursor (fetch errors and fully crowded-out
+      // sections keep their old cursor so the next surf retries them).
       for (const section of briefing.protocols) {
-        if (!section.error && section.newestTs !== null) {
+        if (!section.error && section.nextWatermarkTs !== null) {
           this.store.advanceProtocolState(metabotId, section.key, {
-            lastSeenTs: section.newestTs,
+            lastSeenTs: section.nextWatermarkTs,
             lastPinId: null,
             nowIso,
           });
@@ -249,9 +273,14 @@ export class SurfService {
       finish('done', null);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // Round 3: a failed run keeps the REAL numbers the host can vouch for
+      // (fetched from the briefing; deep reads / KB adds / chain interactions
+      // attached to the session error by main.ts runSurfSession) instead of
+      // the historical all-zero stats.
+      const partial = (error as { surfPartialStats?: Partial<MetawebSurfRunStats> } | null)?.surfPartialStats;
       this.store.finishRun(runId, {
         status: 'failed',
-        stats: emptySurfRunStats(),
+        stats: { ...emptySurfRunStats(), fetched: fetchedCount, ...(partial ?? {}) },
         error: message,
         finishedAtIso: new Date(this.nowMs()).toISOString(),
       });

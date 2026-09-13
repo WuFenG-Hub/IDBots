@@ -28,8 +28,23 @@ export interface SurfBriefingProtocolSection {
   displayName: string;
   fetchedCount: number;
   keptCount: number;
-  /** Newest createdAt seen in this fetch (unix seconds); watermark candidate. */
+  /** Newest createdAt seen in this fetch (unix seconds); reporting only. */
   newestTs: number | null;
+  /**
+   * Kept items dropped by the TOTAL run cap (SURF_TOTAL_FETCH_LIMIT). These
+   * stay OUT of the seen ledger and the watermark does not pass them, so the
+   * cap defers them to the next surf instead of silently dropping them
+   * (round 3, live evidence: 8 Q&A items once vanished without a trace).
+   */
+  droppedByTotalCap: number;
+  /**
+   * Watermark to store after a successful run: the OLDEST kept item that made
+   * the final capped list. Presented items are ledger-filtered on the next
+   * run anyway, and crowded-out items survive that filter — so this cursor
+   * re-fetches a bounded overlap and nothing is lost. null = do not advance
+   * (fetch error, or this protocol was crowded out entirely).
+   */
+  nextWatermarkTs: number | null;
   error: string | null;
 }
 
@@ -71,6 +86,8 @@ export async function buildSurfBriefing(input: {
         fetchedCount: fetched.length,
         keptCount: fresh.length,
         newestTs: fetched.reduce<number | null>((max, item) => Math.max(max ?? 0, item.createdAt), null),
+        droppedByTotalCap: 0,
+        nextWatermarkTs: null,
         error: null,
       });
     } catch (error) {
@@ -80,6 +97,8 @@ export async function buildSurfBriefing(input: {
         fetchedCount: 0,
         keptCount: 0,
         newestTs: null,
+        droppedByTotalCap: 0,
+        nextWatermarkTs: null,
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -89,6 +108,26 @@ export async function buildSurfBriefing(input: {
   const items = kept
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, SURF_TOTAL_FETCH_LIMIT);
+
+  // Cap semantics (round 3): the cap DEFERS, never drops. Per protocol the
+  // next watermark is the oldest item that survived the total cap — presented
+  // items are ledger-filtered next run, crowded-out items survive the filter
+  // and come back. A protocol crowded out entirely keeps its old cursor.
+  for (const section of protocols) {
+    if (section.error) continue;
+    const inList = items.filter((item) => item.protocolKey === section.key);
+    if (inList.length > 0) {
+      section.droppedByTotalCap = section.keptCount - inList.length;
+      section.nextWatermarkTs = inList.reduce((min, item) => Math.min(min, item.createdAt), inList[0].createdAt);
+    } else if (section.keptCount > 0) {
+      section.droppedByTotalCap = section.keptCount;
+      section.nextWatermarkTs = null;
+    } else if (section.newestTs !== null) {
+      // Everything fetched was already in the seen ledger — nothing to
+      // rescue, so the cursor can advance past the scanned window.
+      section.nextWatermarkTs = section.newestTs;
+    }
+  }
 
   return {
     generatedAtIso: nowIso,
@@ -133,7 +172,10 @@ export function renderSurfBriefingMarkdown(briefing: SurfBriefing): string {
     if (items.length > 20) {
       lines.push(`- … and ${items.length - 20} more`);
     }
-    if (!section.error && items.length === 0) {
+    if (section.droppedByTotalCap > 0) {
+      lines.push(`- … plus ${section.droppedByTotalCap} more held back by the run cap — they stay unseen and return next surf`);
+    }
+    if (!section.error && section.keptCount === 0) {
       lines.push('- (nothing new)');
     }
     lines.push('');
