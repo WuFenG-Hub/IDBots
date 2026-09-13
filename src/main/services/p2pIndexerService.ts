@@ -488,7 +488,9 @@ function spawnProcess(dataDir: string, configPath: string): Promise<void> {
     ];
     console.log(`[p2p] Spawning: ${binaryPath} ${args.join(' ')}`);
 
-    const proc = spawn(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // man-p2p is a console-subsystem binary; without windowsHide every spawn
+    // (startup and each crash restart) flashes a console window on Windows.
+    const proc = spawn(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     childProcess = proc;
 
     let started = false;

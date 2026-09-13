@@ -96,7 +96,7 @@ export function runFfmpegProcess(
     return Promise.reject(new MediaToolsError('ffmpeg is not available'));
   }
   return new Promise((resolve, reject) => {
-    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     let stderr = '';
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
