@@ -112,7 +112,7 @@ test('unknown bot is rejected', async () => {
   await assert.rejects(() => service.runSurfAndWait(9, 'manual-ui'), /not found/);
 });
 
-test('memory-disabled bot is rejected loudly before any run row exists (P2.2)', async () => {
+test('memory-disabled bot: manual surf runs degraded, pre-dream stays gated (review 2, item 9B)', async () => {
   const db = createNativeSqliteDatabase(':memory:');
   const store = new MetawebSurfStore(db, () => {});
   const service = new SurfService({
@@ -126,11 +126,12 @@ test('memory-disabled bot is rejected loudly before any run row exists (P2.2)', 
     isMemoryEnabled: () => false,
     nowMs: () => NOW_MS,
   });
-  assert.throws(() => service.startSurf(7, 'manual-ui'), /Memory is disabled/);
-  await assert.rejects(() => service.runSurfAndWait(7, 'pre-dream'), /Memory is disabled/);
-  assert.equal(store.listRunsByMetabot(7).length, 0, 'no orphan run row was created');
-  assert.equal(store.getSeenAction(7, 'pin-a'), null, 'nothing was presented');
-  assert.equal(service.shouldPreDreamSurf(7), false, 'pre-dream path skips quietly when memory is off');
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'done', 'manual triggers RUN even with memory off (degraded, option B)');
+  assert.equal(store.getSeenAction(7, 'pin-a'), 'presented');
+  assert.throws(() => service.startSurf(7, 'pre-dream'), /requires memory/);
+  assert.equal(store.listRunsByMetabot(7).length, 1, 'the rejected pre-dream trigger left no run row');
+  assert.equal(service.shouldPreDreamSurf(7), false, 'pre-dream path stays memory-gated');
 });
 
 test('injected session overrides digest stats and prepends its report', async () => {

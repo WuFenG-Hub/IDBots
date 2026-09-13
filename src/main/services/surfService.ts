@@ -46,6 +46,12 @@ export interface SurfSessionContext {
   botName: string;
   trigger: MetawebSurfTrigger;
   briefing: SurfBriefing;
+  /**
+   * Set by the host session wiring (main.ts): false runs the DEGRADED prompt
+   * variant (no KB/memory tools exist in that session) — manual triggers are
+   * allowed with memory off (review 2, item 9 option B). Absent → full prompt.
+   */
+  memoryEnabled?: boolean;
 }
 
 export interface SurfSessionResult {
@@ -63,10 +69,11 @@ export interface SurfServiceDeps {
   /** Phase-3 LLM session; absent → digest-only run (still useful: report + watermarks). */
   runSurfSession?: (context: SurfSessionContext) => Promise<SurfSessionResult>;
   /**
-   * Memory/KB availability gate (same policy the study service uses): with
-   * memory disabled the surf session gets no KB/memory tools to learn into,
-   * so a run would burn a session hitting 'unknown host tool' all night and
-   * misrecord as done. Absent → gate off (tests).
+   * Memory policy (same source the study service reads). Only the PRE-DREAM
+   * path is gated: the nightly unattended run learns into the KB, so with
+   * memory off it is skipped. Manual triggers deliberately run DEGRADED with
+   * memory off (owner decision, review 2 item 9 option B) — the session gets
+   * no KB/memory tools and the prompt says so. Absent → gate off (tests).
    */
   isMemoryEnabled?: (metabotId: number) => boolean;
   registry?: SurfProtocolDescriptor[];
@@ -151,13 +158,12 @@ export class SurfService {
   private beginRun(metabotId: number, trigger: MetawebSurfTrigger): MetawebSurfRunRecord {
     const bot = this.metabotStore.getMetabotById(metabotId);
     if (!bot) throw new Error(`MetaBot ${metabotId} not found`);
-    // Fail loudly BEFORE a run row exists (review P2.2): with memory disabled
-    // the session gets no KB/memory tools, so it would spend the night hitting
-    // 'unknown host tool' and misrecord as done. Mirrors the study service.
-    if (this.isMemoryEnabled?.(metabotId) === false) {
-      throw new Error(
-        'Memory is disabled for this bot — a surf run learns into its knowledge bases, so there is nothing to surf into. Enable Memory for this bot first.',
-      );
+    // Only pre-dream is memory-gated (same gate as dreaming). Manual triggers
+    // run DEGRADED with memory off (owner decision — review 2 item 9, option
+    // B / plan §4.7): the session then has no KB/memory tools and the prompt
+    // says so, but the bot can still browse, engage, and handle its inbox.
+    if (trigger === 'pre-dream' && this.isMemoryEnabled?.(metabotId) === false) {
+      throw new Error('Pre-dream surf requires memory enabled (same gate as dreaming).');
     }
     if (this.runningByMetabot.has(metabotId)) {
       throw new Error('A surf run is already in progress for this bot');

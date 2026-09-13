@@ -7067,6 +7067,16 @@ const getSurfService = (): SurfService => {
           coworkStore.getConfig().workingDirectory,
           context.metabotId,
         );
+        // Manual surf runs DEGRADED when memory is off (review 2, item 9
+        // option B): the session then physically lacks the KB/memory tools,
+        // so the prompt must not demand them. An unreadable policy (mid
+        // sqlite recovery) keeps the full prompt.
+        let memoryEnabled = true;
+        try {
+          memoryEnabled = getCoworkStore().getEffectiveMemoryPolicyForMetabot(context.metabotId).memoryEnabled;
+        } catch {
+          memoryEnabled = true;
+        }
         // Shared with the cowork session marker: the surf createPin guard
         // mutates this object with every ACTUAL chain write, so after the
         // session it doubles as the on-chain receipt record (review 2, item 6).
@@ -7077,7 +7087,7 @@ const getSurfService = (): SurfService => {
         try {
           const replyText = await runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
             systemPrompt: '',
-            userMessage: buildSurfSessionPrompt(context),
+            userMessage: buildSurfSessionPrompt({ ...context, memoryEnabled }),
             cwd,
             metabotId: context.metabotId,
             activeSkillIds: [],
