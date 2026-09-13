@@ -16,6 +16,7 @@ import {
   emptySurfRunStats,
   type MetawebSurfRunRecord,
   type MetawebSurfRunStats,
+  type MetawebSurfSeenAction,
   type MetawebSurfStore,
   type MetawebSurfTrigger,
 } from '../metawebSurfStore';
@@ -166,6 +167,7 @@ export class SurfService {
       const stats: MetawebSurfRunStats = { ...emptySurfRunStats(), fetched: briefing.items.length };
       let reportMarkdown: string | null = null;
       let reportJson: string | null = null;
+      const sessionSeenActions: Array<{ pinId: string; action: MetawebSurfSeenAction }> = [];
       if (this.runSurfSession) {
         const session = await this.runSurfSession({
           runId,
@@ -177,15 +179,24 @@ export class SurfService {
         Object.assign(stats, session.stats ?? {});
         reportMarkdown = session.reportMarkdown ?? null;
         reportJson = session.reportJson ?? null;
-        for (const seen of session.seenActions ?? []) {
-          this.store.markSeen(metabotId, seen.pinId, seen.action, new Date(this.nowMs()).toISOString());
-        }
+        sessionSeenActions.push(...(session.seenActions ?? []));
       }
+
+      // Seen-ledger writes land ONLY on this success path: every briefed pin
+      // becomes 'presented' and the session's self-reported actions fold on
+      // top (strongest action wins, one batched store write). A run that
+      // fails before this point leaves the ledger untouched, so the next
+      // surf re-presents the same window — one bad night (LLM timeout,
+      // outage) never silently drops that content (review P1).
+      const nowIso = new Date(this.nowMs()).toISOString();
+      this.store.markSeenBatch(metabotId, [
+        ...briefing.items.map((item) => ({ pinId: item.pinId, action: 'presented' as const })),
+        ...sessionSeenActions,
+      ], nowIso);
 
       // Watermarks advance only after the run body completed, and only for
       // protocols whose fetch succeeded (error sections keep their cursor so
       // the next surf retries them).
-      const nowIso = new Date(this.nowMs()).toISOString();
       for (const section of briefing.protocols) {
         if (!section.error && section.newestTs !== null) {
           this.store.advanceProtocolState(metabotId, section.key, {

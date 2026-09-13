@@ -45,7 +45,7 @@ const makeDescriptor = (key, items, error = null) => ({
   },
 });
 
-test('first surf looks back SURF_FIRST_LOOKBACK_SECONDS and marks items presented', async () => {
+test('first surf looks back SURF_FIRST_LOOKBACK_SECONDS and stays side-effect free', async () => {
   const store = setup();
   const inside = NOW_SEC - 1000;
   const outside = NOW_SEC - SURF_FIRST_LOOKBACK_SECONDS - 1000;
@@ -53,7 +53,11 @@ test('first surf looks back SURF_FIRST_LOOKBACK_SECONDS and marks items presente
 
   const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
   assert.deepEqual(briefing.items.map((item) => item.pinId), ['pin-in']);
-  assert.equal(store.getSeenAction(7, 'pin-in'), 'presented');
+  assert.equal(
+    store.getSeenAction(7, 'pin-in'),
+    null,
+    'briefing must NOT mark pins presented — that moved to the run success path (failed runs re-present the window)',
+  );
   assert.equal(briefing.protocols[0].keptCount, 1);
   assert.equal(briefing.interactionBudget, 20);
 });

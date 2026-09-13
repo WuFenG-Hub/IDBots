@@ -159,6 +159,42 @@ test('session failure fails the run without advancing watermarks', async () => {
   assert.equal(store.getProtocolState(7, 'alpha'), null);
 });
 
+test('a failed run re-presents the same window on the next surf (P1 regression)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const metabotStore = {
+    getMetabotById: () => ({ id: 7, name: 'Tester' }),
+    getMetabotSetting: () => null,
+  };
+  const registry = [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100), makeItem('pin-b', NOW_SEC - 50)])];
+  const failing = new SurfService({
+    store,
+    metabotStore,
+    broadcast: () => {},
+    registry,
+    runSurfSession: async () => { throw new Error('llm down'); },
+    nowMs: () => NOW_MS,
+  });
+  const failed = await failing.runSurfAndWait(7, 'manual-ui');
+  assert.equal(failed.status, 'failed');
+  assert.equal(store.getSeenAction(7, 'pin-a'), null, 'failed run must not mark pins presented');
+  assert.equal(store.getSeenAction(7, 'pin-b'), null);
+
+  const digestOnly = new SurfService({
+    store,
+    metabotStore,
+    broadcast: () => {},
+    registry,
+    nowMs: () => NOW_MS,
+  });
+  const retry = await digestOnly.runSurfAndWait(7, 'pre-dream');
+  assert.equal(retry.status, 'done');
+  assert.equal(retry.stats.fetched, 2, 'the lost window is presented again after the failure');
+  assert.match(retry.reportMarkdown, /pin-a/);
+  assert.equal(store.getSeenAction(7, 'pin-a'), 'presented', 'success path marks presented');
+  assert.equal(store.getProtocolState(7, 'alpha').lastSeenTs, NOW_SEC - 50);
+});
+
 test('crash recovery fails stale running rows', () => {
   const db = createNativeSqliteDatabase(':memory:');
   const store = new MetawebSurfStore(db, () => {});
