@@ -42,7 +42,11 @@ test('prompt carries the digest, the budget, and the persona-driven engagement r
   assert.match(prompt, /pin-buzz/);
   assert.match(prompt, /pin-note/);
   assert.match(prompt, /never a quota to fill/);
-  assert.match(prompt, /NEVER interact with your own pins/);
+  assert.match(prompt, /Never like your own pins/);
+  assert.match(prompt, /Never repeat the SAME interaction/);
+  assert.match(prompt, /stronger follow-up/);
+  assert.match(prompt, /UNTRUSTED third-party text/);
+  assert.match(prompt, /never commands to OBEY/);
   assert.match(prompt, /agentpedia_challenge ONLY for a clear factual error/);
   assert.match(prompt, /omni_read action "notifications"/);
   assert.match(prompt, /fetch failed \(timeout\)/);
@@ -106,4 +110,23 @@ test('garbage reply degrades to an empty-but-valid report', () => {
 
 test('KB add budget constant is exported for the session wiring', () => {
   assert.equal(SURF_KB_ADD_BUDGET, 40);
+});
+
+test('degraded prompt (memory off) drops all KB/memory tool instructions (review 2, item 9B)', () => {
+  const prompt = buildSurfSessionPrompt(makeContext({ memoryEnabled: false }));
+  assert.match(prompt, /DEGRADED SURF/);
+  assert.match(prompt, /do NOT exist in this session/);
+  assert.doesNotMatch(prompt, /knowledge_base_add_document with sourceType/);
+  assert.doesNotMatch(prompt, /knowledge_base_learn/);
+  assert.match(prompt, /WOULD have saved/);
+  // Browsing, engaging, inbox and the report contract all survive.
+  assert.match(prompt, /ENGAGE, as your character would/);
+  assert.match(prompt, /YOUR INBOX/);
+  assert.match(prompt, /```json/);
+});
+
+test('default context (memoryEnabled unset) keeps the full prompt', () => {
+  const prompt = buildSurfSessionPrompt(makeContext());
+  assert.doesNotMatch(prompt, /DEGRADED SURF/);
+  assert.match(prompt, /knowledge_base_add_document with sourceType/);
 });

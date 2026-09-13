@@ -475,6 +475,21 @@ export class ChainContentHistoryStore {
     return row ? readRowToRecord(row) : null;
   }
 
+  /**
+   * True when this bot PUBLISHED the pin from this device (the writes ledger
+   * is local-only — pins published elsewhere are unknown). Used by the surf
+   * interaction guard to block self-likes/self-answers (review 2, item 5).
+   */
+  hasWritePin(metabotId: number, pinId: string): boolean {
+    const normalized = String(pinId || '').trim();
+    if (!normalized) return false;
+    const row = this.getOne<{ id: number }>(
+      'SELECT id FROM metabot_chain_writes WHERE metabot_id = ? AND pin_id = ? LIMIT 1',
+      [metabotId, normalized],
+    );
+    return row !== null;
+  }
+
   /** Flag a read pin as saved into a knowledge base. No-op for unknown pins. */
   markReadSavedToKb(metabotId: number, pinId: string, kbId: string | null): boolean {
     this.db.run(

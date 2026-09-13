@@ -9508,6 +9508,7 @@ export class CoworkRunner extends EventEmitter {
             createPin: this.metabotChainWrite.createPin,
             state: surfSession,
             getSeenAction: (metabotId, pinId) => this.metawebSurf?.getSurfSeenAction?.(metabotId, pinId) ?? null,
+            isOwnPin: (metabotId, pinId) => this.metawebSurf?.isOwnPin?.(metabotId, pinId) ?? false,
           })
         : this.metabotChainWrite.createPin;
       if (this.metaFileUpload) {
@@ -9806,9 +9807,11 @@ export class CoworkRunner extends EventEmitter {
     }
     // MetaWeb surf ("AI 冲浪"): metaweb_surf_start is the chat trigger ("去
     // 冲浪"), metaweb_surf_status is how the bot answers "what did you learn".
-    // Same memory gate as the study tools — a surf whose whole point is
-    // feeding the KB makes no sense with memory off.
-    if (sessionMemoryEnabled && this.metawebSurf) {
+    // NOT memory-gated (review 2, item 9 option B): a memory-off bot may
+    // still surf manually — the run is degraded (no KB/memory tools in the
+    // session, and the prompt says so), while pre-dream surf stays
+    // memory-gated inside SurfService.
+    if (this.metawebSurf) {
       memoryTools.push(
         ...buildSurfAgentTools({
           tool,

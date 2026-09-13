@@ -228,5 +228,8 @@ test('main.ts passes the job kind into the study session', () => {
 test('main.ts wires the surf session budgets from the briefing', () => {
   const mainSource = require('node:fs')
     .readFileSync(new URL('../dist-electron/main/main.js', import.meta.url), 'utf8');
-  assert.match(mainSource, /metawebSurfSession:\s*\{\s*interactionBudget:\s*context\.briefing\.interactionBudget/);
+  // The write-state object doubles as the guard's receipt record (item 6),
+  // so the marker is the hoisted variable, not an inline literal.
+  assert.match(mainSource, /interactionBudget:\s*context\.briefing\.interactionBudget/);
+  assert.match(mainSource, /metawebSurfSession:\s*writeState/);
 });

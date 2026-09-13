@@ -29,6 +29,13 @@ export type MetawebSurfControl = {
    * embedding/test controls can omit it — the in-run record still holds.
    */
   getSurfSeenAction?(metabotId: number, pinId: string): MetawebSurfSeenAction | null;
+  /**
+   * Local writes-ledger read backing the guard's self-interaction block
+   * (review 2, item 5): true when this bot published the pin from this
+   * device. Best-effort — pins published elsewhere are unknown to the
+   * ledger. Optional like getSurfSeenAction.
+   */
+  isOwnPin?(metabotId: number, pinId: string): boolean;
 };
 
 function textResult(text: string, isError = false) {
@@ -93,6 +100,7 @@ export function buildSurfAgentTools(deps: {
       'Start one autonomous MetaWeb surf run ("AI 冲浪"), as the MetaBot that owns this session.',
       'Use when the user asks you to go surf / browse the AI internet (去冲浪、上网逛逛), or when you decide a surf would help: you will catch up on new chain content since your last surf, search & learn old content relevant to your role, engage (like/comment/answer) as your persona sees fit, and handle chain notifications addressed to you.',
       'The run is unattended and asynchronous: this call only starts it. While it runs you cannot start a second one; the structured surf report lands in your surf records (metaweb_surf_status) and, for nightly runs, feeds tonight\'s dream.',
+      'If your Memory is off the surf still runs, but degraded: you browse, engage, and handle your inbox — nothing can be saved into knowledge bases or memory, and the report notes what you would have saved.',
       'Interactions cost on-chain fees and are capped by the bot\'s per-run interaction budget. Do not start a surf when one is already running — check metaweb_surf_status first if unsure.',
     ].join(' '),
     {},

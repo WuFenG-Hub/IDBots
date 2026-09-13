@@ -21,12 +21,61 @@ export interface SurfSessionWriteState {
   kbAddsUsed?: number;
   /** targetPinId → strongest interaction rank published this run (dup guard). */
   interactions?: Record<string, number>;
+  /**
+   * pinIds of ORIGINAL posts actually published this run (buzz/note/question/
+   * rev) — the 'posted' receipt class. Read back after the session as ground
+   * truth (review 2, item 6).
+   */
+  postedPinIds?: string[];
 }
 
 export type SurfSeenLedgerReader = (
   metabotId: number,
   pinId: string,
 ) => MetawebSurfSeenAction | null;
+
+const RECEIPT_ACTION_BY_RANK = new Map<number, MetawebSurfSeenAction>(
+  (['liked', 'commented', 'answered', 'challenged'] as MetawebSurfSeenAction[])
+    .map((action) => [SEEN_ACTION_RANK[action], action]),
+);
+
+/** Chain-write classes whose ledger entries come ONLY from guard receipts. */
+const RECEIPT_ACTIONS = new Set<MetawebSurfSeenAction>(['liked', 'commented', 'answered', 'posted', 'challenged']);
+
+/**
+ * The run's ACTUAL on-chain writes as seen-ledger entries, read back from
+ * the guard-mutated write state after the session — the ground truth the
+ * model's self-report is checked against (review 2, item 6).
+ */
+export function surfReceiptSeenActions(
+  state: SurfSessionWriteState,
+): Array<{ pinId: string; action: MetawebSurfSeenAction }> {
+  const fromInteractions = Object.entries(state.interactions ?? {})
+    .map(([pinId, rank]) => ({ pinId, action: RECEIPT_ACTION_BY_RANK.get(rank) }))
+    .filter((entry): entry is { pinId: string; action: MetawebSurfSeenAction } => Boolean(entry.action));
+  const fromPosts = (state.postedPinIds ?? [])
+    .map((pinId) => String(pinId || '').trim())
+    .filter(Boolean)
+    .map((pinId) => ({ pinId, action: 'posted' as MetawebSurfSeenAction }));
+  return [...fromInteractions, ...fromPosts];
+}
+
+/**
+ * Fold receipts over the session's self-reported seen actions: every
+ * chain-write class comes ONLY from what the guard actually published — a
+ * like the model forgot to report is still banked, a like it merely claimed
+ * is dropped. Read/saved-class entries stay self-reported (their blast
+ * radius is one bot's digest, not gas).
+ */
+export function foldSurfReceiptsIntoSeenActions(
+  selfReported: Array<{ pinId: string; action: MetawebSurfSeenAction }>,
+  state: SurfSessionWriteState,
+): Array<{ pinId: string; action: MetawebSurfSeenAction }> {
+  return [
+    ...selfReported.filter((entry) => !RECEIPT_ACTIONS.has(entry.action)),
+    ...surfReceiptSeenActions(state),
+  ];
+}
 
 /**
  * Chain-write paths whose payload targets ANOTHER pin — the "never interact
@@ -81,8 +130,13 @@ function extractInteractionTarget(metaidData: { path?: string; payload: string }
  *
  * Every interaction tool a surf session can reach (like/comment/answer/ask/
  * buzz/note/agentpedia challenge) funnels through this guard, which enforces
- * two rules before the wallet is touched:
+ * three rules before the wallet is touched:
  *
+ * 0. Self-interaction block (review 2, item 5): liking, answering, or
+ *    challenging the bot's OWN pin is chain spam — rejected without spending
+ *    budget, against the local writes ledger (isOwnPin; best-effort, pins
+ *    published elsewhere are unknown). Comments on own pins stay allowed:
+ *    replying in your own thread is how the inbox step works.
  * 1. Duplicate-interaction guard: targeting a pin this bot already engaged
  *    with an equal-or-stronger action — earlier in THIS run (state.interactions)
  *    or in a previous surf (the seen ledger via getSeenAction) — is rejected
@@ -99,11 +153,27 @@ export function createSurfCreatePinGuard(deps: {
   createPin: ChainWriteCreatePin;
   state: SurfSessionWriteState;
   getSeenAction?: SurfSeenLedgerReader;
+  isOwnPin?: (metabotId: number, pinId: string) => boolean;
 }): ChainWriteCreatePin {
-  const { createPin, state, getSeenAction } = deps;
+  const { createPin, state, getSeenAction, isOwnPin } = deps;
   const budget = Math.max(0, Math.floor(state.interactionBudget) || 0);
   return async (metabotId, metaidData, options) => {
     const target = extractInteractionTarget(metaidData);
+    if (target && target.action !== 'commented') {
+      let own = false;
+      try {
+        own = isOwnPin?.(metabotId, target.pinId) === true;
+      } catch {
+        // A sick ledger must not block chain writes — the in-run record and
+        // the budget ceiling still hold.
+        own = false;
+      }
+      if (own) {
+        throw new Error(
+          `Pin ${target.pinId} is YOUR OWN pin — ${target.action === 'liked' ? 'liking' : target.action === 'answered' ? 'answering' : 'challenging'} yourself is chain spam (replying in your own thread via comment is fine and needs no check). Pick a different pin; this attempt did not spend the interaction budget.`,
+        );
+      }
+    }
     if (target) {
       const attemptedRank = SEEN_ACTION_RANK[target.action];
       let ledgerAction: MetawebSurfSeenAction | null = null;
@@ -138,6 +208,11 @@ export function createSurfCreatePinGuard(deps: {
         interactions[target.pinId] ?? -1,
         SEEN_ACTION_RANK[target.action],
       );
+    } else {
+      // Original posts: record the 'posted' receipt so the bot's own fresh
+      // content never comes back as "new" (or gets self-engaged later).
+      const newPinId = typeof result?.pinId === 'string' ? result.pinId.trim() : '';
+      if (newPinId) (state.postedPinIds ??= []).push(newPinId);
     }
     return result;
   };

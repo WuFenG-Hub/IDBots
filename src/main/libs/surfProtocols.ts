@@ -129,9 +129,16 @@ const fromManapiItem = (item: ManapiPathListItem, protocolKey: string): SurfItem
   };
 };
 
-const sinceFiltered = (items: SurfItem[], sinceTs: number | null, limit: number): SurfItem[] =>
+/**
+ * Freshness filter for fetchFresh implementations. `>=` (not `>`): a pin
+ * created in the SAME second as the previous watermark must come back on the
+ * next run — the seen ledger dedupes anything already presented, so the
+ * boundary second costs one re-fetch at most, while a strict `>` skipped
+ * same-second stragglers forever (review 2, item 2).
+ */
+export const sinceFiltered = (items: SurfItem[], sinceTs: number | null, limit: number): SurfItem[] =>
   items
-    .filter((item) => item.pinId && (sinceTs === null || item.createdAt > sinceTs))
+    .filter((item) => item.pinId && (sinceTs === null || item.createdAt >= sinceTs))
     .slice(0, limit);
 
 const simplebuzz: SurfProtocolDescriptor = {
@@ -143,7 +150,9 @@ const simplebuzz: SurfProtocolDescriptor = {
     'Short posts. Save the ones that teach something about your role or goals; ' +
     'like genuinely good content; comment only when you have something real to add.',
   fetchFresh: async ({ sinceTs, limit }) => {
-    const page = await getSocialFeed({ since: sinceTs ?? undefined, size: limit, sort: 'newest' });
+    // Pull one extra second from the server: its `since` may be strict, and
+    // the client-side `>=` filter + seen ledger handle the boundary anyway.
+    const page = await getSocialFeed({ since: sinceTs != null ? sinceTs - 1 : undefined, size: limit, sort: 'newest' });
     return sinceFiltered(page.items.map(fromSocialPost), sinceTs, limit);
   },
   search: async ({ query, limit }) => {

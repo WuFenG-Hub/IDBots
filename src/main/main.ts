@@ -270,6 +270,7 @@ import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { MetawebSurfStore } from './metawebSurfStore';
 import { SurfService, SURF_STATUS_CHANNEL } from './services/surfService';
 import { buildSurfSessionPrompt, parseSurfRunReport, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
+import { foldSurfReceiptsIntoSeenActions, surfReceiptSeenActions, type SurfSessionWriteState } from './libs/surfInteractionGuard';
 import { isSurfBeforeDreamEnabled, SURF_BEFORE_DREAM_ENABLED_KEY } from './services/surfSettings';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
@@ -2675,6 +2676,13 @@ let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
 let metawebSurfStore: MetawebSurfStore | null = null;
 let surfService: SurfService | null = null;
+/**
+ * Live cowork session id behind each in-flight surf run (set when the bridge
+ * creates the session, cleared when it settles). The pre-dream race uses it
+ * to STOP an overrunning surf session instead of letting it linger past the
+ * dream inside the bridge's late-completion window (review 2, item 8).
+ */
+const activeSurfSessionByMetabot = new Map<number, string>();
 let metawebStudyService: MetawebStudyService | null = null;
 let chainContentHistoryStore: ChainContentHistoryStore | null = null;
 let contentSummaryService: ContentSummaryService | null = null;
@@ -4086,7 +4094,24 @@ const startSqliteDaemons = (): void => {
             reportMarkdown: run.status === 'done' ? run.reportMarkdown : null,
           })),
           new Promise<null>((resolve) => {
-            timeout = setTimeout(() => resolve(null), PRE_DREAM_SURF_TIMEOUT_MS);
+            timeout = setTimeout(() => {
+              // Review 2, item 8: an overrunning surf must not linger past
+              // the dream — stop the underlying cowork session. Its own
+              // 30-min watchdog normally beats this race; without the stop,
+              // the bridge's late-completion window would let it keep
+              // reading/writing for hours after the dream already happened.
+              const sessionId = activeSurfSessionByMetabot.get(metabotId);
+              if (sessionId) {
+                try {
+                  getCoworkRunner().stopSession(sessionId, {
+                    reason: 'Pre-dream surf exceeded the 35-min race budget; the dream proceeds and the surf session is stopped.',
+                  });
+                } catch {
+                  // Already settled between the map read and the stop — fine.
+                }
+              }
+              resolve(null);
+            }, PRE_DREAM_SURF_TIMEOUT_MS);
           }),
         ]);
       } catch {
@@ -5663,6 +5688,11 @@ const getCoworkRunner = () => {
         // check (review P2.3) — same store the surf reports/watermarks use.
         getSurfSeenAction: (metabotId: number, pinId: string) =>
           getMetawebSurfStore().getSeenAction(metabotId, pinId),
+        // Local writes-ledger read for the guard's self-interaction block
+        // (review 2, item 5): best-effort — pins this bot published elsewhere
+        // are unknown, the prompt rule covers those.
+        isOwnPin: (metabotId: number, pinId: string) =>
+          getChainContentHistoryStore().hasWritePin(metabotId, pinId),
       },
       // upload_file tool backend. Delegates to the shared uploadMetaFile()
       // service so the tool, the RPC endpoint, and the IPC handlers all share
@@ -7037,28 +7067,69 @@ const getSurfService = (): SurfService => {
           coworkStore.getConfig().workingDirectory,
           context.metabotId,
         );
-        const replyText = await runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
-          systemPrompt: '',
-          userMessage: buildSurfSessionPrompt(context),
-          cwd,
-          metabotId: context.metabotId,
-          activeSkillIds: [],
-          disableRemoteServicesPrompt: true,
-          sourceChannel: 'orchestrator',
-          // Unattended like the study sessions: no owner is watching, stray
-          // prompts auto-reject, memory updates stay enabled so procedure_save
-          // and knowledge_upsert keep working.
-          autoApprove: true,
-          permissionMode: 'acceptEdits',
-          disableMemoryUpdates: false,
-          metawebSurfSession: {
-            interactionBudget: context.briefing.interactionBudget,
-            kbBudget: SURF_KB_ADD_BUDGET,
-          },
-          skillTurnTimeoutMs: 30 * 60 * 1000,
-          onSessionCreated: (sessionId) => coworkStore.setSessionHiddenFromList(sessionId, true),
-        });
-        return parseSurfRunReport(replyText);
+        // Manual surf runs DEGRADED when memory is off (review 2, item 9
+        // option B): the session then physically lacks the KB/memory tools,
+        // so the prompt must not demand them. An unreadable policy (mid
+        // sqlite recovery) keeps the full prompt.
+        let memoryEnabled = true;
+        try {
+          memoryEnabled = getCoworkStore().getEffectiveMemoryPolicyForMetabot(context.metabotId).memoryEnabled;
+        } catch {
+          memoryEnabled = true;
+        }
+        // Shared with the cowork session marker: the surf createPin guard
+        // mutates this object with every ACTUAL chain write, so after the
+        // session it doubles as the on-chain receipt record (review 2, item 6).
+        const writeState: SurfSessionWriteState = {
+          interactionBudget: context.briefing.interactionBudget,
+          kbBudget: SURF_KB_ADD_BUDGET,
+        };
+        try {
+          const replyText = await runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
+            systemPrompt: '',
+            userMessage: buildSurfSessionPrompt({ ...context, memoryEnabled }),
+            cwd,
+            metabotId: context.metabotId,
+            activeSkillIds: [],
+            disableRemoteServicesPrompt: true,
+            sourceChannel: 'orchestrator',
+            // Unattended like the study sessions: no owner is watching, stray
+            // prompts auto-reject, memory updates stay enabled so procedure_save
+            // and knowledge_upsert keep working.
+            autoApprove: true,
+            permissionMode: 'acceptEdits',
+            disableMemoryUpdates: false,
+            metawebSurfSession: writeState,
+            skillTurnTimeoutMs: 30 * 60 * 1000,
+            onSessionCreated: (sessionId) => {
+              activeSurfSessionByMetabot.set(context.metabotId, sessionId);
+              coworkStore.setSessionHiddenFromList(sessionId, true);
+            },
+          });
+          const report = parseSurfRunReport(replyText);
+          // Receipts over self-report: the model's liked/commented/answered/
+          // challenged/posted lists are replaced by what the guard actually
+          // published on-chain; read/saved stay self-reported.
+          report.seenActions = foldSurfReceiptsIntoSeenActions(report.seenActions, writeState);
+          return report;
+        } catch (error) {
+          // A failed/timed-out session may still have PAID for interactions —
+          // bank those receipts immediately or the next surf would re-engage
+          // the same pins (cross-run duplicate protection). No 'presented'
+          // writes here: the failed window itself is still re-presented next
+          // run, so the P1 catch-up semantics stand.
+          const receipts = surfReceiptSeenActions(writeState);
+          if (receipts.length > 0) {
+            try {
+              getMetawebSurfStore().markSeenBatch(context.metabotId, receipts, new Date().toISOString());
+            } catch {
+              // A sick ledger must not mask the session's own failure.
+            }
+          }
+          throw error;
+        } finally {
+          activeSurfSessionByMetabot.delete(context.metabotId);
+        }
       },
     });
   }

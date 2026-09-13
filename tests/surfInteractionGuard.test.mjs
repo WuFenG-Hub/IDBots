@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { createSurfCreatePinGuard } = await import('../dist-electron/main/libs/surfInteractionGuard.js');
+const { createSurfCreatePinGuard, surfReceiptSeenActions, foldSurfReceiptsIntoSeenActions } = await import('../dist-electron/main/libs/surfInteractionGuard.js');
 
 const METABOT_ID = 7;
 
@@ -151,4 +151,104 @@ test('a failed chain write consumes budget but stays re-interactable', async () 
   assert.equal(shared.interactions, undefined, 'failed like was not recorded as an interaction');
   await guard(METABOT_ID, likeData('pin-a'), {}, 'retry after a failure is allowed');
   assert.equal(shared.interactions['pin-a'] > 0, true);
+});
+
+test('self-interactions are blocked for free — like/answer/challenge on own pins (review 2, item 5)', async () => {
+  const { createPin, calls } = okCreatePin();
+  const own = new Set(['own-post', 'own-question', 'own-rev']);
+  const shared = state(9);
+  const guard = createSurfCreatePinGuard({
+    createPin,
+    state: shared,
+    isOwnPin: (_metabotId, pinId) => own.has(pinId),
+  });
+  await assert.rejects(() => guard(METABOT_ID, likeData('own-post'), {}), /YOUR OWN pin/);
+  await assert.rejects(() => guard(METABOT_ID, answerData('own-question'), {}), /YOUR OWN pin/);
+  await assert.rejects(() => guard(METABOT_ID, challengeData('own-rev'), {}), /YOUR OWN pin/);
+  assert.equal(shared.writesUsed, undefined, 'self-interactions never spend budget');
+  assert.equal(calls.length, 0, 'self-interactions never reach the wallet');
+  // Replying in your OWN thread is the inbox flow — comments stay allowed.
+  await guard(METABOT_ID, commentData('own-post'), {});
+  assert.equal(shared.writesUsed, 1);
+  // …and other people's pins are unaffected.
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  assert.equal(shared.writesUsed, 2);
+});
+
+test('a sick own-pin ledger never blocks writes', async () => {
+  const { createPin, calls } = okCreatePin();
+  const guard = createSurfCreatePinGuard({
+    createPin,
+    state: state(3),
+    isOwnPin: () => { throw new Error('sqlite down'); },
+  });
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  assert.equal(calls.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// On-chain receipts → seen-ledger folding (review 2, item 6)
+// ---------------------------------------------------------------------------
+
+test('a successful original post records a posted receipt', async () => {
+  const { createPin } = okCreatePin();
+  const shared = state(5);
+  const guard = createSurfCreatePinGuard({ createPin, state: shared });
+  await guard(METABOT_ID, buzzData(), {});
+  assert.deepEqual(shared.postedPinIds, ['new-pin']);
+  const receipts = surfReceiptSeenActions(shared);
+  assert.deepEqual(receipts, [{ pinId: 'new-pin', action: 'posted' }]);
+});
+
+test('surfReceiptSeenActions maps interaction ranks back to actions', async () => {
+  const { createPin } = okCreatePin();
+  const shared = state(9);
+  const guard = createSurfCreatePinGuard({ createPin, state: shared });
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  await guard(METABOT_ID, commentData('pin-a'), {});
+  await guard(METABOT_ID, answerData('q-1'), {});
+  await guard(METABOT_ID, challengeData('rev-1'), {});
+  const receipts = surfReceiptSeenActions(shared);
+  assert.deepEqual(
+    receipts.map((entry) => `${entry.pinId}:${entry.action}`).sort(),
+    ['pin-a:commented', 'q-1:answered', 'rev-1:challenged'].sort(),
+    'strongest action per target wins (like+comment → commented)',
+  );
+});
+
+test('fold replaces self-reported chain-write classes with ground-truth receipts', () => {
+  const selfReported = [
+    { pinId: 'pin-read', action: 'read' },
+    { pinId: 'pin-saved', action: 'saved' },
+    { pinId: 'pin-hallucinated-like', action: 'liked' },
+    { pinId: 'pin-hallucinated-answer', action: 'answered' },
+  ];
+  const folded = foldSurfReceiptsIntoSeenActions(selfReported, {
+    interactionBudget: 20,
+    kbBudget: 40,
+    interactions: { 'pin-real-like': 4 },
+    postedPinIds: ['pin-real-post'],
+  });
+  assert.deepEqual(
+    folded.map((entry) => `${entry.pinId}:${entry.action}`).sort(),
+    [
+      'pin-read:read',
+      'pin-saved:saved',
+      'pin-real-like:liked',
+      'pin-real-post:posted',
+    ].sort(),
+    'hallucinated interactions dropped, actual receipts banked, read/saved untouched',
+  );
+});
+
+test('fold with zero receipts strips ALL self-reported chain-write classes', () => {
+  const folded = foldSurfReceiptsIntoSeenActions(
+    [
+      { pinId: 'pin-read', action: 'read' },
+      { pinId: 'pin-claimed-like', action: 'liked' },
+      { pinId: 'pin-claimed-post', action: 'posted' },
+    ],
+    { interactionBudget: 20, kbBudget: 40 },
+  );
+  assert.deepEqual(folded, [{ pinId: 'pin-read', action: 'read' }]);
 });
