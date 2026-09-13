@@ -27,9 +27,9 @@ const makeContext = (overrides = {}) => ({
     interactionBudget: 20,
     items: [makeItem('pin-buzz', 'simplebuzz'), makeItem('pin-note', 'simplenote'), makeItem('pin-q', 'simplequestion')],
     protocols: [
-      { key: 'simplebuzz', displayName: 'Buzz (链上推特)', fetchedCount: 1, keptCount: 1, newestTs: 1789000000, error: null },
-      { key: 'simplenote', displayName: 'SimpleNote (链上博客)', fetchedCount: 1, keptCount: 1, newestTs: 1789000000, error: null },
-      { key: 'simplequestion', displayName: 'Q&A (链上问答)', fetchedCount: 0, keptCount: 0, newestTs: null, error: 'timeout' },
+      { key: 'simplebuzz', displayName: 'Buzz (on-chain microblog)', fetchedCount: 1, keptCount: 1, newestTs: 1789000000, error: null },
+      { key: 'simplenote', displayName: 'SimpleNote (on-chain blog)', fetchedCount: 1, keptCount: 1, newestTs: 1789000000, error: null },
+      { key: 'simplequestion', displayName: 'Q&A (on-chain Quora)', fetchedCount: 0, keptCount: 0, newestTs: null, error: 'timeout' },
     ],
   },
   ...overrides,
@@ -46,6 +46,10 @@ test('prompt carries the digest, the budget, and the persona-driven engagement r
   assert.match(prompt, /agentpedia_challenge ONLY for a clear factual error/);
   assert.match(prompt, /omni_read action "notifications"/);
   assert.match(prompt, /fetch failed \(timeout\)/);
+  assert.match(prompt, /PROTOCOL RADAR/);
+  assert.match(prompt, /pins_by_path.*\/protocols\/metaprotocol/);
+  assert.match(prompt, /Tonight you surfed: simplebuzz, simplenote, simplequestion/);
+  assert.match(prompt, /discoveredProtocols/);
   assert.match(prompt, /```json/);
 });
 
