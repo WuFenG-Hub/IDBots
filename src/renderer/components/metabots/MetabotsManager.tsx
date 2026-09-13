@@ -231,8 +231,8 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   }, []);
 
   // Live MetaWeb surf status: patch the card's surf indicator as bots start and
-  // finish surf runs (surfing is renderer-tracked; main does not merge it into
-  // metabot:list, so the badge appears/disappears via this broadcast only).
+  // finish surf runs (initial state is merged main-side into metabot:list,
+  // exactly like dreaming; this broadcast covers transitions after the load).
   useEffect(() => {
     const off = window.electron.surf?.onStatusChanged(({ metabotId, status }) => {
       setList((prev) => prev.map((m) => (m.id === metabotId ? { ...m, surfing: status === 'running' } : m)));

@@ -1806,7 +1806,6 @@ interface IElectronAPI {
   };
   surf: {
     listRuns: (metabotId: number, limit?: number) => Promise<{ success: boolean; runs?: MetawebSurfRunInfo[]; error?: string }>;
-    getRun: (runId: string) => Promise<{ success: boolean; run?: MetawebSurfRunInfo; error?: string }>;
     runNow: (metabotId: number) => Promise<{ success: boolean; runId?: string; error?: string }>;
     onStatusChanged: (callback: (payload: { metabotId: number; runId: string; trigger: string; status: string; error?: string | null }) => void) => () => void;
   };

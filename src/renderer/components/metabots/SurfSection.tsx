@@ -91,15 +91,27 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
 
   // Live surf status for this bot (mirrors the dreamStatusChanged pattern in
   // MetabotsManager). Every event also bumps runVersion so the reports panel
-  // picks up the new/updated run row.
+  // picks up the new/updated run row. The initial state is seeded from the
+  // latest run row — the broadcast only covers transitions while this editor
+  // is open, so opening it mid-run used to leave the button clickable and the
+  // IPC then rejected with a confusing error (review P3).
   useEffect(() => {
+    let cancelled = false;
     setRunning(false);
+    window.electron.surf.listRuns(metabotId, 1)
+      .then((result) => {
+        if (cancelled) return;
+        const latest = result.success ? result.runs?.[0] : undefined;
+        if (latest?.status === 'running') setRunning(true);
+      })
+      .catch(() => undefined);
     const off = window.electron.surf?.onStatusChanged?.((payload) => {
       if (payload.metabotId !== metabotId) return;
       setRunning(payload.status === 'running');
       setRunVersion((v) => v + 1);
     });
     return () => {
+      cancelled = true;
       off?.();
     };
   }, [metabotId]);
