@@ -486,3 +486,86 @@ test('nightly tick repairs stale-version dates one per night, never touching ide
     cleanup();
   }
 });
+
+test('pre-dream surf report lands in the dream prompt as its own section', async () => {
+  const prompts = [];
+  const surfCalls = [];
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js');
+    const dreamStore = new DreamStore(db, () => {});
+    seedActivity(coworkStore, db);
+    const service = new DreamService({
+      coworkStore,
+      metabotStore: metabotStoreStub(),
+      dreamStore,
+      performChat: async (system, user) => {
+        prompts.push(user);
+        return makePayload();
+      },
+      surfBeforeDream: async (metabotId) => {
+        surfCalls.push(metabotId);
+        return { reportMarkdown: '# Surf report\n\nTonight I learned grid systems and liked two posts.' };
+      },
+      llmTimeoutMs: 5000,
+      now: () => new Date(2026, 7, 1, 3, 0),
+    });
+    await service.runNow(5, DAY);
+    assert.deepEqual(surfCalls, [5]);
+    assert.equal(dreamStore.getRun(5, DAY).status, 'completed');
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0], /冲浪报告/);
+    assert.match(prompts[0], /learned grid systems/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a throwing pre-dream surf never fails the dream', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js');
+    const dreamStore = new DreamStore(db, () => {});
+    seedActivity(coworkStore, db);
+    const service = new DreamService({
+      coworkStore,
+      metabotStore: metabotStoreStub(),
+      dreamStore,
+      performChat: async () => makePayload(),
+      surfBeforeDream: async () => { throw new Error('surf exploded'); },
+      llmTimeoutMs: 5000,
+      now: () => new Date(2026, 7, 1, 3, 0),
+    });
+    await service.runNow(5, DAY);
+    assert.equal(dreamStore.getRun(5, DAY).status, 'completed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('an empty day WITH a surf report still dreams (surf is fresh experience)', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js');
+    const dreamStore = new DreamStore(db, () => {});
+    let llmCalls = 0;
+    const service = new DreamService({
+      coworkStore,
+      metabotStore: metabotStoreStub(),
+      dreamStore,
+      performChat: async () => { llmCalls += 1; return makePayload(); },
+      surfBeforeDream: async () => ({ reportMarkdown: '# Surf report\n\nquiet but real surf' }),
+      llmTimeoutMs: 5000,
+      now: () => new Date(2026, 7, 1, 3, 0),
+    });
+    // No activity seeded for this date at all.
+    await service.runNow(5, '2026-07-31');
+    assert.equal(dreamStore.getRun(5, '2026-07-31').status, 'completed');
+    assert.equal(llmCalls, 1, 'the surf report alone justifies the dream LLM call');
+  } finally {
+    cleanup();
+  }
+});

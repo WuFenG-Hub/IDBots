@@ -11,6 +11,11 @@
 import type { MetabotStore } from '../metabotStore';
 import { OPENTEAM_ALLOW_REMOTE_COLLAB_KEY } from './openTeamGuestService';
 import { COWORK_MOUNT_MCP_TOOLS_KEY } from './coworkMcpToolsPreference';
+import {
+  SURF_BEFORE_DREAM_ENABLED_KEY,
+  SURF_INTERACTION_BUDGET_KEY,
+  normalizeSurfBudgetValue,
+} from './surfSettings';
 
 /** Boolean toggle settings are persisted as '1' (on) / '0' (off). */
 const normalizeToggleValue = (value: unknown): string | null => {
@@ -28,6 +33,8 @@ interface RendererSettingDef {
 const RENDERER_SETTING_DEFS: Record<string, RendererSettingDef> = {
   [OPENTEAM_ALLOW_REMOTE_COLLAB_KEY]: { normalizeValue: normalizeToggleValue },
   [COWORK_MOUNT_MCP_TOOLS_KEY]: { normalizeValue: normalizeToggleValue },
+  [SURF_BEFORE_DREAM_ENABLED_KEY]: { normalizeValue: normalizeToggleValue },
+  [SURF_INTERACTION_BUDGET_KEY]: { normalizeValue: normalizeSurfBudgetValue },
 };
 
 export const RENDERER_METABOT_SETTING_KEYS: readonly string[] = Object.keys(RENDERER_SETTING_DEFS);

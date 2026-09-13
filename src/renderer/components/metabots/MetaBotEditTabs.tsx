@@ -36,6 +36,7 @@ import {
 import MetaBotAdvancedActionsSection from './MetaBotAdvancedActionsSection';
 import MetaBotHomepageSection, { composeHomepageForSave } from './MetaBotHomepageSection';
 import KnowledgeBasePanel from './KnowledgeBasePanel';
+import SurfSection from './SurfSection';
 import { buildMetaBotToggleViewModel, canShowMetabotTwinSwitch } from './metaBotCardPresentation.js';
 
 const AVATAR_MAX_SIZE_BYTES = 200 * 1024; // 200KB
@@ -1228,6 +1229,11 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
         />
 
         {renderPanelSaveRow('advanced')}
+
+        {/* MetaWeb surf (AI 冲浪): per-bot surf settings, "Surf now" trigger and
+            the run-history reports panel. Immediate effects, kept out of the
+            homepage save above. */}
+        <SurfSection metabotId={metabotId} />
 
         {/* Wallet / Backup / Delete — OAC-aligned Advanced actions. Immediate
             effects (panels / delete flow), kept out of the homepage save above. */}

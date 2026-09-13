@@ -75,6 +75,12 @@ export interface RunOrchestratorSkillTurnParams {
    * learning allowlist and hard-caps metaweb-source KB adds at pinBudget.
    */
   metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
+  /**
+   * MetaWeb surf session: restricts the inline tool surface to the surf
+   * allowlist and hard-caps chain writes at interactionBudget (KB adds at
+   * kbBudget) through the counting wrappers in coworkRunner.
+   */
+  metawebSurfSession?: { interactionBudget: number; kbBudget: number };
   permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   /** Overrides the skill-turn watchdog timeout (ms). Defaults to 300s. */
   skillTurnTimeoutMs?: number;
@@ -218,6 +224,7 @@ export async function runOrchestratorSkillTurn(
     disableMemoryUpdates = true,
     permissionMode = 'default',
     metawebStudySession,
+    metawebSurfSession,
   } = params;
 
   const now = Date.now();
@@ -447,6 +454,7 @@ export async function runOrchestratorSkillTurn(
         disableRemoteServicesPrompt,
         permissionMode,
         metawebStudySession,
+        metawebSurfSession,
         confirmationMode: 'text',
         workspaceRoot: cwd,
       })
