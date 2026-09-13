@@ -227,12 +227,12 @@ export class SurfService {
       ], nowIso);
 
       // Watermarks advance only after the run body completed, and only for
-      // protocols whose fetch succeeded (error sections keep their cursor so
-      // the next surf retries them).
+      // protocols with a usable cursor (fetch errors and fully crowded-out
+      // sections keep their old cursor so the next surf retries them).
       for (const section of briefing.protocols) {
-        if (!section.error && section.newestTs !== null) {
+        if (!section.error && section.nextWatermarkTs !== null) {
           this.store.advanceProtocolState(metabotId, section.key, {
-            lastSeenTs: section.newestTs,
+            lastSeenTs: section.nextWatermarkTs,
             lastPinId: null,
             nowIso,
           });

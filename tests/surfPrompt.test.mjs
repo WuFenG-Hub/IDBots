@@ -150,3 +150,10 @@ test('inbox step spells out that answers to own questions are not in notificatio
   assert.match(prompt, /NOT in notifications/);
   assert.match(prompt, /get_question_answers for each of your own open question pins/);
 });
+
+test('prompt marks items held back by the run cap (round 3)', () => {
+  const context = makeContext();
+  context.briefing.protocols[0].droppedByTotalCap = 8;
+  const prompt = buildSurfSessionPrompt(context);
+  assert.match(prompt, /Buzz \(on-chain microblog\): 1 new since last surf \(\+ 8 more held back by the run cap — they remain unseen and will be presented next surf\)/);
+});

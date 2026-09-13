@@ -59,7 +59,7 @@ test('digest-only run: report written, watermark advanced, events broadcast', as
   assert.match(run.reportMarkdown, /pin-a/);
 
   const state = store.getProtocolState(7, 'alpha');
-  assert.equal(state.lastSeenTs, NOW_SEC - 50, 'watermark advanced to newest fetched');
+  assert.equal(state.lastSeenTs, NOW_SEC - 100, 'watermark advances to the oldest kept item (cap defers, never drops)');
 
   assert.deepEqual(events.map((e) => e.status), ['running', 'done']);
   assert.equal(events[0].trigger, 'manual-ui');
@@ -214,7 +214,7 @@ test('a failed run re-presents the same window on the next surf (P1 regression)'
   assert.equal(retry.stats.fetched, 2, 'the lost window is presented again after the failure');
   assert.match(retry.reportMarkdown, /pin-a/);
   assert.equal(store.getSeenAction(7, 'pin-a'), 'presented', 'success path marks presented');
-  assert.equal(store.getProtocolState(7, 'alpha').lastSeenTs, NOW_SEC - 50);
+  assert.equal(store.getProtocolState(7, 'alpha').lastSeenTs, NOW_SEC - 100, 'watermark lands on the oldest kept item');
 });
 
 test('crash recovery fails stale running rows', () => {

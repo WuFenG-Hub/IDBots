@@ -103,3 +103,54 @@ test('digest markdown lists sections and items', async () => {
   assert.match(md, /Fake alpha — 1 new/);
   assert.match(md, /pin-a/);
 });
+
+test('total-cap deferral: dropped counts and next watermarks per protocol (round 3)', async () => {
+  const store = setup();
+  // The per-protocol fetch cap is 50, so overflowing the 150 total cap takes
+  // five protocols: a+b+c fill 140 slots, d keeps only its newest 10, e is
+  // crowded out entirely.
+  const registry = [
+    makeDescriptor('proto-a', Array.from({ length: 50 }, (_, i) => makeItem(`a-${i}`, NOW_SEC - 1000 + i, 'proto-a'))),
+    makeDescriptor('proto-b', Array.from({ length: 50 }, (_, i) => makeItem(`b-${i}`, NOW_SEC - 2000 + i, 'proto-b'))),
+    makeDescriptor('proto-c', Array.from({ length: 40 }, (_, i) => makeItem(`c-${i}`, NOW_SEC - 3000 + i, 'proto-c'))),
+    makeDescriptor('proto-d', Array.from({ length: 50 }, (_, i) => makeItem(`d-${i}`, NOW_SEC - 4000 + i, 'proto-d'))),
+    makeDescriptor('proto-e', Array.from({ length: 20 }, (_, i) => makeItem(`e-${i}`, NOW_SEC - 5000 + i, 'proto-e'))),
+  ];
+  const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
+  assert.equal(briefing.items.length, SURF_TOTAL_FETCH_LIMIT);
+  const byKey = Object.fromEntries(briefing.protocols.map((section) => [section.key, section]));
+  assert.equal(byKey['proto-a'].droppedByTotalCap, 0);
+  assert.equal(byKey['proto-a'].nextWatermarkTs, NOW_SEC - 1000, 'oldest in-list item');
+  assert.equal(byKey['proto-c'].droppedByTotalCap, 0);
+  assert.equal(byKey['proto-c'].nextWatermarkTs, NOW_SEC - 3000);
+  assert.equal(byKey['proto-d'].droppedByTotalCap, 40);
+  assert.equal(byKey['proto-d'].nextWatermarkTs, NOW_SEC - 4000 + 40, 'oldest in-list item; the 40 crowded-out items (older) survive the ledger filter next run');
+  assert.equal(byKey['proto-e'].droppedByTotalCap, 20);
+  assert.equal(byKey['proto-e'].nextWatermarkTs, null, 'fully crowded out — keep the old cursor');
+});
+
+test('all-ledger-filtered protocol still advances its cursor', async () => {
+  const store = setup();
+  store.markSeen(7, 'pin-old', 'presented', new Date(NOW_MS).toISOString());
+  const registry = [makeDescriptor('alpha', [makeItem('pin-old', NOW_SEC - 10, 'alpha')])];
+  const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
+  assert.equal(briefing.protocols[0].keptCount, 0);
+  assert.equal(briefing.protocols[0].droppedByTotalCap, 0);
+  assert.equal(briefing.protocols[0].nextWatermarkTs, NOW_SEC - 10, 'nothing to rescue — cursor may advance');
+});
+
+test('digest markdown marks items held back by the run cap', async () => {
+  const store = setup();
+  // 4 x 50 = 200 kept; the oldest protocol is crowded out of the 150 cap.
+  const registry = [
+    makeDescriptor('proto-new', Array.from({ length: 50 }, (_, i) => makeItem(`new-${i}`, NOW_SEC - 1000 + i, 'proto-new'))),
+    makeDescriptor('proto-mid', Array.from({ length: 50 }, (_, i) => makeItem(`mid-${i}`, NOW_SEC - 2000 + i, 'proto-mid'))),
+    makeDescriptor('proto-low', Array.from({ length: 50 }, (_, i) => makeItem(`low-${i}`, NOW_SEC - 3000 + i, 'proto-low'))),
+    makeDescriptor('proto-old', Array.from({ length: 50 }, (_, i) => makeItem(`old-${i}`, NOW_SEC - 4000 + i, 'proto-old'))),
+  ];
+  const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
+  const md = renderSurfBriefingMarkdown(briefing);
+  assert.match(md, /Fake proto-old — 50 new/);
+  assert.match(md, /plus 50 more held back by the run cap — they stay unseen and return next surf/);
+  assert.doesNotMatch(md, /## Fake proto-old — 50 new\n\(nothing new\)/, 'a section with held-back items is not "nothing new"');
+});

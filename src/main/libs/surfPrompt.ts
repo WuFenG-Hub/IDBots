@@ -39,10 +39,13 @@ const formatProtocolSection = (briefing: SurfBriefing, section: SurfBriefingProt
     return lines.join('\n');
   }
   const items = briefing.items.filter((item) => item.protocolKey === section.key);
-  lines.push(`### ${section.displayName}: ${items.length} new since last surf`);
-  if (items.length === 0) {
+  const heldBack = section.droppedByTotalCap > 0
+    ? ` (+ ${section.droppedByTotalCap} more held back by the run cap — they remain unseen and will be presented next surf)`
+    : '';
+  lines.push(`### ${section.displayName}: ${items.length} new since last surf${heldBack}`);
+  if (items.length === 0 && section.droppedByTotalCap === 0) {
     lines.push('(nothing new)');
-  } else {
+  } else if (items.length > 0) {
     for (const item of items.slice(0, PROMPT_DIGEST_ITEM_CAP)) {
       lines.push(formatPromptItem(item));
     }
