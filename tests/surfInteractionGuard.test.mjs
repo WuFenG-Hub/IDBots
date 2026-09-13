@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { createSurfCreatePinGuard, surfReceiptSeenActions, foldSurfReceiptsIntoSeenActions } = await import('../dist-electron/main/libs/surfInteractionGuard.js');
+const { createSurfCreatePinGuard, surfReceiptSeenActions, foldSurfReceiptsIntoSeenActions, recordSurfDeepRead, surfDeepReadReceiptSeenActions, surfSessionPartialStats } = await import('../dist-electron/main/libs/surfInteractionGuard.js');
 
 const METABOT_ID = 7;
 
@@ -251,4 +251,54 @@ test('fold with zero receipts strips ALL self-reported chain-write classes', () 
     { interactionBudget: 20, kbBudget: 40 },
   );
   assert.deepEqual(folded, [{ pinId: 'pin-read', action: 'read' }]);
+});
+
+test('recordSurfDeepRead dedupes and ignores blanks (round 3)', () => {
+  const state = { interactionBudget: 20, kbBudget: 40 };
+  recordSurfDeepRead(state, 'pin-a');
+  recordSurfDeepRead(state, 'pin-a');
+  recordSurfDeepRead(state, '  pin-b  ');
+  recordSurfDeepRead(state, '');
+  assert.deepEqual(state.readPinIds, ['pin-a', 'pin-b']);
+  assert.deepEqual(
+    surfDeepReadReceiptSeenActions(state),
+    [{ pinId: 'pin-a', action: 'read' }, { pinId: 'pin-b', action: 'read' }],
+  );
+});
+
+test('fold unions tracked deep reads over the self-report (round 3)', () => {
+  const folded = foldSurfReceiptsIntoSeenActions(
+    [{ pinId: 'pin-selfread', action: 'read' }, { pinId: 'pin-claimed-like', action: 'liked' }],
+    {
+      interactionBudget: 20,
+      kbBudget: 40,
+      interactions: { 'pin-real-like': 4 },
+      readPinIds: ['pin-trackedread', 'pin-selfread'],
+    },
+  );
+  assert.deepEqual(
+    [...new Set(folded.map((entry) => `${entry.pinId}:${entry.action}`))].sort(),
+    ['pin-selfread:read', 'pin-trackedread:read', 'pin-real-like:liked'].sort(),
+    'a tracked read the model forgot to report is banked; the batch store collapses the duplicate read entries',
+  );
+});
+
+test('surfSessionPartialStats counts only what the host can vouch for (round 3)', () => {
+  assert.deepEqual(
+    surfSessionPartialStats({ interactionBudget: 20, kbBudget: 40 }),
+    {},
+    'empty marker -> empty stats (the failed run falls back to fetched-only)',
+  );
+  const stats = surfSessionPartialStats({
+    interactionBudget: 20,
+    kbBudget: 40,
+    interactions: { 'pin-a': 4, 'pin-b': 5, 'pin-c': 6 },
+    postedPinIds: ['pin-post'],
+    kbAddsUsed: 3,
+    readPinIds: ['pin-r1', 'pin-r2'],
+  });
+  assert.deepEqual(stats, {
+    liked: 1, commented: 1, answered: 1, challenged: 0, posted: 1,
+    savedToKb: 3, deepRead: 2,
+  });
 });

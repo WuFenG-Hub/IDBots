@@ -27,6 +27,15 @@ export interface SurfSessionWriteState {
    * truth (review 2, item 6).
    */
   postedPinIds?: string[];
+  /**
+   * pinIds actually deep-read this run (recorded by the readPin wrapper —
+   * readable pins only, deduped). Success path: folded over the model's
+   * self-reported readPinIds (receipts over self-report, round 3). Failure
+   * path: powers the real partial stats on the failed run row — these pins
+   * deliberately stay OUT of the seen ledger so the next surf re-presents
+   * them (the run's saves are lost; the catch-up must get another chance).
+   */
+  readPinIds?: string[];
 }
 
 export type SurfSeenLedgerReader = (
@@ -74,7 +83,50 @@ export function foldSurfReceiptsIntoSeenActions(
   return [
     ...selfReported.filter((entry) => !RECEIPT_ACTIONS.has(entry.action)),
     ...surfReceiptSeenActions(state),
+    // Deep-read receipts ride on top of the self-report (the batch store
+    // keeps the strongest action per pin, so a self-reported 'saved' still
+    // wins over a tracked 'read' of the same pin).
+    ...surfDeepReadReceiptSeenActions(state),
   ];
+}
+
+/** Record one actual deep read on the session marker (deduped). */
+export function recordSurfDeepRead(state: SurfSessionWriteState, pinId: string): void {
+  const clean = String(pinId ?? '').trim();
+  if (!clean) return;
+  const reads = state.readPinIds ?? (state.readPinIds = []);
+  if (!reads.includes(clean)) reads.push(clean);
+}
+
+/** The run's tracked deep reads as 'read'-class seen-ledger entries. */
+export function surfDeepReadReceiptSeenActions(
+  state: SurfSessionWriteState,
+): Array<{ pinId: string; action: MetawebSurfSeenAction }> {
+  return (state.readPinIds ?? []).map((pinId) => ({ pinId, action: 'read' as const }));
+}
+
+/**
+ * What the host can vouch for on a FAILED run (round 3): real counts from the
+ * guard-mutated marker — chain interactions by their strongest action, posts,
+ * KB adds and tracked deep reads. Attached to the session error so the failed
+ * run row stops reporting all-zero stats.
+ */
+export function surfSessionPartialStats(
+  state: SurfSessionWriteState,
+): Partial<import('../metawebSurfStore').MetawebSurfRunStats> {
+  const stats: Partial<import('../metawebSurfStore').MetawebSurfRunStats> = {};
+  const receipts = surfReceiptSeenActions(state);
+  const countOf = (action: MetawebSurfSeenAction) => receipts.filter((entry) => entry.action === action).length;
+  if (receipts.length > 0) {
+    stats.liked = countOf('liked');
+    stats.commented = countOf('commented');
+    stats.answered = countOf('answered');
+    stats.challenged = countOf('challenged');
+    stats.posted = countOf('posted');
+  }
+  if ((state.kbAddsUsed ?? 0) > 0) stats.savedToKb = state.kbAddsUsed;
+  if ((state.readPinIds?.length ?? 0) > 0) stats.deepRead = state.readPinIds!.length;
+  return stats;
 }
 
 /**

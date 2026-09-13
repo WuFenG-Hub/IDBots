@@ -184,6 +184,7 @@ export class SurfService {
       this.broadcast({ metabotId, runId, trigger, status: outcome, error });
       this.runningByMetabot.delete(metabotId);
     };
+    let fetchedCount = 0;
     try {
       const budget = getSurfInteractionBudget(this.metabotStore, metabotId);
       const briefing = await buildSurfBriefing({
@@ -193,6 +194,7 @@ export class SurfService {
         registry: this.registry,
         nowMs: this.nowMs(),
       });
+      fetchedCount = briefing.items.length;
 
       const stats: MetawebSurfRunStats = { ...emptySurfRunStats(), fetched: briefing.items.length };
       let reportMarkdown: string | null = null;
@@ -249,9 +251,14 @@ export class SurfService {
       finish('done', null);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // Round 3: a failed run keeps the REAL numbers the host can vouch for
+      // (fetched from the briefing; deep reads / KB adds / chain interactions
+      // attached to the session error by main.ts runSurfSession) instead of
+      // the historical all-zero stats.
+      const partial = (error as { surfPartialStats?: Partial<MetawebSurfRunStats> } | null)?.surfPartialStats;
       this.store.finishRun(runId, {
         status: 'failed',
-        stats: emptySurfRunStats(),
+        stats: { ...emptySurfRunStats(), fetched: fetchedCount, ...(partial ?? {}) },
         error: message,
         finishedAtIso: new Date(this.nowMs()).toISOString(),
       });

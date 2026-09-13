@@ -231,3 +231,53 @@ test('crash recovery fails stale running rows', () => {
   assert.equal(service.recoverAfterRestart(), 1);
   assert.equal(store.getRun('stale-1').status, 'failed');
 });
+
+test('a failed run keeps the real partial stats attached to the session error (round 3)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    runSurfSession: async () => {
+      const error = new Error('Skill turn timed out after 3600s');
+      error.surfPartialStats = { deepRead: 26, savedToKb: 2, liked: 6, commented: 1 };
+      throw error;
+    },
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'failed');
+  assert.equal(run.stats.fetched, 1, 'fetched comes from the briefing even on failure');
+  assert.equal(run.stats.deepRead, 26, 'host-vouched partial stats land on the failed row');
+  assert.equal(run.stats.savedToKb, 2);
+  assert.equal(run.stats.liked, 6);
+  assert.equal(run.stats.commented, 1);
+  assert.equal(run.stats.answered, 0, 'untouched classes stay zero');
+  assert.equal(store.getSeenAction(7, 'pin-a'), null, 'partial stats never touch the seen ledger');
+});
+
+test('a failed run without attached partial stats reports fetched only', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100), makeItem('pin-b', NOW_SEC - 50)])],
+    runSurfSession: async () => { throw new Error('llm down'); },
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'failed');
+  assert.equal(run.stats.fetched, 2);
+  assert.equal(run.stats.deepRead, 0);
+  assert.equal(run.stats.liked, 0);
+});

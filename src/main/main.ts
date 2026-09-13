@@ -270,7 +270,7 @@ import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { MetawebSurfStore } from './metawebSurfStore';
 import { SurfService, SURF_STATUS_CHANNEL } from './services/surfService';
 import { buildSurfSessionPrompt, parseSurfRunReport, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
-import { foldSurfReceiptsIntoSeenActions, surfReceiptSeenActions, type SurfSessionWriteState } from './libs/surfInteractionGuard';
+import { foldSurfReceiptsIntoSeenActions, surfReceiptSeenActions, surfSessionPartialStats, type SurfSessionWriteState } from './libs/surfInteractionGuard';
 import { isSurfBeforeDreamEnabled, SURF_BEFORE_DREAM_ENABLED_KEY } from './services/surfSettings';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
 import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
@@ -7148,6 +7148,19 @@ const getSurfService = (): SurfService => {
             } catch {
               // A sick ledger must not mask the session's own failure.
             }
+          }
+          // Round 3: the failed run row deserves REAL numbers, not all-zero
+          // stats — attach what the host can vouch for (deep reads tracked by
+          // the readPin wrapper, KB adds and chain writes from the guard) so
+          // SurfService can store them. Deep reads stay OUT of the ledger:
+          // the run's saves are lost, so catch-up must re-present those pins.
+          try {
+            const partial = surfSessionPartialStats(writeState);
+            if (Object.keys(partial).length > 0) {
+              (error as { surfPartialStats?: unknown }).surfPartialStats = partial;
+            }
+          } catch {
+            // Stat attachment is best-effort; the original error stands.
           }
           throw error;
         } finally {
