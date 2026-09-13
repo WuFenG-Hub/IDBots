@@ -426,3 +426,4 @@ man_base_data_pebble/
 !tests/surfInteractionGuard.test.mjs
 !tests/surfProtocols.test.mjs
 !tests/coworkRunnerSurfWiringStatic.test.mjs
+!tests/scheduledTaskAgentTools.test.mjs

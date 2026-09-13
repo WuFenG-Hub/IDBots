@@ -296,10 +296,11 @@ test('surfSessionPartialStats counts only what the host can vouch for (round 3)'
     postedPinIds: ['pin-post'],
     kbAddsUsed: 3,
     readPinIds: ['pin-r1', 'pin-r2'],
+    tasksScheduled: 2,
   });
   assert.deepEqual(stats, {
     liked: 1, commented: 1, answered: 1, challenged: 0, posted: 1,
-    savedToKb: 3, deepRead: 2,
+    savedToKb: 3, deepRead: 2, tasksScheduled: 2,
   });
 });
 
