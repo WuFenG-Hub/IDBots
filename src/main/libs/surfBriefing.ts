@@ -3,9 +3,13 @@
  *
  * For each registered protocol: fetch items newer than the bot's watermark
  * (first surf looks back SURF_FIRST_LOOKBACK_SECONDS), drop pins already in
- * the seen ledger, cap per protocol and in total, and mark the survivors
- * 'presented' so the next surf does not re-list them. The LLM session then
+ * the seen ledger, and cap per protocol and in total. The LLM session then
  * decides what to deep-read, save, and interact with.
+ *
+ * This builder is side-effect free by design: survivors are marked
+ * 'presented' by surfService ONLY when the run succeeds, so a failed run
+ * (LLM timeout, network outage) re-presents this same window on the next
+ * surf instead of silently dropping it (catch-up semantics, review P1).
  */
 
 import type { MetawebSurfStore } from '../metawebSurfStore';
@@ -60,9 +64,6 @@ export async function buildSurfBriefing(input: {
       const fetched = await descriptor.fetchFresh({ sinceTs, limit: SURF_PROTOCOL_FETCH_LIMIT });
       const unseenIds = new Set(input.store.filterUnseen(input.metabotId, fetched.map((item) => item.pinId)));
       const fresh = fetched.filter((item) => unseenIds.has(item.pinId));
-      for (const item of fresh) {
-        input.store.markSeen(input.metabotId, item.pinId, 'presented', nowIso);
-      }
       kept.push(...fresh);
       protocols.push({
         key: descriptor.key,

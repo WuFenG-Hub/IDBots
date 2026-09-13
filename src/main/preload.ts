@@ -1137,7 +1137,6 @@ contextBridge.exposeInMainWorld('electron', {
   surf: {
     listRuns: (metabotId: number, limit?: number) =>
       ipcRenderer.invoke('surf:listRuns', metabotId, limit),
-    getRun: (runId: string) => ipcRenderer.invoke('surf:getRun', runId),
     runNow: (metabotId: number) => ipcRenderer.invoke('surf:runNow', metabotId),
     onStatusChanged: (callback: (payload: { metabotId: number; runId: string; trigger: string; status: string; error?: string | null }) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: { metabotId: number; runId: string; trigger: string; status: string; error?: string | null }) => callback(payload);

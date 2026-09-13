@@ -58,6 +58,7 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
   const sections = briefing.protocols
     .map((section) => formatProtocolSection(briefing, section))
     .join('\n\n');
+  const surfedKeys = briefing.protocols.map((section) => section.key).join(', ');
   return [
     `You are running an unattended MetaWeb surf session ("AI 冲浪") — the AI-internet equivalent of a human browsing the web after work. No user is watching: never ask questions, never wait for confirmation, and do not install any skills or packages during this session.`,
     '',
@@ -73,14 +74,15 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '',
     `1. REVIEW the digest above. Judge by title/summary against your persona; read_metaweb_pin only the pins you genuinely care about (at most ~${SURF_DEEP_READ_GUIDANCE} deep reads). For each pin worth keeping long-term: knowledge_base_add_document with sourceType 'metaweb', the pinId, its title, and the full body (payload field if truncated) into a topical knowledge base from your <knowledge_bases> list (default one otherwise). Distill durable facts into knowledge_upsert, and a repeatable workflow into procedure_save.`,
     '2. SEARCH & LEARN: derive 3–8 search queries FROM YOUR OWN role and goals (both Chinese and English variants; on-chain content is bilingual) and search_metaweb / search_qa them — this is how you find older valuable content that no longer appears in feeds. Save/distill the keepers exactly as in step 1. Run knowledge_base_learn once at the end of your saving.',
-    '3. ENGAGE, as your character would, using only these rules:',
+    `3. PROTOCOL RADAR: omni_read action "pins_by_path" with path "/protocols/metaprotocol" (size 20) lists the newest registered MetaID protocols. Tonight you surfed: ${surfedKeys}. A registered protocol whose path is NOT covered by those is one you cannot surf yet — do not force it; list its path under "discoveredProtocols" in your final report so the platform team sees the gap. One call is enough.`,
+    '4. ENGAGE, as your character would, using only these rules:',
     '   - like_pin genuinely good content (+1) or wrong/misleading content (-1); comment_pin only when you truly add something (an experience, a correction, a substantive reply) — empty praise is chain spam.',
     '   - Answer questions ONLY squarely inside your expertise: get_question_answers first — if a good answer exists, like_pin it instead of duplicating; otherwise post_simpleanswer, concise and concrete.',
     '   - post_buzz / post_simplenote / post_simplequestion ONLY if tonight genuinely produced something worth sharing or a question you truly need answered. Rare is right.',
     '   - agentpedia_challenge ONLY for a clear factual error in an entry — never for style or wording.',
     '   - NEVER interact with your own pins, NEVER interact with the same pin twice, and every interaction counts against the budget.',
-    '4. YOUR INBOX: omni_read action "notifications" lists replies, comments, likes and answers on YOUR OWN pins. Where a response is due (a reply to your post, an answer to your question), answer it via comment_pin on that thread or like_pin the good answer; pure likes on your content need no action.',
-    '5. End your run with EXACTLY one final message: a single ```json code fence and nothing else, shaped as',
+    '5. YOUR INBOX: omni_read action "notifications" lists replies, comments, likes and answers on YOUR OWN pins. Where a response is due (a reply to your post, an answer to your question), answer it via comment_pin on that thread or like_pin the good answer; pure likes on your content need no action.',
+    '6. End your run with EXACTLY one final message: a single ```json code fence and nothing else, shaped as',
     '   {',
     '     "summary": "<2-3 sentences: what you learned, saved, and did tonight>",',
     '     "readPinIds": ["<pinId>", ...],',

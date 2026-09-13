@@ -136,7 +136,7 @@ const sinceFiltered = (items: SurfItem[], sinceTs: number | null, limit: number)
 
 const simplebuzz: SurfProtocolDescriptor = {
   key: 'simplebuzz',
-  displayName: 'Buzz (链上推特)',
+  displayName: 'Buzz (on-chain microblog)',
   paths: ['/protocols/simplebuzz'],
   interactions: ['like', 'comment'],
   relevanceHint:
@@ -154,7 +154,7 @@ const simplebuzz: SurfProtocolDescriptor = {
 
 const simplenote: SurfProtocolDescriptor = {
   key: 'simplenote',
-  displayName: 'SimpleNote (链上博客)',
+  displayName: 'SimpleNote (on-chain blog)',
   paths: ['/protocols/simplenote'],
   interactions: ['like', 'comment'],
   relevanceHint:
@@ -172,7 +172,7 @@ const simplenote: SurfProtocolDescriptor = {
 
 const simplequestion: SurfProtocolDescriptor = {
   key: 'simplequestion',
-  displayName: 'Q&A (链上问答)',
+  displayName: 'Q&A (on-chain Quora)',
   paths: ['/protocols/simplequestion', '/protocols/simpleanswer'],
   interactions: ['like', 'answer', 'ask', 'comment'],
   relevanceHint:
@@ -192,7 +192,7 @@ const simplequestion: SurfProtocolDescriptor = {
 
 const agentpedia: SurfProtocolDescriptor = {
   key: 'agentpedia',
-  displayName: 'Agentpedia (链上百科)',
+  displayName: 'Agentpedia (on-chain encyclopedia)',
   paths: ['/protocols/agentpedia/rev'],
   interactions: ['challenge'],
   relevanceHint:

@@ -5659,6 +5659,10 @@ const getCoworkRunner = () => {
         },
         isSurfBeforeDreamEnabled: (metabotId: number) =>
           isSurfBeforeDreamEnabled(getMetabotStore(), metabotId),
+        // Seen-ledger read for the surf createPin guard's duplicate-interaction
+        // check (review P2.3) — same store the surf reports/watermarks use.
+        getSurfSeenAction: (metabotId: number, pinId: string) =>
+          getMetawebSurfStore().getSeenAction(metabotId, pinId),
       },
       // upload_file tool backend. Delegates to the shared uploadMetaFile()
       // service so the tool, the RPC endpoint, and the IPC handlers all share
@@ -7015,6 +7019,11 @@ const getSurfService = (): SurfService => {
     surfService = new SurfService({
       store: getMetawebSurfStore(),
       metabotStore: getMetabotStore(),
+      // Same memory gate as the study service (review P2.2): with memory
+      // disabled the surf session has no KB/memory tools to learn into —
+      // manual triggers fail loudly, the pre-dream path skips quietly.
+      isMemoryEnabled: (metabotId) =>
+        getCoworkStore().getEffectiveMemoryPolicyForMetabot(metabotId).memoryEnabled,
       broadcast: (payload) => {
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) {
@@ -11456,6 +11465,7 @@ if (!gotTheLock) {
   ipcMain.handle('metabot:list', async () => withSqliteRecovery('metabot:list', async () => {
     try {
       const dreamService = getDreamService();
+      const surfService = getSurfService();
       const metabotStore = getMetabotStore();
       const list = metabotStore.listMetabots().map((metabot) => {
         // Chain-honest sync state for the My Bots partial badge (FR4):
@@ -11467,6 +11477,10 @@ if (!gotTheLock) {
         return {
           ...metabot,
           dreaming: dreamService?.isDreaming(metabot.id) ?? false,
+          // Same main-side merge as dreaming (review P3): a renderer that
+          // reloads mid-run must not lose the surf badge — the broadcast only
+          // covers transitions that happen while the window is alive.
+          surfing: surfService?.isRunning(metabot.id) ?? false,
           chain_sync_state: chainSync.state,
           chain_sync_pending_steps: chainSync.pendingSteps,
           subsidy_state: subsidy.state,
@@ -11891,18 +11905,6 @@ if (!gotTheLock) {
       } catch (error) {
         rethrowSqliteWasmBoundsError(error);
         return { success: false, error: error instanceof Error ? error.message : 'Failed to list surf runs' };
-      }
-    }));
-
-  ipcMain.handle('surf:getRun', async (_event, runId: string) =>
-    withSqliteRecovery('surf:getRun', async () => {
-      try {
-        const run = getMetawebSurfStore().getRun(String(runId || ''));
-        if (!run) return { success: false, error: 'Surf run not found' };
-        return { success: true, run };
-      } catch (error) {
-        rethrowSqliteWasmBoundsError(error);
-        return { success: false, error: error instanceof Error ? error.message : 'Failed to load surf run' };
       }
     }));
 

@@ -1,0 +1,154 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+const { createSurfCreatePinGuard } = await import('../dist-electron/main/libs/surfInteractionGuard.js');
+
+const METABOT_ID = 7;
+
+const likeData = (pinId) => ({
+  operation: 'create',
+  path: '/protocols/paylike',
+  payload: JSON.stringify({ isLike: '1', likeTo: pinId }),
+});
+
+const commentData = (pinId) => ({
+  operation: 'create',
+  path: '/protocols/paycomment',
+  payload: JSON.stringify({ commentTo: pinId, content: 'nice', contentType: 'text/markdown' }),
+});
+
+const answerData = (pinId) => ({
+  operation: 'create',
+  path: '/protocols/simpleanswer',
+  payload: JSON.stringify({ answerTo: pinId, content: 'answer' }),
+});
+
+const challengeData = (pinId) => ({
+  operation: 'create',
+  path: '/protocols/agentpedia/challenge',
+  payload: JSON.stringify({ targetRev: pinId, reason: 'factual', detail: 'wrong fact here' }),
+});
+
+const buzzData = () => ({
+  operation: 'create',
+  path: '/protocols/simplebuzz',
+  payload: JSON.stringify({ content: 'original post' }),
+});
+
+const okCreatePin = () => {
+  const calls = [];
+  const createPin = async (metabotId, metaidData, options) => {
+    calls.push({ metabotId, metaidData, options });
+    return { txids: ['tx'], pinId: 'new-pin', totalCost: 100 };
+  };
+  return { createPin, calls };
+};
+
+const state = (budget) => ({ interactionBudget: budget, kbBudget: 40 });
+
+test('counts every write and rejects once the budget is spent', async () => {
+  const { createPin, calls } = okCreatePin();
+  const guard = createSurfCreatePinGuard({ createPin, state: state(2) });
+  await guard(METABOT_ID, buzzData(), {});
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  await assert.rejects(() => guard(METABOT_ID, likeData('pin-b'), {}), /budget exhausted/);
+  assert.equal(calls.length, 2, 'the third write never reached the wallet');
+});
+
+test('budget 0 refuses every chain write', async () => {
+  const { createPin, calls } = okCreatePin();
+  const guard = createSurfCreatePinGuard({ createPin, state: state(0) });
+  await assert.rejects(() => guard(METABOT_ID, buzzData(), {}), /budget exhausted/);
+  assert.equal(calls.length, 0);
+});
+
+test('counters live on the shared state: a rebuilt guard keeps the count (P2.1)', async () => {
+  const { createPin, calls } = okCreatePin();
+  const shared = state(2);
+  const guardTurn1 = createSurfCreatePinGuard({ createPin, state: shared });
+  await guardTurn1(METABOT_ID, buzzData(), {});
+  await guardTurn1(METABOT_ID, likeData('pin-a'), {});
+  // The DSH tool surface is rebuilt every turn: a fresh guard instance over
+  // the SAME session marker must not reset the budget counter.
+  const guardTurn2 = createSurfCreatePinGuard({ createPin, state: shared });
+  await assert.rejects(() => guardTurn2(METABOT_ID, buzzData(), {}), /budget exhausted/);
+  assert.equal(calls.length, 2);
+  assert.equal(shared.writesUsed, 2);
+});
+
+test('duplicate interaction with the same pin is rejected without spending budget (P2.3)', async () => {
+  const { createPin, calls } = okCreatePin();
+  const shared = state(5);
+  const guard = createSurfCreatePinGuard({ createPin, state: shared });
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  await assert.rejects(() => guard(METABOT_ID, likeData('pin-a'), {}), /Already interacted/);
+  assert.equal(shared.writesUsed, 1, 'the duplicate did not consume budget');
+  assert.equal(calls.length, 1);
+  // A stronger action on the same target is still allowed (comment after like).
+  await guard(METABOT_ID, commentData('pin-a'), {});
+  // …but not a weaker/equal one afterwards (like after comment).
+  await assert.rejects(() => guard(METABOT_ID, likeData('pin-a'), {}), /Already interacted/);
+  assert.equal(shared.writesUsed, 2);
+});
+
+test('the seen ledger blocks cross-run duplicates; read/save never blocks', async () => {
+  const { createPin } = okCreatePin();
+  const ledger = new Map([['pin-liked', 'liked'], ['pin-saved', 'saved'], ['pin-read', 'read']]);
+  const getSeenAction = (_metabotId, pinId) => ledger.get(pinId) ?? null;
+  const guard = createSurfCreatePinGuard({ createPin, state: state(5), getSeenAction });
+
+  await assert.rejects(() => guard(METABOT_ID, likeData('pin-liked'), {}), /Already interacted/);
+  // saved/read are below interaction rank — engaging with them is fine.
+  await guard(METABOT_ID, likeData('pin-saved'), {});
+  await guard(METABOT_ID, commentData('pin-read'), {});
+});
+
+test('answer and challenge targets are extracted for the dup guard', async () => {
+  const { createPin } = okCreatePin();
+  const shared = state(9);
+  const guard = createSurfCreatePinGuard({ createPin, state: shared });
+  await guard(METABOT_ID, answerData('q-1'), {});
+  await assert.rejects(() => guard(METABOT_ID, answerData('q-1'), {}), /Already interacted/);
+  await guard(METABOT_ID, challengeData('rev-1'), {});
+  await assert.rejects(() => guard(METABOT_ID, challengeData('rev-1'), {}), /Already interacted/);
+});
+
+test('a sick ledger never blocks writes (in-run record still holds)', async () => {
+  const { createPin, calls } = okCreatePin();
+  const shared = state(3);
+  const guard = createSurfCreatePinGuard({
+    createPin,
+    state: shared,
+    getSeenAction: () => { throw new Error('sqlite down'); },
+  });
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  await assert.rejects(() => guard(METABOT_ID, likeData('pin-a'), {}), /Already interacted/);
+  assert.equal(calls.length, 1);
+});
+
+test('original posts skip the dup check but still count against the budget', async () => {
+  const { createPin, calls } = okCreatePin();
+  const shared = state(2);
+  const guard = createSurfCreatePinGuard({ createPin, state: shared });
+  await guard(METABOT_ID, buzzData(), {});
+  await guard(METABOT_ID, buzzData(), {});
+  await assert.rejects(() => guard(METABOT_ID, buzzData(), {}), /budget exhausted/);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(shared.interactions, undefined, 'no targets were recorded for original posts');
+});
+
+test('a failed chain write consumes budget but stays re-interactable', async () => {
+  let attempts = 0;
+  const flaky = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('insufficient funds');
+    return { txids: ['tx'], pinId: 'p', totalCost: 1 };
+  };
+  const shared = state(2);
+  const guard = createSurfCreatePinGuard({ createPin: flaky, state: shared });
+  await assert.rejects(() => guard(METABOT_ID, likeData('pin-a'), {}), /insufficient funds/);
+  assert.equal(shared.writesUsed, 1, 'failed attempts count against the budget');
+  assert.equal(shared.interactions, undefined, 'failed like was not recorded as an interaction');
+  await guard(METABOT_ID, likeData('pin-a'), {}, 'retry after a failure is allowed');
+  assert.equal(shared.interactions['pin-a'] > 0, true);
+});

@@ -120,3 +120,38 @@ test('seen ledger prunes by retention window and per-bot cap', () => {
   const remaining = store.filterUnseen(9, Array.from({ length: SURF_SEEN_MAX_ROWS_PER_BOT + 10 }, (_, i) => `bulk-${i}`));
   assert.equal(remaining.length, 10, 'oldest 10 pruned, cap holds');
 });
+
+test('markSeenBatch writes a run batch with strongest-action-wins and one save', () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  assert.ok(db, 'native sqlite available in test runtime');
+  let saves = 0;
+  const store = new MetawebSurfStore(db, () => { saves += 1; });
+
+  saves = 0;
+  store.markSeenBatch(7, [
+    { pinId: 'pin-1', action: 'presented' },
+    { pinId: 'pin-1', action: 'liked' },
+    { pinId: 'pin-2', action: 'presented' },
+    { pinId: ' pin-3 ', action: 'read' },
+    { pinId: '', action: 'presented' },
+  ], NOW);
+  assert.equal(store.getSeenAction(7, 'pin-1'), 'liked', 'strongest action inside the batch wins');
+  assert.equal(store.getSeenAction(7, 'pin-2'), 'presented');
+  assert.equal(store.getSeenAction(7, 'pin-3'), 'read', 'pin ids are trimmed');
+  assert.equal(saves, 1, 'the whole batch persists with a single saveDb');
+
+  saves = 0;
+  store.markSeenBatch(7, [
+    { pinId: 'pin-1', action: 'read' },
+    { pinId: 'pin-2', action: 'saved' },
+  ], NOW);
+  assert.equal(store.getSeenAction(7, 'pin-1'), 'liked', 'batch never downgrades a stored action');
+  assert.equal(store.getSeenAction(7, 'pin-2'), 'saved');
+  assert.equal(saves, 1, 'still one save even when only some rows change');
+
+  saves = 0;
+  store.markSeenBatch(7, [{ pinId: 'pin-1', action: 'presented' }], NOW);
+  assert.equal(saves, 0, 'a no-op batch skips the save entirely');
+  store.markSeenBatch(7, [], NOW);
+  assert.equal(saves, 0);
+});

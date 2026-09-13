@@ -35,7 +35,8 @@ export type MetawebSurfSeenAction =
   | 'posted'
   | 'challenged';
 
-const SEEN_ACTION_RANK: Record<MetawebSurfSeenAction, number> = {
+/** Exported for the surf interaction guard (duplicate-interaction checks rank actions). */
+export const SEEN_ACTION_RANK: Record<MetawebSurfSeenAction, number> = {
   presented: 0,
   skipped: 1,
   read: 2,
@@ -421,6 +422,57 @@ export class MetawebSurfStore {
       );
       this.saveDb();
     }
+  }
+
+  /**
+   * Batch variant of markSeen: one read + at most one save for a whole run's
+   * worth of ledger writes. A single surf presents up to ~150 pins, and on the
+   * WASM backend every saveDb serializes the whole database — per-row saves
+   * made the success path O(n) full-DB writes. Strongest action wins both
+   * within the batch and against the stored row; first_seen_at is kept.
+   */
+  markSeenBatch(
+    metabotId: number,
+    entries: Array<{ pinId: string; action: MetawebSurfSeenAction }>,
+    nowIso: string,
+  ): void {
+    const strongest = new Map<string, MetawebSurfSeenAction>();
+    for (const entry of entries) {
+      const pinId = String(entry.pinId || '').trim();
+      if (!pinId) continue;
+      const current = strongest.get(pinId);
+      if (!current || SEEN_ACTION_RANK[entry.action] > SEEN_ACTION_RANK[current]) {
+        strongest.set(pinId, entry.action);
+      }
+    }
+    if (strongest.size === 0) return;
+    const pinIds = [...strongest.keys()];
+    const placeholders = pinIds.map(() => '?').join(', ');
+    const existingRows = this.getAll<{ pin_id: string; action: MetawebSurfSeenAction }>(
+      `SELECT pin_id, action FROM metaweb_surf_seen_pins
+       WHERE metabot_id = ? AND pin_id IN (${placeholders})`,
+      [metabotId, ...pinIds],
+    );
+    const existing = new Map(existingRows.map((row) => [row.pin_id, row.action]));
+    let dirty = false;
+    for (const [pinId, action] of strongest) {
+      const stored = existing.get(pinId);
+      if (!stored) {
+        this.db.run(
+          `INSERT INTO metaweb_surf_seen_pins (metabot_id, pin_id, first_seen_at, action)
+           VALUES (?, ?, ?, ?)`,
+          [metabotId, pinId, nowIso, action],
+        );
+        dirty = true;
+      } else if (SEEN_ACTION_RANK[action] > SEEN_ACTION_RANK[stored]) {
+        this.db.run(
+          'UPDATE metaweb_surf_seen_pins SET action = ? WHERE metabot_id = ? AND pin_id = ?',
+          [action, metabotId, pinId],
+        );
+        dirty = true;
+      }
+    }
+    if (dirty) this.saveDb();
   }
 
   /** Return the subset of candidate pin ids the bot has never seen. */

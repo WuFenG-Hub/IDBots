@@ -202,6 +202,7 @@ import { buildAgentpediaAgentTools } from './agentpediaAgentTools';
 import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
 import { buildLikePinAgentTools } from './likePinAgentTools';
 import { buildCommentPinAgentTools } from './commentPinAgentTools';
+import { createSurfCreatePinGuard, type SurfSessionWriteState } from './surfInteractionGuard';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import {
@@ -1215,17 +1216,21 @@ interface ActiveSession {
    * kind 'qa-surf' swaps the allowlist for the Q&A surfing surface (participate:
    * answer/react) while keeping the same KB budget wrapper.
    */
-  metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
+  metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf'; kbAddsUsed?: number };
   /**
    * MetaWeb surf session marker: when set, the inline tool surface is
    * restricted to the surf allowlist (read/search/learn + the persona-driven
    * interaction tools like_pin / comment_pin / post_simple* / post_buzz /
    * post_simplenote / agentpedia_challenge) and EVERY chain write funnels
-   * through a counting createPin wrapper that hard-stops at interactionBudget
-   * (the 20/run default is a ceiling, never a target). kbBudget caps
-   * metaweb-source KB adds through the same wrapper the study session uses.
+   * through the surf createPin guard (libs/surfInteractionGuard.ts) that
+   * hard-stops at interactionBudget (the 20/run default is a ceiling, never
+   * a target) and rejects duplicate interactions with an already-engaged
+   * pin. kbBudget caps metaweb-source KB adds through the same wrapper the
+   * study session uses. All counters live ON this marker object — the tool
+   * surface is rebuilt per DSH turn, and closure counters would silently
+   * reset mid-run (review P2.1).
    */
-  metawebSurfSession?: { interactionBudget: number; kbBudget: number };
+  metawebSurfSession?: SurfSessionWriteState;
   /** Permission mode controlling tool gating (default/plan/acceptEdits/bypassPermissions). */
   permissionMode: CoworkPermissionMode;
   /** Runtime effort override from the UI picker; a canonical rung, the 'default' sentinel (model default, skipping brain/global), or null = tiered defaults (brain → global → per-model). */
@@ -6290,17 +6295,21 @@ export class CoworkRunner extends EventEmitter {
       autoApprove?: boolean;
       disableMemoryUpdates?: boolean;
       /** M4 nightly study session: restrict inline tools to the learning allowlist and cap metaweb-source KB adds at pinBudget. */
-      metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf' };
+      metawebStudySession?: { pinBudget: number; kind?: 'topic' | 'qa-surf'; kbAddsUsed?: number };
   /**
    * MetaWeb surf session marker: when set, the inline tool surface is
    * restricted to the surf allowlist (read/search/learn + the persona-driven
    * interaction tools like_pin / comment_pin / post_simple* / post_buzz /
    * post_simplenote / agentpedia_challenge) and EVERY chain write funnels
-   * through a counting createPin wrapper that hard-stops at interactionBudget
-   * (the 20/run default is a ceiling, never a target). kbBudget caps
-   * metaweb-source KB adds through the same wrapper the study session uses.
+   * through the surf createPin guard (libs/surfInteractionGuard.ts) that
+   * hard-stops at interactionBudget (the 20/run default is a ceiling, never
+   * a target) and rejects duplicate interactions with an already-engaged
+   * pin. kbBudget caps metaweb-source KB adds through the same wrapper the
+   * study session uses. All counters live ON this marker object — the tool
+   * surface is rebuilt per DSH turn, and closure counters would silently
+   * reset mid-run (review P2.1).
    */
-  metawebSurfSession?: { interactionBudget: number; kbBudget: number };
+  metawebSurfSession?: SurfSessionWriteState;
       disableRemoteServicesPrompt?: boolean;
       workspaceRoot?: string;
       confirmationMode?: 'modal' | 'text';
@@ -9489,11 +9498,17 @@ export class CoworkRunner extends EventEmitter {
       const gateLocalFile = (filePath: string) => checkUploadAllowed(filePath, uploadGate);
       // MetaWeb surf sessions: every chain write below (like/comment/answer/
       // ask/buzz/note/agentpedia challenge — omni_cast excluded by allowlist)
-      // funnels through ONE counting wrapper, so the run's interaction budget
-      // is a hard ceiling no matter which tool the persona picks.
+      // funnels through ONE guard, so the run's interaction budget is a hard
+      // ceiling no matter which tool the persona picks, and a pin the bot
+      // already engaged (earlier this run or in a previous surf) rejects
+      // duplicate interactions before the wallet is touched (review P2.1/P2.3).
       const surfSession = this.activeSessions.get(sessionId)?.metawebSurfSession;
       const createPinForSession: ChainWriteCreatePin = surfSession
-        ? this.wrapCreatePinForSurf(this.metabotChainWrite.createPin, surfSession.interactionBudget)
+        ? createSurfCreatePinGuard({
+            createPin: this.metabotChainWrite.createPin,
+            state: surfSession,
+            getSeenAction: (metabotId, pinId) => this.metawebSurf?.getSurfSeenAction?.(metabotId, pinId) ?? null,
+          })
         : this.metabotChainWrite.createPin;
       if (this.metaFileUpload) {
         const gatedUpload = wrapUploadWithGate(this.metaFileUpload.upload.bind(this.metaFileUpload), uploadGate);
@@ -9755,11 +9770,14 @@ export class CoworkRunner extends EventEmitter {
       const studySession = this.activeSessions.get(sessionId)?.metawebStudySession;
       const surfKbSession = this.activeSessions.get(sessionId)?.metawebSurfSession;
       const kbBudget = studySession?.pinBudget ?? surfKbSession?.kbBudget;
+      // The budget counter rides the session marker (kbAddsUsed) so a per-turn
+      // tool-surface rebuild cannot reset it mid-run (review P2.1).
+      const kbMarker = studySession ?? surfKbSession;
       memoryTools.push(
         ...buildKnowledgeBaseAgentTools({
           tool,
-          knowledgeBase: kbBudget != null
-            ? this.wrapKnowledgeBaseForStudy(this.knowledgeBase, kbBudget)
+          knowledgeBase: kbMarker && kbBudget != null
+            ? this.wrapKnowledgeBaseForStudy(this.knowledgeBase, kbMarker, kbBudget)
             : this.knowledgeBase,
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
@@ -9772,7 +9790,10 @@ export class CoworkRunner extends EventEmitter {
     // "what have you been learning" — the deliberate substitute for a
     // proactive morning report. Same strict session attribution as above, and
     // the same memory gate: a study job's whole purpose is feeding the KB.
-    if (sessionMemoryEnabled && this.metawebStudy && this.metawebSurf) {
+    // The legacy metaweb_qa_surf_* aliases register only when the surf
+    // control is also wired — a study-only embedding keeps the topic tools
+    // (review P3: the two controls must not be hard-coupled).
+    if (sessionMemoryEnabled && this.metawebStudy) {
       memoryTools.push(
         ...buildMetawebStudyAgentTools({
           tool,
@@ -9887,51 +9908,37 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
-   * M4 study-session KB wrapper: counts metaweb-source addDocument calls and
-   * rejects once the job's nightly pin budget is spent. Methods are delegated
-   * explicitly — the control is a class instance, so a spread would drop its
-   * prototype methods.
+   * M4 study-session / surf-session KB wrapper: counts metaweb-source
+   * addDocument calls and rejects once the run's pin budget is spent. The
+   * counter lives on the SESSION MARKER (kbAddsUsed), not in this closure —
+   * the tool surface is rebuilt per DSH turn and a closure counter would
+   * silently reset mid-run (review P2.1). Methods are delegated explicitly —
+   * the control is a class instance, so a spread would drop its prototype
+   * methods.
    */
-  private wrapKnowledgeBaseForStudy(control: KnowledgeBaseControl, pinBudget: number): KnowledgeBaseControl {
+  private wrapKnowledgeBaseForStudy(
+    control: KnowledgeBaseControl,
+    marker: { kbAddsUsed?: number },
+    pinBudget: number,
+  ): KnowledgeBaseControl {
     const budget = Math.max(1, Math.floor(pinBudget) || 1);
-    let metawebAdds = 0;
     return {
       listKnowledgeBases: (metabotId) => control.listKnowledgeBases(metabotId),
       queryKnowledgeBase: (metabotId, input) => control.queryKnowledgeBase(metabotId, input),
       addDocument: (metabotId, input) => {
         if (input?.source?.type === 'metaweb') {
-          if (metawebAdds >= budget) {
+          const used = marker.kbAddsUsed ?? 0;
+          if (used >= budget) {
             throw new Error(
-              `Study session pin budget reached (${budget} pins saved this run). Stop saving and write the final \`\`\`json report now.`
+              `Pin-saving budget reached (${budget} metaweb pins saved this run). Stop saving and write the final \`\`\`json report now.`
             );
           }
-          metawebAdds += 1;
+          marker.kbAddsUsed = used + 1;
         }
         return control.addDocument(metabotId, input);
       },
       learnKnowledgeBase: (metabotId, kbId, options) => control.learnKnowledgeBase(metabotId, kbId, options),
       learnAllKnowledgeBases: (metabotId, options) => control.learnAllKnowledgeBases(metabotId, options),
-    };
-  }
-
-  /**
-   * Surf-session createPin wrapper: counts EVERY chain write the session's
-   * tools attempt and rejects once the run's interaction budget is spent.
-   * Budget 0 means "no interactions" — learning still works, every write is
-   * refused. The error text doubles as prompt guidance: the model is told to
-   * stop interacting and finish its report.
-   */
-  private wrapCreatePinForSurf(createPin: ChainWriteCreatePin, interactionBudget: number): ChainWriteCreatePin {
-    const budget = Math.max(0, Math.floor(interactionBudget) || 0);
-    let writes = 0;
-    return async (metabotId, metaidData, options) => {
-      if (writes >= budget) {
-        throw new Error(
-          `MetaWeb surf interaction budget exhausted for this run (${budget} chain writes allowed). Stop interacting and write the final surf report now.`
-        );
-      }
-      writes += 1;
-      return createPin(metabotId, metaidData, options);
     };
   }
 

@@ -16,6 +16,7 @@ import {
   emptySurfRunStats,
   type MetawebSurfRunRecord,
   type MetawebSurfRunStats,
+  type MetawebSurfSeenAction,
   type MetawebSurfStore,
   type MetawebSurfTrigger,
 } from '../metawebSurfStore';
@@ -61,6 +62,13 @@ export interface SurfServiceDeps {
   broadcast: (payload: SurfStatusEvent) => void;
   /** Phase-3 LLM session; absent → digest-only run (still useful: report + watermarks). */
   runSurfSession?: (context: SurfSessionContext) => Promise<SurfSessionResult>;
+  /**
+   * Memory/KB availability gate (same policy the study service uses): with
+   * memory disabled the surf session gets no KB/memory tools to learn into,
+   * so a run would burn a session hitting 'unknown host tool' all night and
+   * misrecord as done. Absent → gate off (tests).
+   */
+  isMemoryEnabled?: (metabotId: number) => boolean;
   registry?: SurfProtocolDescriptor[];
   nowMs?: () => number;
 }
@@ -70,6 +78,7 @@ export class SurfService {
   private readonly metabotStore: SurfMetabotStoreLike;
   private readonly broadcast: (payload: SurfStatusEvent) => void;
   private readonly runSurfSession?: (context: SurfSessionContext) => Promise<SurfSessionResult>;
+  private readonly isMemoryEnabled?: (metabotId: number) => boolean;
   private readonly registry: SurfProtocolDescriptor[];
   private readonly nowMs: () => number;
   private readonly runningByMetabot = new Map<number, string>();
@@ -79,6 +88,7 @@ export class SurfService {
     this.metabotStore = deps.metabotStore;
     this.broadcast = deps.broadcast;
     this.runSurfSession = deps.runSurfSession;
+    this.isMemoryEnabled = deps.isMemoryEnabled;
     this.registry = deps.registry ?? DEFAULT_SURF_PROTOCOLS;
     this.nowMs = deps.nowMs ?? (() => Date.now());
   }
@@ -104,6 +114,13 @@ export class SurfService {
   shouldPreDreamSurf(metabotId: number): boolean {
     if (!isSurfBeforeDreamEnabled(this.metabotStore, metabotId)) return false;
     if (this.isRunning(metabotId)) return false;
+    try {
+      // A bot without memory learns nothing from surfing — skip quietly here
+      // (the dream proceeds either way); manual triggers fail loudly instead.
+      if (this.isMemoryEnabled?.(metabotId) === false) return false;
+    } catch {
+      return false;
+    }
     const latest = this.store.getLatestFinishedRun(metabotId);
     if (!latest?.finishedAt) return true;
     const finishedMs = Date.parse(latest.finishedAt);
@@ -134,6 +151,14 @@ export class SurfService {
   private beginRun(metabotId: number, trigger: MetawebSurfTrigger): MetawebSurfRunRecord {
     const bot = this.metabotStore.getMetabotById(metabotId);
     if (!bot) throw new Error(`MetaBot ${metabotId} not found`);
+    // Fail loudly BEFORE a run row exists (review P2.2): with memory disabled
+    // the session gets no KB/memory tools, so it would spend the night hitting
+    // 'unknown host tool' and misrecord as done. Mirrors the study service.
+    if (this.isMemoryEnabled?.(metabotId) === false) {
+      throw new Error(
+        'Memory is disabled for this bot — a surf run learns into its knowledge bases, so there is nothing to surf into. Enable Memory for this bot first.',
+      );
+    }
     if (this.runningByMetabot.has(metabotId)) {
       throw new Error('A surf run is already in progress for this bot');
     }
@@ -166,6 +191,7 @@ export class SurfService {
       const stats: MetawebSurfRunStats = { ...emptySurfRunStats(), fetched: briefing.items.length };
       let reportMarkdown: string | null = null;
       let reportJson: string | null = null;
+      const sessionSeenActions: Array<{ pinId: string; action: MetawebSurfSeenAction }> = [];
       if (this.runSurfSession) {
         const session = await this.runSurfSession({
           runId,
@@ -177,15 +203,24 @@ export class SurfService {
         Object.assign(stats, session.stats ?? {});
         reportMarkdown = session.reportMarkdown ?? null;
         reportJson = session.reportJson ?? null;
-        for (const seen of session.seenActions ?? []) {
-          this.store.markSeen(metabotId, seen.pinId, seen.action, new Date(this.nowMs()).toISOString());
-        }
+        sessionSeenActions.push(...(session.seenActions ?? []));
       }
+
+      // Seen-ledger writes land ONLY on this success path: every briefed pin
+      // becomes 'presented' and the session's self-reported actions fold on
+      // top (strongest action wins, one batched store write). A run that
+      // fails before this point leaves the ledger untouched, so the next
+      // surf re-presents the same window — one bad night (LLM timeout,
+      // outage) never silently drops that content (review P1).
+      const nowIso = new Date(this.nowMs()).toISOString();
+      this.store.markSeenBatch(metabotId, [
+        ...briefing.items.map((item) => ({ pinId: item.pinId, action: 'presented' as const })),
+        ...sessionSeenActions,
+      ], nowIso);
 
       // Watermarks advance only after the run body completed, and only for
       // protocols whose fetch succeeded (error sections keep their cursor so
       // the next surf retries them).
-      const nowIso = new Date(this.nowMs()).toISOString();
       for (const section of briefing.protocols) {
         if (!section.error && section.newestTs !== null) {
           this.store.advanceProtocolState(metabotId, section.key, {
