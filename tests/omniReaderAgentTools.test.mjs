@@ -164,7 +164,9 @@ test('notifications keeps the backend "notifcation" typo and requires address', 
   assert.match(missing.content[0].text, /requires address/);
   await byName.omni_read.handler({ action: 'notifications', address: '1Boat', size: 20, lastId: '1773555167558' });
   const url = new URL(calls.fetchJson[0]);
-  assert.equal(url.origin + url.pathname, 'https://manapi.metaid.io/api/notifcation/list');
+  // manapi.metaid.io answers this route with a perpetual empty list; the
+  // working host is man.metaid.io (verified live for multiple addresses).
+  assert.equal(url.origin + url.pathname, 'https://man.metaid.io/api/notifcation/list');
   assert.equal(url.searchParams.get('address'), '1Boat');
   assert.equal(url.searchParams.get('size'), '20');
   assert.equal(url.searchParams.get('lastId'), '1773555167558');

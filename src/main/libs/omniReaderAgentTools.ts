@@ -145,7 +145,7 @@ export function buildOmniReaderAgentTools(deps: {
     [
       'Read-only raw MetaID/MetaWeb indexer queries over HTTP.',
       'Users: action "user_info" with exactly one of metaid | address | globalmetaid (metafile-indexer first, falls back to manapi for metaid/address); "search_users" with keyword plus optional keytype metaid|name and limit (default 10).',
-      'Social/buzz: "buzz_newest" (lastId, size, metaid, followed 0/1), "buzz_recommended" (lastId, size, userAddress), "buzz_hot" (lastId, size <= 50), "buzz_search" (key required), "buzz_info" (pinId required); "notifications" (address required, size, lastId); "followers"/"following" (metaid required, cursor default 0, size).',
+      'Social/buzz: "buzz_newest" (lastId, size, metaid, followed 0/1), "buzz_recommended" (lastId, size, userAddress), "buzz_hot" (lastId, size <= 50), "buzz_search" (key required), "buzz_info" (pinId required); "notifications" (address required, size, lastId; lastId returns entries NEWER than that id, not a page-down cursor; answers to YOUR questions are NOT included — poll get_question_answers per own question pin); "followers"/"following" (metaid required, cursor default 0, size).',
       'Pins: "pin" (pinId), "pin_version" (pinId + ver int, 0 = initial), "pin_list"/"metaid_list"/"block_list"/"mempool_list" (page, size), "pins_by_path" (path required, e.g. /protocols/simplebuzz, size 1-100, cursor), "pins_by_metaid" (metaid required, optional path), "pins_by_address" (address + path required), "pin_content" (pinId, returns the raw content body).',
       'Metafile index: "file_info" (pinId), "file_latest" (firstPinId), "files_by_creator" (address), "files_by_metaid" (metaid), "files_by_extension" (extension like .jpg required, optional metaid/timestamp/size); plus "indexer_status", "indexer_stats", "global_counts".',
       'Paged actions echo lastId/cursor in the response; pass it back for the next page. All parameters are URL-encoded automatically.',
@@ -273,7 +273,10 @@ export function buildOmniReaderAgentTools(deps: {
             const address = asString(args.address);
             if (!address) return textResult('omni_read notifications requires address.', true);
             // The "notifcation" spelling is the backend's; keep it verbatim.
-            const url = buildUrl(MANAPI_BASE, 'api/notifcation/list', {
+            // Served by the MAN indexer: manapi answers this route with a
+            // perpetual empty list for every address, while man.metaid.io
+            // returns real notifications with the identical shape.
+            const url = buildUrl(MAN_BASE, 'api/notifcation/list', {
               address,
               size: args.size,
               lastId: asString(args.lastId) || undefined,
