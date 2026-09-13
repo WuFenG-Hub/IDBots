@@ -9508,6 +9508,7 @@ export class CoworkRunner extends EventEmitter {
             createPin: this.metabotChainWrite.createPin,
             state: surfSession,
             getSeenAction: (metabotId, pinId) => this.metawebSurf?.getSurfSeenAction?.(metabotId, pinId) ?? null,
+            isOwnPin: (metabotId, pinId) => this.metawebSurf?.isOwnPin?.(metabotId, pinId) ?? false,
           })
         : this.metabotChainWrite.createPin;
       if (this.metaFileUpload) {

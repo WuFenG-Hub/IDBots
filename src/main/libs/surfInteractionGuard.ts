@@ -81,8 +81,13 @@ function extractInteractionTarget(metaidData: { path?: string; payload: string }
  *
  * Every interaction tool a surf session can reach (like/comment/answer/ask/
  * buzz/note/agentpedia challenge) funnels through this guard, which enforces
- * two rules before the wallet is touched:
+ * three rules before the wallet is touched:
  *
+ * 0. Self-interaction block (review 2, item 5): liking, answering, or
+ *    challenging the bot's OWN pin is chain spam — rejected without spending
+ *    budget, against the local writes ledger (isOwnPin; best-effort, pins
+ *    published elsewhere are unknown). Comments on own pins stay allowed:
+ *    replying in your own thread is how the inbox step works.
  * 1. Duplicate-interaction guard: targeting a pin this bot already engaged
  *    with an equal-or-stronger action — earlier in THIS run (state.interactions)
  *    or in a previous surf (the seen ledger via getSeenAction) — is rejected
@@ -99,11 +104,27 @@ export function createSurfCreatePinGuard(deps: {
   createPin: ChainWriteCreatePin;
   state: SurfSessionWriteState;
   getSeenAction?: SurfSeenLedgerReader;
+  isOwnPin?: (metabotId: number, pinId: string) => boolean;
 }): ChainWriteCreatePin {
-  const { createPin, state, getSeenAction } = deps;
+  const { createPin, state, getSeenAction, isOwnPin } = deps;
   const budget = Math.max(0, Math.floor(state.interactionBudget) || 0);
   return async (metabotId, metaidData, options) => {
     const target = extractInteractionTarget(metaidData);
+    if (target && target.action !== 'commented') {
+      let own = false;
+      try {
+        own = isOwnPin?.(metabotId, target.pinId) === true;
+      } catch {
+        // A sick ledger must not block chain writes — the in-run record and
+        // the budget ceiling still hold.
+        own = false;
+      }
+      if (own) {
+        throw new Error(
+          `Pin ${target.pinId} is YOUR OWN pin — ${target.action === 'liked' ? 'liking' : target.action === 'answered' ? 'answering' : 'challenging'} yourself is chain spam (replying in your own thread via comment is fine and needs no check). Pick a different pin; this attempt did not spend the interaction budget.`,
+        );
+      }
+    }
     if (target) {
       const attemptedRank = SEEN_ACTION_RANK[target.action];
       let ledgerAction: MetawebSurfSeenAction | null = null;

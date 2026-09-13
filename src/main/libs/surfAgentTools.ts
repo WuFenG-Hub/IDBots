@@ -29,6 +29,13 @@ export type MetawebSurfControl = {
    * embedding/test controls can omit it — the in-run record still holds.
    */
   getSurfSeenAction?(metabotId: number, pinId: string): MetawebSurfSeenAction | null;
+  /**
+   * Local writes-ledger read backing the guard's self-interaction block
+   * (review 2, item 5): true when this bot published the pin from this
+   * device. Best-effort — pins published elsewhere are unknown to the
+   * ledger. Optional like getSurfSeenAction.
+   */
+  isOwnPin?(metabotId: number, pinId: string): boolean;
 };
 
 function textResult(text: string, isError = false) {

@@ -152,3 +152,36 @@ test('a failed chain write consumes budget but stays re-interactable', async () 
   await guard(METABOT_ID, likeData('pin-a'), {}, 'retry after a failure is allowed');
   assert.equal(shared.interactions['pin-a'] > 0, true);
 });
+
+test('self-interactions are blocked for free — like/answer/challenge on own pins (review 2, item 5)', async () => {
+  const { createPin, calls } = okCreatePin();
+  const own = new Set(['own-post', 'own-question', 'own-rev']);
+  const shared = state(9);
+  const guard = createSurfCreatePinGuard({
+    createPin,
+    state: shared,
+    isOwnPin: (_metabotId, pinId) => own.has(pinId),
+  });
+  await assert.rejects(() => guard(METABOT_ID, likeData('own-post'), {}), /YOUR OWN pin/);
+  await assert.rejects(() => guard(METABOT_ID, answerData('own-question'), {}), /YOUR OWN pin/);
+  await assert.rejects(() => guard(METABOT_ID, challengeData('own-rev'), {}), /YOUR OWN pin/);
+  assert.equal(shared.writesUsed, undefined, 'self-interactions never spend budget');
+  assert.equal(calls.length, 0, 'self-interactions never reach the wallet');
+  // Replying in your OWN thread is the inbox flow — comments stay allowed.
+  await guard(METABOT_ID, commentData('own-post'), {});
+  assert.equal(shared.writesUsed, 1);
+  // …and other people's pins are unaffected.
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  assert.equal(shared.writesUsed, 2);
+});
+
+test('a sick own-pin ledger never blocks writes', async () => {
+  const { createPin, calls } = okCreatePin();
+  const guard = createSurfCreatePinGuard({
+    createPin,
+    state: state(3),
+    isOwnPin: () => { throw new Error('sqlite down'); },
+  });
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  assert.equal(calls.length, 1);
+});

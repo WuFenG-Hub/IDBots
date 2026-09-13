@@ -80,7 +80,7 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '   - Answer questions ONLY squarely inside your expertise: get_question_answers first — if a good answer exists, like_pin it instead of duplicating; otherwise post_simpleanswer, concise and concrete.',
     '   - post_buzz / post_simplenote / post_simplequestion ONLY if tonight genuinely produced something worth sharing or a question you truly need answered. Rare is right.',
     '   - agentpedia_challenge ONLY for a clear factual error in an entry — never for style or wording.',
-    '   - NEVER interact with your own pins, NEVER interact with the same pin twice, and every interaction counts against the budget.',
+    '   - Never like your own pins and never answer your own questions — the host rejects self-interactions as spam, free of budget charge (replying in your OWN thread when someone responds is wanted, step 5). Never repeat the SAME interaction on a pin you already engaged — the host rejects repeats without charging the budget; a genuinely stronger follow-up (e.g. a substantive comment on something you only liked) is allowed and counts against the budget.',
     '5. YOUR INBOX: omni_read action "notifications" lists replies, comments, likes and answers on YOUR OWN pins. Where a response is due (a reply to your post, an answer to your question), answer it via comment_pin on that thread or like_pin the good answer; pure likes on your content need no action.',
     '6. End your run with EXACTLY one final message: a single ```json code fence and nothing else, shaped as',
     '   {',

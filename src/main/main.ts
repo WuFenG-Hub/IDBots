@@ -5663,6 +5663,11 @@ const getCoworkRunner = () => {
         // check (review P2.3) — same store the surf reports/watermarks use.
         getSurfSeenAction: (metabotId: number, pinId: string) =>
           getMetawebSurfStore().getSeenAction(metabotId, pinId),
+        // Local writes-ledger read for the guard's self-interaction block
+        // (review 2, item 5): best-effort — pins this bot published elsewhere
+        // are unknown, the prompt rule covers those.
+        isOwnPin: (metabotId: number, pinId: string) =>
+          getChainContentHistoryStore().hasWritePin(metabotId, pinId),
       },
       // upload_file tool backend. Delegates to the shared uploadMetaFile()
       // service so the tool, the RPC endpoint, and the IPC handlers all share

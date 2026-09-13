@@ -42,7 +42,9 @@ test('prompt carries the digest, the budget, and the persona-driven engagement r
   assert.match(prompt, /pin-buzz/);
   assert.match(prompt, /pin-note/);
   assert.match(prompt, /never a quota to fill/);
-  assert.match(prompt, /NEVER interact with your own pins/);
+  assert.match(prompt, /Never like your own pins/);
+  assert.match(prompt, /Never repeat the SAME interaction/);
+  assert.match(prompt, /stronger follow-up/);
   assert.match(prompt, /agentpedia_challenge ONLY for a clear factual error/);
   assert.match(prompt, /omni_read action "notifications"/);
   assert.match(prompt, /fetch failed \(timeout\)/);
