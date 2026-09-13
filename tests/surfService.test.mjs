@@ -112,6 +112,27 @@ test('unknown bot is rejected', async () => {
   await assert.rejects(() => service.runSurfAndWait(9, 'manual-ui'), /not found/);
 });
 
+test('memory-disabled bot is rejected loudly before any run row exists (P2.2)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    isMemoryEnabled: () => false,
+    nowMs: () => NOW_MS,
+  });
+  assert.throws(() => service.startSurf(7, 'manual-ui'), /Memory is disabled/);
+  await assert.rejects(() => service.runSurfAndWait(7, 'pre-dream'), /Memory is disabled/);
+  assert.equal(store.listRunsByMetabot(7).length, 0, 'no orphan run row was created');
+  assert.equal(store.getSeenAction(7, 'pin-a'), null, 'nothing was presented');
+  assert.equal(service.shouldPreDreamSurf(7), false, 'pre-dream path skips quietly when memory is off');
+});
+
 test('injected session overrides digest stats and prepends its report', async () => {
   const db = createNativeSqliteDatabase(':memory:');
   const store = new MetawebSurfStore(db, () => {});

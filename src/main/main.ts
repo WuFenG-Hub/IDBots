@@ -7019,6 +7019,11 @@ const getSurfService = (): SurfService => {
     surfService = new SurfService({
       store: getMetawebSurfStore(),
       metabotStore: getMetabotStore(),
+      // Same memory gate as the study service (review P2.2): with memory
+      // disabled the surf session has no KB/memory tools to learn into —
+      // manual triggers fail loudly, the pre-dream path skips quietly.
+      isMemoryEnabled: (metabotId) =>
+        getCoworkStore().getEffectiveMemoryPolicyForMetabot(metabotId).memoryEnabled,
       broadcast: (payload) => {
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) {
