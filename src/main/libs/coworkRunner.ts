@@ -2222,6 +2222,30 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  /**
+   * Failures thrown BEFORE the execution pipeline engages (persona/prompt
+   * building, turn prologue) bypass the pipeline's own settle handling. They
+   * used to be swallowed into console.error only, stranding the session on
+   * status='running' with a leaked activeSessions entry — the UI showed an
+   * endless "working in background" and the private-chat daemon kept deferring
+   * to a turn that would never finish (2026-09-14 session bfe4934f). Settle
+   * the turn like any in-pipeline failure; the caller rethrows so bounded
+   * caller-side retries and accumulator rejection still run. Idempotent: a
+   * turn the pipeline already settled (or replaced) is left alone.
+   */
+  private settlePrePipelineTurnFailure(activeSession: ActiveSession, source: string, error: unknown): void {
+    const { sessionId } = activeSession;
+    if (this.activeSessions.get(sessionId) !== activeSession) return;
+    const message = error instanceof Error ? error.message : String(error);
+    coworkLog('ERROR', source, 'Turn failed before the execution pipeline settled it', {
+      sessionId,
+      error: message,
+    });
+    this.handleError(sessionId, message);
+    this.clearPendingPermissions(sessionId);
+    this.removeActiveSession(sessionId, activeSession);
+  }
+
   private transitionLocalTurnForRetry(activeSession: ActiveSession, reason: string): void {
     this.failPendingLocalSteers(
       activeSession,
@@ -6472,56 +6496,57 @@ export class CoworkRunner extends EventEmitter {
       ),
     };
     this.activeSessions.set(sessionId, activeSession);
-    if (systemPromptChanged) {
-      // Same attribution as continueSession's reset: the next turn's miss must
-      // be labeled 'system_prompt_changed', not 'unknown'.
-      activeSession.pendingCacheBreakReason = 'system_prompt_changed';
-    }
-    if (session.cwd !== sessionCwd) {
-      this.store.updateSession(sessionId, { cwd: sessionCwd });
-    }
-
-    const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
-    const personaBlock = this.buildMetabotPersonaBlock(sessionId);
-    // Freeze the persona block for the lifetime of this active session: it sits
-    // at the head of the system prompt, so a live DB re-read per turn would let
-    // any mid-session persona edit break DeepSeek's cached prefix.
-    activeSession.personaBlock = personaBlock;
-    const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
-    // Only session-invariant blocks belong in the system prompt. The hot-layer
-    // experience injection (self-identity + dream summaries, rewritten nightly)
-    // rides the current user message via buildVolatileContextPrompt instead.
-    const personaWithExperience = [
-      personaBlock,
-      this.buildTwinOrchestrationPrompt(sessionId),
-      this.buildWelcomeBootstrapPrompt(sessionId),
-      await this.buildTwinLocalRosterPrompt(sessionId),
-    ]
-      .filter((section) => section?.trim())
-      .join('\n\n');
-    const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
-    const { skillsSection, skillsCatalogMode } = this.resolveSkillsPromptForTurn(sessionId, activeSession, baseSystemPrompt);
-    activeSession.skillsCatalogMode = skillsCatalogMode;
-    const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
-      baseSystemPrompt,
-      this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
-      sessionCwd,
-      activeSession.confirmationMode,
-      sessionMemoryEnabled,
-      personaWithExperience,
-      systemPromptProfile,
-      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
-      skillsSection
-    );
-    this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
-
-    // Run claude-code using the SDK
     try {
+      if (systemPromptChanged) {
+        // Same attribution as continueSession's reset: the next turn's miss must
+        // be labeled 'system_prompt_changed', not 'unknown'.
+        activeSession.pendingCacheBreakReason = 'system_prompt_changed';
+      }
+      if (session.cwd !== sessionCwd) {
+        this.store.updateSession(sessionId, { cwd: sessionCwd });
+      }
+
+      const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
+      const personaBlock = this.buildMetabotPersonaBlock(sessionId);
+      // Freeze the persona block for the lifetime of this active session: it sits
+      // at the head of the system prompt, so a live DB re-read per turn would let
+      // any mid-session persona edit break DeepSeek's cached prefix.
+      activeSession.personaBlock = personaBlock;
+      const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
+      // Only session-invariant blocks belong in the system prompt. The hot-layer
+      // experience injection (self-identity + dream summaries, rewritten nightly)
+      // rides the current user message via buildVolatileContextPrompt instead.
+      const personaWithExperience = [
+        personaBlock,
+        this.buildTwinOrchestrationPrompt(sessionId),
+        this.buildWelcomeBootstrapPrompt(sessionId),
+        await this.buildTwinLocalRosterPrompt(sessionId),
+      ]
+        .filter((section) => section?.trim())
+        .join('\n\n');
+      const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
+      const { skillsSection, skillsCatalogMode } = this.resolveSkillsPromptForTurn(sessionId, activeSession, baseSystemPrompt);
+      activeSession.skillsCatalogMode = skillsCatalogMode;
+      const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
+        baseSystemPrompt,
+        this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
+        sessionCwd,
+        activeSession.confirmationMode,
+        sessionMemoryEnabled,
+        personaWithExperience,
+        systemPromptProfile,
+        this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
+        skillsSection
+      );
+      this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
+
+      // Run claude-code using the SDK
       this.markCrossSessionTurnRunning(sessionId);
       await this.runClaudeCode(activeSession, prompt, sessionCwd, effectiveSystemPrompt);
     } catch (error) {
       if (isDshShutdownError(error)) throw error;
-      console.error('Cowork session error:', error);
+      this.settlePrePipelineTurnFailure(activeSession, 'startSession', error);
+      throw error;
     } finally {
       this.markCrossSessionTurnSettled(sessionId);
     }
@@ -6604,46 +6629,47 @@ export class CoworkRunner extends EventEmitter {
       this.store.updateSession(sessionId, { cwd: sessionCwd });
     }
 
-    // Use provided systemPrompt (e.g. with updated skill routing) or fall back to session's stored one.
-    // Always prepend workspace safety prompt so folder boundary rules are enforced at prompt level.
-    const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
-    // Reuse the persona block frozen at session start (see startSession); fall
-    // back to a fresh read only if this active session predates the freeze.
-    const personaBlock = activeSession.personaBlock ?? this.buildMetabotPersonaBlock(sessionId);
-    const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
-    // Only session-invariant blocks belong in the system prompt. The hot-layer
-    // experience injection (self-identity + dream summaries, rewritten nightly)
-    // rides the current user message via buildVolatileContextPrompt instead.
-    const personaWithExperience = [
-      personaBlock,
-      this.buildTwinOrchestrationPrompt(sessionId),
-      this.buildWelcomeBootstrapPrompt(sessionId),
-      await this.buildTwinLocalRosterPrompt(sessionId),
-    ]
-      .filter((section) => section?.trim())
-      .join('\n\n');
-    const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
-    const { skillsSection, skillsCatalogMode } = this.resolveSkillsPromptForTurn(sessionId, activeSession, baseSystemPrompt);
-    activeSession.skillsCatalogMode = skillsCatalogMode;
-    const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
-      baseSystemPrompt,
-      this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
-      sessionCwd,
-      activeSession.confirmationMode,
-      sessionMemoryEnabled,
-      personaWithExperience,
-      systemPromptProfile,
-      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
-      skillsSection
-    );
-    this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
-
     try {
+      // Use provided systemPrompt (e.g. with updated skill routing) or fall back to session's stored one.
+      // Always prepend workspace safety prompt so folder boundary rules are enforced at prompt level.
+      const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
+      // Reuse the persona block frozen at session start (see startSession); fall
+      // back to a fresh read only if this active session predates the freeze.
+      const personaBlock = activeSession.personaBlock ?? this.buildMetabotPersonaBlock(sessionId);
+      const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
+      // Only session-invariant blocks belong in the system prompt. The hot-layer
+      // experience injection (self-identity + dream summaries, rewritten nightly)
+      // rides the current user message via buildVolatileContextPrompt instead.
+      const personaWithExperience = [
+        personaBlock,
+        this.buildTwinOrchestrationPrompt(sessionId),
+        this.buildWelcomeBootstrapPrompt(sessionId),
+        await this.buildTwinLocalRosterPrompt(sessionId),
+      ]
+        .filter((section) => section?.trim())
+        .join('\n\n');
+      const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
+      const { skillsSection, skillsCatalogMode } = this.resolveSkillsPromptForTurn(sessionId, activeSession, baseSystemPrompt);
+      activeSession.skillsCatalogMode = skillsCatalogMode;
+      const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
+        baseSystemPrompt,
+        this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
+        sessionCwd,
+        activeSession.confirmationMode,
+        sessionMemoryEnabled,
+        personaWithExperience,
+        systemPromptProfile,
+        this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
+        skillsSection
+      );
+      this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
+
       this.markCrossSessionTurnRunning(sessionId);
       await this.runClaudeCode(activeSession, prompt, sessionCwd, effectiveSystemPrompt);
     } catch (error) {
       if (isDshShutdownError(error)) throw error;
-      console.error('Cowork continue error:', error);
+      this.settlePrePipelineTurnFailure(activeSession, 'continueSession', error);
+      throw error;
     } finally {
       this.markCrossSessionTurnSettled(sessionId);
     }
