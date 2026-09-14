@@ -155,12 +155,13 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   // the host MetaApp guard treats it as a pre-approved request.
   const quickActionPromptRef = useRef<string | null>(null);
 
-  const {
-    currentSession,
-    isStreaming,
-    config,
-    preferredMetabotId,
-  } = useSelector((state: RootState) => state.cowork);
+  // Field-level subscriptions: a whole-slice selector re-renders this view on
+  // every composer keystroke (drafts live in the same slice) and drags the
+  // session sidebar through a full re-render each time.
+  const currentSession = useSelector((state: RootState) => state.cowork.currentSession);
+  const isStreaming = useSelector((state: RootState) => state.cowork.isStreaming);
+  const config = useSelector((state: RootState) => state.cowork.config);
+  const preferredMetabotId = useSelector((state: RootState) => state.cowork.preferredMetabotId);
   activeSessionIdRef.current = currentSession?.id ?? null;
 
   const activeSkillIds = useSelector((state: RootState) => state.skill.activeSkillIds);
