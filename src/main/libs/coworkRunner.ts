@@ -41,7 +41,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
+import { CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isQuotaDshTurnError, isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -8550,6 +8550,10 @@ export class CoworkRunner extends EventEmitter {
       // preserved and no tool side effects replay — instead of failing the
       // whole task. A transient failure past the budget falls through to the
       // error settlement below; non-transient codes never enter this path.
+      // Route behind the most recent turn attempt — the quota notice below
+      // must name the route that actually ran out of credit, which can be the
+      // fallback brain route after a provider-outage switch, not `route`.
+      let lastAttemptRoute = route;
       for (let resumeAttempt = 1; resumeAttempt <= DSH_TRANSIENT_TURN_MAX_RESUMES; resumeAttempt += 1) {
         if (outcome.kind !== 'error' || activeSession.abortController.signal.aborted || !isTransientDshTurnError(outcome)) break;
         coworkLog(
@@ -8610,6 +8614,7 @@ export class CoworkRunner extends EventEmitter {
           );
           for (let fallbackAttempt = 1; fallbackAttempt <= DSH_FALLBACK_TURN_MAX_RESUMES; fallbackAttempt += 1) {
             if (outcome.kind !== 'error' || activeSession.abortController.signal.aborted || !isTransientDshTurnError(outcome)) break;
+            lastAttemptRoute = fallbackRoute;
             coworkLog(
               'WARN',
               'runDshSessionLocal',
@@ -8639,7 +8644,17 @@ export class CoworkRunner extends EventEmitter {
           ?? outcome.reason
           ?? JSON.stringify(outcome).slice(0, 300);
         coworkLog('ERROR', 'runDshSessionLocal', 'DSH turn failed', { outcome });
-        this.handleError(sessionId, `DSH turn failed: ${failureDetail}`);
+        // Quota death is not retryable on the same route and the raw provider
+        // body names no culprit: append an actionable notice naming the route
+        // that ran out of credit, so "switch model and retry" is discoverable
+        // from the transcript alone (2026-09-14 A2A stall post-mortem).
+        const quotaNotice = isQuotaDshTurnError(outcome)
+          ? ` ${tApp(
+              `（模型供应商 ${lastAttemptRoute.provider} 的 ${lastAttemptRoute.model} 额度不足，本轮已终止：请为该供应商充值，或更换模型后重发。）`,
+              ` (Provider ${lastAttemptRoute.provider} model ${lastAttemptRoute.model} is out of credits and the turn was aborted: top up that provider or switch models, then resend.)`
+            )}`
+          : '';
+        this.handleError(sessionId, `DSH turn failed: ${failureDetail}${quotaNotice}`);
         this.clearPendingPermissions(sessionId);
         this.settleDshSteerSubmissions(activeSession, 'failed', `DSH turn failed: ${failureDetail}`);
         this.removeActiveSession(sessionId, activeSession);

@@ -32,3 +32,39 @@ test('provider error signal de-duplicates repeated details', async () => {
 
   assert.equal(signal, 'same error');
 });
+
+test('isQuotaDshTurnError matches the kernel QUOTA code and upstream credit fingerprints', async () => {
+  const { isQuotaDshTurnError } = await import('../dist-electron/main/libs/coworkAssistantReply.js');
+
+  // Kernel-normalized code (the 2026-09-14 commandcode incident shape).
+  assert.equal(
+    isQuotaDshTurnError({
+      kind: 'error',
+      error: {
+        code: 'QUOTA',
+        message: '400: {"message":"You have insufficient credits to make this request.","type":"invalid_request_error","code":"BAD_REQUEST"}',
+      },
+    }),
+    true,
+  );
+  // Fingerprint-only variants (code lost or relayed as BAD_REQUEST).
+  assert.equal(
+    isQuotaDshTurnError({ kind: 'error', error: { code: 'BAD_REQUEST', message: 'Insufficient Balance' } }),
+    true,
+  );
+  assert.equal(
+    isQuotaDshTurnError({ kind: 'error', error: { message: 'This request exceeds your billing limit.' } }),
+    true,
+  );
+  // Non-quota failures must not classify.
+  assert.equal(
+    isQuotaDshTurnError({ kind: 'error', error: { code: 'SERVER', message: 'OpenAI API error (500)' } }),
+    false,
+  );
+  assert.equal(
+    isQuotaDshTurnError({ kind: 'error', error: { code: 'TRANSPORT', message: 'fetch failed' } }),
+    false,
+  );
+  assert.equal(isQuotaDshTurnError({ kind: 'completed' }), false);
+  assert.equal(isQuotaDshTurnError(null), false);
+});

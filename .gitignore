@@ -434,3 +434,4 @@ man_base_data_pebble/
 !tests/scheduledTaskAgentTools.test.mjs
 !tests/surfReadsService.test.mjs
 !tests/metaProtocolAgentTools.test.mjs
+!tests/a2aGuidanceFailureVisibility.test.mjs
