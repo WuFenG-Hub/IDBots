@@ -81,6 +81,25 @@ export function isTransientDshTurnError(outcome: { kind?: string; error?: { code
   return typeof code === 'string' && TRANSIENT_TURN_ERROR_CODES.has(code);
 }
 
+/**
+ * Upstream "account has no spendable credit left" fingerprints mirrored from
+ * provider error bodies (OpenAI-compat relays, DeepSeek, aggregator gateways).
+ * ASCII upstream error fingerprints only — never natural-language intent.
+ */
+const QUOTA_ERROR_MESSAGE_FINGERPRINT = /insufficient[ _-]?(credits?|quota|balance|funds)|quota[ _-]?exceeded|billing[ _-]?limit/i;
+
+/** True when a DSH turn outcome failed because the provider account ran out
+ *  of spendable credit/balance — the kernel-normalized `QUOTA` code, or an
+ *  upstream insufficient-credit fingerprint in the raw message. Retrying on
+ *  the same route cannot succeed; the transcript error should name the
+ *  provider/model so the operator knows what to top up or switch. */
+export function isQuotaDshTurnError(outcome: { kind?: string; error?: { code?: string; message?: string } }): boolean {
+  if (outcome?.kind !== 'error') return false;
+  const code = outcome.error?.code;
+  if (typeof code === 'string' && code.toUpperCase() === 'QUOTA') return true;
+  return QUOTA_ERROR_MESSAGE_FINGERPRINT.test(String(outcome.error?.message ?? ''));
+}
+
 const NON_ANSWER_PLACEHOLDERS = new Set<string>([
   DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER,
 ]);

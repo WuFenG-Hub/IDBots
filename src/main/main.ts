@@ -239,6 +239,7 @@ import {
 } from './services/openTeamService';
 import { getMetaIdDetail, searchMetaIds } from './services/metaIdSearchService';
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
+import { coworkLog } from './libs/coworkLogger';
 import {
   buildA2AGuidanceRestartPrompt,
   generateA2AGuidanceRestartMessage,
@@ -9778,6 +9779,12 @@ if (!gotTheLock) {
           emitCoworkStreamMessage(sessionId, message);
           coworkStoreInst.updateSession(sessionId, { status: 'completed' });
           a2aGuidanceQueue.clear(sessionId, session.metabotId);
+          coworkLog('INFO', 'A2A Guidance', 'Guided restart delivered', {
+            sessionId,
+            metabotId: session.metabotId,
+            messageId: message.id,
+            pinId: sent.pinId,
+          });
 
           return { success: true, mode: 'restart_started' as const, messageId: message.id };
         } catch (restartError) {
@@ -9792,6 +9799,47 @@ if (!gotTheLock) {
                 queueError instanceof Error ? queueError.message : String(queueError)
               }`
             );
+          }
+          // §visibility: a failed guided restart used to surface only as a
+          // small red status line while nothing landed in the transcript or
+          // cowork.log — indistinguishable from "no reaction" (2026-09-14 A2A
+          // stall post-mortem, where the bot brain still pointed at a
+          // credit-exhausted provider). Mirror turn errors: durable transcript
+          // notice + cowork.log entry, so the failure reason and the fact the
+          // guidance was preserved for the next local turn are both visible.
+          const restartFailureReason = restartError instanceof Error
+            ? restartError.message
+            : String(restartError);
+          coworkLog('ERROR', 'A2A Guidance', 'Guided restart failed; guidance preserved for the next local turn', {
+            sessionId,
+            metabotId: session.metabotId,
+            error: restartFailureReason,
+          });
+          try {
+            const guidanceFailureNotice = tApp(
+              `引导对话失败：${restartFailureReason}。指引已保留，下次本机回合（例如对方再来消息或再次点引导对话）会继续带上。`,
+              `Guided dialogue failed: ${restartFailureReason}. The guidance was preserved and will ride the next local turn (for example the next peer message, or another guided attempt).`
+            );
+            // metadata.error carries the full notice (not just the raw reason)
+            // because the A2A error banner — the only surface for system
+            // messages in A2A sessions — reads metadata.error first.
+            const message = coworkStoreInst.addMessage(sessionId, {
+              type: 'system',
+              content: guidanceFailureNotice,
+              metadata: {
+                error: guidanceFailureNotice,
+                a2aGuidanceFailed: true,
+              },
+            });
+            emitCoworkStreamMessage(sessionId, message);
+          } catch (noticeError) {
+            // Bounds errors from the notice write must reach the sqlite
+            // recovery wrapper, not be swallowed as a logging failure.
+            if (isSqliteWasmBoundsError(noticeError)) throw noticeError;
+            coworkLog('WARN', 'A2A Guidance', 'Failed to append the guided-restart failure notice to the transcript', {
+              sessionId,
+              error: noticeError instanceof Error ? noticeError.message : String(noticeError),
+            });
           }
           throw restartError;
         }
