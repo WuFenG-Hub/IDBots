@@ -390,6 +390,14 @@ import {
   metawebProtocols as metawebProtocolsRemote,
 } from './services/metawebSurfReadsService';
 import {
+  listMetaProtocols as listMetaProtocolsRemote,
+  checkMetaProtocolPath as checkMetaProtocolPathRemote,
+  getMetaProtocolDetail as getMetaProtocolDetailRemote,
+  getMetaProtocolPinVersions as getMetaProtocolPinVersionsRemote,
+  listMetaProtocolRegistrationsViaManapi as listMetaProtocolRegistrationsViaManapiRemote,
+  getMetaProtocolVersionsViaManapi as getMetaProtocolVersionsViaManapiRemote,
+} from './services/metaProtocolService';
+import {
   qaSearch as qaSearchRemote,
   qaLatestQuestions as qaLatestQuestionsRemote,
   qaQuestionDetail as qaQuestionDetailRemote,
@@ -5261,6 +5269,7 @@ const getCoworkRunner = () => {
           name: m.name,
           mvc_address: m.mvc_address ?? null,
           globalmetaid: m.globalmetaid ?? null,
+          metaid: m.metaid ?? null,
           role: m.role,
           soul: m.soul,
           bio: m.bio ?? null,
@@ -5645,6 +5654,31 @@ const getCoworkRunner = () => {
           const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
           return metawebPinVersionsRemote(pinId, baseUrl ? { baseUrl } : undefined);
         },
+      },
+      // Metaprotocol registry tool backends (metaprotocol_registry /
+      // post_metaprotocol): thin pass-throughs to the metaso-p2p
+      // /api/metaweb/protocols* family plus the read-only MANAPI degraded
+      // fallback (manapi.metaid.io). IDBOTS_METAWEB_API_BASE_URL overrides
+      // the default so.metaid.io base for staging integration.
+      metaProtocolRegistry: {
+        list: async (params) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          return listMetaProtocolsRemote(params, baseUrl ? { baseUrl } : undefined);
+        },
+        check: async (path) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          return checkMetaProtocolPathRemote(path, baseUrl ? { baseUrl } : undefined);
+        },
+        detail: async (input) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          return getMetaProtocolDetailRemote(input, baseUrl ? { baseUrl } : undefined);
+        },
+        pinVersions: async (pinId) => {
+          const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+          return getMetaProtocolPinVersionsRemote(pinId, baseUrl ? { baseUrl } : undefined);
+        },
+        fallbackListRegistrations: () => listMetaProtocolRegistrationsViaManapiRemote(),
+        fallbackVersions: (sourcePinId) => getMetaProtocolVersionsViaManapiRemote(sourcePinId),
       },
       // On-chain Q&A recall tool backends (search_qa / list_latest_questions /
       // get_question_answers): thin pass-throughs to the metaso-p2p /api/qa/*
