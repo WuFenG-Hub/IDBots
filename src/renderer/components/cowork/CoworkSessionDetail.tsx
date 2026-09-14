@@ -1951,6 +1951,7 @@ const AssistantTurnBlock: React.FC<{
   showTypingIndicator?: boolean;
   showCopyButtons?: boolean;
   showImagePreviews?: boolean;
+  sessionLive?: boolean;
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
 }> = ({
@@ -1960,6 +1961,7 @@ const AssistantTurnBlock: React.FC<{
   showTypingIndicator = false,
   showCopyButtons = true,
   showImagePreviews = true,
+  sessionLive = false,
   onOpenLocalFile,
   onBranch,
 }) => {
@@ -2035,6 +2037,10 @@ const AssistantTurnBlock: React.FC<{
       sdkIcon = '⏱️';
       sdkTint = 'text-amber-600 dark:text-amber-400';
       sdkContent = i18nService.t('coworkDshTurnStalled');
+    } else if (meta.dshTurnInterrupted === true) {
+      sdkIcon = '⚠️';
+      sdkTint = 'text-amber-600 dark:text-amber-400';
+      sdkContent = i18nService.t('coworkDshTurnInterrupted');
     } else if (meta.steerInterruptAcknowledged === true) {
       // The CLI reported the interrupted turn via an internal diagnostic; the
       // steer was delivered and the task continues toward it.
@@ -2113,11 +2119,23 @@ const AssistantTurnBlock: React.FC<{
   ): React.ReactNode => {
     if (item.type === 'assistant') {
       if (item.message.metadata?.isThinking) {
+        const abandonedEmptyThink = !sessionLive
+          && Boolean(item.message.metadata?.isStreaming)
+          && !item.message.content?.trim();
+        if (abandonedEmptyThink) {
+          const interrupted = renderSystemMessage({
+            ...item.message,
+            type: 'system',
+            metadata: { ...item.message.metadata, dshTurnInterrupted: true },
+          });
+          return interrupted ? <div key={item.message.id}>{interrupted}</div> : null;
+        }
         return (
           <ThinkingBlock
             key={item.message.id}
             message={item.message}
             mapDisplayText={mapDisplayText}
+            live={sessionLive && Boolean(item.message.metadata?.isStreaming)}
           />
         );
       }
@@ -2177,10 +2195,19 @@ const AssistantTurnBlock: React.FC<{
   // before it (thinking, tool calls, intermediate notes) is the working
   // process. Once the turn completes, the process collapses behind a
   // "Worked for X" header so only the delivery stays visible.
-  const isTurnComplete = !visibleAssistantItems.some((item) => {
+  const isTurnComplete = !sessionLive || !visibleAssistantItems.some((item) => {
     const message = item.type === 'tool_group' ? item.group.toolUse : item.message;
     return Boolean(message.metadata?.isStreaming);
   });
+  const showInterruptedBanner = !sessionLive && (
+    visibleAssistantItems.some((item) => {
+      if (item.type === 'system') return item.message.metadata?.dshTurnInterrupted === true;
+      if (item.type !== 'assistant') return false;
+      return Boolean(item.message.metadata?.isStreaming)
+        && Boolean(item.message.metadata?.isThinking)
+        && !item.message.content?.trim();
+    })
+  );
   let deliveryIndex = -1;
   for (let i = visibleAssistantItems.length - 1; i >= 0; i--) {
     const item = visibleAssistantItems[i];
@@ -2249,6 +2276,15 @@ const AssistantTurnBlock: React.FC<{
               visibleAssistantItems.map((item, index) => renderVisibleItem(item, index, visibleAssistantItems))
             )}
             {showTypingIndicator && <TypingDots />}
+            {showWorkedHeader && showInterruptedBanner && (
+              renderSystemMessage({
+                id: 'dsh-turn-interrupted',
+                type: 'system',
+                content: '',
+                timestamp: Date.now(),
+                metadata: { dshTurnInterrupted: true },
+              })
+            )}
           </div>
         </div>
       </div>
@@ -3516,6 +3552,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             showTypingIndicator
             showCopyButtons={!isStreaming}
             showImagePreviews
+            sessionLive={isStreaming || currentSession?.status === 'running'}
             onOpenLocalFile={handleOpenLocalFile}
           />
         </div>
@@ -3546,6 +3583,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 showTypingIndicator={showTypingIndicator}
                 showCopyButtons={!isStreaming}
                 showImagePreviews
+                sessionLive={isStreaming || currentSession?.status === 'running'}
                 onOpenLocalFile={handleOpenLocalFile}
                 onBranch={handleBranchFromMessage}
               />

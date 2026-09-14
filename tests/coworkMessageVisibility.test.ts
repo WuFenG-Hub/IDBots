@@ -18,7 +18,9 @@ test('empty replyTruncatedTurn / emptyTerminalTurn / dshTurnStalled diagnostics 
   assert.equal(isRenderableAssistantOrSystemMessage(msg({ metadata: { replyTruncatedTurn: true } })), true);
   assert.equal(isRenderableAssistantOrSystemMessage(msg({ metadata: { emptyTerminalTurn: true } })), true);
   assert.equal(isRenderableAssistantOrSystemMessage(msg({ metadata: { dshTurnStalled: true } })), true);
+  assert.equal(isRenderableAssistantOrSystemMessage(msg({ metadata: { dshTurnInterrupted: true } })), true);
   assert.equal(isDiagnosticSystemMetadata({ replyTruncatedTurn: true }), true);
+  assert.equal(isDiagnosticSystemMetadata({ dshTurnInterrupted: true }), true);
 });
 
 test('empty system messages without a diagnostic flag stay hidden', () => {

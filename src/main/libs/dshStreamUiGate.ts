@@ -141,4 +141,20 @@ export class DshStreamUiGate {
     cancel();
     this.cancelFlush.delete(key);
   }
+
+  /**
+   * Persist every live overlay for a session (isStreaming=false) then drop
+   * in-memory state. App shutdown / stop used to call clearSession which
+   * discarded unfinalized thinking placeholders and left SQLite rows with
+   * isStreaming=true (2026-09-14 session 50780b67).
+   */
+  finalizeSession(sessionId: string): void {
+    const prefix = `${sessionId}\0`;
+    for (const [key, content] of [...this.liveContent]) {
+      if (!key.startsWith(prefix)) continue;
+      const messageId = key.slice(prefix.length);
+      this.onFinalize(sessionId, messageId, content);
+    }
+    this.clearSession(sessionId);
+  }
 }

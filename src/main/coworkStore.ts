@@ -3696,6 +3696,93 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Boot-time heal for DSH streaming placeholders abandoned by a hard quit
+   * (electron:dev SIGKILL, force-quit). resetRunningSessions only flips
+   * status running→idle; it leaves assistant rows with isStreaming=true,
+   * so the Think row keeps pulsing with no error (2026-09-14 50780b67).
+   * Finalize those rows and, when the leftover is empty thinking, insert a
+   * localized idle diagnostic.
+   */
+  healAbandonedStreamingMessages(): number {
+    if (!this.tableExists('cowork_messages')) {
+      return 0;
+    }
+
+    const rows = this.getAll<{
+      id: string;
+      session_id: string;
+      type: string;
+      content: string;
+      metadata: string | null;
+    }>(`
+      SELECT id, session_id, type, content, metadata
+      FROM cowork_messages
+      WHERE metadata IS NOT NULL
+        AND metadata LIKE '%"isStreaming":true%'
+    `);
+    if (rows.length === 0) {
+      return 0;
+    }
+
+    const sessionsNeedingDiagnostic = new Set<string>();
+    let changed = 0;
+    this.db.run('BEGIN TRANSACTION');
+    try {
+      for (const row of rows) {
+        let metadata: CoworkMessageMetadata;
+        try {
+          const parsed = JSON.parse(row.metadata ?? '') as unknown;
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+          metadata = parsed as CoworkMessageMetadata;
+        } catch {
+          continue;
+        }
+        if (metadata.isStreaming !== true) continue;
+
+        const nextMetadata: CoworkMessageMetadata = {
+          ...metadata,
+          isStreaming: false,
+          isFinal: true,
+        };
+        this.db.run(
+          'UPDATE cowork_messages SET metadata = ? WHERE id = ? AND session_id = ?',
+          [JSON.stringify(nextMetadata), row.id, row.session_id],
+        );
+        changed += this.db.getRowsModified?.() || 0;
+
+        const empty = !String(row.content ?? '').trim();
+        if (row.type === 'assistant' && metadata.isThinking === true && empty) {
+          sessionsNeedingDiagnostic.add(row.session_id);
+        }
+      }
+      this.db.run('COMMIT');
+    } catch (error) {
+      try {
+        this.db.run('ROLLBACK');
+      } catch {
+        // Preserve the transaction failure as the authoritative startup error.
+      }
+      throw error;
+    }
+
+    for (const sessionId of sessionsNeedingDiagnostic) {
+      const latest = this.getSessionLatestMessage(sessionId);
+      if (latest?.metadata?.dshTurnInterrupted === true) continue;
+      this.addMessage(sessionId, {
+        type: 'system',
+        content: '',
+        metadata: { dshTurnInterrupted: true },
+      });
+      changed += 1;
+    }
+
+    if (changed > 0) {
+      this.saveDb();
+    }
+    return changed;
+  }
+
+  /**
    * Boot-time heal for shutdown-aborted A2A sessions (the 2026-09-12 mass
    * 'error' incident): when the app quit closes the DSH runtime, in-flight
    * A2A turns crashed with `DshKernel: closed` and CoworkRunner.handleError

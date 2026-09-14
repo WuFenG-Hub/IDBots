@@ -17,6 +17,7 @@ const DIAGNOSTIC_METADATA_FLAGS = [
   'emptyTerminalTurn',
   'replyTruncatedTurn',
   'dshTurnStalled',
+  'dshTurnInterrupted',
   'sdkConversationReset',
   'sdkRateLimit',
   'sdkPermissionDenied',
