@@ -1944,17 +1944,7 @@ const TypingDots: React.FC = () => (
   </div>
 );
 
-const AssistantTurnBlock: React.FC<{
-  turn: ConversationTurn;
-  resolveLocalFilePath?: (href: string, text: string) => string | null;
-  mapDisplayText?: (value: string) => string;
-  showTypingIndicator?: boolean;
-  showCopyButtons?: boolean;
-  showImagePreviews?: boolean;
-  sessionLive?: boolean;
-  onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
-  onBranch?: (message: CoworkMessage) => void | Promise<void>;
-}> = ({
+const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   turn,
   resolveLocalFilePath,
   mapDisplayText,
@@ -1964,7 +1954,17 @@ const AssistantTurnBlock: React.FC<{
   sessionLive = false,
   onOpenLocalFile,
   onBranch,
-}) => {
+}: {
+  turn: ConversationTurn;
+  resolveLocalFilePath?: (href: string, text: string) => string | null;
+  mapDisplayText?: (value: string) => string;
+  showTypingIndicator?: boolean;
+  showCopyButtons?: boolean;
+  showImagePreviews?: boolean;
+  sessionLive?: boolean;
+  onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
+  onBranch?: (message: CoworkMessage) => void | Promise<void>;
+}) {
   const visibleAssistantItems = getVisibleAssistantItems(turn.assistantItems);
   // Collapsed by default once a turn completes; the header expands to reveal
   // the working process (thinking, tool calls, intermediate notes).
@@ -2290,7 +2290,7 @@ const AssistantTurnBlock: React.FC<{
       </div>
     </div>
   );
-};
+});
 
 const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   onManageSkills,
@@ -2308,7 +2308,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   updateBadge,
 }) => {
   const isMac = window.electron.platform === 'darwin';
-  const { currentSession, isStreaming, pendingPermissions } = useSelector((state: RootState) => state.cowork);
+  // Field-level subscriptions: a whole-slice selector re-rendered the entire
+  // transcript on every composer keystroke because sessionDrafts/draftPrompt
+  // live in the same cowork slice (one dispatch per keystroke).
+  const currentSession = useSelector((state: RootState) => state.cowork.currentSession);
+  const isStreaming = useSelector((state: RootState) => state.cowork.isStreaming);
+  const pendingPermissions = useSelector((state: RootState) => state.cowork.pendingPermissions);
   const pendingPermission = currentSession
     ? pendingPermissions.find((permission) => permission.sessionId === currentSession.id) ?? null
     : null;
@@ -3516,12 +3521,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     onFocusedOrderConsumed,
   ]);
 
+  // Memoized on the messages array identity so unrelated re-renders keep
+  // stable turn references (AssistantTurnBlock is memoized on its props).
+  const sessionMessages = currentSession?.messages;
+  const turns = useMemo(
+    () => buildConversationTurns(sessionMessages ? buildDisplayItems(sessionMessages) : []),
+    [sessionMessages],
+  );
+
   if (!currentSession) {
     return null;
   }
 
-  const displayItems = buildDisplayItems(currentSession.messages);
-  const turns = buildConversationTurns(displayItems);
   const showA2AServiceSessionId = shouldShowA2AServiceSessionId({
     sessionId: currentSession.id,
     sessionType: currentSession.sessionType,
