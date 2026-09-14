@@ -3,7 +3,7 @@
  * modes. Pure functions only (no React / i18n / electron imports) so they can
  * be unit-tested with tsx directly.
  *
- * Two view modes:
+ * Two view modes, both for the local-chats list:
  *  - timeline: buckets sessions by last-activity (or creation) date into
  *    Today / Yesterday / This Week (2-7 days) / Last Week (8-14 days) /
  *    This Month / calendar-month groups. Time buckets are static headers.
@@ -300,4 +300,154 @@ export const groupSessionsByProject = (
     return a.key.localeCompare(b.key);
   });
   return { pinned, groups };
+};
+
+/** Option key of the leading entry, which always means "no bot filter". */
+export const ALL_BOTS_OPTION_KEY = 'all';
+
+/** Stable selector key for the LOCAL bot that owns a session. Rows without a
+ * metabotId land in one shared bucket, so the filter can never hide them
+ * silently — they stay reachable through 全部 and have an option of their own. */
+export const sessionBotKey = (session: CoworkSessionSummary): string =>
+  session.metabotId != null ? `bot:${session.metabotId}` : 'bot:unknown';
+
+/** One entry of the online-chats Bot selector: 全部 first, then one per bot. */
+export interface BotSelectorOption {
+  /** ALL_BOTS_OPTION_KEY for the 全部 option, else a sessionBotKey. */
+  key: string;
+  /** Bot identity; absent on the 全部 option (which already contains the rest). */
+  bot?: { id: number; name: string | null; avatar: string | null };
+  /** Sessions behind the option — pinned rows INCLUDED (the selector counts a
+   * bot's whole workload, while group headers only see the unpinned remainder). */
+  sessionCount: number;
+  /** Of those, how many are unread; drives the option's unread marker. */
+  unreadCount: number;
+  /** createdAt of the option's oldest session; orders the options. */
+  firstSeenAt: number;
+}
+
+/** Accumulator: adds the freshness stamp used to pick a bot's name/avatar. */
+interface BotSelectorAccumulator extends BotSelectorOption {
+  botSnapshotUpdatedAt: number;
+}
+
+/**
+ * Build the online-chats Bot selector: the leading 全部 option first, then one
+ * option per local bot (newest-first, mirroring the group order so the menu does
+ * not reshuffle as sessions update).
+ *
+ * The unread counts come from the caller's existing `unreadSessionIds` — this
+ * helper invents no state of its own; it only folds what the list already has.
+ */
+export const buildBotSelectorOptions = (
+  sessions: CoworkSessionSummary[],
+  unreadSessionIds: readonly string[],
+): BotSelectorOption[] => {
+  const unreadSet = new Set(unreadSessionIds);
+  const all: BotSelectorOption = {
+    key: ALL_BOTS_OPTION_KEY,
+    sessionCount: 0,
+    unreadCount: 0,
+    firstSeenAt: Number.MAX_SAFE_INTEGER,
+  };
+  const byKey = new Map<string, BotSelectorAccumulator>();
+
+  for (const session of sessions) {
+    const key = sessionBotKey(session);
+    let option = byKey.get(key);
+    if (!option) {
+      const botId = session.metabotId ?? null;
+      option = {
+        key,
+        sessionCount: 0,
+        unreadCount: 0,
+        firstSeenAt: Number.MAX_SAFE_INTEGER,
+        botSnapshotUpdatedAt: -1,
+        // A known bot always gets an identity so its option reads as a bot even
+        // before a session row carries the name/avatar snapshot.
+        ...(botId != null ? { bot: { id: botId, name: null, avatar: null } } : {}),
+      };
+      byKey.set(key, option);
+    }
+    const unread = unreadSet.has(session.id);
+    option.sessionCount += 1;
+    all.sessionCount += 1;
+    if (unread) {
+      option.unreadCount += 1;
+      all.unreadCount += 1;
+    }
+    if (session.createdAt < option.firstSeenAt) {
+      option.firstSeenAt = session.createdAt;
+    }
+    if (option.bot && (session.metabotName || session.metabotAvatar) && session.updatedAt >= option.botSnapshotUpdatedAt) {
+      // Freshest snapshot wins; fields the fresher row lacks fall back.
+      option.bot = {
+        id: option.bot.id,
+        name: session.metabotName ?? option.bot.name,
+        avatar: session.metabotAvatar ?? option.bot.avatar,
+      };
+      option.botSnapshotUpdatedAt = session.updatedAt;
+    }
+  }
+
+  const botOptions: BotSelectorOption[] = [...byKey.values()]
+    .map((option) => ({
+      key: option.key,
+      sessionCount: option.sessionCount,
+      unreadCount: option.unreadCount,
+      firstSeenAt: option.firstSeenAt,
+      ...(option.bot ? { bot: option.bot } : {}),
+    }))
+    .sort((a, b) => {
+      if (a.firstSeenAt !== b.firstSeenAt) return b.firstSeenAt - a.firstSeenAt;
+      return a.key.localeCompare(b.key);
+    });
+
+  return [all, ...botOptions];
+};
+
+/**
+ * Whether the selector earns its space: it needs at least two LOCAL bots. With
+ * a single bot the lone option would only repeat what the list already shows,
+ * so the control is dropped entirely (the single-bot degradation that mirrors
+ * the single-group rule). Rows with no metabotId do not count — a stray legacy
+ * row must not switch the selector on for a single-bot install.
+ */
+export const shouldShowBotSelector = (options: BotSelectorOption[]): boolean =>
+  options.filter((option) => option.bot).length > 1;
+
+/**
+ * The option the selector opens on: the Twin — the bot you hold conversations
+ * with, while workers are picked deliberately. Falls back to 全部 when the twin
+ * is unknown or has no A2A sessions yet, so the list is never scoped to an
+ * option that does not exist.
+ */
+export const defaultBotSelectorKey = (
+  options: BotSelectorOption[],
+  twinMetabotId: number | null | undefined,
+): string => {
+  if (twinMetabotId == null) return ALL_BOTS_OPTION_KEY;
+  const twinKey = `bot:${twinMetabotId}`;
+  return options.some((option) => option.key === twinKey) ? twinKey : ALL_BOTS_OPTION_KEY;
+};
+
+/**
+ * Unread sessions the CURRENT selection keeps off screen — the aggregate the
+ * selector itself must carry. A native <select> shows one option at a time and
+ * its menu is closed in the normal case, so without this number work waiting
+ * under another bot would be invisible. 全部 renders every row, so nothing is
+ * hidden and the signal is 0.
+ */
+export const unreadOutsideBotSelection = (
+  options: BotSelectorOption[],
+  activeKey: string,
+): number => {
+  if (activeKey === ALL_BOTS_OPTION_KEY) return 0;
+  return options.reduce(
+    (total, option) =>
+      option.key === activeKey || option.key === ALL_BOTS_OPTION_KEY
+        ? total
+        : total + option.unreadCount,
+    0,
+  );
 };

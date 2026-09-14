@@ -412,9 +412,16 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
   // one returns to the Bot Browser surface).
   const isBrowser = session.sessionType === 'browser';
   const showA2ADot = shouldShowCoworkA2ADot({ sessionType: session.sessionType, showStatusIndicator });
-  const displayTitle = session.title?.trim()
-    || session.peerName
-    || i18nService.t('coworkNewSession');
+  const storedTitle = session.title?.trim() ?? '';
+  // A2A rows are stored with a `Private-<peerId prefix>` placeholder title when
+  // the peer profile was still unknown (see main's coworkStore fallback). Once
+  // the peer name has resolved that stale placeholder must not be what the list
+  // shows, so it is skipped in favor of the name; any real title (user-edited,
+  // or derived from the conversation) still wins.
+  const isPrivatePlaceholderTitle = isA2A && /^Private-[A-Za-z0-9]{6,12}$/.test(storedTitle);
+  const displayTitle = isPrivatePlaceholderTitle && session.peerName?.trim()
+    ? session.peerName.trim()
+    : storedTitle || session.peerName || i18nService.t('coworkNewSession');
   const menuItems = useMemo(() => {
     return [
       { key: 'copy-session-id', label: copySessionIdLabel, onClick: handleCopySessionIdClick },
