@@ -437,7 +437,7 @@ class ApiService {
 
       const requestBody: any = {
         model: modelId,
-        max_tokens: 8192,
+        max_tokens: 32768,
         messages: messages,
         stream: true,
       };
@@ -464,8 +464,8 @@ class ApiService {
           type: 'enabled',
           budget_tokens: 10000
         };
-        // Thinking 模型需要更大的 max_tokens
-        requestBody.max_tokens = 16000;
+        // Thinking models need max_tokens above the thinking budget.
+        requestBody.max_tokens = 32768;
       }
 
       return new Promise((resolve, reject) => {

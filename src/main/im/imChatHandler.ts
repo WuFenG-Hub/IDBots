@@ -24,6 +24,11 @@ export interface IMChatHandlerOptions {
   imSettings: IMSettings;
 }
 
+// Default completion budget for inbound IM replies. Thinking-capable
+// models share this ceiling with visible tokens, so a 4K cap truncated
+// GLM/DeepSeek replies mid-thought; 32K matches the app-wide default.
+export const IM_DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
+
 export class IMChatHandler {
   private options: IMChatHandlerOptions;
 
@@ -162,7 +167,7 @@ export class IMChatHandler {
 
     const body: any = {
       model: config.model || 'claude-3-5-sonnet-20241022',
-      max_tokens: 4096,
+      max_tokens: IM_DEFAULT_MAX_OUTPUT_TOKENS,
       messages: [{ role: 'user', content: userMessage }],
     };
 
@@ -215,7 +220,7 @@ export class IMChatHandler {
       ? {
           model: config.model || 'gpt-4o',
           input: [{ role: 'user', content: [{ type: 'input_text', text: userMessage }] }],
-          max_output_tokens: 4096,
+          max_output_tokens: IM_DEFAULT_MAX_OUTPUT_TOKENS,
         }
       : {
           model: config.model || 'gpt-4o',
@@ -226,9 +231,9 @@ export class IMChatHandler {
     }
     if (!useResponsesApi) {
       if (this.shouldUseMaxCompletionTokens(config)) {
-        body.max_completion_tokens = 4096;
+        body.max_completion_tokens = IM_DEFAULT_MAX_OUTPUT_TOKENS;
       } else {
-        body.max_tokens = 4096;
+        body.max_tokens = IM_DEFAULT_MAX_OUTPUT_TOKENS;
       }
     }
 

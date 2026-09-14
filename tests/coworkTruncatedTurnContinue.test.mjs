@@ -49,6 +49,12 @@ test('CoworkSessionDetail renders empty diagnostic flags via the shared visibili
     false,
     'CoworkSessionDetail must use the shared helper, not a local copy that hides empty diagnostics',
   );
+  assert.ok(sessionDetailSource.includes('dshTurnInterrupted'));
+  assert.ok(sessionDetailSource.includes('coworkDshTurnInterrupted'));
+  assert.ok(
+    sessionDetailSource.includes('sessionLive'),
+    'idle leftover isStreaming thinking must not keep the turn looking live',
+  );
 });
 
 test('GLM-5 thinking models declare a 32K output ceiling in KNOWN_MODEL_LIMITS', () => {

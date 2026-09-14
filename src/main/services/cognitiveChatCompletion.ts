@@ -156,11 +156,12 @@ function resolveDeepSeekResponsesReasoning(
  * thinking-enabled call needs far more headroom than a disabled one — a 2-4K
  * ceiling lets max-effort reasoning consume the whole budget and return
  * truncated or empty text (the 2026-08-08 dream-diary failure mode, elsewhere).
- * Ceilings only: billing is by actual tokens used, so short replies cost the
- * same as before.
+ * Thinking-on defaults to 32K (the app-wide ceiling); thinking-off stays at
+ * 4K for compact JSON callers. Ceilings only: billing is by actual tokens
+ * used, so short replies cost the same as before.
  */
 function resolveDefaultMaxOutputTokens(thinking: 'enabled' | 'disabled' | undefined): number {
-  return thinking === 'disabled' ? 4_096 : 16_384;
+  return thinking === 'disabled' ? 4_096 : 32_768;
 }
 
 function extractAnthropicThinkingText(block: { type?: string; text?: string; thinking?: string }): string {

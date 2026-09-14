@@ -111,6 +111,31 @@ test('live overlays let session switch see unpersisted streaming content', () =>
   assert.equal(other.messages[0].content, 'other-session')
 })
 
+test('finalizeSession persist-finalizes live overlays then clears them', () => {
+  const { DshStreamUiGate } = loadGate()
+  const emitted = []
+  const persisted = []
+  const gate = new DshStreamUiGate({
+    throttleMs: 90,
+    emitUpdate: (sessionId, messageId, content, metadata) => emitted.push({ sessionId, messageId, content, metadata }),
+    persistFinalize: (sessionId, messageId, content, metadata) => persisted.push({ sessionId, messageId, content, metadata }),
+  })
+
+  gate.onUpdate('s1', 'think', '')
+  gate.onUpdate('s1', 'think', 'partial thought')
+  gate.onUpdate('s2', 'other', 'keep')
+  gate.finalizeSession('s1')
+
+  assert.equal(persisted.length, 1)
+  assert.equal(persisted[0].messageId, 'think')
+  assert.equal(persisted[0].content, 'partial thought')
+  assert.deepEqual(emitted.at(-1).metadata, { isStreaming: false, isFinal: true })
+  const viewed = gate.applyOverlays({ id: 's1', messages: [{ id: 'think', content: '' }] })
+  assert.equal(viewed.messages[0].content, '')
+  const other = gate.applyOverlays({ id: 's2', messages: [{ id: 'other', content: '' }] })
+  assert.equal(other.messages[0].content, 'keep')
+})
+
 test('clearSession drops overlays and cancels a pending trailing flush', () => {
   const { DshStreamUiGate } = loadGate()
   const clock = createClock()

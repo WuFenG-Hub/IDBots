@@ -15748,6 +15748,12 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
     startupLog(`reset running sessions done (count=${resetCount})`);
 
+    const healedStreaming = getCoworkStore().healAbandonedStreamingMessages();
+    if (healedStreaming > 0) {
+      console.log(`[Main] Healed ${healedStreaming} abandoned cowork streaming placeholder(s)`);
+    }
+    startupLog(`heal abandoned streaming messages done (count=${healedStreaming})`);
+
     // Heal A2A conversations parked on 'error' solely by a shutdown abort
     // (latest transcript message is the DSH shutdown marker). Runs before the
     // private-chat daemon restarts so the UI never shows the stale banner.

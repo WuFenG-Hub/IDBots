@@ -78,8 +78,9 @@ export function splitThinkTaggedContent(input: string): SplitThinkTaggedContent 
 export const ThinkingBlock: React.FC<{
   message: CoworkMessage;
   mapDisplayText?: (value: string) => string;
-}> = ({ message, mapDisplayText }) => {
-  const isCurrentlyStreaming = Boolean(message.metadata?.isStreaming);
+  live?: boolean;
+}> = ({ message, mapDisplayText, live }) => {
+  const isCurrentlyStreaming = live ?? Boolean(message.metadata?.isStreaming);
   const [isExpanded, setIsExpanded] = useState(false);
   const summaryRef = useRef<HTMLSpanElement>(null);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;

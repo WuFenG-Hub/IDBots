@@ -166,6 +166,8 @@ tests/*
 !tests/coworkEmptyTerminalTurn.test.mjs
 !tests/coworkTruncatedTurnContinue.test.mjs
 !tests/coworkMessageVisibility.test.ts
+!tests/coworkAbandonedStreamingHeal.test.mjs
+!tests/dshStreamUiGate.test.mjs
 !tests/coworkFormatTransform.test.mjs
 !tests/coworkModelLimits.test.mjs
 !tests/coworkContextBudget.test.mjs

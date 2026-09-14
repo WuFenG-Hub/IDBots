@@ -2206,7 +2206,7 @@ export class CoworkRunner extends EventEmitter {
       new Error('Cowork steer input channel closed before delivery')
     );
     this.activeSessions.delete(sessionId);
-    this.dshStreamUi.clearSession(sessionId);
+    this.dshStreamUi.finalizeSession(sessionId);
     // Best-effort pruning: a closed session no longer dispatches host tools,
     // so its registry entry can go (missing entry → safe `unknown host tool`).
     this.dshHostToolRegistry.delete(sessionId);
@@ -8674,8 +8674,12 @@ export class CoworkRunner extends EventEmitter {
         // App/host shutdown closed the runtime mid-turn. This is not a
         // session failure: no 'error' status, no persisted Error bubble —
         // rethrow so the caller's promise rejects and its own soft path
-        // (guidance-abort style) applies. The next boot re-drives the work.
+        // (guidance-abort style) applies. Finalize streaming placeholders
+        // and leave a localized idle diagnostic so the Think row does not
+        // pulse forever with no banner (2026-09-14 session 50780b67).
         coworkLog('INFO', 'runDshSessionLocal', 'turn aborted: DSH runtime is shutting down', { sessionId });
+        this.dshStreamUi.finalizeSession(sessionId);
+        this.reportTurnInterrupted(sessionId);
         this.clearPendingPermissions(sessionId);
         this.settleDshSteerSubmissions(activeSession, 'settled');
         this.removeActiveSession(sessionId, activeSession);
@@ -12605,6 +12609,15 @@ export class CoworkRunner extends EventEmitter {
    */
   private reportReplyTruncatedTurn(sessionId: string): void {
     this.addSystemMessage(sessionId, '', { replyTruncatedTurn: true });
+  }
+
+  /**
+   * App quit / runtime close cut a live DSH turn. Keep the session idle (not
+   * `error`) but persist a localized banner so the UI does not look frozen
+   * on an empty streaming Think row.
+   */
+  private reportTurnInterrupted(sessionId: string): void {
+    this.addSystemMessage(sessionId, '', { dshTurnInterrupted: true });
   }
 
   private findAttachmentsOutsideCwd(prompt: string, cwd: string): string[] {

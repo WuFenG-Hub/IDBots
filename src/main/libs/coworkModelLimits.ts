@@ -1,5 +1,5 @@
 export const DEFAULT_COWORK_CONTEXT_WINDOW = 128_000;
-export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 8_192;
+export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 32_768;
 // The whole DeepSeek V4 family shares the same 1M context window. The flash
 // variant powers cowork/A2A automation sessions (via resolveAutomationModelOverride),
 // so it must carry the same window as v4-pro or the context ring wrongly falls back
@@ -16,9 +16,10 @@ export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
 export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
 // GLM-5.x actual max output is 128K (z.ai). The app's declared ceiling is
-// 32K — same cap as DeepSeek / the MetaApp bridge — so thinking-enabled
-// turns cannot exhaust DEFAULT 8192 mid-thought (2026-09-14 silent stall on
-// glm-5.3-flash sessions e6af1710, 572751a8, 10b02949).
+// 32K — same cap as DeepSeek / the MetaApp bridge / the app-wide default —
+// so thinking-enabled turns cannot exhaust a small ceiling mid-thought
+// (2026-09-14 silent stall on glm-5.3-flash sessions e6af1710, 572751a8,
+// 10b02949).
 export const GLM_MAX_OUTPUT_TOKENS = 32_768;
 
 export type CoworkModelLimitSource = 'provider-model' | 'available-model' | 'known-model' | 'family-model' | 'fallback';
@@ -149,7 +150,7 @@ function normalizeModelId(value: unknown): string {
  * DeepSeek V4 family fallback for ids no exact catalog entry tracks. The
  * vendor ships ephemeral/regional SKUs that append suffixes to the family
  * name (deepseek-v4.1-flash-expires-on-0910) — an exact-match catalog can
- * never keep up, and the uncatalogued id fell to
+ * never keep up, and the uncatalogued id fell to the old
  * DEFAULT_COWORK_MAX_OUTPUT_TOKENS (8192). With reasoning effort 'max' the
  * thinking tokens alone consumed that ceiling and the turn died as a
  * hollow-completed reasoning-only truncation (the 2026-09-09 cw-86812c4f
@@ -181,9 +182,10 @@ function deepseekV4FamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits
 /**
  * GLM-4.5+ / GLM-5.x family fallback for gateway ids the exact catalog does
  * not track (`z-ai/glm-5.4-flash`, ephemeral SKUs). Thinking shares the
- * output budget, so uncatalogued ids must not inherit DEFAULT 8192.
- * Context window stays on the conservative default unless the exact SKU is
- * catalogued — only the output ceiling is the stall-critical field.
+ * output budget, so uncatalogued ids pin the 32K ceiling even if a future
+ * DEFAULT change regresses. Context window stays on the conservative
+ * default unless the exact SKU is catalogued — only the output ceiling is
+ * the stall-critical field.
  */
 function glmFamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>> | undefined {
   const segment = (modelId.split('/').pop() ?? modelId);
