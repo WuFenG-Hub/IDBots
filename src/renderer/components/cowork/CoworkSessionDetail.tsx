@@ -69,6 +69,7 @@ import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 import { getCompactFolderName } from '../../utils/path';
 import { isRenderableAvatarSource as isSharedRenderableAvatarSource } from '../../utils/avatarSource';
+import { isRenderableAssistantOrSystemMessage } from '../../utils/coworkMessageVisibility';
 import {
   buildPrivateA2ASessionDisplayId,
   getCoworkSessionTitleClassName,
@@ -1016,16 +1017,6 @@ const buildConversationTurns = (items: DisplayItem[]): ConversationTurn[] => {
   }
 
   return turns;
-};
-
-const isRenderableAssistantOrSystemMessage = (message: CoworkMessage): boolean => {
-  if (hasText(message.content) || hasText(message.metadata?.error)) {
-    return true;
-  }
-  if (message.metadata?.isThinking) {
-    return Boolean(message.metadata?.isStreaming);
-  }
-  return false;
 };
 
 const isVisibleAssistantTurnItem = (item: AssistantTurnItem): boolean => {

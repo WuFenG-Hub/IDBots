@@ -113,3 +113,11 @@ test('isTransientDshTurnError classifies only transient-code error outcomes', as
   assert.equal(isNonAnswerAssistantReply(TRANSIENT_TURN_RESUME_PROMPT), false);
 });
 
+// Recovery turns after a thinking burnout / empty terminal must disable
+// thinking. Re-running effort-max thinking on the same output ceiling is
+// what made the 2026-09-14 auto-continue stall a second time.
+test('CONTINUE_TURN_REASONING_EFFORT is off so recovery turns emit tools or text', async () => {
+  const { CONTINUE_TURN_REASONING_EFFORT } = await importCompiled('coworkAssistantReply');
+  assert.equal(CONTINUE_TURN_REASONING_EFFORT, 'off');
+});
+

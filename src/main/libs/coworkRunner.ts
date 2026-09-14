@@ -41,7 +41,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
+import { CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -8101,7 +8101,12 @@ export class CoworkRunner extends EventEmitter {
         }, this.dshTurnStallTimeoutMs);
         dshStallTimer.unref?.();
       };
-      const runGuardedTurn = async (turnPrompt: string, images?: DshHostToolImagePayload[], routeOverride?: DshProviderRouteInfo) => {
+      const runGuardedTurn = async (
+        turnPrompt: string,
+        images?: DshHostToolImagePayload[],
+        routeOverride?: DshProviderRouteInfo,
+        turnOpts?: { reasoningEffort?: LlmEffortLevel },
+      ) => {
         // Route this attempt runs on: the session's primary route, or — once
         // the primary burned its transient-resume budget on a provider outage
         // (GT-02) — the bot fallback-brain route handed in as an override.
@@ -8127,6 +8132,15 @@ export class CoworkRunner extends EventEmitter {
                 ?? fallbackModelOptions?.reasoningEffort,
             ),
             activeSession.thinkingOverride ?? fallbackModelOptions?.thinking,
+            turnOfficialDeepSeekNative ? 'deepseek-native' : 'generic',
+          );
+        }
+        if (turnOpts?.reasoningEffort) {
+          // Recovery turns (empty-terminal / max-tokens continue) pin effort
+          // explicitly so thinking cannot consume the output ceiling again.
+          turnReasoningEffort = mapDshReasoningEffort(
+            toLlmEffortLevel(turnOpts.reasoningEffort),
+            turnOpts.reasoningEffort === 'off' ? { type: 'disabled' } : undefined,
             turnOfficialDeepSeekNative ? 'deepseek-native' : 'generic',
           );
         }
@@ -8468,7 +8482,12 @@ export class CoworkRunner extends EventEmitter {
           'Empty terminal turn (DSH reasoning-only stop) — auto-continuing once',
           { sessionId }
         );
-        outcome = await runGuardedTurn(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT);
+        outcome = await runGuardedTurn(
+          EMPTY_TERMINAL_TURN_CONTINUE_PROMPT,
+          undefined,
+          undefined,
+          { reasoningEffort: CONTINUE_TURN_REASONING_EFFORT },
+        );
       }
 
       // Output-ceiling truncation (turn/end reason `max-tokens`): the turn
@@ -8488,7 +8507,12 @@ export class CoworkRunner extends EventEmitter {
           'Turn cut by the output token ceiling (max-tokens) — auto-continuing once',
           { sessionId }
         );
-        outcome = await runGuardedTurn(TRUNCATED_TURN_CONTINUE_PROMPT);
+        outcome = await runGuardedTurn(
+          TRUNCATED_TURN_CONTINUE_PROMPT,
+          undefined,
+          undefined,
+          { reasoningEffort: CONTINUE_TURN_REASONING_EFFORT },
+        );
       }
 
       // Transient environmental failure (TRANSPORT/TIMEOUT/RATE_LIMIT/SERVER/

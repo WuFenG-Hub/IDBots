@@ -15,6 +15,11 @@ export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 // thinking-enabled replies (the 2026-08-08 dream-diary failure mode).
 export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
 export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
+// GLM-5.x actual max output is 128K (z.ai). The app's declared ceiling is
+// 32K — same cap as DeepSeek / the MetaApp bridge — so thinking-enabled
+// turns cannot exhaust DEFAULT 8192 mid-thought (2026-09-14 silent stall on
+// glm-5.3-flash sessions e6af1710, 572751a8, 10b02949).
+export const GLM_MAX_OUTPUT_TOKENS = 32_768;
 
 export type CoworkModelLimitSource = 'provider-model' | 'available-model' | 'known-model' | 'family-model' | 'fallback';
 
@@ -111,20 +116,20 @@ const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contex
   // group-task bots were re-routed to on 2026-09-03: uncatalogued at the
   // time, it inherited the old default-true and lost describe_image while
   // read_image silently dropped pixels (2026-09-04 regression).
-  'glm-5.3-flash': { contextWindow: 1_048_576, supportsVision: false },
-  'glm-5.3': { contextWindow: 1_000_000, supportsVision: false },
-  'glm-5.2': { contextWindow: 1_000_000, supportsVision: false },
-  'glm-5.2-fast': { contextWindow: 1_000_000, supportsVision: false },
-  'z-ai/glm-5.3-flash': { contextWindow: 1_048_576, supportsVision: false },
-  'zai-org/GLM-5.3': { contextWindow: 1_000_000, supportsVision: false },
-  'zai-org/GLM-5.2': { contextWindow: 1_000_000, supportsVision: false },
-  'zai-org/GLM-5.2-Fast': { contextWindow: 1_000_000, supportsVision: false },
-  'zai-org/GLM-5.1': { contextWindow: 202_800, supportsVision: false },
-  'zai-org/GLM-5': { contextWindow: 202_800, supportsVision: false },
-  'glm-5.1': { contextWindow: 202_800, supportsVision: false },
-  'glm-5': { contextWindow: 202_800, supportsVision: false },
-  'glm-4.7': { contextWindow: 204_800, supportsVision: false },
-  'glm-4.7-flash': { contextWindow: 204_800, supportsVision: false },
+  'glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'glm-5.3': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'glm-5.2': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'glm-5.2-fast': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'z-ai/glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'zai-org/GLM-5.3': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'zai-org/GLM-5.2': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'zai-org/GLM-5.2-Fast': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'zai-org/GLM-5.1': { contextWindow: 202_800, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'zai-org/GLM-5': { contextWindow: 202_800, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'glm-5.1': { contextWindow: 202_800, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'glm-5': { contextWindow: 202_800, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'glm-4.7': { contextWindow: 204_800, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'glm-4.7-flash': { contextWindow: 204_800, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'MiniMax-M3': { contextWindow: 1_000_000, supportsVision: true },
   'MiniMax-M2.7': { contextWindow: 204_800, supportsVision: true },
   'MiniMax-M2.5': { contextWindow: 204_800, supportsVision: true },
@@ -171,6 +176,19 @@ function deepseekV4FamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits
     maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
     supportsVision: segment.includes('vision'),
   };
+}
+
+/**
+ * GLM-4.5+ / GLM-5.x family fallback for gateway ids the exact catalog does
+ * not track (`z-ai/glm-5.4-flash`, ephemeral SKUs). Thinking shares the
+ * output budget, so uncatalogued ids must not inherit DEFAULT 8192.
+ * Context window stays on the conservative default unless the exact SKU is
+ * catalogued — only the output ceiling is the stall-critical field.
+ */
+function glmFamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>> | undefined {
+  const segment = (modelId.split('/').pop() ?? modelId);
+  if (!/^glm-(?:4\.[5-9]|[5-9])/i.test(segment)) return undefined;
+  return { maxOutputTokens: GLM_MAX_OUTPUT_TOKENS };
 }
 
 function toPositiveInteger(value: unknown): number | undefined {
@@ -258,7 +276,7 @@ function buildLimits(
   source: CoworkModelLimitSource,
   explicit?: Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>>,
 ): CoworkModelLimits {
-  const known = KNOWN_MODEL_LIMITS[modelId] ?? deepseekV4FamilyLimits(modelId);
+  const known = KNOWN_MODEL_LIMITS[modelId] ?? deepseekV4FamilyLimits(modelId) ?? glmFamilyLimits(modelId);
   return {
     modelId,
     contextWindow: explicit?.contextWindow ?? known?.contextWindow ?? DEFAULT_COWORK_CONTEXT_WINDOW,
@@ -287,6 +305,7 @@ export function modelSupportsVision(modelId: string | null | undefined): boolean
   }
   return KNOWN_MODEL_LIMITS[normalized]?.supportsVision
     ?? deepseekV4FamilyLimits(normalized)?.supportsVision
+    ?? glmFamilyLimits(normalized)?.supportsVision
     ?? false;
 }
 
@@ -322,7 +341,7 @@ export function resolveCoworkModelLimits(
     return buildLimits(modelId, 'known-model');
   }
 
-  if (deepseekV4FamilyLimits(modelId)) {
+  if (deepseekV4FamilyLimits(modelId) || glmFamilyLimits(modelId)) {
     return buildLimits(modelId, 'family-model');
   }
 
