@@ -428,3 +428,6 @@ man_base_data_pebble/
 !tests/coworkRunnerSurfWiringStatic.test.mjs
 !tests/scheduledTaskAgentTools.test.mjs
 !tests/surfReadsService.test.mjs
+
+# bye-closed private chat reopen regression (local-re-engagement)
+!tests/privateChatClosedReopen.test.mjs
