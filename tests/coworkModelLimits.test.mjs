@@ -327,6 +327,43 @@ test('glm-5.3-flash — the 2026-09-04 regression model — resolves non-vision 
   assert.notEqual(limits.source, 'fallback');
 });
 
+// 2026-09-14 silent-stall: glm-5.3-flash (commandcode catalog entries carry
+// contextWindow but no maxOutputTokens) inherited DEFAULT 8192. Thinking at
+// effort-max burned that ceiling, auto-continue burned it again, and the
+// session went idle with no visible reply (e6af1710 / 572751a8 / 10b02949).
+test('glm-5.3-flash thinking models get the 32K output ceiling, not the 8K fallback', async () => {
+  const { resolveCoworkModelLimits, DEFAULT_COWORK_MAX_OUTPUT_TOKENS } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  for (const modelId of ['glm-5.3-flash', 'z-ai/glm-5.3-flash', 'glm-5.3', 'zai-org/GLM-5.3']) {
+    const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
+    assert.equal(limits.maxOutputTokens, 32_768, `${modelId} must not inherit the 8K fallback`);
+    assert.notEqual(limits.maxOutputTokens, DEFAULT_COWORK_MAX_OUTPUT_TOKENS, modelId);
+  }
+
+  // Commandcode-shaped catalog: contextWindow only, no maxOutputTokens.
+  const gatewayLimits = resolveCoworkModelLimits({
+    model: { defaultModel: 'z-ai/glm-5.3-flash', availableModels: [] },
+    providers: {
+      commandcode: {
+        enabled: true,
+        models: [{ id: 'z-ai/glm-5.3-flash', contextWindow: 1_048_576 }],
+      },
+    },
+  });
+  assert.equal(gatewayLimits.maxOutputTokens, 32_768);
+  assert.equal(gatewayLimits.contextWindow, 1_048_576);
+});
+
+test('uncatalogued glm-5.x gateway ids inherit the 32K output ceiling via family fallback', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'acme/glm-5.4-flash');
+  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.source, 'family-model');
+});
+
 test('every catalogued vision-capable preset resolves supportsVision=true', async () => {
   const { resolveCoworkModelLimits } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');

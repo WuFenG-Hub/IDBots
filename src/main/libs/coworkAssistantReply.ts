@@ -38,6 +38,15 @@ export const TRUNCATED_TURN_CONTINUE_PROMPT =
   'Your previous response was cut off by the output token limit. Continue from where you left off with minimal further reasoning and deliver the complete answer.';
 
 /**
+ * Effort used for empty-terminal and max-tokens auto-continue turns.
+ * Re-running the original effort (often `max`, thinking on) burns the output
+ * ceiling on reasoning again — the 2026-09-14 silent stall after one
+ * continuation (sessions e6af1710, 572751a8, 10b02949). `off` forces the
+ * recovery turn to emit tools or visible text.
+ */
+export const CONTINUE_TURN_REASONING_EFFORT = 'off' as const;
+
+/**
  * Provider failure codes that mean "the request never got answered for
  * environmental reasons" — network unreachable (TRANSPORT), request timed out
  * (TIMEOUT), provider 429/5xx (RATE_LIMIT/SERVER), or a stream that closed
