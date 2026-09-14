@@ -199,6 +199,11 @@ import {
 } from './postBuzzAgentTools';
 import { buildPostSimpleNoteAgentTools } from './postSimpleNoteAgentTools';
 import { buildAgentpediaAgentTools } from './agentpediaAgentTools';
+import {
+  buildMetaProtocolAgentTools,
+  type MetaProtocolActingIdentity,
+  type MetaProtocolRegistryControl,
+} from './metaProtocolAgentTools';
 import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
 import { buildLikePinAgentTools } from './likePinAgentTools';
 import { buildCommentPinAgentTools } from './commentPinAgentTools';
@@ -1495,6 +1500,7 @@ type CoworkMetabotIdentity = {
   fallback_llm_effort?: string | null;
   mvc_address?: string | null;
   globalmetaid?: string | null;
+  metaid?: string | null;
   enabled?: boolean | null;
   metabot_type?: 'twin' | 'worker' | 'welcome' | null;
   boss_global_metaid?: string | null;
@@ -1730,6 +1736,16 @@ export interface CoworkRunnerOptions {
    */
   metawebLearning?: MetawebLearningControl;
   /**
+   * When set, every cowork session gets the metaprotocol registry tools
+   * backed by the metaso-p2p /api/metaweb/protocols* family with a read-only
+   * MANAPI degraded fallback (services/metaProtocolService.ts; main.ts wires
+   * the control): the read-only metaprotocol_registry registers with the
+   * other read tools, the post_metaprotocol writer registers only when a
+   * chain-write control exists (schema-gated payloads, MetaSo precheck,
+   * registrant identity cascade for updates).
+   */
+  metaProtocolRegistry?: MetaProtocolRegistryControl;
+  /**
    * When set, every cowork session gets the on-chain Q&A recall tools
    * (search_qa / list_latest_questions / get_question_answers) backed by the
    * metaso-p2p /api/qa/* APIs (main.ts wires the control).
@@ -1892,6 +1908,7 @@ const METAWEB_STUDY_TOOL_ALLOWLIST = new Set([
   'read_metaweb_pin',
   'read_metaweb_pins_batch',
   'metaweb_pin_versions',
+  'metaprotocol_registry',
   'knowledge_base_list',
   'knowledge_base_query',
   'knowledge_base_add_document',
@@ -1918,6 +1935,7 @@ const METAWEB_QA_SURF_TOOL_ALLOWLIST = new Set([
   'get_question_answers',
   'post_simpleanswer',
   'like_pin',
+  'metaprotocol_registry',
 ]);
 
 /**
@@ -1942,6 +1960,7 @@ const METAWEB_SURF_TOOL_ALLOWLIST = new Set([
   'post_buzz',
   'post_simplenote',
   'agentpedia_challenge',
+  'metaprotocol_registry',
   'create_scheduled_task',
 ]);
 
@@ -1979,6 +1998,7 @@ export class CoworkRunner extends EventEmitter {
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
   private metawebLearning?: MetawebLearningControl;
+  private metaProtocolRegistry?: MetaProtocolRegistryControl;
   private qaRecall?: QaRecallControl;
   private knowledgeBase?: KnowledgeBaseControl;
   private metawebStudy?: MetawebStudyControl;
@@ -2103,6 +2123,7 @@ export class CoworkRunner extends EventEmitter {
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
     this.metawebLearning = options?.metawebLearning;
+    this.metaProtocolRegistry = options?.metaProtocolRegistry;
     this.qaRecall = options?.qaRecall;
     this.knowledgeBase = options?.knowledgeBase;
     this.metawebStudy = options?.metawebStudy;
@@ -9564,6 +9585,23 @@ export class CoworkRunner extends EventEmitter {
             resolveMetabotId,
           })
         );
+        // Metaprotocol registry writer (/protocols/metaprotocol):
+        // post_metaprotocol publish/update. Payloads are schema-gated
+        // pre-write, MetaSo-prechecked with a MANAPI degraded scan, and
+        // updates pass the registrant identity cascade before any chain
+        // write. The read twin (metaprotocol_registry) registers with the
+        // read tools below; only the writer belongs to the chain-write gate.
+        if (this.metaProtocolRegistry) {
+          const metaProtocolTools = buildMetaProtocolAgentTools({
+            tool,
+            metaProtocol: this.metaProtocolRegistry,
+            createPin: createPinForSession,
+            sessionId,
+            resolveMetabotId,
+            resolveActingIdentity: (metabotId) => this.resolveMetaProtocolActingIdentity(metabotId),
+          });
+          memoryTools.push(metaProtocolTools[metaProtocolTools.length - 1]);
+        }
         // On-chain Q&A (simplequestion/simpleanswer): ask when stuck, answer
         // what you know. Registration posture identical to the tools above.
         // The repeat notice prefers the Q&A index (cross-machine complete,
@@ -9789,6 +9827,21 @@ export class CoworkRunner extends EventEmitter {
         })
       );
     }
+    // Metaprotocol registry read tool: the authoritative protocol catalog
+    // (list/read/versions) with a MANAPI degraded fallback. Read-only — it
+    // registers on every surface the control reaches; the post_metaprotocol
+    // writer is gated on the chain-write control above.
+    if (this.metaProtocolRegistry) {
+      memoryTools.push(
+        ...buildMetaProtocolAgentTools({
+          tool,
+          metaProtocol: this.metaProtocolRegistry,
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
+          resolveActingIdentity: (metabotId) => this.resolveMetaProtocolActingIdentity(metabotId),
+        })
+      );
+    }
     // On-chain Q&A recall (search_qa / list_latest_questions /
     // get_question_answers) rides with the same always-on posture: it is the
     // bot's window into the community knowledge base and the search-first
@@ -9987,6 +10040,24 @@ export class CoworkRunner extends EventEmitter {
       },
       learnKnowledgeBase: (metabotId, kbId, options) => control.learnKnowledgeBase(metabotId, kbId, options),
       learnAllKnowledgeBases: (metabotId, options) => control.learnAllKnowledgeBases(metabotId, options),
+    };
+  }
+
+  /**
+   * Acting-MetaBot identity for the metaprotocol registry tools: display
+   * name (payload `authors` field) plus the globalMetaId → metaId → address
+   * cascade used by post_metaprotocol's registrant check. Undefined when the
+   * metabot is unknown — the write tool then refuses updates (no identity,
+   * no registrant match).
+   */
+  private resolveMetaProtocolActingIdentity(metabotId: number): MetaProtocolActingIdentity | undefined {
+    const metabot = this.getMetabotById?.(metabotId);
+    if (!metabot) return undefined;
+    return {
+      name: metabot.name?.trim() || '',
+      globalMetaId: metabot.globalmetaid?.trim() || '',
+      metaId: metabot.metaid?.trim() || '',
+      address: metabot.mvc_address?.trim() || '',
     };
   }
 
