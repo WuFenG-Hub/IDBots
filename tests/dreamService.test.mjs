@@ -110,7 +110,7 @@ test('runNow completes the full dream pipeline and writes all artifacts', async 
     assert.equal(run.status, 'completed');
     assert.equal(run.llmId, 'bot-own-llm');
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].maxTokens, 8192);
+    assert.equal(calls[0].maxTokens, 32768);
     assert.equal(calls[0].throwOnEmptyContent, true);
     assert.equal(calls[0].thinking, 'disabled');
 
@@ -189,7 +189,7 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
     assert.ok(calls.some((call) => call.user.includes('分块提炼阶段')));
     assert.ok(calls.some((call) => call.user.includes('分块证据摘要')));
     assert.ok(calls.some((call) => call.maxTokens === 4096), 'fragment calls use a compact output budget');
-    assert.equal(calls.at(-1).maxTokens, 8192, 'final synthesis uses the default model output limit');
+    assert.equal(calls.at(-1).maxTokens, 32768, 'final synthesis uses the default model output limit');
     const synthesisCall = calls.find((call) => call.user.includes('分块证据摘要'));
     assert.ok(synthesisCall, 'fragment synthesis call exists');
     assert.ok(synthesisCall.user.includes('## 当日写入链上的内容'), 'synthesis keeps published chain content');

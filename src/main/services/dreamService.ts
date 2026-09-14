@@ -49,7 +49,7 @@ import {
 const DREAM_TICK_INTERVAL_MS = 60_000;
 const DREAM_LLM_TIMEOUT_MS = 180_000;
 // The requested ceiling is clamped to the selected model's declared limit
-// (DeepSeek V4 declares 32K, unknown models stay at 8192). The dream JSON is
+// (DeepSeek V4 declares 32K, unknown models now share that 32K default). The dream JSON is
 // far smaller in practice; the headroom only matters so a long day is never
 // truncated mid-JSON, and it costs nothing on short days.
 const DREAM_LLM_TARGET_MAX_TOKENS = 32_768;

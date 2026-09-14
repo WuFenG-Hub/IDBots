@@ -63,7 +63,7 @@ test('resolveCoworkModelLimits falls back conservatively for unknown models', as
     source: 'fallback',
   });
   assert.equal(DEFAULT_COWORK_CONTEXT_WINDOW, 128_000);
-  assert.equal(DEFAULT_COWORK_MAX_OUTPUT_TOKENS, 8_192);
+  assert.equal(DEFAULT_COWORK_MAX_OUTPUT_TOKENS, 32_768);
 });
 
 test('resolveCoworkModelLimits can use built-in DeepSeek V4 Pro defaults by model id', async () => {
@@ -88,7 +88,7 @@ test('resolveCoworkModelLimits can use built-in DeepSeek V4 Pro defaults by mode
   });
 });
 
-test('deepseek-v4-flash declares a 32K output ceiling instead of the 8192 fallback', async () => {
+test('deepseek-v4-flash declares a 32K output ceiling instead of a smaller fallback', async () => {
   const { resolveCoworkModelLimits } = await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits({
@@ -328,17 +328,16 @@ test('glm-5.3-flash — the 2026-09-04 regression model — resolves non-vision 
 });
 
 // 2026-09-14 silent-stall: glm-5.3-flash (commandcode catalog entries carry
-// contextWindow but no maxOutputTokens) inherited DEFAULT 8192. Thinking at
-// effort-max burned that ceiling, auto-continue burned it again, and the
-// session went idle with no visible reply (e6af1710 / 572751a8 / 10b02949).
-test('glm-5.3-flash thinking models get the 32K output ceiling, not the 8K fallback', async () => {
-  const { resolveCoworkModelLimits, DEFAULT_COWORK_MAX_OUTPUT_TOKENS } =
+// contextWindow but no maxOutputTokens) inherited the old DEFAULT 8192.
+// Thinking at effort-max burned that ceiling. Catalog + family fallback now
+// pin 32K, which matches the raised default so unknown models get the same.
+test('glm-5.3-flash thinking models get the 32K output ceiling', async () => {
+  const { resolveCoworkModelLimits } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   for (const modelId of ['glm-5.3-flash', 'z-ai/glm-5.3-flash', 'glm-5.3', 'zai-org/GLM-5.3']) {
     const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
-    assert.equal(limits.maxOutputTokens, 32_768, `${modelId} must not inherit the 8K fallback`);
-    assert.notEqual(limits.maxOutputTokens, DEFAULT_COWORK_MAX_OUTPUT_TOKENS, modelId);
+    assert.equal(limits.maxOutputTokens, 32_768, `${modelId} must resolve to the 32K output ceiling`);
   }
 
   // Commandcode-shaped catalog: contextWindow only, no maxOutputTokens.
@@ -460,7 +459,7 @@ test('catalog supportsImage maps onto supportsVision', async () => {
 // ---------------------------------------------------------------------------
 // DeepSeek V4 family fallback (2026-09-09 cw-86812c4f stall): ephemeral SKU
 // suffixes (deepseek-v4.1-flash-expires-on-0910) escape the exact catalog and
-// fell to DEFAULT_COWORK_MAX_OUTPUT_TOKENS (8192); with reasoning effort
+// fell to the old DEFAULT_COWORK_MAX_OUTPUT_TOKENS (8192); with reasoning effort
 // 'max' the thinking alone burned that ceiling and the turn ended as a
 // hollow-completed reasoning-only truncation. Any id whose last path segment
 // starts with 'deepseek-v4' now inherits the family limits.
@@ -545,11 +544,23 @@ test('family fallback marks vision SKUs and never overrides explicit provider va
   assert.equal(explicit.source, 'provider-model');
 });
 
-test('non-deepseek unknown models keep the conservative 8192 fallback', async () => {
+test('unknown models inherit the 32K default output ceiling', async () => {
   const { resolveCoworkModelLimits, DEFAULT_COWORK_MAX_OUTPUT_TOKENS } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'some-gw/deepseek-chat');
+  assert.equal(DEFAULT_COWORK_MAX_OUTPUT_TOKENS, 32_768);
   assert.equal(limits.maxOutputTokens, DEFAULT_COWORK_MAX_OUTPUT_TOKENS);
   assert.equal(limits.source, 'fallback');
+});
+
+test('catalogued models without an explicit output ceiling inherit the 32K default', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  for (const modelId of ['claude-sonnet-4-6', 'gpt-5.6-sol', 'kimi-k2.6', 'MiniMax-M3', 'qwen3.6-plus']) {
+    const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
+    assert.equal(limits.maxOutputTokens, 32_768, `${modelId} must inherit the 32K default`);
+    assert.equal(limits.source, 'known-model', modelId);
+  }
 });

@@ -70,11 +70,11 @@ test('DeepSeek Responses reasoning disable must be explicit effort none', () => 
 });
 
 test('default output budget leaves headroom for thinking-mode reasoning', () => {
-  // Reasoning shares the output budget: thinking-enabled calls get 16K,
+  // Reasoning shares the output budget: thinking-enabled calls get 32K,
   // thinking-disabled calls keep the lean 4K default.
   assert.equal(resolveDefaultMaxOutputTokens('disabled'), 4_096);
-  assert.equal(resolveDefaultMaxOutputTokens('enabled'), 16_384);
-  assert.equal(resolveDefaultMaxOutputTokens(undefined), 16_384);
+  assert.equal(resolveDefaultMaxOutputTokens('enabled'), 32_768);
+  assert.equal(resolveDefaultMaxOutputTokens(undefined), 32_768);
 });
 
 test('Responses tools keep the default web_search injection for chat callers', () => {

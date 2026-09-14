@@ -1456,9 +1456,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       id: modelId,
       name: modelName,
       supportsImage: newModelSupportsImage,
-      // A new model pins a 32K output ceiling so an uncatalogued id never
-      // falls back to the 8192 main-process default (which thinking-heavy
-      // models burn on reasoning alone — the cw-86812c4f stall). Edits keep
+      // A new model pins a 32K output ceiling so an uncatalogued id matches
+      // the main-process default (thinking-heavy models used to burn the old
+      // 8192 fallback on reasoning alone — the cw-86812c4f stall). Edits keep
       // whatever the entry already stored via the spread above.
       ...(!isEditingModel && { maxOutputTokens: NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS }),
       // Empty input clears an explicitly stored window (JSON drops the
@@ -1553,7 +1553,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         name: modelName,
         supportsImage: false,
         // Same rationale as the add-model form: draft entries pin the 32K
-        // output ceiling so they never resolve to the 8192 fallback.
+        // output ceiling so they match the main-process default.
         maxOutputTokens: NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS,
         // Omitted when left empty so resolution keeps the known-model catalog
         // / 128K default instead of pinning an explicit value.
