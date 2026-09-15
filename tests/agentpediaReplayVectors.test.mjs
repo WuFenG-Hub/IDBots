@@ -82,9 +82,28 @@ function resolve(view, dottedPath) {
   return cur;
 }
 
+// jsonAbsent reports whether a resolved view value is the JS shape of "not
+// there": undefined (the path does not exist), null, or the empty string (the
+// form an omitempty-dropped value or a never-written plate takes). Twin of
+// jsonAbsent in the Go harness (internal/agentpedia/vectors_test.go): both sides
+// must judge the same path identically.
+function jsonAbsent(value) {
+  return value === undefined || value === null || value === '';
+}
+
 function assertExpect(view, expect) {
   for (const [path, expected] of Object.entries(expect)) {
-    if (path.endsWith('.$contains')) {
+    if (path.endsWith('.$absent')) {
+      // `<path>.$absent` passes when the path does not exist at all, or resolves
+      // to null / '' — the only way to assert a non-existence with this
+      // vocabulary (the declared view contract carries no `redirect` field, so
+      // `redirect` is always an existence question).
+      const actual = resolve(view, path.slice(0, -'.$absent'.length));
+      assert.ok(
+        jsonAbsent(actual),
+        `${path}: expected absent, got ${JSON.stringify(actual)}`,
+      );
+    } else if (path.endsWith('.$contains')) {
       const parentPath = path.slice(0, -'.$contains'.length);
       const parent = resolve(view, parentPath);
       if (!Array.isArray(parent)) {
