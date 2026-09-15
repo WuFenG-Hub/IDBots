@@ -28,6 +28,7 @@
  * See scripts/dsh-kernel-patches/README.md for how to add or rebase patches.
  */
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
@@ -36,6 +37,45 @@ const PATCHES_DIR = path.join(__dirname, 'dsh-kernel-patches');
 const RUNTIME_NODE_MODULES = path.join(PROJECT_ROOT, 'dsh-runtime', 'node_modules');
 
 const CHECK_ONLY = process.argv.includes('--check');
+
+const tempDirs = [];
+
+process.on('exit', () => {
+  for (const dir of tempDirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best effort — temp dir, never worth failing the build over
+    }
+  }
+});
+
+/**
+ * `git apply` compares the patch bytes against the working-tree file bytes, so
+ * a patch file that Git rewrote to CRLF on checkout (Git for Windows' default
+ * core.autocrlf=true) can never match an LF file in node_modules — the apply
+ * then fails with "patch does not apply" even though the patch is correct.
+ * `.gitattributes` keeps our own checkouts LF, and this normalizes any patch
+ * file that arrived with CRLF anyway (a clone made before the attribute
+ * existed, a tar extraction, or a runner workspace that is never re-checked
+ * out). Only line endings are normalized: the patch content is still matched
+ * byte for byte, so a genuinely drifted package keeps failing loudly.
+ */
+function lfNormalizedPatch(patchPath, label) {
+  const raw = fs.readFileSync(patchPath);
+  if (!raw.includes(0x0d)) {
+    return patchPath;
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-kernel-patch-'));
+  tempDirs.push(dir);
+  const normalized = path.join(dir, label);
+  fs.writeFileSync(normalized, raw.toString('utf8').replace(/\r\n/g, '\n'), 'utf8');
+  console.log(
+    `[dsh-kernel-patches] ${label}: patch file has CRLF (line-ending conversion on checkout) — ` +
+    'using an LF-normalized copy',
+  );
+  return normalized;
+}
 
 function fail(message) {
   console.error(`[dsh-kernel-patches] ${message}`);
@@ -103,12 +143,13 @@ function main() {
     }
 
     const patchPath = path.join(PATCHES_DIR, patchFile);
-    const reverseCheck = git(['apply', '--check', '--reverse', patchPath]);
+    const applyPath = lfNormalizedPatch(patchPath, label);
+    const reverseCheck = git(['apply', '--check', '--reverse', applyPath]);
     if (reverseCheck.status === 0) {
       console.log(`[dsh-kernel-patches] ${label}: already applied`);
       continue;
     }
-    const forwardCheck = git(['apply', '--check', patchPath]);
+    const forwardCheck = git(['apply', '--check', applyPath]);
     if (forwardCheck.status !== 0) {
       console.error(
         `[dsh-kernel-patches] ${label}: does not apply to the installed ${target.name}@${installedVersion} ` +
@@ -122,7 +163,7 @@ function main() {
       failures += 1;
       continue;
     }
-    const applied = git(['apply', patchPath]);
+    const applied = git(['apply', applyPath]);
     if (applied.status !== 0) {
       console.error(`[dsh-kernel-patches] ${label}: git apply failed:\n${applied.stderr}`);
       failures += 1;

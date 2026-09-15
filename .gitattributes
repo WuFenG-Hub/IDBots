@@ -1,0 +1,11 @@
+# Kernel patches are applied with plain `git apply` against byte-exact files
+# inside dsh-runtime/node_modules, so the patch files must be checked out
+# exactly as committed (LF) on every platform.
+#
+# Without this, Git for Windows (core.autocrlf=true by default) rewrites the
+# patch file to CRLF in the working tree while the target node_modules file
+# stays LF, and `git apply` then fails with:
+#   error: patch failed: ...:395
+#   error: ...: patch does not apply
+# (Windows CI run 34960957498 / 35007381714 failed exactly this way.)
+scripts/dsh-kernel-patches/*.patch -text
