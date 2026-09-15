@@ -39,11 +39,17 @@ test('non-order tool calls and reasoning are hidden in A2A sessions', () => {
     content: 'Error: Cannot find module /tmp/x.js',
     metadata: { error: 'Cannot find module /tmp/x.js' },
   });
+  const noReplySentinel = asMessage({
+    type: 'assistant',
+    content: '[NO_REPLY]',
+    metadata: { privateChatNoReply: true, sourceChannel: 'metaweb_private' },
+  });
 
   assert.equal(shouldHideA2AInternalMessage(toolUse), true);
   assert.equal(shouldHideA2AInternalMessage(toolResult), true);
   assert.equal(shouldHideA2AInternalMessage(thinking), true);
   assert.equal(shouldHideA2AInternalMessage(internalSystemError), true);
+  assert.equal(shouldHideA2AInternalMessage(noReplySentinel), true);
 });
 
 test('order-related internal states stay visible for traceability', () => {

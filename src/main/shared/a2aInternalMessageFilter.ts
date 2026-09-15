@@ -47,15 +47,18 @@ export const isA2AOrderRelatedMessage = (message: A2AFilterableMessage): boolean
 
 /**
  * Hide non-order internal states in A2A sessions: tool calls (Bash/Read/…),
- * internal reasoning (isThinking) and internal system notices. Conversation
- * bubbles (messages delivered on-chain, or local notices like the end-of-
- * conversation marker and failed-delivery retries) stay visible.
+ * internal reasoning (isThinking), internal system notices, and no-reply
+ * sentinel bubbles (the bot chose silence — nothing was delivered on-chain).
+ * Conversation bubbles (messages delivered on-chain, or local notices like
+ * the end-of-conversation marker and failed-delivery retries) stay visible.
  */
 export const shouldHideA2AInternalMessage = (message: A2AFilterableMessage): boolean => {
   if (isA2AOrderRelatedMessage(message)) return false;
   if (message.type === 'tool_use' || message.type === 'tool_result') return true;
   if (message.type === 'system') return true;
-  if (readMetadata(message).isThinking === true) return true;
+  const metadata = readMetadata(message);
+  if (metadata.isThinking === true) return true;
+  if (metadata.privateChatNoReply === true) return true;
   return false;
 };
 

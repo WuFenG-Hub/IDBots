@@ -1066,6 +1066,34 @@ function isByeText(value: string): boolean {
   return value.trim().toLowerCase() === 'bye';
 }
 
+/**
+ * Protocol tag a MetaBot emits when it decides the latest peer message needs
+ * no answer. The host delivers NOTHING for it. Without this affordance the
+ * only way to "not reply" is empty output, which chat models essentially
+ * never produce — they narrate the decision instead ("（保持静默。）"), and
+ * that narration is itself a delivered message that re-triggers the peer and
+ * traps both bots in an endless "I am staying silent" ping-pong (the
+ * 2026-09-15 BOT-009 loop: ~30 silence notes each, all on-chain).
+ */
+export const PRIVATE_CHAT_NO_REPLY_SENTINEL = '[NO_REPLY]';
+
+/**
+ * Exact-match check (ASCII protocol tag): tolerates surrounding whitespace,
+ * wrapping quotes/backticks and a trailing sentence punctuation mark, but any
+ * additional prose means it is real reply text and must be delivered verbatim.
+ */
+export function isPrivateChatNoReplySentinel(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const normalized = value
+    .trim()
+    .replace(/^["'`“”『「]+/, '')
+    .replace(/["'`“”』」]+$/, '')
+    .replace(/[.!。！？?…]+$/, '')
+    .trim()
+    .toLowerCase();
+  return normalized === PRIVATE_CHAT_NO_REPLY_SENTINEL.toLowerCase();
+}
+
 export function shouldSkipPrivateChatAutoReplyText(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return true;
@@ -1073,6 +1101,9 @@ export function shouldSkipPrivateChatAutoReplyText(value: string): boolean {
   if (normalized === 'thinking...' || normalized === 'thinking…') return true;
   if (/^[.\s]+$/.test(normalized)) return true;
   if (/^[…\s]+$/.test(normalized)) return true;
+  // A peer host on an older version may broadcast its own sentinel verbatim;
+  // that is a silence marker, never something to answer.
+  if (isPrivateChatNoReplySentinel(normalized)) return true;
   return false;
 }
 
@@ -1197,10 +1228,10 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     '- Continue only when you can add valuable discussion, sharper reasoning, or useful questions.',
     '- Keep the discussion around one coherent topic instead of drifting between unrelated subjects.',
     '- Avoid empty pleasantries, loops, repeated introductions, and generic filler.',
-    '- You do not need to reply to every message; reply only to the latest meaningful message.',
+    '- You do not need to reply to every message; reply only to the latest meaningful message. When the latest message needs no answer — a work-in-progress signal, a hold marker, a mere acknowledgement, or meaningless placeholder/closing content such as "Thinking...", "....", or "bye" — reply with exactly `[NO_REPLY]` and nothing else: the host then delivers nothing to the peer.',
     '- Your reply is delivered to the peer on-chain verbatim, word for word. Output ONLY the final message for the peer: make the judgment calls in this policy (whether to reply, wrapping up, saying bye) silently, and never narrate them as text before or around your reply — a reply that opens with your own analysis of the peer\'s message ("this looks like a duplicate closing message, I will close briefly") leaks your internal state to the peer.',
+    '- Never announce silence, waiting, or "no reply needed" in words. Such an announcement IS a delivered message: it forces the peer to process and answer it, trapping both bots in an endless exchange of "I am staying silent" notes. Staying silent means replying `[NO_REPLY]` (the host delivers nothing) — never telling the peer that you will stay silent.',
     '- MetaWeb references: cite on-chain content with a full, clickable MetaWeb URI — pin://<pinId> for any pin (the correct choice for readable text: simplenote notes, buzz posts), metafile://<pinId> ONLY for binary files published on /file (images, video, audio, PDF, archives), metaapp://<pinId> for MetaApps, metaid://<globalMetaId> for people/bots. Never send Web2 viewer URLs, and never deliver a text/Markdown document as a metafile:// upload — publish readable text as a simplenote note and reference it as pin://.',
-    '- If the latest message is clearly meaningless placeholder or closing content, such as "Thinking...", "....", or "bye", do not reply.',
     skillPolicyRule,
     skillWaitNoticeRule,
     forceByeRule,
@@ -5020,6 +5051,33 @@ async function processOne(
 
       trimmed = (reply ?? '').trim();
       if (!trimmed) {
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+      if (isPrivateChatNoReplySentinel(trimmed)) {
+        emitLog(
+          `[PrivateChat] Bot chose silence for message ${row.id} (${PRIVATE_CHAT_NO_REPLY_SENTINEL}); delivering nothing to ${fromGlobalMetaId.slice(0, 12)}…`
+        );
+        // The skill-turn path already persisted the sentinel as an assistant
+        // bubble. Keep it for local context, but tag it so the A2A view hides
+        // it and no late-completion pickup re-delivers it as a real reply.
+        if (skillAssistantMessageId) {
+          const candidate = coworkStore.getMessageById(sessionId, skillAssistantMessageId);
+          if (candidate?.type === 'assistant') {
+            const metadata: CoworkMessageMetadata = {
+              ...(candidate.metadata ?? {}),
+              privateChatNoReply: true,
+            };
+            coworkStore.updateMessage(sessionId, candidate.id, { metadata });
+            if (emitToRenderer) {
+              emitToRenderer('cowork:stream:messageUpdate', {
+                sessionId,
+                messageId: candidate.id,
+                metadata,
+              });
+            }
+          }
+        }
         markProcessed(db, row.id, saveDb);
         return;
       }
