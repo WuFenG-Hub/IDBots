@@ -10,6 +10,8 @@ let getPrivateChatReplyDelayMs;
 let shouldKeepPrivateChatConversationClosedAfterBye;
 let shouldDisplayInboundPrivateChatWhileClosed;
 let shouldSkipPrivateChatAutoReplyText;
+let PRIVATE_CHAT_NO_REPLY_SENTINEL;
+let isPrivateChatNoReplySentinel;
 let hasNewerPrivateChatMessage;
 let evaluatePrivateChatAutoReplyPolicy;
 let hasPriorNonHandshakePrivateChatOutbound;
@@ -35,6 +37,8 @@ try {
     buildPrivateChatA2AChainMetadata,
     isPrivateChatHandshakePlaintext,
     shouldContinuePrivateChatInboundAfterOutgoingSync,
+    PRIVATE_CHAT_NO_REPLY_SENTINEL,
+    isPrivateChatNoReplySentinel,
   } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 } catch {
   ({
@@ -54,6 +58,8 @@ try {
     buildPrivateChatA2AChainMetadata,
     isPrivateChatHandshakePlaintext,
     shouldContinuePrivateChatInboundAfterOutgoingSync,
+    PRIVATE_CHAT_NO_REPLY_SENTINEL,
+    isPrivateChatNoReplySentinel,
   } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 }
 
@@ -390,6 +396,19 @@ test('private chat prompt includes recent A2A context and topic-ending policy', 
   assert.match(prompt, /leaks your internal state to the peer/i);
   assert.match(prompt, /Thinking\.\.\./);
   assert.match(prompt, /\.\.\.\./);
+  // Silence affordance (2026-09-15 BOT-009 silence ping-pong): silence is a
+  // protocol tag the host suppresses, never a prose announcement.
+  assert.match(prompt, /`\[NO_REPLY\]` and nothing else/);
+  assert.match(prompt, /Never announce silence/i);
+  assert.match(prompt, /endless exchange of "I am staying silent" notes/);
+  assert.equal(typeof PRIVATE_CHAT_NO_REPLY_SENTINEL, 'string');
+  assert.equal(typeof isPrivateChatNoReplySentinel, 'function');
+  assert.equal(isPrivateChatNoReplySentinel(PRIVATE_CHAT_NO_REPLY_SENTINEL), true);
+  assert.equal(shouldSkipPrivateChatAutoReplyText('[NO_REPLY]'), true);
+  assert.equal(shouldSkipPrivateChatAutoReplyText('  [no_reply].'), true);
+  // Extra prose is a real reply: never silently dropped.
+  assert.equal(shouldSkipPrivateChatAutoReplyText('[NO_REPLY] 好的，等我消息'), false);
+  assert.equal(isPrivateChatNoReplySentinel('[NO_REPLY] 好的，等我消息'), false);
   assert.match(prompt, /say exactly "bye"/i);
   assert.match(prompt, /30 turns/i);
   assert.match(prompt, /Peer Bot: 我们讨论一下比特币生态的索引器吧/);
