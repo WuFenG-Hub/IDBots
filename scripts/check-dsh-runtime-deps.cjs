@@ -22,12 +22,17 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const REMEDIATION =
   'Run: npm install --prefix dsh-runtime   (or: npm ci --prefix dsh-runtime for a clean reinstall)';
 const REMEDIATION_LOCK =
   'Regenerate with: npm install --prefix dsh-runtime   ' +
   '(never hand-edit the lockfile; commit dsh-runtime/package.json and package-lock.json in the SAME commit)';
+const REMEDIATION_PATCH =
+  'Run: node scripts/apply-dsh-kernel-patches.cjs   ' +
+  '(applies scripts/dsh-kernel-patches/*.patch to the installed kernel packages; ' +
+  'also runs automatically in the root postinstall)';
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -108,25 +113,35 @@ function checkDshRuntimeDeps(projectRoot) {
 function main() {
   const projectRoot = path.resolve(__dirname, '..');
   const { ok, problems, lockProblems } = checkDshRuntimeDeps(projectRoot);
-  if (ok) {
-    console.log('[PASS] dsh-runtime dependencies match package.json');
-    return;
-  }
-  if (lockProblems.length > 0) {
-    console.error('[FAIL] dsh-runtime/package-lock.json is out of sync with package.json:');
-    for (const problem of lockProblems) {
-      console.error(`  - ${problem}`);
+  if (!ok) {
+    if (lockProblems.length > 0) {
+      console.error('[FAIL] dsh-runtime/package-lock.json is out of sync with package.json:');
+      for (const problem of lockProblems) {
+        console.error(`  - ${problem}`);
+      }
+      console.error(REMEDIATION_LOCK);
     }
-    console.error(REMEDIATION_LOCK);
-  }
-  if (problems.length > 0) {
-    console.error('[FAIL] dsh-runtime/node_modules is stale or incomplete:');
-    for (const problem of problems) {
-      console.error(`  - ${problem}`);
+    if (problems.length > 0) {
+      console.error('[FAIL] dsh-runtime/node_modules is stale or incomplete:');
+      for (const problem of problems) {
+        console.error(`  - ${problem}`);
+      }
+      console.error(REMEDIATION);
     }
-    console.error(REMEDIATION);
+    process.exit(1);
   }
-  process.exit(1);
+  console.log('[PASS] dsh-runtime dependencies match package.json');
+
+  // Kernel patches are part of the install state: a node_modules refresh that
+  // skips them would ship the upstream defects the patches exist to fix.
+  const patches = spawnSync(process.execPath, [path.join(__dirname, 'apply-dsh-kernel-patches.cjs'), '--check'], {
+    stdio: 'inherit',
+  });
+  if (patches.status !== 0) {
+    console.error('[FAIL] dsh-runtime kernel patches are not applied:');
+    console.error(REMEDIATION_PATCH);
+    process.exit(1);
+  }
 }
 
 if (require.main === module) {

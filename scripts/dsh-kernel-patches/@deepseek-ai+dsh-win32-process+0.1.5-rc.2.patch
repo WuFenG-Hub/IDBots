@@ -1,0 +1,29 @@
+--- a/dsh-runtime/node_modules/@deepseek-ai/dsh-win32-process/lib/index.js
++++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-win32-process/lib/index.js
+@@ -395,7 +395,7 @@
+ 			hStdError: stdErr.write
+ 		});
+ 		processInfo = allocProcessInfo();
+-		if (createRestrictedProcess(api, options, buildCommandLine(options.command, options.args), 0, startupInfo, processInfo) === 0) throwWin32(api, "CreateProcessAsUserW", api.getLastError(), `command: ${options.command}, cwd: ${options.cwd}`);
++		if (createRestrictedProcess(api, options, buildCommandLine(options.command, options.args), 0x08000000, startupInfo, processInfo) === 0) throwWin32(api, "CreateProcessAsUserW", api.getLastError(), `command: ${options.command}, cwd: ${options.cwd}`);
+ 		const info = decodeProcessInfo(processInfo);
+ 		if (info.hProcess === null || info.hThread === null) {
+ 			if (info.hProcess !== null) api.terminateProcess(info.hProcess, 1);
+@@ -601,7 +601,7 @@
+ */
+ function spawnInheritedJobProcess(api, options) {
+ 	const commandLine = buildCommandLine(options.command, options.args);
+-	return spawnJobProcess(api, options, () => inheritedStandardHandles(api), "CreateProcessAsUserW", (startupInfo, processInfo) => createRestrictedProcess(api, options, commandLine, 4, startupInfo, processInfo));
++	return spawnJobProcess(api, options, () => inheritedStandardHandles(api), "CreateProcessAsUserW", (startupInfo, processInfo) => createRestrictedProcess(api, options, commandLine, 4 | 0x08000000, startupInfo, processInfo));
+ }
+ /**
+ * Spawn an ordinary process suspended, assign its Job, then resume it.
+@@ -612,7 +612,7 @@
+ function spawnCurrentTokenJobProcess(api, options) {
+ 	const commandLine = buildCommandLine(options.command, options.args);
+ 	const environment = encodeWindowsEnvironment(options.env);
+-	return spawnJobProcess(api, options, () => targetCarrierHandles(api, options.stdio), "CreateProcessW", (startupInfo, processInfo) => api.createProcessW(options.applicationName, commandLine, null, null, 1, 1028, environment, options.cwd, startupInfo, processInfo));
++	return spawnJobProcess(api, options, () => targetCarrierHandles(api, options.stdio), "CreateProcessW", (startupInfo, processInfo) => api.createProcessW(options.applicationName, commandLine, null, null, 1, 1028 | 0x08000000, environment, options.cwd, startupInfo, processInfo));
+ }
+ /**
+ * Verify that an unnamed kill-on-close Job can be created and released now.

@@ -87,6 +87,16 @@ function main() {
     );
   }
 
+  console.log('[upgrade:dsh] re-applying kernel patches ...');
+  const patches = spawnSync(process.execPath, [path.join(__dirname, 'apply-dsh-kernel-patches.cjs')], { stdio: 'inherit' });
+  if (patches.status !== 0) {
+    fail(
+      'kernel patch re-apply failed — the upgrade changed files a patch targets. ' +
+      'Rebase or drop the affected patch under scripts/dsh-kernel-patches/ (see its README.md), ' +
+      'then rerun this script.',
+    );
+  }
+
   console.log('[upgrade:dsh] running the deps gate ...');
   const gate = spawnSync(process.execPath, [path.join(__dirname, 'check-dsh-runtime-deps.cjs')], { stdio: 'inherit' });
   if (gate.status !== 0) {
