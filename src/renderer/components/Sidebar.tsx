@@ -728,6 +728,9 @@ const Sidebar: React.FC<SidebarProps> = ({
                 onToggleSessionSelected={handleToggleBatchSelected}
                 viewMode={taskRecordTab === 'local' ? sessionViewMode : undefined}
                 sortMode={taskRecordTab === 'local' ? sessionSortMode : undefined}
+                /** Online chats: the Bot selector is this list's only
+                 * selector, so it is switched on here — nothing else changes. */
+                botSelector={taskRecordTab === 'a2a'}
               />
             )}
           </div>
