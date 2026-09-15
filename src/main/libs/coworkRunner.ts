@@ -7595,7 +7595,27 @@ export class CoworkRunner extends EventEmitter {
         }).catch(() => undefined);
       }
       const recent = this.store.listSessions?.()?.[0];
-      const sessionRoute = recent?.id ? this.resolveSessionDshRoute(recent.id) : null;
+      // The warmed row is whatever listSessions() ranks first — and that is
+      // always a PINNED session (ORDER BY s.pinned DESC, activity_at DESC, ...).
+      // Its STORED model/provider can outlive the provider catalog: once the
+      // provider drops that model id (or the provider itself is disabled),
+      // resolveSessionDshRoute rethrows the `... provider selection is
+      // required.` ModelProviderSelectionError. Letting that escape voided the
+      // entire warmup even though the app-global default route was healthy, so
+      // every startup cold-started. Isolate the session resolution: a dead
+      // pinned route degrades to the default route (session route still wins
+      // whenever it does resolve).
+      let sessionRoute: ReturnType<typeof resolveDshProviderRoute> = null;
+      if (recent?.id) {
+        try {
+          sessionRoute = this.resolveSessionDshRoute(recent.id);
+        } catch (error) {
+          coworkLog('WARN', 'prewarmDshRuntime', 'Pinned session route did not resolve; warming the default route', {
+            sessionId: recent.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
       const defaultRoute = resolveDshProviderRoute();
       const route = (sessionRoute?.baseUrl && sessionRoute.apiKey) ? sessionRoute : defaultRoute;
       if (!route?.baseUrl || !route.apiKey) {
