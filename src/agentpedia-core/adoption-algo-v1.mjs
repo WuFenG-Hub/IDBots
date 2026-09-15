@@ -27,6 +27,25 @@ export const REP_DELTAS = {
   'ban-editor': -5,
 };
 
+// transfer-slug alias plate (errata C1): the alias is a KEY-level navigation
+// pointer — aliasOf[fromEntry] = bare slug of toEntry — rendered as `redirect` on
+// the source key only, never on the target key. The shared record is untouched, so
+// head/history/rev counts are unchanged and an alias never means "closed" (only the
+// explicit /rev redirect plate terminates a stream, by pinning head).
+//
+// This is the single switch for the C1 <-> C2 fallback: set it to false and
+// transfer-slug contributes no plate at all (C2) while the record alias still
+// applies; nothing else in the engine changes.
+const transferSlugAliasPlate = true;
+
+// bareSlug strips the "<lang>:" prefix off an entryKey, yielding the bare slug a
+// redirect plate carries ({to: <bare slug>}). Twin of the Go engine's bareSlug;
+// an entryKey without a colon has no slug.
+function bareSlug(entryKey) {
+  const i = entryKey.indexOf(':');
+  return i < 0 ? '' : entryKey.slice(i + 1);
+}
+
 // arbiter-draw-v1 (spec v0.1 §13.4): key = first 8 bytes (big-endian) of
 // sha256(seedPinId + editorGlobalMetaId); top-N keys join the arbiter set.
 export function arbiterDrawV1(seedPinId, candidates, n) {
@@ -80,6 +99,7 @@ export function replay(inputEvents, options = {}) {
   let founders = [];
   const editors = new Map(); // id -> {founder, registeredAt, registerH, stake, endorsements:Set, reputation, validRevs, suspensionUntil, revoked, banned, regChallengeH, pocH}
   const entries = new Map(); // entryKey -> view entry
+  const aliasOf = new Map(); // errata C1: entryKey -> bare slug it navigates to
   const graveyard = [];
   const challenges = new Map(); // challengePin -> {targetRev, challenger, entryKey}
   const proposals = new Map(); // proposalPin -> {...}
@@ -202,7 +222,15 @@ export function replay(inputEvents, options = {}) {
           const from = entries.get(p.params.fromEntry);
           if (from) {
             entries.set(p.params.toEntry, from);
-            from.redirect = { to: p.params.toEntry.split(':').slice(1).join(':') };
+            // Errata C1: record the alias as a KEY-level fact, not as a field of
+            // the shared record — a record-level field renders on every key that
+            // holds the record, including the target key, which produced the
+            // self-referential plate (zh:alpha -> "alpha"). Written here and only
+            // here: applyOutcome runs once per proposal (votes after the proposal
+            // leaves 'open' are graveyarded), so the plate is written once, at the
+            // instant the ruling turns effective, and never depends on Map order.
+            const slug = bareSlug(p.params.toEntry);
+            if (slug) aliasOf.set(p.params.fromEntry, slug);
           }
           break;
         }
@@ -586,6 +614,23 @@ export function replay(inputEvents, options = {}) {
 
   closeExpiredProposals((events[events.length - 1]?.height ?? 0) + 1);
 
+  // plateOf returns the redirect plate rendered on ONE entryKey: the errata-C1
+  // key-level alias plate when that key is the source of an effective
+  // transfer-slug ruling, otherwise the record's explicit /rev redirect plate
+  // (unchanged). A key that is neither renders none — which is why the target key
+  // of a transfer never shows a plate of its own.
+  //
+  // This is the projection half of the C1 switch: with transferSlugAliasPlate set
+  // to false the alias plate is never rendered (C2), and the explicit /rev plate
+  // is all that is left.
+  const plateOf = (key, en) => {
+    if (transferSlugAliasPlate) {
+      const to = aliasOf.get(key);
+      if (to) return { to };
+    }
+    return en.redirect;
+  };
+
   // ----- view -----
   const view = { entries: {}, graveyard, pending: [...pending], editors: {}, proposals: {}, params, founders };
   for (const [key, en] of entries.entries()) {
@@ -596,7 +641,7 @@ export function replay(inputEvents, options = {}) {
       history: [...en.history],
       disputed: [...en.disputed],
       contests: en.contests.map((c) => ({ ...c })),
-      redirect: en.redirect,
+      redirect: plateOf(key, en),
       frozenAt: en.frozenAt,
       baselineRev: en.baselineRev,
       versions: Object.fromEntries([...en.versions.entries()].map(([k, v]) => [k, { ...v }])),
