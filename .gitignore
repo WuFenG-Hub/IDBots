@@ -437,3 +437,4 @@ man_base_data_pebble/
 !tests/surfReadsService.test.mjs
 !tests/metaProtocolAgentTools.test.mjs
 !tests/a2aGuidanceFailureVisibility.test.mjs
+!tests/coworkSessionBrainProvider.test.ts

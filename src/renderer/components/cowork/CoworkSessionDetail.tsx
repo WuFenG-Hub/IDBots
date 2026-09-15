@@ -2768,6 +2768,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         name: result.metabot.name,
         avatar: result.metabot.avatar ?? null,
         llm_id: result.metabot.llm_id ?? null,
+        llm_provider: result.metabot.llm_provider ?? null,
+        llm_effort: result.metabot.llm_effort ?? null,
         globalmetaid: result.metabot.globalmetaid ?? null,
         metabot_type: result.metabot.metabot_type ?? 'worker',
       });
