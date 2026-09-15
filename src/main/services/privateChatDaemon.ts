@@ -801,6 +801,64 @@ export function shouldDisplayInboundPrivateChatWhileClosed(params: {
     && shouldKeepPrivateChatConversationClosedAfterBye(params);
 }
 
+/** How many recent messages a closed-conversation reopen scan inspects. */
+const PRIVATE_CHAT_CLOSED_REOPEN_SCAN_MESSAGES = 200;
+
+/**
+ * A bye only means "stop auto-replying"; it is not a one-way mute. When the
+ * LOCAL MetaBot has itself sent an outbound private message to this peer after
+ * the bye (a scheduled report, a manual send from the Bot Browser, a
+ * bot-initiated turn), the conversation is demonstrably live again on our side
+ * — keeping the flag set then swallows the peer's reply silently, which is the
+ * reported "只入库不回复" defect.
+ */
+export function shouldReopenClosedPrivateChatForLocalOutbound(params: {
+  mappingMeta: Record<string, unknown>;
+  /** Newest local outbound turn in the mapped session (ms, local clock). */
+  lastLocalOutboundAt?: number | null;
+}): boolean {
+  if (params.mappingMeta.byeSent !== true) return false;
+  const endedAt = typeof params.mappingMeta.endedAt === 'number' && Number.isFinite(params.mappingMeta.endedAt)
+    ? params.mappingMeta.endedAt
+    : 0;
+  // No recorded bye time: keep the existing (permanent) closed semantics rather
+  // than guessing that this conversation was re-engaged.
+  if (!endedAt) return false;
+  const lastOutboundAt = typeof params.lastLocalOutboundAt === 'number' && Number.isFinite(params.lastLocalOutboundAt)
+    ? params.lastLocalOutboundAt
+    : 0;
+  return lastOutboundAt > endedAt;
+}
+
+/**
+ * Newest local outbound turn in a private A2A session, ignoring what the bye
+ * itself leaves behind: the end-marker bubble (`a2aConversationEnded`, whose
+ * created_at is a millisecond AFTER `endedAt`) and the end system notice. Both
+ * would otherwise look like a local re-engagement the instant the conversation
+ * was closed.
+ */
+function findLastLocalOutboundPrivateChatAt(
+  coworkStore: Pick<CoworkStore, 'getSessionView'>,
+  sessionId: string
+): number | null {
+  const trimmedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!trimmedSessionId) return null;
+  const view = coworkStore.getSessionView(trimmedSessionId, PRIVATE_CHAT_CLOSED_REOPEN_SCAN_MESSAGES);
+  let latest: number | null = null;
+  for (const message of view?.messages ?? []) {
+    if (message.type !== 'assistant') continue;
+    const metadata = message.metadata ?? {};
+    if (metadata.sourceChannel !== 'metaweb_private') continue;
+    if (metadata.direction !== 'outgoing') continue;
+    if (metadata.a2aConversationEnded === true) continue;
+    if (metadata.a2aConversationEndSystemNotice === true) continue;
+    const at = typeof message.timestamp === 'number' && Number.isFinite(message.timestamp) ? message.timestamp : 0;
+    if (at <= 0) continue;
+    if (latest === null || at > latest) latest = at;
+  }
+  return latest;
+}
+
 export function resolveSellerOrderOutputType(input: {
   plaintext: string;
   serviceId?: string | null;
@@ -4556,7 +4614,22 @@ async function processOne(
 
     const mappingMeta = parseConversationMappingMetadata(existingMapping?.metadataJson);
     if (mappingMeta.byeSent === true) {
-      if (shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, reopenGapMs: metabot.a2a_bye_cooldown_ms ?? undefined })) {
+      // The local side may have re-engaged this peer after the bye; a bye only
+      // suppresses the auto-reply, it must not mute a conversation we are
+      // ourselves still writing to.
+      if (shouldReopenClosedPrivateChatForLocalOutbound({
+        mappingMeta,
+        lastLocalOutboundAt: findLastLocalOutboundPrivateChatAt(coworkStore, mappedSessionId),
+      })) {
+        coworkStore.updateConversationMappingMetadata('metaweb_private', externalConversationId, metabot.id, {
+          ...mappingMeta,
+          byeSent: false,
+          endedByHuman: false,
+          endedByAutoPolicy: false,
+          restartedAt: Date.now(),
+        });
+        emitLog(`[PrivateChat] Reopened closed private chat ${externalConversationId.slice(0, 30)}…: the local side re-engaged the peer after the bye.`);
+      } else if (shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, reopenGapMs: metabot.a2a_bye_cooldown_ms ?? undefined })) {
         const { sessionId } = await resolvePrivateConversationSession(
           coworkStore,
           metabot.id,

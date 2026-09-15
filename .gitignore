@@ -438,3 +438,6 @@ man_base_data_pebble/
 !tests/metaProtocolAgentTools.test.mjs
 !tests/a2aGuidanceFailureVisibility.test.mjs
 !tests/coworkSessionBrainProvider.test.ts
+
+# bye-closed private chat reopen regression (local-re-engagement)
+!tests/privateChatClosedReopen.test.mjs
