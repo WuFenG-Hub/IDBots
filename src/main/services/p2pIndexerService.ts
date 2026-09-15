@@ -443,6 +443,15 @@ export function resolveMainConfigPath(): string {
   return preferred;
 }
 
+/**
+ * The generated runtime config embeds the whole resolved man-p2p config,
+ * including plaintext third-party RPC credentials, so it must stay owner-only —
+ * the same convention the sibling `identity.key` follows. Without an explicit
+ * mode, `fs.writeFileSync` falls back to `0o666 & ~umask` (0644 under the usual
+ * umask), which is wider than the credential-free files beside it.
+ */
+const RUNTIME_CONFIG_FILE_MODE = 0o600;
+
 export function resolveRuntimeConfigPath(
   mainConfigPath: string,
   dataDir: string,
@@ -467,7 +476,13 @@ export function resolveRuntimeConfigPath(
   }
 
   fs.mkdirSync(path.dirname(runtimeConfigPath), { recursive: true });
-  fs.writeFileSync(runtimeConfigPath, runtimeConfig, 'utf8');
+  fs.writeFileSync(runtimeConfigPath, runtimeConfig, {
+    encoding: 'utf8',
+    mode: RUNTIME_CONFIG_FILE_MODE,
+  });
+  // `mode` only takes effect when the file is created, so tighten runtime configs
+  // that earlier versions already wrote world-readable.
+  fs.chmodSync(runtimeConfigPath, RUNTIME_CONFIG_FILE_MODE);
   return runtimeConfigPath;
 }
 

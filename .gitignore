@@ -97,6 +97,7 @@ tests/*
 !tests/promptComposer.test.mjs
 !tests/cognitiveGroupChatPrompt.test.mjs
 !tests/p2pIndexerServiceRecovery.test.mjs
+!tests/p2pRuntimeConfigMode.test.mjs
 !tests/chatSkillAuthorization.test.mjs
 !tests/orchestratorCoworkBridgeSkillIds.test.mjs
 !tests/groupChatAllowChatSkillsRuntime.test.mjs
