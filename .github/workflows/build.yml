@@ -73,6 +73,14 @@ jobs:
         working-directory: dsh-runtime
         run: npm ci
 
+      # npm ci above reinstalls dsh-runtime/node_modules from scratch, wiping
+      # the kernel patches the root postinstall applied. Re-apply AFTER the
+      # last dsh-runtime install step: without this the packaged app silently
+      # ships the unpatched kernel (v0.9.3 regression — the shipped Windows
+      # exe still flashed a bash.exe console window while CI stayed green).
+      - name: Apply DSH kernel patches
+        run: node scripts/apply-dsh-kernel-patches.cjs
+
       - name: Build renderer (Vite)
         run: npm run build
 
@@ -83,7 +91,12 @@ jobs:
         run: node --test tests/llmSafeText.test.mjs
 
       - name: Validate runtime dependency contracts
-        run: node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs
+        run: |
+          node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs
+          # Depth defense: prove the kernel patches survived every install
+          # step above (they live in gitignored node_modules, so nothing else
+          # would catch a step that reinstalls dsh-runtime after the apply).
+          node scripts/apply-dsh-kernel-patches.cjs --check
 
       # Static source-contract tests for the workspace-instructions line
       # (AGENTS.md/CLAUDE.md injection + git branch chip). Pure file-read +
@@ -254,6 +267,28 @@ jobs:
             exit 1
           }
           & $signTool verify /pa /all $installer.FullName
+
+      # Product-level guard: verify the SHIPPED file carries the kernel patch.
+      # extraResources lands verbatim in win-unpacked, so this checks exactly
+      # what users install. Fingerprint = the three CREATE_NO_WINDOW flags the
+      # dsh-win32-process patch adds; update this step together with
+      # scripts/dsh-kernel-patches/@deepseek-ai+dsh-win32-process* when the
+      # patch is rebased.
+      - name: Verify DSH kernel patch in packaged app (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $f = 'release\win-unpacked\resources\dsh-runtime\node_modules\@deepseek-ai\dsh-win32-process\lib\index.js'
+          if (-not (Test-Path $f)) {
+            Write-Error "Packaged kernel file missing: $f"
+            exit 1
+          }
+          $count = (Select-String -Path $f -Pattern '0x08000000' -AllMatches | ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
+          if ($count -ne 3) {
+            Write-Error "Kernel patch NOT in the packaged app (found $count of 3 CREATE_NO_WINDOW flags in dsh-win32-process). The pipeline dropped scripts/dsh-kernel-patches — do not ship."
+            exit 1
+          }
+          Write-Host "Kernel patch verified in packaged app ($count/3 CREATE_NO_WINDOW flags)."
 
       - name: Notarize app (macOS)
         if: runner.os == 'macOS'
