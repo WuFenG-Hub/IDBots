@@ -20,7 +20,7 @@ node --test tests/agentpediaReplayVectors.test.mjs
 npm run test:agentpedia
 ```
 
-Expected: 39/39 pass (25 pipeline + 12 supplementary + 2 structural). The headline
+Expected: 45/45 pass (25 pipeline + 18 supplementary + 2 structural). The headline
 assertion is the 25/25 compatibility statement required by spec v0.1.6 §2.
 
 ## Source of truth
