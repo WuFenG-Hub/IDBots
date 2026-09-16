@@ -51,6 +51,8 @@ docs/*
 !docs/gasfee-flow/**
 !docs/analysis/
 !docs/analysis/**
+!docs/tickets/
+!docs/tickets/**
 tests/*
 !tests/mvcSponsorCircuitBreaker.test.mjs
 !tests/groupTaskChatMode.test.mjs
