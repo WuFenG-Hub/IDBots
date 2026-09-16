@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 let startPrivateChatDaemon;
 let stopPrivateChatDaemon;
 let buildPrivateChatA2AWakeNotice;
+let buildPrivateChatA2ASystemPrompt;
 let nextPrivateChatA2AWakeAt;
 let setPrivateChatA2AWakeDelaysForTests;
 let PRIVATE_CHAT_A2A_DEFAULT_WAKE_DELAYS_MS;
@@ -13,6 +14,7 @@ try {
     startPrivateChatDaemon,
     stopPrivateChatDaemon,
     buildPrivateChatA2AWakeNotice,
+    buildPrivateChatA2ASystemPrompt,
     nextPrivateChatA2AWakeAt,
     setPrivateChatA2AWakeDelaysForTests,
     PRIVATE_CHAT_A2A_DEFAULT_WAKE_DELAYS_MS,
@@ -22,11 +24,29 @@ try {
     startPrivateChatDaemon,
     stopPrivateChatDaemon,
     buildPrivateChatA2AWakeNotice,
+    buildPrivateChatA2ASystemPrompt,
     nextPrivateChatA2AWakeAt,
     setPrivateChatA2AWakeDelaysForTests,
     PRIVATE_CHAT_A2A_DEFAULT_WAKE_DELAYS_MS,
   } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 }
+
+test('A2A system prompt forbids silence while a deferred answer is owed', () => {
+  const prompt = buildPrivateChatA2ASystemPrompt({
+    metabot: { name: 'Local Bot' },
+    analysis: {
+      contextMessages: [],
+      incomingTurnCount: 1,
+      shouldForceBye: false,
+    },
+  });
+  assert.ok(
+    prompt.includes('check what YOU still owe the peer'),
+    'the owed-reply check should precede the silence decision in every A2A turn prompt'
+  );
+  assert.ok(prompt.includes('leaves both sides waiting forever'));
+  assert.ok(prompt.includes('needs no answer AND you owe the peer nothing'));
+});
 
 test('wake notice explains the timer, the owed-reply option, and the exits', () => {
   const notice = buildPrivateChatA2AWakeNotice(2);
