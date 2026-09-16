@@ -27,6 +27,18 @@ const PEBBLE_DIR_NAME = 'man_base_data_pebble';
 const EXPECTED_MODE = 0o600;
 const WIDE_MODE = 0o644;
 
+/**
+ * File modes are a POSIX concept: on Windows `fs.statSync().mode` does not
+ * reflect `chmod` at all (a plain file reports 0o666), so every assertion in
+ * this file — including the self-control — is unobservable there. The shipped
+ * fix still runs on Windows (its chmod is simply a no-op), so skipping the
+ * whole file keeps it wired into the release gate on POSIX without turning
+ * Windows CI red on an assertion the platform cannot express.
+ */
+const skipOnWindows = process.platform === 'win32'
+  ? 'POSIX file modes are not observable on Windows'
+  : false;
+
 function patchElectron() {
   const originalLoad = Module._load;
   Module._load = function patchedModuleLoad(request, parent, isMain) {
@@ -94,7 +106,7 @@ function writeBaseConfig(baseConfigPath, dirValue) {
   return baseConfig;
 }
 
-test('control: the mode assertion can observe a 0644 file (assertion is not vacuous)', () => {
+test('control: the mode assertion can observe a 0644 file (assertion is not vacuous)', { skip: skipOnWindows }, () => {
   // Self-control for the assertion machinery: if a plain writeFileSync under
   // umask 0022 were to already report 0600, the regression tests below would not
   // prove anything.
@@ -106,7 +118,7 @@ test('control: the mode assertion can observe a 0644 file (assertion is not vacu
   });
 });
 
-test('resolveRuntimeConfigPath writes a freshly generated man-p2p runtime config with mode 0600', () => {
+test('resolveRuntimeConfigPath writes a freshly generated man-p2p runtime config with mode 0600', { skip: skipOnWindows }, () => {
   const { resolveRuntimeConfigPath } = loadService();
   withFixedUmask(() => {
     const { dataDir, baseConfigPath } = makeRoot();
@@ -125,7 +137,7 @@ test('resolveRuntimeConfigPath writes a freshly generated man-p2p runtime config
   });
 });
 
-test('resolveRuntimeConfigPath tightens a pre-existing world-readable runtime config to 0600', () => {
+test('resolveRuntimeConfigPath tightens a pre-existing world-readable runtime config to 0600', { skip: skipOnWindows }, () => {
   const { resolveRuntimeConfigPath } = loadService();
   withFixedUmask(() => {
     const { dataDir, baseConfigPath } = makeRoot();
@@ -144,7 +156,7 @@ test('resolveRuntimeConfigPath tightens a pre-existing world-readable runtime co
   });
 });
 
-test('resolveRuntimeConfigPath leaves the user-provided base config untouched when no runtime override is needed', () => {
+test('resolveRuntimeConfigPath leaves the user-provided base config untouched when no runtime override is needed', { skip: skipOnWindows }, () => {
   const { resolveRuntimeConfigPath } = loadService();
   withFixedUmask(() => {
     const { dataDir, baseConfigPath } = makeRoot();
