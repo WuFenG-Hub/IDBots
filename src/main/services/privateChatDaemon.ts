@@ -1094,6 +1094,24 @@ export function isPrivateChatNoReplySentinel(value: unknown): boolean {
   return normalized === PRIVATE_CHAT_NO_REPLY_SENTINEL.toLowerCase();
 }
 
+/**
+ * Host notice appended to the system prompt when an A2A reply turn is re-run
+ * because the previous attempt completed WITHOUT any final reply text — the
+ * 2026-09-16 stall: opencode/DeepSeek turns completed normally with the whole
+ * answer drafted inside the reasoning block and no final text message, and the
+ * silent markProcessed of that empty reply stranded the peer forever.
+ */
+export function buildPrivateChatEmptyReplyRetryNotice(attempt: number): string {
+  const safeAttempt = Number.isFinite(attempt) && attempt > 0 ? Math.floor(attempt) : 1;
+  return [
+    `## Host Retry Notice (attempt ${safeAttempt} for the latest peer message)`,
+    'Your previous turn for the latest peer message ended with no final reply text — for example a reasoning-only completion where the whole answer stayed inside the thinking block.',
+    'The host delivers ONLY your final text message to the peer; reasoning content is never delivered. An empty turn is not a valid outcome.',
+    'Answer the latest peer message again now and make sure the reply is emitted as a regular final text message outside any thinking block.',
+    'If you genuinely have nothing to deliver, reply with exactly `[NO_REPLY]`.',
+  ].join('\n');
+}
+
 export function shouldSkipPrivateChatAutoReplyText(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   if (!normalized) return true;
@@ -4968,6 +4986,13 @@ async function processOne(
         })
       : '';
     const systemPromptWithExperience = experienceContext ? `${systemPrompt}\n\n${experienceContext}` : systemPrompt;
+    // A re-run of this row (after an empty-reply retry or a retriable skill-turn
+    // error) carries an explicit host notice so the model knows why it is being
+    // asked again and what a valid completion looks like.
+    const emptyReplyRetryAttempt = privateChatSkillTurnRetries.get(taskKey)?.attempts ?? 0;
+    const systemPromptForTurn = emptyReplyRetryAttempt > 0
+      ? `${systemPromptWithExperience}\n\n${buildPrivateChatEmptyReplyRetryNotice(emptyReplyRetryAttempt)}`
+      : systemPromptWithExperience;
     let reply = '';
     let trimmed = '';
     let skillAssistantMessageId: string | null = null;
@@ -4986,7 +5011,7 @@ async function processOne(
         } else if (canRunChatSkills && runPrivateChatSkillTurn) {
           const skillTurnResult = await runPrivateChatSkillTurn({
             sessionId,
-            systemPrompt: systemPromptWithExperience,
+            systemPrompt: systemPromptForTurn,
             userMessage: plaintext,
             metabotId: metabot.id,
             activeSkillIds: chatSkillsRouting.activeSkillIds,
@@ -4996,7 +5021,7 @@ async function processOne(
           skillAssistantMessageId = skillTurnResult.assistantMessageId ?? null;
         } else {
           await waitBeforePrivateChatReply(conversationAnalysis.incomingTurnCount);
-          reply = await performChat(systemPromptWithExperience, plaintext, llmId, {
+          reply = await performChat(systemPromptForTurn, plaintext, llmId, {
             signal: guidanceTurn.abortController.signal,
             llmProvider: brain.llmProvider,
             fallbackLlmId,
@@ -5051,9 +5076,64 @@ async function processOne(
 
       trimmed = (reply ?? '').trim();
       if (!trimmed) {
+        // The turn COMPLETED but produced no deliverable text. Observed shape
+        // (2026-09-16 stall): the model drafts the whole answer inside its
+        // reasoning block, the stream ends without a final text message, and
+        // the kernel reports a normal completion — extractFinalAssistantReply
+        // correctly refuses thinking content, so the reply comes back empty.
+        // Silently marking the row processed here stranded the peer forever;
+        // retry with an explicit protocol notice instead (same bounded backoff
+        // as skill-turn failures).
+        const previous = privateChatSkillTurnRetries.get(taskKey);
+        const attempts = (previous?.attempts ?? 0) + 1;
+        if (attempts < PRIVATE_CHAT_SKILL_TURN_MAX_ATTEMPTS) {
+          const nextRetryAt = nextSkillTurnRetryAt(attempts);
+          privateChatSkillTurnRetries.set(taskKey, { attempts, nextRetryAt });
+          const waitMs = Math.max(0, nextRetryAt - Date.now());
+          emitLog(
+            `[PrivateChat] Turn for message ${row.id} completed without final reply text (reasoning-only completion); ` +
+            `keeping the message unprocessed to retry with a protocol notice ` +
+            `(attempt ${attempts}/${PRIVATE_CHAT_SKILL_TURN_MAX_ATTEMPTS}, next retry in ${waitMs}ms).`
+          );
+          appendPrivateChatA2AMessage({
+            coworkStore,
+            sessionId,
+            externalConversationId,
+            type: 'assistant',
+            content: `[Host] Previous turn ended with no final reply text (reasoning only). Re-running with a protocol notice (attempt ${attempts + 1}/${PRIVATE_CHAT_SKILL_TURN_MAX_ATTEMPTS} in ${Math.round(waitMs / 1000)}s).`,
+            extraMetadata: {
+              isThinking: true,
+              isStreaming: false,
+              isFinal: true,
+              privateChatReplyRetryNotice: true,
+            },
+            emitToRenderer,
+          });
+          return;
+        }
+        privateChatSkillTurnRetries.delete(taskKey);
+        emitLog(
+          `[PrivateChat] Turn for message ${row.id} still produced no final reply text after ` +
+          `${PRIVATE_CHAT_SKILL_TURN_MAX_ATTEMPTS} attempts; marking processed — the peer message will go unanswered.`
+        );
+        appendPrivateChatA2AMessage({
+          coworkStore,
+          sessionId,
+          externalConversationId,
+          type: 'assistant',
+          content: `[Host] Turn ended with no final reply text after ${PRIVATE_CHAT_SKILL_TURN_MAX_ATTEMPTS} attempts; the message was marked processed without a reply.`,
+          extraMetadata: {
+            isThinking: true,
+            isStreaming: false,
+            isFinal: true,
+            privateChatReplyRetryNotice: true,
+          },
+          emitToRenderer,
+        });
         markProcessed(db, row.id, saveDb);
         return;
       }
+      privateChatSkillTurnRetries.delete(taskKey);
       if (isPrivateChatNoReplySentinel(trimmed)) {
         emitLog(
           `[PrivateChat] Bot chose silence for message ${row.id} (${PRIVATE_CHAT_NO_REPLY_SENTINEL}); delivering nothing to ${fromGlobalMetaId.slice(0, 12)}…`

@@ -424,6 +424,7 @@ man_base_data_pebble/
 /output/
 !tests/privateChatCompletedTurnPickup.test.mjs
 !tests/privateChatNoReplySentinel.test.mjs
+!tests/privateChatEmptyReplyRetry.test.mjs
 !tests/dshShutdownSoftFail.test.mjs
 !tests/metawebSurfStore.test.mjs
 !tests/surfBriefing.test.mjs
