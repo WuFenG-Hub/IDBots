@@ -182,6 +182,10 @@ const coworkSlice = createSlice({
             state.sessions[sessionIndex] = {
               ...state.sessions[sessionIndex],
               ...summary,
+              // The full-session payload carries the raw last-activity
+              // updated_at; merging it would reorder the row on every open or
+              // profile refresh, so the list keeps its own sort anchor.
+              updatedAt: state.sessions[sessionIndex].updatedAt,
             };
           } else {
             state.sessions.unshift(summary);
@@ -243,6 +247,9 @@ const coworkSlice = createSlice({
       }
     },
 
+    // Status flips (running/waiting/completed) repaint the row's status dot but
+    // never reorder the list: the sort anchor is the last user-side input, so
+    // parallel streaming sessions stay put while their turns run.
     updateSessionStatus(state, action: PayloadAction<{ sessionId: string; status: CoworkSessionStatus }>) {
       const { sessionId, status } = action.payload;
 
@@ -250,13 +257,11 @@ const coworkSlice = createSlice({
       const sessionIndex = state.sessions.findIndex(s => s.id === sessionId);
       if (sessionIndex !== -1) {
         state.sessions[sessionIndex].status = status;
-        state.sessions[sessionIndex].updatedAt = Date.now();
       }
 
       // Update current session if applicable
       if (state.currentSession?.id === sessionId) {
         state.currentSession.status = status;
-        state.currentSession.updatedAt = Date.now();
         // Streaming state is tied to the currently opened session only
         state.isStreaming = status === 'running';
       }
@@ -280,18 +285,26 @@ const coworkSlice = createSlice({
 
     addMessage(state, action: PayloadAction<{ sessionId: string; message: CoworkMessage }>) {
       const { sessionId, message } = action.payload;
+      // Only user-side input (typed by the user or injected by orchestration —
+      // both land as type 'user') moves a session's sort anchor. Assistant /
+      // tool / system stream traffic must not reshuffle the sidebar while
+      // several sessions run in parallel. Mirrors the SQL in
+      // coworkStore.listSessions, which ranks by the last type='user' message.
+      const isUserTurn = message.type === 'user';
 
       if (state.currentSession?.id === sessionId) {
         const exists = state.currentSession.messages.some((item) => item.id === message.id);
         if (!exists) {
           state.currentSession.messages.push(message);
-          state.currentSession.updatedAt = message.timestamp;
+          if (isUserTurn) {
+            state.currentSession.updatedAt = message.timestamp;
+          }
         }
       }
 
       // Update session in list
       const sessionIndex = state.sessions.findIndex(s => s.id === sessionId);
-      if (sessionIndex !== -1) {
+      if (sessionIndex !== -1 && isUserTurn) {
         state.sessions[sessionIndex].updatedAt = message.timestamp;
       }
 
@@ -370,11 +383,9 @@ const coworkSlice = createSlice({
       const sessionIndex = state.sessions.findIndex(s => s.id === sessionId);
       if (sessionIndex !== -1) {
         state.sessions[sessionIndex].title = title;
-        state.sessions[sessionIndex].updatedAt = Date.now();
       }
       if (state.currentSession?.id === sessionId) {
         state.currentSession.title = title;
-        state.currentSession.updatedAt = Date.now();
       }
     },
 
