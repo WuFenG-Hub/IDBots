@@ -8,7 +8,7 @@ vectors, view parity with the MetaSo implementation).
 ## Layout
 
 - `adoption-algo-v1.mjs` — one-pass deterministic replay: `replay(events, options) -> view`.
-- `replay-vectors.v1.json` — 25 pipeline vectors + 6 supplementary boundary vectors,
+- `replay-vectors.v1.json` — 25 pipeline vectors + 18 supplementary boundary vectors (43 total),
   each event stream fully explicit, each vector tagged with its on-chain source pin.
 - `tests/agentpediaReplayVectors.test.mjs` (repo `tests/`) — mechanical harness.
 
