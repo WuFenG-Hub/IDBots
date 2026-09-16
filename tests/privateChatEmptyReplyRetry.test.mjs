@@ -5,17 +5,20 @@ import crypto from 'node:crypto';
 let startPrivateChatDaemon;
 let stopPrivateChatDaemon;
 let buildPrivateChatEmptyReplyRetryNotice;
+let buildPrivateChatA2ASystemPrompt;
 try {
   ({
     startPrivateChatDaemon,
     stopPrivateChatDaemon,
     buildPrivateChatEmptyReplyRetryNotice,
+    buildPrivateChatA2ASystemPrompt,
   } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 } catch {
   ({
     startPrivateChatDaemon,
     stopPrivateChatDaemon,
     buildPrivateChatEmptyReplyRetryNotice,
+    buildPrivateChatA2ASystemPrompt,
   } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 }
 
@@ -26,6 +29,22 @@ test('empty-reply retry notice names the attempt, the deliverable shape, and the
   assert.ok(notice.includes('[NO_REPLY]'), 'notice should offer the sentinel as the legal silent exit');
   // Degenerate attempt numbers fall back to 1 instead of leaking NaN.
   assert.ok(buildPrivateChatEmptyReplyRetryNotice(Number.NaN).includes('attempt 1'));
+});
+
+test('A2A system prompt requires the final reply outside any thinking block', () => {
+  const prompt = buildPrivateChatA2ASystemPrompt({
+    metabot: { name: 'Local Bot' },
+    analysis: {
+      contextMessages: [],
+      incomingTurnCount: 1,
+      shouldForceBye: false,
+    },
+  });
+  assert.ok(
+    prompt.includes('MUST be a regular text message outside any thinking/reasoning block'),
+    'standing protocol rule should be present in every A2A turn prompt'
+  );
+  assert.ok(prompt.includes('reasoning content is never sent to the peer'));
 });
 
 const TEST_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
