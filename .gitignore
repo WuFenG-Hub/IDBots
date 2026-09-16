@@ -74,6 +74,7 @@ tests/*
 !tests/coworkTranscriptExport.test.mjs
 !tests/coworkSessionGoal.test.mjs
 !tests/coworkSessionGtCloseStatus.test.mjs
+!tests/coworkSessionSortAnchor.test.ts
 !tests/coworkDshSessionTypes.test.mjs
 !tests/coworkDshStallWatchdog.test.mjs
 !tests/coworkDshDeletePolicy.test.mjs
