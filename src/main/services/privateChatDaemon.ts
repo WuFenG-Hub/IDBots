@@ -266,6 +266,182 @@ const privateChatSkillTurnRetries = new Map<string, { attempts: number; nextRetr
 const PRIVATE_CHAT_BUSY_DEFER_MAX_MS = 45 * 60_000;
 const privateChatBusyDeferredSince = new Map<string, number>();
 
+/**
+ * Bounded host wake for silent-but-open A2A conversations (2026-09-16 deadlock
+ * shape: the local bot promised a deferred answer, the peer's follow-ups were
+ * hold/ack messages the model answered with [NO_REPLY], and — because the
+ * daemon only reacts to NEW inbound messages — both sides then waited
+ * forever). Whenever a turn in an established, not-bye'd conversation ends
+ * without delivering anything (sentinel or empty give-up), the daemon arms a
+ * timer that re-drives the same inbound row as a wake turn: the model gets a
+ * host wake notice and re-decides (deliver the owed answer / close with bye /
+ * stay silent). All intent judgment stays in the LLM; the host only schedules
+ * on verifiable facts (nothing was delivered, conversation open).
+ */
+interface PrivateChatA2AWakeEntry {
+  rowId: number;
+  sessionId: string;
+  metabotId: number;
+  externalConversationId: string;
+  fromGlobalMetaId: string | null;
+  fromMetaId: string | null;
+  toGlobalMetaId: string | null;
+  toMetaId: string | null;
+  /** Wake turns already fired for this conversation. */
+  fires: number;
+  fireAt: number;
+  /** True while the re-driven row is being processed as a wake turn. */
+  running: boolean;
+}
+const privateChatA2AWakes = new Map<string, PrivateChatA2AWakeEntry>();
+/** Wake schedule (delay before fire N+1); length bounds the total fires. */
+export const PRIVATE_CHAT_A2A_DEFAULT_WAKE_DELAYS_MS: readonly number[] = [15 * 60_000, 2 * 60 * 60_000, 12 * 60 * 60_000];
+let privateChatA2AWakeDelaysMs: readonly number[] = PRIVATE_CHAT_A2A_DEFAULT_WAKE_DELAYS_MS;
+
+/**
+ * Next wake fire timestamp after `fires` wakes have already fired, or null
+ * when the wake budget is exhausted.
+ */
+export function nextPrivateChatA2AWakeAt(fires: number, now: number = Date.now()): number | null {
+  const safeFires = Number.isFinite(fires) && fires >= 0 ? Math.floor(fires) : 0;
+  if (safeFires >= privateChatA2AWakeDelaysMs.length) return null;
+  return now + Math.max(1, privateChatA2AWakeDelaysMs[safeFires] ?? 1);
+}
+
+/** Test seam: shrink the wake schedule so daemon-level tests can observe fires. */
+export function setPrivateChatA2AWakeDelaysForTests(delays: readonly number[]): void {
+  privateChatA2AWakeDelaysMs = delays.filter((delay) => Number.isFinite(delay) && delay > 0);
+}
+
+/** Host notice appended to the system prompt of a wake turn. */
+export function buildPrivateChatA2AWakeNotice(fire: number): string {
+  const safeFire = Number.isFinite(fire) && fire > 0 ? Math.floor(fire) : 1;
+  return [
+    `## Host Wake Check ${safeFire} (host timer — no new peer message arrived)`,
+    'Your previous turn for the peer\'s latest message ended WITHOUT delivering anything, and the conversation is still open. The host woke you on a timer because it only runs you again when a NEW peer message arrives — if both sides now wait, the conversation deadlocks.',
+    'Decide again for the conversation tail:',
+    '- If you owe the peer an answer you promised or deferred earlier (for example you said you would verify something and reply later), deliver it now as your final text.',
+    '- If the conversation has nothing left to produce, close it politely by replying exactly "bye".',
+    '- Reply `[NO_REPLY]` only if you genuinely owe nothing and the conversation should stay open awaiting the peer.',
+  ].join('\n');
+}
+
+function armPrivateChatA2AWake(params: {
+  row: PrivateChatMessageRow;
+  sessionId: string;
+  metabotId: number;
+  externalConversationId: string;
+  fires: number;
+  emitLog: (msg: string) => void;
+}): void {
+  const fireAt = nextPrivateChatA2AWakeAt(params.fires);
+  if (fireAt == null) {
+    privateChatA2AWakes.delete(params.row.pin_id);
+    params.emitLog(
+      `[PrivateChat] Wake budget exhausted for ${params.externalConversationId.slice(0, 30)}…; ` +
+      `the silent conversation tail will stay as-is.`
+    );
+    return;
+  }
+  const waitMs = Math.max(0, fireAt - Date.now());
+  privateChatA2AWakes.set(params.row.pin_id, {
+    rowId: params.row.id,
+    sessionId: params.sessionId,
+    metabotId: params.metabotId,
+    externalConversationId: params.externalConversationId,
+    fromGlobalMetaId: params.row.from_global_metaid,
+    fromMetaId: params.row.from_metaid,
+    toGlobalMetaId: params.row.to_global_metaid,
+    toMetaId: params.row.to_metaid,
+    fires: params.fires,
+    fireAt,
+    running: false,
+  });
+  params.emitLog(
+    `[PrivateChat] Wake ${params.fires + 1} scheduled in ${Math.round(waitMs / 1000)}s for the silent open ` +
+    `conversation ${params.externalConversationId.slice(0, 30)}… (message ${params.row.id}).`
+  );
+}
+
+function cancelPrivateChatA2AWakesForConversation(
+  externalConversationId: string,
+  reason: string,
+  emitLog?: (msg: string) => void,
+): void {
+  for (const [taskKey, wake] of privateChatA2AWakes) {
+    if (wake.externalConversationId !== externalConversationId) continue;
+    privateChatA2AWakes.delete(taskKey);
+  }
+  emitLog?.(`[PrivateChat] Cancelled pending wake for ${externalConversationId.slice(0, 30)}… (${reason}).`);
+}
+
+/** Fire due wakes: re-drive their inbound row and let the poll pick it up. */
+function fireDuePrivateChatA2AWakes(deps: {
+  db: Pick<Database, 'exec' | 'run'>;
+  saveDb: SaveDbFn;
+  coworkStore: Pick<CoworkStore, 'getConversationMapping' | 'getSessionWithoutMessages' | 'addMessage' | 'updateSession'>;
+  emitLog: (msg: string) => void;
+  emitToRenderer?: (channel: string, data: unknown) => void;
+}): void {
+  const now = Date.now();
+  for (const [taskKey, wake] of [...privateChatA2AWakes]) {
+    if (wake.running || wake.fireAt > now) continue;
+    privateChatA2AWakes.delete(taskKey);
+
+    const mapping = deps.coworkStore.getConversationMapping(
+      'metaweb_private',
+      wake.externalConversationId,
+      wake.metabotId,
+    );
+    if (parseConversationMappingMetadata(mapping?.metadataJson).byeSent === true) {
+      deps.emitLog(`[PrivateChat] Wake for ${wake.externalConversationId.slice(0, 30)}… cancelled: conversation closed with bye.`);
+      continue;
+    }
+    if (!deps.coworkStore.getSessionWithoutMessages(wake.sessionId)) {
+      deps.emitLog(`[PrivateChat] Wake for ${wake.externalConversationId.slice(0, 30)}… cancelled: session no longer exists.`);
+      continue;
+    }
+    if (hasNewerPrivateChatMessage(deps.db, {
+      currentRowId: wake.rowId,
+      fromGlobalMetaId: wake.fromGlobalMetaId,
+      fromMetaId: wake.fromMetaId,
+      toGlobalMetaId: wake.toGlobalMetaId,
+      toMetaId: wake.toMetaId,
+    })) {
+      deps.emitLog(`[PrivateChat] Wake for ${wake.externalConversationId.slice(0, 30)}… cancelled: a newer peer message owns the conversation tail.`);
+      continue;
+    }
+
+    wake.fires += 1;
+    wake.running = true;
+    wake.fireAt = Number.POSITIVE_INFINITY;
+    privateChatA2AWakes.set(taskKey, wake);
+    try {
+      deps.db.run('UPDATE private_chat_messages SET is_processed = 0 WHERE id = ?', [wake.rowId]);
+      deps.saveDb();
+    } catch (error) {
+      privateChatA2AWakes.delete(taskKey);
+      deps.emitLog(`[PrivateChat] Wake for ${wake.externalConversationId.slice(0, 30)}… failed to re-drive message ${wake.rowId}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    appendPrivateChatA2AMessage({
+      coworkStore: deps.coworkStore,
+      sessionId: wake.sessionId,
+      externalConversationId: wake.externalConversationId,
+      type: 'assistant',
+      content: `[Host] Wake check ${wake.fires}: re-evaluating the silent conversation tail (no new peer message) for an owed deferred reply or a bye.`,
+      extraMetadata: {
+        isThinking: true,
+        isStreaming: false,
+        isFinal: true,
+        privateChatWakeNotice: true,
+      },
+      emitToRenderer: deps.emitToRenderer,
+    });
+    deps.emitLog(`[PrivateChat] Wake ${wake.fires} fired for ${wake.externalConversationId.slice(0, 30)}…; re-driving message ${wake.rowId}.`);
+  }
+}
+
 export function shouldDeferForBusyRunnerSession(
   isSessionTurnActive: ((sessionId: string) => boolean) | undefined,
   sessionId: string,
@@ -1247,6 +1423,7 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     '- Keep the discussion around one coherent topic instead of drifting between unrelated subjects.',
     '- Avoid empty pleasantries, loops, repeated introductions, and generic filler.',
     '- You do not need to reply to every message; reply only to the latest meaningful message. When the latest message needs no answer — a work-in-progress signal, a hold marker, a mere acknowledgement, or meaningless placeholder/closing content such as "Thinking...", "....", or "bye" — reply with exactly `[NO_REPLY]` and nothing else: the host then delivers nothing to the peer.',
+    '- Before choosing `[NO_REPLY]`, check what YOU still owe the peer. The host only runs you again when a NEW peer message arrives, so if your own earlier reply promised a later answer or update (for example you said you would verify something and come back with the result), a `[NO_REPLY]` now leaves both sides waiting forever. When you owe the peer an answer, deliver it (or a substantive interim result) as your reply; when the conversation has nothing left to produce, close it by replying exactly "bye". Choose `[NO_REPLY]` only when the latest message needs no answer AND you owe the peer nothing.',
     '- Your reply is delivered to the peer on-chain verbatim, word for word. Output ONLY the final message for the peer: make the judgment calls in this policy (whether to reply, wrapping up, saying bye) silently, and never narrate them as text before or around your reply — a reply that opens with your own analysis of the peer\'s message ("this looks like a duplicate closing message, I will close briefly") leaks your internal state to the peer.',
     '- Your final reply MUST be a regular text message outside any thinking/reasoning block. The host delivers ONLY your final text — reasoning content is never sent to the peer. Ending a turn with the whole answer drafted inside reasoning and no final text is a protocol violation that leaves the peer waiting forever; if you have decided to say nothing, reply with exactly `[NO_REPLY]` instead of ending wordless.',
     '- Never announce silence, waiting, or "no reply needed" in words. Such an announcement IS a delivered message: it forces the peer to process and answer it, trapping both bots in an endless exchange of "I am staying silent" notes. Staying silent means replying `[NO_REPLY]` (the host delivers nothing) — never telling the peer that you will stay silent.',
@@ -3398,6 +3575,11 @@ async function processOne(
   if (pendingRetry && Date.now() < pendingRetry.nextRetryAt) {
     return;
   }
+  // A wake turn re-drives a previously processed row whose conversation went
+  // silent without a bye; it re-decides under a host wake notice instead of a
+  // new peer message.
+  const wakeEntry = privateChatA2AWakes.get(taskKey);
+  const isWakeTurn = wakeEntry?.running === true;
   thinkingTasks.add(taskKey);
   try {
     const toGlobalMetaId = (row.to_global_metaid ?? row.to_metaid ?? '').trim();
@@ -4792,12 +4974,16 @@ async function processOne(
     // A previous reply turn for this conversation may have completed after
     // the daemon stopped waiting for it (skill-turn watchdog, app restart).
     // If its final reply was never delivered, deliver that reply now instead
-    // of re-running an expensive LLM turn for the same trigger.
-    const completedTurnReply = findDeliverableCompletedTurnReply({
-      coworkStore,
-      sessionId,
-      triggerMessageId: userMessage.id,
-    });
+    // of re-running an expensive LLM turn for the same trigger. A wake turn
+    // skips the pickup on purpose: its window still ends in the old silent
+    // decision, which is exactly what the wake re-decides.
+    const completedTurnReply = isWakeTurn
+      ? null
+      : findDeliverableCompletedTurnReply({
+          coworkStore,
+          sessionId,
+          triggerMessageId: userMessage.id,
+        });
     if (completedTurnReply) {
       emitLog(`[PrivateChat] Picking up the completed reply turn for message ${row.id} instead of starting a new turn.`);
     }
@@ -4989,11 +5175,15 @@ async function processOne(
     const systemPromptWithExperience = experienceContext ? `${systemPrompt}\n\n${experienceContext}` : systemPrompt;
     // A re-run of this row (after an empty-reply retry or a retriable skill-turn
     // error) carries an explicit host notice so the model knows why it is being
-    // asked again and what a valid completion looks like.
+    // asked again and what a valid completion looks like. A wake turn instead
+    // carries the wake notice: re-decide the silent tail (owed answer / bye /
+    // sentinel), because no new peer message drove this run.
     const emptyReplyRetryAttempt = privateChatSkillTurnRetries.get(taskKey)?.attempts ?? 0;
-    const systemPromptForTurn = emptyReplyRetryAttempt > 0
-      ? `${systemPromptWithExperience}\n\n${buildPrivateChatEmptyReplyRetryNotice(emptyReplyRetryAttempt)}`
-      : systemPromptWithExperience;
+    const systemPromptForTurn = [
+      systemPromptWithExperience,
+      emptyReplyRetryAttempt > 0 ? `\n\n${buildPrivateChatEmptyReplyRetryNotice(emptyReplyRetryAttempt)}` : '',
+      isWakeTurn ? `\n\n${buildPrivateChatA2AWakeNotice(wakeEntry?.fires ?? 1)}` : '',
+    ].filter(Boolean).join('');
     let reply = '';
     let trimmed = '';
     let skillAssistantMessageId: string | null = null;
@@ -5075,6 +5265,13 @@ async function processOne(
         return;
       }
 
+      // Fresh bye state for wake arming below: the byeSent block normalized
+      // the store before the turn, but the turn may have run for minutes and
+      // the conversation could have been closed meanwhile.
+      const conversationClosedByBye = parseConversationMappingMetadata(
+        coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id)?.metadataJson
+      ).byeSent === true;
+
       trimmed = (reply ?? '').trim();
       if (!trimmed) {
         // The turn COMPLETED but produced no deliverable text. Observed shape
@@ -5131,6 +5328,20 @@ async function processOne(
           },
           emitToRenderer,
         });
+        // The conversation tail is now silent without a bye — arm a wake so
+        // the host revisits it on a timer (only for established, open
+        // conversations; a wake turn that exhausted its reply retries does
+        // not re-arm).
+        if (!isWakeTurn && hasPriorLocalOutbound && !conversationClosedByBye) {
+          armPrivateChatA2AWake({
+            row,
+            sessionId,
+            metabotId: metabot.id,
+            externalConversationId,
+            fires: 0,
+            emitLog,
+          });
+        }
         markProcessed(db, row.id, saveDb);
         return;
       }
@@ -5158,6 +5369,30 @@ async function processOne(
               });
             }
           }
+        }
+        // The host only runs this bot again when a NEW peer message arrives,
+        // so a silent decision in an open conversation can strand both sides
+        // (the 2026-09-16 deadlock). Arm a bounded wake that re-drives this
+        // row under a wake notice; a wake turn that stays silent re-arms
+        // until the budget is exhausted.
+        if (isWakeTurn) {
+          armPrivateChatA2AWake({
+            row,
+            sessionId,
+            metabotId: metabot.id,
+            externalConversationId,
+            fires: wakeEntry?.fires ?? 1,
+            emitLog,
+          });
+        } else if (hasPriorLocalOutbound && !conversationClosedByBye) {
+          armPrivateChatA2AWake({
+            row,
+            sessionId,
+            metabotId: metabot.id,
+            externalConversationId,
+            fires: 0,
+            emitLog,
+          });
         }
         markProcessed(db, row.id, saveDb);
         return;
@@ -5312,6 +5547,9 @@ async function processOne(
         });
       }
       emitLog(`[PrivateChat] Replied to ${fromGlobalMetaId.slice(0, 12)}…`);
+      // A delivered reply (including bye) means the conversation tail is no
+      // longer silent — any pending wake for it is obsolete.
+      cancelPrivateChatA2AWakesForConversation(externalConversationId, 'a reply was delivered', emitLog);
     } catch (e) {
       rethrowSqliteWasmBoundsError(e);
       const errorMessage = e instanceof Error ? e.message : String(e);
@@ -5424,6 +5662,15 @@ export function startPrivateChatDaemon(
     privateChatPollTickRunning = true;
     const runActiveTickWork = async (): Promise<void> => {
       try {
+        // Fire due wakes first: a fired wake resets its row to unprocessed so
+        // the query below re-drives it in this same tick.
+        fireDuePrivateChatA2AWakes({
+          db,
+          saveDb,
+          coworkStore,
+          emitLog,
+          emitToRenderer,
+        });
         let rows: PrivateChatMessageRow[];
         try {
           rows = parsePrivateChatRows(db);
@@ -5513,6 +5760,7 @@ export async function stopPrivateChatDaemon(options?: { waitForTick?: boolean })
   thinkingTasks.clear();
   privateChatSkillTurnRetries.clear();
   privateChatBusyDeferredSince.clear();
+  privateChatA2AWakes.clear();
   if (options?.waitForTick) {
     await activeTickPromise?.catch(() => undefined);
     await Promise.allSettled(detachedWork);
