@@ -286,6 +286,7 @@ import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService'
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
 import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
 import { TrackedTaskBoardService } from './services/trackedTaskBoard';
+import { RsiLadderCardService } from './services/rsiLadderCard';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
   CoworkTurnSubmissionController,
@@ -6678,6 +6679,14 @@ const getTrackedTaskBoard = () => {
   return trackedTaskBoard;
 };
 
+let rsiLadderCard: RsiLadderCardService | null = null;
+const getRsiLadderCard = () => {
+  if (!rsiLadderCard) {
+    rsiLadderCard = new RsiLadderCardService({ userDataPath: app.getPath('userData') });
+  }
+  return rsiLadderCard;
+};
+
 /**
  * Broadcast a `trackedTask:update` event so an open board refreshes after a
  * write that changes card state (currently: closing a card). The payload
@@ -11795,6 +11804,18 @@ if (!gotTheLock) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to set the admission mode' };
     }
   });
+  // ==================== RSI Ladder Card IPC (top-level star card, taskkey=local:88) ====================
+  // Read-only view over the on-chain registration chain (§2.5): no chain writes,
+  // no auto-registration, no auto-verification ever happen through this channel.
+
+  ipcMain.handle('rsiLadder:snapshot', async (_event, input?: { refresh?: boolean }) => {
+    try {
+      return await getRsiLadderCard().snapshot(input ?? {});
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the RSI ladder card' };
+    }
+  });
+
   // ==================== Scheduled Task IPC Handlers ====================
 
   ipcMain.handle('scheduledTask:list', async () => {

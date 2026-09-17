@@ -2,6 +2,7 @@ import type { McpServerConfig, McpServerFormData } from './mcp';
 import type { ProjectFormData, ProjectRecord } from './project';
 import type { GroupChatTranscriptMessage } from './groupTask';
 import type { TrackedCardBoard, TrackedCardCloseResult, TrackedCardDetail } from './trackedTask';
+import type { RsiLadderSnapshotResult } from './rsiLadder';
 import type { OpenTeamCollabSummary, OpenTeamGuestInvite } from './openTeamCollab';
 import type {
   BrowserCommandResult as CoreBrowserCommandResult,
@@ -1490,6 +1491,15 @@ interface IElectronAPI {
      * 漏推时 30s 轮询兜底。
      */
     onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => () => void;
+  };
+  /**
+   * RSI 爬梯卡（跟踪任务入口下的独立顶层星标卡）读路径。
+   * 主进程实现在 src/main/services/rsiLadderCard.ts，channel `rsiLadder:snapshot`。
+   * 唯一数据源=链上 taskkey=local:88 的 /protocols/simplelog 记录；本地仅缓存，
+   * 与链上冲突时以链上为准（需求稿 §2.5，pin://8f14471c…552i0）。
+   */
+  rsiLadder: {
+    snapshot: (input?: { refresh?: boolean }) => Promise<RsiLadderSnapshotResult>;
   };
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) => Promise<any>;

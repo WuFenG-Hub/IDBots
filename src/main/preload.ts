@@ -896,6 +896,11 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('trackedTask:update', handler);
     },
   },
+  rsiLadder: {
+    // RSI 爬梯卡（跟踪任务顶层星标卡）：只读链上登记链的视图通道。
+    // 唯一数据源=链上 taskkey=local:88 的 simplelog 记录，本地仅缓存（§2.5）。
+    snapshot: (input?: { refresh?: boolean }) => ipcRenderer.invoke('rsiLadder:snapshot', input),
+  },
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[]; mode?: 'task' | 'chat' }) =>
       ipcRenderer.invoke('groupTask:create', input),
