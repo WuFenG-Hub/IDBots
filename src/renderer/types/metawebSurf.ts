@@ -20,7 +20,9 @@ export interface MetawebSurfRunStats {
   posted: number;
   challenged: number;
   inboxHandled: number;
+  inboxPresented: number;
   discoveredProtocols: number;
+  tasksScheduled: number;
 }
 
 export interface MetawebSurfRunInfo {

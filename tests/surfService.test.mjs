@@ -576,6 +576,7 @@ test('inbox: baseline is the previous run START (createdAt), owner from identity
   ], 'baseline = the previous run START (createdAt), NOT finishedAt; owner = identity address');
   assert.equal(seenBriefing.inbox.items.length, 1);
   assert.equal(seenBriefing.inbox.items[0].pinId, 'inbox-1');
+  assert.equal(run.stats.inboxPresented, 1, 'host-computed inbox count lands in run stats');
   assert.equal(store.getSeenAction(7, 'inbox-1'), 'presented', 'inbox pins fold into the same success-path batch');
 
   // Next run: the same interaction is ledger-filtered (exactly-once) and the

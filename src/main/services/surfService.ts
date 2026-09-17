@@ -339,6 +339,14 @@ export class SurfService {
         }
       }
 
+      // Host-computed after the session merge (session stats never carry it):
+      // how many inbox items the deterministic section presented tonight.
+      // Separates "inbox was empty" from "inboxHandled 0 because nothing
+      // needed a reply" — indistinguishable in live data until now.
+      stats.inboxPresented = briefing.inbox && !briefing.inbox.error
+        ? briefing.inbox.items.length
+        : 0;
+
       // Seen-ledger writes land ONLY on this success path: every briefed pin
       // becomes 'presented' and the session's self-reported actions fold on
       // top (strongest action wins, one batched store write). Presented

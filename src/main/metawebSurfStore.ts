@@ -79,6 +79,8 @@ export interface MetawebSurfRunStats {
   posted: number;
   challenged: number;
   inboxHandled: number;
+  /** Items the deterministic inbox presented that night (host-computed — separates 'inbox empty' from 'nothing worth acting on'). */
+  inboxPresented: number;
   discoveredProtocols: number;
   /** Scheduled tasks created (surf→work handoff); ground truth from the session marker. */
   tasksScheduled: number;
@@ -95,6 +97,7 @@ export const emptySurfRunStats = (): MetawebSurfRunStats => ({
   posted: 0,
   challenged: 0,
   inboxHandled: 0,
+  inboxPresented: 0,
   discoveredProtocols: 0,
   tasksScheduled: 0,
 });

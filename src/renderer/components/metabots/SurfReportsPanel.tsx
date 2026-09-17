@@ -57,6 +57,8 @@ const formatRunStats = (stats: MetawebSurfRunStats): string => {
   if (stats.deepRead > 0) parts.push(i18nService.t('surfRunStatsRead').replace('{count}', String(stats.deepRead)));
   if (stats.savedToKb > 0) parts.push(i18nService.t('surfRunStatsSaved').replace('{count}', String(stats.savedToKb)));
   if (acted > 0) parts.push(i18nService.t('surfRunStatsActed').replace('{count}', String(acted)));
+  if (stats.tasksScheduled > 0) parts.push(i18nService.t('surfRunStatsTasks').replace('{count}', String(stats.tasksScheduled)));
+  if (stats.inboxPresented > 0) parts.push(i18nService.t('surfRunStatsInbox').replace('{count}', String(stats.inboxPresented)));
   return parts.join(' · ');
 };
 
