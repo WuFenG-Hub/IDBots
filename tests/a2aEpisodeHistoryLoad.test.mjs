@@ -49,9 +49,33 @@ test('in-session paging chains into cross-episode paging at the session boundary
     /beforeCursor: \{ episodeIndex: null, beforeSequence: null \}/,
     'the probe uses the first-page-below-anchor cursor',
   );
-  // Earlier-episode messages prepend before the session page (chronological order).
+  // Earlier-episode messages prepend before the session page (chronological
+  // order), tagged with their episode index for boundary detection.
   const chained = source.match(
-    /messages: \[\s*\.\.\.below\.page\.messages\.map\(\(entry\) => entry\.message\),\s*\.\.\.result\.page\.messages,\s*\]/,
+    /messages: \[\s*\.\.\.below\.page\.messages\.map\(\(entry\) => \(\{[\s\S]*?\}\)\),\s*\.\.\.result\.page\.messages,\s*\]/,
   );
-  assert.ok(chained, 'cross-episode messages must prepend before the in-session page messages');
+  assert.ok(chained, 'cross-episode messages must prepend (tagged) before the in-session page messages');
+});
+
+test('episode divider cards render at rollover boundaries with i18n', () => {
+  const detail = read('src/renderer/components/cowork/CoworkSessionDetail.tsx');
+  const service = read('src/renderer/services/cowork.ts');
+  const i18n = read('src/renderer/services/i18n.ts');
+  const preload = read('src/main/preload.ts');
+  const main = read('src/main/main.ts');
+
+  // Prepended cross-episode messages carry their episode index so the view
+  // can detect boundaries.
+  assert.match(service, /a2aEpisodeIndex: entry\.episodeIndex/);
+  // The view inserts a divider item when a message opens a newer episode.
+  assert.match(detail, /type: 'episode-end'/);
+  assert.match(detail, /A2AEpisodeDividerCard/);
+  // The card title is localized in both languages with an {index} slot.
+  assert.match(i18n, /a2aEpisodeDividerTitle: '第 \{index\} 代结束 · 交接摘要'/);
+  assert.match(i18n, /a2aEpisodeDividerTitle: 'Episode \{index\} ended · handoff summary'/);
+  assert.match(detail, /i18nService\.t\('a2aEpisodeDividerTitle'\)\.replace\('\{index\}'/);
+  // The summaries come from the thread's episode metadata over IPC.
+  assert.match(main, /cowork:session:getA2AEpisodes/);
+  assert.match(preload, /getA2AEpisodes: \(sessionId: string\)/);
+  assert.match(service, /async getA2AEpisodes\(/);
 });

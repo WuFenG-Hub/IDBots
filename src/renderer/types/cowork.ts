@@ -232,6 +232,18 @@ export interface CoworkA2AHistoryMessage {
   message: CoworkMessage;
 }
 
+export interface CoworkA2AEpisodeInfo {
+  sessionId: string;
+  threadId: string;
+  episodeIndex: number;
+  previousSessionId: string | null;
+  nextSessionId: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  closeReason: string | null;
+  summary: string | null;
+}
+
 export interface CoworkA2AHistoryPage {
   threadId: string;
   participantPairKey: string;

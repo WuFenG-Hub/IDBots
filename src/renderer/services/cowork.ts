@@ -908,7 +908,13 @@ class CoworkService {
       if (store.getState().cowork.currentSessionId !== sessionId) return 0;
       store.dispatch(prependMessages({
         sessionId,
-        messages: page.page.messages.map((entry) => entry.message),
+        messages: page.page.messages.map((entry) => ({
+          ...entry.message,
+          metadata: {
+            ...(entry.message.metadata ?? {}),
+            a2aEpisodeIndex: entry.episodeIndex,
+          },
+        })),
         messageHistory: {
           hasMoreBefore: page.page.hasMoreBefore,
           beforeSequence: page.page.beforeCursor?.beforeSequence ?? null,
@@ -945,7 +951,13 @@ class CoworkService {
         store.dispatch(prependMessages({
           sessionId,
           messages: [
-            ...below.page.messages.map((entry) => entry.message),
+            ...below.page.messages.map((entry) => ({
+              ...entry.message,
+              metadata: {
+                ...(entry.message.metadata ?? {}),
+                a2aEpisodeIndex: entry.episodeIndex,
+              },
+            })),
             ...result.page.messages,
           ],
           messageHistory: {
@@ -1020,6 +1032,17 @@ class CoworkService {
       return null;
     }
     return result.page;
+  }
+
+  async getA2AEpisodes(sessionId: string): Promise<Array<{ episodeIndex: number; endedAt: number | null; closeReason: string | null; summary: string | null }> | null> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getA2AEpisodes) return null;
+    const result = await cowork.getA2AEpisodes(sessionId);
+    if (!result.success || !result.episodes) {
+      console.error('Failed to load A2A conversation episodes:', result.error);
+      return null;
+    }
+    return result.episodes;
   }
 
   async respondToPermission(requestId: string, result: CoworkPermissionResult): Promise<boolean> {

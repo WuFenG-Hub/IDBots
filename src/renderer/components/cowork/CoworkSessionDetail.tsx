@@ -2293,6 +2293,30 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   );
 });
 
+/** Divider card rendered where the A2A conversation crosses an episode boundary. */
+const A2AEpisodeDividerCard: React.FC<{
+  episodeIndex: number;
+  summary: string | null;
+}> = ({ episodeIndex, summary }) => {
+  const title = i18nService.t('a2aEpisodeDividerTitle').replace('{index}', String(episodeIndex));
+  return (
+    <div className="mx-auto my-3 w-full max-w-2xl px-4">
+      <div className="rounded-lg border border-black/10 px-4 py-3 dark:border-white/10 dark:bg-claude-darkBg/60">
+        <div className="flex items-center gap-3 font-mono text-[11px] leading-4 text-claude-textSecondary dark:text-claude-darkTextSecondary">
+          <span className="h-px flex-1 bg-black/10 dark:bg-white/10" />
+          <span className="whitespace-nowrap select-none">{title}</span>
+          <span className="h-px flex-1 bg-black/10 dark:bg-white/10" />
+        </div>
+        {summary ? (
+          <p className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap text-xs leading-5 text-claude-textSecondary dark:text-claude-darkTextSecondary">
+            {summary}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+};
+
 const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   onManageSkills,
   onContinue,
@@ -2672,6 +2696,30 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       !shouldHideControlMessage(message) && !shouldHideA2AInternalMessage(message)
     )) ?? []
   ), [currentSession?.messages]);
+  // Episode metadata of the A2A thread — powers the divider cards shown where
+  // the visible history crosses an episode rollover boundary.
+  const [a2aThreadEpisodes, setA2aThreadEpisodes] = useState<Array<{
+    episodeIndex: number;
+    endedAt: number | null;
+    closeReason: string | null;
+    summary: string | null;
+  }>>([]);
+  useEffect(() => {
+    if (!isPrivateA2ASession || !currentSession?.id) {
+      setA2aThreadEpisodes([]);
+      return;
+    }
+    let cancelled = false;
+    void coworkService.getA2AEpisodes(currentSession.id).then((episodes) => {
+      if (!cancelled) setA2aThreadEpisodes(episodes ?? []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isPrivateA2ASession, currentSession?.id]);
+  const a2aEpisodeByIndex = useMemo(() => new Map(
+    a2aThreadEpisodes.map((episode) => [episode.episodeIndex, episode]),
+  ), [a2aThreadEpisodes]);
   const a2aPeerGlobalMetaId = useMemo(() => {
     if (currentSession?.sessionType !== 'a2a') return null;
     const sessionPeerGlobalMetaId = typeof currentSession.peerGlobalMetaId === 'string'
@@ -3864,7 +3912,30 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             const content = typeof msg.content === 'string' ? msg.content : '';
             const isOrderStart = ORDER_START_CONTENT_RE.test(content.trim());
             const isOrderEnd = ORDER_END_CONTENT_RE.test(content.trim());
-            const items: Array<{ type: 'separator-start' | 'separator-end' | 'message'; key: string; message?: CoworkMessage }> = [];
+            const items: Array<{ type: 'separator-start' | 'separator-end' | 'episode-end' | 'message'; key: string; message?: CoworkMessage; endedEpisodeIndex?: number }> = [];
+
+            // Episode boundary: this message opens a newer episode than the
+            // previous one (untagged messages belong to the current/newest
+            // episode). Mark the ended episode with a divider card.
+            const episodeIndexAt = (position: number): number | null => {
+              const target = arr[position];
+              if (!target) return null;
+              return typeof target.metadata?.a2aEpisodeIndex === 'number'
+                ? target.metadata.a2aEpisodeIndex
+                : null;
+            };
+            const previousEpisodeIndex = episodeIndexAt(index - 1);
+            const currentEpisodeIndex = episodeIndexAt(index);
+            if (
+              previousEpisodeIndex != null
+              && (currentEpisodeIndex ?? Number.POSITIVE_INFINITY) > previousEpisodeIndex
+            ) {
+              items.push({
+                type: 'episode-end',
+                key: `episode-end-before-${msg.id}`,
+                endedEpisodeIndex: previousEpisodeIndex,
+              });
+            }
 
             if (isOrderStart && index > 0) {
               items.push({ type: 'separator-start', key: `order-start-before-${msg.id}` });
@@ -3880,6 +3951,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
             return items;
           }).map((item) => {
+            if (item.type === 'episode-end') {
+              const endedEpisode = item.endedEpisodeIndex != null
+                ? a2aEpisodeByIndex.get(item.endedEpisodeIndex)
+                : undefined;
+              return (
+                <A2AEpisodeDividerCard
+                  key={item.key}
+                  episodeIndex={item.endedEpisodeIndex ?? 0}
+                  summary={endedEpisode?.summary ?? null}
+                />
+              );
+            }
             if (item.type === 'separator-start' || item.type === 'separator-end') {
               const label = item.type === 'separator-start' ? 'Order Start' : 'Order End';
               return (

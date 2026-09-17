@@ -10638,6 +10638,25 @@ if (!gotTheLock) {
     });
   });
 
+  // Episode metadata (index, close reason, handoff summary) of an A2A
+  // conversation thread — feeds the episode divider cards in the chat view.
+  ipcMain.handle('cowork:session:getA2AEpisodes', async (_event, sessionId: unknown) => {
+    return withSqliteRecovery('cowork:session:getA2AEpisodes', async () => {
+      try {
+        const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+        if (!id) return { success: false, error: 'Session id is required' };
+        const episodes = getCoworkStore().listA2AConversationEpisodes(id);
+        return { success: true, episodes };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to list A2A conversation episodes',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:list', async (_event, options?: { metabotId?: number | null }) => {
     return withSqliteRecovery('cowork:session:list', async () => {
       try {
