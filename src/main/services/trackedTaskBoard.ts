@@ -1,4 +1,5 @@
 import type { SqliteDatabase as Database } from '../sqliteTypes';
+import { extractPinidToken } from './groupTaskDeliverableParser';
 import {
   OrchestrationStore,
   type OrchestrationAttempt,
@@ -11,25 +12,35 @@ import {
  * Long-task board (tracking board) over the single authoritative ledger
  * `orchestration_tasks`.
  *
- * Contract source: 《IDBots 长期任务看板 v1 · 架构规格》
- * pin://4c560264d874a569645142d671258908c26492509b9e03c813edae2035be1503i0 (§1–§4).
+ * Contract source: 《IDBots 长期任务看板 v1 · 架构契约 v1.3（冻结版）》
+ * pin://9d5feb452dad05b11714f8919d60bec316d87f10ce779b5cfe73a6ee91ea888fi0
+ * (`[SEC-04]`..`[SEC-10]`), plus the chair's rulings.
  *
  * Hard rules this module obeys:
- *  - One ledger. No fourth table is created; `card_state` is derived in memory
- *    and NEVER persisted (a persisted derived state drifts from the facts).
- *  - The ledger's `status` CHECK domain is NOT extended.
- *  - "待收口" (closure due) is an orthogonal flag, not a fifth column.
- *  - `deriveCardState` is a pure function: every input comes from the ledger,
- *    so an independent verifier can recompute the same verdict from the same rows.
+ *  - One ledger, no fourth table, `status` CHECK domain untouched.
+ *  - **Storage holds facts (inputs) only; every derived value is computed at
+ *    read time.** `cardState`, `closureDue`, `closureSuggestion` and
+ *    `activityAtMs` are never persisted.
+ *  - `deriveCardState` is a pure function: all inputs come from the ledger and
+ *    `nowMs` is injected, so a third party recomputes the same verdict.
+ *  - Daemon liveness lives in the existing `kv` table (`tracking_tick_beat`)
+ *    and NEVER in a card row. Writing a heartbeat must not touch `updated_at`,
+ *    or the >2 day zombie rule could never fire.
  */
 
-/** Idle thresholds (contract §3). Judgement uses strict greater-than. */
+/** Idle thresholds (contract `[SEC-07]`). Judgement uses strict greater-than. */
 export const TRACKED_CARD_WARN_MS = 86_400_000; // 1 day
 export const TRACKED_CARD_ZOMBIE_MS = 172_800_000; // 2 days
 
+/** Default board scope: recent activity, plus every closureDue card (`[SEC-09]` D3). */
+export const TRACKED_CARD_SCOPE_WINDOW_MS = 7 * 86_400_000;
+
+/** Drawer summary is hard-truncated server-side to this many lines (`[SEC-09]`). */
+export const TRACKED_CARD_REASON_LIMIT = 5;
+
 export type TrackedCardState = 'waiting_decision' | 'in_progress' | 'blocked_external' | 'closed';
 
-/** Mutual-exclusion priority: closed > waiting_decision > blocked_external > in_progress. */
+/** Mutual-exclusion priority (contract `[SEC-06]`); NOT the display order. */
 export const TRACKED_CARD_STATE_ORDER: TrackedCardState[] = [
   'waiting_decision',
   'in_progress',
@@ -38,9 +49,9 @@ export const TRACKED_CARD_STATE_ORDER: TrackedCardState[] = [
 ];
 
 /**
- * Renderer-side i18n keys. UI copy stays in the renderer so the main process
- * never carries a second copy of the labels (AGENTS.md: UI copy is English by
- * default and lives in i18n).
+ * Renderer-side i18n keys. UI copy stays in the renderer (AGENTS.md: UI copy is
+ * English by default and lives in i18n), so the main process never carries a
+ * second copy of the labels.
  */
 export const TRACKED_CARD_STATE_LABEL_KEY: Record<TrackedCardState, string> = {
   waiting_decision: 'trackedTask.column.waitingDecision',
@@ -48,6 +59,9 @@ export const TRACKED_CARD_STATE_LABEL_KEY: Record<TrackedCardState, string> = {
   blocked_external: 'trackedTask.column.blockedExternal',
   closed: 'trackedTask.column.closed',
 };
+
+/** Two separate closureDue levels, counted apart (contract `[SEC-07]`, chair D1). */
+export type TrackedClosureDueLevel = 'zombie' | 'terminal_missing_conclusion' | 'sessions_ended';
 
 export type TrackedCardSourceKind = 'group_task' | 'scheduled_task' | 'session';
 
@@ -62,15 +76,18 @@ export interface TrackedCardDerivationInput {
   attempts: OrchestrationAttempt[];
   /** group_task_checkpoints rows with status='open' for the linked group task. */
   openCheckpointCount: number;
-  /** group_task_deliverables rows whose uri is verifiable (contract §2.3 R2). */
+  /** group_task_deliverables rows whose uri is verifiable (contract `[SEC-06]` R2). */
   verifiableDeliverableCount: number;
   /** Closing conclusion on the ledger row; NULL means the card is NOT closed. */
   closureConclusion: string | null;
-  /** Linked scheduled task, when the card is attached to one (contract §1.2). */
+  /** Linked scheduled task, when the card is attached to one. */
   scheduled: { enabled: boolean; nextRunAtMs: number | null; running: boolean } | null;
-  /** Every linked session status, for the "session ended" rule (contract §2.3 R3). */
+  /** Every linked session status, for the "session ended" rule. */
   sessionStatuses: string[];
-  /** All candidate activity timestamps in epoch ms; nulls are ignored. */
+  /**
+   * All candidate activity timestamps in epoch ms. The daemon heartbeat is NOT
+   * one of them (contract `[SEC-07]` R2 hard constraint).
+   */
   activityAtMs: Array<number | null>;
   nowMs: number;
 }
@@ -79,29 +96,40 @@ export interface TrackedCardDerivation {
   cardState: TrackedCardState;
   closureDue: boolean;
   closureWarn: boolean;
+  closureDueLevel: TrackedClosureDueLevel | null;
   closureSuggestion: string;
   lastActivityAtMs: number | null;
   idleMs: number | null;
   reasons: string[];
+  /** Lines dropped by the ≤5 hard truncation, surfaced as `…另有 N 条`. */
+  reasonOverflow: number;
 }
 
 function formatDays(ms: number): string {
   return (ms / TRACKED_CARD_WARN_MS).toFixed(1);
 }
 
-/**
- * Pure derivation. No IO, no clock read — `nowMs` is an input.
- */
+/** Terminal ledger statuses (chair's unified rule). */
+export function isTerminalStatus(status: OrchestrationTaskStatus): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+/** `closed` ⟺ a terminal status AND a non-empty conclusion (chair's unified rule). */
+export function isClosedStatus(status: OrchestrationTaskStatus, conclusion: string | null): boolean {
+  return isTerminalStatus(status) && Boolean(conclusion?.trim());
+}
+
+/** Pure derivation. No IO, no clock read — `nowMs` is an input. */
 export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardDerivation {
   const { task, steps, attempts, nowMs } = input;
 
-  const blockedSteps = steps.filter((step) => step.status === 'blocked');
-  const unmetDependencySteps = blockedSteps.filter((step) => {
-    const completed = new Set(
-      steps.filter((candidate) => candidate.status === 'completed').map((candidate) => candidate.id),
-    );
-    return step.dependencyStepIds.some((dependencyId) => !completed.has(dependencyId));
-  });
+  const completedStepIds = new Set(
+    steps.filter((step) => step.status === 'completed').map((step) => step.id),
+  );
+  const unmetDependencySteps = steps.filter(
+    (step) => step.status === 'blocked'
+      && step.dependencyStepIds.some((dependencyId) => !completedStepIds.has(dependencyId)),
+  );
   const waitingInputSteps = steps.filter((step) => step.status === 'waiting_input');
   const activeSteps = steps.filter(
     (step) => step.status === 'ready' || step.status === 'queued' || step.status === 'running',
@@ -110,15 +138,22 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     (attempt) => attempt.status === 'queued' || attempt.status === 'running',
   );
 
-  const activity = input.activityAtMs.filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const activity = input.activityAtMs.filter(
+    (value): value is number => typeof value === 'number' && Number.isFinite(value),
+  );
   const lastActivityAtMs = activity.length ? Math.max(...activity) : null;
   const idleMs = lastActivityAtMs === null ? null : Math.max(0, nowMs - lastActivityAtMs);
 
-  const terminal = task.status === 'completed' || task.status === 'cancelled' || task.status === 'failed';
+  const terminal = isTerminalStatus(task.status);
   const hasConclusion = Boolean(input.closureConclusion?.trim());
-  const closed = (task.status === 'completed' || task.status === 'cancelled') && hasConclusion;
-  // E6 generalised: a terminal ledger status without a conclusion is NOT closed.
+  const closed = terminal && hasConclusion;
   const terminalWithoutConclusion = terminal && !hasConclusion;
+
+  function scheduledAwaitingExternal(): boolean {
+    const scheduled = input.scheduled;
+    if (!scheduled) return false;
+    return scheduled.enabled && !scheduled.running && (scheduled.nextRunAtMs ?? 0) > nowMs;
+  }
 
   let cardState: TrackedCardState;
   if (closed) {
@@ -126,10 +161,7 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
   } else if (
     input.openCheckpointCount > 0
     || waitingInputSteps.length > 0
-    // `review` IS the ledger's "awaiting your decision" landing point. The
-    // contract's §2.2 rows list the checkpoint / waiting_input cases; without
-    // this clause a review card with finished steps would fall through to
-    // 进行中, which contradicts §1.1 + §2.4 E1.
+    // `review` IS the ledger's "awaiting your decision" landing point (`[SEC-06]`).
     || task.status === 'review'
     || terminalWithoutConclusion
   ) {
@@ -140,13 +172,7 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     cardState = 'in_progress';
   }
 
-  function scheduledAwaitingExternal(): boolean {
-    const scheduled = input.scheduled;
-    if (!scheduled) return false;
-    return scheduled.enabled && !scheduled.running && (scheduled.nextRunAtMs ?? 0) > nowMs;
-  }
-
-  // Strictly greater-than: exactly 24h/48h must NOT trip (contract §2.4 E3).
+  // Strictly greater-than: exactly 24h/48h must NOT trip.
   const closureWarn = idleMs !== null && idleMs > TRACKED_CARD_WARN_MS;
   const zombie = idleMs !== null && idleMs > TRACKED_CARD_ZOMBIE_MS;
   const sessionsEnded =
@@ -154,37 +180,42 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     && input.sessionStatuses.every((status) => status === 'idle')
     && openAttempts.length === 0;
 
-  const closureDue =
-    zombie
-    || (terminal && !hasConclusion)
-    || (sessionsEnded && cardState !== 'closed');
+  const closureDue = (zombie && !closed) || terminalWithoutConclusion || (sessionsEnded && !closed);
+  const closureDueLevel: TrackedClosureDueLevel | null = !closureDue
+    ? null
+    : terminalWithoutConclusion
+      ? 'terminal_missing_conclusion'
+      : zombie && !closed
+        ? 'zombie'
+        : 'sessions_ended';
 
-  const reasons: string[] = [];
-  if (task.status === 'review') reasons.push('ledger status=review, awaiting a decision');
-  if (waitingInputSteps.length > 0) reasons.push(`${waitingInputSteps.length} step(s) waiting_input`);
-  if (input.openCheckpointCount > 0) reasons.push(`${input.openCheckpointCount} open group-task checkpoint(s)`);
+  const allReasons: string[] = [];
+  if (task.status === 'review') allReasons.push('ledger status=review, awaiting a decision');
+  if (waitingInputSteps.length > 0) allReasons.push(`${waitingInputSteps.length} step(s) waiting_input`);
+  if (input.openCheckpointCount > 0) {
+    allReasons.push(`${input.openCheckpointCount} open group-task checkpoint(s)`);
+  }
   if (unmetDependencySteps.length > 0) {
-    reasons.push(`${unmetDependencySteps.length} blocked step(s) with unmet dependencies`);
+    allReasons.push(`${unmetDependencySteps.length} blocked step(s) with unmet dependencies`);
   }
-  if (activeSteps.length > 0) reasons.push(`${activeSteps.length} step(s) ready/queued/running`);
-  if (openAttempts.length > 0) reasons.push(`${openAttempts.length} attempt(s) queued/running`);
+  if (activeSteps.length > 0) allReasons.push(`${activeSteps.length} step(s) ready/queued/running`);
+  if (openAttempts.length > 0) allReasons.push(`${openAttempts.length} attempt(s) queued/running`);
   if (input.verifiableDeliverableCount > 0) {
-    reasons.push(`${input.verifiableDeliverableCount} verifiable deliverable(s)`);
+    allReasons.push(`${input.verifiableDeliverableCount} verifiable deliverable(s)`);
   }
-  if (terminal && !hasConclusion) reasons.push('terminal status without a closing conclusion');
-  if (idleMs !== null && closureWarn) reasons.push(`idle for ${formatDays(idleMs)} day(s)`);
-  if (input.sessionStatuses.length > 0) {
-    reasons.push(`linked sessions: ${input.sessionStatuses.join(', ')}`);
-  }
+  if (terminalWithoutConclusion) allReasons.push('terminal status without a closing conclusion');
+  if (idleMs !== null && closureWarn) allReasons.push(`idle for ${formatDays(idleMs)} day(s)`);
+  if (input.sessionStatuses.length > 0) allReasons.push(`linked sessions: ${input.sessionStatuses.join(', ')}`);
 
   return {
     cardState,
     closureDue,
     closureWarn,
+    closureDueLevel,
     closureSuggestion: buildClosureSuggestion({
       cardState,
       closureDue,
-      isTerminal: terminal,
+      terminal,
       hasConclusion,
       verifiableDeliverableCount: input.verifiableDeliverableCount,
       unmetDependencyCount: unmetDependencySteps.length,
@@ -192,28 +223,29 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     }),
     lastActivityAtMs,
     idleMs,
-    reasons: reasons.slice(0, 5),
+    reasons: allReasons.slice(0, TRACKED_CARD_REASON_LIMIT),
+    reasonOverflow: Math.max(0, allReasons.length - TRACKED_CARD_REASON_LIMIT),
   };
 }
 
 function buildClosureSuggestion(input: {
   cardState: TrackedCardState;
   closureDue: boolean;
-  isTerminal: boolean;
+  terminal: boolean;
   hasConclusion: boolean;
   verifiableDeliverableCount: number;
   unmetDependencyCount: number;
   idleMs: number | null;
 }): string {
   if (input.cardState === 'closed') return '';
+  if (input.terminal && !input.hasConclusion) {
+    return 'Reached a terminal status without a conclusion; add a one-line closing note.';
+  }
   if (input.verifiableDeliverableCount > 0) {
     return `Deliverables are verifiable (${input.verifiableDeliverableCount}); close the card with a one-line conclusion.`;
   }
   if (input.unmetDependencyCount > 0 && input.idleMs !== null) {
     return `Dependencies unresolved for ${formatDays(input.idleMs)} day(s); reassign or cancel.`;
-  }
-  if (input.isTerminal && !input.hasConclusion) {
-    return 'Reached a terminal status without a conclusion; add a one-line closing note.';
   }
   if (input.closureDue && input.idleMs !== null) {
     return `No activity for ${formatDays(input.idleMs)} day(s); close it or redefine the acceptance criteria.`;
@@ -231,8 +263,11 @@ export interface TrackedCardSummary {
   ledgerStatus: OrchestrationTaskStatus;
   closureWarn: boolean;
   closureDue: boolean;
+  closureDueLevel: TrackedClosureDueLevel | null;
   closureSuggestion: string;
   closureConclusion: string | null;
+  /** Computed activity anchor — never persisted, never fed by the daemon heartbeat. */
+  activityAtMs: number | null;
   lastActivityAtMs: number | null;
   idleMs: number | null;
   createdAt: string;
@@ -245,15 +280,38 @@ export interface TrackedCardSummary {
   needsOwnerAction: boolean;
   actionRank: number;
   reasons: string[];
+  reasonOverflow: number;
+}
+
+export interface TrackedCardCounts {
+  total: number;
+  visible: number;
+  /** Folded away by the default scope; must stay reachable, never silently hidden. */
+  folded: number;
+  closureDue: number;
+  /** Level 1: idle past the zombie threshold. */
+  zombieLevel: number;
+  /** Level 2: terminal status without a written conclusion. */
+  terminalMissingConclusionLevel: number;
+  /** Level 3: every linked session ended and nothing is queued. */
+  sessionsEndedLevel: number;
 }
 
 export interface TrackedCardBoard {
   ledger: 'orchestration_tasks';
   generatedAtMs: number;
+  /** Echoed back so the UI can label the filter and offer a one-click clear. */
+  scopeApplied: 'default' | 'all';
+  scopeWindowMs: number;
+  /** Monotonic per-process sequence for renderer-side event de-duplication. */
+  seq: number;
   columns: Array<{ state: TrackedCardState; labelKey: string; cardIds: string[] }>;
   cards: TrackedCardSummary[];
   closureDueCardIds: string[];
   closureDueCount: number;
+  counts: TrackedCardCounts;
+  /** True when more cards exist beyond `limit`/`offset`. */
+  hasMore: boolean;
 }
 
 export interface TrackedCardDetail extends TrackedCardSummary {
@@ -266,25 +324,65 @@ export interface TrackedCardDetail extends TrackedCardSummary {
   checkpoints: Array<{ topic: string | null; status: string; createdAt: string | null }>;
   dependencies: Array<{ stepId: string; title: string; status: string; dependsOn: string[]; unmet: string[] }>;
   steps: Array<{ id: string; ordinal: number; title: string; status: string; assigneeMetabotId: number | null }>;
+  participants: number[];
   sessions: TrackedCardSessionLink[];
-  deliverables: Array<{ uri: string; status: string; confirmation: string }>;
+  deliverables: Array<{ uri: string; status: string; confirmation: string; kind: string }>;
   events: Array<{ at: string | null; kind: string; detail: string }>;
   closure: { conclusion: string | null; by: string | null; at: string | null; pinId: string | null };
+}
+
+export interface TrackedCardListInput {
+  ownerGlobalMetaId?: string;
+  /** `default` = recent activity ∪ every closureDue card; `all` = no folding. */
+  scope?: 'default' | 'all';
+  limit?: number;
+  offset?: number;
 }
 
 export interface TrackedCardCloseInput {
   taskId: string;
   conclusion: string;
   by: 'owner' | 'twin';
+  /** Only a hint: per the ledger whitelist the status may legitimately stay put. */
   targetStatus?: 'completed' | 'cancelled';
   pinId?: string | null;
 }
 
 export interface TrackedCardCloseResult {
   ok: boolean;
-  code?: 'NOT_FOUND' | 'VALIDATION' | 'TRANSITION_NOT_ALLOWED';
+  code?: 'NOT_FOUND' | 'VALIDATION';
   error?: string;
   card?: TrackedCardSummary;
+  /** Whether the ledger status actually moved. The conclusion is always written. */
+  statusMoved?: boolean;
+  statusNote?: string;
+}
+
+export interface TrackedScheduledAttachInput {
+  scheduledTaskIds: string[];
+  ownerGlobalMetaId: string;
+  twinMetabotId: number;
+}
+
+export interface TrackedScheduledAttachResult {
+  attached: Array<{ scheduledTaskId: string; cardId: string; reused: boolean }>;
+  skipped: Array<{ scheduledTaskId: string; reason: string }>;
+}
+
+export interface TrackedUnattachedScheduledTask {
+  id: string;
+  name: string;
+  enabled: boolean;
+  nextRunAtMs: number | null;
+}
+
+export interface TrackedSweepResult {
+  assessed: number;
+  closureDue: number;
+  zombieLevel: number;
+  terminalMissingConclusionLevel: number;
+  sessionsEndedLevel: number;
+  beat: string;
 }
 
 interface Row { [key: string]: unknown }
@@ -316,17 +414,31 @@ function epochMs(value: unknown): number | null {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
+/** kv key holding daemon liveness only — never any card state (`[SEC-07]`). */
+export const TRACKED_TICK_BEAT_KV_KEY = 'tracking_tick_beat';
+
+/** List-view rank (contract `[SEC-09]`); ties break on `activityAt` ascending. */
+export function trackedCardActionRank(card: {
+  state: TrackedCardState;
+  closureDue: boolean;
+}): number {
+  if (card.closureDue && card.state !== 'closed') return 0;
+  if (card.state === 'waiting_decision') return 1;
+  if (card.state === 'blocked_external') return 2;
+  if (card.state === 'in_progress') return 3;
+  return 4;
+}
+
 export interface TrackedTaskBoardDeps {
   db: Database;
   orchestrationStore: OrchestrationStore;
   saveDb: () => void;
+  instanceId?: string;
 }
 
-/**
- * Read/derive side of the board. Writes only two things: the closure columns on
- * the ledger row (via the state-machine whitelist for `status`).
- */
 export class TrackedTaskBoardService {
+  private seq = 0;
+
   constructor(private readonly deps: TrackedTaskBoardDeps) {}
 
   private getAll(sql: string, params: unknown[] = []): Row[] {
@@ -337,30 +449,71 @@ export class TrackedTaskBoardService {
     return this.getAll(sql, params)[0] ?? null;
   }
 
-  listCards(ownerGlobalMetaId?: string): TrackedCardBoard {
-    const nowMs = Date.now();
-    const tasks = ownerGlobalMetaId
-      ? this.getAll(
-        'SELECT * FROM orchestration_tasks WHERE owner_global_meta_id = ? ORDER BY updated_at DESC',
-        [ownerGlobalMetaId],
-      )
-      : this.getAll('SELECT * FROM orchestration_tasks ORDER BY updated_at DESC');
+  /** Monotonic sequence for renderer-side de-duplication; never persisted. */
+  nextSeq(): number {
+    this.seq += 1;
+    return this.seq;
+  }
 
-    const cards = tasks
+  listCards(input: TrackedCardListInput = {}): TrackedCardBoard {
+    const nowMs = Date.now();
+    const scope: 'default' | 'all' = input.scope === 'all' ? 'all' : 'default';
+    const rows = input.ownerGlobalMetaId
+      ? this.getAll(
+        'SELECT id FROM orchestration_tasks WHERE owner_global_meta_id = ? ORDER BY updated_at DESC',
+        [input.ownerGlobalMetaId],
+      )
+      : this.getAll('SELECT id FROM orchestration_tasks ORDER BY updated_at DESC');
+
+    const all = rows
       .map((row) => this.buildSummary(String(row.id), nowMs))
       .filter((card): card is TrackedCardSummary => card !== null);
+
+    const visible = scope === 'all'
+      ? all
+      : all.filter((card) => card.closureDue || isInsideScopeWindow(card, nowMs));
+    const folded = all.length - visible.length;
+
+    const sorted = [...visible].sort((a, b) => {
+      const byRank = a.actionRank - b.actionRank;
+      if (byRank !== 0) return byRank;
+      // Same weight: earlier activity first (`[SEC-09]`).
+      const aAt = a.activityAtMs ?? Number.MAX_SAFE_INTEGER;
+      const bAt = b.activityAtMs ?? Number.MAX_SAFE_INTEGER;
+      if (aAt !== bAt) return aAt - bAt;
+      return a.id.localeCompare(b.id);
+    });
+
+    const limit = typeof input.limit === 'number' && input.limit > 0 ? Math.floor(input.limit) : null;
+    const offset = typeof input.offset === 'number' && input.offset > 0 ? Math.floor(input.offset) : 0;
+    const page = sorted.slice(offset, limit === null ? undefined : offset + limit);
 
     return {
       ledger: 'orchestration_tasks',
       generatedAtMs: nowMs,
+      scopeApplied: scope,
+      scopeWindowMs: TRACKED_CARD_SCOPE_WINDOW_MS,
+      seq: this.nextSeq(),
       columns: TRACKED_CARD_STATE_ORDER.map((state) => ({
         state,
         labelKey: TRACKED_CARD_STATE_LABEL_KEY[state],
-        cardIds: cards.filter((card) => card.state === state).map((card) => card.id),
+        cardIds: page.filter((card) => card.state === state).map((card) => card.id),
       })),
-      cards: [...cards].sort((a, b) => (a.actionRank - b.actionRank) || (b.updatedAt.localeCompare(a.updatedAt))),
-      closureDueCardIds: cards.filter((card) => card.closureDue).map((card) => card.id),
-      closureDueCount: cards.filter((card) => card.closureDue).length,
+      cards: page,
+      closureDueCardIds: page.filter((card) => card.closureDue).map((card) => card.id),
+      closureDueCount: page.filter((card) => card.closureDue).length,
+      counts: {
+        total: all.length,
+        visible: sorted.length,
+        folded,
+        closureDue: sorted.filter((card) => card.closureDue).length,
+        zombieLevel: sorted.filter((card) => card.closureDueLevel === 'zombie').length,
+        terminalMissingConclusionLevel: sorted.filter(
+          (card) => card.closureDueLevel === 'terminal_missing_conclusion',
+        ).length,
+        sessionsEndedLevel: sorted.filter((card) => card.closureDueLevel === 'sessions_ended').length,
+      },
+      hasMore: limit !== null && offset + limit < sorted.length,
     };
   }
 
@@ -389,6 +542,9 @@ export class TrackedTaskBoardService {
         'SELECT uri, status, confirmation FROM group_task_deliverables WHERE task_id = ? ORDER BY id ASC',
         [groupTaskId],
       );
+    const memberRows = groupTaskId === null
+      ? []
+      : this.getAll('SELECT metabot_id FROM group_task_members WHERE task_id = ?', [groupTaskId]);
 
     const completedStepIds = new Set(steps.filter((step) => step.status === 'completed').map((step) => step.id));
     const dependencies = steps
@@ -423,7 +579,13 @@ export class TrackedTaskBoardService {
       .filter((event) => Boolean(event.at))
       .sort((a, b) => String(a.at).localeCompare(String(b.at)));
 
-    const closure = this.readClosure(taskId);
+    const participants = new Set<number>();
+    participants.add(task.twinMetabotId);
+    for (const step of steps) if (step.assigneeMetabotId !== null) participants.add(step.assigneeMetabotId);
+    for (const row of memberRows) {
+      const id = Number(row.metabot_id);
+      if (!Number.isNaN(id)) participants.add(id);
+    }
 
     return {
       ...summary,
@@ -446,22 +608,29 @@ export class TrackedTaskBoardService {
         status: step.status,
         assigneeMetabotId: step.assigneeMetabotId,
       })),
+      participants: [...participants].sort((a, b) => a - b),
       sessions: this.listCardSessions(taskId),
-      deliverables: deliverables.map((row) => ({
-        uri: String(row.uri ?? ''),
-        status: String(row.status ?? ''),
-        confirmation: String(row.confirmation ?? ''),
-      })),
+      deliverables: deliverables.map((row) => {
+        const uri = String(row.uri ?? '');
+        return {
+          uri,
+          status: String(row.status ?? ''),
+          confirmation: String(row.confirmation ?? ''),
+          // Kind comes from the ONE parser, never a second URI regex.
+          kind: trackedDeliverableKind(uri),
+        };
+      }),
       events,
-      closure,
+      closure: this.readClosure(taskId),
     };
   }
 
   /**
    * Card -> every linked session. Five sources from the ledger, no mapping
-   * table (contract §4). S4 is reduced to `group_tasks.source_session_id`:
-   * the specified extra predicate on `cowork_sessions.session_type` cannot be
-   * expressed because that column does not exist (verified on f2e1cb82).
+   * table (`[SEC-08]`). S4 keeps the full group-chat predicate on
+   * `cowork_sessions.session_type = 'group_task'`; that column is added by
+   * `coworkStore.ensureMemorySchemaCompatibility()` (coworkStore.ts:1231), not
+   * by sqliteStore's DDL — reading sqliteStore alone makes it look absent.
    */
   listCardSessions(taskId: string): TrackedCardSessionLink[] {
     const rows = this.getAll(
@@ -477,8 +646,9 @@ export class TrackedTaskBoardService {
            FROM scheduled_task_runs r JOIN scheduled_tasks st ON st.id = r.task_id
           WHERE st.orchestration_task_id = ? AND r.session_id IS NOT NULL
          UNION
-         SELECT gt.source_session_id AS session_id, 'group_chat' AS role
-           FROM group_tasks gt WHERE gt.orchestration_task_id = ? AND gt.source_session_id IS NOT NULL
+         SELECT cs.id AS session_id, 'group_chat' AS role
+           FROM group_tasks gt JOIN cowork_sessions cs ON cs.id = gt.source_session_id
+          WHERE gt.orchestration_task_id = ? AND cs.session_type = 'group_task'
          UNION
          SELECT st.cowork_session_id AS session_id, 'scheduled_home' AS role
            FROM scheduled_tasks st WHERE st.orchestration_task_id = ? AND st.cowork_session_id IS NOT NULL
@@ -505,8 +675,10 @@ export class TrackedTaskBoardService {
            FROM scheduled_task_runs r JOIN scheduled_tasks st ON st.id = r.task_id
           WHERE r.session_id = ? AND st.orchestration_task_id IS NOT NULL
          UNION
-         SELECT orchestration_task_id AS card_id, 'group_chat' AS role
-           FROM group_tasks WHERE source_session_id = ? AND orchestration_task_id IS NOT NULL
+         SELECT gt.orchestration_task_id AS card_id, 'group_chat' AS role
+           FROM group_tasks gt JOIN cowork_sessions cs ON cs.id = gt.source_session_id
+          WHERE gt.source_session_id = ? AND gt.orchestration_task_id IS NOT NULL
+            AND cs.session_type = 'group_task'
          UNION
          SELECT orchestration_task_id AS card_id, 'scheduled_home' AS role
            FROM scheduled_tasks WHERE cowork_session_id = ? AND orchestration_task_id IS NOT NULL
@@ -517,8 +689,13 @@ export class TrackedTaskBoardService {
   }
 
   /**
-   * Close a card: persist the conclusion on the ledger row and move `status`
-   * through the state machine whitelist. Never writes `status` directly.
+   * Close a card (`[SEC-10]`), two-stage per the chair's F1 ruling:
+   *  1. always write the four closure columns;
+   *  2. move `status` ONLY when the ledger whitelist allows it — otherwise the
+   *     conclusion still closes the card through the terminal-status rule and
+   *     the status legitimately stays put (e.g. a `failed` card).
+   * `status` is never written directly: the move goes through
+   * `orchestrationStore.updateTaskStatus` and its TASK_TRANSITIONS whitelist.
    */
   closeCard(input: TrackedCardCloseInput): TrackedCardCloseResult {
     const conclusion = input.conclusion?.trim();
@@ -532,25 +709,137 @@ export class TrackedTaskBoardService {
     if (!task) {
       return { ok: false, code: 'NOT_FOUND', error: `orchestration task ${input.taskId} not found` };
     }
-    const targetStatus: OrchestrationTaskStatus = input.targetStatus === 'cancelled' ? 'cancelled' : 'completed';
-    if (task.status !== targetStatus) {
+
+    let statusMoved = false;
+    let statusNote = 'ledger status is already terminal; the conclusion alone closes the card.';
+    if (!isTerminalStatus(task.status)) {
+      const targetStatus: OrchestrationTaskStatus = input.targetStatus === 'cancelled' ? 'cancelled' : 'completed';
       try {
         this.deps.orchestrationStore.updateTaskStatus(input.taskId, targetStatus);
+        statusMoved = true;
+        statusNote = `ledger status ${task.status} -> ${targetStatus}`;
       } catch (error) {
-        return {
-          ok: false,
-          code: 'TRANSITION_NOT_ALLOWED',
-          error: error instanceof Error ? error.message : String(error),
-        };
+        statusNote = `ledger transition refused (${error instanceof Error ? error.message : String(error)}); `
+          + 'the conclusion is still recorded.';
       }
     }
+
     this.deps.db.run(
       'UPDATE orchestration_tasks SET closure_conclusion = ?, closure_by = ?, closure_at = ?, closure_pin_id = ? WHERE id = ?',
       [conclusion, input.by, new Date().toISOString(), input.pinId ?? null, input.taskId],
     );
     this.deps.saveDb();
     const card = this.buildSummary(input.taskId, Date.now());
-    return card ? { ok: true, card } : { ok: false, code: 'NOT_FOUND', error: 'card vanished after close' };
+    return card
+      ? { ok: true, card, statusMoved, statusNote }
+      : { ok: false, code: 'NOT_FOUND', error: 'card vanished after close' };
+  }
+
+  /** Daemon liveness only; carries no card state (`[SEC-07]`). */
+  recordTickBeat(atMs = Date.now()): { key: string; value: string } {
+    const instanceId = this.deps.instanceId ?? 'local';
+    const value = `${instanceId}|${atMs}`;
+    this.deps.db.run(
+      'INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      [TRACKED_TICK_BEAT_KV_KEY, value, atMs],
+    );
+    this.deps.saveDb();
+    return { key: TRACKED_TICK_BEAT_KV_KEY, value };
+  }
+
+  readTickBeat(): string | null {
+    return text(this.getOne('SELECT value FROM kv WHERE key = ?', [TRACKED_TICK_BEAT_KV_KEY])?.value);
+  }
+
+  /**
+   * Scheduled tasks that are not on a card yet — the D2 batch-confirm list.
+   * Historical rows are NEVER backfilled automatically; the owner confirms.
+   */
+  listUnattachedScheduledTasks(): TrackedUnattachedScheduledTask[] {
+    return this.getAll(
+      `SELECT id, name, enabled, next_run_at_ms FROM scheduled_tasks
+        WHERE orchestration_task_id IS NULL
+          AND ('scheduled-task:' || id) NOT IN (
+            SELECT source_session_id FROM orchestration_tasks
+             WHERE source_session_id IS NOT NULL
+          )
+        ORDER BY name ASC`,
+    ).map((row) => ({
+      id: String(row.id),
+      name: String(row.name ?? ''),
+      enabled: Number(row.enabled) === 1,
+      nextRunAtMs: row.next_run_at_ms === null || row.next_run_at_ms === undefined
+        ? null
+        : Number(row.next_run_at_ms),
+    }));
+  }
+
+  /**
+   * Attach the explicitly confirmed scheduled tasks to cards (D2). Idempotent
+   * on `source_session_id = 'scheduled-task:<id>'`; re-running never creates a
+   * second card, and nothing is attached unless it was named here.
+   */
+  attachScheduledTasks(input: TrackedScheduledAttachInput): TrackedScheduledAttachResult {
+    const result: TrackedScheduledAttachResult = { attached: [], skipped: [] };
+    const ownerGlobalMetaId = input.ownerGlobalMetaId?.trim();
+    if (!ownerGlobalMetaId) {
+      return { attached: [], skipped: (input.scheduledTaskIds ?? []).map((id) => ({
+        scheduledTaskId: id,
+        reason: 'no owner GlobalMetaID is bound to this host',
+      })) };
+    }
+    for (const scheduledTaskId of input.scheduledTaskIds ?? []) {
+      const scheduled = this.getOne('SELECT id, name, orchestration_task_id FROM scheduled_tasks WHERE id = ?', [
+        scheduledTaskId,
+      ]);
+      if (!scheduled) {
+        result.skipped.push({ scheduledTaskId, reason: 'scheduled task not found' });
+        continue;
+      }
+      const anchor = `scheduled-task:${scheduledTaskId}`;
+      let card = this.deps.orchestrationStore.getTaskBySourceSessionId(anchor);
+      const boundCardId = text(scheduled.orchestration_task_id);
+      if (!card && boundCardId) card = this.deps.orchestrationStore.getTask(boundCardId);
+      if (card) {
+        if (boundCardId !== card.id) {
+          this.deps.db.run('UPDATE scheduled_tasks SET orchestration_task_id = ? WHERE id = ?', [card.id, scheduledTaskId]);
+          this.deps.saveDb();
+        }
+        result.attached.push({ scheduledTaskId, cardId: card.id, reused: true });
+        continue;
+      }
+      const created = this.deps.orchestrationStore.createTask({
+        ownerIntent: String(scheduled.name ?? scheduledTaskId),
+        enrichedGoal: null,
+        acceptanceCriteria: [],
+        sourceSessionId: anchor,
+        twinMetabotId: input.twinMetabotId,
+        ownerGlobalMetaId,
+      });
+      this.deps.db.run('UPDATE scheduled_tasks SET orchestration_task_id = ? WHERE id = ?', [created.id, scheduledTaskId]);
+      this.deps.saveDb();
+      result.attached.push({ scheduledTaskId, cardId: created.id, reused: false });
+    }
+    return result;
+  }
+
+  /**
+   * Zombie sweep: read-only assessment plus the tick beat. Deliberately writes
+   * no card row, no `status`, and never touches `group_tasks`.
+   */
+  sweep(atMs = Date.now()): TrackedSweepResult {
+    const cards = this.listCards({ scope: 'all' }).cards;
+    const beat = this.recordTickBeat(atMs).value;
+    return {
+      assessed: cards.length,
+      closureDue: cards.filter((card) => card.closureDue).length,
+      zombieLevel: cards.filter((card) => card.closureDueLevel === 'zombie').length,
+      terminalMissingConclusionLevel: cards.filter(
+        (card) => card.closureDueLevel === 'terminal_missing_conclusion',
+      ).length,
+      sessionsEndedLevel: cards.filter((card) => card.closureDueLevel === 'sessions_ended').length,
+      beat,
+    };
   }
 
   private readClosure(taskId: string): TrackedCardDetail['closure'] {
@@ -606,6 +895,7 @@ export class TrackedTaskBoardService {
       `SELECT status FROM cowork_sessions WHERE id IN (${sessions.map(() => '?').join(',') || "''"})`,
       sessions.map((link) => link.sessionId),
     ).map((row) => String(row.status));
+    const closure = this.readClosure(taskId);
 
     const derivation = deriveCardState({
       task,
@@ -613,7 +903,7 @@ export class TrackedTaskBoardService {
       attempts,
       openCheckpointCount,
       verifiableDeliverableCount,
-      closureConclusion: this.readClosure(taskId).conclusion,
+      closureConclusion: closure.conclusion,
       scheduled: scheduled
         ? {
           enabled: Number(scheduled.enabled) === 1,
@@ -624,6 +914,8 @@ export class TrackedTaskBoardService {
         }
         : null,
       sessionStatuses,
+      // The daemon heartbeat (kv `tracking_tick_beat`) is intentionally absent:
+      // it is liveness of the process, not activity of the card.
       activityAtMs: [
         epochMs(task.updatedAt),
         ...steps.map((step) => epochMs(step.updatedAt)),
@@ -655,8 +947,10 @@ export class TrackedTaskBoardService {
       ledgerStatus: task.status,
       closureWarn: derivation.closureWarn,
       closureDue: derivation.closureDue,
+      closureDueLevel: derivation.closureDueLevel,
       closureSuggestion: derivation.closureSuggestion,
-      closureConclusion: this.readClosure(taskId).conclusion,
+      closureConclusion: closure.conclusion,
+      activityAtMs: derivation.lastActivityAtMs,
       lastActivityAtMs: derivation.lastActivityAtMs,
       idleMs: derivation.idleMs,
       createdAt: task.createdAt,
@@ -666,16 +960,27 @@ export class TrackedTaskBoardService {
       groupTaskId,
       scheduledTaskId,
       needsOwnerAction: derivation.cardState === 'waiting_decision' || derivation.closureDue,
-      actionRank: derivation.cardState === 'waiting_decision'
-        ? 0
-        : derivation.closureDue
-          ? 1
-          : derivation.cardState === 'blocked_external'
-            ? 2
-            : derivation.cardState === 'in_progress'
-              ? 3
-              : 4,
+      actionRank: trackedCardActionRank({
+        state: derivation.cardState,
+        closureDue: derivation.closureDue,
+      }),
       reasons: derivation.reasons,
+      reasonOverflow: derivation.reasonOverflow,
     };
   }
+}
+
+/** Deliverable kind, delegated to the single parser (`[SEC-11]`). */
+export function trackedDeliverableKind(uri: string): string {
+  const trimmed = uri.trim();
+  if (!trimmed) return 'none';
+  if (extractPinidToken(trimmed)) return trimmed.startsWith('metafile://') ? 'metafile' : 'pin';
+  if (trimmed.startsWith('metaapp://')) return 'metaapp';
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return 'url';
+  return 'other';
+}
+
+function isInsideScopeWindow(card: TrackedCardSummary, nowMs: number): boolean {
+  if (card.activityAtMs === null) return true; // unknown activity is never silently hidden
+  return nowMs - card.activityAtMs <= TRACKED_CARD_SCOPE_WINDOW_MS;
 }

@@ -854,9 +854,19 @@ contextBridge.exposeInMainWorld('electron', {
   trackedTask: {
     // Long-task board over the single authoritative ledger (orchestration_tasks).
     // The renderer must read card state through these channels only.
-    list: (input?: { ownerGlobalMetaId?: string }) => ipcRenderer.invoke('trackedTask:list', input),
+    list: (input?: {
+      ownerGlobalMetaId?: string;
+      scope?: 'default' | 'all';
+      limit?: number;
+      offset?: number;
+    }) => ipcRenderer.invoke('trackedTask:list', input),
     detail: (input: { cardId: string }) => ipcRenderer.invoke('trackedTask:detail', input),
     cardsForSession: (input: { sessionId: string }) => ipcRenderer.invoke('trackedTask:cardsForSession', input),
+    /** D2 batch confirm: list the scheduled tasks that are not on a card yet. */
+    unattachedScheduledTasks: () => ipcRenderer.invoke('trackedTask:unattachedScheduledTasks'),
+    /** Attach exactly the named scheduled tasks; never a blanket backfill. */
+    attachScheduledTasks: (input: { scheduledTaskIds: string[] }) =>
+      ipcRenderer.invoke('trackedTask:attachScheduledTasks', input),
     close: (input: {
       cardId: string;
       conclusion: string;
@@ -864,7 +874,12 @@ contextBridge.exposeInMainWorld('electron', {
       targetStatus?: 'completed' | 'cancelled';
       pinId?: string | null;
     }) => ipcRenderer.invoke('trackedTask:close', input),
-    onUpdate: (callback: (data: { cardId: string; reason: string }) => void) => {
+    /**
+     * `seq` is monotonic per process: drop any frame with `seq <= lastSeenSeq`
+     * and refetch only `taskIds`. Poll once every 30s as a fallback for a
+     * missed push.
+     */
+    onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('trackedTask:update', handler);
       return () => ipcRenderer.removeListener('trackedTask:update', handler);

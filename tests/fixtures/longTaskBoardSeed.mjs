@@ -188,8 +188,19 @@ function buildCases(anchorMs) {
       zombie: 'none',
       activityAgeMs: 5 * HOUR,
       activityAnchor: 'task.updated_at',
+      sourceSessionId: 'seed-session-standalone-05',
     },
-    { tasks: [{ id: 'seed-task-05', status: 'running', updatedDelta: -5 * HOUR }] },
+    {
+      tasks: [
+        {
+          id: 'seed-task-05',
+          status: 'running',
+          updatedDelta: -5 * HOUR,
+          sourceSessionId: 'seed-session-standalone-05',
+        },
+      ],
+      sessions: [{ id: 'seed-session-standalone-05', status: 'running' }],
+    },
   );
 
   // --- SEED-06: planning -> 进行中 ----------------------------------------
@@ -228,8 +239,10 @@ function buildCases(anchorMs) {
           status: 'running',
           queuedDelta: -1 * HOUR,
           startedDelta: -1 * HOUR,
+          workerSessionId: 'seed-session-worker-07',
         },
       ],
+      sessions: [{ id: 'seed-session-worker-07', status: 'running' }],
     },
   );
 
@@ -367,6 +380,7 @@ function buildCases(anchorMs) {
       zombie: 'none',
       activityAgeMs: 2 * DAY,
       activityAnchor: 'task.updated_at',
+      closureDueLevel: 'terminal_missing_conclusion',
       note: 'contract §2.4 E6 generalised: a terminal status with no conclusion is NOT closed',
     },
     { tasks: [{ id: 'seed-task-18', status: 'failed', updatedDelta: -2 * DAY }] },
@@ -393,7 +407,13 @@ function buildCases(anchorMs) {
           sourceSessionId: 'group-task:8301',
         },
       ],
-      groupTasks: [{ id: 8301, orchestrationTaskId: 'seed-task-19', status: 'executing' }],
+      groupTasks: [{
+        id: 8301,
+        orchestrationTaskId: 'seed-task-19',
+        status: 'executing',
+        sourceSessionId: 'seed-session-gt-8301',
+      }],
+      sessions: [{ id: 'seed-session-gt-8301', status: 'running', sessionType: 'group_task' }],
     },
   );
 
@@ -420,7 +440,13 @@ function buildCases(anchorMs) {
           closureConclusion: 'seed: group task closed and accepted',
         },
       ],
-      groupTasks: [{ id: 8302, orchestrationTaskId: 'seed-task-20', status: 'done' }],
+      groupTasks: [{
+        id: 8302,
+        orchestrationTaskId: 'seed-task-20',
+        status: 'done',
+        sourceSessionId: 'seed-session-gt-8302',
+      }],
+      sessions: [{ id: 'seed-session-gt-8302', status: 'idle', sessionType: 'group_task' }],
     },
   );
 
@@ -447,8 +473,17 @@ function buildCases(anchorMs) {
           sourceSessionId: 'scheduled-task:seed-sched-01',
         },
       ],
-      scheduledTasks: [{ id: 'seed-sched-01' }],
-      scheduledTaskRuns: [{ id: 'seed-run-21', taskId: 'seed-sched-01', startedDelta: -2 * HOUR }],
+      scheduledTasks: [{ id: 'seed-sched-01', coworkSessionId: 'seed-session-sched-home-21' }],
+      scheduledTaskRuns: [{
+        id: 'seed-run-21',
+        taskId: 'seed-sched-01',
+        startedDelta: -2 * HOUR,
+        sessionId: 'seed-session-sched-run-21',
+      }],
+      sessions: [
+        { id: 'seed-session-sched-run-21', status: 'running' },
+        { id: 'seed-session-sched-home-21', status: 'running' },
+      ],
     },
   );
 
@@ -487,7 +522,13 @@ function buildCases(anchorMs) {
           sourceSessionId: 'group-task:8303',
         },
       ],
-      groupTasks: [{ id: 8303, orchestrationTaskId: 'seed-task-23', status: 'executing' }],
+      groupTasks: [{
+        id: 8303,
+        orchestrationTaskId: 'seed-task-23',
+        status: 'executing',
+        sourceSessionId: 'seed-session-gt-8303',
+      }],
+      sessions: [{ id: 'seed-session-gt-8303', status: 'running', sessionType: 'group_task' }],
       deliverables: [
         {
           taskId: 8303,
@@ -549,6 +590,47 @@ function buildCases(anchorMs) {
         },
       ],
     },
+  );
+
+  // --- SEED-26: session ended -> closureDue, without forcing a column move ---
+  add(
+    {
+      id: 'SEED-26',
+      title: 'every linked session ended, nothing queued (contract R3)',
+      boardColumn: 'active',
+      zombie: 'none',
+      activityAgeMs: 2 * HOUR,
+      activityAnchor: 'task.updated_at',
+      closureDueLevel: 'sessions_ended',
+      sourceSessionId: 'seed-session-ended-26',
+      note: 'session-ended triggers a closureDue assessment; it never auto-closes the card',
+    },
+    {
+      tasks: [
+        {
+          id: 'seed-task-26',
+          status: 'running',
+          updatedDelta: -2 * HOUR,
+          sourceSessionId: 'seed-session-ended-26',
+        },
+      ],
+      sessions: [{ id: 'seed-session-ended-26', status: 'idle' }],
+    },
+  );
+
+  // --- SEED-27: an independent session belongs to no card ------------------
+  add(
+    {
+      id: 'SEED-27',
+      title: 'independent session with no card link',
+      boardColumn: null,
+      zombie: null,
+      activityAgeMs: null,
+      activityAnchor: null,
+      independentSessionId: 'seed-session-independent',
+      note: 'NEGATIVE CASE: 0 rows means an independent session; the UI must not invent an owner',
+    },
+    { sessions: [{ id: 'seed-session-independent', status: 'idle' }] },
   );
 
   return cases.map((entry) => ({
@@ -616,12 +698,13 @@ function insertAttempt(db, anchorMs, attempt) {
     `INSERT INTO orchestration_attempts
       (id, step_id, idempotency_key, worker_metabot_id, worker_session_id, status, prompt,
        result_json, error, queued_at, started_at, finished_at)
-     VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, NULL, ?, ?, NULL)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)`,
     [
       attempt.id,
       attempt.stepId,
       `seed:${attempt.id}`,
       WORKER_METABOT_ID,
+      attempt.workerSessionId ?? null,
       attempt.status,
       `seed prompt for ${attempt.id}`,
       isoAt(anchorMs, attempt.queuedDelta),
@@ -630,12 +713,43 @@ function insertAttempt(db, anchorMs, attempt) {
   );
 }
 
+/**
+ * `cowork_sessions.session_type` is added by coworkStore's own idempotent
+ * migration (coworkStore.ts:1231), not by sqliteStore's DDL. Any verification
+ * that touches it must run on a migrated database, so the fixture applies the
+ * same guarded ALTER instead of pretending the column does not exist.
+ */
+function ensureSessionTypeColumn(db) {
+  const result = db.exec('PRAGMA table_info(cowork_sessions)');
+  const columns = (result[0]?.values?.map((row) => row[1]) || []);
+  if (!columns.includes('session_type')) {
+    db.run("ALTER TABLE cowork_sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'standard'");
+  }
+}
+
+function insertSession(db, anchorMs, session) {
+  db.run(
+    `INSERT INTO cowork_sessions
+      (id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode,
+       hidden_from_session_list, project_id, created_at, updated_at, session_type)
+     VALUES (?, ?, NULL, ?, 0, '/tmp/seed', '', 'auto', 0, NULL, ?, ?, ?)`,
+    [
+      session.id,
+      `seed session ${session.id}`,
+      session.status ?? 'idle',
+      anchorMs - HOUR,
+      anchorMs - MIN,
+      session.sessionType ?? 'standard',
+    ],
+  );
+}
+
 function insertGroupTask(db, anchorMs, groupTask) {
   db.run(
     `INSERT INTO group_tasks
       (id, orchestration_task_id, group_id, title, goal, acceptance_criteria, status,
-       chair_metabot_id, created_by, mode, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user', 'task', ?, ?)`,
+       chair_metabot_id, created_by, mode, source_session_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user', 'task', ?, ?, ?)`,
     [
       groupTask.id,
       groupTask.orchestrationTaskId,
@@ -645,6 +759,7 @@ function insertGroupTask(db, anchorMs, groupTask) {
       'seed acceptance criteria',
       groupTask.status,
       TWIN_METABOT_ID,
+      groupTask.sourceSessionId ?? null,
       isoAt(anchorMs, -6 * HOUR),
       isoAt(anchorMs, -1 * HOUR),
     ],
@@ -672,14 +787,15 @@ function insertScheduledTask(db, anchorMs, scheduledTask) {
   db.run(
     `INSERT INTO scheduled_tasks
       (id, name, description, enabled, schedule_json, prompt, execution_mode, notify_platforms_json,
-       consecutive_errors, created_at, updated_at)
-     VALUES (?, ?, ?, 1, ?, ?, 'auto', '[]', 0, ?, ?)`,
+       consecutive_errors, cowork_session_id, created_at, updated_at)
+     VALUES (?, ?, ?, 1, ?, ?, 'auto', '[]', 0, ?, ?, ?)`,
     [
       scheduledTask.id,
       `seed scheduled task ${scheduledTask.id}`,
       'seed scheduled task for the long-task board fixture',
       JSON.stringify({ type: 'daily', time: '09:00' }),
       'seed prompt',
+      scheduledTask.coworkSessionId ?? null,
       isoAt(anchorMs, -2 * DAY),
       isoAt(anchorMs, -2 * DAY),
     ],
@@ -690,8 +806,14 @@ function insertScheduledTaskRun(db, anchorMs, run) {
   db.run(
     `INSERT INTO scheduled_task_runs
       (id, task_id, session_id, status, started_at, finished_at, duration_ms, trigger_type)
-     VALUES (?, ?, NULL, 'success', ?, ?, 1000, 'scheduled')`,
-    [run.id, run.taskId, isoAt(anchorMs, run.startedDelta), isoAt(anchorMs, run.startedDelta + 1000)],
+     VALUES (?, ?, ?, 'success', ?, ?, 1000, 'scheduled')`,
+    [
+      run.id,
+      run.taskId,
+      run.sessionId ?? null,
+      isoAt(anchorMs, run.startedDelta),
+      isoAt(anchorMs, run.startedDelta + 1000),
+    ],
   );
 }
 
@@ -704,8 +826,10 @@ export function seedLongTaskBoard(sqliteStore, options = {}) {
   const db = sqliteStore.getDatabase();
   const cases = buildCases(anchorMs);
 
+  ensureSessionTypeColumn(db);
   for (const testCase of cases) {
     const rows = testCase.rows;
+    for (const session of rows.sessions ?? []) insertSession(db, anchorMs, session);
     for (const task of rows.tasks ?? []) insertTask(db, anchorMs, task);
     for (const step of rows.steps ?? []) insertStep(db, anchorMs, step);
     for (const attempt of rows.attempts ?? []) insertAttempt(db, anchorMs, attempt);
@@ -735,6 +859,7 @@ export function seedLongTaskBoard(sqliteStore, options = {}) {
       groupTasks: cases.flatMap((c) => c.rows.groupTasks ?? []).length,
       deliverables: cases.flatMap((c) => c.rows.deliverables ?? []).length,
       scheduledTasks: cases.flatMap((c) => c.rows.scheduledTasks ?? []).length,
+      sessions: cases.flatMap((c) => c.rows.sessions ?? []).length,
       pendingSpec: cases.filter((c) => c.pendingSpec).length,
     },
   };

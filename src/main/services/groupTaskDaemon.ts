@@ -1766,6 +1766,14 @@ export interface GroupTaskDaemonDeps {
    */
   stopWorkerSession?: (sessionId: string) => void;
   /**
+   * Long-task board (task #83): throttled read-only assessment of the tracking
+   * ledger plus the kv process beat. Unwired = the sweep stays off. It must
+   * never write a card row, and the daemon owns the throttle so the 5s tick
+   * does not turn a day-scale judgement into a day-scale write storm.
+   */
+  sweepTrackedCards?: () => void;
+  trackedSweepThrottleMs?: number;
+  /**
    * Task #60: true while the cowork runner still holds a live turn handle for
    * the session (wired to CoworkRunner.isSessionActive in main.ts). The
    * skill-turn watchdog latch uses it to distinguish a genuinely terminated
@@ -10649,6 +10657,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  const trackedSweepThrottleMs = deps.trackedSweepThrottleMs ?? 3_600_000;
+  let lastTrackedSweepAtMs = 0;
+  const maybeSweepTrackedCards = (): void => {
+    const sweep = deps.sweepTrackedCards;
+    if (!sweep) return;
+    const at = now();
+    if (!isTrackedSweepDue(lastTrackedSweepAtMs, at, trackedSweepThrottleMs)) return;
+    lastTrackedSweepAtMs = at;
+    try {
+      sweep();
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Tracked-card sweep failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
   const runGuardedTick = (): void => {
     // Tick watchdog (fix/group-member-status): a hung await inside runTick
     // (a promise that never settles — observed in the wild as the loop going
@@ -10676,6 +10701,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
     ticking = true;
     tickLastProgressAtMs = now();
+    maybeSweepTrackedCards();
     tickEpoch += 1;
     const epoch = tickEpoch;
     void runTick()
@@ -10714,6 +10740,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 }
 
 let activeDaemonLoop: GroupTaskDaemonLoop | null = null;
+
+/**
+ * Day-scale judgement on a 5s tick: the tracking-board sweep runs at most once
+ * per throttle window. Exported so the throttle itself is unit-testable.
+ */
+export function isTrackedSweepDue(lastRunAtMs: number, nowMs: number, throttleMs: number): boolean {
+  if (!Number.isFinite(lastRunAtMs) || lastRunAtMs <= 0) return true;
+  return nowMs - lastRunAtMs >= throttleMs;
+}
 
 export function startGroupTaskDaemon(deps: GroupTaskDaemonDeps): void {
   stopGroupTaskDaemon();
