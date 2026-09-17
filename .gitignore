@@ -44,6 +44,7 @@ docs/*
 !docs/metaweb-search-backend-requirements.md
 !docs/metaweb-search-quality-requirements.md
 !docs/metaweb-surf-backend-requirements.md
+!docs/metaweb-surf-backend-requirements-r2.md
 !docs/metaweb-qa-backend-requirements.md
 !docs/metaweb-qa-backend-requirements-v2.md
 !docs/metaweb-qa-frontend-metaapp-guide.md
@@ -310,6 +311,8 @@ man_base_data_pebble/
 !tests/metawebQaSurfSession.test.mjs
 !tests/qandaMetaAppStatic.test.mjs
 !tests/metawebLearningAskNudge.test.mjs
+!tests/metawebLearningBatchBudget.test.mjs
+!tests/metawebPinPayloadFallback.test.mjs
 !tests/networkServicesAgentTools.test.mjs
 !tests/onlineBotsAgentTools.test.mjs
 !tests/metaFileUploadAgentTools.test.mjs

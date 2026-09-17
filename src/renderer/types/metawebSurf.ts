@@ -20,7 +20,9 @@ export interface MetawebSurfRunStats {
   posted: number;
   challenged: number;
   inboxHandled: number;
+  inboxPresented: number;
   discoveredProtocols: number;
+  tasksScheduled: number;
 }
 
 export interface MetawebSurfRunInfo {
@@ -31,6 +33,8 @@ export interface MetawebSurfRunInfo {
   stats: MetawebSurfRunStats;
   reportMarkdown: string | null;
   reportJson: string | null;
+  /** The briefing digest the session was shown that night (report stored separately). */
+  briefingMarkdown: string | null;
   error: string | null;
   startedAt: string;
   finishedAt: string | null;

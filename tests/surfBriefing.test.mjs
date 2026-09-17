@@ -144,6 +144,31 @@ test('all-ledger-filtered protocol still advances its cursor', async () => {
   assert.equal(briefing.protocols[0].nextWatermarkTs, NOW_SEC - 10, 'nothing to rescue — cursor may advance');
 });
 
+test('very short / symbol-only titles fold into one noise line; signal items keep their lines (live-audit round 1)', async () => {
+  const store = setup();
+  const noisy = (pinId, title) => ({ ...makeItem(pinId, NOW_SEC - 5, 'alpha'), title });
+  const registry = [makeDescriptor('alpha', [
+    noisy('pin-good', 'A real methodological write-up'),
+    noisy('pin-2', '2'),
+    noisy('pin-emoji', '😂'),
+    noisy('pin-dots', '……'),
+    noisy('pin-untitled', ''),
+    noisy('pin-ok', 'ok 好'), // 4 chars incl. CJK — signal
+  ])];
+  const briefing = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry, nowMs: NOW_MS });
+  const md = renderSurfBriefingMarkdown(briefing);
+  assert.match(md, /A real methodological write-up/);
+  assert.match(md, /ok 好/);
+  // The untitled item renders via its summary fallback — signal, not noise.
+  assert.match(md, /\[pin-untitled\] Summary pin-untitled/);
+  assert.match(md, /3 very short \/ symbol-only post\(s\) folded out of this listing/);
+  assert.ok(!md.includes('[pin-2]'), 'one-liner noise must not render as an item line');
+  assert.ok(!md.includes('[pin-emoji]'));
+  assert.ok(!md.includes('[pin-dots]'));
+  // Folding is display-only: every item stays briefed for the seen ledger.
+  assert.equal(briefing.items.length, 6);
+});
+
 test('digest markdown marks items held back by the run cap', async () => {
   const store = setup();
   // 4 x 50 = 200 kept; the oldest protocol is crowded out of the 150 cap.

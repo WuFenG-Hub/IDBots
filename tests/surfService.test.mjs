@@ -55,8 +55,11 @@ test('digest-only run: report written, watermark advanced, events broadcast', as
 
   assert.equal(run.status, 'done');
   assert.equal(run.stats.fetched, 2);
-  assert.match(run.reportMarkdown, /# Surf digest/);
-  assert.match(run.reportMarkdown, /pin-a/);
+  // Digest-only runs (no injected session) keep the digest in its own
+  // column; the report itself is empty (live-audit round 1 separation).
+  assert.equal(run.reportMarkdown, null);
+  assert.match(run.briefingMarkdown, /# Surf digest/);
+  assert.match(run.briefingMarkdown, /pin-a/);
 
   const state = store.getProtocolState(7, 'alpha');
   assert.equal(state.lastSeenTs, NOW_SEC - 100, 'watermark advances to the oldest kept item (cap defers, never drops)');
@@ -182,7 +185,8 @@ test('injected session overrides digest stats and prepends its report', async ()
   assert.equal(run.stats.savedToKb, 1);
   assert.equal(run.stats.liked, 2);
   assert.match(run.reportMarkdown, /^# Session report/);
-  assert.match(run.reportMarkdown, /# Surf digest/);
+  assert.doesNotMatch(run.reportMarkdown, /# Surf digest/);
+  assert.match(run.briefingMarkdown, /# Surf digest/);
   assert.equal(run.reportJson, '{"liked":2}');
 });
 
@@ -204,6 +208,48 @@ test('session failure fails the run without advancing watermarks', async () => {
   assert.equal(run.status, 'failed');
   assert.match(run.error, /llm down/);
   assert.equal(store.getProtocolState(7, 'alpha'), null);
+});
+
+test('a session that returns no report and no receipts fails the run and keeps the window (live-audit round 1)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    runSurfSession: async () => ({
+      stats: { deepRead: 0, savedToKb: 0, liked: 0, commented: 0, answered: 0, posted: 0, challenged: 0, inboxHandled: 0, tasksScheduled: 0 },
+      reportMarkdown: null,
+      reportJson: null,
+    }),
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'failed');
+  assert.match(run.error, /without a report and without any host-verifiable activity/);
+  // Nothing consumed: no seen-ledger marks, no watermark, next run re-presents.
+  assert.equal(store.getSeenAction(7, 'pin-a'), null);
+  assert.equal(store.getProtocolState(7, 'alpha'), null);
+  // A sibling run WITH receipts (even without a report) still completes —
+  // host-verifiable work must not be punished for the missing JSON fence.
+  const service2 = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-b', NOW_SEC - 50)])],
+    runSurfSession: async () => ({ stats: { deepRead: 1 }, reportMarkdown: null, reportJson: null }),
+    nowMs: () => NOW_MS,
+  });
+  const run2 = await service2.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run2.status, 'done');
+  assert.equal(run2.stats.deepRead, 1);
 });
 
 test('a failed run re-presents the same window on the next surf (P1 regression)', async () => {
@@ -237,7 +283,7 @@ test('a failed run re-presents the same window on the next surf (P1 regression)'
   const retry = await digestOnly.runSurfAndWait(7, 'pre-dream');
   assert.equal(retry.status, 'done');
   assert.equal(retry.stats.fetched, 2, 'the lost window is presented again after the failure');
-  assert.match(retry.reportMarkdown, /pin-a/);
+  assert.match(retry.briefingMarkdown, /pin-a/);
   assert.equal(store.getSeenAction(7, 'pin-a'), 'presented', 'success path marks presented');
   assert.equal(store.getProtocolState(7, 'alpha').lastSeenTs, NOW_SEC - 100, 'watermark lands on the oldest kept item');
 });
@@ -329,7 +375,7 @@ test('the next run inherits the notes written by the previous DONE run (round 3)
     registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
     runSurfSession: async (context) => {
       seenContext = context;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
@@ -519,7 +565,7 @@ test('inbox: baseline is the previous run START (createdAt), owner from identity
     },
     runSurfSession: async (context) => {
       seenBriefing = context.briefing;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
@@ -530,6 +576,7 @@ test('inbox: baseline is the previous run START (createdAt), owner from identity
   ], 'baseline = the previous run START (createdAt), NOT finishedAt; owner = identity address');
   assert.equal(seenBriefing.inbox.items.length, 1);
   assert.equal(seenBriefing.inbox.items[0].pinId, 'inbox-1');
+  assert.equal(run.stats.inboxPresented, 1, 'host-computed inbox count lands in run stats');
   assert.equal(store.getSeenAction(7, 'inbox-1'), 'presented', 'inbox pins fold into the same success-path batch');
 
   // Next run: the same interaction is ledger-filtered (exactly-once) and the
@@ -550,7 +597,7 @@ test('inbox: baseline is the previous run START (createdAt), owner from identity
     },
     runSurfSession: async (context) => {
       seenBriefing = context.briefing;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
@@ -579,7 +626,7 @@ test('inbox: no identity or no fetcher → no inbox section, run still succeeds'
     fetchSurfInbox: async () => { throw new Error('must not be called without an owner'); },
     runSurfSession: async (context) => {
       seenBriefing = context.briefing;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
@@ -608,14 +655,14 @@ test('radar: fetchProtocolRadar flows into the briefing and a failure still fini
     }),
     runSurfSession: async (context) => {
       seenBriefing = context.briefing;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
   const run = await service.runSurfAndWait(7, 'manual-ui');
   assert.equal(run.status, 'done');
   assert.equal(seenBriefing.protocolRadar.items.length, 1);
-  assert.match(run.reportMarkdown, /## Protocol radar — 1 registered protocol\(s\)/, 'radar lands in the digest appendix');
+  assert.match(run.briefingMarkdown, /## Protocol radar — 1 registered protocol\(s\)/, 'radar lands in the digest appendix');
 
   const failingRadar = new SurfService({
     store,
@@ -630,5 +677,5 @@ test('radar: fetchProtocolRadar flows into the briefing and a failure still fini
   });
   const second = await failingRadar.runSurfAndWait(7, 'manual-ui');
   assert.equal(second.status, 'done', 'a sick radar backend never fails the run');
-  assert.match(second.reportMarkdown, /radar fetch failed: radar down/);
+  assert.match(second.briefingMarkdown, /radar fetch failed: radar down/);
 });

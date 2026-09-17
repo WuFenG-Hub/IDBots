@@ -53,6 +53,20 @@ export const SURF_SEEN_MAX_ROWS_PER_BOT = 5000;
 /** A run row keeps at most this many characters of rendered report. */
 const MAX_REPORT_MARKDOWN_CHARS = 20000;
 const MAX_REPORT_JSON_CHARS = 40000;
+/**
+ * The nightly briefing digest (what the bot was shown) is stored next to the
+ * report, under its own larger cap — previously it was appended to
+ * report_markdown and the 20k report cap silently cut its tail (inbox/radar
+ * sections vanished mid-pin-id; live-audit round 1).
+ */
+const MAX_BRIEFING_MARKDOWN_CHARS = 64000;
+
+/** Cap a stored text with an explicit in-band marker — never a silent slice. */
+const clampWithMarker = (text: string, cap: number, label: string): string => {
+  if (text.length <= cap) return text;
+  const marker = `\n\n[${label} truncated at ${cap} chars to fit storage — the tail was NOT stored]`;
+  return `${text.slice(0, Math.max(0, cap - marker.length))}${marker}`;
+};
 
 export interface MetawebSurfRunStats {
   fetched: number;
@@ -65,6 +79,8 @@ export interface MetawebSurfRunStats {
   posted: number;
   challenged: number;
   inboxHandled: number;
+  /** Items the deterministic inbox presented that night (host-computed — separates 'inbox empty' from 'nothing worth acting on'). */
+  inboxPresented: number;
   discoveredProtocols: number;
   /** Scheduled tasks created (surf→work handoff); ground truth from the session marker. */
   tasksScheduled: number;
@@ -81,6 +97,7 @@ export const emptySurfRunStats = (): MetawebSurfRunStats => ({
   posted: 0,
   challenged: 0,
   inboxHandled: 0,
+  inboxPresented: 0,
   discoveredProtocols: 0,
   tasksScheduled: 0,
 });
@@ -93,6 +110,8 @@ export interface MetawebSurfRunRecord {
   stats: MetawebSurfRunStats;
   reportMarkdown: string | null;
   reportJson: string | null;
+  /** The briefing digest the session was shown that night (separate from the report). */
+  briefingMarkdown: string | null;
   error: string | null;
   startedAt: string;
   finishedAt: string | null;
@@ -124,6 +143,7 @@ interface MetawebSurfRunRow {
   stats_json: string;
   report_markdown: string | null;
   report_json: string | null;
+  briefing_markdown: string | null;
   error: string | null;
   started_at: string;
   finished_at: string | null;
@@ -167,6 +187,7 @@ const rowToRunRecord = (row: MetawebSurfRunRow): MetawebSurfRunRecord => ({
   stats: parseStats(row.stats_json),
   reportMarkdown: row.report_markdown || null,
   reportJson: row.report_json || null,
+  briefingMarkdown: row.briefing_markdown || null,
   error: row.error || null,
   startedAt: row.started_at,
   finishedAt: row.finished_at || null,
@@ -196,6 +217,7 @@ export function ensureMetawebSurfSchema(db: Database): void {
       stats_json TEXT NOT NULL DEFAULT '{}',
       report_markdown TEXT,
       report_json TEXT,
+      briefing_markdown TEXT,
       error TEXT,
       started_at TEXT NOT NULL,
       finished_at TEXT,
@@ -228,8 +250,15 @@ export function ensureMetawebSurfSchema(db: Database): void {
     if (!protocolStateColumns.includes('last_fresh_cursor')) {
       db.run('ALTER TABLE metaweb_surf_protocol_state ADD COLUMN last_fresh_cursor TEXT;');
     }
+    // Same idempotent pattern for the separated briefing digest (live-audit
+    // round 1): pre-migration rows keep their digest inside report_markdown.
+    const runCols = db.exec('PRAGMA table_info(metaweb_surf_runs);');
+    const runColumns = (runCols[0]?.values ?? []).map((row) => String(row[1]));
+    if (!runColumns.includes('briefing_markdown')) {
+      db.run('ALTER TABLE metaweb_surf_runs ADD COLUMN briefing_markdown TEXT;');
+    }
   } catch (error) {
-    console.warn('[MetawebSurfStore] Failed to migrate metaweb_surf_protocol_state:', error);
+    console.warn('[MetawebSurfStore] Failed to migrate metaweb surf tables:', error);
   }
   db.run(`
     CREATE TABLE IF NOT EXISTS metaweb_surf_seen_pins (
@@ -299,6 +328,7 @@ export class MetawebSurfStore {
       stats: MetawebSurfRunStats;
       reportMarkdown?: string | null;
       reportJson?: string | null;
+      briefingMarkdown?: string | null;
       error?: string | null;
       finishedAtIso: string;
     },
@@ -306,13 +336,14 @@ export class MetawebSurfStore {
     this.db.run(
       `UPDATE metaweb_surf_runs
        SET status = ?, stats_json = ?, report_markdown = ?, report_json = ?,
-           error = ?, finished_at = ?, updated_at = ?
+           briefing_markdown = ?, error = ?, finished_at = ?, updated_at = ?
        WHERE id = ?`,
       [
         outcome.status,
         JSON.stringify(outcome.stats),
-        outcome.reportMarkdown ? outcome.reportMarkdown.slice(0, MAX_REPORT_MARKDOWN_CHARS) : null,
-        outcome.reportJson ? outcome.reportJson.slice(0, MAX_REPORT_JSON_CHARS) : null,
+        outcome.reportMarkdown ? clampWithMarker(outcome.reportMarkdown, MAX_REPORT_MARKDOWN_CHARS, 'report') : null,
+        outcome.reportJson ? clampWithMarker(outcome.reportJson, MAX_REPORT_JSON_CHARS, 'report JSON') : null,
+        outcome.briefingMarkdown ? clampWithMarker(outcome.briefingMarkdown, MAX_BRIEFING_MARKDOWN_CHARS, 'briefing digest') : null,
         outcome.error ?? null,
         outcome.finishedAtIso,
         outcome.finishedAtIso,

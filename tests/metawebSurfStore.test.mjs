@@ -47,6 +47,46 @@ test('run lifecycle: create running, finish done with stats and report', () => {
   assert.equal(store.getLatestFinishedRun(8), null);
 });
 
+test('briefing digest is stored separately; oversized texts carry an explicit truncation marker (live-audit round 1)', () => {
+  const { store } = setup();
+  store.createRun({ id: 'run-sep', metabotId: 7, trigger: 'pre-dream', nowIso: NOW });
+  store.finishRun('run-sep', {
+    status: 'done',
+    stats: emptySurfRunStats(),
+    reportMarkdown: '# Surf report',
+    briefingMarkdown: '# Surf digest\n- pin a',
+    finishedAtIso: '2026-09-13T01:20:00.000Z',
+  });
+  const separated = store.getRun('run-sep');
+  assert.equal(separated.reportMarkdown, '# Surf report');
+  assert.equal(separated.briefingMarkdown, '# Surf digest\n- pin a');
+
+  // A digest over the 64k cap keeps its head with an in-band marker —
+  // never a silent mid-pin-id cut (the old behavior on report_markdown).
+  store.createRun({ id: 'run-big', metabotId: 7, trigger: 'pre-dream', nowIso: NOW });
+  const bigDigest = 'x'.repeat(80_000);
+  store.finishRun('run-big', {
+    status: 'done',
+    stats: emptySurfRunStats(),
+    briefingMarkdown: bigDigest,
+    finishedAtIso: '2026-09-13T01:25:00.000Z',
+  });
+  const capped = store.getRun('run-big');
+  assert.ok(capped.briefingMarkdown.length <= 64_000);
+  assert.match(capped.briefingMarkdown, /\[briefing digest truncated at 64000 chars to fit storage/);
+  // A capped report likewise carries its own marker instead of a bare slice.
+  store.createRun({ id: 'run-big2', metabotId: 7, trigger: 'pre-dream', nowIso: NOW });
+  store.finishRun('run-big2', {
+    status: 'done',
+    stats: emptySurfRunStats(),
+    reportMarkdown: 'y'.repeat(30_000),
+    finishedAtIso: '2026-09-13T01:30:00.000Z',
+  });
+  const cappedReport = store.getRun('run-big2');
+  assert.ok(cappedReport.reportMarkdown.length <= 20_000);
+  assert.match(cappedReport.reportMarkdown, /\[report truncated at 20000 chars to fit storage/);
+});
+
 test('listRunsByMetabot is newest first and capped', () => {
   const { store } = setup();
   for (let i = 0; i < 5; i += 1) {
