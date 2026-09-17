@@ -14,15 +14,22 @@ import {
  *
  * Contract source: 《IDBots 长期任务看板 v1 · 架构契约 v1.3（冻结版）》
  * pin://9d5feb452dad05b11714f8919d60bec316d87f10ce779b5cfe73a6ee91ea888fi0
- * (`[SEC-04]`..`[SEC-10]`), plus the chair's rulings.
+ * (`[SEC-04]`..`[SEC-10]`), plus the chair's rulings; v1.1 additions follow
+ * 《长期任务看板 v1.1 · 口径冻结件 v1.0》
+ * pin://4d633cb0b84843bcdc27727339654dbedb34ff488de84f867b2b1073c8127e1fi0
+ * (§2 admission, §4 closureDue, §5 sessions_ended, §6 archive).
  *
  * Hard rules this module obeys:
- *  - One ledger, no fourth table, `status` CHECK domain untouched.
+ *  - One ledger, no fourth table, `status` CHECK domain untouched, zero DDL.
  *  - **Storage holds facts (inputs) only; every derived value is computed at
- *    read time.** `cardState`, `closureDue`, `closureSuggestion` and
- *    `activityAtMs` are never persisted.
- *  - `deriveCardState` is a pure function: all inputs come from the ledger and
- *    `nowMs` is injected, so a third party recomputes the same verdict.
+ *    read time.** `cardState`, `closureDue`, `closureSuggestion`, `activityAtMs`
+ *    and v1.1's `admitted` / `archived` are never persisted — the archive is a
+ *    projection (`archived := ¬admitted`), not a column.
+ *  - `deriveCardState` and `trackAdmission` are pure functions: all inputs come
+ *    from the ledger and its linked tables, `nowMs` is injected, so a third
+ *    party recomputes the same verdict.
+ *  - `admitted` is a NECESSARY condition of `closureDue`: the whole delegation
+ *    ledger may not be projected into "needs closure".
  *  - Daemon liveness lives in the existing `kv` table (`tracking_tick_beat`)
  *    and NEVER in a card row. Writing a heartbeat must not touch `updated_at`,
  *    or the >2 day zombie rule could never fire.
@@ -59,6 +66,84 @@ export const TRACKED_CARD_STATE_LABEL_KEY: Record<TrackedCardState, string> = {
   blocked_external: 'trackedTask.column.blockedExternal',
   closed: 'trackedTask.column.closed',
 };
+
+/**
+ * Admission (v1.1, freeze doc §2). `admitted` is a NECESSARY condition of
+ * `closureDue`: a row that does not qualify is archived, never queued for
+ * closure. Like every other derived value it is computed at read time and never
+ * persisted (I-2), and the judgement itself is a pure function so a third party
+ * re-derives it from the same rows (I-4).
+ */
+export const TRACKED_LONG_TASK_REGISTRY_KV_KEY = 'tracked_long_task_registry';
+
+/** `wide` (default) = ADM-1 ∨ ADM-2 ∨ ADM-3 ∨ ADM-4 ∨ ADM-5; `strict` = ADM-1 ∨ ADM-3. */
+export const TRACKED_ADMISSION_MODE_KV_KEY = 'tracked_admission_mode';
+
+export const TRACKED_ADMISSION_MODES = ['wide', 'strict'] as const;
+
+export type TrackedAdmissionMode = (typeof TRACKED_ADMISSION_MODES)[number];
+
+export type TrackedAdmissionRule = 'ADM-1' | 'ADM-2' | 'ADM-3' | 'ADM-4' | 'ADM-5';
+
+export interface TrackedAdmissionInput {
+  /** ADM-1: the id is listed in the `tracked_long_task_registry` kv entry. */
+  registered: boolean;
+  /** ADM-2: `count(orchestration_steps)`; the rule is strictly greater than 1. */
+  stepCount: number;
+  /** ADM-3 first branch: a group_tasks row points at this card. */
+  groupTaskLinked: boolean;
+  /** ADM-3 second branch: a scheduled_tasks row points at this card. */
+  scheduledTaskLinked: boolean;
+  /** ADM-4 first branch: some step carries a non-empty dependency list. */
+  hasDependencies: boolean;
+  /** ADM-4 second branch: a linked group task carries checkpoint rows. */
+  hasCheckpoints: boolean;
+  /** ADM-5: a linked group task was created by the owner (`created_by='user'`). */
+  ownerInitiated: boolean;
+  mode: TrackedAdmissionMode;
+}
+
+export interface TrackedAdmissionVerdict {
+  admitted: boolean;
+  mode: TrackedAdmissionMode;
+  /** Every rule that matched, in ADM-1..ADM-5 order. Empty means archived. */
+  matched: TrackedAdmissionRule[];
+}
+
+/** The exact rules the freeze doc pins; the mode switch never changes storage. */
+export function trackAdmission(input: TrackedAdmissionInput): TrackedAdmissionVerdict {
+  const matched: TrackedAdmissionRule[] = [];
+  if (input.registered) matched.push('ADM-1');
+  const attached = input.groupTaskLinked || input.scheduledTaskLinked;
+  if (input.mode === 'strict') {
+    // Strict = ADM-1 ∨ ADM-3 — the long-lived shapes only.
+    if (attached) matched.push('ADM-3');
+    return { admitted: matched.length > 0, mode: input.mode, matched };
+  }
+  if (input.stepCount > 1) matched.push('ADM-2');
+  if (attached) matched.push('ADM-3');
+  if (input.hasDependencies || input.hasCheckpoints) matched.push('ADM-4');
+  if (input.ownerInitiated) matched.push('ADM-5');
+  return { admitted: matched.length > 0, mode: input.mode, matched };
+}
+
+/** Exact string equality, per the freeze doc; malformed JSON is an empty set, never a throw. */
+export function parseLongTaskRegistry(raw: string | null): string[] {
+  const asText = raw?.trim();
+  if (!asText) return [];
+  try {
+    const parsed = JSON.parse(asText);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is string => typeof entry === 'string' && entry !== '');
+  } catch {
+    return [];
+  }
+}
+
+/** Anything that is not exactly `strict` reads as the `wide` default. */
+export function resolveAdmissionMode(raw: string | null): TrackedAdmissionMode {
+  return raw?.trim() === 'strict' ? 'strict' : 'wide';
+}
 
 /**
  * Three separate closureDue levels, never merged (contract `[SEC-07]` + appendix
@@ -168,6 +253,12 @@ export interface TrackedCardDerivationInput {
   verifiableDeliverableCount: number;
   /** Closing conclusion on the ledger row; NULL means the card is NOT closed. */
   closureConclusion: string | null;
+  /**
+   * v1.1: `trackAdmission(...).admitted`. A NECESSARY condition of
+   * `closureDue` — an unadmitted row is archived and never queued for closure
+   * (freeze doc §4). Supplied by the caller, never read from storage.
+   */
+  admitted: boolean;
   /** Linked scheduled task, when the card is attached to one. */
   scheduled: { enabled: boolean; nextRunAtMs: number | null; running: boolean } | null;
   /** Every linked session status, for the "session ended" rule. */
@@ -182,6 +273,13 @@ export interface TrackedCardDerivationInput {
 
 export interface TrackedCardDerivation {
   cardState: TrackedCardState;
+  /**
+   * True when `admitted` arrived as a non-boolean (e.g. a caller that forgot it).
+   * The derivation still fails closed to `closureDue: false`, but the miss is
+   * REPORTED rather than swallowed: a future caller that bypasses
+   * `trackAdmission` would otherwise silently stop queueing anything.
+   */
+  admissionInputMissing: boolean;
   closureDue: boolean;
   closureWarn: boolean;
   closureDueLevel: TrackedClosureDueLevel | null;
@@ -274,7 +372,18 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     && input.sessionStatuses.every((status) => status === 'idle')
     && openAttempts.length === 0;
 
-  const closureDue = (zombie && !closed) || terminalWithoutConclusion || (sessionsEnded && !closed);
+  // v1.1: admission is a NECESSARY condition (freeze doc §4). Unadmitted rows
+  // produce no closureDue and no suggestion at ANY level — not even zombie or
+  // sessions_ended. This is the gate that stops the v1 board from projecting
+  // the whole delegation ledger into "needs closure".
+  //
+  // `admitted` is coerced, not trusted: it is a required input, but a caller that
+  // omits it must NOT produce a non-boolean `closureDue`. It fails closed to
+  // `false` — the quiet direction, so a missed argument can never masquerade as
+  // "nothing needs closure" through a truthy accident.
+  const admissionInputMissing = typeof input.admitted !== 'boolean';
+  const closureDue = input.admitted === true && !closed
+    && (zombie || terminalWithoutConclusion || sessionsEnded);
   const closureDueLevel: TrackedClosureDueLevel | null = !closureDue
     ? null
     : terminalWithoutConclusion
@@ -373,6 +482,7 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
 
   return {
     cardState,
+    admissionInputMissing,
     closureDue,
     closureWarn,
     closureDueLevel,
@@ -461,6 +571,15 @@ export interface TrackedCardSummary {
   sourceKind: TrackedCardSourceKind;
   groupTaskId: number | null;
   scheduledTaskId: string | null;
+  /**
+   * v1.1 read-time projection (freeze doc §6): `archived := ¬admitted`. Nothing
+   * is written, moved or deleted — this flag IS the archive.
+   */
+  admitted: boolean;
+  /** Which admission rules matched; empty exactly when the card is archived. */
+  admissionMatched: TrackedAdmissionRule[];
+  /** Diagnostic: the admission input was not a boolean for this card. Must be false. */
+  admissionInputMissing: boolean;
   /** Cheap, deterministic ordering signal for the "needs my action" list view. */
   needsOwnerAction: boolean;
   actionRank: number;
@@ -472,10 +591,24 @@ export interface TrackedCardSummary {
 }
 
 export interface TrackedCardCounts {
+  /** Every ledger row; `admitted + archived === total` is a hard invariant. */
   total: number;
+  /** Cards the board shows (the current scope's visible set). */
   visible: number;
   /** Folded away by the default scope; must stay reachable, never silently hidden. */
   folded: number;
+  /** Cards that passed admission — the only rows that can ever be closureDue. */
+  admitted: number;
+  /** `¬admitted`: queryable through `scope:'archived'`, never in the closure queue. */
+  archived: number;
+  /** Diagnostic only: registry ids that no longer exist in the ledger (freeze §2 ADM-1). */
+  staleRegistration: number;
+  /**
+   * Diagnostic only: cards whose admission input was missing/not a boolean.
+   * Expected 0 — the board always supplies `trackAdmission`'s verdict, so a
+   * non-zero value means some caller bypassed it and is silently queueing nothing.
+   */
+  admissionInputMissing: number;
   closureDue: number;
   /** Level 1: idle past the zombie threshold. */
   zombieLevel: number;
@@ -488,8 +621,17 @@ export interface TrackedCardCounts {
 export interface TrackedCardBoard {
   ledger: 'orchestration_tasks';
   generatedAtMs: number;
+  /** Exactly what the caller asked for; `null` when the scope was omitted. */
+  scopeRequested: string | null;
   /** Echoed back so the UI can label the filter and offer a one-click clear. */
-  scopeApplied: 'default' | 'all';
+  scopeApplied: TrackedCardScope;
+  /**
+   * True when `scopeRequested` was not one of the three known scopes. The
+   * fallback to `default` is then EXPLICIT — never a silent re-shaping of the
+   * board, which is exactly how the v1 build answered `scope:'archived'` with
+   * the default view.
+   */
+  scopeFallback: boolean;
   scopeWindowMs: number;
   /** Monotonic per-process sequence for renderer-side event de-duplication. */
   seq: number;
@@ -538,10 +680,18 @@ export interface TrackedCardDetail extends TrackedCardSummary {
   closure: { conclusion: string | null; by: string | null; at: string | null; pinId: string | null };
 }
 
+/**
+ * Board scope (v1.1). `default` = recent activity ∪ every closureDue card;
+ * `all` = every admitted card, no folding; `archived` = exactly the rows that
+ * failed admission (kept queryable, never in the closure queue).
+ */
+export type TrackedCardScope = 'default' | 'all' | 'archived';
+
+export const TRACKED_CARD_SCOPES: readonly TrackedCardScope[] = ['default', 'all', 'archived'];
+
 export interface TrackedCardListInput {
   ownerGlobalMetaId?: string;
-  /** `default` = recent activity ∪ every closureDue card; `all` = no folding. */
-  scope?: 'default' | 'all';
+  scope?: TrackedCardScope;
   limit?: number;
   offset?: number;
 }
@@ -662,9 +812,32 @@ export class TrackedTaskBoardService {
     return this.seq;
   }
 
+  /**
+   * The two v1.1 kv facts, read ONCE per board read (registry + mode). No DDL:
+   * the whole admission switch lives in the existing `kv` table (I-3).
+   */
+  private readAdmissionContext(): { registeredIds: Set<string>; mode: TrackedAdmissionMode } {
+    const rows = this.getAll('SELECT key, value FROM kv WHERE key IN (?, ?)', [
+      TRACKED_LONG_TASK_REGISTRY_KV_KEY,
+      TRACKED_ADMISSION_MODE_KV_KEY,
+    ]);
+    const byKey = new Map(rows.map((row) => [String(row.key), text(row.value)]));
+    return {
+      registeredIds: new Set(parseLongTaskRegistry(byKey.get(TRACKED_LONG_TASK_REGISTRY_KV_KEY) ?? null)),
+      mode: resolveAdmissionMode(byKey.get(TRACKED_ADMISSION_MODE_KV_KEY) ?? null),
+    };
+  }
+
   listCards(input: TrackedCardListInput = {}): TrackedCardBoard {
     const nowMs = Date.now();
-    const scope: 'default' | 'all' = input.scope === 'all' ? 'all' : 'default';
+    // A scope is only ever one of the three declared values. An omitted scope is
+    // the documented default; anything else is reported as `scopeFallback`
+    // rather than being quietly answered with the default view.
+    const scopeRequested = typeof input.scope === 'string' && input.scope.trim() !== '' ? input.scope : null;
+    const scopeFallback = scopeRequested !== null && !TRACKED_CARD_SCOPES.includes(scopeRequested as TrackedCardScope);
+    const scope: TrackedCardScope = scopeFallback || scopeRequested === null
+      ? 'default'
+      : (scopeRequested as TrackedCardScope);
     const rows = input.ownerGlobalMetaId
       ? this.getAll(
         'SELECT id FROM orchestration_tasks WHERE owner_global_meta_id = ? ORDER BY updated_at DESC',
@@ -672,14 +845,21 @@ export class TrackedTaskBoardService {
       )
       : this.getAll('SELECT id FROM orchestration_tasks ORDER BY updated_at DESC');
 
-    const all = rows
-      .map((row) => this.buildSummary(String(row.id), nowMs))
+    const admission = this.readAdmissionContext();
+    const built = rows
+      .map((row) => this.buildSummary(String(row.id), nowMs, admission))
       .filter((card): card is TrackedCardSummary => card !== null);
+    const admittedCards = built.filter((card) => card.admitted);
+    const archivedCards = built.filter((card) => !card.admitted);
 
-    const visible = scope === 'all'
-      ? all
-      : all.filter((card) => card.closureDue || isInsideScopeWindow(card, nowMs));
-    const folded = all.length - visible.length;
+    // The archive view is its own population: it is NOT "folded away", it is
+    // "not admitted", and the two must never be conflated (freeze doc §6).
+    const visible = scope === 'archived'
+      ? archivedCards
+      : scope === 'all'
+        ? admittedCards
+        : admittedCards.filter((card) => card.closureDue || isInsideScopeWindow(card, nowMs));
+    const folded = scope === 'archived' ? 0 : admittedCards.length - visible.length;
 
     const sorted = [...visible].sort((a, b) => {
       const byRank = a.actionRank - b.actionRank;
@@ -695,10 +875,14 @@ export class TrackedTaskBoardService {
     const offset = typeof input.offset === 'number' && input.offset > 0 ? Math.floor(input.offset) : 0;
     const page = sorted.slice(offset, limit === null ? undefined : offset + limit);
 
+    const ledgerIds = new Set(built.map((card) => card.id));
+
     return {
       ledger: 'orchestration_tasks',
       generatedAtMs: nowMs,
+      scopeRequested,
       scopeApplied: scope,
+      scopeFallback,
       scopeWindowMs: TRACKED_CARD_SCOPE_WINDOW_MS,
       seq: this.nextSeq(),
       columns: TRACKED_CARD_STATE_ORDER.map((state) => ({
@@ -710,9 +894,13 @@ export class TrackedTaskBoardService {
       closureDueCardIdsPage: page.filter((card) => card.closureDue).map((card) => card.id),
       closureDueCountPage: page.filter((card) => card.closureDue).length,
       counts: {
-        total: all.length,
+        total: built.length,
         visible: sorted.length,
         folded,
+        admitted: admittedCards.length,
+        archived: archivedCards.length,
+        staleRegistration: [...admission.registeredIds].filter((id) => !ledgerIds.has(id)).length,
+        admissionInputMissing: built.filter((card) => card.admissionInputMissing).length,
         closureDue: sorted.filter((card) => card.closureDue).length,
         zombieLevel: sorted.filter((card) => card.closureDueLevel === 'zombie').length,
         terminalNoConclusionLevel: sorted.filter(
@@ -725,7 +913,7 @@ export class TrackedTaskBoardService {
   }
 
   getCard(taskId: string): TrackedCardDetail | null {
-    const summary = this.buildSummary(taskId, Date.now());
+    const summary = this.buildSummary(taskId, Date.now(), this.readAdmissionContext());
     if (!summary) return null;
     const task = this.deps.orchestrationStore.getTask(taskId);
     if (!task) return null;
@@ -960,7 +1148,7 @@ export class TrackedTaskBoardService {
       [conclusion, input.by, new Date().toISOString(), input.pinId ?? null, input.taskId],
     );
     this.deps.saveDb();
-    const card = this.buildSummary(input.taskId, Date.now());
+    const card = this.buildSummary(input.taskId, Date.now(), this.readAdmissionContext());
     return card
       ? { ok: true, card, statusMoved, statusNote }
       : { ok: false, code: 'NOT_FOUND', error: 'card vanished after close' };
@@ -979,7 +1167,59 @@ export class TrackedTaskBoardService {
   }
 
   readTickBeat(): string | null {
-    return text(this.getOne('SELECT value FROM kv WHERE key = ?', [TRACKED_TICK_BEAT_KV_KEY])?.value);
+    return this.readKv(TRACKED_TICK_BEAT_KV_KEY);
+  }
+
+  private readKv(key: string): string | null {
+    return text(this.getOne('SELECT value FROM kv WHERE key = ?', [key])?.value);
+  }
+
+  private writeKv(key: string, value: string): void {
+    this.deps.db.run(
+      'INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      [key, value, Date.now()],
+    );
+    this.deps.saveDb();
+  }
+
+  /**
+   * ADM-1's face (freeze doc §2): the owner's explicit "this is a long task"
+   * registration. It is data in the existing `kv` table — no column, no table,
+   * no migration. A malformed registry reads as an empty set, never an error.
+   */
+  listRegisteredLongTaskIds(): string[] {
+    return parseLongTaskRegistry(this.readKv(TRACKED_LONG_TASK_REGISTRY_KV_KEY));
+  }
+
+  registerLongTask(taskId: string): { ok: boolean; registered: string[] } {
+    const id = taskId?.trim();
+    if (!id) return { ok: false, registered: this.listRegisteredLongTaskIds() };
+    const current = this.listRegisteredLongTaskIds();
+    if (!current.includes(id)) {
+      this.writeKv(TRACKED_LONG_TASK_REGISTRY_KV_KEY, JSON.stringify([...current, id]));
+    }
+    return { ok: true, registered: this.listRegisteredLongTaskIds() };
+  }
+
+  unregisterLongTask(taskId: string): { ok: boolean; registered: string[] } {
+    const id = taskId?.trim();
+    const current = this.listRegisteredLongTaskIds();
+    const next = current.filter((entry) => entry !== id);
+    if (next.length !== current.length) {
+      this.writeKv(TRACKED_LONG_TASK_REGISTRY_KV_KEY, JSON.stringify(next));
+    }
+    return { ok: true, registered: next };
+  }
+
+  /** `wide` unless the kv entry says exactly `strict`. */
+  getAdmissionMode(): TrackedAdmissionMode {
+    return resolveAdmissionMode(this.readKv(TRACKED_ADMISSION_MODE_KV_KEY));
+  }
+
+  setAdmissionMode(mode: string): TrackedAdmissionMode {
+    const resolved = resolveAdmissionMode(mode);
+    this.writeKv(TRACKED_ADMISSION_MODE_KV_KEY, resolved);
+    return resolved;
   }
 
   /**
@@ -1086,7 +1326,11 @@ export class TrackedTaskBoardService {
     };
   }
 
-  private buildSummary(taskId: string, nowMs: number): TrackedCardSummary | null {
+  private buildSummary(
+    taskId: string,
+    nowMs: number,
+    admission: { registeredIds: Set<string>; mode: TrackedAdmissionMode },
+  ): TrackedCardSummary | null {
     const task = this.deps.orchestrationStore.getTask(taskId);
     if (!task) return null;
     const steps = this.deps.orchestrationStore.listSteps(taskId);
@@ -1101,6 +1345,28 @@ export class TrackedTaskBoardService {
       [taskId],
     );
     const scheduledTaskId = scheduled ? String(scheduled.id) : null;
+
+    // Admission facts, straight off the ledger and its linked tables. The two
+    // EXISTS-style branches (owner-initiated, checkpoints) ignore the LIMIT 1
+    // pick above on purpose — the freeze doc words them as EXISTS.
+    const admissionFacts = this.getOne(
+      `SELECT
+         (SELECT COUNT(*) FROM group_tasks WHERE orchestration_task_id = ? AND created_by = 'user') AS owner_initiated,
+         (SELECT COUNT(*) FROM group_task_checkpoints c
+            JOIN group_tasks g ON g.id = c.task_id
+           WHERE g.orchestration_task_id = ?) AS checkpoint_count`,
+      [taskId, taskId],
+    ) ?? {};
+    const admissionVerdict = trackAdmission({
+      registered: admission.registeredIds.has(taskId),
+      stepCount: steps.length,
+      groupTaskLinked: groupTaskId !== null,
+      scheduledTaskLinked: scheduledTaskId !== null,
+      hasDependencies: steps.some((step) => step.dependencyStepIds.length > 0),
+      hasCheckpoints: Number(admissionFacts.checkpoint_count ?? 0) > 0,
+      ownerInitiated: Number(admissionFacts.owner_initiated ?? 0) > 0,
+      mode: admission.mode,
+    });
 
     const openCheckpointCount = groupTaskId === null
       ? 0
@@ -1135,6 +1401,7 @@ export class TrackedTaskBoardService {
       openCheckpointCount,
       verifiableDeliverableCount,
       closureConclusion: closure.conclusion,
+      admitted: admissionVerdict.admitted,
       scheduled: scheduled
         ? {
           enabled: Number(scheduled.enabled) === 1,
@@ -1192,6 +1459,9 @@ export class TrackedTaskBoardService {
       sourceKind,
       groupTaskId,
       scheduledTaskId,
+      admitted: admissionVerdict.admitted,
+      admissionMatched: admissionVerdict.matched,
+      admissionInputMissing: derivation.admissionInputMissing,
       needsOwnerAction: derivation.cardState === 'waiting_decision' || derivation.closureDue,
       actionRank: trackedCardActionRank({
         state: derivation.cardState,

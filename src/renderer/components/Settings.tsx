@@ -10,7 +10,7 @@ import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
 import FreeQuotaCard from './FreeQuotaCard';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon, ArrowPathIcon, FunnelIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, CommandCodeIcon, OpenCodeIcon } from './icons/providers';
 import { fetchProviderModelList, providerSupportsModelListSync } from '../services/providerModels';
@@ -32,6 +32,7 @@ import { groupTaskStatusLabelKey } from './groupTasks/GroupTasksView';
 import IMSettings from './im/IMSettings';
 import EmailSkillConfig from './skills/EmailSkillConfig';
 import MemorySettings from './settings/MemorySettings';
+import TrackedTaskSettings from './settings/TrackedTaskSettings';
 import SkillMcpManager from './skills/SkillMcpManager';
 import ProjectsManager from './projects/ProjectsManager';
 import P2PConfigPanel from './p2p/P2PConfigPanel';
@@ -40,7 +41,7 @@ import TrafficSettings from './traffic/TrafficSettings';
 import { defaultConfig, type AppConfig, getVisibleProviders } from '../config';
 import { LLM_FREE_PROVIDER_KEY, FREE_PROVIDER_DISPLAY_NAME, getFreeProviderModelDisplayName } from '../services/llmFreeQuotaGate.js';
 
-type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic' | 'p2p';
+type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'trackedTask' | 'archivedChats' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic' | 'p2p';
 
 export type SettingsOpenOptions = {
   initialTab?: TabType;
@@ -2073,6 +2074,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     { key: 'projects',       label: i18nService.t('projectsTab'),    icon: <BriefcaseIcon className="h-5 w-5" /> },
     { key: 'im',             label: i18nService.t('imBot'),          icon: <ChatBubbleLeftIcon className="h-5 w-5" /> },
     { key: 'coworkMemory',   label: i18nService.t('coworkMemoryTitle'), icon: <BrainIcon className="h-5 w-5" /> },
+    { key: 'trackedTask',    label: i18nService.t('trackedTaskSettingsTitle'), icon: <FunnelIcon className="h-5 w-5" /> },
     { key: 'archivedChats',  label: i18nService.t('archivedChatsTab'),  icon: <ArchiveBoxIcon className="h-5 w-5" /> },
     { key: 'paramsConfig',    label: i18nService.t('paramsAndConfig'), icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" /></svg> },
     { key: 'traffic',         label: i18nService.t('trafficTab'),     icon: <BoltIcon className="h-5 w-5" /> },
@@ -2442,6 +2444,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
 
       case 'coworkMemory':
         return <MemorySettings onClose={onClose} />;
+
+      case 'trackedTask':
+        return <TrackedTaskSettings />;
 
       case 'archivedChats': {
         const totalArchivedChatPages = Math.max(1, Math.ceil(archivedChatsTotal / ARCHIVED_CHATS_PAGE_SIZE));

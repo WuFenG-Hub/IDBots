@@ -1431,12 +1431,27 @@ interface IElectronAPI {
   trackedTask: {
     list: (input?: {
       ownerGlobalMetaId?: string;
-      scope?: 'default' | 'all';
+      scope?: 'default' | 'all' | 'archived';
       limit?: number;
       offset?: number;
     }) => Promise<{
       success: boolean;
       board?: TrackedCardBoard;
+      error?: string;
+    }>;
+    /**
+     * Admission mode (v1.1). One `kv` row, no schema change: `wide` admits
+     * ADM-1..ADM-5, `strict` admits ADM-1 v ADM-3. Switching is reversible and
+     * never touches the ledger.
+     */
+    admissionMode: () => Promise<{
+      success: boolean;
+      mode?: 'wide' | 'strict';
+      error?: string;
+    }>;
+    setAdmissionMode: (input: { mode: 'wide' | 'strict' }) => Promise<{
+      success: boolean;
+      mode?: 'wide' | 'strict';
       error?: string;
     }>;
     detail: (input: { cardId: string }) => Promise<{

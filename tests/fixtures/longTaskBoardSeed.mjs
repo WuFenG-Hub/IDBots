@@ -653,6 +653,178 @@ function buildCases(anchorMs) {
     { sessions: [{ id: 'seed-session-independent', status: 'idle' }] },
   );
 
+  // --- SEED-28..SEED-37: v1.1 admission boundary cases (freeze doc §2/§4/§6) --
+  // Every case below is UNREGISTERED, so only the rule it names can admit it.
+  // `boardColumn: null` means archived: off the board at every scope, still
+  // readable through `scope:'archived'` and `getCard`.
+  const ADMISSION_FRESH_MS = 2 * HOUR;
+  const adm = (id, suffix, spec, rows = {}) => add(
+    {
+      id,
+      title: spec.title,
+      boardColumn: spec.boardColumn,
+      zombie: spec.zombie ?? 'none',
+      activityAgeMs: spec.activityAgeMs ?? ADMISSION_FRESH_MS,
+      activityAnchor: 'task.updated_at',
+      registered: spec.registered === true,
+      admission: spec.admission,
+      note: spec.note,
+    },
+    {
+      tasks: [{
+        id: `seed-task-${suffix}`,
+        status: spec.status ?? 'running',
+        updatedDelta: -(spec.activityAgeMs ?? ADMISSION_FRESH_MS),
+      }],
+      ...rows,
+    },
+  );
+
+  adm('SEED-28', '28', {
+    title: 'single-step receipt, idle 3 days, nothing else -> ARCHIVED',
+    boardColumn: null,
+    activityAgeMs: 3 * DAY,
+    admission: { admitted: false, via: null },
+    note:
+      'v1.1 CORE GATE: with no admission branch the row never becomes closureDue — not even as a 2-day '
+      + 'zombie. The idle signal itself is still computed (closureWarn stays true); it just cannot queue '
+      + 'the card. This one row is the whole "238 -> single digits" mechanism.',
+  }, {
+    steps: [{ id: 'seed-step-28a', taskId: 'seed-task-28', ordinal: 1, status: 'running', updatedDelta: -3 * DAY }],
+  });
+
+  adm('SEED-29', '29', {
+    title: 'ADM-1: single-step receipt explicitly registered as a long task',
+    boardColumn: 'active',
+    zombie: 'zombie',
+    activityAgeMs: 3 * DAY,
+    registered: true,
+    admission: { admitted: true, via: 'ADM-1' },
+    note:
+      'The kv registration (tracked_long_task_registry) is the ONLY matching branch; with it the very '
+      + 'same idle row becomes a closureDue zombie. SEED-28/SEED-29 differ by exactly one kv entry.',
+  }, {
+    steps: [{ id: 'seed-step-29a', taskId: 'seed-task-29', ordinal: 1, status: 'running', updatedDelta: -3 * DAY }],
+  });
+
+  adm('SEED-30', '30', {
+    title: 'ADM-2: two steps (strictly greater than 1)',
+    boardColumn: 'active',
+    zombie: 'zombie',
+    activityAgeMs: 3 * DAY,
+    admission: { admitted: true, via: 'ADM-2' },
+    note: 'ADM-2 is strict > 1, so the second step is what flips SEED-28\'s shape into a card.',
+  }, {
+    steps: [
+      { id: 'seed-step-30a', taskId: 'seed-task-30', ordinal: 1, status: 'completed', updatedDelta: -3 * DAY },
+      { id: 'seed-step-30b', taskId: 'seed-task-30', ordinal: 2, status: 'running', updatedDelta: -3 * DAY },
+    ],
+  });
+
+  adm('SEED-31', '31', {
+    title: 'ADM-3 (group task): linked group task, twin-created',
+    boardColumn: 'active',
+    admission: { admitted: true, via: 'ADM-3' },
+    note:
+      'created_by="twin" on purpose: ADM-3 must fire while ADM-5 must NOT — the card carries the group '
+      + 'link without being owner-initiated.',
+  }, {
+    steps: [{ id: 'seed-step-31a', taskId: 'seed-task-31', ordinal: 1, status: 'running', updatedDelta: -ADMISSION_FRESH_MS }],
+    groupTasks: [{
+      id: 8401,
+      orchestrationTaskId: 'seed-task-31',
+      status: 'executing',
+      createdBy: 'twin',
+    }],
+  });
+
+  adm('SEED-32', '32', {
+    title: 'ADM-3 (scheduled task): bound scheduled task',
+    boardColumn: 'active',
+    admission: { admitted: true, via: 'ADM-3' },
+    note: 'Second branch of ADM-3 — the scheduled-task binding column, no group task involved.',
+  }, {
+    steps: [{ id: 'seed-step-32a', taskId: 'seed-task-32', ordinal: 1, status: 'running', updatedDelta: -ADMISSION_FRESH_MS }],
+    scheduledTasks: [{ id: 'seed-sched-32', orchestrationTaskId: 'seed-task-32' }],
+  });
+
+  adm('SEED-33', '33', {
+    title: 'ADM-4 (dependencies): one step carrying a dependency list',
+    boardColumn: 'blocked',
+    admission: { admitted: true, via: 'ADM-4' },
+    note:
+      'A single step, so ADM-2 cannot fire (1 is not > 1): only the dependency branch admits this row. '
+      + 'The unsettled dependency also makes 等外部·阻塞 the derived column — admission and the derived '
+      + 'column are independent axes.',
+  }, {
+    steps: [{
+      id: 'seed-step-33a',
+      taskId: 'seed-task-33',
+      ordinal: 1,
+      status: 'blocked',
+      updatedDelta: -ADMISSION_FRESH_MS,
+      dependencyStepIds: ['seed-step-missing'],
+    }],
+  });
+
+  adm('SEED-34', '34', {
+    title: 'ADM-4 (checkpoints): group task with a checkpoint row',
+    boardColumn: 'decide',
+    admission: { admitted: true, via: 'ADM-4' },
+    note:
+      'The checkpoint branch is nested under group_tasks, so ADM-3 fires too — the freeze doc keeps this '
+      + 'redundancy on purpose and the expectation records BOTH matches. The open checkpoint is also what '
+      + 'puts the card in 待你拍板: the same fact feeds two independent axes.',
+  }, {
+    steps: [{ id: 'seed-step-34a', taskId: 'seed-task-34', ordinal: 1, status: 'running', updatedDelta: -ADMISSION_FRESH_MS }],
+    groupTasks: [{
+      id: 8402,
+      orchestrationTaskId: 'seed-task-34',
+      status: 'executing',
+      createdBy: 'twin',
+    }],
+    checkpoints: [{ taskId: 8402, topic: 'seed checkpoint', status: 'open' }],
+  });
+
+  adm('SEED-35', '35', {
+    title: 'ADM-5: owner-initiated group task (created_by=user)',
+    boardColumn: 'active',
+    admission: { admitted: true, via: 'ADM-5' },
+    note:
+      'ADM-5 requires a group_tasks row, so ADM-3 always co-fires; the assertion pins that ADM-5 is '
+      + 'present, and SEED-31 pins that a twin-created link must not produce it.',
+  }, {
+    steps: [{ id: 'seed-step-35a', taskId: 'seed-task-35', ordinal: 1, status: 'running', updatedDelta: -ADMISSION_FRESH_MS }],
+    groupTasks: [{
+      id: 8403,
+      orchestrationTaskId: 'seed-task-35',
+      status: 'executing',
+      createdBy: 'user',
+    }],
+  });
+
+  adm('SEED-36', '36', {
+    title: 'ADM-2 boundary: zero steps, nothing else -> ARCHIVED',
+    boardColumn: null,
+    activityAgeMs: 3 * DAY,
+    admission: { admitted: false, via: null },
+    note: '0 is not > 1: a step count of zero must not satisfy ADM-2 any more than a single step does.',
+  });
+
+  adm('SEED-37', '37', {
+    title: 'strict mode: two steps only, admitted under wide, archived under strict',
+    boardColumn: 'active',
+    admission: { admitted: true, via: 'ADM-2', strict: false },
+    note:
+      'The same row under the two modes; the switch is the kv entry tracked_admission_mode and changes no '
+      + 'stored data. SEED-30 is its wide-mode twin.',
+  }, {
+    steps: [
+      { id: 'seed-step-37a', taskId: 'seed-task-37', ordinal: 1, status: 'completed', updatedDelta: -ADMISSION_FRESH_MS },
+      { id: 'seed-step-37b', taskId: 'seed-task-37', ordinal: 2, status: 'running', updatedDelta: -ADMISSION_FRESH_MS },
+    ],
+  });
+
   return cases.map((entry) => ({
     ...entry.spec,
     orchestrationTaskId: entry.rows.tasks?.[0]?.id ?? null,
@@ -769,7 +941,7 @@ function insertGroupTask(db, anchorMs, groupTask) {
     `INSERT INTO group_tasks
       (id, orchestration_task_id, group_id, title, goal, acceptance_criteria, status,
        chair_metabot_id, created_by, mode, source_session_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user', 'task', ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'task', ?, ?, ?)`,
     [
       groupTask.id,
       groupTask.orchestrationTaskId,
@@ -779,9 +951,25 @@ function insertGroupTask(db, anchorMs, groupTask) {
       'seed acceptance criteria',
       groupTask.status,
       TWIN_METABOT_ID,
+      // v1.1: ADM-5 reads exactly this column, so the fixture must be able to
+      // seed both values. Defaults to the historical 'user'.
+      groupTask.createdBy ?? 'user',
       groupTask.sourceSessionId ?? null,
-      isoAt(anchorMs, -6 * HOUR),
-      isoAt(anchorMs, -1 * HOUR),
+      isoAt(anchorMs, groupTask.createdDelta ?? -6 * HOUR),
+      isoAt(anchorMs, groupTask.updatedDelta ?? -1 * HOUR),
+    ],
+  );
+}
+
+function insertCheckpoint(db, anchorMs, checkpoint) {
+  db.run(
+    `INSERT INTO group_task_checkpoints (task_id, topic, status, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [
+      checkpoint.taskId,
+      checkpoint.topic,
+      checkpoint.status,
+      isoAt(anchorMs, checkpoint.createdDelta ?? -2 * HOUR),
     ],
   );
 }
@@ -823,8 +1011,8 @@ function insertScheduledTask(db, anchorMs, scheduledTask) {
   db.run(
     `INSERT INTO scheduled_tasks
       (id, name, description, enabled, schedule_json, prompt, execution_mode, notify_platforms_json,
-       consecutive_errors, cowork_session_id, created_at, updated_at)
-     VALUES (?, ?, ?, 1, ?, ?, 'auto', '[]', 0, ?, ?, ?)`,
+       consecutive_errors, cowork_session_id, orchestration_task_id, created_at, updated_at)
+     VALUES (?, ?, ?, 1, ?, ?, 'auto', '[]', 0, ?, ?, ?, ?)`,
     [
       scheduledTask.id,
       `seed scheduled task ${scheduledTask.id}`,
@@ -832,6 +1020,7 @@ function insertScheduledTask(db, anchorMs, scheduledTask) {
       JSON.stringify({ type: 'daily', time: '09:00' }),
       'seed prompt',
       scheduledTask.coworkSessionId ?? null,
+      scheduledTask.orchestrationTaskId ?? null,
       isoAt(anchorMs, -2 * DAY),
       isoAt(anchorMs, -2 * DAY),
     ],
@@ -870,22 +1059,38 @@ export function seedLongTaskBoard(sqliteStore, options = {}) {
     for (const step of rows.steps ?? []) insertStep(db, anchorMs, step);
     for (const attempt of rows.attempts ?? []) insertAttempt(db, anchorMs, attempt);
     for (const groupTask of rows.groupTasks ?? []) insertGroupTask(db, anchorMs, groupTask);
+    for (const checkpoint of rows.checkpoints ?? []) insertCheckpoint(db, anchorMs, checkpoint);
     for (const message of rows.messages ?? []) insertGroupMessage(db, anchorMs, message);
     for (const deliverable of rows.deliverables ?? []) insertDeliverable(db, anchorMs, deliverable);
     for (const scheduledTask of rows.scheduledTasks ?? []) insertScheduledTask(db, anchorMs, scheduledTask);
     for (const run of rows.scheduledTaskRuns ?? []) insertScheduledTaskRun(db, anchorMs, run);
   }
 
+  // v1.1: v1's card corpus stays about the columns/thresholds it was written
+  // for, so every v1 case is registered in `tracked_long_task_registry` (ADM-1)
+  // by default. A case that wants to test admission itself sets
+  // `registered: false` and declares which rule must carry it.
+  const registeredIds = cases
+    .filter((testCase) => testCase.registered !== false)
+    .map((testCase) => testCase.rows.tasks?.[0]?.id)
+    .filter(Boolean);
+  db.run(
+    `INSERT INTO kv (key, value, updated_at) VALUES ('tracked_long_task_registry', ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [JSON.stringify(registeredIds), anchorMs],
+  );
+
   sqliteStore.getSaveFunction()();
 
   return {
     fixture: 'long-task-board-seed',
-    version: 1,
+    version: 2,
     anchorAtMs: anchorMs,
     anchorIso: new Date(anchorMs).toISOString(),
     toleranceMs: SEED_TOLERANCE_MS,
     ownerGlobalMetaId: OWNER_GLOBAL_META_ID,
     twinMetabotId: TWIN_METABOT_ID,
+    registeredTaskIds: registeredIds,
     columns: BOARD_COLUMNS,
     zombieStates: ZOMBIE_STATES,
     cases: cases.map(({ rows: _rows, ...rest }) => rest),
@@ -894,10 +1099,13 @@ export function seedLongTaskBoard(sqliteStore, options = {}) {
       steps: cases.flatMap((c) => c.rows.steps ?? []).length,
       attempts: cases.flatMap((c) => c.rows.attempts ?? []).length,
       groupTasks: cases.flatMap((c) => c.rows.groupTasks ?? []).length,
+      checkpoints: cases.flatMap((c) => c.rows.checkpoints ?? []).length,
       deliverables: cases.flatMap((c) => c.rows.deliverables ?? []).length,
       scheduledTasks: cases.flatMap((c) => c.rows.scheduledTasks ?? []).length,
       sessions: cases.flatMap((c) => c.rows.sessions ?? []).length,
       messages: cases.flatMap((c) => c.rows.messages ?? []).length,
+      registered: registeredIds.length,
+      archived: cases.filter((c) => c.admission?.admitted === false).length,
       pendingSpec: cases.filter((c) => c.pendingSpec).length,
     },
   };

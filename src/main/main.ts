@@ -11735,6 +11735,25 @@ if (!gotTheLock) {
       return { ok: false, error: error instanceof Error ? error.message : 'Failed to close the card' };
     }
   });
+  ipcMain.handle('trackedTask:admissionMode', async () => {
+    try {
+      return { success: true, mode: getTrackedTaskBoard().getAdmissionMode() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the admission mode' };
+    }
+  });
+
+  ipcMain.handle('trackedTask:setAdmissionMode', async (_event, input: { mode: string }) => {
+    try {
+      const mode = getTrackedTaskBoard().setAdmissionMode(input?.mode ?? '');
+      // The mode decides which rows are admitted, so it changes cards, counts and
+      // the archive population at once: refresh the open board, never patch it.
+      broadcastTrackedTaskUpdate([], 'admission_mode');
+      return { success: true, mode };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to set the admission mode' };
+    }
+  });
   // ==================== Scheduled Task IPC Handlers ====================
 
   ipcMain.handle('scheduledTask:list', async () => {

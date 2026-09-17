@@ -8,9 +8,11 @@ import {
   mergeCardSummary,
 } from '../store/slices/trackedTaskSlice';
 import type {
+  TrackedAdmissionMode,
   TrackedCardClosureInput,
   TrackedCardClosureReceipt,
   TrackedCardListInput,
+  TrackedCardScope,
 } from '../types/trackedTask';
 
 const FALLBACK_POLL_MS = 30_000;
@@ -38,7 +40,8 @@ class TrackedTaskService {
   private lastSeenSeq = 0;
   private lastPushAtMs = 0;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private lastScope: 'default' | 'all' = 'default';
+  private lastScope: TrackedCardScope = 'default';
+  private admissionMode: TrackedAdmissionMode | null = null;
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -146,6 +149,39 @@ class TrackedTaskService {
     } catch (err: unknown) {
       store.dispatch(setError(err instanceof Error ? err.message : String(err)));
     }
+  }
+
+  /**
+   * 准入口径（v1.1 冻结件 §2）。读写都只碰既有 `kv` 表的一行：
+   * 没有新列、没有新表，切换可逆。切换后整块重取看板（准入决定卡片/计数/
+   * 归档种群，不是局部补丁）。
+   */
+  getAdmissionMode(): TrackedAdmissionMode | null {
+    return this.admissionMode;
+  }
+
+  async loadAdmissionMode(): Promise<TrackedAdmissionMode | null> {
+    const api = this.api();
+    if (!api || typeof api.admissionMode !== 'function') return null;
+    const result = await api.admissionMode();
+    if (result?.success && result.mode) {
+      this.admissionMode = result.mode;
+      return result.mode;
+    }
+    return null;
+  }
+
+  async setAdmissionMode(mode: TrackedAdmissionMode): Promise<TrackedAdmissionMode | null> {
+    const api = this.api();
+    if (!api || typeof api.setAdmissionMode !== 'function') return null;
+    const result = await api.setAdmissionMode({ mode });
+    if (result?.success && result.mode) {
+      this.admissionMode = result.mode;
+      void this.loadBoard();
+      return result.mode;
+    }
+    store.dispatch(setError(result?.error ?? 'Failed to set the admission mode'));
+    return null;
   }
 
   /**

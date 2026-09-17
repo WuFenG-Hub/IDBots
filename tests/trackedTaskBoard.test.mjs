@@ -52,11 +52,31 @@ test('every seeded case lands in the column the shared fixture declares', async 
   const { sqliteStore, board, manifest } = await openBoard();
   try {
     const cards = new Map(board.listCards({ scope: 'all' }).cards.map((card) => [card.id, card]));
+    const archived = new Map(board.listCards({ scope: 'archived' }).cards.map((card) => [card.id, card]));
     for (const testCase of manifest.cases) {
       if (!testCase.orchestrationTaskId) continue; // e.g. the independent-session case
+      // v1.1: a case that declares itself unadmitted is deliberately OFF the
+      // board and must be queryable through the archive instead.
+      if (testCase.admission?.admitted === false) {
+        assert.equal(
+          cards.has(testCase.orchestrationTaskId),
+          false,
+          `${testCase.id}: an unadmitted card must not appear on the board`,
+        );
+        const archivedCard = archived.get(testCase.orchestrationTaskId);
+        assert.ok(archivedCard, `${testCase.id}: archived card ${testCase.orchestrationTaskId} must stay queryable`);
+        assert.equal(archivedCard.closureDue, false, `${testCase.id}: archived rows never queue for closure`);
+        assert.equal(archivedCard.closureDueLevel, null, `${testCase.id}: archived rows carry no closure level`);
+        continue;
+      }
       const card = cards.get(testCase.orchestrationTaskId);
       assert.ok(card, `${testCase.id}: card ${testCase.orchestrationTaskId} missing`);
       assert.equal(card.state, COLUMN_TO_STATE[testCase.boardColumn], `${testCase.id}: ${testCase.title}`);
+      assert.equal(
+        archived.has(testCase.orchestrationTaskId),
+        false,
+        `${testCase.id}: an admitted card must never be in the archive`,
+      );
     }
   } finally {
     sqliteStore.close();
@@ -267,7 +287,10 @@ test('the default scope folds old quiet cards but never hides them', async () =>
     assert.equal(all.scopeApplied, 'all');
     assert.equal(scoped.counts.total, all.counts.total);
     assert.ok(scoped.counts.folded >= 2, `expected the 10-day-old closed cards to fold (got ${scoped.counts.folded})`);
-    assert.equal(scoped.counts.visible + scoped.counts.folded, scoped.counts.total);
+    // v1.1: `folded` counts ADMITTED cards the default window hides; archived
+    // rows are a separate population and are never "folded" (freeze doc §6).
+    assert.equal(scoped.counts.visible + scoped.counts.folded, scoped.counts.admitted);
+    assert.equal(scoped.counts.admitted + scoped.counts.archived, scoped.counts.total);
 
     // Folded, not hidden: the ids are reachable through scope=all.
     const visibleIds = new Set(scoped.cards.map((card) => card.id));
@@ -351,10 +374,22 @@ test('liveness lives in kv only: no heartbeat column is added to the ledger', as
     board.recordTickBeat(1_700_000_000_000);
     assert.equal(board.readTickBeat(), 'local|1700000000000');
     const kvKeys = sqliteStore.getDatabase().exec('SELECT key, value FROM kv')[0].values;
-    assert.ok(kvKeys.some((row) => String(row[0]) === 'tracking_tick_beat'), 'the beat key must exist');
-    assert.ok(
-      kvKeys.every((row) => !/seed-task-|seed-step-|seed-attempt-/.test(String(row[1]))),
-      'kv must never carry a card-level value',
+    const beat = kvKeys.find((row) => String(row[0]) === 'tracking_tick_beat');
+    assert.ok(beat, 'the beat key must exist');
+    assert.equal(
+      /seed-task-|seed-step-|seed-attempt-/.test(String(beat[1])),
+      false,
+      'the beat value is liveness only — it must never carry a card-level value',
+    );
+    // v1.1: `tracked_long_task_registry` is the ONE documented card-id carrier
+    // in kv (ADM-1). It is data, not liveness — and it is deliberately the only
+    // exception, so a new card-level key would still fail this assertion.
+    const registry = kvKeys.find((row) => String(row[0]) === 'tracked_long_task_registry');
+    assert.ok(registry, 'the v1.1 registration key must exist');
+    assert.deepEqual(
+      board.listRegisteredLongTaskIds(),
+      JSON.parse(String(registry[1])),
+      'the registry accessor must read exactly what the kv row holds',
     );
   } finally {
     sqliteStore.close();
@@ -849,6 +884,7 @@ test('the terminal reason survives the five-line truncation (ordering guarantee)
     openCheckpointCount: 1,
     verifiableDeliverableCount: 2,
     closureConclusion: null,
+    admitted: true,
     scheduled: null,
     sessionStatuses: ['idle'],
     activityAtMs: [Date.parse('2026-09-14T06:00:00.000Z')],
@@ -863,4 +899,532 @@ test('the terminal reason survives the five-line truncation (ordering guarantee)
     'the closure trigger must be the first reason line, not a truncated-away one',
   );
   assert.ok(derived.reasonCodes.some((fact) => fact.code === 'terminal_without_conclusion'));
+});
+
+// ==================== v1.1: admission, archive, migration ====================
+
+/**
+ * Admission expectations per seeded case. `wide` is the default; `strict` is
+ * the same rows read through `tracked_admission_mode=strict` (ADM-1 ∨ ADM-3).
+ */
+const ADMISSION_EXPECTATIONS = {
+  'seed-task-28': { wide: { admitted: false, matched: [] }, strict: { admitted: false, matched: [] } },
+  'seed-task-29': { wide: { admitted: true, matched: ['ADM-1'] }, strict: { admitted: true, matched: ['ADM-1'] } },
+  'seed-task-30': { wide: { admitted: true, matched: ['ADM-2'] }, strict: { admitted: false, matched: [] } },
+  'seed-task-31': { wide: { admitted: true, matched: ['ADM-3'] }, strict: { admitted: true, matched: ['ADM-3'] } },
+  'seed-task-32': { wide: { admitted: true, matched: ['ADM-3'] }, strict: { admitted: true, matched: ['ADM-3'] } },
+  'seed-task-33': { wide: { admitted: true, matched: ['ADM-4'] }, strict: { admitted: false, matched: [] } },
+  'seed-task-34': { wide: { admitted: true, matched: ['ADM-3', 'ADM-4'] }, strict: { admitted: true, matched: ['ADM-3'] } },
+  'seed-task-35': { wide: { admitted: true, matched: ['ADM-3', 'ADM-5'] }, strict: { admitted: true, matched: ['ADM-3'] } },
+  'seed-task-36': { wide: { admitted: false, matched: [] }, strict: { admitted: false, matched: [] } },
+  'seed-task-37': { wide: { admitted: true, matched: ['ADM-2'] }, strict: { admitted: false, matched: [] } },
+};
+
+/** Every row the board could write; used to prove a read path wrote nothing. */
+function ledgerDump(db) {
+  const tables = ['orchestration_tasks', 'orchestration_steps', 'group_tasks', 'scheduled_tasks', 'kv'];
+  return tables
+    .map((table) => {
+      const result = db.exec(`SELECT * FROM ${table} ORDER BY 1`);
+      const columns = result[0]?.columns ?? [];
+      const rows = (result[0]?.values ?? []).map((values) => values.join('\u0001'));
+      return `${table}:${columns.join(',')}\n${rows.join('\n')}`;
+    })
+    .join('\n---\n');
+}
+
+test('admission is exactly the five declared rules, in both modes', async () => {
+  const { sqliteStore, board, manifest } = await openBoard();
+  try {
+    const read = (scope) => new Map(board.listCards({ scope }).cards.map((card) => [card.id, card]));
+
+    const wide = { ...Object.fromEntries(read('all')), ...Object.fromEntries(read('archived')) };
+    for (const [id, expectation] of Object.entries(ADMISSION_EXPECTATIONS)) {
+      const card = wide[id];
+      assert.ok(card, `${id}: card missing from both board and archive`);
+      assert.equal(card.admitted, expectation.wide.admitted, `${id}: admitted under wide`);
+      assert.deepEqual(card.admissionMatched, expectation.wide.matched, `${id}: matched rules under wide`);
+      assert.ok(manifest.registeredTaskIds.includes(id) === (expectation.wide.matched[0] === 'ADM-1'), `${id}: fixture registration`);
+    }
+
+    // v1's own corpus stays on the board: the fixture registers it (ADM-1).
+    assert.ok(manifest.registeredTaskIds.includes('seed-task-14'));
+    assert.equal(wide['seed-task-14'].admitted, true);
+    assert.deepEqual(wide['seed-task-14'].admissionMatched, ['ADM-1']);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('the wide/strict switch changes the verdict and writes nothing at all', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    assert.equal(board.getAdmissionMode(), 'wide', 'the default mode is wide');
+    const ledgerBefore = db.exec('SELECT * FROM orchestration_tasks ORDER BY id')[0].values;
+    const kvBefore = Object.fromEntries(
+      db.exec('SELECT key, value FROM kv')[0].values.map(([key, value]) => [String(key), String(value)]),
+    );
+
+    assert.equal(board.setAdmissionMode('strict'), 'strict');
+    assert.equal(board.getAdmissionMode(), 'strict');
+    // The switch is one kv row; the ledger itself must be byte-identical.
+    const strictCards = Object.fromEntries(
+      [...board.listCards({ scope: 'all' }).cards, ...board.listCards({ scope: 'archived' }).cards]
+        .map((card) => [card.id, card]),
+    );
+    for (const [id, expectation] of Object.entries(ADMISSION_EXPECTATIONS)) {
+      assert.equal(strictCards[id].admitted, expectation.strict.admitted, `${id}: admitted under strict`);
+      assert.deepEqual(strictCards[id].admissionMatched, expectation.strict.matched, `${id}: matched under strict`);
+    }
+
+    // Anything unrecognised falls back to wide rather than throwing.
+    assert.equal(board.setAdmissionMode('nonsense'), 'wide');
+    assert.equal(board.getAdmissionMode(), 'wide');
+    board.setAdmissionMode('strict');
+
+    // Compare the ledger and the registry cell by cell: a mode switch is one kv
+    // value and nothing else.
+    assert.deepEqual(
+      db.exec('SELECT * FROM orchestration_tasks ORDER BY id')[0].values,
+      ledgerBefore,
+      'the mode switch must not touch a single ledger row',
+    );
+    const kvAfter = Object.fromEntries(
+      db.exec('SELECT key, value FROM kv')[0].values.map(([key, value]) => [String(key), String(value)]),
+    );
+    assert.deepEqual(
+      Object.keys(kvAfter).filter((key) => !(key in kvBefore)),
+      ['tracked_admission_mode'],
+      'the mode key is the only kv row the switch may create',
+    );
+    assert.deepEqual(Object.keys(kvBefore).filter((key) => !(key in kvAfter)), [], 'no kv key may disappear');
+    for (const key of Object.keys(kvBefore)) {
+      if (key === 'tracked_admission_mode') continue;
+      assert.equal(kvAfter[key], kvBefore[key], `kv.${key} must survive a mode switch untouched`);
+    }
+    assert.equal(kvAfter.tracked_admission_mode, 'strict');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('the archive is a read-time projection: nothing is written, moved or deleted', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    const before = ledgerDump(db);
+
+    const all = board.listCards({ scope: 'all' });
+    const archived = board.listCards({ scope: 'archived' });
+    const scoped = board.listCards();
+
+    assert.equal(all.counts.admitted + all.counts.archived, all.counts.total, 'admitted + archived = total');
+    assert.equal(archived.cards.length, archived.counts.archived, 'the archive scope returns exactly ¬admitted');
+    assert.equal(all.counts.archived > 0, true, 'the fixture must actually seed archived rows, or this proves nothing');
+
+    const boardIds = new Set(all.cards.map((card) => card.id));
+    const archivedIds = new Set(archived.cards.map((card) => card.id));
+    assert.equal([...boardIds].some((id) => archivedIds.has(id)), false, 'the two populations must be disjoint');
+    assert.equal(boardIds.size + archivedIds.size, all.counts.total, 'their union must be the whole ledger');
+
+    // Nobody can be closureDue and archived at the same time, at any scope.
+    for (const card of archived.cards) {
+      assert.equal(card.closureDue, false, `${card.id}: archived row is due for closure`);
+      assert.equal(card.closureSuggestionCode, null, `${card.id}: archived row carries a suggestion`);
+    }
+    assert.equal(archived.counts.closureDue, 0);
+    assert.equal(scoped.counts.closureDue, all.counts.closureDue, 'closureDue cards are never folded or archived');
+
+    // Deep links keep working for archived rows (freeze doc §6: 保留可查).
+    const archivedId = archived.cards[0].id;
+    const detail = board.getCard(archivedId);
+    assert.ok(detail, 'getCard must not filter by admission');
+    assert.equal(detail.admitted, false);
+    assert.ok(detail.steps.length >= 0 && detail.owner.ownerGlobalMetaId.length > 0);
+
+    assert.equal(ledgerDump(db), before, 'reading the board (all three scopes + a detail) must write nothing');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('sessions_ended is a hint for archived rows and a trigger only for admitted ones', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    const nowIso = new Date(Date.now() - 5 * 60_000).toISOString();
+    db.run(
+      `INSERT INTO orchestration_tasks
+         (id, owner_intent, enriched_goal, acceptance_criteria_json, source_session_id, twin_metabot_id,
+          owner_global_meta_id, status, plan_version, created_at, updated_at, completed_at)
+       VALUES ('probe-task-01', 'probe', NULL, '[]', 'probe-session-01', 1,
+               'idq1t3lzq0q4rec8edujklp4w8hfmgceqxth82a7m9', 'running', 1, ?, ?, NULL)`,
+      [nowIso, nowIso],
+    );
+    db.run(
+      `INSERT INTO cowork_sessions
+         (id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode,
+          hidden_from_session_list, project_id, created_at, updated_at, session_type)
+       VALUES ('probe-session-01', 'probe', NULL, 'idle', 0, '/tmp/probe', '', 'auto', 0, NULL, ?, ?, 'standard')`,
+      [nowIso, nowIso],
+    );
+
+    // Unregistered, no steps, no group/scheduled link: archived. Its only linked
+    // session is idle, yet nothing may queue.
+    const probe = (scope) => board.listCards({ scope }).cards.find((card) => card.id === 'probe-task-01');
+    const archivedCard = probe('archived');
+    assert.ok(archivedCard, 'the probe row must be archived');
+    assert.equal(archivedCard.closureDue, false, 'sessions_ended alone must not queue an unadmitted card');
+    assert.equal(archivedCard.closureSuggestionCode, null);
+    assert.equal(archivedCard.closureDueLevel, null);
+    // ...but the fact is still reported in the drawer as a hint (§5).
+    assert.ok(
+      archivedCard.reasonCodes.some((fact) => fact.code === 'linked_sessions'),
+      'the linked-session hint must survive the downgrade',
+    );
+
+    // Register it (ADM-1): the very same row is now queued by sessions_ended.
+    assert.equal(board.registerLongTask('probe-task-01').ok, true);
+    const admittedCard = probe('all');
+    assert.ok(admittedCard, 'a registered row must be on the board');
+    assert.equal(admittedCard.closureDue, true);
+    assert.equal(admittedCard.closureDueLevel, 'sessions_ended');
+    assert.equal(admittedCard.closureSuggestionCode, 'session_ended');
+    const byLevel = (level) => board.listCards({ scope: 'all' }).cards
+      .filter((card) => card.closureDueLevel === level)
+      .map((card) => card.id);
+    assert.equal(board.listCards({ scope: 'all' }).counts.sessionsEndedLevel, byLevel('sessions_ended').length);
+    assert.ok(byLevel('sessions_ended').includes('probe-task-01'));
+
+    // Registration is idempotent, and unregistering puts the row back in the
+    // archive without deleting anything.
+    assert.deepEqual(board.registerLongTask('probe-task-01').registered.filter((id) => id === 'probe-task-01').length, 1);
+    const registered = board.unregisterLongTask('probe-task-01');
+    assert.equal(registered.ok, true);
+    assert.equal(registered.registered.includes('probe-task-01'), false);
+    assert.ok(probe('archived'), 'unregistered rows return to the archive');
+    assert.equal(probe('all'), undefined);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('a malformed registry reads as an empty set and never blocks the board', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    const admittedBefore = board.listCards({ scope: 'all' }).counts.admitted;
+    const registryValue = String(
+      db.exec("SELECT value FROM kv WHERE key = 'tracked_long_task_registry'")[0].values[0][0],
+    );
+
+    db.run("UPDATE kv SET value = 'not json at all' WHERE key = 'tracked_long_task_registry'");
+    assert.deepEqual(board.listRegisteredLongTaskIds(), []);
+    const broken = board.listCards({ scope: 'all' });
+    const brokenCards = Object.fromEntries(
+      [...broken.cards, ...board.listCards({ scope: 'archived' }).cards].map((card) => [card.id, card]),
+    );
+    // Losing ADM-1 must not throw and must not guess: exactly the rows that had
+    // no structural branch fall to the archive, the rest are untouched.
+    assert.ok(broken.counts.admitted > 0, 'structural branches must still admit');
+    assert.ok(broken.counts.admitted < admittedBefore, 'dropping ADM-1 must shrink the board');
+    assert.equal(brokenCards['seed-task-29'].admitted, false, 'an ADM-1-only row falls to the archive');
+    assert.equal(brokenCards['seed-task-30'].admitted, true, 'an ADM-2-only row is unaffected');
+    assert.equal(broken.counts.admitted + broken.counts.archived, broken.counts.total);
+
+    db.run("UPDATE kv SET value = '{\"a\":1}' WHERE key = 'tracked_long_task_registry'");
+    assert.deepEqual(board.listRegisteredLongTaskIds(), [], 'a JSON object is not a registry');
+
+    // Positive control: a valid registry brings the very same rows back.
+    db.run('UPDATE kv SET value = ? WHERE key = ?', [registryValue, 'tracked_long_task_registry']);
+    assert.equal(board.listCards({ scope: 'all' }).counts.admitted, admittedBefore);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('the startup backfill closes pre-upgrade terminal rows once, and only those', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-tracked-backfill-'));
+  const legacy = [
+    ['legacy-a', 'completed', null],
+    ['legacy-b', 'failed', null],
+    ['legacy-c', 'cancelled', '   '],
+    ['legacy-d', 'completed', 'owner already closed this one'],
+    ['legacy-e', 'running', null],
+  ];
+  const insertLegacy = (db, id, status, conclusion) => db.run(
+    `INSERT INTO orchestration_tasks
+       (id, owner_intent, enriched_goal, acceptance_criteria_json, source_session_id, twin_metabot_id,
+        owner_global_meta_id, status, plan_version, created_at, updated_at, completed_at,
+        closure_conclusion, closure_by, closure_at, closure_pin_id)
+     VALUES (?, ?, NULL, '[]', NULL, 1, 'idq1t3lzq0q4rec8edujklp4w8hfmgceqxth82a7m9', ?, 1, ?, ?, NULL, ?, ?, NULL, NULL)`,
+    [id, `legacy ${id}`, status, '2026-09-01T00:00:00.000Z', '2026-09-10T00:00:00.000Z',
+      conclusion, conclusion ? 'owner' : null],
+  );
+  const rows = (db, sql) => db.exec(sql)[0].values.map((values) => values.join('\u0001'));
+
+  const store = await SqliteStore.create(dir);
+  let result;
+  try {
+    const db = store.getDatabase();
+    for (const [id, status, conclusion] of legacy) insertLegacy(db, id, status, conclusion);
+    const updatedBefore = rows(db, 'SELECT id, updated_at FROM orchestration_tasks ORDER BY id');
+
+    result = store.migrateTrackedTaskClosureBackfill();
+    assert.deepEqual(
+      {
+        scanned: result.scanned,
+        backfilled: result.backfilled,
+        skippedAlreadyConcluded: result.skippedAlreadyConcluded,
+        skippedNonTerminal: result.skippedNonTerminal,
+      },
+      { scanned: 3, backfilled: 3, skippedAlreadyConcluded: 1, skippedNonTerminal: 1 },
+    );
+
+    // (a) the activity anchor must not move, or zombie/scope semantics shift.
+    assert.deepEqual(
+      rows(db, 'SELECT id, updated_at FROM orchestration_tasks ORDER BY id'),
+      updatedBefore,
+      'the backfill must never write updated_at',
+    );
+    // (b) status is untouched; only the four closure columns are written.
+    assert.deepEqual(
+      rows(db, 'SELECT id, status FROM orchestration_tasks ORDER BY id'),
+      [['legacy-a', 'completed'], ['legacy-b', 'failed'], ['legacy-c', 'cancelled'],
+        ['legacy-d', 'completed'], ['legacy-e', 'running']].map((pair) => pair.join('\u0001')),
+      'the backfill must never write status',
+    );
+    for (const id of ['legacy-a', 'legacy-b', 'legacy-c']) {
+      const [conclusion, by, at, pin] = db.exec(
+        'SELECT closure_conclusion, closure_by, closure_at, closure_pin_id FROM orchestration_tasks WHERE id = ?',
+        [id],
+      )[0].values[0];
+      assert.match(String(conclusion), /^系统迁移：/, `${id}: the conclusion must state its provenance`);
+      assert.equal(by, 'system_backfill', `${id}: closure_by`);
+      assert.equal(at, result.snapshotAt, `${id}: closure_at is the migration instant`);
+      assert.equal(pin, null, `${id}: no pin is fabricated`);
+    }
+    // (c) an existing conclusion is never overwritten.
+    assert.equal(
+      db.exec("SELECT closure_conclusion FROM orchestration_tasks WHERE id = 'legacy-d'")[0].values[0][0],
+      'owner already closed this one',
+    );
+    assert.equal(
+      db.exec("SELECT closure_by FROM orchestration_tasks WHERE id = 'legacy-d'")[0].values[0][0],
+      'owner',
+    );
+
+    // (d) re-entrant: the second run matches nothing.
+    const second = store.migrateTrackedTaskClosureBackfill();
+    assert.equal(second.backfilled, 0, 'the migration must be idempotent');
+    assert.equal(second.scanned, 0, 'nothing is left in the target set');
+  } finally {
+    store.close();
+  }
+
+  // The upgrade path: reopening the SAME directory runs the migration again in
+  // ensureSchema, so an upgraded user must never see these 88-shaped rows as
+  // "terminal without a conclusion".
+  const reopened = await SqliteStore.create(dir);
+  try {
+    const db = reopened.getDatabase();
+    const third = reopened.migrateTrackedTaskClosureBackfill();
+    assert.equal(third.backfilled, 0, 'the reopen path must not re-close anything');
+
+    // `cowork_sessions.session_type` is added by coworkStore's own idempotent
+    // migration in production; this test boots the store alone, so it applies
+    // the same guarded ALTER the fixture does.
+    const sessionColumns = db.exec('PRAGMA table_info(cowork_sessions)')[0].values.map((row) => row[1]);
+    if (!sessionColumns.includes('session_type')) {
+      db.run("ALTER TABLE cowork_sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'standard'");
+    }
+
+    const orchestrationStore = new OrchestrationStore(db, reopened.getSaveFunction());
+    const board = new TrackedTaskBoardService({
+      db,
+      orchestrationStore,
+      saveDb: reopened.getSaveFunction(),
+    });
+    // Positive control FIRST: a terminal row written AFTER the migration (i.e. a
+    // genuinely new post-upgrade failure) must still raise the false-positive
+    // signal — otherwise "terminalNoConclusionLevel === 0" proves nothing.
+    insertLegacy(db, 'legacy-new', 'failed', null);
+    board.registerLongTask('legacy-new');
+    assert.equal(board.listCards({ scope: 'all' }).counts.terminalNoConclusionLevel, 1,
+      'a post-migration terminal row must still be flagged');
+
+    board.unregisterLongTask('legacy-new');
+    for (const id of ['legacy-a', 'legacy-b', 'legacy-c', 'legacy-d']) board.registerLongTask(id);
+    const counts = board.listCards({ scope: 'all' }).counts;
+    assert.equal(counts.terminalNoConclusionLevel, 0, 'the migrated rows are closed, not flagged');
+    assert.equal(counts.closureDue, 0, 'the four migrated rows raise no closure request at all');
+    const legacyCard = board.listCards({ scope: 'all' }).cards.find((card) => card.id === 'legacy-a');
+    assert.equal(legacyCard.state, 'closed');
+    assert.match(String(legacyCard.closureConclusion), /^系统迁移：/);
+  } finally {
+    reopened.close();
+  }
+});
+
+test('scope is a real three-value axis and an unknown scope is never silently default (H6)', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const archived = board.listCards({ scope: 'archived' });
+    assert.equal(archived.scopeApplied, 'archived', 'H6: archived must be a REAL scope, not a default fallback');
+    assert.equal(archived.scopeRequested, 'archived');
+    assert.equal(archived.scopeFallback, false);
+
+    // The archived view is exactly ¬admitted, and it is not the default view.
+    const admittedIds = new Set(board.listCards({ scope: 'all' }).cards.map((card) => card.id));
+    assert.ok(archived.cards.length > 0, 'the fixture must seed archived rows or this proves nothing');
+    assert.equal(
+      archived.cards.every((card) => card.admitted === false),
+      true,
+      'every archived row must be unadmitted',
+    );
+    assert.equal(archived.cards.some((card) => admittedIds.has(card.id)), false);
+    assert.notDeepEqual(
+      archived.cards.map((card) => card.id).sort(),
+      board.listCards().cards.map((card) => card.id).sort(),
+      'the archived view must not be the default view',
+    );
+
+    const omitted = board.listCards();
+    assert.equal(omitted.scopeRequested, null, 'an omitted scope is documented, not a fallback');
+    assert.equal(omitted.scopeApplied, 'default');
+    assert.equal(omitted.scopeFallback, false);
+
+    // An unrecognised value is reported, never quietly answered with `default`.
+    const bogus = board.listCards({ scope: 'nonsense' });
+    assert.equal(bogus.scopeRequested, 'nonsense');
+    assert.equal(bogus.scopeFallback, true, 'an unknown scope must be flagged, not silently reshaped');
+    assert.equal(bogus.scopeApplied, 'default');
+
+    for (const scope of ['default', 'all', 'archived']) {
+      assert.equal(board.listCards({ scope }).scopeFallback, false, `${scope} must be recognised`);
+    }
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('the two v1.1 UI entries are wired end to end (archive read-only, reversible mode switch)', async () => {
+  const fs = await import('node:fs');
+  const read = (relative) => fs.readFileSync(relative, 'utf8');
+
+  // 1) Archive entry: a real scope, rendered through the READ-ONLY list.
+  const section = read('src/renderer/components/trackedTasks/TrackedTasksSection.tsx');
+  assert.match(section, /scope: 'archived'/, 'the archive view must request the archived scope');
+  assert.match(section, /viewMode === 'archive'/, 'the archive view must be a rendered branch');
+  assert.match(section, /emptyTextKey="trackedTask\.archive\.empty"/);
+  assert.match(section, /readOnly\b/, 'the archive list must be rendered read-only');
+
+  // The read-only flag is what removes the closing action — assert BOTH halves
+  // (header cell and row cell), a single occurrence would leave the column behind.
+  const list = read('src/renderer/components/trackedTasks/TrackedTasksList.tsx');
+  assert.equal(
+    (list.match(/\{!readOnly && \(/g) ?? []).length,
+    2,
+    'readOnly must gate the action column header AND the per-row action',
+  );
+
+  // 2) Mode switch: reachable from Settings and carried over IPC.
+  const settings = read('src/renderer/components/Settings.tsx');
+  assert.match(settings, /case 'trackedTask':/);
+  assert.match(settings, /key: 'trackedTask'/);
+  const pane = read('src/renderer/components/settings/TrackedTaskSettings.tsx');
+  assert.match(pane, /setAdmissionMode/);
+  assert.match(pane, /\['wide', 'strict'\]/);
+  for (const file of ['src/main/main.ts', 'src/main/preload.ts']) {
+    const source = read(file);
+    assert.match(source, /trackedTask:admissionMode/, `${file}: read channel missing`);
+    assert.match(source, /trackedTask:setAdmissionMode/, `${file}: write channel missing`);
+  }
+
+  // 3) Every new key exists in BOTH languages: exactly two occurrences each.
+  const i18n = read('src/renderer/services/i18n.ts');
+  const keys = [
+    'trackedTask.view.archive',
+    'trackedTask.archive.title',
+    'trackedTask.archive.readOnly',
+    'trackedTask.archive.hint',
+    'trackedTask.archive.empty',
+    'trackedTask.admission.title',
+    'trackedTask.admission.hint',
+    'trackedTask.admission.modeWide',
+    'trackedTask.admission.modeStrict',
+    'trackedTask.admission.reversible',
+    'trackedTask.admission.activeRules',
+    'trackedTask.admission.notAdmitted',
+    'trackedTask.admission.adm1',
+    'trackedTask.admission.adm2',
+    'trackedTask.admission.adm3',
+    'trackedTask.admission.adm4',
+    'trackedTask.admission.adm5',
+    'trackedTaskSettingsTitle',
+  ];
+  const countKey = (key) => (i18n.match(
+    new RegExp(`(['"]${key.replace(/\./g, '\\.')}['"]\\s*:|\\b${key.replace(/\./g, '\\.')}\\s*:)`, 'g'),
+  ) ?? []).length;
+  // Positive control FIRST: prove the counter can see absence, otherwise a
+  // "everything is 2" pass could just be a counter stuck at 2.
+  assert.equal(countKey('trackedTask.thisKeyDoesNotExist'), 0, 'the key counter must be able to see 0');
+  for (const key of keys) {
+    assert.equal(countKey(key), 2, `${key}: expected the key in exactly EN + ZH, saw ${countKey(key)}`);
+  }
+});
+
+test('a missing `admitted` input cannot produce a non-boolean closureDue (F-A)', async () => {
+  const mod = await import('../dist-electron/main/services/trackedTaskBoard.js');
+  const { deriveCardState } = mod;
+
+  const nowMs = Date.parse('2026-09-17T06:00:00.000Z');
+  const task = {
+    id: 'no-admission', ownerIntent: 'x', enrichedGoal: null, acceptanceCriteria: [],
+    sourceSessionId: null, twinMetabotId: 1, ownerGlobalMetaId: 'owner',
+    status: 'failed', planVersion: 1,
+    createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-14T06:00:00.000Z', completedAt: null,
+  };
+  const base = {
+    task,
+    steps: [],
+    attempts: [],
+    openCheckpointCount: 0,
+    verifiableDeliverableCount: 0,
+    closureConclusion: null,
+    scheduled: null,
+    sessionStatuses: ['idle'],
+    activityAtMs: [Date.parse('2026-09-14T06:00:00.000Z')],
+    nowMs,
+  };
+
+  // Positive control first: WITH the input the gate is open, so the assertion
+  // below is about the missing-argument case and not about a dead code path.
+  const admitted = deriveCardState({ ...base, admitted: true });
+  assert.equal(admitted.closureDue, true, 'an admitted terminal row must be due for closure');
+
+  const omitted = deriveCardState(base);
+  assert.equal(omitted.closureDue, false, 'a missing `admitted` must fail closed to a real boolean');
+  assert.equal(typeof omitted.closureDue, 'boolean', 'closureDue must never be undefined');
+  assert.equal(omitted.closureDueLevel, null);
+  assert.equal(omitted.closureSuggestionCode, null);
+  // The miss is reported, not swallowed (chair ruling §14.2): a silent
+  // fail-closed is how a bypassing caller stops queueing anything unnoticed.
+  assert.equal(omitted.admissionInputMissing, true, 'a missing input must be visible');
+  assert.equal(admitted.admissionInputMissing, false, 'the normal path must report no miss');
+
+  // And the board surfaces it as a count that is 0 on the normal path.
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const counts = board.listCards({ scope: 'all' }).counts;
+    assert.equal(counts.admissionInputMissing, 0, 'the shipped board must never miss the input');
+    assert.equal(
+      typeof counts.admissionInputMissing,
+      'number',
+      'the counter must be exposed unconditionally, not only when non-zero',
+    );
+  } finally {
+    sqliteStore.close();
+  }
 });
