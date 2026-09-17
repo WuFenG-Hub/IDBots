@@ -781,3 +781,86 @@ test('the key table is per (side, code): 10 + 5 = 15, not per code (E-6)', async
   ].sort();
   assert.deepEqual([...new Set(all)].sort(), expected);
 });
+
+test('the terminal fact pair holds in BOTH directions (R-3 second direction)', async () => {
+  const { sqliteStore, board, orchestrationStore } = await openBoard();
+  try {
+    for (const card of board.listCards({ scope: 'all' }).cards) {
+      const hasReason = card.reasonCodes.some((fact) => fact.code === 'terminal_without_conclusion');
+      // Direction 1: the reason implies its suggestion.
+      if (hasReason) {
+        assert.equal(
+          card.closureSuggestionCode,
+          'terminal_no_conclusion',
+          `${card.id}: direction 1 broken — the terminal reason fired without its suggestion`,
+        );
+      }
+      // Direction 2: the suggestion implies its reason. Separate assertion on
+      // purpose, so a failure names WHICH direction broke. This relies on the
+      // trigger fact being first in the reason order, because only the first
+      // five lines survive the payload truncation.
+      if (card.closureSuggestionCode === 'terminal_no_conclusion') {
+        assert.ok(
+          hasReason,
+          `${card.id}: direction 2 broken — the terminal suggestion fired without its reason `
+          + `(reasonOverflow=${card.reasonOverflow}, codes=${card.reasonCodes.map((f) => f.code).join(',')})`,
+        );
+      }
+    }
+
+    // Positive control for direction 2: a card that MUST satisfy it.
+    const terminal = cardById(board, 'seed-task-18');
+    assert.equal(terminal.closureSuggestionCode, 'terminal_no_conclusion');
+    assert.ok(terminal.reasonCodes.some((fact) => fact.code === 'terminal_without_conclusion'));
+    assert.equal(orchestrationStore.getTask('seed-task-18').status, 'failed');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('the terminal reason survives the five-line truncation (ordering guarantee)', async () => {
+  const mod = await import('../dist-electron/main/services/trackedTaskBoard.js');
+  const { deriveCardState } = mod;
+
+  // A deliberately crowded card: eight candidate reason lines plus a terminal
+  // status without a conclusion. Only five survive the payload truncation, so
+  // the trigger fact must be ordered first or direction 2 of the pair breaks.
+  const nowMs = Date.parse('2026-09-17T06:00:00.000Z');
+  const task = {
+    id: 'crowded', ownerIntent: 'crowded', enrichedGoal: null, acceptanceCriteria: [],
+    sourceSessionId: null, twinMetabotId: 1, ownerGlobalMetaId: 'owner',
+    status: 'failed', planVersion: 1,
+    createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-14T06:00:00.000Z', completedAt: null,
+  };
+  const step = (id, status, deps = []) => ({
+    id, taskId: 'crowded', ordinal: 1, title: id, objective: '', acceptanceCriteria: [],
+    dependencyStepIds: deps, assigneeMetabotId: null, permissionScope: {}, deadlineAt: null,
+    status, acceptedResult: null, activeAttemptId: null,
+    createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-14T06:00:00.000Z',
+  });
+  const derived = deriveCardState({
+    task,
+    steps: [step('s1', 'waiting_input'), step('s2', 'blocked', ['s3']), step('s3', 'running')],
+    attempts: [{
+      id: 'a1', stepId: 's3', idempotencyKey: 'a1', workerMetabotId: 2, workerSessionId: null,
+      status: 'queued', prompt: '', result: null, error: null,
+      queuedAt: '2026-09-14T06:00:00.000Z', startedAt: null, finishedAt: null,
+    }],
+    openCheckpointCount: 1,
+    verifiableDeliverableCount: 2,
+    closureConclusion: null,
+    scheduled: null,
+    sessionStatuses: ['idle'],
+    activityAtMs: [Date.parse('2026-09-14T06:00:00.000Z')],
+    nowMs,
+  });
+
+  assert.equal(derived.closureSuggestionCode, 'terminal_no_conclusion');
+  assert.ok(derived.reasonOverflow > 0, 'this card must actually truncate, or the test proves nothing');
+  assert.equal(
+    derived.reasonCodes[0].code,
+    'terminal_without_conclusion',
+    'the closure trigger must be the first reason line, not a truncated-away one',
+  );
+  assert.ok(derived.reasonCodes.some((fact) => fact.code === 'terminal_without_conclusion'));
+});

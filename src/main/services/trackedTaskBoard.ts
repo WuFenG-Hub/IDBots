@@ -284,6 +284,17 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
         : 'sessions_ended';
 
   const reasonEntries: Array<{ code: TrackedFactCode; params: Record<string, string | number>; text: string }> = [];
+  // First on purpose: this fact is the trigger of the `terminal_no_conclusion`
+  // suggestion, and the payload keeps only the first five reason lines. If it
+  // could be truncated away, the pair's reverse implication (suggestion present
+  // => this reason present) would silently stop holding.
+  if (terminalWithoutConclusion) {
+    reasonEntries.push({
+      code: 'terminal_without_conclusion',
+      params: {},
+      text: 'terminal status without a closing conclusion',
+    });
+  }
   if (task.status === 'review') {
     reasonEntries.push({
       code: 'ledger_review',
@@ -331,13 +342,6 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
       code: 'deliverables_verifiable',
       params: { count: input.verifiableDeliverableCount },
       text: `${input.verifiableDeliverableCount} verifiable deliverable(s)`,
-    });
-  }
-  if (terminalWithoutConclusion) {
-    reasonEntries.push({
-      code: 'terminal_without_conclusion',
-      params: {},
-      text: 'terminal status without a closing conclusion',
     });
   }
   if (idleMs !== null && closureWarn) {
