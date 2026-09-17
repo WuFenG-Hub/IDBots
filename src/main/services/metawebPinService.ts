@@ -120,6 +120,20 @@ function normalizeMeta(raw: unknown): MetawebPinMeta {
 export function normalizePin(raw: unknown): MetawebPin {
   const record = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const textValue = typeof record.text === 'string' ? record.text : null;
+  // metaso-p2p's server-side text extraction misses JSON protocols whose
+  // prose lives in payload.content (paycomment, agentpedia rev — live-audit
+  // round 1: bots read these pins as "no readable text" while the full body
+  // sat in the never-truncated payload). Derive the body from payload.content
+  // when the server gave none; encrypted/binary payloads carry no string
+  // content field and stay null.
+  const payloadRecord = record.payload && typeof record.payload === 'object' && !Array.isArray(record.payload)
+    ? record.payload as Record<string, unknown>
+    : null;
+  const payloadContent = payloadRecord && typeof payloadRecord.content === 'string' && payloadRecord.content.trim()
+    ? payloadRecord.content
+    : null;
+  const effectiveText = textValue ?? payloadContent;
+  const fromPayload = textValue == null && payloadContent != null;
   return {
     pinId: text(record.pinId),
     currentPinId: text(record.currentPinId) || text(record.pinId),
@@ -131,9 +145,13 @@ export function normalizePin(raw: unknown): MetawebPin {
     createdAt: Number(record.createdAt) || 0,
     contentType: text(record.contentType),
     payload: record.payload ?? null,
-    text: textValue,
-    truncated: textValue != null ? record.truncated === true : null,
-    totalLength: textValue != null && Number.isFinite(Number(record.totalLength)) ? Number(record.totalLength) : null,
+    text: effectiveText,
+    truncated: effectiveText != null ? (fromPayload ? false : record.truncated === true) : null,
+    totalLength: effectiveText != null
+      ? (fromPayload
+        ? effectiveText.length
+        : Number.isFinite(Number(record.totalLength)) ? Number(record.totalLength) : null)
+      : null,
     meta: normalizeMeta(record.meta),
     attachments: Array.isArray(record.attachments) ? record.attachments.map(normalizeAttachment) : [],
     source: text(record.source) || 'local',

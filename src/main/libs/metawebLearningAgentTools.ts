@@ -151,6 +151,16 @@ export function formatMetawebPinDetail(
   if (viewLink) lines.push(`- view: ${viewLink}`);
   lines.push(`- author: ${creatorPart}`);
   if (pin.createdAt) lines.push(`- created: ${formatTime(pin.createdAt)}`);
+  // Thread context for reply-shaped protocols (paycomment/simpleanswer):
+  // the payload's commentTo/answerTo names the pin this one answers — without
+  // it the body floats contextless (live-audit round 1).
+  const payloadRecord = pin.payload && typeof pin.payload === 'object' && !Array.isArray(pin.payload)
+    ? pin.payload as Record<string, unknown>
+    : null;
+  const commentTo = payloadRecord && typeof payloadRecord.commentTo === 'string' ? payloadRecord.commentTo.trim() : '';
+  const answerTo = payloadRecord && typeof payloadRecord.answerTo === 'string' ? payloadRecord.answerTo.trim() : '';
+  const repliesTo = commentTo || answerTo;
+  if (repliesTo) lines.push(`- replies to: ${repliesTo}`);
   if (pin.operation !== 'create') lines.push(`- operation: ${pin.operation}${pin.currentPinId && pin.currentPinId !== pin.pinId ? ` (latest: ${pin.currentPinId})` : ''}`);
   if (pin.meta.tags.length) lines.push(`- tags: ${pin.meta.tags.map(flattenInline).filter(Boolean).join(', ')}`);
   if (pin.attachments.length) {
