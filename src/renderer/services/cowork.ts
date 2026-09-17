@@ -930,6 +930,34 @@ class CoworkService {
       return 0;
     }
     if (store.getState().cowork.currentSessionId !== sessionId) return 0;
+    // The in-session window just ended. For A2A threads with previous
+    // episodes, chain one cross-episode page below the current episode so
+    // the "load earlier" affordance keeps working instead of dead-ending at
+    // the session boundary (the thread's earlier generations are older than
+    // this session's page, so they prepend before it).
+    if (!result.page.hasMoreBefore && currentSession?.sessionType === 'a2a' && cowork.getA2AConversationHistoryPage) {
+      const below = await cowork.getA2AConversationHistoryPage({
+        sessionId,
+        beforeCursor: { episodeIndex: null, beforeSequence: null },
+        limit: history.pageSize,
+      });
+      if (below.success && below.page && below.page.messages.length > 0) {
+        store.dispatch(prependMessages({
+          sessionId,
+          messages: [
+            ...below.page.messages.map((entry) => entry.message),
+            ...result.page.messages,
+          ],
+          messageHistory: {
+            hasMoreBefore: below.page.hasMoreBefore,
+            beforeSequence: below.page.beforeCursor?.beforeSequence ?? null,
+            beforeEpisodeIndex: below.page.beforeCursor?.episodeIndex ?? null,
+            pageSize: history.pageSize,
+          },
+        }));
+        return result.page.messages.length + below.page.messages.length;
+      }
+    }
     store.dispatch(prependMessages({
       sessionId,
       messages: result.page.messages,

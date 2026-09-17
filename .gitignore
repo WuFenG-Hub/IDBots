@@ -441,6 +441,7 @@ man_base_data_pebble/
 !tests/privateChatEmptyReplyRetry.test.mjs
 !tests/privateChatNoReplyWake.test.mjs
 !tests/a2aEpisodeRollover.test.mjs
+!tests/a2aEpisodeHistoryLoad.test.mjs
 !tests/dshShutdownSoftFail.test.mjs
 !tests/metawebSurfStore.test.mjs
 !tests/surfBriefing.test.mjs

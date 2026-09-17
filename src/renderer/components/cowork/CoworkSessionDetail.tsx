@@ -3307,11 +3307,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     const sessionId = currentSession?.id;
     const history = currentSession?.messageHistory;
     const container = scrollContainerRef.current;
+    // NOTE: no beforeSequence guard here. For A2A sessions a null
+    // beforeSequence with hasMoreBefore=true is the episode-rollover state:
+    // the current episode's window fits entirely, and the service pages into
+    // the PREVIOUS episodes of the thread (first cross-episode page uses the
+    // null-null cursor). Guarding on beforeSequence dead-ends the history
+    // right after a rollover.
     if (
       !sessionId
       || currentSession?.sessionType !== 'a2a'
       || !history?.hasMoreBefore
-      || history.beforeSequence == null
       || !container
       || historyLoadInFlightRef.current
     ) {
