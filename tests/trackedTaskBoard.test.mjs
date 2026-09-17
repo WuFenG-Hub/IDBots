@@ -1569,59 +1569,87 @@ test('the closing modal says Twin executes the conclusion as the final close-out
     assert.equal(values.length, 2, `${key}: expected exactly EN + ZH, saw ${values.length}`);
   }
 
-  // Owner ruling B: the conclusion IS an instruction — both languages must say
-  // Twin executes it as the final close-out.
-  const hint = copyFor('trackedTask.close.recordOnlyHint');
-  assert.ok(
-    hint.some((text) => text.includes('执行') && text.includes('Twin')),
-    'zh hint must say Twin executes the conclusion',
-  );
-  assert.ok(
-    hint.some((text) => /Twin executes it verbatim/i.test(text)),
-    'en hint must say Twin executes the conclusion',
-  );
-
-  // The superseded wording must be gone. Each absence check carries its own
-  // positive control: neither predicate may be one that can never fire. The
-  // literals are assembled from fragments so the repo-wide zero-hit grep
-  // (freeze doc §7) does not trip over this test's own positive control.
+  // ---------------------------------------------------------------------
+  // D7 (spec v1.2.2): the copy is frozen as SEMANTIC anchors, not verbatim
+  // strings — the verbatim strings are read off the FINAL HEAD by S3 and
+  // recorded there. So the assertions below check must-contain / must-not
+  // anchors only; no second verbatim authority lives in this file.
+  // ---------------------------------------------------------------------
+  // The three forbidden tokens are assembled from fragments so this file never
+  // carries the literal and the repo-wide zero-hit scan further down cannot
+  // trip over its own lexicon. Positive controls for each follow.
+  const FORBIDDEN_ZH = ['不会自动', '执行'].join('');
+  const FORBIDDEN_EN = ['will not be ', 'executed automatically'].join('');
+  const FORBIDDEN_RECORDED_ONLY = ['recorded', ' only'].join('');
   const supersededZh = ['这段结论会被记录，不会自动', '执行。'].join('');
   const supersededEn = ['This conclusion is recorded', ' only — it will not be ', 'executed automatically.'].join('');
+  assert.ok(supersededZh.includes(FORBIDDEN_ZH), 'the zh absence predicate must see the superseded wording');
   assert.ok(
-    supersededZh.includes(['不会自动', '执行'].join('')),
-    'the zh absence predicate must be able to see the superseded wording',
+    new RegExp(FORBIDDEN_EN).test(supersededEn),
+    'the en absence predicate must see the superseded wording',
   );
   assert.ok(
-    // Fragment-built: the literal must not appear in this file either.
-    new RegExp(['will not be ', 'executed automatically'].join('')).test(supersededEn),
-    'the en absence predicate must be able to see the superseded wording',
-  );
-  assert.ok(
-    hint.every((text) => !text.includes(['不会自动', '执行'].join(''))),
-    'no copy may keep the superseded zh phrasing',
-  );
-  assert.ok(
-    hint.every((text) => !new RegExp(['will not be ', 'executed automatically'].join('')).test(text)),
-    'no copy may keep the superseded en phrasing',
+    FORBIDDEN_RECORDED_ONLY.length > 0 && supersededEn.includes(FORBIDDEN_RECORDED_ONLY),
+    'the recorded-only predicate must see a hit on the superseded wording',
   );
 
-  // Flipping the semantics must NOT drop the safety boundary: the copy still
-  // tells the owner a destructive action goes through confirmation.
-  assert.ok(hint.some((text) => text.includes('确认')), 'zh hint must keep the safety gate for destructive actions');
-  assert.ok(
-    hint.some((text) => /ask you first|confirm/i.test(text)),
-    'en hint must keep the safety gate for destructive actions',
-  );
-
-  // And the strings that named a pure recorder must now read as a close-out
-  // action performed by the actor named beside them.
-  for (const key of ['trackedTask.close.confirm', 'trackedTask.closure.byOwner', 'trackedTask.closure.byTwin']) {
-    for (const text of copyFor(key)) {
-      assert.match(text, /收口|clos(e|ed)\b/i, `${key}: "${text}" must read as a close-out action`);
+  // D7 must-contain / must-not-contain, per key, per language.
+  const anchors = [
+    {
+      key: 'trackedTask.close.recordOnlyHint',
+      mustContain: { zh: ['执行', 'Twin', '确认'], en: [/execut/i, /confirm/i, /Twin/] },
+      mustNot: { zh: [FORBIDDEN_ZH], en: [new RegExp(FORBIDDEN_EN), new RegExp(FORBIDDEN_RECORDED_ONLY)] },
+    },
+    {
+      key: 'trackedTask.close.by',
+      mustContain: { zh: ['收口'], en: [/Closed by/] },
+      mustNot: { zh: ['记录人'], en: [/Recorded by/] },
+    },
+    {
+      key: 'trackedTask.close.confirm',
+      mustContain: { zh: ['收口'], en: [/[Cc]los/] },
+      mustNot: { zh: ['确认记录'], en: [/Record it/] },
+    },
+    {
+      key: 'trackedTask.closure.byOwner',
+      mustContain: { zh: ['收口'], en: [/[Cc]los/] },
+      mustNot: { zh: ['记录'], en: [/[Rr]ecord/] },
+    },
+    {
+      key: 'trackedTask.closure.byTwin',
+      mustContain: { zh: ['收口'], en: [/[Cc]los/] },
+      mustNot: { zh: ['记录'], en: [/[Rr]ecord/] },
+    },
+    {
+      key: 'trackedTask.receipt.statusKept',
+      mustContain: { zh: ['收口'], en: [/[Cc]los/] },
+      mustNot: { zh: ['结论已记录'], en: [/recorded/] },
+    },
+  ];
+  for (const anchor of anchors) {
+    const values = copyFor(anchor.key);
+    assert.equal(values.length, 2, `${anchor.key}: expected exactly EN + ZH, saw ${values.length}`);
+    const [zh, en] = values;
+    for (const needle of anchor.mustContain.zh) {
+      assert.ok(zh.includes(needle), `${anchor.key}: zh "${zh}" must contain "${needle}"`);
+    }
+    for (const pattern of anchor.mustContain.en) {
+      assert.match(en, pattern, `${anchor.key}: en "${en}" must match ${pattern}`);
+    }
+    for (const needle of anchor.mustNot.zh) {
+      assert.equal(zh.includes(needle), false, `${anchor.key}: zh "${zh}" must not contain "${needle}"`);
+    }
+    for (const pattern of anchor.mustNot.en) {
+      assert.doesNotMatch(en, pattern, `${anchor.key}: en "${en}" must not match ${pattern}`);
     }
   }
-  for (const text of copyFor('trackedTask.close.by')) {
-    assert.doesNotMatch(text, /记录|recorded/i, `trackedTask.close.by: "${text}" still reads as a pure record`);
+
+  // D8: the paired surface is 8 keys. The two that carry no wording requirement
+  // this round still must exist exactly once per language.
+  for (const key of ['trackedTask.close.title', 'trackedTask.close.conclusionPlaceholder']) {
+    const values = copyFor(key);
+    assert.equal(values.length, 2, `${key}: expected exactly EN + ZH, saw ${values.length}`);
+    assert.ok(values[0] && values[1], `${key}: both languages must carry non-empty copy`);
   }
 });
 
