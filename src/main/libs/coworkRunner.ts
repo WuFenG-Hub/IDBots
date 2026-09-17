@@ -211,6 +211,7 @@ import { createSurfCreatePinGuard, recordSurfDeepRead, type SurfSessionWriteStat
 import { buildScheduledTaskAgentTools, type ScheduledTaskAgentControl } from './scheduledTaskAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
+import { buildPostSimpleLogAgentTools } from './postSimpleLogAgentTools';
 import {
   buildWalletAgentTools,
   type WalletToolsControl,
@@ -9735,6 +9736,18 @@ export class CoworkRunner extends EventEmitter {
           })
         );
       }
+      // SimpleLog (/protocols/simplelog): the PROCESS record layer of
+      // collaboration — one entry per complete progress, deliverables as bare
+      // chain URIs the ledger reads directly. Distinct from post_simplenote
+      // (knowledge for the whole internet): 过程进 log，知识进 note.
+      memoryTools.push(
+        ...buildPostSimpleLogAgentTools({
+          tool,
+          createPin: createPinForSession,
+          sessionId,
+          resolveMetabotId,
+        })
+      );
       memoryTools.push(
         ...buildOmniCasterAgentTools({
           tool,

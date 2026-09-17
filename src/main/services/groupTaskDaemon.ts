@@ -93,6 +93,7 @@ import {
 import {
   parseDeliverableLines,
   parseDeliverableSegments,
+  parseSimpleLogDeliverables,
   extractPinidToken,
   hasDeliverableTagLine,
   extractLocalFilePaths,
@@ -4580,13 +4581,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // examples), never a real delivery. Inline backticks survive: real
     // deliveries wrap URIs / local file paths in them.
     const parseContent = stripFencedCodeBlocks(content);
+    // SimpleLog intake (/protocols/simplelog, v1): a record carries its
+    // deliverables as a bare chain-URI array — no [DELIVERABLE] tag, no prose
+    // to guess from. Both shapes feed the SAME ledger path below (per-candidate
+    // rows, dedupe, verification); tag-less records are the record layer's
+    // native form, tag lines stay the ad-hoc delivery form.
+    const simpleLogCandidates = parseSimpleLogDeliverables(parseContent);
     if (message.senderSuspect) {
       // no deliverable collection for non-member speakers
     } else if (task.mode === 'chat') {
       // R6/R9 (OpenTeam chat scenario): chat groups run zero ledger
       // discipline — a stray [DELIVERABLE] line in a conversation is noise,
       // never a task artifact.
-    } else if (hasDeliverableTagLine(parseContent) && !isChairMessage) {
+    } else if (
+      (hasDeliverableTagLine(parseContent) || simpleLogCandidates.length > 0)
+      && !isChairMessage
+    ) {
       // Round-4: per-candidate ingestion. Every [DELIVERABLE] tag occurrence
       // (its own line or inline) produces one candidate; valid candidates each
       // get their own row — a message with two tag lines records TWO rows.
@@ -4594,7 +4604,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // line can never hide a real URI on a sibling line.
       const msgPinId = message.pinId;
       const tagLines = deliverableTagLines(parseContent);
-      const candidates = parseDeliverableLines(parseContent);
+      // Tag candidates keep the head of the list so their index alignment with
+      // candidateSegments below stays intact; the record's array items are
+      // appended (their kind is never 'text', so the local-file upgrade
+      // branch is not reachable for them).
+      const candidates = [
+        ...parseDeliverableLines(parseContent),
+        ...simpleLogCandidates,
+      ];
       // Index-aligned raw segment text per candidate (ledger fix: text
       // candidates may carry a local file path worth uploading on-chain).
       const candidateSegments = parseDeliverableSegments(parseContent);
