@@ -94,8 +94,12 @@ const trackedTaskSlice = createSlice({
         ...column,
         cardIds: state.board!.cards.filter((c) => c.state === column.state).map((c) => c.id),
       }));
-      state.board.closureDueCardIds = state.board.cards.filter((c) => c.closureDue).map((c) => c.id);
-      state.board.closureDueCount = state.board.closureDueCardIds.length;
+      // 这两项是**页内基数**（A-3）：这里按当前已载入的卡重算，语义与后端 `page` 一致。
+      // 看板级数字（counts.*）不在这里改——收口后由 loadBoard() 从后端整体重取。
+      state.board.closureDueCardIdsPage = state.board.cards
+        .filter((c) => c.closureDue && c.state !== 'closed')
+        .map((c) => c.id);
+      state.board.closureDueCountPage = state.board.closureDueCardIdsPage.length;
     },
     dropDetail(state, action: PayloadAction<string>) {
       delete state.details[action.payload];

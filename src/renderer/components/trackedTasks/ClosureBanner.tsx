@@ -15,6 +15,10 @@ interface ClosureBannerProps {
 
 /**
  * 「待收口」横条 —— 跨列的正交标志（chair D1：**不是第 5 列**，卡留在自己那一列）。
+ *
+ * 数字来源（A-3 作用域纪律）：横幅里的一切计数都取 `counts.*`（可见集）；
+ * `closureDueCountPage` / `closureDueCardIdsPage` 是**页内基数**，
+ * 本组件**一处都不用**——它只覆盖当前分页，拿来当看板级总计就是错的。
  * 三级分别计数（[SEC-07]）：僵尸级 / 终态缺结论级 各自可见，会话已结束级作为补充信息。
  * 横条右侧兼作「只看需要我出手」开关。
  */
@@ -33,7 +37,7 @@ const ClosureBanner: React.FC<ClosureBannerProps> = ({
   const levels: Array<{ key: keyof TrackedCardCounts; className: string }> = [
     { key: 'zombieLevel', className: 'border-red-500/40 bg-red-500/10 text-red-500' },
     {
-      key: 'terminalMissingConclusionLevel',
+      key: 'terminalNoConclusionLevel',
       className: 'border-amber-500/40 bg-amber-500/10 text-amber-500',
     },
     {
@@ -58,8 +62,8 @@ const ClosureBanner: React.FC<ClosureBannerProps> = ({
             const labelKey =
               level.key === 'zombieLevel'
                 ? 'trackedTask.counts.zombie'
-                : level.key === 'terminalMissingConclusionLevel'
-                  ? 'trackedTask.counts.terminalMissing'
+                : level.key === 'terminalNoConclusionLevel'
+                  ? 'trackedTask.counts.terminalNoConclusion'
                   : 'trackedTask.counts.sessionsEnded';
             return (
               <span

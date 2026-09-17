@@ -173,6 +173,8 @@ class TrackedTaskService {
           store.dispatch(mergeCardSummary(result.card));
         }
         void this.loadCard(input.cardId);
+        // 收口会改 counts / columns / 页内基数：整块重取一次，别在前端拼统计。
+        void this.loadBoard();
         return {
           error: null,
           receipt: {

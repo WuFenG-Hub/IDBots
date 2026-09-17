@@ -23,11 +23,11 @@ export const TRACKED_BOARD_COLUMN_FALLBACK: TrackedCardState[] = [
 ];
 
 /** closureDue 的三级来源：跨列正交标志，不是第 5 列（chair D1）。 */
-export type TrackedClosureDueLevel = 'zombie' | 'terminal_missing_conclusion' | 'sessions_ended';
+export type TrackedClosureDueLevel = 'zombie' | 'terminal_no_conclusion' | 'sessions_ended';
 
 export const TRACKED_DUE_LEVEL_LABEL_KEYS: Record<TrackedClosureDueLevel, string> = {
   zombie: 'trackedTask.dueLevel.zombie',
-  terminal_missing_conclusion: 'trackedTask.dueLevel.terminalMissingConclusion',
+  terminal_no_conclusion: 'trackedTask.dueLevel.terminalNoConclusion',
   sessions_ended: 'trackedTask.dueLevel.sessionsEnded',
 };
 
@@ -115,7 +115,7 @@ export interface TrackedCardCounts {
   /** 第 1 级：超过僵尸阈值。 */
   zombieLevel: number;
   /** 第 2 级：终态但没有结论。 */
-  terminalMissingConclusionLevel: number;
+  terminalNoConclusionLevel: number;
   /** 第 3 级：全部关联会话已结束且无排队任务。 */
   sessionsEndedLevel: number;
 }
@@ -171,8 +171,13 @@ export interface TrackedCardBoard {
   seq: number;
   columns: Array<{ state: TrackedCardState; labelKey: string; cardIds: string[] }>;
   cards: TrackedCardSummary[];
-  closureDueCardIds: string[];
-  closureDueCount: number;
+  /**
+   * 页内基数（PAGE），不是可见集：只覆盖当前页，**禁止**用于看板级总计或横幅。
+   * 看板级数字读 `counts.closureDue` / `counts.zombieLevel` /
+   * `counts.terminalNoConclusionLevel` / `counts.sessionsEndedLevel`。
+   */
+  closureDueCardIdsPage: string[];
+  closureDueCountPage: number;
   counts: TrackedCardCounts;
   /** limit/offset 之外还有卡时为 true。 */
   hasMore: boolean;
