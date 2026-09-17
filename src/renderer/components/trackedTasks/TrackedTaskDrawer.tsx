@@ -72,7 +72,7 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
 
   // 摘要与建议：结构化事实 → i18n 文案；后端 reasons 仅作 fallback（日志串，不是 UI 文案）。
   const summaryLines = (detail.reasonCodes?.length ? detail.reasonCodes.slice(0, 5).map((fact, index) => reasonText(fact, detail.reasons?.[index])) : (detail.reasons ?? []).slice(0, 5));
-  const suggestion = suggestionTextForCard(detail, detail.deliverables.length);
+  const suggestion = suggestionTextForCard(detail);
 
   const ownerName = personName(detail.owner.twinMetabotId, metabotNames);
   // 参与席 = 后端给的 participants（metabotId 列表）；负责人来自 owner.twinMetabotId。
