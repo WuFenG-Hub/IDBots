@@ -989,6 +989,10 @@ export class SqliteStore {
     // must never introduce a fourth table.
     this.migrateScheduledTaskOrchestrationLink();
     this.migrateOrchestrationTaskClosureColumns();
+    // Long-task board v1.2 (task #86): the conclusion is an INSTRUCTION, so the
+    // row must also carry its processing mark and the receipt. Five more ADD
+    // COLUMNs on the same ledger — still no fourth table (freeze doc §2.1).
+    this.migrateOrchestrationTaskClosureProcessingColumns();
     // Long-task board v1.1 (task #84): the columns above must exist before the
     // backfill runs. Ordering matters — the backfill's UPDATE names all four.
     this.migrateTrackedTaskClosureBackfill();
@@ -2980,6 +2984,38 @@ export class SqliteStore {
    * "not closed yet", and altering a CHECK would force a table rebuild of the
    * shared Twin orchestration ledger.
    */
+  /**
+   * Migration (long-task board v1.2, task #86 §2.1): the conclusion is executed,
+   * so the row also carries its processing mark and the receipt. Five NULLABLE
+   * ADD COLUMNs on the same ledger, no CHECK, no table rebuild — the derived
+   * "still pending" verdict is recomputed at read time, never stored as a flag.
+   *
+   * `closure_processed_hash` binds the mark to the EXACT conclusion text, which
+   * is what makes a later conclusion on an already-acked card re-enter the queue
+   * (freeze doc §3.1 T1) without any "claim" intermediate state.
+   */
+  private migrateOrchestrationTaskClosureProcessingColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(orchestration_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      const additions: Array<[string, string]> = [
+        ['closure_processed_at', 'TEXT'],
+        ['closure_processed_by', 'TEXT'],
+        ['closure_processed_hash', 'TEXT'],
+        ['closure_receipt', 'TEXT'],
+        ['closure_receipt_pin_id', 'TEXT'],
+      ];
+      for (const [name, type] of additions) {
+        if (!columns.includes(name)) {
+          this.db.run(`ALTER TABLE orchestration_tasks ADD COLUMN ${name} ${type}`);
+        }
+      }
+      this.save();
+    } catch (error) {
+      console.warn('migrateOrchestrationTaskClosureProcessingColumns:', error);
+    }
+  }
+
   private migrateOrchestrationTaskClosureColumns(): void {
     try {
       const colsResult = this.db.exec('PRAGMA table_info(orchestration_tasks)');

@@ -5775,6 +5775,14 @@ const getCoworkRunner = () => {
       // prompt and schedule. A schedule that never fires (past 'at' datetime,
       // unparsable cron — the store computes nextRunAtMs=null for both) rolls
       // back and throws: a silently dead task is the worst outcome.
+      // Long-task board v1.2 (task #86 §6): the Twin's closure-execution
+      // channel. Both methods delegate straight to the board service, so the
+      // queue derivation stays in its single implementation and the agent layer
+      // owns no database handle of its own.
+      trackedTaskClosureTools: {
+        listPendingClosures: (input) => getTrackedTaskBoard().listPendingClosures(input),
+        acknowledgeClosure: (input) => getTrackedTaskBoard().acknowledgeClosure(input),
+      },
       scheduledTaskTools: {
         createTask: (input) => {
           const store = getScheduledTaskStore();
