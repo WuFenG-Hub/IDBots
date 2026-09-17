@@ -83,11 +83,12 @@ test('prompt carries the digest, the budget, and the persona-driven engagement r
   assert.match(prompt, /```json/);
 });
 
-test('step 1 instructs ONE read_metaweb_pins_batch call for the shortlist (surf-reads backend)', () => {
+test('step 1 instructs budget-capped batch reads in ~10-12 pin chunks (live-audit round 1)', () => {
   const prompt = buildSurfSessionPrompt(makeContext());
-  assert.match(prompt, /read the whole shortlist in ONE read_metaweb_pins_batch call/);
-  assert.match(prompt, /at most 50 ids — a 30-id batch counts as 30 deep reads/);
-  assert.match(prompt, /truncated:true/);
+  assert.match(prompt, /read_metaweb_pins_batch calls of ~10-12 pinIds/);
+  assert.match(prompt, /the whole batch result is budget-capped/);
+  assert.match(prompt, /an omitted body did NOT count as a read/);
+  assert.doesNotMatch(prompt, /a 30-id batch counts as 30 deep reads/, 'the old whole-shortlist-in-one-call guidance is gone');
   assert.doesNotMatch(prompt, /read_metaweb_pin only the pins you genuinely care about/, 'no more per-pin read loop');
 });
 

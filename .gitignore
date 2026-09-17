@@ -307,6 +307,7 @@ man_base_data_pebble/
 !tests/metawebQaSurfSession.test.mjs
 !tests/qandaMetaAppStatic.test.mjs
 !tests/metawebLearningAskNudge.test.mjs
+!tests/metawebLearningBatchBudget.test.mjs
 !tests/networkServicesAgentTools.test.mjs
 !tests/onlineBotsAgentTools.test.mjs
 !tests/metaFileUploadAgentTools.test.mjs
