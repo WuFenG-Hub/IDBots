@@ -651,7 +651,7 @@ test('structured facts are authoritative and the diagnostic strings derive from 
       for (const [index, fact] of card.reasonCodes.entries()) {
         assert.equal(typeof fact.code, 'string', `${card.id}[${index}]: code missing`);
         assert.ok(KEY_REGISTRY[fact.code], `${card.id}[${index}]: code ${fact.code} has no i18n key`);
-        assert.equal(typeof fact.args, 'object', `${card.id}[${index}]: args missing`);
+        assert.equal(typeof fact.params, 'object', `${card.id}[${index}]: args missing`);
       }
       // Rule 4: a suggestion exists exactly when the card is due for closure.
       assert.equal(
@@ -663,7 +663,7 @@ test('structured facts are authoritative and the diagnostic strings derive from 
         assert.ok(KEY_REGISTRY[card.closureSuggestionCode], `${card.id}: suggestion code has no i18n key`);
         assert.equal(
           card.closureSuggestion,
-          RENDER(card.closureSuggestionCode, card.closureSuggestionArgs),
+          RENDER(card.closureSuggestionCode, card.closureSuggestionParams),
           `${card.id}: the diagnostic string must be derived from code+args, never written twice`,
         );
       } else {
@@ -675,7 +675,7 @@ test('structured facts are authoritative and the diagnostic strings derive from 
     const due = cardById(board, 'seed-task-14');
     assert.equal(due.closureDue, true);
     assert.equal(due.closureSuggestionCode, 'stale_inactivity');
-    assert.equal(typeof due.closureSuggestionArgs.days, 'number');
+    assert.equal(typeof due.closureSuggestionParams.days, 'number');
     assert.match(due.closureSuggestion, /day\(s\)/);
 
     const clean = cardById(board, 'seed-task-05');
@@ -702,6 +702,30 @@ test('structured facts are authoritative and the diagnostic strings derive from 
     assert.ok(withSessions.reasonCodes.some((fact) => fact.code === 'deliverables_verifiable'));
     assert.ok(withSessions.reasonCodes.some((fact) => fact.code === 'linked_sessions'));
     assert.equal(orchestrationStore.getTask('seed-task-23').status, 'running');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('the terminal-no-conclusion fact can never exist in only one of its two homes (A-6/appendix B)', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    // loop registered the reason code (`terminal_without_conclusion`) and the
+    // suggestion code (`terminal_no_conclusion`) as deliberately different
+    // names for one fact. Two names for one fact may not silently diverge, so
+    // their co-occurrence is pinned here.
+    for (const card of board.listCards({ scope: 'all' }).cards) {
+      const hasReason = card.reasonCodes.some((fact) => fact.code === 'terminal_without_conclusion');
+      if (!hasReason) continue;
+      assert.equal(
+        card.closureSuggestionCode,
+        'terminal_no_conclusion',
+        `${card.id}: the terminal-no-conclusion reason fired without its suggestion`,
+      );
+    }
+    const terminal = cardById(board, 'seed-task-18');
+    assert.ok(terminal.reasonCodes.some((fact) => fact.code === 'terminal_without_conclusion'));
+    assert.equal(terminal.closureSuggestionCode, 'terminal_no_conclusion');
   } finally {
     sqliteStore.close();
   }

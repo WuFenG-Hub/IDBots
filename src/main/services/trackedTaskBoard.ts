@@ -69,8 +69,8 @@ export type TrackedClosureDueLevel = 'zombie' | 'terminal_no_conclusion' | 'sess
 
 /**
  * Structured facts, not UI copy (appendix B / A-6). The backend publishes a
- * closed `code` plus `args`; the renderer renders the human string from
- * `code + args` through i18n. The English `reasons` / `closureSuggestion`
+ * closed `code` plus `params`; the renderer renders the human string from
+ * `code + params` through i18n. The English `reasons` / `closureSuggestion`
  * strings are DIAGNOSTIC ONLY (logs, event stream) and must never be rendered
  * in the UI.
  */
@@ -115,7 +115,7 @@ export const TRACKED_FACT_CODE_I18N_KEY: Record<TrackedFactCode, string> = {
 
 export interface TrackedFact {
   code: TrackedFactCode;
-  args: Record<string, string | number>;
+  params: Record<string, string | number>;
 }
 
 export type TrackedCardSourceKind = 'group_task' | 'scheduled_task' | 'session';
@@ -155,7 +155,7 @@ export interface TrackedCardDerivation {
   /** ENGLISH DIAGNOSTIC ONLY — never render this in the UI (appendix B). */
   closureSuggestion: string;
   closureSuggestionCode: TrackedSuggestionCode | null;
-  closureSuggestionArgs: Record<string, string | number> | null;
+  closureSuggestionParams: Record<string, string | number> | null;
   lastActivityAtMs: number | null;
   idleMs: number | null;
   /** ENGLISH DIAGNOSTIC ONLY — never render this in the UI (appendix B). */
@@ -250,74 +250,74 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
         ? 'zombie'
         : 'sessions_ended';
 
-  const reasonEntries: Array<{ code: TrackedFactCode; args: Record<string, string | number>; text: string }> = [];
+  const reasonEntries: Array<{ code: TrackedFactCode; params: Record<string, string | number>; text: string }> = [];
   if (task.status === 'review') {
     reasonEntries.push({
       code: 'ledger_review',
-      args: {},
+      params: {},
       text: 'ledger status=review, awaiting a decision',
     });
   }
   if (waitingInputSteps.length > 0) {
     reasonEntries.push({
       code: 'steps_waiting_input',
-      args: { count: waitingInputSteps.length },
+      params: { count: waitingInputSteps.length },
       text: `${waitingInputSteps.length} step(s) waiting_input`,
     });
   }
   if (input.openCheckpointCount > 0) {
     reasonEntries.push({
       code: 'open_checkpoints',
-      args: { count: input.openCheckpointCount },
+      params: { count: input.openCheckpointCount },
       text: `${input.openCheckpointCount} open group-task checkpoint(s)`,
     });
   }
   if (unmetDependencySteps.length > 0) {
     reasonEntries.push({
       code: 'blocked_unmet_dependencies',
-      args: { count: unmetDependencySteps.length },
+      params: { count: unmetDependencySteps.length },
       text: `${unmetDependencySteps.length} blocked step(s) with unmet dependencies`,
     });
   }
   if (activeSteps.length > 0) {
     reasonEntries.push({
       code: 'steps_active',
-      args: { count: activeSteps.length },
+      params: { count: activeSteps.length },
       text: `${activeSteps.length} step(s) ready/queued/running`,
     });
   }
   if (openAttempts.length > 0) {
     reasonEntries.push({
       code: 'attempts_open',
-      args: { count: openAttempts.length },
+      params: { count: openAttempts.length },
       text: `${openAttempts.length} attempt(s) queued/running`,
     });
   }
   if (input.verifiableDeliverableCount > 0) {
     reasonEntries.push({
       code: 'deliverables_verifiable',
-      args: { count: input.verifiableDeliverableCount },
+      params: { count: input.verifiableDeliverableCount },
       text: `${input.verifiableDeliverableCount} verifiable deliverable(s)`,
     });
   }
   if (terminalWithoutConclusion) {
     reasonEntries.push({
       code: 'terminal_without_conclusion',
-      args: {},
+      params: {},
       text: 'terminal status without a closing conclusion',
     });
   }
   if (idleMs !== null && closureWarn) {
     reasonEntries.push({
       code: 'idle_days',
-      args: { days: idleMs / TRACKED_CARD_WARN_MS },
+      params: { days: idleMs / TRACKED_CARD_WARN_MS },
       text: `idle for ${formatDays(idleMs)} day(s)`,
     });
   }
   if (input.sessionStatuses.length > 0) {
     reasonEntries.push({
       code: 'linked_sessions',
-      args: { count: input.sessionStatuses.length },
+      params: { count: input.sessionStatuses.length },
       text: `linked sessions: ${input.sessionStatuses.join(', ')}`,
     });
   }
@@ -340,13 +340,13 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     closureWarn,
     closureDueLevel,
     // Derived from the structured facts below, never written twice by hand.
-    closureSuggestion: suggestion ? renderTrackedSuggestion(suggestion.code, suggestion.args) : '',
+    closureSuggestion: suggestion ? renderTrackedSuggestion(suggestion.code, suggestion.params) : '',
     closureSuggestionCode: suggestion?.code ?? null,
-    closureSuggestionArgs: suggestion?.args ?? null,
+    closureSuggestionParams: suggestion?.params ?? null,
     lastActivityAtMs,
     idleMs,
     reasons: keptReasons.map((entry) => entry.text),
-    reasonCodes: keptReasons.map((entry) => ({ code: entry.code, args: entry.args })),
+    reasonCodes: keptReasons.map((entry) => ({ code: entry.code, params: entry.params })),
     reasonOverflow: Math.max(0, reasonEntries.length - TRACKED_CARD_REASON_LIMIT),
   };
 }
@@ -358,14 +358,14 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
  */
 export function renderTrackedSuggestion(
   code: TrackedSuggestionCode,
-  args: Record<string, string | number>,
+  params: Record<string, string | number>,
 ): string {
-  const days = typeof args.days === 'number' ? args.days.toFixed(1) : '0.0';
+  const days = typeof params.days === 'number' ? params.days.toFixed(1) : '0.0';
   switch (code) {
     case 'terminal_no_conclusion':
       return 'Reached a terminal status without a conclusion; add a one-line closing note.';
     case 'deliverables_verifiable':
-      return `Deliverables are verifiable (${args.count}); close the card with a one-line conclusion.`;
+      return `Deliverables are verifiable (${params.count}); close the card with a one-line conclusion.`;
     case 'unresolved_dependencies':
       return `Dependencies unresolved for ${days} day(s); reassign or cancel.`;
     case 'session_ended':
@@ -384,17 +384,17 @@ function pickClosureSuggestion(input: {
   verifiableDeliverableCount: number;
   unmetDependencyCount: number;
   idleMs: number | null;
-}): { code: TrackedSuggestionCode; args: Record<string, string | number> } | null {
+}): { code: TrackedSuggestionCode; params: Record<string, string | number> } | null {
   // A suggestion exists exactly when the card is due for closure (A-6 rule 4).
   if (!input.closureDue || input.cardState === 'closed') return null;
   const days = input.idleMs === null ? 0 : input.idleMs / TRACKED_CARD_WARN_MS;
-  if (input.terminal && !input.hasConclusion) return { code: 'terminal_no_conclusion', args: {} };
+  if (input.terminal && !input.hasConclusion) return { code: 'terminal_no_conclusion', params: {} };
   if (input.verifiableDeliverableCount > 0) {
-    return { code: 'deliverables_verifiable', args: { count: input.verifiableDeliverableCount } };
+    return { code: 'deliverables_verifiable', params: { count: input.verifiableDeliverableCount } };
   }
-  if (input.unmetDependencyCount > 0) return { code: 'unresolved_dependencies', args: { days } };
-  if (input.closureDueLevel === 'sessions_ended') return { code: 'session_ended', args: {} };
-  return { code: 'stale_inactivity', args: { days } };
+  if (input.unmetDependencyCount > 0) return { code: 'unresolved_dependencies', params: { days } };
+  if (input.closureDueLevel === 'sessions_ended') return { code: 'session_ended', params: {} };
+  return { code: 'stale_inactivity', params: { days } };
 }
 
 export interface TrackedCardSummary {
@@ -412,7 +412,7 @@ export interface TrackedCardSummary {
   closureSuggestion: string;
   /** Structured facts for the renderer; `null` when nothing is due. */
   closureSuggestionCode: TrackedSuggestionCode | null;
-  closureSuggestionArgs: Record<string, string | number> | null;
+  closureSuggestionParams: Record<string, string | number> | null;
   closureConclusion: string | null;
   /** Computed activity anchor — never persisted, never fed by the daemon heartbeat. */
   activityAtMs: number | null;
@@ -1144,7 +1144,7 @@ export class TrackedTaskBoardService {
       closureDueLevel: derivation.closureDueLevel,
       closureSuggestion: derivation.closureSuggestion,
       closureSuggestionCode: derivation.closureSuggestionCode,
-      closureSuggestionArgs: derivation.closureSuggestionArgs,
+      closureSuggestionParams: derivation.closureSuggestionParams,
       closureConclusion: closure.conclusion,
       activityAtMs: derivation.lastActivityAtMs,
       lastActivityAtMs: derivation.lastActivityAtMs,
