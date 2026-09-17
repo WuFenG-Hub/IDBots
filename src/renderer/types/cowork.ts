@@ -221,8 +221,9 @@ export interface CoworkMessagePage {
 }
 
 export interface CoworkA2AHistoryCursor {
-  episodeIndex: number;
-  beforeSequence: number;
+  /** Null fields together request the first page strictly below the anchor episode. */
+  episodeIndex: number | null;
+  beforeSequence: number | null;
 }
 
 export interface CoworkA2AHistoryMessage {
@@ -243,6 +244,8 @@ export interface CoworkMessageHistoryState {
   hasMoreBefore: boolean;
   beforeSequence: number | null;
   pageSize: number;
+  /** Episode index of the A2A cross-episode paging cursor; null while paging stays inside the current episode. */
+  beforeEpisodeIndex?: number | null;
 }
 
 export interface CoworkServiceOrderSummary {

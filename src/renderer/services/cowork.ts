@@ -885,8 +885,41 @@ class CoworkService {
     if (!cowork?.getSessionMessagesPage) return 0;
     const currentSession = store.getState().cowork.currentSession;
     const history = currentSession?.id === sessionId ? currentSession.messageHistory : null;
-    if (!history?.hasMoreBefore || history.beforeSequence == null) return 0;
+    if (!history?.hasMoreBefore) return 0;
 
+    // A2A thread aggregation: once the session's own window is exhausted
+    // (no in-session cursor left), "load earlier" pages through the previous
+    // episodes of the conversation thread instead of stopping.
+    const crossEpisode = currentSession?.sessionType === 'a2a'
+      && (history.beforeEpisodeIndex != null || history.beforeSequence == null);
+    if (crossEpisode && cowork.getA2AConversationHistoryPage) {
+      const beforeCursor = history.beforeEpisodeIndex != null
+        ? { episodeIndex: history.beforeEpisodeIndex, beforeSequence: history.beforeSequence ?? 0 }
+        : { episodeIndex: null, beforeSequence: null };
+      const page = await cowork.getA2AConversationHistoryPage({
+        sessionId,
+        beforeCursor,
+        limit: history.pageSize,
+      });
+      if (!page.success || !page.page) {
+        console.error('Failed to load earlier A2A episode messages:', page.error);
+        return 0;
+      }
+      if (store.getState().cowork.currentSessionId !== sessionId) return 0;
+      store.dispatch(prependMessages({
+        sessionId,
+        messages: page.page.messages.map((entry) => entry.message),
+        messageHistory: {
+          hasMoreBefore: page.page.hasMoreBefore,
+          beforeSequence: page.page.beforeCursor?.beforeSequence ?? null,
+          beforeEpisodeIndex: page.page.beforeCursor?.episodeIndex ?? null,
+          pageSize: history.pageSize,
+        },
+      }));
+      return page.page.messages.length;
+    }
+
+    if (history.beforeSequence == null) return 0;
     const result = await cowork.getSessionMessagesPage({
       sessionId,
       beforeSequence: history.beforeSequence,
