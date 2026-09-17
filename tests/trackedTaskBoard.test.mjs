@@ -355,7 +355,7 @@ test('the list view ranks cards by the contract weights, ties on the most recent
     assert.deepEqual(
       closedColumn.map((card) => card.id),
       ['seed-task-20', 'seed-task-16', 'seed-task-17'],
-      'the closed column leads with the card that moved last (SEED-20, 3d) over the 10-day-old pair',
+      'the closed column leads with SEED-20 (group task touched an hour ago) over the 10-day-old pair',
     );
 
     // The archive view is its own population but uses the same tie rule.
@@ -1522,5 +1522,63 @@ test('a missing `admitted` input cannot produce a non-boolean closureDue (F-A)',
     );
   } finally {
     sqliteStore.close();
+  }
+});
+
+test('the closing modal says the conclusion is recorded, never executed', async () => {
+  const fs = await import('node:fs');
+  const read = (relative) => fs.readFileSync(relative, 'utf8');
+
+  // The note must be RENDERED next to the conclusion input, not merely defined.
+  const modal = read('src/renderer/components/trackedTasks/CloseTaskModal.tsx');
+  assert.match(
+    modal,
+    /trackedTask\.close\.recordOnlyHint/,
+    'the record-only note must be rendered in the closing modal',
+  );
+  // Measured inside the JSX return, so the header comment that documents the key
+  // cannot substitute for the rendered element.
+  const jsxStart = modal.indexOf('return (');
+  assert.ok(jsxStart > -1, 'the modal must have a JSX body');
+  const textareaAt = modal.indexOf('trackedTask.close.conclusionPlaceholder', jsxStart);
+  const hintAt = modal.indexOf('trackedTask.close.recordOnlyHint', jsxStart);
+  assert.ok(textareaAt > -1 && hintAt > textareaAt, 'the note must sit below the conclusion textarea');
+
+  const i18n = read('src/renderer/services/i18n.ts');
+  const copyFor = (key) => [...i18n.matchAll(
+    new RegExp(`'${key.replace(/\./g, '\\.')}':\\s*'([^']*)'`, 'g'),
+  )].map((match) => match[1]);
+  // Positive control FIRST: prove the extractor can see absence, otherwise the
+  // "exactly EN + ZH" check below could pass on an extractor that sees nothing.
+  assert.equal(copyFor('trackedTask.thisKeyDoesNotExist').length, 0, 'the copy extractor must be able to see 0');
+
+  const keys = [
+    'trackedTask.close.title',
+    'trackedTask.close.conclusionPlaceholder',
+    'trackedTask.close.recordOnlyHint',
+    'trackedTask.close.confirm',
+    'trackedTask.close.by',
+    'trackedTask.closure.byOwner',
+    'trackedTask.closure.byTwin',
+  ];
+  for (const key of keys) {
+    const values = copyFor(key);
+    assert.equal(values.length, 2, `${key}: expected exactly EN + ZH, saw ${values.length}`);
+  }
+
+  // Both languages state it outright.
+  const hint = copyFor('trackedTask.close.recordOnlyHint');
+  assert.ok(hint.some((text) => text.includes('不会自动执行')), 'zh hint must say it is not executed automatically');
+  assert.ok(
+    hint.some((text) => /will not be executed automatically/.test(text)),
+    'en hint must say it is not executed automatically',
+  );
+
+  // The strings the owner read as "whoever records it will act on it" must no
+  // longer read as an action: neither a close-out verb nor an executor.
+  for (const key of ['trackedTask.close.confirm', 'trackedTask.closure.byOwner', 'trackedTask.closure.byTwin']) {
+    for (const text of copyFor(key)) {
+      assert.doesNotMatch(text, /收口|closed by|confirm close/i, `${key}: "${text}" still reads as a close-out action`);
+    }
   }
 });

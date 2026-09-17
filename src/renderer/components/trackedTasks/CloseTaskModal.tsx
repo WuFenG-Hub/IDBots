@@ -16,6 +16,10 @@ interface CloseTaskModalProps {
  * 「收口并写一句结论」（验收⑥）。
  * 只有一个确认动作，没有验收 / 拒绝二选一；结论为空则不允许提交。
  * 卡上带一句话收口建议时，按钮把它灌进输入框——人只需按需改一两个字。
+ *
+ * 结论是**记录**，不是指令：写下的这句话不会被执行，选谁记录也不改变这一点
+ * （owner 实机反馈过「选 Twin 收口，以为 Twin 会照做」）。所以
+ * `trackedTask.close.recordOnlyHint` 必须显式摆在输入框下面，而不是靠人推断。
  */
 const CloseTaskModal: React.FC<CloseTaskModalProps> = ({
   card,
@@ -63,6 +67,9 @@ const CloseTaskModal: React.FC<CloseTaskModalProps> = ({
           placeholder={i18nService.t('trackedTask.close.conclusionPlaceholder')}
           className="mt-1 w-full resize-y rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg px-2.5 py-2 text-sm dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent"
         />
+        <p className="mt-1 break-words text-[11px] leading-snug dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('trackedTask.close.recordOnlyHint')}
+        </p>
 
         {suggestion && (
           <button
