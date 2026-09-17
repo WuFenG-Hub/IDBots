@@ -250,7 +250,7 @@ test('the board is deterministic: a second service over the same rows agrees', a
     const detail = board.getCard('seed-task-23');
     assert.equal(detail.sourceKind, 'group_task');
     assert.equal(detail.groupTaskId, 8303);
-    assert.deepEqual(detail.deliverables.map((item) => item.status), ['delivered']);
+    assert.deepEqual(detail.deliverables.map((item) => item.status), ['delivered', 'delivered']);
     assert.ok(detail.sessions.some((link) => link.sessionId === 'group-task:8303'));
   } finally {
     sqliteStore.close();
@@ -581,4 +581,58 @@ test('needsOwnerAction is exactly the declaration it claims (appendix A-4)', asy
   } finally {
     sqliteStore.close();
   }
+});
+
+test('card deliverables carry the single parser verdict over the source message (SEC-11)', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const detail = board.getCard('seed-task-23');
+    assert.equal(detail.deliverables.length, 2);
+
+    const [good, bad] = detail.deliverables;
+    assert.equal(good.kind, 'pin');
+    assert.equal(good.sourceMessageFound, true, 'the source message body must be joined in');
+    assert.equal(good.valid, true, 'a well-formed [DELIVERABLE] line validates');
+    assert.deepEqual(good.issues, []);
+
+    assert.equal(bad.sourceMessageFound, true);
+    assert.equal(bad.valid, false, 'a truncated pinid must NOT validate');
+    assert.ok(bad.issues.length > 0, 'the parser reason must be surfaced, not swallowed');
+
+    // Trichotomy: no source body -> unknown (null), explicitly NOT "invalid".
+    sqliteStore.getDatabase().run('UPDATE group_task_deliverables SET msg_pin_id = ? WHERE uri = ?', [
+      'f'.repeat(64) + 'i0',
+      'pin://deadbeef',
+    ]);
+    const unknown = board.getCard('seed-task-23').deliverables[1];
+    assert.equal(unknown.sourceMessageFound, false);
+    assert.equal(unknown.valid, null, 'a missing source body is unknown, never "invalid"');
+    assert.deepEqual(unknown.issues, []);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('the two orchestration_tasks DDL definitions declare the same column set (R4 guard)', async () => {
+  const fs = await import('node:fs');
+  const extract = (source) => {
+    const start = source.indexOf('CREATE TABLE IF NOT EXISTS orchestration_tasks (');
+    assert.notEqual(start, -1, 'orchestration_tasks DDL not found');
+    const end = source.indexOf(');', start);
+    return source
+      .slice(start, end)
+      .split('\n')
+      .map((line) => line.trim().replace(/,$/, ''))
+      .filter((line) => /^[a-z_][a-z0-9_]*\s+[A-Z]/i.test(line))
+      .map((line) => line.split(/\s+/)[0])
+      .sort();
+  };
+  const fromStore = extract(fs.readFileSync('src/main/sqliteStore.ts', 'utf8'));
+  const fromOrchestration = extract(fs.readFileSync('src/main/orchestrationStore.ts', 'utf8'));
+  assert.ok(fromStore.length >= 12, `expected the base columns, saw ${fromStore.length}`);
+  assert.deepEqual(
+    fromOrchestration,
+    fromStore,
+    'the two DDL copies must declare identical column sets: whichever runs first wins and drift is silent',
+  );
 });

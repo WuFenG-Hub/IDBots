@@ -529,6 +529,18 @@ function buildCases(anchorMs) {
         sourceSessionId: 'seed-session-gt-8303',
       }],
       sessions: [{ id: 'seed-session-gt-8303', status: 'running', sessionType: 'group_task' }],
+      messages: [
+        {
+          pinId: 'b'.repeat(64) + 'i0',
+          groupId: 'seed-group-8303',
+          content: `shipped\n[DELIVERABLE] pin://${DELIVERABLE_PIN}\n`,
+        },
+        {
+          pinId: 'c'.repeat(64) + 'i0',
+          groupId: 'seed-group-8303',
+          content: 'shipped\n[DELIVERABLE] pin://deadbeef\n',
+        },
+      ],
       deliverables: [
         {
           taskId: 8303,
@@ -536,6 +548,14 @@ function buildCases(anchorMs) {
           uri: `pin://${DELIVERABLE_PIN}`,
           status: 'delivered',
           confirmation: 'confirmed',
+          createdDelta: -4 * HOUR,
+        },
+        {
+          taskId: 8303,
+          msgPinId: 'c'.repeat(64) + 'i0',
+          uri: 'pin://deadbeef',
+          status: 'delivered',
+          confirmation: 'unconfirmed',
           createdDelta: -4 * HOUR,
         },
       ],
@@ -766,6 +786,22 @@ function insertGroupTask(db, anchorMs, groupTask) {
   );
 }
 
+function insertGroupMessage(db, anchorMs, message) {
+  db.run(
+    `INSERT INTO group_chat_messages
+      (pin_id, group_id, sender_metaid, protocol, content, content_type, chain_timestamp, is_processed, created_at)
+     VALUES (?, ?, ?, 'simplegroupchat', ?, 'text/plain', ?, 1, ?)`,
+    [
+      message.pinId,
+      message.groupId,
+      'seed-sender',
+      message.content,
+      anchorMs - 4 * HOUR,
+      isoAt(anchorMs, -4 * HOUR),
+    ],
+  );
+}
+
 function insertDeliverable(db, anchorMs, deliverable) {
   db.run(
     `INSERT INTO group_task_deliverables
@@ -834,6 +870,7 @@ export function seedLongTaskBoard(sqliteStore, options = {}) {
     for (const step of rows.steps ?? []) insertStep(db, anchorMs, step);
     for (const attempt of rows.attempts ?? []) insertAttempt(db, anchorMs, attempt);
     for (const groupTask of rows.groupTasks ?? []) insertGroupTask(db, anchorMs, groupTask);
+    for (const message of rows.messages ?? []) insertGroupMessage(db, anchorMs, message);
     for (const deliverable of rows.deliverables ?? []) insertDeliverable(db, anchorMs, deliverable);
     for (const scheduledTask of rows.scheduledTasks ?? []) insertScheduledTask(db, anchorMs, scheduledTask);
     for (const run of rows.scheduledTaskRuns ?? []) insertScheduledTaskRun(db, anchorMs, run);
@@ -860,6 +897,7 @@ export function seedLongTaskBoard(sqliteStore, options = {}) {
       deliverables: cases.flatMap((c) => c.rows.deliverables ?? []).length,
       scheduledTasks: cases.flatMap((c) => c.rows.scheduledTasks ?? []).length,
       sessions: cases.flatMap((c) => c.rows.sessions ?? []).length,
+      messages: cases.flatMap((c) => c.rows.messages ?? []).length,
       pendingSpec: cases.filter((c) => c.pendingSpec).length,
     },
   };

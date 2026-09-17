@@ -1,5 +1,5 @@
 import type { SqliteDatabase as Database } from '../sqliteTypes';
-import { extractPinidToken } from './groupTaskDeliverableParser';
+import { extractPinidToken, validateDeliverableLines } from './groupTaskDeliverableParser';
 import {
   OrchestrationStore,
   type OrchestrationAttempt,
@@ -336,7 +336,20 @@ export interface TrackedCardDetail extends TrackedCardSummary {
   steps: Array<{ id: string; ordinal: number; title: string; status: string; assigneeMetabotId: number | null }>;
   participants: number[];
   sessions: TrackedCardSessionLink[];
-  deliverables: Array<{ uri: string; status: string; confirmation: string; kind: string }>;
+  /**
+   * `valid` is the verdict of the ONE parser (`validateDeliverableLines`) run
+   * over the SOURCE message body, not a re-implementation. `null` means the
+   * source body was not available — unknown, explicitly not "invalid".
+   */
+  deliverables: Array<{
+    uri: string;
+    status: string;
+    confirmation: string;
+    kind: string;
+    valid: boolean | null;
+    issues: string[];
+    sourceMessageFound: boolean;
+  }>;
   events: Array<{ at: string | null; kind: string; detail: string }>;
   closure: { conclusion: string | null; by: string | null; at: string | null; pinId: string | null };
 }
@@ -549,7 +562,11 @@ export class TrackedTaskBoardService {
     const deliverables = groupTaskId === null
       ? []
       : this.getAll(
-        'SELECT uri, status, confirmation FROM group_task_deliverables WHERE task_id = ? ORDER BY id ASC',
+        `SELECT d.uri, d.status, d.confirmation, d.msg_pin_id, m.content AS source_content
+           FROM group_task_deliverables d
+           LEFT JOIN group_chat_messages m ON m.pin_id = d.msg_pin_id
+          WHERE d.task_id = ?
+          ORDER BY d.id ASC`,
         [groupTaskId],
       );
     const memberRows = groupTaskId === null
@@ -622,12 +639,32 @@ export class TrackedTaskBoardService {
       sessions: this.listCardSessions(taskId),
       deliverables: deliverables.map((row) => {
         const uri = String(row.uri ?? '');
+        const source = text(row.source_content);
+        // Kind comes from the ONE parser, never a second URI regex.
+        const kind = trackedDeliverableKind(uri);
+        let valid: boolean | null = null;
+        let issues: string[] = [];
+        if (source !== null) {
+          const verdict = validateDeliverableLines(source);
+          const matching = verdict.candidates.find((candidate) => candidate.uri === uri);
+          if (matching) {
+            valid = matching.valid === true;
+            if (!valid) issues = [matching.note ?? 'invalid deliverable format'];
+          } else {
+            // The source body was available but carries no candidate for this
+            // uri: the row and the parser disagree. Report it, do not guess.
+            valid = false;
+            issues = ['no [DELIVERABLE] candidate in the source message matches this uri'];
+          }
+        }
         return {
           uri,
           status: String(row.status ?? ''),
           confirmation: String(row.confirmation ?? ''),
-          // Kind comes from the ONE parser, never a second URI regex.
-          kind: trackedDeliverableKind(uri),
+          kind,
+          valid,
+          issues,
+          sourceMessageFound: source !== null,
         };
       }),
       events,
