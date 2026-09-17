@@ -11121,6 +11121,7 @@ if (!gotTheLock) {
     memoryLlmJudgeEnabled?: boolean;
     memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems?: number;
+    dreamEnabled?: boolean;
     hygieneEnabled?: boolean;
   }) => {
     try {
@@ -11147,6 +11148,7 @@ if (!gotTheLock) {
             ? input.memoryUserMemoriesMaxItems
             : undefined,
         hygieneEnabled: typeof input?.hygieneEnabled === 'boolean' ? input.hygieneEnabled : undefined,
+        dreamEnabled: typeof input?.dreamEnabled === 'boolean' ? input.dreamEnabled : undefined,
       });
       return { success: true, policy };
     } catch (error) {
