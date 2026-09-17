@@ -355,6 +355,7 @@ man_base_data_pebble/
 !tests/capabilityValidation.test.mjs
 !tests/counterfactualReplay.test.mjs
 !tests/dreamTelemetryWeekly.test.mjs
+!tests/guidanceBudget.test.mjs
 !tests/memoryHygieneService.test.mjs
 !tests/llmFallback.test.mjs
 !tests/systemBrain.test.mjs

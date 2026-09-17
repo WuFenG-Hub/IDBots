@@ -98,7 +98,7 @@ export function buildWeeklyDreamPrompt(input: {
     '{',
     '  "weekly_summary": "这一周整体上发生了什么、我做得怎么样(第一人称,300字以内)",',
     '  "cross_day_patterns": ["跨天模式:至少两天证据支撑的规律(反复出现的坑/持续升温或降温的合作/反复未晋升的草案),最多5条,没有就给空数组"],',
-    '  "focus_for_next_week": "下周最值得注意或改进的一件事(一句话,没有就给空字符串)"',
+    '  "focus_for_next_week": "下周最值得注意或改进的一件事(一句话,是方向参考而非硬性任务;没有就给空字符串)"',
     '}',
   ].join('\n');
 
