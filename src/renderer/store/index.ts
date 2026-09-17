@@ -6,6 +6,7 @@ import skillReducer from './slices/skillSlice';
 import imReducer from './slices/imSlice';
 import quickActionReducer from './slices/quickActionSlice';
 import scheduledTaskReducer from './slices/scheduledTaskSlice';
+import trackedTaskReducer from './slices/trackedTaskSlice';
 import groupTasksReducer from './slices/groupTasksSlice';
 import mcpReducer from './slices/mcpSlice';
 import agentGameReducer from './slices/agentGameSlice';
@@ -19,6 +20,7 @@ export const store = configureStore({
     im: imReducer,
     quickAction: quickActionReducer,
     scheduledTask: scheduledTaskReducer,
+    trackedTask: trackedTaskReducer,
     groupTasks: groupTasksReducer,
     mcp: mcpReducer,
     agentGame: agentGameReducer,

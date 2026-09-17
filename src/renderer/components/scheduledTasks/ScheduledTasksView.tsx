@@ -9,6 +9,8 @@ import TaskForm from './TaskForm';
 import TaskDetail from './TaskDetail';
 import AllRunsHistory from './AllRunsHistory';
 import DeleteConfirmModal from './DeleteConfirmModal';
+import { TrackedTasksSection } from '../trackedTasks';
+import type { TrackingTabId } from '../../types/trackedTask';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -21,8 +23,25 @@ interface ScheduledTasksViewProps {
   updateBadge?: React.ReactNode;
 }
 
-type TabType = 'tasks' | 'history';
+/** 定时任务 Tab 的内层子 Tab（「任务 / 历史」，原样保留）。 */
+type ScheduledSubTab = 'tasks' | 'history';
 
+/** 两层 Tab 共用同一套激活态视觉（下划线），不新造第二套。 */
+const tabButtonClass = (active: boolean): string =>
+  `px-4 py-2.5 text-sm font-medium transition-colors relative ${
+    active
+      ? 'dark:text-claude-darkText text-claude-text'
+      : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
+  }`;
+
+/**
+ * 跟踪任务页（原「定时任务」入口）。
+ *
+ * 两层 Tab（已冻结口径）：
+ *   L1：长期任务（默认在前） | 定时任务
+ *   L2：仅「定时任务」内 —— 任务 | 历史（原样保留）
+ * 长期任务 Tab 的主体是跨 session 共享的长期任务看板（components/trackedTasks）。
+ */
 const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
   isSidebarCollapsed,
   onToggleSidebar,
@@ -35,7 +54,8 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
   const selectedTaskId = useSelector((state: RootState) => state.scheduledTask.selectedTaskId);
   const tasks = useSelector((state: RootState) => state.scheduledTask.tasks);
   const selectedTask = selectedTaskId ? tasks.find((t) => t.id === selectedTaskId) ?? null : null;
-  const [activeTab, setActiveTab] = useState<TabType>('tasks');
+  const [trackingTab, setTrackingTab] = useState<TrackingTabId>('longTerm');
+  const [scheduledSubTab, setScheduledSubTab] = useState<ScheduledSubTab>('tasks');
   const [deleteTaskInfo, setDeleteTaskInfo] = useState<{ id: string; name: string } | null>(null);
 
   const handleRequestDelete = useCallback((taskId: string, taskName: string) => {
@@ -67,16 +87,27 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
     dispatch(setViewMode('list'));
   };
 
-  const handleTabChange = (tab: TabType) => {
-    setActiveTab(tab);
+  const handleScheduledSubTabChange = (tab: ScheduledSubTab) => {
+    setScheduledSubTab(tab);
     if (tab === 'tasks') {
       dispatch(selectTask(null));
       dispatch(setViewMode('list'));
     }
   };
 
-  // Show tabs only in list view (not in create/edit/detail sub-views)
-  const showTabs = viewMode === 'list' && !selectedTaskId;
+  const handleTrackingTabChange = (tab: TrackingTabId) => {
+    setTrackingTab(tab);
+    if (tab === 'scheduled') {
+      dispatch(selectTask(null));
+      dispatch(setViewMode('list'));
+      setScheduledSubTab('tasks');
+    }
+  };
+
+  // 「定时任务」Tab 里的创建/编辑/详情子视图会顶掉 Tab 行，把标题位让给返回按钮
+  const inScheduledSubView = viewMode !== 'list' || Boolean(selectedTaskId);
+  const showTrackingTabs = trackingTab === 'longTerm' || !inScheduledSubView;
+  const showScheduledSubTabs = trackingTab === 'scheduled' && !inScheduledSubView;
 
   return (
     <div className="flex flex-col h-full">
@@ -102,7 +133,7 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
               {updateBadge}
             </div>
           )}
-          {viewMode !== 'list' && (
+          {trackingTab === 'scheduled' && inScheduledSubView && (
             <button
               onClick={handleBackToList}
               className="non-draggable p-2 rounded-lg dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors"
@@ -118,40 +149,60 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
         <WindowTitleBar inline />
       </div>
 
-      {/* Tabs + New Task button */}
-      {showTabs && (
-        <div className="flex items-center justify-between border-b dark:border-claude-darkBorder border-claude-border px-4 shrink-0">
+      {/* L1 tabs：长期任务（默认在前） | 定时任务 */}
+      {showTrackingTabs && (
+        <div className="flex items-center border-b dark:border-claude-darkBorder border-claude-border px-4 shrink-0">
           <div className="flex">
             <button
               type="button"
-              onClick={() => handleTabChange('tasks')}
-              className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
-                activeTab === 'tasks'
-                  ? 'dark:text-claude-darkText text-claude-text'
-                  : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
-              }`}
+              onClick={() => handleTrackingTabChange('longTerm')}
+              className={tabButtonClass(trackingTab === 'longTerm')}
             >
-              {i18nService.t('scheduledTasksTabTasks')}
-              {activeTab === 'tasks' && (
+              {i18nService.t('trackedTask.tab.longTerm')}
+              {trackingTab === 'longTerm' && (
                 <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
               )}
             </button>
             <button
               type="button"
-              onClick={() => handleTabChange('history')}
-              className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
-                activeTab === 'history'
-                  ? 'dark:text-claude-darkText text-claude-text'
-                  : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
-              }`}
+              onClick={() => handleTrackingTabChange('scheduled')}
+              className={tabButtonClass(trackingTab === 'scheduled')}
             >
-              {i18nService.t('scheduledTasksTabHistory')}
-              {activeTab === 'history' && (
+              {i18nService.t('trackedTask.tab.scheduled')}
+              {trackingTab === 'scheduled' && (
                 <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
               )}
             </button>
           </div>
-          {activeTab === 'tasks' && (
+        </div>
+      )}
+
+      {/* L2 tabs（仅「定时任务」内）+ New Task button */}
+      {showScheduledSubTabs && (
+        <div className="flex items-center justify-between border-b dark:border-claude-darkBorder border-claude-border px-4 shrink-0">
+          <div className="flex">
+            <button
+              type="button"
+              onClick={() => handleScheduledSubTabChange('tasks')}
+              className={tabButtonClass(scheduledSubTab === 'tasks')}
+            >
+              {i18nService.t('scheduledTasksTabTasks')}
+              {scheduledSubTab === 'tasks' && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleScheduledSubTabChange('history')}
+              className={tabButtonClass(scheduledSubTab === 'history')}
+            >
+              {i18nService.t('scheduledTasksTabHistory')}
+              {scheduledSubTab === 'history' && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
+              )}
+            </button>
+          </div>
+          {scheduledSubTab === 'tasks' && (
             <button
               type="button"
               onClick={() => dispatch(setViewMode('create'))}
@@ -164,31 +215,37 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
       )}
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto">
-        {showTabs && activeTab === 'history' ? (
-          <AllRunsHistory />
+      <div className="flex-1 min-h-0 overflow-hidden">
+        {trackingTab === 'longTerm' ? (
+          <TrackedTasksSection />
         ) : (
-          <>
-            {viewMode === 'list' && <TaskList onRequestDelete={handleRequestDelete} />}
-            {viewMode === 'create' && (
-              <TaskForm
-                mode="create"
-                onCancel={handleBackToList}
-                onSaved={handleBackToList}
-              />
+          <div className="h-full overflow-y-auto">
+            {showScheduledSubTabs && scheduledSubTab === 'history' ? (
+              <AllRunsHistory />
+            ) : (
+              <>
+                {viewMode === 'list' && <TaskList onRequestDelete={handleRequestDelete} />}
+                {viewMode === 'create' && (
+                  <TaskForm
+                    mode="create"
+                    onCancel={handleBackToList}
+                    onSaved={handleBackToList}
+                  />
+                )}
+                {viewMode === 'edit' && selectedTask && (
+                  <TaskForm
+                    mode="edit"
+                    task={selectedTask}
+                    onCancel={() => dispatch(setViewMode('detail'))}
+                    onSaved={() => dispatch(setViewMode('detail'))}
+                  />
+                )}
+                {viewMode === 'detail' && selectedTask && (
+                  <TaskDetail task={selectedTask} onRequestDelete={handleRequestDelete} />
+                )}
+              </>
             )}
-            {viewMode === 'edit' && selectedTask && (
-              <TaskForm
-                mode="edit"
-                task={selectedTask}
-                onCancel={() => dispatch(setViewMode('detail'))}
-                onSaved={() => dispatch(setViewMode('detail'))}
-              />
-            )}
-            {viewMode === 'detail' && selectedTask && (
-              <TaskDetail task={selectedTask} onRequestDelete={handleRequestDelete} />
-            )}
-          </>
+          </div>
         )}
       </div>
 
