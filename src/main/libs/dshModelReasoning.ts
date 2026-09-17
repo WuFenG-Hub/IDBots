@@ -22,8 +22,11 @@
 // 0f81a549: turns ≤111 returned separate reasoning items, turns ≥112 none),
 // and with no thinking channel GLM narrated its reply-or-skip deliberation
 // into the visible text, which the A2A private-chat path then published
-// on-chain verbatim (fix/a2a-private-chat-thinking-leak). Anthropic-format
-// relays speak a different thinking dialect (out of scope here).
+// on-chain verbatim (fix/a2a-private-chat-thinking-leak).
+//
+// Anthropic-Messages relays speak Claude's adaptive-thinking dialect: enabled
+// rungs send `thinking: { type: 'adaptive' }` plus `output_config.effort`, and
+// `off` sends the explicit `thinking: { type: 'disabled' }`.
 
 /** Wire declarations dsh-llm-pi-ai accepts on a route model entry. */
 export interface DshModelReasoningDeclaration {
@@ -104,6 +107,26 @@ const GLM_RESPONSES_DECLARATION: DshModelReasoningDeclaration = {
   },
 };
 
+// GLM behind an Anthropic-Messages-compatible gateway (Volcengine Ark's
+// coding/agent plans serve the GLM line over /v1/messages). The wire dialect
+// is Claude's adaptive thinking: enabled rungs send
+// `thinking: { type: 'adaptive', display: 'summarized' }` plus
+// `output_config: { effort }`. Ark's accepted effort vocabulary is exactly
+// low/medium/high/max — it 400s `xhigh` (cc-switch#2729, 2026-05-11) — which
+// this ladder never emits. `off` keeps the shared send-nothing declaration;
+// on this wire pi-ai's writer translates it into the explicit
+// `thinking: { type: 'disabled' }` (thinkingLevelMap.off stays absent, and
+// absent !== null). forceAdaptiveThinking is offered by the anthropic compat
+// gate; without it pi-ai falls back to budget_tokens thinking, which Ark's
+// GLM-serving endpoint does not document. Verified against pi-ai
+// anthropic-messages streamSimple/buildParams (2026-09-17).
+const GLM_ANTHROPIC_DECLARATION: DshModelReasoningDeclaration = {
+  reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' },
+  compat: {
+    forceAdaptiveThinking: true,
+  },
+};
+
 /** Bare model id: drop any vendor prefix ("deepseek/deepseek-v4-flash" → "deepseek-v4-flash"). */
 const bareModelIdOf = (modelId: string): string => {
   const trimmed = modelId.trim();
@@ -129,7 +152,7 @@ export function dshModelReasoningDeclaration(
   if (GLM_PATTERN.test(bare)) {
     if (apiFormat === 'openai') return GLM_CHAT_COMPLETIONS_DECLARATION;
     if (apiFormat === 'responses') return GLM_RESPONSES_DECLARATION;
-    return null;
+    return GLM_ANTHROPIC_DECLARATION;
   }
   return null;
 }
