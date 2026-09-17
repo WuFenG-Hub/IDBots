@@ -642,7 +642,9 @@ test('structured facts are authoritative and the diagnostic strings derive from 
   const { sqliteStore, board, orchestrationStore } = await openBoard();
   try {
     const mod = await import('../dist-electron/main/services/trackedTaskBoard.js');
-    const KEY_REGISTRY = mod.TRACKED_FACT_CODE_I18N_KEY;
+    const KEY_REGISTRY = mod.TRACKED_FACT_CODE_I18N_KEY; // per-code index (NOT the render table)
+    const REASON_KEYS = mod.TRACKED_REASON_I18N_KEY;
+    const SUGGESTION_KEYS = mod.TRACKED_SUGGESTION_I18N_KEY;
     const RENDER = mod.renderTrackedSuggestion;
 
     for (const card of board.listCards({ scope: 'all' }).cards) {
@@ -650,8 +652,8 @@ test('structured facts are authoritative and the diagnostic strings derive from 
       assert.equal(card.reasonCodes.length, card.reasons.length, `${card.id}: codes/reasons length mismatch`);
       for (const [index, fact] of card.reasonCodes.entries()) {
         assert.equal(typeof fact.code, 'string', `${card.id}[${index}]: code missing`);
-        assert.ok(KEY_REGISTRY[fact.code], `${card.id}[${index}]: code ${fact.code} has no i18n key`);
-        assert.equal(typeof fact.params, 'object', `${card.id}[${index}]: args missing`);
+        assert.ok(REASON_KEYS[fact.code], `${card.id}[${index}]: code ${fact.code} has no reason-side i18n key`);
+        assert.equal(typeof fact.args, 'object', `${card.id}[${index}]: args missing`);
       }
       // Rule 4: a suggestion exists exactly when the card is due for closure.
       assert.equal(
@@ -660,10 +662,13 @@ test('structured facts are authoritative and the diagnostic strings derive from 
         `${card.id}: suggestion presence must match closureDue`,
       );
       if (card.closureSuggestionCode !== null) {
-        assert.ok(KEY_REGISTRY[card.closureSuggestionCode], `${card.id}: suggestion code has no i18n key`);
+        assert.ok(
+          SUGGESTION_KEYS[card.closureSuggestionCode],
+          `${card.id}: suggestion code ${card.closureSuggestionCode} has no suggestion-side i18n key`,
+        );
         assert.equal(
           card.closureSuggestion,
-          RENDER(card.closureSuggestionCode, card.closureSuggestionParams),
+          RENDER(card.closureSuggestionCode, card.closureSuggestionArgs),
           `${card.id}: the diagnostic string must be derived from code+args, never written twice`,
         );
       } else {
@@ -675,7 +680,7 @@ test('structured facts are authoritative and the diagnostic strings derive from 
     const due = cardById(board, 'seed-task-14');
     assert.equal(due.closureDue, true);
     assert.equal(due.closureSuggestionCode, 'stale_inactivity');
-    assert.equal(typeof due.closureSuggestionParams.days, 'number');
+    assert.equal(typeof due.closureSuggestionArgs.days, 'number');
     assert.match(due.closureSuggestion, /day\(s\)/);
 
     const clean = cardById(board, 'seed-task-05');
@@ -695,7 +700,12 @@ test('structured facts are authoritative and the diagnostic strings derive from 
       ]),
     );
     assert.ok(emitted.size > 0);
-    for (const code of emitted) assert.ok(KEY_REGISTRY[code], `unregistered code ${code}`);
+    for (const code of emitted) {
+      assert.ok(
+        REASON_KEYS[code] || SUGGESTION_KEYS[code],
+        `unregistered code ${code} on both sides`,
+      );
+    }
 
     // The reason codes are a real projection of the same rows, not decoration.
     const withSessions = cardById(board, 'seed-task-23');
@@ -729,4 +739,45 @@ test('the terminal-no-conclusion fact can never exist in only one of its two hom
   } finally {
     sqliteStore.close();
   }
+});
+
+test('the key table is per (side, code): 10 + 5 = 15, not per code (E-6)', async () => {
+  const mod = await import('../dist-electron/main/services/trackedTaskBoard.js');
+  const { TRACKED_REASON_I18N_KEY: REASON, TRACKED_SUGGESTION_I18N_KEY: SUGGESTION } = mod;
+
+  assert.equal(Object.keys(REASON).length, 10, 'reason side has 10 key slots');
+  assert.equal(Object.keys(SUGGESTION).length, 5, 'suggestion side has 5 key slots');
+  assert.equal(new Set(Object.values(REASON)).size, 10, 'reason keys are distinct');
+  assert.equal(new Set(Object.values(SUGGESTION)).size, 5, 'suggestion keys are distinct');
+
+  const all = [...Object.values(REASON), ...Object.values(SUGGESTION)];
+  assert.equal(new Set(all).size, 15, 'the renderer needs 15 distinct keys');
+  for (const key of Object.values(REASON)) assert.match(key, /^trackedTask\.reason\./);
+  for (const key of Object.values(SUGGESTION)) assert.match(key, /^trackedTask\.suggestion\./);
+
+  // E-6: one code, two sides, two DIFFERENT keys. A per-code map cannot express
+  // this, which is why the per-code index is not the renderer's key table.
+  assert.equal(REASON.deliverables_verifiable, 'trackedTask.reason.deliverablesVerifiable');
+  assert.equal(SUGGESTION.deliverables_verifiable, 'trackedTask.suggestion.deliverablesVerifiable');
+  assert.notEqual(REASON.deliverables_verifiable, SUGGESTION.deliverables_verifiable);
+
+  // The exact cross-end roster the renderer must provide (zh + en each).
+  const expected = [
+    'trackedTask.reason.attemptsOpen',
+    'trackedTask.reason.blockedUnmetDependencies',
+    'trackedTask.reason.deliverablesVerifiable',
+    'trackedTask.reason.idleDays',
+    'trackedTask.reason.ledgerReview',
+    'trackedTask.reason.linkedSessions',
+    'trackedTask.reason.openCheckpoints',
+    'trackedTask.reason.stepsActive',
+    'trackedTask.reason.stepsWaitingInput',
+    'trackedTask.reason.terminalWithoutConclusion',
+    'trackedTask.suggestion.deliverablesVerifiable',
+    'trackedTask.suggestion.sessionEnded',
+    'trackedTask.suggestion.staleInactivity',
+    'trackedTask.suggestion.terminalNoConclusion',
+    'trackedTask.suggestion.unresolvedDependencies',
+  ].sort();
+  assert.deepEqual([...new Set(all)].sort(), expected);
 });
