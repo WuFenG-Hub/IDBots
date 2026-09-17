@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SimpleLog 时间线 — 按 taskid 聚合</title>
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">LOG</span>
+      <span class="brand-name">SimpleLog 时间线</span>
+      <span class="brand-sub">按 taskid / taskkey 聚合的过程记录</span>
+    </div>
+    <div class="tools">
+      <input id="filter" type="search" placeholder="过滤 kind / summary / 作者 / pinId" autocomplete="off">
+      <button id="refresh" type="button">刷新</button>
+    </div>
+  </header>
+  <div class="subbar" id="meta"><span class="pill">读取中…</span></div>
+  <div class="layout">
+    <aside id="sidebar" class="sidebar"><div class="state">读取中…</div></aside>
+    <main id="main" class="main"><div class="state">读取中…</div></main>
+  </div>
+  <footer class="foot">
+    <p>数据来源：<code>/protocols/simplelog</code> 全量路径列表（仅用于发现条目）+ 每条 <code>/content/&lt;pinId&gt;</code> 忠实正文（含 30–60 秒索引延迟重试窗口）。列表返回的滚动摘要字段与本视图无关。</p>
+    <p>本视图只读：不写链、不签任何请求。记录按时间序如实展示，更正条目带标记但原条目不被隐藏。</p>
+  </footer>
+  <script src="./simplelog-core.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
