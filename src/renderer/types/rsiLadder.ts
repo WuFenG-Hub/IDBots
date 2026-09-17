@@ -67,8 +67,6 @@ export interface RsiLadderReview {
   source: RsiLadderSource;
   verdict: '通过' | '无效' | null;
   improvementId: string | null;
-  /** 原始 summary（「更正：」前缀 = 对既有回写的更正，见多回写确定性口径）。 */
-  summary: string;
   refs: string[];
 }
 
