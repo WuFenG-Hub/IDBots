@@ -285,6 +285,7 @@ import { withChainWriteBudget } from './libs/chainWriteBudget';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
 import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
+import { TrackedTaskBoardService } from './services/trackedTaskBoard';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
   CoworkTurnSubmissionController,
@@ -6635,6 +6636,33 @@ const getGroupTaskOrchestrationBridge = () => {
   return groupTaskOrchestrationBridge;
 };
 
+let trackedTaskBoard: TrackedTaskBoardService | null = null;
+const getTrackedTaskBoard = () => {
+  if (!trackedTaskBoard) {
+    const sqliteStore = getStore();
+    trackedTaskBoard = new TrackedTaskBoardService({
+      db: sqliteStore.getDatabase(),
+      orchestrationStore: getOrchestrationStore(),
+      saveDb: sqliteStore.getSaveFunction(),
+    });
+  }
+  return trackedTaskBoard;
+};
+
+/**
+ * Broadcast a `trackedTask:update` event so an open board refreshes after a
+ * write that changes card state (currently: closing a card).
+ */
+const broadcastTrackedTaskUpdate = (cardId: string, reason: string): void => {
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) {
+      try {
+        win.webContents.send('trackedTask:update', { cardId, reason });
+      } catch { /* ignore */ }
+    }
+  });
+};
+
 const getTwinOrchestrationService = () => new TwinOrchestrationService({
   orchestrationStore: getOrchestrationStore(),
   coworkStore: getCoworkStore(),
@@ -11608,6 +11636,60 @@ if (!gotTheLock) {
       return { success: true, messages };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to list external collaboration messages' };
+    }
+  });
+
+  // ==================== Tracked Task (long-task board) IPC ====================
+  // The board reads the single authoritative ledger (orchestration_tasks). The
+  // renderer never touches sqlite and never derives card state itself.
+
+  ipcMain.handle('trackedTask:list', async (_event, input?: { ownerGlobalMetaId?: string }) => {
+    try {
+      const board = getTrackedTaskBoard().listCards(input?.ownerGlobalMetaId);
+      return { success: true, board };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list tracked cards' };
+    }
+  });
+
+  ipcMain.handle('trackedTask:detail', async (_event, input: { cardId: string }) => {
+    try {
+      const detail = getTrackedTaskBoard().getCard(input?.cardId);
+      if (!detail) return { success: false, code: 'NOT_FOUND', error: 'Card not found' };
+      return { success: true, detail };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the card' };
+    }
+  });
+
+  ipcMain.handle('trackedTask:cardsForSession', async (_event, input: { sessionId: string }) => {
+    try {
+      const cards = getTrackedTaskBoard().listCardsForSession(input?.sessionId);
+      return { success: true, cards };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to resolve the card for this session' };
+    }
+  });
+
+  ipcMain.handle('trackedTask:close', async (_event, input: {
+    cardId: string;
+    conclusion: string;
+    by: 'owner' | 'twin';
+    targetStatus?: 'completed' | 'cancelled';
+    pinId?: string | null;
+  }) => {
+    try {
+      const result = getTrackedTaskBoard().closeCard({
+        taskId: input?.cardId,
+        conclusion: input?.conclusion,
+        by: input?.by,
+        targetStatus: input?.targetStatus,
+        pinId: input?.pinId ?? null,
+      });
+      if (result.ok) broadcastTrackedTaskUpdate(input.cardId, 'closed');
+      return result;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Failed to close the card' };
     }
   });
 

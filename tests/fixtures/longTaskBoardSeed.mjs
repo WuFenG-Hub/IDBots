@@ -104,16 +104,18 @@ function buildCases(anchorMs) {
     },
   );
 
-  // --- SEED-02: step waiting_input -> 等外部·阻塞 ---------------------------
+  // --- SEED-02: step waiting_input -> 待你拍板 ------------------------------
   add(
     {
       id: 'SEED-02',
-      title: 'step waiting_input (external dependency)',
-      boardColumn: 'blocked',
+      title: 'step waiting_input',
+      boardColumn: 'decide',
       zombie: 'none',
       activityAgeMs: 15 * MIN,
       activityAnchor: 'step.updated_at',
-      note: 'step-level waiting_input is the only existing 等外部 signal',
+      note:
+        'Corrected against the architecture contract §2.2 ②: step-level waiting_input lands in 待你拍板, '
+        + 'not 等外部·阻塞. Only blocked-with-unmet-dependencies is 等外部·阻塞 (§2.2 ①, §2.4 E2).',
     },
     {
       tasks: [{ id: 'seed-task-02', status: 'running', updatedDelta: -15 * MIN }],
@@ -276,16 +278,18 @@ function buildCases(anchorMs) {
   };
 
   threshold('SEED-09', DAY - 10 * MIN, 'active', 'none', 'just under the >1 day warning threshold');
-  threshold('SEED-10', DAY, null, null, 'EXACT 1 day: >1d is strict, confirm half-open interval with loop');
+  threshold('SEED-10', DAY, 'active', 'none', 'EXACT 1 day: threshold uses strict >, so exactly 24h does NOT trip (contract §2.4 E3)');
   threshold('SEED-11', DAY + 10 * MIN, 'active', 'warn', 'just over the >1 day warning threshold');
   threshold('SEED-12', 2 * DAY - 10 * MIN, 'active', 'warn', 'just under the >2 day zombie threshold');
-  threshold('SEED-13', 2 * DAY, null, null, 'EXACT 2 days: >2d is strict, confirm half-open interval with loop');
+  threshold('SEED-13', 2 * DAY, 'active', 'warn', 'EXACT 2 days: strict > keeps it out of zombie, but it is still past the 1 day warning');
   threshold(
     'SEED-14',
     2 * DAY + 10 * MIN,
-    'decide',
+    'active',
     'zombie',
-    'auto 待收口 + one-line closing suggestion required by criterion 3',
+    'Zombie. Per the chair D1 ruling there is no fifth column: the card keeps its derived column '
+    + '(here 进行中) and surfaces through closureDue=true -> top chip, count banner, filtered list, '
+    + 'plus a one-line closing suggestion (criterion 3).',
   );
 
   // --- SEED-15: NULL updated_at is unreachable ----------------------------
@@ -305,11 +309,13 @@ function buildCases(anchorMs) {
     { tasks: [{ id: 'seed-task-15', status: 'running', updatedDelta: -45 * MIN }] },
   );
 
-  // --- SEED-16 / SEED-17: closed -------------------------------------------
+  // --- SEED-16 / SEED-17: closed (terminal status AND a written conclusion) --
+  // Contract §2.4 E6: a terminal ledger status with a NULL conclusion is NOT
+  // closed, so these two carry a conclusion to actually land in 已收口.
   add(
     {
       id: 'SEED-16',
-      title: 'completed task',
+      title: 'completed task with a closing conclusion',
       boardColumn: 'closed',
       zombie: 'none',
       activityAgeMs: 10 * DAY,
@@ -322,6 +328,7 @@ function buildCases(anchorMs) {
           status: 'completed',
           updatedDelta: -10 * DAY,
           completedDelta: -10 * DAY,
+          closureConclusion: 'seed: shipped and verified',
         },
       ],
       steps: [
@@ -332,7 +339,7 @@ function buildCases(anchorMs) {
   add(
     {
       id: 'SEED-17',
-      title: 'cancelled task',
+      title: 'cancelled task with a closing conclusion',
       boardColumn: 'closed',
       zombie: 'none',
       activityAgeMs: 10 * DAY,
@@ -345,22 +352,22 @@ function buildCases(anchorMs) {
           status: 'cancelled',
           updatedDelta: -10 * DAY,
           completedDelta: -10 * DAY,
+          closureConclusion: 'seed: cancelled by the owner',
         },
       ],
     },
   );
 
-  // --- SEED-18: failed -> bucket is a spec decision ------------------------
+  // --- SEED-18: terminal without a conclusion --------------------------------
   add(
     {
       id: 'SEED-18',
-      title: 'failed task',
-      boardColumn: null,
-      zombie: null,
+      title: 'failed task without a closing conclusion',
+      boardColumn: 'decide',
+      zombie: 'none',
       activityAgeMs: 2 * DAY,
       activityAnchor: 'task.updated_at',
-      pendingSpec: true,
-      note: 'closed vs 待你拍板 for failed is a spec decision',
+      note: 'contract §2.4 E6 generalised: a terminal status with no conclusion is NOT closed',
     },
     { tasks: [{ id: 'seed-task-18', status: 'failed', updatedDelta: -2 * DAY }] },
   );
@@ -394,7 +401,7 @@ function buildCases(anchorMs) {
   add(
     {
       id: 'SEED-20',
-      title: 'group task closed (done) -> card closed',
+      title: 'group task closed (done) with a conclusion -> card closed',
       boardColumn: 'closed',
       zombie: 'none',
       activityAgeMs: 3 * DAY,
@@ -410,6 +417,7 @@ function buildCases(anchorMs) {
           updatedDelta: -3 * DAY,
           completedDelta: -3 * DAY,
           sourceSessionId: 'group-task:8302',
+          closureConclusion: 'seed: group task closed and accepted',
         },
       ],
       groupTasks: [{ id: 8302, orchestrationTaskId: 'seed-task-20', status: 'done' }],
@@ -449,12 +457,11 @@ function buildCases(anchorMs) {
     {
       id: 'SEED-22',
       title: 'updated_at in the future (clock skew)',
-      boardColumn: null,
-      zombie: null,
+      boardColumn: 'active',
+      zombie: 'none',
       activityAgeMs: -45 * MIN,
       activityAnchor: 'task.updated_at',
-      pendingSpec: true,
-      note: 'DEFENSIVE: negative age must not throw and must not mean "active forever"',
+      note: 'DEFENSIVE: a negative age is clamped to 0 and never reported as a zombie',
     },
     { tasks: [{ id: 'seed-task-22', status: 'running', updatedDelta: 45 * MIN }] },
   );
@@ -499,12 +506,11 @@ function buildCases(anchorMs) {
     {
       id: 'SEED-24',
       title: 'task in review while a step is waiting_input',
-      boardColumn: null,
-      zombie: null,
+      boardColumn: 'decide',
+      zombie: 'none',
       activityAgeMs: 20 * MIN,
       activityAnchor: 'task.updated_at',
-      pendingSpec: true,
-      note: 'PRECEDENCE: 待你拍板 vs 等外部·阻塞 is a spec decision',
+      note: 'PRECEDENCE: contract §2.2 — waiting_decision beats blocked_external',
     },
     {
       tasks: [{ id: 'seed-task-24', status: 'review', updatedDelta: -20 * MIN }],
@@ -559,8 +565,9 @@ function insertTask(db, anchorMs, task) {
   db.run(
     `INSERT INTO orchestration_tasks
       (id, owner_intent, enriched_goal, acceptance_criteria_json, source_session_id,
-       twin_metabot_id, owner_global_meta_id, status, plan_version, created_at, updated_at, completed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+       twin_metabot_id, owner_global_meta_id, status, plan_version, created_at, updated_at, completed_at,
+       closure_conclusion, closure_by, closure_at, closure_pin_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
     [
       task.id,
       `seed: ${task.id}`,
@@ -573,6 +580,10 @@ function insertTask(db, anchorMs, task) {
       isoAt(anchorMs, task.createdDelta ?? (task.updatedDelta ?? 0) - HOUR),
       task.updatedDelta === null ? null : isoAt(anchorMs, task.updatedDelta),
       task.completedDelta === undefined ? null : isoAt(anchorMs, task.completedDelta),
+      task.closureConclusion ?? null,
+      task.closureConclusion ? (task.closureBy ?? 'owner') : null,
+      task.closureConclusion ? isoAt(anchorMs, task.updatedDelta ?? 0) : null,
+      null,
     ],
   );
 }

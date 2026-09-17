@@ -851,6 +851,25 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('scheduledTask:runUpdate', handler);
     },
   },
+  trackedTask: {
+    // Long-task board over the single authoritative ledger (orchestration_tasks).
+    // The renderer must read card state through these channels only.
+    list: (input?: { ownerGlobalMetaId?: string }) => ipcRenderer.invoke('trackedTask:list', input),
+    detail: (input: { cardId: string }) => ipcRenderer.invoke('trackedTask:detail', input),
+    cardsForSession: (input: { sessionId: string }) => ipcRenderer.invoke('trackedTask:cardsForSession', input),
+    close: (input: {
+      cardId: string;
+      conclusion: string;
+      by: 'owner' | 'twin';
+      targetStatus?: 'completed' | 'cancelled';
+      pinId?: string | null;
+    }) => ipcRenderer.invoke('trackedTask:close', input),
+    onUpdate: (callback: (data: { cardId: string; reason: string }) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('trackedTask:update', handler);
+      return () => ipcRenderer.removeListener('trackedTask:update', handler);
+    },
+  },
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[]; mode?: 'task' | 'chat' }) =>
       ipcRenderer.invoke('groupTask:create', input),
