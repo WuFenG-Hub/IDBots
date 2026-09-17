@@ -280,27 +280,6 @@ test('the default scope folds old quiet cards but never hides them', async () =>
   }
 });
 
-test('closureDue is counted in two separate levels (contract SEC-07)', async () => {
-  const { sqliteStore, board } = await openBoard();
-  try {
-    const boardResult = board.listCards({ scope: 'all' });
-    const zombie = boardResult.cards.filter((card) => card.closureDueLevel === 'zombie').map((card) => card.id);
-    const terminal = boardResult.cards
-      .filter((card) => card.closureDueLevel === 'terminal_missing_conclusion')
-      .map((card) => card.id);
-    assert.ok(zombie.includes('seed-task-14'), 'the >2 day idle card is the zombie level');
-    assert.ok(terminal.length > 0, 'terminal cards without a conclusion form the second level');
-    assert.equal(boardResult.counts.zombieLevel, zombie.length);
-    assert.equal(boardResult.counts.terminalMissingConclusionLevel, terminal.length);
-    assert.equal(
-      boardResult.counts.closureDue,
-      boardResult.cards.filter((card) => card.closureDue).length,
-    );
-  } finally {
-    sqliteStore.close();
-  }
-});
-
 test('the list view ranks cards by the contract weights, ties on earlier activity', async () => {
   const { sqliteStore, board } = await openBoard();
   try {
@@ -535,6 +514,70 @@ test('scheduled tasks attach on explicit confirmation only, idempotently (D2)', 
     });
     assert.equal(ownerless.attached.length, 0);
     assert.match(ownerless.skipped[0].reason, /owner/i);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('closureDue levels stay exclusive, ordered, and never merged (appendix A-2)', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const all = () => board.listCards({ scope: 'all' }).cards;
+    const LEVELS = ['zombie', 'terminal_no_conclusion', 'sessions_ended'];
+
+    for (const card of all()) {
+      assert.ok(
+        card.closureDueLevel === null || LEVELS.includes(card.closureDueLevel),
+        `${card.id}: unexpected level ${card.closureDueLevel}`,
+      );
+      // The boolean is exactly "any level set": the three levels are never merged away.
+      assert.equal(card.closureDue, card.closureDueLevel !== null, `${card.id}: boolean/level disagree`);
+      // Level 2 needs no `!closed` guard: a terminal-without-conclusion card is
+      // by construction NOT closed, so the level can never sit on a closed card.
+      if (card.closureDueLevel === 'terminal_no_conclusion') {
+        assert.notEqual(card.state, 'closed', `${card.id}: level 2 on a closed card`);
+      }
+    }
+
+    const counts = board.listCards({ scope: 'all' }).counts;
+    assert.equal(counts.closureDue, counts.zombieLevel + counts.terminalNoConclusionLevel + counts.sessionsEndedLevel);
+
+    // Fixed priority: terminal_no_conclusion > zombie > sessions_ended.
+    sqliteStore.getDatabase().run('UPDATE orchestration_tasks SET updated_at = ? WHERE id = ?', [
+      new Date(Date.now() - 3 * 86_400_000).toISOString(),
+      'seed-task-18',
+    ]);
+    const priority = cardById(board, 'seed-task-18');
+    assert.equal(priority.closureDueLevel, 'terminal_no_conclusion', 'level 2 outranks level 1');
+    assert.ok(priority.closureWarn, 'the zombie signal is still reported through closureWarn');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('needsOwnerAction is exactly the declaration it claims (appendix A-4)', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    for (const card of board.listCards({ scope: 'all' }).cards) {
+      assert.equal(
+        card.needsOwnerAction,
+        card.state === 'waiting_decision' || card.closureDue,
+        `${card.id}: needsOwnerAction does not match (waiting_decision || closureDue)`,
+      );
+      // Implication: a closed card can never demand owner action.
+      if (card.state === 'closed') assert.equal(card.needsOwnerAction, false, `${card.id}: closed but needs action`);
+    }
+    // Table-driven rank check over the contract weights.
+    const EXPECTED = {
+      waiting_decision: 1,
+      blocked_external: 2,
+      in_progress: 3,
+      closed: 4,
+    };
+    for (const card of board.listCards({ scope: 'all' }).cards) {
+      const expected = card.closureDue && card.state !== 'closed' ? 0 : EXPECTED[card.state];
+      assert.equal(card.actionRank, expected, `${card.id}: actionRank ${card.actionRank} != ${expected}`);
+    }
   } finally {
     sqliteStore.close();
   }

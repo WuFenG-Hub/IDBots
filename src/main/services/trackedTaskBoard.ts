@@ -60,8 +60,12 @@ export const TRACKED_CARD_STATE_LABEL_KEY: Record<TrackedCardState, string> = {
   closed: 'trackedTask.column.closed',
 };
 
-/** Two separate closureDue levels, counted apart (contract `[SEC-07]`, chair D1). */
-export type TrackedClosureDueLevel = 'zombie' | 'terminal_missing_conclusion' | 'sessions_ended';
+/**
+ * Three separate closureDue levels, never merged (contract `[SEC-07]` + appendix
+ * A-2). Fixed priority: `terminal_no_conclusion` > `zombie` > `sessions_ended`.
+ * Each level is readable on its own, and `closureDue === true` iff any is set.
+ */
+export type TrackedClosureDueLevel = 'zombie' | 'terminal_no_conclusion' | 'sessions_ended';
 
 export type TrackedCardSourceKind = 'group_task' | 'scheduled_task' | 'session';
 
@@ -184,7 +188,7 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
   const closureDueLevel: TrackedClosureDueLevel | null = !closureDue
     ? null
     : terminalWithoutConclusion
-      ? 'terminal_missing_conclusion'
+      ? 'terminal_no_conclusion'
       : zombie && !closed
         ? 'zombie'
         : 'sessions_ended';
@@ -292,7 +296,7 @@ export interface TrackedCardCounts {
   /** Level 1: idle past the zombie threshold. */
   zombieLevel: number;
   /** Level 2: terminal status without a written conclusion. */
-  terminalMissingConclusionLevel: number;
+  terminalNoConclusionLevel: number;
   /** Level 3: every linked session ended and nothing is queued. */
   sessionsEndedLevel: number;
 }
@@ -307,8 +311,14 @@ export interface TrackedCardBoard {
   seq: number;
   columns: Array<{ state: TrackedCardState; labelKey: string; cardIds: string[] }>;
   cards: TrackedCardSummary[];
-  closureDueCardIds: string[];
-  closureDueCount: number;
+  /**
+   * PAGE scope, not the visible set: these two cover the current page only and
+   * must never be rendered as a board-wide total or in a banner. For a
+   * board-wide number read `counts.closureDue` / `counts.zombieLevel` /
+   * `counts.terminalNoConclusionLevel` / `counts.sessionsEndedLevel`.
+   */
+  closureDueCardIdsPage: string[];
+  closureDueCountPage: number;
   counts: TrackedCardCounts;
   /** True when more cards exist beyond `limit`/`offset`. */
   hasMore: boolean;
@@ -380,7 +390,7 @@ export interface TrackedSweepResult {
   assessed: number;
   closureDue: number;
   zombieLevel: number;
-  terminalMissingConclusionLevel: number;
+  terminalNoConclusionLevel: number;
   sessionsEndedLevel: number;
   beat: string;
 }
@@ -500,16 +510,16 @@ export class TrackedTaskBoardService {
         cardIds: page.filter((card) => card.state === state).map((card) => card.id),
       })),
       cards: page,
-      closureDueCardIds: page.filter((card) => card.closureDue).map((card) => card.id),
-      closureDueCount: page.filter((card) => card.closureDue).length,
+      closureDueCardIdsPage: page.filter((card) => card.closureDue).map((card) => card.id),
+      closureDueCountPage: page.filter((card) => card.closureDue).length,
       counts: {
         total: all.length,
         visible: sorted.length,
         folded,
         closureDue: sorted.filter((card) => card.closureDue).length,
         zombieLevel: sorted.filter((card) => card.closureDueLevel === 'zombie').length,
-        terminalMissingConclusionLevel: sorted.filter(
-          (card) => card.closureDueLevel === 'terminal_missing_conclusion',
+        terminalNoConclusionLevel: sorted.filter(
+          (card) => card.closureDueLevel === 'terminal_no_conclusion',
         ).length,
         sessionsEndedLevel: sorted.filter((card) => card.closureDueLevel === 'sessions_ended').length,
       },
@@ -834,8 +844,8 @@ export class TrackedTaskBoardService {
       assessed: cards.length,
       closureDue: cards.filter((card) => card.closureDue).length,
       zombieLevel: cards.filter((card) => card.closureDueLevel === 'zombie').length,
-      terminalMissingConclusionLevel: cards.filter(
-        (card) => card.closureDueLevel === 'terminal_missing_conclusion',
+      terminalNoConclusionLevel: cards.filter(
+        (card) => card.closureDueLevel === 'terminal_no_conclusion',
       ).length,
       sessionsEndedLevel: cards.filter((card) => card.closureDueLevel === 'sessions_ended').length,
       beat,

@@ -380,7 +380,7 @@ function buildCases(anchorMs) {
       zombie: 'none',
       activityAgeMs: 2 * DAY,
       activityAnchor: 'task.updated_at',
-      closureDueLevel: 'terminal_missing_conclusion',
+      closureDueLevel: 'terminal_no_conclusion',
       note: 'contract §2.4 E6 generalised: a terminal status with no conclusion is NOT closed',
     },
     { tasks: [{ id: 'seed-task-18', status: 'failed', updatedDelta: -2 * DAY }] },
