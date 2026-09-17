@@ -17,12 +17,14 @@ import {
   ArrowPathIcon,
   FunnelIcon,
   CheckCircleIcon,
+  QuestionMarkCircleIcon,
 } from '@heroicons/react/24/outline';
 import TrackedTasksBoard from './TrackedTasksBoard';
 import TrackedTasksList from './TrackedTasksList';
 import TrackedTaskDrawer from './TrackedTaskDrawer';
 import CloseTaskModal from './CloseTaskModal';
 import ClosureBanner from './ClosureBanner';
+import AdmissionRulesModal from './AdmissionRulesModal';
 import { filterNeedsOwnerAction } from './trackedTaskRanking';
 import type { TrackedCardScope, TrackedCardSummary, TrackedTaskViewMode } from '../../types/trackedTask';
 
@@ -53,6 +55,9 @@ const TrackedTasksSection: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
   const [metabotNames, setMetabotNames] = useState<Map<number, string>>(new Map());
+  const [admissionModalOpen, setAdmissionModalOpen] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveNotice, setArchiveNotice] = useState(false);
 
   useEffect(() => {
     void trackedTaskService.init();
@@ -148,6 +153,34 @@ const TrackedTasksSection: React.FC = () => {
     [closeTarget, dispatch]
   );
 
+  /**
+   * v1.3 手工归档（反馈⑥）：只读归档视图里唯一多的一个写入口，仅对已收口的卡开放。
+   * 服务层成功后整块重取看板（归档改变准入种群与 counts）；这里只关抽屉、出回执横条。
+   */
+  const submitArchive = useCallback(
+    async (cardId: string) => {
+      setArchiving(true);
+      const outcome = await trackedTaskService.archiveCard({ cardId, archived: true });
+      setArchiving(false);
+      if (outcome.error) {
+        dispatch(setError(outcome.error));
+        return;
+      }
+      dispatch(selectCard(null));
+      setArchiveNotice(true);
+    },
+    [dispatch]
+  );
+
+  /** 反馈⑤：切到 cowork 新对话并预填 composer 草稿（文案走 i18n，App.tsx 接力）。 */
+  const handleNewTrackedTask = useCallback(() => {
+    window.dispatchEvent(
+      new CustomEvent('cowork:newChatWithDraft', {
+        detail: { text: i18nService.t('trackedTask.newTaskDraft') },
+      })
+    );
+  }, []);
+
   const foldedCount = board?.counts.folded ?? 0;
   const scopeIsDefault = (board?.scopeApplied ?? scope) === 'default';
   const inArchiveView = viewMode === 'archive';
@@ -221,13 +254,33 @@ const TrackedTasksSection: React.FC = () => {
         {board?.hasMore ? '+' : ''}
       </span>
 
+      {/* 准入规则说明入口（反馈④）：刷新左侧，样式对齐既有工具栏按钮。 */}
+      <button
+        type="button"
+        onClick={() => setAdmissionModalOpen(true)}
+        title={i18nService.t('trackedTask.admission.title')}
+        className="ml-auto inline-flex items-center gap-1 rounded-md border dark:border-claude-darkBorder border-claude-border px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
+      >
+        <QuestionMarkCircleIcon className="w-3.5 h-3.5" />
+        {i18nService.t('trackedTask.admission.entry')}
+      </button>
+
       <button
         type="button"
         onClick={() => void trackedTaskService.loadBoard()}
-        className="ml-auto inline-flex items-center gap-1 rounded-md border dark:border-claude-darkBorder border-claude-border px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
+        className="inline-flex items-center gap-1 rounded-md border dark:border-claude-darkBorder border-claude-border px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
       >
         <ArrowPathIcon className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
         {i18nService.t('trackedTask.refresh')}
+      </button>
+
+      {/* 新建任务（反馈⑤）：样式与定时任务的 New Task 一致，点击切到 cowork 并预填草稿。 */}
+      <button
+        type="button"
+        onClick={handleNewTrackedTask}
+        className="btn-idchat-primary-filled px-3 py-1 text-sm font-medium"
+      >
+        {i18nService.t('trackedTask.newTask.button')}
       </button>
     </div>
   );
@@ -289,6 +342,23 @@ const TrackedTasksSection: React.FC = () => {
         </div>
       )}
 
+      {/* 归档回执横条（反馈⑥）：归档成功后短暂确认，卡已在归档视图可查 */}
+      {archiveNotice && (
+        <div className="flex shrink-0 items-center gap-2 border-b dark:border-claude-darkBorder border-claude-border bg-emerald-500/5 px-4 py-1.5">
+          <CheckCircleIcon className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+          <span className="text-xs text-emerald-500">
+            {i18nService.t('trackedTask.archive.successToast')}
+          </span>
+          <button
+            type="button"
+            onClick={() => setArchiveNotice(false)}
+            className="ml-auto text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary hover:underline"
+          >
+            {i18nService.t('close')}
+          </button>
+        </div>
+      )}
+
       {board && (
         <ClosureBanner
           cards={board.cards}
@@ -342,6 +412,8 @@ const TrackedTasksSection: React.FC = () => {
           metabotNames={metabotNames}
           onClose={() => dispatch(selectCard(null))}
           onRequestCloseCard={requestClose}
+          onArchiveCard={submitArchive}
+          archiving={archiving}
         />
       )}
 
@@ -356,6 +428,10 @@ const TrackedTasksSection: React.FC = () => {
             setCloseError(null);
           }}
         />
+      )}
+
+      {admissionModalOpen && (
+        <AdmissionRulesModal onClose={() => setAdmissionModalOpen(false)} />
       )}
     </div>
   );
