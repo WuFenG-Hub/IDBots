@@ -2,7 +2,7 @@
 //
 // 权威来源：src/main/services/trackedTaskBoard.ts `listCards()`（契约 v1.4 + 附录 A-4）：
 //   ① actionRank 升序
-//   ② 同权重按 activityAtMs 升序（null 视为最大，排最后）
+//   ② 同权重按 activityAtMs 降序（最近活动在前；null 视为最早，排最后）
 //   ③ 仍相等按 id 升序（为 limit/offset 稳定分页而加的终键）
 //   `needsOwnerAction ≡ (waiting_decision ∨ closureDue)`，由后端给出。
 //
@@ -12,10 +12,11 @@
 
 import type { TrackedCardSummary } from '../../types/trackedTask';
 
-const NO_ACTIVITY = Number.MAX_SAFE_INTEGER;
+/** 活动时间未知的哨兵值：低于任何真实时间戳，降序时自然排最后。 */
+const NO_ACTIVITY = Number.NEGATIVE_INFINITY;
 
 /**
- * 台账清单顺序：actionRank ↑ → activityAtMs ↑（null 最后）→ id ↑。
+ * 台账清单顺序：actionRank ↑ → activityAtMs ↓（null 最后）→ id ↑。
  * 结果是**输入的确定性函数**：把同一批卡打乱顺序喂进来，输出必须逐行相同。
  */
 export function orderCardsForBoardList(cards: TrackedCardSummary[]): TrackedCardSummary[] {
@@ -25,7 +26,7 @@ export function orderCardsForBoardList(cards: TrackedCardSummary[]): TrackedCard
 
     const aAt = a.activityAtMs ?? NO_ACTIVITY;
     const bAt = b.activityAtMs ?? NO_ACTIVITY;
-    if (aAt !== bAt) return aAt - bAt;
+    if (aAt !== bAt) return bAt - aAt;
 
     return a.id.localeCompare(b.id);
   });

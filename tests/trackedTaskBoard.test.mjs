@@ -48,6 +48,34 @@ function cardById(board, id) {
   return card;
 }
 
+/**
+ * The `[SEC-09]` tie rule: inside one actionRank, activity descends — the card
+ * that moved most recently leads — and equal activity falls back to id
+ * ascending. `activityAtMs === null` means "unknown activity" and must land
+ * last, never silently on top.
+ */
+function assertNewestFirst(cards, label) {
+  for (let index = 1; index < cards.length; index += 1) {
+    const previous = cards[index - 1];
+    const current = cards[index];
+    if (previous.actionRank !== current.actionRank) continue;
+    const previousAt = previous.activityAtMs ?? Number.NEGATIVE_INFINITY;
+    const currentAt = current.activityAtMs ?? Number.NEGATIVE_INFINITY;
+    assert.ok(
+      previousAt >= currentAt,
+      `${label}: weight ${current.actionRank} must lead with the most recent activity,`
+        + ` but ${current.id} (${currentAt}) came after ${previous.id} (${previousAt})`,
+    );
+    if (previousAt === currentAt) {
+      assert.ok(
+        previous.id.localeCompare(current.id) <= 0,
+        `${label}: equal activity at weight ${current.actionRank} must fall back to id ascending`
+          + ` (${previous.id} before ${current.id})`,
+      );
+    }
+  }
+}
+
 test('every seeded case lands in the column the shared fixture declares', async () => {
   const { sqliteStore, board, manifest } = await openBoard();
   try {
@@ -303,7 +331,7 @@ test('the default scope folds old quiet cards but never hides them', async () =>
   }
 });
 
-test('the list view ranks cards by the contract weights, ties on earlier activity', async () => {
+test('the list view ranks cards by the contract weights, ties on the most recent activity', async () => {
   const { sqliteStore, board } = await openBoard();
   try {
     const cards = board.listCards({ scope: 'all' }).cards;
@@ -316,6 +344,74 @@ test('the list view ranks cards by the contract weights, ties on earlier activit
       else if (card.state === 'in_progress') assert.equal(card.actionRank, 3);
       else assert.equal(card.actionRank, 4);
     }
+
+    // Same weight -> most recent activity first, on the whole board and again on
+    // the closed column: weight 4 is where the owner saw the oldest card pinned
+    // to the top, so it gets its own explicit expectation.
+    assertNewestFirst(cards, 'scope=all');
+    const closedColumn = cards.filter((card) => card.state === 'closed');
+    assert.ok(closedColumn.length >= 3, 'the fixture must seed the closed cards or this check proves nothing');
+    assertNewestFirst(closedColumn, 'closed column');
+    assert.deepEqual(
+      closedColumn.map((card) => card.id),
+      ['seed-task-20', 'seed-task-16', 'seed-task-17'],
+      'the closed column leads with SEED-20 (group task touched an hour ago) over the 10-day-old pair',
+    );
+
+    // The archive view is its own population but uses the same tie rule.
+    const archived = board.listCards({ scope: 'archived' }).cards;
+    assert.ok(archived.length > 1, 'the fixture must seed archived rows or this check proves nothing');
+    assertNewestFirst(archived, 'scope=archived');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('an unreadable activity timestamp is unknown activity, never a throw', async () => {
+  const { sqliteStore, board, manifest } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    const nowMs = Date.now() + SEED_CLOCK_AHEAD_MS;
+    // `orchestration_tasks.updated_at` is TEXT NOT NULL, so a value the board
+    // cannot parse IS reachable. It must degrade to "unknown activity" — not to
+    // a crash, not to 0, and not to a bogus epoch near the top of its column.
+    db.run(
+      `INSERT INTO orchestration_tasks
+        (id, owner_intent, enriched_goal, acceptance_criteria_json, source_session_id,
+         twin_metabot_id, owner_global_meta_id, status, plan_version, created_at, updated_at, completed_at,
+         closure_conclusion, closure_by, closure_at, closure_pin_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'running', 1, ?, 'not-a-timestamp', NULL, NULL, NULL, NULL, NULL)`,
+      [
+        'seed-task-unknown-activity',
+        'unknown activity timestamp',
+        'unknown activity timestamp',
+        '[]',
+        null,
+        manifest.twinMetabotId,
+        manifest.ownerGlobalMetaId,
+        new Date(nowMs - 2 * 60 * 60 * 1000).toISOString(),
+      ],
+    );
+    // ADM-1 is the only branch a step-less row can match (v1.1 freeze doc §2), so
+    // registering it is what puts the row on the board at all.
+    db.run(
+      `INSERT INTO kv (key, value, updated_at) VALUES ('tracked_long_task_registry', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [JSON.stringify([...manifest.registeredTaskIds, 'seed-task-unknown-activity']), nowMs],
+    );
+
+    const cards = board.listCards({ scope: 'all' }).cards;
+    const unknown = cards.find((card) => card.id === 'seed-task-unknown-activity');
+    assert.ok(unknown, 'the row must still render');
+    assert.equal(unknown.admitted, true, 'the kv registration must admit the row');
+    assert.equal(unknown.activityAtMs, null, 'an unparseable timestamp is null activity, not 0 and not NaN');
+    assertNewestFirst(cards, 'scope=all with an unknown-activity card');
+    const peers = cards.filter((card) => card.actionRank === unknown.actionRank);
+    assert.equal(
+      peers[peers.length - 1].id,
+      unknown.id,
+      'unknown activity sorts last inside its weight',
+    );
   } finally {
     sqliteStore.close();
   }
@@ -1426,5 +1522,63 @@ test('a missing `admitted` input cannot produce a non-boolean closureDue (F-A)',
     );
   } finally {
     sqliteStore.close();
+  }
+});
+
+test('the closing modal says the conclusion is recorded, never executed', async () => {
+  const fs = await import('node:fs');
+  const read = (relative) => fs.readFileSync(relative, 'utf8');
+
+  // The note must be RENDERED next to the conclusion input, not merely defined.
+  const modal = read('src/renderer/components/trackedTasks/CloseTaskModal.tsx');
+  assert.match(
+    modal,
+    /trackedTask\.close\.recordOnlyHint/,
+    'the record-only note must be rendered in the closing modal',
+  );
+  // Measured inside the JSX return, so the header comment that documents the key
+  // cannot substitute for the rendered element.
+  const jsxStart = modal.indexOf('return (');
+  assert.ok(jsxStart > -1, 'the modal must have a JSX body');
+  const textareaAt = modal.indexOf('trackedTask.close.conclusionPlaceholder', jsxStart);
+  const hintAt = modal.indexOf('trackedTask.close.recordOnlyHint', jsxStart);
+  assert.ok(textareaAt > -1 && hintAt > textareaAt, 'the note must sit below the conclusion textarea');
+
+  const i18n = read('src/renderer/services/i18n.ts');
+  const copyFor = (key) => [...i18n.matchAll(
+    new RegExp(`'${key.replace(/\./g, '\\.')}':\\s*'([^']*)'`, 'g'),
+  )].map((match) => match[1]);
+  // Positive control FIRST: prove the extractor can see absence, otherwise the
+  // "exactly EN + ZH" check below could pass on an extractor that sees nothing.
+  assert.equal(copyFor('trackedTask.thisKeyDoesNotExist').length, 0, 'the copy extractor must be able to see 0');
+
+  const keys = [
+    'trackedTask.close.title',
+    'trackedTask.close.conclusionPlaceholder',
+    'trackedTask.close.recordOnlyHint',
+    'trackedTask.close.confirm',
+    'trackedTask.close.by',
+    'trackedTask.closure.byOwner',
+    'trackedTask.closure.byTwin',
+  ];
+  for (const key of keys) {
+    const values = copyFor(key);
+    assert.equal(values.length, 2, `${key}: expected exactly EN + ZH, saw ${values.length}`);
+  }
+
+  // Both languages state it outright.
+  const hint = copyFor('trackedTask.close.recordOnlyHint');
+  assert.ok(hint.some((text) => text.includes('不会自动执行')), 'zh hint must say it is not executed automatically');
+  assert.ok(
+    hint.some((text) => /will not be executed automatically/.test(text)),
+    'en hint must say it is not executed automatically',
+  );
+
+  // The strings the owner read as "whoever records it will act on it" must no
+  // longer read as an action: neither a close-out verb nor an executor.
+  for (const key of ['trackedTask.close.confirm', 'trackedTask.closure.byOwner', 'trackedTask.closure.byTwin']) {
+    for (const text of copyFor(key)) {
+      assert.doesNotMatch(text, /收口|closed by|confirm close/i, `${key}: "${text}" still reads as a close-out action`);
+    }
   }
 });

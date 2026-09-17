@@ -2,7 +2,7 @@
  * 清单视图排序/筛选的纯函数单测。
  *
  * 被测对象：src/renderer/components/trackedTasks/trackedTaskRanking.ts
- *   —— 逐档复现主进程 `listCards()` 的排序键（actionRank ↑ → activityAtMs ↑ → id ↑）。
+ *   —— 逐档复现主进程 `listCards()` 的排序键（actionRank ↑ → activityAtMs ↓ → id ↑）。
  *   本测试同时锁住两条边界：
  *     ① 前端不得用 card.state 重推排序（否则等于第二套口径）；
  *     ② 顺序必须是**输入的确定性函数**——同批卡打乱输入，输出逐行相同（分页稳定的前提）。
@@ -62,13 +62,26 @@ test('第一档：actionRank 升序', () => {
   assert.deepEqual(ranked.map((c) => c.id), ['r0', 'r1', 'r3']);
 });
 
-test('第二档：同权重按 activityAtMs 升序，null 排最后', () => {
+test('第二档：同权重按 activityAtMs 降序（最近活动最先），null 排最后', () => {
   const ranked = orderCardsForBoardList([
     card({ id: 'no-activity', actionRank: 2, activityAtMs: null }),
     card({ id: 'late', actionRank: 2, activityAtMs: MS(2000) }),
     card({ id: 'early', actionRank: 2, activityAtMs: MS(1000) }),
   ]);
-  assert.deepEqual(ranked.map((c) => c.id), ['early', 'late', 'no-activity']);
+  assert.deepEqual(ranked.map((c) => c.id), ['late', 'early', 'no-activity']);
+});
+
+test('已收口/归档档（actionRank 4）最新活动在最上', () => {
+  const ranked = orderCardsForBoardList([
+    card({ id: 'closed-10d', actionRank: 4, state: 'closed', activityAtMs: MS(1000) }),
+    card({ id: 'closed-3d', actionRank: 4, state: 'closed', activityAtMs: MS(3000) }),
+    card({ id: 'closed-no-activity', actionRank: 4, state: 'closed', activityAtMs: null }),
+    card({ id: 'closed-oldest', actionRank: 4, state: 'closed', activityAtMs: MS(500) }),
+  ]);
+  assert.deepEqual(
+    ranked.map((c) => c.id),
+    ['closed-3d', 'closed-10d', 'closed-oldest', 'closed-no-activity']
+  );
 });
 
 test('第三档：名次与活动时间全等时按 id 升序（分页稳定）', () => {

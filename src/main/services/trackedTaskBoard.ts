@@ -774,7 +774,14 @@ function epochMs(value: unknown): number | null {
 /** kv key holding daemon liveness only — never any card state (`[SEC-07]`). */
 export const TRACKED_TICK_BEAT_KV_KEY = 'tracking_tick_beat';
 
-/** List-view rank (contract `[SEC-09]`); ties break on `activityAt` ascending. */
+/**
+ * Sort sentinel for a card whose activity timestamp is unknown (`null`). It sits
+ * below every real epoch, so a descending sort keeps those cards last rather than
+ * silently promoting them to the top.
+ */
+const NO_ACTIVITY_AT_MS = Number.NEGATIVE_INFINITY;
+
+/** List-view rank (contract `[SEC-09]`); ties break on `activityAt` descending. */
 export function trackedCardActionRank(card: {
   state: TrackedCardState;
   closureDue: boolean;
@@ -864,10 +871,11 @@ export class TrackedTaskBoardService {
     const sorted = [...visible].sort((a, b) => {
       const byRank = a.actionRank - b.actionRank;
       if (byRank !== 0) return byRank;
-      // Same weight: earlier activity first (`[SEC-09]`).
-      const aAt = a.activityAtMs ?? Number.MAX_SAFE_INTEGER;
-      const bAt = b.activityAtMs ?? Number.MAX_SAFE_INTEGER;
-      if (aAt !== bAt) return aAt - bAt;
+      // Same weight: most recent activity first (`[SEC-09]`), so the closed and
+      // archived columns lead with the card that moved last.
+      const aAt = a.activityAtMs ?? NO_ACTIVITY_AT_MS;
+      const bAt = b.activityAtMs ?? NO_ACTIVITY_AT_MS;
+      if (aAt !== bAt) return bAt - aAt;
       return a.id.localeCompare(b.id);
     });
 
