@@ -20,7 +20,10 @@ const MAX_IMPLICIT_SIGNALS = 5;
 
 export type { DreamImplicitSignal, DreamImplicitSignalKind } from '../dreamStore';
 
-const normalize = (text: string): string => text.replace(/\s+/g, ' ').trim();
+// Case-folded so Latin-script re-asks ("Video" vs "video") compare equal;
+// no-op for Chinese and other case-less scripts. Detection stays purely
+// structural — no language-specific rules anywhere in this layer.
+const normalize = (text: string): string => text.replace(/\s+/g, ' ').trim().toLowerCase();
 
 /** Character-bigram Jaccard similarity; 0 for anything too short to compare. */
 export function bigramSimilarity(a: string, b: string): number {

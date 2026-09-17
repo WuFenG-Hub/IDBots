@@ -58,6 +58,27 @@ test('bigramSimilarity: identical = 1, disjoint ≈ 0, partial in between', () =
   assert.equal(bigramSimilarity('a', 'ab'), 0);
 });
 
+test('implicit detection is language-agnostic: case and script insensitive', () => {
+  // English re-ask with different case and a politeness prefix still counts.
+  assert.ok(bigramSimilarity('Make me a Birthday Video', 'please make me a birthday video') > 0.6);
+  // Unrelated English texts stay far apart.
+  assert.ok(bigramSimilarity('make me a birthday video', 'what is the weather today') < 0.2);
+
+  const activity = {
+    sessions: [{
+      sessionId: 's1', title: 'Birthday video', sessionType: 'standard', peerName: null, isOrder: false,
+      messages: [
+        { type: 'user', content: 'Make me a Birthday Video', createdAt: DAY_START },
+        { type: 'assistant', content: 'On it', createdAt: DAY_START + 60_000 },
+        { type: 'user', content: 'please make me a birthday video', createdAt: DAY_START + 5 * 60_000 },
+      ],
+    }],
+    taskRuns: [], orderCount: 0, groupTasks: [],
+  };
+  const signals = extractImplicitSignals(activity);
+  assert.equal(signals.filter((signal) => signal.kind === 'reask').length, 1);
+});
+
 test('extractImplicitSignals: reask within window, burst tail, repeat orders', () => {
   const activity = {
     sessions: [
