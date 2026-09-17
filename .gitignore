@@ -54,6 +54,8 @@ docs/*
 !docs/tickets/
 !docs/tickets/**
 tests/*
+!tests/fixtures/
+!tests/fixtures/longTaskBoardSeed.mjs
 !tests/mvcSponsorCircuitBreaker.test.mjs
 !tests/groupTaskChatMode.test.mjs
 !tests/devWindowLoadRetry.test.mjs
