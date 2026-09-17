@@ -314,6 +314,31 @@ export class SurfService {
         sessionSeenActions.push(...(session.seenActions ?? []));
       }
 
+      // Live-audit round 1 (2026-09-17): 3 of 57 live runs returned with NO
+      // final report AND no host-verifiable activity (zero deep reads, zero
+      // chain-write receipts, zero scheduled tasks — consistent with a
+      // silently truncated turn), yet still reached this success path:
+      // briefed pins were marked 'presented' and never re-presented. A
+      // session that provably did nothing must not consume the window — fail
+      // the run so the next surf re-presents it, same as any other failure.
+      if (this.runSurfSession) {
+        const sessionDidSomething = reportJson != null
+          || reportMarkdown != null
+          || stats.deepRead > 0
+          || stats.savedToKb > 0
+          || stats.knowledgePoints > 0
+          || stats.liked > 0
+          || stats.commented > 0
+          || stats.answered > 0
+          || stats.posted > 0
+          || stats.challenged > 0
+          || stats.inboxHandled > 0
+          || stats.tasksScheduled > 0;
+        if (!sessionDidSomething) {
+          throw new Error('Surf session ended without a report and without any host-verifiable activity (no reads, writes or tasks) — the window stays unconsumed; possible silent turn truncation.');
+        }
+      }
+
       // Seen-ledger writes land ONLY on this success path: every briefed pin
       // becomes 'presented' and the session's self-reported actions fold on
       // top (strongest action wins, one batched store write). Presented

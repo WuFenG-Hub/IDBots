@@ -206,6 +206,48 @@ test('session failure fails the run without advancing watermarks', async () => {
   assert.equal(store.getProtocolState(7, 'alpha'), null);
 });
 
+test('a session that returns no report and no receipts fails the run and keeps the window (live-audit round 1)', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    runSurfSession: async () => ({
+      stats: { deepRead: 0, savedToKb: 0, liked: 0, commented: 0, answered: 0, posted: 0, challenged: 0, inboxHandled: 0, tasksScheduled: 0 },
+      reportMarkdown: null,
+      reportJson: null,
+    }),
+    nowMs: () => NOW_MS,
+  });
+  const run = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run.status, 'failed');
+  assert.match(run.error, /without a report and without any host-verifiable activity/);
+  // Nothing consumed: no seen-ledger marks, no watermark, next run re-presents.
+  assert.equal(store.getSeenAction(7, 'pin-a'), null);
+  assert.equal(store.getProtocolState(7, 'alpha'), null);
+  // A sibling run WITH receipts (even without a report) still completes —
+  // host-verifiable work must not be punished for the missing JSON fence.
+  const service2 = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-b', NOW_SEC - 50)])],
+    runSurfSession: async () => ({ stats: { deepRead: 1 }, reportMarkdown: null, reportJson: null }),
+    nowMs: () => NOW_MS,
+  });
+  const run2 = await service2.runSurfAndWait(7, 'manual-ui');
+  assert.equal(run2.status, 'done');
+  assert.equal(run2.stats.deepRead, 1);
+});
+
 test('a failed run re-presents the same window on the next surf (P1 regression)', async () => {
   const db = createNativeSqliteDatabase(':memory:');
   const store = new MetawebSurfStore(db, () => {});
@@ -329,7 +371,7 @@ test('the next run inherits the notes written by the previous DONE run (round 3)
     registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
     runSurfSession: async (context) => {
       seenContext = context;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
@@ -519,7 +561,7 @@ test('inbox: baseline is the previous run START (createdAt), owner from identity
     },
     runSurfSession: async (context) => {
       seenBriefing = context.briefing;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
@@ -550,7 +592,7 @@ test('inbox: baseline is the previous run START (createdAt), owner from identity
     },
     runSurfSession: async (context) => {
       seenBriefing = context.briefing;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
@@ -579,7 +621,7 @@ test('inbox: no identity or no fetcher → no inbox section, run still succeeds'
     fetchSurfInbox: async () => { throw new Error('must not be called without an owner'); },
     runSurfSession: async (context) => {
       seenBriefing = context.briefing;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
@@ -608,7 +650,7 @@ test('radar: fetchProtocolRadar flows into the briefing and a failure still fini
     }),
     runSurfSession: async (context) => {
       seenBriefing = context.briefing;
-      return { stats: {}, reportMarkdown: null, reportJson: null };
+      return { stats: {}, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
     },
     nowMs: () => NOW_MS,
   });
