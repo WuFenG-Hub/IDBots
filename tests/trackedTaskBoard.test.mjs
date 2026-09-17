@@ -1525,7 +1525,7 @@ test('a missing `admitted` input cannot produce a non-boolean closureDue (F-A)',
   }
 });
 
-test('the closing modal says the conclusion is recorded, never executed', async () => {
+test('the closing modal says Twin executes the conclusion as the final close-out', async () => {
   const fs = await import('node:fs');
   const read = (relative) => fs.readFileSync(relative, 'utf8');
 
@@ -1534,7 +1534,7 @@ test('the closing modal says the conclusion is recorded, never executed', async 
   assert.match(
     modal,
     /trackedTask\.close\.recordOnlyHint/,
-    'the record-only note must be rendered in the closing modal',
+    'the close-out note must be rendered in the closing modal',
   );
   // Measured inside the JSX return, so the header comment that documents the key
   // cannot substitute for the rendered element.
@@ -1566,19 +1566,52 @@ test('the closing modal says the conclusion is recorded, never executed', async 
     assert.equal(values.length, 2, `${key}: expected exactly EN + ZH, saw ${values.length}`);
   }
 
-  // Both languages state it outright.
+  // Owner ruling B: the conclusion IS an instruction — both languages must say
+  // Twin executes it as the final close-out.
   const hint = copyFor('trackedTask.close.recordOnlyHint');
-  assert.ok(hint.some((text) => text.includes('不会自动执行')), 'zh hint must say it is not executed automatically');
   assert.ok(
-    hint.some((text) => /will not be executed automatically/.test(text)),
-    'en hint must say it is not executed automatically',
+    hint.some((text) => text.includes('执行') && text.includes('Twin')),
+    'zh hint must say Twin executes the conclusion',
+  );
+  assert.ok(
+    hint.some((text) => /executed by Twin/.test(text)),
+    'en hint must say the conclusion is executed by Twin',
   );
 
-  // The strings the owner read as "whoever records it will act on it" must no
-  // longer read as an action: neither a close-out verb nor an executor.
+  // The superseded wording must be gone. Each absence check carries its own
+  // positive control: neither predicate may be one that can never fire.
+  assert.ok(
+    '这段结论会被记录，不会自动执行。'.includes('不会自动执行'),
+    'the zh absence predicate must be able to see the superseded wording',
+  );
+  assert.ok(
+    /will not be executed automatically/.test(
+      'This conclusion is recorded only — it will not be executed automatically.',
+    ),
+    'the en absence predicate must be able to see the superseded wording',
+  );
+  assert.ok(hint.every((text) => !text.includes('不会自动执行')), 'no copy may keep the superseded zh phrasing');
+  assert.ok(
+    hint.every((text) => !/will not be executed automatically/.test(text)),
+    'no copy may keep the superseded en phrasing',
+  );
+
+  // Flipping the semantics must NOT drop the safety boundary: the copy still
+  // tells the owner a destructive action goes through confirmation.
+  assert.ok(hint.some((text) => text.includes('确认')), 'zh hint must keep the safety gate for destructive actions');
+  assert.ok(
+    hint.some((text) => /ask you first|confirm/i.test(text)),
+    'en hint must keep the safety gate for destructive actions',
+  );
+
+  // And the strings that named a pure recorder must now read as a close-out
+  // action performed by the actor named beside them.
   for (const key of ['trackedTask.close.confirm', 'trackedTask.closure.byOwner', 'trackedTask.closure.byTwin']) {
     for (const text of copyFor(key)) {
-      assert.doesNotMatch(text, /收口|closed by|confirm close/i, `${key}: "${text}" still reads as a close-out action`);
+      assert.match(text, /收口|clos(e|ed)( it)? out/i, `${key}: "${text}" must read as a close-out action`);
     }
+  }
+  for (const text of copyFor('trackedTask.close.by')) {
+    assert.doesNotMatch(text, /记录|recorded/i, `trackedTask.close.by: "${text}" still reads as a pure record`);
   }
 });
