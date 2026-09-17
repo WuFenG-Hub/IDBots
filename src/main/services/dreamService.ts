@@ -24,6 +24,12 @@ import {
   parseCapabilityValidationOutput,
 } from '../libs/capabilityValidationPrompt';
 import {
+  buildCounterfactualReplayPrompt,
+  extractNegativeDecisionPoints,
+  parseCounterfactualReplayOutput,
+  pickCounterfactualLesson,
+} from '../libs/counterfactualReplayPrompt';
+import {
   chunkDreamActivity,
   estimateDreamActivityTokens,
   summariesToActivity,
@@ -665,6 +671,8 @@ export class DreamService {
         // Pending capability drafts can still be validated against older
         // diaries even when today added no new activity.
         await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
+        // Empty days have no negative decision points, so the replay no-ops.
+        await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
         return;
       }
 
@@ -693,6 +701,7 @@ export class DreamService {
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
       await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
+      await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
@@ -824,6 +833,66 @@ export class DreamService {
     }
   }
 
+  /**
+   * Dream-RSI P1 counterfactual replay: replay the day's negative-outcome
+   * decision points (thumbs-down replies, poorly rated task work), imagine
+   * alternative actions, and score them against the recorded outcome. Only a
+   * lesson whose best alternative clearly beats the recorded action is written
+   * as a dream-origin value_boundary — simulation-validated, not post-hoc
+   * narration. Runs after finishRun and never affects the run's outcome;
+   * no negative points means no LLM call.
+   */
+  private async runCounterfactualReplayAfterDream(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+    activity: DreamDayActivity,
+  ): Promise<void> {
+    try {
+      const points = extractNegativeDecisionPoints(activity);
+      if (points.length === 0) return;
+      const prompt = buildCounterfactualReplayPrompt({
+        botName: metabot.name,
+        date,
+        points,
+      });
+      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
+      const parsed = parseCounterfactualReplayOutput(raw, new Set(points.map((point) => point.id)));
+      if (!parsed.ok) {
+        console.warn(`[DreamService] Counterfactual replay parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
+        return;
+      }
+      const seenLessons = new Set<string>();
+      let written = 0;
+      for (const result of parsed.results) {
+        const lesson = pickCounterfactualLesson(result);
+        if (!lesson || seenLessons.has(lesson)) continue;
+        seenLessons.add(lesson);
+        this.deps.coworkStore.createUserMemory({
+          metabotId: metabot.id,
+          text: `${lesson}(源自:反事实重放 ${date})`,
+          scopeKind: 'owner',
+          scopeKey: 'owner:self',
+          usageClass: 'value_boundary',
+          origin: 'dream',
+          isExplicit: true,
+          forceNew: true,
+          source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+        });
+        written += 1;
+      }
+      if (written > 0) {
+        console.log(
+          `[DreamService] Counterfactual replay for metabot ${metabot.id} date ${date}: points=${points.length}, lessons=${written}`,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[DreamService] Counterfactual replay failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   private writeDreamResults(
     metabotId: number,
     date: string,
@@ -888,8 +957,17 @@ export class DreamService {
     }
 
     const seenLessons = new Set<string>();
+    let unsourcedLessons = 0;
     for (const lesson of output.valueLessons) {
-      const text = lesson.source ? `${lesson.rule}(源自:${lesson.source})` : lesson.rule;
+      // P1b evidence gate: a value lesson must cite the concrete evidence it
+      // was distilled from. Unsourced rules are post-hoc rationalization risk
+      // and are dropped instead of entering the code-of-conduct hot layer.
+      const source = lesson.source?.trim();
+      if (!source) {
+        unsourcedLessons += 1;
+        continue;
+      }
+      const text = `${lesson.rule}(源自:${source})`;
       if (seenLessons.has(text)) continue;
       seenLessons.add(text);
       this.deps.coworkStore.createUserMemory({
@@ -903,6 +981,11 @@ export class DreamService {
         forceNew: true,
         source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
       });
+    }
+    if (unsourcedLessons > 0) {
+      console.warn(
+        `[DreamService] Dropped ${unsourcedLessons} unsourced value lesson(s) for metabot ${metabotId} date ${date} (evidence gate)`,
+      );
     }
 
     const seenReviews = new Set<string>();
