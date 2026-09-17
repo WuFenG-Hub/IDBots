@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { sinceFiltered, applyFreshWindowFilter } = await import('../dist-electron/main/libs/surfProtocols.js');
+const { sinceFiltered, applyFreshWindowFilter, DEFAULT_SURF_PROTOCOLS } = await import('../dist-electron/main/libs/surfProtocols.js');
 
 const makeItem = (pinId, createdAt) => ({
   pinId,
@@ -74,4 +74,55 @@ test('applyFreshWindowFilter in backlog mode still drops id-less items and caps 
     applyFreshWindowFilter(items, 1789000000, 2, true).map((item) => item.pinId),
     ['pin-a', 'pin-b'],
   );
+});
+
+
+// ---------------------------------------------------------------------------
+// agentpedia descriptor on the live-audit R6 feed (live-audit round 2)
+// ---------------------------------------------------------------------------
+
+test('agentpedia fetchFresh rides the cursor-backed feed: window sends since, backlog sends cursor only', async () => {
+  const descriptor = DEFAULT_SURF_PROTOCOLS.find((entry) => entry.key === 'agentpedia');
+  assert.ok(descriptor, 'agentpedia descriptor present in the default registry');
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      status: 200,
+      json: async () => ({
+        // Current production shape: bare, no envelope.
+        items: [
+          {
+            pinId: 'rev-x', path: '/protocols/agentpedia/rev', chainName: 'mvc',
+            timestamp: 1789617000, globalMetaId: 'idq-author',
+            title: '世界计算机宪章', summary: 'v0.3.1', contentExcerpt: '…', type: 'rev',
+          },
+        ],
+        hasMore: true,
+        nextCursor: 'cur-next',
+      }),
+    };
+  };
+  try {
+    const window = await descriptor.fetchFresh({ sinceTs: 1789400000, limit: 50 });
+    const windowUrl = new URL(calls[0]);
+    assert.equal(windowUrl.pathname, '/api/agentpedia/pins');
+    assert.equal(windowUrl.searchParams.get('path'), '/protocols/agentpedia/rev');
+    assert.equal(windowUrl.searchParams.get('since'), '1789400000', 'window page sends since');
+    assert.equal(windowUrl.searchParams.get('cursor'), null, 'window page sends no cursor');
+    assert.equal(window.items.length, 1);
+    assert.equal(window.items[0].title, '世界计算机宪章');
+    assert.equal(window.items[0].extra, 'rev');
+    assert.equal(window.hasMore, true, 'hasMore now flows — overflow registers backlog debt');
+    assert.equal(window.nextCursor, 'cur-next');
+
+    const backlog = await descriptor.fetchFresh({ sinceTs: 1789400000, limit: 50, backlogCursor: 'cur-next' });
+    const backlogUrl = new URL(calls[1]);
+    assert.equal(backlogUrl.searchParams.get('cursor'), 'cur-next');
+    assert.equal(backlogUrl.searchParams.get('since'), null, 'backlog page resumed by cursor ALONE — since would drop every backlog item server-side');
+    assert.equal(backlog.items.length, 1, 'backlog items bypass the since filter (older than the watermark by construction)');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

@@ -11,17 +11,18 @@
  * Stage-0 fresh fetches are backed by the metaso-p2p "surf reads" API
  * (services/metawebSurfReadsService.ts, R1): deterministic total order,
  * inclusive `since`, gap-free cursor paging, byte-identical dedupe and
- * per-author throttling. agentpedia is NOT indexed server-side and stays on
- * the MANAPI path-list client.
+ * per-author throttling. agentpedia rides its own cursor-backed aggregation
+ * feed (agentpediaPins, same paging contract as R1).
  */
 
 import { getSocialFeed } from '../services/socialRecallService';
 import { searchMetaweb, type MetawebSearchItem } from '../services/metawebSearchService';
 import { qaSearch, type QaQuestionItem } from '../services/qaRecallService';
-import { listPinsByPath, type ManapiPathListItem } from '../services/manapiPinService';
 import {
   metawebFresh,
+  agentpediaPins,
   type MetawebFreshItem,
+  type AgentpediaPinsItem,
 } from '../services/metawebSurfReadsService';
 
 /** One content item surfaced to the bot during a surf run. */
@@ -88,22 +89,6 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-/** contentSummary is truncated server-side and may not parse; best-effort. */
-function extractJsonField(raw: string, field: string): string {
-  if (!raw) return '';
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return text(parsed?.[field]);
-  } catch {
-    const match = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(raw);
-    if (!match) return '';
-    try {
-      return JSON.parse(`"${match[1]}"`) as string;
-    } catch {
-      return match[1];
-    }
-  }
-}
 
 const fromSocialPost = (item: import('../services/socialRecallService').SocialPostItem): SurfItem => ({
   pinId: item.currentPinId || item.pinId,
@@ -148,25 +133,6 @@ const fromQaQuestion = (item: QaQuestionItem): SurfItem => ({
     ? `${item.answerCount} answers`
     : 'unanswered',
 });
-
-const fromManapiItem = (item: ManapiPathListItem, protocolKey: string): SurfItem => {
-  const title = extractJsonField(item.contentSummary, 'title');
-  const content = extractJsonField(item.contentSummary, 'content');
-  const slug = extractJsonField(item.contentSummary, 'slug');
-  return {
-    pinId: item.pinId,
-    protocolKey,
-    chainName: 'mvc',
-    title,
-    summary: (content || item.contentSummary).slice(0, 280),
-    authorName: '',
-    authorGlobalMetaId: item.globalMetaId,
-    createdAt: item.timestamp || item.seenTime,
-    likeCount: null,
-    commentCount: null,
-    extra: slug ? `entry: ${slug}` : null,
-  };
-};
 
 /** R1 fresh-feed item → SurfItem. `protocolKey` buckets the item (answers map onto their question section). */
 const fromFreshItem = (item: MetawebFreshItem, protocolKey: string): SurfItem => {
@@ -339,6 +305,21 @@ const simplequestion: SurfProtocolDescriptor = {
   },
 };
 
+/** Agentpedia feed item → SurfItem (title/summary/excerpt arrive pre-extracted). */
+const fromAgentpediaItem = (item: AgentpediaPinsItem): SurfItem => ({
+  pinId: item.pinId,
+  protocolKey: 'agentpedia',
+  chainName: item.chainName || 'mvc',
+  title: item.title || item.contentExcerpt.slice(0, 60),
+  summary: item.summary || item.contentExcerpt.slice(0, 280),
+  authorName: '',
+  authorGlobalMetaId: item.globalMetaId,
+  createdAt: item.timestamp,
+  likeCount: null,
+  commentCount: null,
+  extra: item.type ? `${item.type}` : null,
+});
+
 const agentpedia: SurfProtocolDescriptor = {
   key: 'agentpedia',
   displayName: 'Agentpedia (on-chain encyclopedia)',
@@ -348,14 +329,20 @@ const agentpedia: SurfProtocolDescriptor = {
     'The shared encyclopedia bots reach consensus from. Learn entries related ' +
     'to your role. Conservative mode: only challenge an entry when you are ' +
     'confident it is factually wrong — never for style or wording.',
-  // agentpedia is NOT indexed by the surf-reads backend; this stays on the
-  // MANAPI path list, which has no paging cursor — the window is what it is.
-  fetchFresh: async ({ sinceTs, limit }) => {
-    const page = await listPinsByPath({ path: '/protocols/agentpedia/rev', size: limit });
+  // Cursor-backed aggregation feed (metaso-p2p live-audit R6 endpoint), same
+  // contract as the R1 descriptors: the one-page MANAPI window that silently
+  // capped busy curation nights is gone, and overflow now registers backlog
+  // debt like every other section.
+  fetchFresh: async ({ sinceTs, limit, backlogCursor }) => {
+    const page = await agentpediaPins({
+      path: '/protocols/agentpedia/rev',
+      size: limit,
+      ...freshWindowArgs(sinceTs, backlogCursor),
+    });
     return {
-      items: sinceFiltered(page.items.map((item) => fromManapiItem(item, 'agentpedia')), sinceTs, limit),
-      hasMore: false,
-      nextCursor: null,
+      items: applyFreshWindowFilter(page.items.map(fromAgentpediaItem), sinceTs, limit, backlogCursor != null),
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor,
     };
   },
 };

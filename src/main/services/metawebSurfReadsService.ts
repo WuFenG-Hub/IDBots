@@ -65,12 +65,13 @@ function resolveOptions(options: MetawebSurfReadsOptions | undefined): Required<
 
 type Envelope = Record<string, unknown>;
 
-async function requestEnvelope(
+/** Shared fetch core: timeout mapping + invalid-response guard, no envelope logic. */
+async function fetchJsonBody(
   url: string,
   init: { method: 'GET' | 'POST'; body?: unknown },
   fetchImpl: typeof fetch,
   timeoutMs: number,
-): Promise<Envelope> {
+): Promise<{ status: number; body: Envelope | null }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -97,18 +98,28 @@ async function requestEnvelope(
     if (!body || typeof body !== 'object') {
       throw new Error(`MetaWeb surf-reads API returned an invalid response (HTTP ${response.status}).`);
     }
-    const code = Number(body.code);
-    if (code === 0) {
-      return (body.data && typeof body.data === 'object' ? body.data : {}) as Envelope;
-    }
-    const message = text(body.message) || 'unknown error';
-    if (code === 40400) {
-      throw new MetawebPinVersionsNotFoundError(message);
-    }
-    throw new Error(`MetaWeb surf-reads API error ${code}: ${message}`);
+    return { status: response.status, body };
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function requestEnvelope(
+  url: string,
+  init: { method: 'GET' | 'POST'; body?: unknown },
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+): Promise<Envelope> {
+  const { body } = await fetchJsonBody(url, init, fetchImpl, timeoutMs);
+  const code = Number(body!.code);
+  if (code === 0) {
+    return (body!.data && typeof body!.data === 'object' ? body!.data : {}) as Envelope;
+  }
+  const message = text(body!.message) || 'unknown error';
+  if (code === 40400) {
+    throw new MetawebPinVersionsNotFoundError(message);
+  }
+  throw new Error(`MetaWeb surf-reads API error ${code}: ${message}`);
 }
 
 const getEnvelope = (
@@ -473,5 +484,96 @@ export async function metawebProtocols(
       : [],
     hasMore: data.hasMore === true,
     nextCursor: text(data.nextCursor) || null,
+  };
+}
+
+// ---------------- Agentpedia pins feed (aggregation, cursor-capped) ----------------
+
+export type AgentpediaPinsItem = {
+  pinId: string;
+  path: string;
+  chainName: string;
+  /** Unix seconds of the confirmed pin. */
+  timestamp: number;
+  genesisHeight: number | null;
+  txIndex: number | null;
+  globalMetaId: string;
+  address: string;
+  title: string;
+  summary: string;
+  contentExcerpt: string;
+  type: string;
+};
+
+export type AgentpediaPinsPage = {
+  items: AgentpediaPinsItem[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
+function normalizeAgentpediaItem(raw: unknown): AgentpediaPinsItem {
+  const record = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const num = (value: unknown): number | null => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+  };
+  return {
+    pinId: text(record.pinId),
+    path: text(record.path),
+    chainName: text(record.chainName) || 'mvc',
+    timestamp: Number(record.timestamp) || 0,
+    genesisHeight: num(record.genesisHeight),
+    txIndex: num(record.txIndex),
+    globalMetaId: text(record.globalMetaId),
+    address: text(record.address),
+    title: text(record.title),
+    summary: text(record.summary),
+    contentExcerpt: text(record.contentExcerpt),
+    type: text(record.type),
+  };
+}
+
+/**
+ * GET /api/agentpedia/pins — the agentpedia fresh feed with truthful cursor
+ * paging (metaso-p2p live-audit round 2, requirement R6), replacing the
+ * one-page MANAPI path-list window that silently capped the surf digest.
+ * Same cursor contract as R1: `since` inclusive, backlog pages resumed by
+ * cursor alone (never send both).
+ *
+ * The endpoint shipped WITHOUT the {code,data} envelope — bare
+ * {items,hasMore,nextCursor}, bare {"error":...} on bad input — and metaso
+ * was asked to align it with the platform convention. This client accepts
+ * BOTH shapes so the descriptor switch is not blocked on that fix.
+ */
+export async function agentpediaPins(
+  input: {
+    /** Full path ('/protocols/agentpedia/rev'), short name ('rev'), or omit for all agentpedia paths. */
+    path?: string;
+    since?: number;
+    size?: number;
+    cursor?: string;
+  },
+  options?: MetawebSurfReadsOptions,
+): Promise<AgentpediaPinsPage> {
+  const { baseUrl, fetchImpl, timeoutMs } = resolveOptions(options);
+  const url = new URL(`${baseUrl}/api/agentpedia/pins`);
+  if (input.path) url.searchParams.set('path', input.path);
+  if (input.since !== undefined) url.searchParams.set('since', String(Math.floor(input.since)));
+  if (input.size !== undefined) url.searchParams.set('size', String(Math.floor(input.size)));
+  if (input.cursor) url.searchParams.set('cursor', input.cursor);
+
+  const { status, body } = await fetchJsonBody(url.toString(), { method: 'GET' }, fetchImpl, timeoutMs);
+  const record = body!;
+  const payload = Number(record.code) === 0 && record.data && typeof record.data === 'object'
+    ? record.data as Record<string, unknown>
+    : record;
+  if (!Array.isArray(payload.items)) {
+    const message = text(payload.error) || text(record.message) || `HTTP ${status}`;
+    throw new Error(`MetaWeb surf-reads API error: ${message}`);
+  }
+  return {
+    items: payload.items.map(normalizeAgentpediaItem),
+    hasMore: payload.hasMore === true,
+    nextCursor: text(payload.nextCursor) || null,
   };
 }
