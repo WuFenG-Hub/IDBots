@@ -5195,10 +5195,14 @@ export class CoworkRunner extends EventEmitter {
       offset: 0,
     });
     const summaries = this.experienceStore?.listDailySummaries(metabotId, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
+    // Validated capability drafts (Dream-RSI P0): only drafts that survived
+    // the dream-time validation pass are injected as proven techniques.
+    const provenTechniques = this.store.listCapabilityDrafts(metabotId, { status: 'validated', limit: 5 });
     const experienceBlock = composeExperiencePromptBlocks({
       identityText: identityEntry?.text ?? null,
       valueBoundaries: valueBoundaryEntries,
       workReviews: workReviewEntries,
+      provenTechniques,
       summaries,
     });
     // Knowledge hot-layer: surface the bot's most relevant reusable knowledge

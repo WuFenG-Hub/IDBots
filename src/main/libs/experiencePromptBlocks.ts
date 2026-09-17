@@ -141,17 +141,50 @@ export function buildRecentDailySummariesBlock(
   ].join('\n');
 }
 
+/**
+ * Validated capability drafts ("proven techniques"): dream-distilled skills
+ * and workflows that survived the dream-time validation pass against recorded
+ * history. Injected as available options the bot may apply when the situation
+ * matches — never as standing orders (Dream-RSI §5.1: strong semantic
+ * directives over-constrain behavior).
+ */
+export function buildProvenTechniquesBlock(
+  entries: Array<{ title: string; description?: string | null }>,
+  maxItems = 5,
+): string {
+  const items = entries
+    .map((entry) => ({
+      title: entry.title?.trim(),
+      description: entry.description?.trim() ?? '',
+    }))
+    .filter((entry) => Boolean(entry.title))
+    .slice(0, Math.max(1, maxItems));
+  if (items.length === 0) return '';
+  return [
+    '<proven_techniques>',
+    ...items.map((entry) => `  <technique name="${escapeXml(entry.title!)}">${escapeXml(entry.description)}</technique>`),
+    '</proven_techniques>',
+    '<instruction>',
+    'The &lt;proven_techniques&gt; block lists techniques you distilled in past dreams AND validated',
+    'against your own recorded history. When a new task matches one, apply it; when none match, work',
+    'as usual. These are proven options, not standing orders.',
+    '</instruction>',
+  ].join('\n');
+}
+
 export function buildExperiencePromptBlocksXml(input: {
   identityText?: string | null;
   summaries: ExperienceSummaryLike[];
   valueBoundaries?: Array<{ text: string }>;
   workReviews?: Array<{ text: string }>;
+  provenTechniques?: Array<{ title: string; description?: string | null }>;
   maxChars?: number;
 }): string {
   return [
     input.identityText ? buildSelfIdentityBlock(input.identityText) : '',
     buildValueBoundariesBlock(input.valueBoundaries ?? []),
     buildWorkReviewsBlock(input.workReviews ?? []),
+    buildProvenTechniquesBlock(input.provenTechniques ?? []),
     buildRecentDailySummariesBlock(input.summaries, input.maxChars),
   ]
     .filter((block) => block.trim())

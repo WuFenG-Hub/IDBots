@@ -816,6 +816,10 @@ export interface CapabilityDraft {
   capabilityType: string;
   status: string;
   createdAt: number;
+  /** Dream-time validation pass outcome; NULL while never validated. */
+  validationScore: number | null;
+  validationNotes: string | null;
+  validatedAt: number | null;
 }
 
 interface CapabilityDraftRow {
@@ -827,6 +831,9 @@ interface CapabilityDraftRow {
   capability_type: string;
   status: string;
   created_at: number | string;
+  validation_score?: number | null;
+  validation_notes?: string | null;
+  validated_at?: number | string | null;
 }
 
 export interface CoworkUserMemoryStats {
@@ -6436,8 +6443,9 @@ export class CoworkStore implements MemoryBackend {
   /**
    * Insert capability-learning candidates from a dream run into
    * `capability_drafts` (L3b procedural-memory drafts, SDD §4.1). Every row is
-   * written with status 'draft'; promotion into real skills is a later phase
-   * and this method never touches the skill tables (R4.3 — no pollution).
+   * written with status 'draft'; the dream-time validation pass later promotes
+   * them to 'validated' or demotes them to 'rejected'. This method never
+   * touches the skill tables (R4.3 — no pollution).
    * Invalid entries (empty title/description) are skipped. Returns the number
    * of rows inserted.
    */
@@ -6473,20 +6481,37 @@ export class CoworkStore implements MemoryBackend {
     return inserted;
   }
 
-  /** Read capability drafts, newest first; scoped to one MetaBot when `metabotId` is given. */
-  listCapabilityDrafts(metabotId?: number): CapabilityDraft[] {
-    const rows = metabotId !== undefined && Number.isInteger(metabotId)
-      ? this.getAll<CapabilityDraftRow>(`
-          SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at
-          FROM capability_drafts
-          WHERE metabot_id = ?
-          ORDER BY created_at DESC, id DESC
-        `, [metabotId])
-      : this.getAll<CapabilityDraftRow>(`
-          SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at
-          FROM capability_drafts
-          ORDER BY created_at DESC, id DESC
-        `);
+  /**
+   * Read capability drafts, newest first; scoped to one MetaBot when
+   * `metabotId` is given, and optionally filtered by status (e.g. 'draft'
+   * pending validation, 'validated' for prompt injection).
+   */
+  listCapabilityDrafts(
+    metabotId?: number,
+    options?: { status?: string; limit?: number },
+  ): CapabilityDraft[] {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (metabotId !== undefined && Number.isInteger(metabotId)) {
+      where.push('metabot_id = ?');
+      params.push(metabotId);
+    }
+    if (typeof options?.status === 'string' && options.status.trim()) {
+      where.push('status = ?');
+      params.push(options.status.trim());
+    }
+    const limit = Number.isInteger(options?.limit) && (options?.limit ?? 0) > 0
+      ? Math.floor(options!.limit!)
+      : null;
+    const sql = `
+      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
+             validation_score, validation_notes, validated_at
+      FROM capability_drafts
+      ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY created_at DESC, id DESC
+      ${limit != null ? `LIMIT ${limit}` : ''}
+    `;
+    const rows = this.getAll<CapabilityDraftRow>(sql, params);
     return rows.map((row) => ({
       id: Number(row.id),
       metabotId: Number(row.metabot_id),
@@ -6496,7 +6521,52 @@ export class CoworkStore implements MemoryBackend {
       capabilityType: String(row.capability_type),
       status: String(row.status),
       createdAt: Number(row.created_at),
+      validationScore: row.validation_score == null ? null : Number(row.validation_score),
+      validationNotes: row.validation_notes == null ? null : String(row.validation_notes),
+      validatedAt: row.validated_at == null ? null : Number(row.validated_at),
     }));
+  }
+
+  /**
+   * Record the dream-time validation verdict for one capability draft
+   * (Dream-RSI P0 replay gate). Only the validation columns and status move;
+   * the draft content itself is immutable dream output.
+   */
+  updateCapabilityDraftValidation(input: {
+    id: number;
+    metabotId: number;
+    status: 'draft' | 'validated' | 'rejected';
+    validationScore?: number | null;
+    validationNotes?: string | null;
+  }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0) {
+      return false;
+    }
+    const existing = this.getOne<{ id: number | string }>(
+      'SELECT id FROM capability_drafts WHERE id = ? AND metabot_id = ? LIMIT 1',
+      [id, metabotId],
+    );
+    if (!existing) return false;
+    this.db.run(`
+      UPDATE capability_drafts
+      SET status = ?, validation_score = ?, validation_notes = ?, validated_at = ?
+      WHERE id = ? AND metabot_id = ?
+    `, [
+      input.status,
+      typeof input.validationScore === 'number' && Number.isFinite(input.validationScore)
+        ? input.validationScore
+        : null,
+      typeof input.validationNotes === 'string' && input.validationNotes.trim()
+        ? input.validationNotes.trim().slice(0, 500)
+        : null,
+      Date.now(),
+      id,
+      metabotId,
+    ]);
+    this.saveDb();
+    return true;
   }
 
   updateUserMemory(input: MemoryUpdateUserMemoryInput): CoworkUserMemory | null {

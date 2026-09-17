@@ -5180,6 +5180,9 @@ async function processOne(
             limit: 5,
             offset: 0,
           }),
+          // Validated capability drafts (Dream-RSI P0): only drafts that
+          // survived the dream-time validation pass are injected.
+          provenTechniques: coworkStore.listCapabilityDrafts(metabot.id, { status: 'validated', limit: 5 }),
           summaries: getRecentDailySummaries?.(metabot.id, RECENT_SUMMARIES_PROMPT_DAYS) ?? [],
         })
       : '';

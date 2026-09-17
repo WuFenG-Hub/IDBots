@@ -3905,6 +3905,8 @@ const startSqliteDaemons = (): void => {
         offset: 0,
       }).map((entry) => ({ text: entry.text })),
     listDailySummaries: (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
+    listValidatedCapabilityDrafts: (metabotId) =>
+      getCoworkStore().listCapabilityDrafts(metabotId, { status: 'validated', limit: 5 }),
     buildTeamCultureBlock: () => {
       try {
         const cultureStore = getTeamCultureStore();

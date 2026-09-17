@@ -17,6 +17,13 @@ import {
   type DreamOutput,
 } from '../libs/dreamPrompt';
 import {
+  CAPABILITY_VALIDATION_MAX_DRAFTS,
+  CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE,
+  CAPABILITY_VALIDATION_SUMMARY_DAYS,
+  buildCapabilityValidationPrompt,
+  parseCapabilityValidationOutput,
+} from '../libs/capabilityValidationPrompt';
+import {
   chunkDreamActivity,
   estimateDreamActivityTokens,
   summariesToActivity,
@@ -655,6 +662,9 @@ export class DreamService {
       ) {
         // Nothing happened that day — no LLM call, no summary, still recorded.
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
+        // Pending capability drafts can still be validated against older
+        // diaries even when today added no new activity.
+        await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
         return;
       }
 
@@ -682,6 +692,7 @@ export class DreamService {
       this.writeDreamResults(metabotId, date, output, activity, brain.llmId, isRepair, impressionSubjects, metabot.globalmetaid);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
+      await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
@@ -739,6 +750,78 @@ export class DreamService {
     // Keep the original output rather than failing the whole run over length.
     console.warn('[DreamService] self_identity still below minimum after retry; keeping best effort output');
     return output.selfIdentity ? output : (retry.ok ? retry.output : output);
+  }
+
+  /**
+   * Dream-RSI P0 replay gate: after a dream completes, validate pending
+   * capability drafts against the bot's own recorded history (recent dream
+   * diaries). One LLM call per run, only when drafts are pending; a 'validated'
+   * verdict must also clear the score threshold, and a weak or unparseable
+   * verdict leaves the draft untouched. Runs after finishRun and never
+   * affects the dream run's recorded outcome.
+   */
+  private async validateCapabilityDraftsAfterDream(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+  ): Promise<void> {
+    try {
+      const pending = this.deps.coworkStore.listCapabilityDrafts(metabot.id, {
+        status: 'draft',
+        limit: CAPABILITY_VALIDATION_MAX_DRAFTS,
+      });
+      if (pending.length === 0) return;
+      const recentSummaries = this.deps.dreamStore.listDailySummaries(
+        metabot.id,
+        CAPABILITY_VALIDATION_SUMMARY_DAYS,
+      );
+      const prompt = buildCapabilityValidationPrompt({
+        botName: metabot.name,
+        date,
+        drafts: pending.map((draft) => ({
+          id: draft.id,
+          dreamDate: draft.dreamDate,
+          title: draft.title,
+          description: draft.description,
+          capabilityType: draft.capabilityType,
+        })),
+        recentSummaries: recentSummaries.map((summary) => ({
+          summaryDate: summary.summaryDate,
+          summaryText: summary.summaryText,
+        })),
+      });
+      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
+      const parsed = parseCapabilityValidationOutput(raw, new Set(pending.map((draft) => draft.id)));
+      if (!parsed.ok) {
+        console.warn(`[DreamService] Capability validation parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
+        return;
+      }
+      let validated = 0;
+      let rejected = 0;
+      for (const verdict of parsed.verdicts) {
+        const promote = verdict.verdict === 'validated' && verdict.score >= CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE;
+        const demote = verdict.verdict === 'rejected';
+        if (!promote && !demote) continue;
+        this.deps.coworkStore.updateCapabilityDraftValidation({
+          id: verdict.id,
+          metabotId: metabot.id,
+          status: promote ? 'validated' : 'rejected',
+          validationScore: verdict.score,
+          validationNotes: verdict.rationale,
+        });
+        if (promote) validated += 1;
+        else rejected += 1;
+      }
+      if (validated > 0 || rejected > 0) {
+        console.log(
+          `[DreamService] Capability validation for metabot ${metabot.id}: validated=${validated}, rejected=${rejected}, checked=${pending.length}`,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[DreamService] Capability validation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private writeDreamResults(
