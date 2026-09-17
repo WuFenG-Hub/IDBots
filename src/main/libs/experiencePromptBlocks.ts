@@ -4,11 +4,12 @@ import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 /**
  * Experience prompt blocks — the hot layer of the tiered experience system.
  *
- * Pure builders for the two always-on blocks injected into a bot's system
- * prompt: the protected self-identity entry ("我是谁", written by the dream
- * service) and the last few days' daily summaries. Warm/cold layers are not
- * injected; they are reached through the experience_recall tool, whose query
- * defaults and result formatting also live here.
+ * Pure builders for the always-on blocks injected alongside a bot's prompt:
+ * the protected self-identity entry ("我是谁", written by the dream service),
+ * dream-distilled value boundaries, past work reviews, and the last few days'
+ * daily summaries. Warm/cold layers are not injected; they are reached through
+ * the experience_recall tool, whose query defaults and result formatting also
+ * live here.
  */
 
 export const RECENT_SUMMARIES_PROMPT_DAYS = 7;
