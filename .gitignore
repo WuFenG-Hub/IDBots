@@ -62,6 +62,7 @@ tests/*
 !tests/rsiLadderIndex.test.ts
 !tests/rsiLadderMountStatic.test.ts
 !tests/rsiLadderRegistryCli.test.ts
+!tests/rsiLadderRegistryE2e.test.ts
 !tests/mvcSponsorCircuitBreaker.test.mjs
 !tests/groupTaskChatMode.test.mjs
 !tests/devWindowLoadRetry.test.mjs

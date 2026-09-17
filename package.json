@@ -86,7 +86,7 @@
     "release:runbook": "node scripts/release-runbook.mjs",
     "preelectron:dev:dsh": "npm run check:dsh-deps",
     "electron:dev:dsh": "cross-env IDBOTS_USER_DATA_PATH=./.dev-userdata-dsh IDBOTS_APP_DATA_PATH=./.dev-appdata-dsh concurrently \"vite --host 127.0.0.1 --port 5185\" \"wait-on -v -t 120000 -d 10000 http://127.0.0.1:5185 && node scripts/wait-electron-dev-build.mjs dist-electron && cross-env NODE_ENV=development IDBOTS_DISABLE_SINGLE_INSTANCE_LOCK=1 ELECTRON_START_URL=http://127.0.0.1:5185 electron .\"",
-    "test:rsi-ladder": "npx tsx --test tests/rsiLadderCompute.test.ts tests/rsiLadderIndex.test.ts tests/rsiLadderMountStatic.test.ts tests/rsiLadderRegistryCli.test.ts",
+    "test:rsi-ladder": "npx tsx --test tests/rsiLadderCompute.test.ts tests/rsiLadderIndex.test.ts tests/rsiLadderMountStatic.test.ts tests/rsiLadderRegistryCli.test.ts tests/rsiLadderRegistryE2e.test.ts",
     "rsi-ladder:dedup": "npx tsx scripts/rsi-ladder-registry.ts dedup",
     "rsi-ladder:receipt": "npx tsx scripts/rsi-ladder-registry.ts receipt"
   },
