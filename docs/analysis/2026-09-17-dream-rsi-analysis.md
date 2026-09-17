@@ -183,7 +183,15 @@ guidance injected into every prompt. Guardrails:
 - **Aggressive exploitation.** §5.1 warns that over-fitting guidance to history reduces the
   diversity that a social bot needs to stay interesting.
 
-## 6. Suggested sequencing
+## 6. Scope guardrails (owner decision, 2026-09-17)
+
+- `self_identity` (self-cognition) and `impression_updates` (impressions of other
+  identities) are the two most core outputs of the dream system and are **frozen for now**:
+  no changes to their prompt sections, write paths, gating, or consumption. Proposals P0–P2
+  operate only on `capability_drafts`, `value_lessons`, `knowledge_points`, telemetry, and
+  scheduling — they must leave the identity and impression pipelines untouched.
+
+## 7. Suggested sequencing
 
 1. Quick wins (work_reviews injection, dream toggle UI) — small, independent.
 2. P0 capability validation loop — closes the RSI loop with existing data.
