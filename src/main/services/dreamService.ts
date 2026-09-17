@@ -426,8 +426,13 @@ export class DreamService {
     brain: DreamBrainPair,
     fragmentOutputTokens: number,
   ): Promise<DreamFragmentSummary> {
+    // Cache key mixes in the fragment prompt builder's own source so editing
+    // the template invalidates stale summaries automatically — previously only
+    // a manual DREAM_VERSION bump did that.
     const contentHash = createHash('sha256')
       .update(JSON.stringify(chunk))
+      .update('\n--prompt--\n')
+      .update(buildDreamFragmentPrompt.toString())
       .digest('hex');
     const existing = this.deps.dreamStore.getDreamFragment(metabot.id, date, chunk.fragmentKey);
     if (
