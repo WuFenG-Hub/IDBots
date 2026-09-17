@@ -10600,12 +10600,11 @@ if (!gotTheLock) {
         if (!session || session.sessionType !== 'a2a') {
           return { success: false, error: 'A2A session not found' };
         }
-        const beforeCursor = input?.beforeCursor
-          && typeof input.beforeCursor.episodeIndex === 'number'
-          && typeof input.beforeCursor.beforeSequence === 'number'
+        const rawCursor = input?.beforeCursor;
+        const beforeCursor = rawCursor
           ? {
-              episodeIndex: input.beforeCursor.episodeIndex,
-              beforeSequence: input.beforeCursor.beforeSequence,
+              episodeIndex: typeof rawCursor.episodeIndex === 'number' ? rawCursor.episodeIndex : null,
+              beforeSequence: typeof rawCursor.beforeSequence === 'number' ? rawCursor.beforeSequence : null,
             }
           : null;
         const page = getCoworkStore().getA2AConversationHistoryPage(sessionId, {

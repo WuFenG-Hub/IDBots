@@ -139,6 +139,12 @@ function createEmptyReplyDaemonHarness() {
         .reverse()
         .slice(0, limit);
     },
+    getRecentA2AThreadMessages(sessionId, limit = 400) {
+      return this.getRecentPrivateA2AMessages(sessionId, limit);
+    },
+    listA2AConversationEpisodes() {
+      return [];
+    },
     getRecentPrivateA2AMessages(sessionId, requestedLimit = 100) {
       const limit = Number.isFinite(requestedLimit)
         ? Math.max(1, Math.min(1000, Math.floor(requestedLimit)))

@@ -48,6 +48,10 @@ import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import type { MetaidDataPayload } from './metaidCore';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
+import {
+  buildA2AEpisodeContinuityPromptBlock,
+  maybeRollOverPrivateChatEpisode,
+} from './a2aEpisodeRollover';
 import { parseOpenTeamEnvelope, type OpenTeamInvitePayload, type OpenTeamKickPayload } from './openTeamProtocols';
 import {
   handleIncomingOpenTeamInvite,
@@ -1384,6 +1388,11 @@ export function analyzePrivateChatA2AConversation(params: {
   let activeSegment: PrivateChatA2AContextMessage[] = [];
   let previousSegmentTail: PrivateChatA2AContextMessage[] = [];
   let previousTimestamp: number | null = null;
+  // Thread-scoped bye pressure: incoming messages since the last outgoing
+  // bye. Deliberately NOT reset by conversation gaps or episode rollovers —
+  // only a real bye (conversation end) resets it. Gap splits above only
+  // govern the context window segmentation.
+  let incomingSinceBye = 0;
 
   for (const message of sortedMessages) {
     const timestamp = Number.isFinite(message.timestamp) ? message.timestamp : params.now ?? Date.now();
@@ -1404,6 +1413,7 @@ export function analyzePrivateChatA2AConversation(params: {
     if (direction === 'outgoing' && isByeText(content)) {
       previousSegmentTail = [];
       activeSegment = [];
+      incomingSinceBye = 0;
       continue;
     }
 
@@ -1416,6 +1426,9 @@ export function analyzePrivateChatA2AConversation(params: {
       timestamp,
       direction,
     });
+    if (direction === 'incoming') {
+      incomingSinceBye += 1;
+    }
   }
 
   const activeContextMessages = activeSegment.slice(-PRIVATE_CHAT_CONTEXT_MAX_MESSAGES);
@@ -1427,7 +1440,7 @@ export function analyzePrivateChatA2AConversation(params: {
     ...previousContextMessages,
     ...activeContextMessages,
   ];
-  const incomingTurnCount = activeSegment.filter((message) => message.direction === 'incoming').length;
+  const incomingTurnCount = incomingSinceBye;
   return {
     contextMessages,
     incomingTurnCount,
@@ -5014,13 +5027,44 @@ async function processOne(
       return;
     }
 
-    const { sessionId, episodeStarted } = await resolvePrivateConversationSession(
+    const resolvedConversation = await resolvePrivateConversationSession(
       coworkStore,
       metabot.id,
       metabot.globalmetaid,
       row,
       plaintext
     );
+    // Long-lived threads roll over to a fresh episode session past the message
+    // threshold (bounded kernel context, handoff summary for continuity). The
+    // inbound message below then lands in the successor session.
+    const rolloverBrain = metabotBrainOptions(metabot);
+    const rollover = await maybeRollOverPrivateChatEpisode({
+      coworkStore,
+      sessionId: resolvedConversation.sessionId,
+      externalConversationId,
+      metabotId: metabot.id,
+      localGlobalMetaId: metabot.globalmetaid,
+      peerGlobalMetaId: fromGlobalMetaId,
+      peerName: (row.from_name as string | null) ?? null,
+      peerAvatar: (row.from_avatar as string | null) ?? null,
+      performChat,
+      llmId: rolloverBrain.llmId,
+      llmProvider: rolloverBrain.llmProvider,
+      fallbackLlmId: rolloverBrain.fallbackLlmId,
+      fallbackLlmProvider: rolloverBrain.fallbackLlmProvider,
+      effort: rolloverBrain.effort,
+      fallbackEffort: rolloverBrain.fallbackEffort,
+      emitLog,
+    });
+    let sessionId = resolvedConversation.sessionId;
+    let episodeStarted = resolvedConversation.episodeStarted;
+    if (rollover) {
+      sessionId = rollover.sessionId;
+      episodeStarted = true;
+      // Pending wakes reference the retired session's row bookkeeping; the
+      // rollover turn re-arms on its own outcome if it stays silent.
+      cancelPrivateChatA2AWakesForConversation(externalConversationId, 'episode rollover', emitLog);
+    }
     // Keep the session's stored peer name/avatar in sync with the latest
     // chain profile (socket userInfo may be stale or absent); the refresh is
     // TTL-cached so it stays cheap on busy conversations.
@@ -5050,6 +5094,7 @@ async function processOne(
         ...(episodeStarted ? {
           refreshSessionSummary: true,
           a2aEpisodeStarted: true,
+          ...(rollover ? { previousEpisodeSessionId: rollover.previousSessionId } : {}),
         } : {}),
       },
       emitToRenderer,
@@ -5101,7 +5146,17 @@ async function processOne(
         );
       }
     }
-    const promptMemoryContext = [memoryContext, cognitionContext].filter(Boolean).join('\n\n');
+    // Successor episodes see the closed episodes' handoff summaries as their
+    // own memory of the thread (topics, conclusions, open commitments).
+    let episodeContinuityContext = '';
+    try {
+      episodeContinuityContext = buildA2AEpisodeContinuityPromptBlock(
+        coworkStore
+          .listA2AConversationEpisodes(sessionId)
+          .filter((episode) => episode.sessionId !== sessionId),
+      );
+    } catch { /* thread lookup is best-effort; non-thread sessions have none */ }
+    const promptMemoryContext = [memoryContext, cognitionContext, episodeContinuityContext].filter(Boolean).join('\n\n');
 
     const brain = metabotBrainOptions(metabot);
     const llmId = brain.llmId;
@@ -5116,7 +5171,13 @@ async function processOne(
       1000,
       Math.max(120, normalizeA2AMaxIncomingTurns(metabot.a2a_max_incoming_turns ?? undefined) * 4 + 40),
     );
-    const recentPrivateMessages = coworkStore.getRecentPrivateA2AMessages(sessionId, contextMessageLimit);
+    // Bye pressure is thread-scoped: count incoming messages since the last
+    // outgoing bye ACROSS episode rollovers, so a long-lived conversation
+    // cannot outlive the max-incoming-turns policy by rotating sessions.
+    const recentPrivateMessages = coworkStore.getRecentA2AThreadMessages(
+      sessionId,
+      Math.max(contextMessageLimit, 400),
+    );
     const conversationAnalysis = analyzePrivateChatA2AConversation({
       messages: recentPrivateMessages.length > 0 ? recentPrivateMessages : [userMessage],
       maxIncomingTurns: metabot.a2a_max_incoming_turns ?? undefined,
