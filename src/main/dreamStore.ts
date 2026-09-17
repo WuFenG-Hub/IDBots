@@ -184,6 +184,23 @@ export interface DreamChainReadActivity {
   lastReadAtMs: number;
 }
 
+/** Structural implicit-signal kinds (mechanical facts, no sentiment). */
+export type DreamImplicitSignalKind = 'reask' | 'unanswered_burst' | 'repeat_order';
+
+/**
+ * One structural fact collected by the mechanical implicit-signal layer
+ * (libs/implicitSignals.ts). Carries numbers, never a sentiment label — what
+ * the fact means is the dreaming bot's call.
+ */
+export interface DreamImplicitSignal {
+  kind: DreamImplicitSignalKind;
+  sessionId: string | null;
+  /** For reask: index of the SECOND user message (the restated one). */
+  messageIndex?: number;
+  /** Rendered fact with numbers — no sentiment label attached. */
+  text: string;
+}
+
 export interface DreamDayActivity {
   sessions: DreamSessionActivity[];
   taskRuns: DreamTaskRunActivity[];
@@ -197,6 +214,8 @@ export interface DreamDayActivity {
   chainWrites?: DreamChainWriteActivity[];
   /** Chain pins this bot fully read that day (chain content history). */
   chainReads?: DreamChainReadActivity[];
+  /** Structural implicit signals, attached by the dream service post-query. */
+  implicitSignals?: DreamImplicitSignal[];
 }
 
 interface DreamRunRow {

@@ -30,9 +30,9 @@ const CONTEXT_WINDOW_MESSAGES = 6;
 const LOW_RATING_THRESHOLD = 2;
 
 export interface CounterfactualDecisionPoint {
-  /** Stable id echoed back by the LLM (`msg:...` / `task:...`). */
+  /** Stable id echoed back by the LLM (`msg:...` / `task:...` / `implicit:...`). */
   id: string;
-  kind: 'thumbs_down' | 'low_rating';
+  kind: 'thumbs_down' | 'low_rating' | 'implicit';
   /** What led up to the decision point. */
   situation: string;
   /** What the bot actually did. */
@@ -106,7 +106,55 @@ export function extractNegativeDecisionPoints(
       outcome: `人类验收评分 ${task.rating}/5${task.ratingComment?.trim() ? `,评语:「${truncate(task.ratingComment.trim(), 200)}」` : '。(无评语)'}`,
     }));
 
-  return [...thumbsDown.map((entry) => entry.point), ...lowRatings].slice(0, Math.max(1, maxPoints));
+  // Implicit candidates (lowest priority): structural facts only, never
+  // pre-labeled negative — the replay itself decides whether the recorded
+  // action was actually fine, and the margin gate absorbs false alarms.
+  const implicit: CounterfactualDecisionPoint[] = [];
+  for (const signal of activity.implicitSignals ?? []) {
+    if (signal.kind !== 'reask' && signal.kind !== 'unanswered_burst') continue;
+    const session = activity.sessions.find((entry) => entry.sessionId === signal.sessionId);
+    if (!session || signal.messageIndex == null) continue;
+    if (signal.kind === 'reask') {
+      // The decision under review is the assistant reply the user restated over.
+      let anchorIndex = -1;
+      for (let index = signal.messageIndex - 1; index >= 0; index -= 1) {
+        if (session.messages[index].type === 'assistant') {
+          anchorIndex = index;
+          break;
+        }
+      }
+      if (anchorIndex < 0) continue;
+      const context = session.messages
+        .slice(Math.max(0, anchorIndex - CONTEXT_WINDOW_MESSAGES), anchorIndex)
+        .map((entry) => `${entry.type === 'user' ? '对方' : '我'}: ${truncate(entry.content.replace(/\s+/g, ' ').trim(), CONTEXT_MESSAGE_MAX_CHARS)}`)
+        .join('\n');
+      implicit.push({
+        id: `implicit:${session.sessionId}:${anchorIndex}`,
+        kind: 'implicit',
+        situation: `会话「${session.title}」:\n${context || '(该回复之前没有更多上下文)'}`,
+        botAction: truncate(session.messages[anchorIndex].content.replace(/\s+/g, ' ').trim(), ACTION_MAX_CHARS),
+        outcome: `${signal.text}。(隐式信号,未经人类明确评价,可能并非负面)`,
+      });
+    } else {
+      const tail = session.messages
+        .slice(Math.max(0, signal.messageIndex - CONTEXT_WINDOW_MESSAGES))
+        .map((entry) => `${entry.type === 'user' ? '对方' : '我'}: ${truncate(entry.content.replace(/\s+/g, ' ').trim(), CONTEXT_MESSAGE_MAX_CHARS)}`)
+        .join('\n');
+      implicit.push({
+        id: `implicit:${session.sessionId}:${signal.messageIndex}:silent`,
+        kind: 'implicit',
+        situation: `会话「${session.title}」:\n${tail}`,
+        botAction: '(没有回复)',
+        outcome: `${signal.text}。(隐式信号,未经人类明确评价,可能并非负面)`,
+      });
+    }
+  }
+
+  return [
+    ...thumbsDown.map((entry) => entry.point),
+    ...lowRatings,
+    ...implicit,
+  ].slice(0, Math.max(1, maxPoints));
 }
 
 export function buildCounterfactualReplayPrompt(input: {

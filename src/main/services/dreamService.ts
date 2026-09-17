@@ -29,6 +29,7 @@ import {
   parseCounterfactualReplayOutput,
   pickCounterfactualLesson,
 } from '../libs/counterfactualReplayPrompt';
+import { extractImplicitSignals } from '../libs/implicitSignals';
 import {
   WEEKLY_DREAM_MIN_DAYS,
   buildWeeklyDreamPrompt,
@@ -687,6 +688,9 @@ export class DreamService {
       }
       const { startMs, endMs } = getDayBoundsMs(date);
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
+      // Mechanical implicit-signal collection: structural facts only, attached
+      // before prompt building so the dream itself judges what they mean.
+      activity.implicitSignals = extractImplicitSignals(activity);
       const impressionSubjects = this.buildDreamImpressionSubjects(metabot, date);
       const existingKnowledge = this.buildExistingKnowledge(metabot);
       if (
@@ -710,6 +714,7 @@ export class DreamService {
         this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
           emptyDay: true,
           estimatedActivityTokens: 0,
+          implicitSignals: 0,
           validation,
           replay,
           weeklyLongDream,
@@ -752,6 +757,8 @@ export class DreamService {
         fragmentCount: prepared.meta.fragmentCount,
         estimatedActivityTokens: prepared.meta.estimatedInputTokens,
         outputChars: JSON.stringify(output).length,
+        implicitSignals: activity.implicitSignals?.length ?? 0,
+        diaryUnmatchedRefs: this.countUnmatchedDiaryRefs(output.dailySummary, activity),
         validation,
         replay,
         weeklyLongDream,
@@ -861,9 +868,22 @@ export class DreamService {
         console.warn(`[DreamService] Capability validation parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
         return { ...zero, checked: pending.length };
       }
+      // Grounding gate: a verdict whose rationale cites a diary date that was
+      // never provided as evidence is a hallucinated citation — drop it.
+      const evidenceDates = new Set([date, ...recentSummaries.map((summary) => summary.summaryDate)]);
+      const groundedVerdicts = parsed.verdicts.filter((verdict) => {
+        const citedDates = verdict.rationale.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
+        return citedDates.every((cited) => evidenceDates.has(cited));
+      });
+      const droppedUngrounded = parsed.verdicts.length - groundedVerdicts.length;
+      if (droppedUngrounded > 0) {
+        console.warn(
+          `[DreamService] Dropped ${droppedUngrounded} capability verdict(s) citing unrecorded diary dates for metabot ${metabot.id}`,
+        );
+      }
       let validated = 0;
       let rejected = 0;
-      for (const verdict of parsed.verdicts) {
+      for (const verdict of groundedVerdicts) {
         const promote = verdict.verdict === 'validated' && verdict.score >= CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE;
         const demote = verdict.verdict === 'rejected';
         if (!promote && !demote) continue;
@@ -905,11 +925,15 @@ export class DreamService {
     brain: DreamBrainPair,
     date: string,
     activity: DreamDayActivity,
-  ): Promise<{ points: number; lessons: number }> {
-    const zero = { points: 0, lessons: 0 };
+  ): Promise<{ points: number; lessons: number; pointsByKind: Record<string, number> }> {
+    const zero = { points: 0, lessons: 0, pointsByKind: {} as Record<string, number> };
     try {
       const points = extractNegativeDecisionPoints(activity);
-      if (points.length === 0) return zero;
+      if (points.length === 0) return { ...zero, pointsByKind: {} };
+      const pointsByKind: Record<string, number> = {};
+      for (const point of points) {
+        pointsByKind[point.kind] = (pointsByKind[point.kind] ?? 0) + 1;
+      }
       const prompt = buildCounterfactualReplayPrompt({
         botName: metabot.name,
         date,
@@ -919,7 +943,7 @@ export class DreamService {
       const parsed = parseCounterfactualReplayOutput(raw, new Set(points.map((point) => point.id)));
       if (!parsed.ok) {
         console.warn(`[DreamService] Counterfactual replay parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
-        return { points: points.length, lessons: 0 };
+        return { points: points.length, lessons: 0, pointsByKind };
       }
       const seenLessons = new Set<string>();
       let written = 0;
@@ -945,7 +969,7 @@ export class DreamService {
           `[DreamService] Counterfactual replay for metabot ${metabot.id} date ${date}: points=${points.length}, lessons=${written}`,
         );
       }
-      return { points: points.length, lessons: written };
+      return { points: points.length, lessons: written, pointsByKind };
     } catch (error) {
       console.warn(
         `[DreamService] Counterfactual replay failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1035,6 +1059,33 @@ export class DreamService {
       );
       return false;
     }
+  }
+
+  /**
+   * Grounding telemetry (F2): count 「」-quoted spans in the diary that match
+   * no real session title, task title, or peer name from the day's record.
+   * Telemetry-only — a noisy proxy for hallucinated references, never a gate.
+   */
+  private countUnmatchedDiaryRefs(summaryText: string, activity: DreamDayActivity): number {
+    const knownNames = new Set<string>();
+    for (const session of activity.sessions) {
+      if (session.title.trim()) knownNames.add(session.title.trim());
+      if (session.peerName?.trim()) knownNames.add(session.peerName.trim());
+    }
+    for (const task of activity.groupTasks ?? []) {
+      if (task.title.trim()) knownNames.add(task.title.trim());
+    }
+    for (const chat of activity.groupChats ?? []) {
+      if (chat.title.trim()) knownNames.add(chat.title.trim());
+    }
+    let unmatched = 0;
+    for (const match of summaryText.matchAll(/「([^」]{2,40})」/g)) {
+      const span = (match[1] ?? '').trim();
+      if (!span) continue;
+      const known = [...knownNames].some((name) => span === name || span.includes(name) || name.includes(span));
+      if (!known) unmatched += 1;
+    }
+    return unmatched;
   }
 
   private writeDreamResults(
