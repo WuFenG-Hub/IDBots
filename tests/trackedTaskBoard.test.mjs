@@ -653,7 +653,7 @@ test('structured facts are authoritative and the diagnostic strings derive from 
       for (const [index, fact] of card.reasonCodes.entries()) {
         assert.equal(typeof fact.code, 'string', `${card.id}[${index}]: code missing`);
         assert.ok(REASON_KEYS[fact.code], `${card.id}[${index}]: code ${fact.code} has no reason-side i18n key`);
-        assert.equal(typeof fact.args, 'object', `${card.id}[${index}]: args missing`);
+        assert.equal(typeof fact.params, 'object', `${card.id}[${index}]: args missing`);
       }
       // Rule 4: a suggestion exists exactly when the card is due for closure.
       assert.equal(
@@ -668,7 +668,7 @@ test('structured facts are authoritative and the diagnostic strings derive from 
         );
         assert.equal(
           card.closureSuggestion,
-          RENDER(card.closureSuggestionCode, card.closureSuggestionArgs),
+          RENDER(card.closureSuggestionCode, card.closureSuggestionParams),
           `${card.id}: the diagnostic string must be derived from code+args, never written twice`,
         );
       } else {
@@ -680,7 +680,7 @@ test('structured facts are authoritative and the diagnostic strings derive from 
     const due = cardById(board, 'seed-task-14');
     assert.equal(due.closureDue, true);
     assert.equal(due.closureSuggestionCode, 'stale_inactivity');
-    assert.equal(typeof due.closureSuggestionArgs.days, 'number');
+    assert.equal(typeof due.closureSuggestionParams.days, 'number');
     assert.match(due.closureSuggestion, /day\(s\)/);
 
     const clean = cardById(board, 'seed-task-05');
