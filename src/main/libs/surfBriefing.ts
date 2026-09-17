@@ -331,6 +331,21 @@ const formatItemLine = (item: SurfItem): string => {
   return `- [${item.pinId}] ${title} (${date}${stats ? `; ${stats}` : ''})`;
 };
 
+/**
+ * Factual display-title shape, nothing linguistic: a title of at most 2
+ * non-whitespace characters, or one without a single letter/digit in any
+ * script (pure emoji/punctuation), carries nothing to judge a pin by. Live
+ * surf digests ran ~half of the buzz feed as such one-liners ("2", emoji,
+ * "…"). Folding is DISPLAY-ONLY — items stay in the briefing, the seen
+ * ledger, and the watermark math; nothing is dropped.
+ */
+const isLowSignalDisplayTitle = (item: SurfItem): boolean => {
+  const title = (item.title || item.summary.slice(0, 60) || '').trim();
+  if (!title) return true;
+  if (title.length <= 2) return true;
+  return !/[\p{L}\p{N}]/u.test(title);
+};
+
 const formatInboxLine = (item: SurfInboxItem): string => {
   const date = item.createdAt > 0 ? new Date(item.createdAt * 1000).toISOString().slice(0, 10) : '?';
   const actor = item.actorName || item.actorGlobalMetaId || 'unknown';
@@ -364,11 +379,16 @@ export function renderSurfBriefingMarkdown(briefing: SurfBriefing): string {
       lines.push(`(fetch failed: ${section.error})`);
     }
     const items = briefing.items.filter((item) => item.protocolKey === section.key);
-    for (const item of items.slice(0, 20)) {
+    const signalItems = items.filter((item) => !isLowSignalDisplayTitle(item));
+    const foldedCount = items.length - signalItems.length;
+    for (const item of signalItems.slice(0, 20)) {
       lines.push(formatItemLine(item));
     }
-    if (items.length > 20) {
-      lines.push(`- … and ${items.length - 20} more`);
+    if (signalItems.length > 20) {
+      lines.push(`- … and ${signalItems.length - 20} more`);
+    }
+    if (foldedCount > 0) {
+      lines.push(`- … ${foldedCount} very short / symbol-only post(s) folded out of this listing (still briefed and in the seen ledger)`);
     }
     if (section.droppedByTotalCap > 0) {
       lines.push(`- … plus ${section.droppedByTotalCap} more held back by the run cap — they stay unseen and return next surf`);
