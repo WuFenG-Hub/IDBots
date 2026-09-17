@@ -84,10 +84,14 @@ interface ChainHit {
 }
 
 /** 链上分支查重：抓 /protocols/simplelog，按 taskkey=local:88 解析出登记 improvement_id。 */
+/** 防御性扫描上限：与视图服务 MAX_PAGES 同一裁决（全量回填，5000 条防御帽）。 */
+const MAX_SCAN_PAGES = 50;
+
 async function fetchChainHits(): Promise<ChainHit[]> {
   const hits: ChainHit[] = [];
   let cursor: string | undefined;
-  for (let page = 0; page < 5; page += 1) {
+  let truncated = false;
+  for (let page = 0; page < MAX_SCAN_PAGES; page += 1) {
     const url = new URL('api/pin/path/list', `${MANAPI_BASE}/`);
     url.searchParams.set('path', '/protocols/simplelog');
     url.searchParams.set('size', '100');
@@ -123,17 +127,29 @@ async function fetchChainHits(): Promise<ChainHit[]> {
     const next = response?.data?.nextCursor;
     if (typeof next !== 'string' || !next || list.length === 0) break;
     cursor = next;
+    if (page === MAX_SCAN_PAGES - 1) truncated = true;
+  }
+  if (truncated) {
+    console.error('[rsi-ladder] 警告：链上扫描达到防御性上限（50 页/5000 条）仍有余页，查重结果可能不完整——请人工复核或提高上限');
   }
   return hits;
 }
 
+/** 子命令判定（互斥分发；无/未知子命令一律 fail-closed，杜绝静默串命令）。 */
+export type RegistryCommand = 'dedup' | 'receipt';
+
+export function resolveCommand(argv: string[]): RegistryCommand | null {
+  const positional = argv.find((token) => !token.startsWith('--'));
+  return positional === 'dedup' || positional === 'receipt' ? positional : null;
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
-  const command = process.argv.slice(2).find((token) => !token.startsWith('--'));
+  const command = resolveCommand(process.argv.slice(2));
   const dataDir = resolveDataDir(args['data-dir']);
   const indexPath = registrationIndexPathFor(dataDir);
 
-  if (command === 'dedup' || args['improvement-id']) {
+  if (command === 'dedup') {
     const improvementId = args['improvement-id'] ?? '';
     if (!IMPROVEMENT_ID_RE.test(improvementId)) {
       console.error(`[rsi-ladder] improvement-id 不合法（需全量 64hex 或 64hex+i0）：${improvementId}`);
@@ -166,7 +182,7 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  if (command === 'receipt' || args['registered-pin']) {
+  if (command === 'receipt') {
     const registeredPin = args['registered-pin'] ?? '';
     const improvementId = args['improvement-id'] ?? '';
     const initiator = args.initiator === 'owner' ? 'owner' : args.initiator === 'bot' ? 'bot' : null;
@@ -222,9 +238,12 @@ async function main(): Promise<number> {
   return 1;
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((error) => {
-    console.error('[rsi-ladder] 未捕获错误：', error);
-    process.exit(1);
-  });
+// 仅直接执行时运行（被测试 import 时不产生副作用——P1 修复的可测性前提）。
+if (require.main === module) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((error) => {
+      console.error('[rsi-ladder] 未捕获错误：', error);
+      process.exit(1);
+    });
+}

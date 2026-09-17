@@ -172,6 +172,10 @@ export class RsiLadderCardService {
       const next = response?.data?.nextCursor;
       if (typeof next !== 'string' || !next || list.length === 0) break;
       cursor = next;
+      if (page === MAX_PAGES - 1) {
+        // 截断显式警告（loop 修线4）：防御帽触发绝不静默。
+        console.warn('[rsiLadderCard] 链上扫描达到防御性上限（50 页/5000 条）仍有余页，快照基于部分历史');
+      }
     }
     return records;
   }
