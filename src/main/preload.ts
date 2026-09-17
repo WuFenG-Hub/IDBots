@@ -471,6 +471,8 @@ contextBridge.exposeInMainWorld('electron', {
       beforeCursor?: { episodeIndex: number | null; beforeSequence: number | null } | null;
       limit?: number;
     }) => ipcRenderer.invoke('cowork:session:getA2AHistoryPage', input),
+    getA2AEpisodes: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:getA2AEpisodes', sessionId),
     listSessions: (options?: { metabotId?: number | null }) =>
       ipcRenderer.invoke('cowork:session:list', options),
     processServiceRefund: (sessionId: string) =>

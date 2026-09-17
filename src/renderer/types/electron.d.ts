@@ -325,8 +325,20 @@ interface CoworkMessagePage {
 }
 
 interface CoworkA2AHistoryCursor {
+  episodeIndex: number | null;
+  beforeSequence: number | null;
+}
+
+interface CoworkA2AEpisodeInfo {
+  sessionId: string;
+  threadId: string;
   episodeIndex: number;
-  beforeSequence: number;
+  previousSessionId: string | null;
+  nextSessionId: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  closeReason: string | null;
+  summary: string | null;
 }
 
 interface CoworkA2AHistoryPage {
@@ -1120,6 +1132,7 @@ interface IElectronAPI {
     setMessageFeedback: (input: { messageId: string; rating: 'up' | 'down' | null; comment?: string | null }) => Promise<{ success: boolean; feedback?: CoworkMessageFeedbackRecord | null; error?: string }>;
     listSessionFeedback: (input: { sessionId: string }) => Promise<{ success: boolean; feedback?: CoworkMessageFeedbackRecord[]; error?: string }>;
     getA2AConversationHistoryPage: (input: { sessionId: string; beforeCursor?: CoworkA2AHistoryCursor | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkA2AHistoryPage; error?: string }>;
+    getA2AEpisodes: (sessionId: string) => Promise<{ success: boolean; episodes?: CoworkA2AEpisodeInfo[]; error?: string }>;
     listSessions: (options?: { metabotId?: number | null }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
     processServiceRefund: (sessionId: string) => Promise<{
       success: boolean;
