@@ -28,6 +28,7 @@ import type {
   TaskCommTrendRow,
 } from '../../types/cowork';
 import MetaIDContactPanel, { ContactGlobalMetaIdHint } from './MetaIDContactPanel';
+import DreamTelemetryPanel from './DreamTelemetryPanel';
 import BrainIcon from '../icons/BrainIcon';
 
 type MetabotOption = {
@@ -65,6 +66,7 @@ type DreamDiaryRun = {
   llmId: string | null;
   dreamVersion: number;
   error: string | null;
+  telemetry?: Record<string, unknown> | null;
   startedAt: number;
   completedAt: number | null;
   nextRetryAt: number | null;
@@ -1363,6 +1365,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       {dreamNotice && (
         <div className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">{dreamNotice}</div>
       )}
+      <DreamTelemetryPanel runs={dreamRuns} />
       <div className="max-h-[520px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
         {dreamLoading ? (
           <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('loading')}</div>
