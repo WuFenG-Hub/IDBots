@@ -273,6 +273,13 @@ export interface TrackedCardDerivationInput {
 
 export interface TrackedCardDerivation {
   cardState: TrackedCardState;
+  /**
+   * True when `admitted` arrived as a non-boolean (e.g. a caller that forgot it).
+   * The derivation still fails closed to `closureDue: false`, but the miss is
+   * REPORTED rather than swallowed: a future caller that bypasses
+   * `trackAdmission` would otherwise silently stop queueing anything.
+   */
+  admissionInputMissing: boolean;
   closureDue: boolean;
   closureWarn: boolean;
   closureDueLevel: TrackedClosureDueLevel | null;
@@ -374,6 +381,7 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
   // omits it must NOT produce a non-boolean `closureDue`. It fails closed to
   // `false` — the quiet direction, so a missed argument can never masquerade as
   // "nothing needs closure" through a truthy accident.
+  const admissionInputMissing = typeof input.admitted !== 'boolean';
   const closureDue = input.admitted === true && !closed
     && (zombie || terminalWithoutConclusion || sessionsEnded);
   const closureDueLevel: TrackedClosureDueLevel | null = !closureDue
@@ -474,6 +482,7 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
 
   return {
     cardState,
+    admissionInputMissing,
     closureDue,
     closureWarn,
     closureDueLevel,
@@ -569,6 +578,8 @@ export interface TrackedCardSummary {
   admitted: boolean;
   /** Which admission rules matched; empty exactly when the card is archived. */
   admissionMatched: TrackedAdmissionRule[];
+  /** Diagnostic: the admission input was not a boolean for this card. Must be false. */
+  admissionInputMissing: boolean;
   /** Cheap, deterministic ordering signal for the "needs my action" list view. */
   needsOwnerAction: boolean;
   actionRank: number;
@@ -592,6 +603,12 @@ export interface TrackedCardCounts {
   archived: number;
   /** Diagnostic only: registry ids that no longer exist in the ledger (freeze §2 ADM-1). */
   staleRegistration: number;
+  /**
+   * Diagnostic only: cards whose admission input was missing/not a boolean.
+   * Expected 0 — the board always supplies `trackAdmission`'s verdict, so a
+   * non-zero value means some caller bypassed it and is silently queueing nothing.
+   */
+  admissionInputMissing: number;
   closureDue: number;
   /** Level 1: idle past the zombie threshold. */
   zombieLevel: number;
@@ -883,6 +900,7 @@ export class TrackedTaskBoardService {
         admitted: admittedCards.length,
         archived: archivedCards.length,
         staleRegistration: [...admission.registeredIds].filter((id) => !ledgerIds.has(id)).length,
+        admissionInputMissing: built.filter((card) => card.admissionInputMissing).length,
         closureDue: sorted.filter((card) => card.closureDue).length,
         zombieLevel: sorted.filter((card) => card.closureDueLevel === 'zombie').length,
         terminalNoConclusionLevel: sorted.filter(
@@ -1443,6 +1461,7 @@ export class TrackedTaskBoardService {
       scheduledTaskId,
       admitted: admissionVerdict.admitted,
       admissionMatched: admissionVerdict.matched,
+      admissionInputMissing: derivation.admissionInputMissing,
       needsOwnerAction: derivation.cardState === 'waiting_decision' || derivation.closureDue,
       actionRank: trackedCardActionRank({
         state: derivation.cardState,

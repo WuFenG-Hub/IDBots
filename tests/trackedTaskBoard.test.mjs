@@ -1409,4 +1409,22 @@ test('a missing `admitted` input cannot produce a non-boolean closureDue (F-A)',
   assert.equal(typeof omitted.closureDue, 'boolean', 'closureDue must never be undefined');
   assert.equal(omitted.closureDueLevel, null);
   assert.equal(omitted.closureSuggestionCode, null);
+  // The miss is reported, not swallowed (chair ruling §14.2): a silent
+  // fail-closed is how a bypassing caller stops queueing anything unnoticed.
+  assert.equal(omitted.admissionInputMissing, true, 'a missing input must be visible');
+  assert.equal(admitted.admissionInputMissing, false, 'the normal path must report no miss');
+
+  // And the board surfaces it as a count that is 0 on the normal path.
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const counts = board.listCards({ scope: 'all' }).counts;
+    assert.equal(counts.admissionInputMissing, 0, 'the shipped board must never miss the input');
+    assert.equal(
+      typeof counts.admissionInputMissing,
+      'number',
+      'the counter must be exposed unconditionally, not only when non-zero',
+    );
+  } finally {
+    sqliteStore.close();
+  }
 });

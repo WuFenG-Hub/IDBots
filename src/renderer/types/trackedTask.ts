@@ -160,6 +160,8 @@ export interface TrackedCardSummary {
   admitted: boolean;
   /** 命中的准入规则（ADM-1..ADM-5）；归档卡为空数组。 */
   admissionMatched: TrackedAdmissionRule[];
+  /** 诊断位：本卡的准入输入不是布尔（漏传）。正常路径恒为 false。 */
+  admissionInputMissing: boolean;
   /** 「需要我出手」的权威判定（后端给出），前端不重算。 */
   needsOwnerAction: boolean;
   /** 「需要我出手」的权威排序键（后端给出），前端只用它排序。 */
@@ -183,6 +185,8 @@ export interface TrackedCardCounts {
   archived: number;
   /** 诊断用：登记名册里已不存在于台账的 id 数（冻结件 §2 ADM-1）。 */
   staleRegistration: number;
+  /** 诊断用：准入输入漏传的卡数。正常路径恒为 0，非 0 即「静默不排队」的告警。 */
+  admissionInputMissing: number;
   closureDue: number;
   /** 第 1 级：超过僵尸阈值。 */
   zombieLevel: number;
