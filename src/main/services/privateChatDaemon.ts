@@ -1301,6 +1301,75 @@ export function shouldSkipPrivateChatAutoReplyText(value: string): boolean {
   return false;
 }
 
+/**
+ * True when the inbound plaintext is verbatim-identical to the immediately
+ * previous inbound message of the same active conversation segment. The first
+ * copy already drove (or is driving) a reply turn, so re-running the model for
+ * each identical retransmission only feeds degenerate loops — the 2026-09-17
+ * BOT-009 ping-pong, where both hosts mirrored each other's silence notes
+ * ("（静默。）") for 40+ on-chain messages. Pure byte-equality dedup on the
+ * message stream; no wording, language, or intent is interpreted.
+ */
+export function isRepeatPrivateChatInboundMessage(params: {
+  messages: CoworkMessage[];
+  plaintext: string;
+  now?: number;
+}): boolean {
+  const target = String(params.plaintext ?? '').trim();
+  if (!target) return false;
+  const now = Number.isFinite(params.now) ? (params.now as number) : Date.now();
+  const a2aMessages = params.messages.filter(isPrivateA2AMessage);
+  for (let i = a2aMessages.length - 1; i >= 0; i -= 1) {
+    const message = a2aMessages[i];
+    if (!message) continue;
+    if (resolveA2AMessageDirection(message) !== 'incoming') continue;
+    const timestamp = Number.isFinite(message.timestamp) ? message.timestamp : now;
+    if (now - timestamp > A2A_SESSION_CONVERSATION_GAP_MS) return false;
+    return String(message.content ?? '').trim() === target;
+  }
+  return false;
+}
+
+/**
+ * Delivery-side degenerate-loop guard. Counts the trailing run of already
+ * delivered outgoing messages that are verbatim-identical to the candidate
+ * reply (skill wait notices and failed/suppressed deliveries do not count).
+ * A bot never needs to say the exact same thing three times in a row: once
+ * the tail shows two identical delivered replies, a third identical delivery
+ * is definitionally an echo loop — the converged stage of the 2026-09-17
+ * silence ping-pong, where flash-tier models ignored the `[NO_REPLY]`
+ * protocol and mirrored the peer's silence notation back onto the chain.
+ * Language-agnostic by construction: byte equality only.
+ */
+export const PRIVATE_CHAT_ECHO_GUARD_MIN_REPEATS = 2;
+
+export function wouldCreatePrivateChatEchoLoop(params: {
+  messages: CoworkMessage[];
+  replyText: string;
+  minRepeats?: number;
+}): boolean {
+  const target = String(params.replyText ?? '').trim();
+  if (!target) return false;
+  const requestedMinRepeats = params.minRepeats;
+  const minRepeats = Number.isFinite(requestedMinRepeats) && (requestedMinRepeats as number) >= 1
+    ? Math.floor(requestedMinRepeats as number)
+    : PRIVATE_CHAT_ECHO_GUARD_MIN_REPEATS;
+  const deliveredOutgoing = params.messages
+    .filter(isPrivateA2AMessage)
+    .filter((message) => (
+      resolveA2AMessageDirection(message) === 'outgoing'
+      && message.metadata?.privateChatNoReply !== true
+      && message.metadata?.privateChatSkillWaitNotice !== true
+      && message.metadata?.privateChatDeliveryStatus !== 'failed'
+    ));
+  let identicalRun = 0;
+  for (let i = deliveredOutgoing.length - 1; i >= 0; i -= 1) {
+    if (String(deliveredOutgoing[i]?.content ?? '').trim() !== target) break;
+    identicalRun += 1;
+  }
+  return identicalRun >= minRepeats;
+}
+
 export function analyzePrivateChatA2AConversation(params: {
   messages: CoworkMessage[];
   now?: number;
@@ -1422,11 +1491,12 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     '- Continue only when you can add valuable discussion, sharper reasoning, or useful questions.',
     '- Keep the discussion around one coherent topic instead of drifting between unrelated subjects.',
     '- Avoid empty pleasantries, loops, repeated introductions, and generic filler.',
-    '- You do not need to reply to every message; reply only to the latest meaningful message. When the latest message needs no answer — a work-in-progress signal, a hold marker, a mere acknowledgement, or meaningless placeholder/closing content such as "Thinking...", "....", or "bye" — reply with exactly `[NO_REPLY]` and nothing else: the host then delivers nothing to the peer.',
+    '- You do not need to reply to every message; reply only to the latest meaningful message. When the latest message needs no answer — a work-in-progress signal, a hold marker, a mere acknowledgement, meaningless placeholder/closing content such as "Thinking...", "....", or "bye", or a silence/hold announcement in any wording or notation (for example a parenthesized "staying silent" note) — reply with exactly `[NO_REPLY]` and nothing else: the host then delivers nothing to the peer.',
     '- Before choosing `[NO_REPLY]`, check what YOU still owe the peer. The host only runs you again when a NEW peer message arrives, so if your own earlier reply promised a later answer or update (for example you said you would verify something and come back with the result), a `[NO_REPLY]` now leaves both sides waiting forever. When you owe the peer an answer, deliver it (or a substantive interim result) as your reply; when the conversation has nothing left to produce, close it by replying exactly "bye". Choose `[NO_REPLY]` only when the latest message needs no answer AND you owe the peer nothing.',
     '- Your reply is delivered to the peer on-chain verbatim, word for word. Output ONLY the final message for the peer: make the judgment calls in this policy (whether to reply, wrapping up, saying bye) silently, and never narrate them as text before or around your reply — a reply that opens with your own analysis of the peer\'s message ("this looks like a duplicate closing message, I will close briefly") leaks your internal state to the peer.',
     '- Your final reply MUST be a regular text message outside any thinking/reasoning block. The host delivers ONLY your final text — reasoning content is never sent to the peer. Ending a turn with the whole answer drafted inside reasoning and no final text is a protocol violation that leaves the peer waiting forever; if you have decided to say nothing, reply with exactly `[NO_REPLY]` instead of ending wordless.',
     '- Never announce silence, waiting, or "no reply needed" in words. Such an announcement IS a delivered message: it forces the peer to process and answer it, trapping both bots in an endless exchange of "I am staying silent" notes. Staying silent means replying `[NO_REPLY]` (the host delivers nothing) — never telling the peer that you will stay silent.',
+    '- Never mirror or reuse the peer\'s silence notation. When the peer\'s message is itself a silence/hold announcement — in any language or notation — treat it as a no-op and reply `[NO_REPLY]`; echoing a silence note back (or answering it substantively) traps both bots in an endless loop of silence notes.',
     '- MetaWeb references: cite on-chain content with a full, clickable MetaWeb URI — pin://<pinId> for any pin (the correct choice for readable text: simplenote notes, buzz posts), metafile://<pinId> ONLY for binary files published on /file (images, video, audio, PDF, archives), metaapp://<pinId> for MetaApps, metaid://<globalMetaId> for people/bots. Never send Web2 viewer URLs, and never deliver a text/Markdown document as a metafile:// upload — publish readable text as a simplenote note and reference it as pin://.',
     skillPolicyRule,
     skillWaitNoticeRule,
@@ -4783,6 +4853,20 @@ async function processOne(
       emitLog(`[PrivateChat] Deferring message ${row.id}: session ${mappedSessionId} still has an active reply turn.`);
       return;
     }
+    // A verbatim retransmission of the previous inbound message carries no
+    // new information — the first copy already drove a reply turn — and
+    // answering each copy again is what turns leaked silence notes into an
+    // endless ping-pong (2026-09-17). Byte-equality only, no wording checks.
+    if (mappedSessionId && isRepeatPrivateChatInboundMessage({
+      messages: coworkStore.getRecentPrivateA2AMessages(mappedSessionId, 20),
+      plaintext,
+    })) {
+      emitLog(
+        `[PrivateChat] Skip message ${row.id}: identical to the previous inbound message from ${fromGlobalMetaId.slice(0, 12)}… in this conversation segment; the earlier copy already drove a reply turn.`
+      );
+      markProcessed(db, row.id, saveDb);
+      return;
+    }
     let currentExperienceEvidenceId: string | null = null;
     try {
       const recordedExperience = recordMetaIDPrivateA2AExperience({
@@ -5346,13 +5430,12 @@ async function processOne(
         return;
       }
       privateChatSkillTurnRetries.delete(taskKey);
-      if (isPrivateChatNoReplySentinel(trimmed)) {
-        emitLog(
-          `[PrivateChat] Bot chose silence for message ${row.id} (${PRIVATE_CHAT_NO_REPLY_SENTINEL}); delivering nothing to ${fromGlobalMetaId.slice(0, 12)}…`
-        );
-        // The skill-turn path already persisted the sentinel as an assistant
-        // bubble. Keep it for local context, but tag it so the A2A view hides
-        // it and no late-completion pickup re-delivers it as a real reply.
+      const deliverNothingForSilentTurn = (logMessage: string): void => {
+        emitLog(`[PrivateChat] ${logMessage}; delivering nothing to ${fromGlobalMetaId.slice(0, 12)}…`);
+        // The skill-turn path may already have persisted the would-be reply as
+        // an assistant bubble. Keep it for local context, but tag it so the
+        // A2A view hides it and no late-completion pickup re-delivers it as a
+        // real reply.
         if (skillAssistantMessageId) {
           const candidate = coworkStore.getMessageById(sessionId, skillAssistantMessageId);
           if (candidate?.type === 'assistant') {
@@ -5395,6 +5478,25 @@ async function processOne(
           });
         }
         markProcessed(db, row.id, saveDb);
+      };
+      if (isPrivateChatNoReplySentinel(trimmed)) {
+        deliverNothingForSilentTurn(
+          `Bot chose silence for message ${row.id} (${PRIVATE_CHAT_NO_REPLY_SENTINEL})`
+        );
+        return;
+      }
+      // Degenerate echo loop (2026-09-17): the model ignored the sentinel
+      // protocol and produced the same silence note the peer keeps sending.
+      // Once the conversation tail already holds two identical delivered
+      // replies, delivering a third verbatim copy can only perpetuate the
+      // loop — suppress it exactly like a sentinel silence.
+      if (wouldCreatePrivateChatEchoLoop({
+        messages: coworkStore.getRecentPrivateA2AMessages(sessionId, 24),
+        replyText: trimmed,
+      })) {
+        deliverNothingForSilentTurn(
+          `Echo-loop guard matched for message ${row.id}: the reply repeats the last delivered outgoing messages verbatim`
+        );
         return;
       }
       guidanceTurn.assistantOutputStarted = true;

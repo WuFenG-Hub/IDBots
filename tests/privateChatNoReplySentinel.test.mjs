@@ -7,6 +7,9 @@ let stopPrivateChatDaemon;
 let PRIVATE_CHAT_NO_REPLY_SENTINEL;
 let isPrivateChatNoReplySentinel;
 let shouldSkipPrivateChatAutoReplyText;
+let isRepeatPrivateChatInboundMessage;
+let wouldCreatePrivateChatEchoLoop;
+let buildPrivateChatA2ASystemPrompt;
 let extractFinalAssistantReply;
 let shouldHideA2AInternalMessage;
 try {
@@ -16,6 +19,9 @@ try {
     PRIVATE_CHAT_NO_REPLY_SENTINEL,
     isPrivateChatNoReplySentinel,
     shouldSkipPrivateChatAutoReplyText,
+    isRepeatPrivateChatInboundMessage,
+    wouldCreatePrivateChatEchoLoop,
+    buildPrivateChatA2ASystemPrompt,
   } = await import('../dist-electron/main/services/privateChatDaemon.js'));
   ({ extractFinalAssistantReply } = await import('../dist-electron/main/services/orchestratorCoworkBridge.js'));
   ({ shouldHideA2AInternalMessage } = await import('../dist-electron/main/shared/a2aInternalMessageFilter.js'));
@@ -26,6 +32,9 @@ try {
     PRIVATE_CHAT_NO_REPLY_SENTINEL,
     isPrivateChatNoReplySentinel,
     shouldSkipPrivateChatAutoReplyText,
+    isRepeatPrivateChatInboundMessage,
+    wouldCreatePrivateChatEchoLoop,
+    buildPrivateChatA2ASystemPrompt,
   } = await import('../dist-electron/main/services/privateChatDaemon.js'));
   ({ extractFinalAssistantReply } = await import('../dist-electron/main/services/orchestratorCoworkBridge.js'));
   ({ shouldHideA2AInternalMessage } = await import('../dist-electron/main/shared/a2aInternalMessageFilter.js'));
@@ -53,6 +62,104 @@ test('sentinel matches exact tag with cosmetic wrapping only', () => {
 test('inbound sentinel from an unupgraded peer is skipped like a placeholder', () => {
   assert.equal(shouldSkipPrivateChatAutoReplyText('[NO_REPLY]'), true);
   assert.equal(shouldSkipPrivateChatAutoReplyText('[no_reply] '), true);
+});
+
+test('inbound verbatim retransmission of the previous inbound message is detected by byte equality only', () => {
+  const now = 1_790_000_000_000;
+  const incoming = (id, content, timestamp) => ({
+    id,
+    type: 'user',
+    content,
+    timestamp,
+    metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
+  });
+  const outgoing = (id, content, timestamp) => ({
+    id,
+    type: 'assistant',
+    content,
+    timestamp,
+    metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing', privateChatDeliveryStatus: 'sent' },
+  });
+  // 2026-09-17 loop shape: the peer re-sends the same silence note.
+  const messages = [
+    incoming('i1', '（静默。）', now - 90_000),
+    outgoing('o1', '（静默。）', now - 80_000),
+    incoming('i2', '（静默。）', now - 30_000),
+  ];
+  assert.equal(isRepeatPrivateChatInboundMessage({ messages, plaintext: '（静默。）', now }), true);
+  // Any different text (whitespace aside) is new information.
+  assert.equal(isRepeatPrivateChatInboundMessage({ messages, plaintext: '（静默——我先等等。）', now }), false);
+  assert.equal(isRepeatPrivateChatInboundMessage({ messages, plaintext: '  （静默。）  ', now }), true);
+  // The comparison target is the previous INBOUND message, not our own reply.
+  assert.equal(isRepeatPrivateChatInboundMessage({ messages, plaintext: 'nudge', now }), false);
+  // A retransmission after the conversation gap (5 min) starts a new segment.
+  const staleSegment = [
+    incoming('i1', '（静默。）', now - 10 * 60_000),
+    outgoing('o1', '（静默。）', now - 9 * 60_000),
+    incoming('i2', '（静默。）', now - 8 * 60_000),
+  ];
+  assert.equal(isRepeatPrivateChatInboundMessage({ messages: staleSegment, plaintext: '（静默。）', now }), false);
+  // No prior inbound at all → never a repeat.
+  assert.equal(isRepeatPrivateChatInboundMessage({ messages: [outgoing('o1', 'x', now - 1000)], plaintext: 'x', now }), false);
+  assert.equal(isRepeatPrivateChatInboundMessage({ messages: [], plaintext: 'x', now }), false);
+});
+
+test('echo-loop guard fires only on a verbatim repeat of delivered outgoing replies', () => {
+  const now = 1_790_000_000_000;
+  const mk = (id, content, timestamp, metadata = {}) => ({
+    id,
+    type: 'assistant',
+    content,
+    timestamp,
+    metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing', privateChatDeliveryStatus: 'sent', ...metadata },
+  });
+  const incoming = (id, content, timestamp) => ({
+    id,
+    type: 'user',
+    content,
+    timestamp,
+    metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
+  });
+  const silence = '（静默。）';
+  // Converged loop tail: two identical delivered replies interleaved with inbound notes.
+  const loopTail = [
+    mk('o1', silence, now - 90_000),
+    incoming('i1', silence, now - 80_000),
+    mk('o2', silence, now - 70_000),
+    incoming('i2', silence, now - 30_000),
+  ];
+  assert.equal(wouldCreatePrivateChatEchoLoop({ messages: loopTail, replyText: silence }), true);
+  // A single prior identical delivery is allowed (acknowledgements can repeat).
+  const single = [mk('o1', silence, now - 90_000), incoming('i1', silence, now - 30_000)];
+  assert.equal(wouldCreatePrivateChatEchoLoop({ messages: single, replyText: silence }), false);
+  // Different trailing reply text resets the run.
+  const varied = [mk('o1', silence, now - 90_000), mk('o2', '收到，稍等。', now - 70_000)];
+  assert.equal(wouldCreatePrivateChatEchoLoop({ messages: varied, replyText: silence }), false);
+  // Suppressed no-reply bubbles and failed deliveries never reached the peer, so they do not count.
+  const suppressedOnly = [
+    mk('o1', silence, now - 90_000),
+    mk('o2', silence, now - 70_000, { privateChatNoReply: true }),
+    mk('o3', silence, now - 50_000, { privateChatDeliveryStatus: 'failed' }),
+  ];
+  assert.equal(wouldCreatePrivateChatEchoLoop({ messages: suppressedOnly, replyText: silence }), false);
+  // Skill wait notices interleave without breaking the delivered-reply run.
+  const withWaitNotice = [
+    mk('o1', silence, now - 90_000),
+    mk('w1', '我需要查询一下，请稍等。', now - 80_000, { privateChatSkillWaitNotice: true }),
+    mk('o2', silence, now - 70_000),
+  ];
+  assert.equal(wouldCreatePrivateChatEchoLoop({ messages: withWaitNotice, replyText: silence }), true);
+  assert.equal(wouldCreatePrivateChatEchoLoop({ messages: loopTail, replyText: '' }), false);
+});
+
+test('A2A system prompt forbids mirroring the peer silence notation', () => {
+  const prompt = buildPrivateChatA2ASystemPrompt({
+    metabot: { name: 'Local Bot' },
+    analysis: { contextMessages: [], incomingTurnCount: 0, shouldForceBye: false },
+  });
+  assert.equal(typeof prompt, 'string');
+  assert.match(prompt, /Never mirror or reuse the peer's silence notation/);
+  assert.match(prompt, /a silence\/hold announcement in any wording or notation/);
 });
 
 test('final-reply extraction returns the sentinel instead of walking back to earlier text', () => {
@@ -336,4 +443,156 @@ test('daemon delivers nothing for a sentinel reply and marks the turn silent', a
   const sentinelBubble = session.messages.find((message) => message.content === '[NO_REPLY]');
   assert.equal(sentinelBubble?.metadata?.privateChatNoReply, true);
   assert.equal(sentinelBubble?.metadata?.privateChatDeliveryStatus, undefined);
+});
+
+test('daemon absorbs a verbatim retransmission of the previous inbound message without a turn', async () => {
+  const { db, row, coworkStore, metabotStore, session } = createSentinelDaemonHarness();
+  const externalConversationId = 'metaweb-private:peer-global';
+  row.content = '（静默。）';
+  // Previous turn already handled the first copy of this silence note.
+  session.messages.push({
+    id: 'seed-in-1',
+    type: 'user',
+    content: '（静默。）',
+    timestamp: Date.now() - 60_000,
+    metadata: { sourceChannel: 'metaweb_private', direction: 'incoming', externalConversationId },
+  });
+  const logs = [];
+  let createPinCount = 0;
+  let turnAttempts = 0;
+
+  startPrivateChatDaemon(
+    db,
+    () => {},
+    coworkStore,
+    metabotStore,
+    { on() {}, off() {} },
+    async () => {
+      createPinCount += 1;
+      throw new Error('no on-chain pin should be created for an absorbed retransmission');
+    },
+    (message) => logs.push(message),
+    null,
+    undefined,
+    undefined,
+    () => ({ respondToStrangerPrivateChats: true }),
+    undefined,
+    undefined,
+    undefined,
+    async () => {
+      turnAttempts += 1;
+      throw new Error('no LLM turn should run for an absorbed retransmission');
+    },
+    async () => {
+      turnAttempts += 1;
+      throw new Error('no skill turn should run for an absorbed retransmission');
+    },
+    async () => '我需要查询一下，请稍等。'
+  );
+
+  try {
+    await waitFor(() => logs.some((message) => message.includes('identical to the previous inbound message')));
+  } finally {
+    await stopPrivateChatDaemon({ waitForTick: true });
+  }
+
+  assert.equal(row.is_processed, 1);
+  assert.equal(createPinCount, 0);
+  assert.equal(turnAttempts, 0);
+  // The retransmission is not appended to the session context either.
+  assert.equal(session.messages.filter((message) => message.type === 'user').length, 1);
+});
+
+test('daemon suppresses a reply that would repeat the last delivered outgoing messages verbatim', async () => {
+  const { db, row, coworkStore, metabotStore, session } = createSentinelDaemonHarness();
+  const base = Date.now() - 120_000;
+  // Converged 2026-09-17 loop tail: the model keeps mirroring the peer's
+  // silence note instead of emitting the sentinel.
+  session.messages.push(
+    {
+      id: 'seed-in-1',
+      type: 'user',
+      content: 'nudge-1',
+      timestamp: base,
+      metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
+    },
+    {
+      id: 'seed-out-1',
+      type: 'assistant',
+      content: '（静默。）',
+      timestamp: base + 1_000,
+      metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing', privateChatDeliveryStatus: 'sent' },
+    },
+    {
+      id: 'seed-in-2',
+      type: 'user',
+      content: 'nudge-2',
+      timestamp: base + 2_000,
+      metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
+    },
+    {
+      id: 'seed-out-2',
+      type: 'assistant',
+      content: '（静默。）',
+      timestamp: base + 3_000,
+      metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing', privateChatDeliveryStatus: 'sent' },
+    }
+  );
+  row.content = 'nudge-3';
+  const logs = [];
+  let createPinCount = 0;
+
+  startPrivateChatDaemon(
+    db,
+    () => {},
+    coworkStore,
+    metabotStore,
+    { on() {}, off() {} },
+    async () => {
+      createPinCount += 1;
+      throw new Error('no on-chain pin should be created for an echo-loop reply');
+    },
+    (message) => logs.push(message),
+    null,
+    undefined,
+    undefined,
+    () => ({ respondToStrangerPrivateChats: true }),
+    undefined,
+    undefined,
+    undefined,
+    async () => ({
+      prompt: '<available_skills><skill><id>metaid-master-wiki</id></skill></available_skills>',
+      activeSkillIds: ['metaid-master-wiki'],
+    }),
+    async (params) => {
+      const persisted = coworkStore.addMessage(params.sessionId, {
+        type: 'assistant',
+        content: '（静默。）',
+        metadata: { isStreaming: false, isFinal: true },
+      });
+      return { replyText: '（静默。）', assistantMessageId: persisted.id };
+    },
+    async () => '我需要查询一下，请稍等。'
+  );
+
+  try {
+    await waitFor(() => logs.some((message) => message.includes('Echo-loop guard matched')));
+  } finally {
+    await stopPrivateChatDaemon({ waitForTick: true });
+  }
+
+  assert.equal(row.is_processed, 1);
+  assert.equal(createPinCount, 0);
+  const mirroredBubble = session.messages
+    .filter((message) => message.content === '（静默。）')
+    .find((message) => message.metadata?.privateChatNoReply === true);
+  assert.ok(mirroredBubble, 'the suppressed echo bubble must be tagged privateChatNoReply');
+  assert.equal(mirroredBubble.metadata.privateChatDeliveryStatus, undefined);
+  // No third copy of the silence note was delivered on-chain.
+  const deliveredSilenceNotes = session.messages.filter((message) => (
+    message.metadata?.direction === 'outgoing'
+      && message.metadata?.privateChatDeliveryStatus === 'sent'
+      && message.content === '（静默。）'
+  ));
+  assert.equal(deliveredSilenceNotes.length, 2);
 });
