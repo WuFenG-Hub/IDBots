@@ -441,6 +441,12 @@ export interface GroupTaskAcceptanceSummary {
   publishedGroupPinId: string | null;
   /** Source session that received the R2 acceptance notification, if any. */
   notifiedSession: string | null;
+  /**
+   * Task #83 audit (F2a): set when a review→executing rework voided this
+   * already-notified summary. NULL = still authoritative; the acceptance card
+   * surfaces the stamp so the owner never acts on a retracted review.
+   */
+  supersededAt: string | null;
 }
 
 export interface CreateGroupTaskInput {
@@ -655,6 +661,7 @@ interface GroupTaskAcceptanceSummaryRow {
   generated_at: string | null;
   published_group_pin_id: string | null;
   notified_session: string | null;
+  superseded_at?: string | null;
 }
 
 interface GroupTaskSupervisorSignalRow {
@@ -995,6 +1002,7 @@ function rowToGroupTaskAcceptanceSummary(
     generatedAt: row.generated_at ?? null,
     publishedGroupPinId: row.published_group_pin_id ?? null,
     notifiedSession: row.notified_session ?? null,
+    supersededAt: row.superseded_at ?? null,
   };
 }
 
@@ -1577,6 +1585,30 @@ export class GroupTaskStore {
       [taskId],
     );
     return rows.map(rowToGroupTaskAcceptanceSummary);
+  }
+
+  /**
+   * Task #83 audit (F2a): a review→executing rework voids every summary the
+   * owner was already notified about (outcome still null). Stamp them
+   * superseded so the acceptance card and the audit trail show the
+   * retraction instead of presenting a stale review as current. Returns the
+   * superseded versions (empty when nothing was open — e.g. rework before
+   * the first summary). Idempotent: already-stamped rows are untouched.
+   */
+  supersedeOpenAcceptanceSummaries(taskId: number): number[] {
+    const open = this.getAll<{ id: number; version: number }>(
+      `SELECT id, version FROM group_task_acceptance_summaries
+       WHERE task_id = ? AND outcome IS NULL AND superseded_at IS NULL`,
+      [taskId],
+    );
+    if (open.length === 0) return [];
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries SET superseded_at = datetime('now')
+       WHERE task_id = ? AND outcome IS NULL AND superseded_at IS NULL`,
+      [taskId],
+    );
+    this.saveDb();
+    return open.map((row) => row.version);
   }
 
   /** Record the pin of the group message that published the latest summary. */

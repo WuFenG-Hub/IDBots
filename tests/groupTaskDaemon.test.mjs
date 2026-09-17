@@ -5513,6 +5513,45 @@ test('P0-3 (single-commander): missing ACK past the timeout records ONE host env
   }
 });
 
+test('Task #83 F2a: the on-chain rework hatch supersedes the delivered acceptance summary and retracts it', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: (m) => { milestones.push(m); return true; },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-f2a', task.id]);
+    // Chair drives the task into review — the entry ceremony builds summary v1.
+    insertGroupMessage(h.db, {
+      pinId: 'f2a-rev-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '验收 [STATUS:REVIEW]',
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    assert.ok(h.groupTaskStore.getLatestAcceptanceSummary(task.id), 'review entry generated summary v1');
+
+    // The chair self-reopens (the legal rework hatch) — the delivered summary
+    // must be voided and the owner told.
+    insertGroupMessage(h.db, {
+      pinId: 'f2a-rework-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '交付物未入账，打回返工 [STATUS:EXECUTING]',
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
+    const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
+    assert.ok(summary.supersededAt, 'the review-entry summary is stamped superseded');
+    const retraction = milestones.find(
+      (m) => m.kind === 'anomaly' && typeof m.subject === 'string' && m.subject.startsWith('review_retracted:'),
+    );
+    assert.ok(retraction, 'the origin session received the retraction');
+    assert.match(retraction.message, /作废|no longer authoritative/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('Task #83 P1: a worker whose turn is still in flight defers the no-ACK note; it fires once the turn settles silent', async () => {
   const h = await createHarness({ ackTimeoutMs: 180_000 });
   try {

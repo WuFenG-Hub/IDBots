@@ -209,6 +209,11 @@ export interface GroupTaskAcceptanceSummary {
   generatedAt: string | null;
   publishedGroupPinId: string | null;
   notifiedSession: string | null;
+  /**
+   * Task #83 audit (F2a): set when a review→executing rework voided this
+   * already-notified summary — the card badges it "superseded by rework".
+   */
+  supersededAt?: string | null;
 }
 
 export interface GroupTaskMemberSummary extends GroupTaskMember {

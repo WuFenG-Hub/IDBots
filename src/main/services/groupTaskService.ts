@@ -13,6 +13,7 @@ import {
   buildSourceSessionAcceptanceNotice,
   buildSourceSessionReviewFallback,
   buildSourceSessionReviewNotice,
+  buildSourceSessionReviewRetractedNotice,
   copyAcceptanceCommentLine,
   copyAcceptanceRatingLine,
   copyDefaultObserverExpectation,
@@ -459,6 +460,40 @@ export function clearSourceSessionMilestoneGuard(
   } catch {
     // kv unavailable — the guard simply stays armed (report skipped once more)
   }
+}
+
+/**
+ * Task #83 audit (F2a): shared rework-hatch retraction. A review→executing
+ * rework voids every acceptance summary the owner was already notified about
+ * (outcome still open): stamp them superseded so the Tasks card shows the
+ * retraction, and tell the origin session that the card it received is no
+ * longer authoritative. Best-effort — the rework itself never fails on this.
+ * Returns the voided versions.
+ */
+export function retractGroupTaskReviewOnRework(task: GroupTask): number[] {
+  let voided: number[] = [];
+  try {
+    voided = getGroupTaskStore().supersedeOpenAcceptanceSummaries(task.id);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Failed to supersede acceptance summaries on rework of task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return [];
+  }
+  if (voided.length > 0) {
+    notifySourceSessionMilestone(
+      task,
+      'anomaly',
+      buildSourceSessionReviewRetractedNotice({
+        title: task.title,
+        status: 'executing',
+        voidedVersions: voided,
+      }),
+      `review_retracted:${voided.join(',')}`,
+    );
+  }
+  return voided;
 }
 
 function getKvStore(): GroupTaskServiceKvStore {
@@ -2379,6 +2414,10 @@ export async function reworkGroupTask(
       `${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  // Task #83 audit (F2a): the rework voids the acceptance summary the owner
+  // was already notified about — stamp it superseded and retract it on the
+  // origin-session rail.
+  retractGroupTaskReviewOnRework(task);
   // Ledger fix (#14→#16): the chair's reject (rework) is a verdict on the
   // CURRENT deliverables — pending rows become 'rejected' so the acceptance
   // history stays traceable in the ledger; a corrected re-delivery re-opens
@@ -2925,6 +2964,9 @@ export async function reopenGroupTask(
       `${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  // Task #83 audit (F2a): same retraction as the chair rework path — void +
+  // re-notify the already-delivered acceptance summary.
+  retractGroupTaskReviewOnRework(task);
   return getGroupTask(taskId);
 }
 

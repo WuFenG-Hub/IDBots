@@ -57,6 +57,7 @@ import {
   buildSourceSessionCheckpointNotice,
   buildSourceSessionCreatedNotice,
   buildSourceSessionDispatchNotice,
+  buildSourceSessionReviewRetractedNotice,
   copyCorrectionApplied,
   copyLocalDeliverableNoPin,
   copyLocalDeliverableOnChain,
@@ -5101,6 +5102,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // [STATUS:REVIEW] verdict arriving within the debounce window is
               // recognized as a stale in-flight turn (task #24).
               deps.getStore().set(`${GROUP_TASK_REWORK_AT_KV_PREFIX}${task.id}`, now());
+              // Task #83 audit (F2a): the rework voids the acceptance summary
+              // the owner was already notified about — stamp it superseded and
+              // retract on the origin-session rail, so the owner's card never
+              // points at a review that no longer stands.
+              try {
+                const voided = store.supersedeOpenAcceptanceSummaries(task.id);
+                if (voided.length > 0) {
+                  notifySourceSessionMilestone(
+                    task,
+                    'anomaly',
+                    buildSourceSessionReviewRetractedNotice({
+                      title: task.title,
+                      status: updated.status,
+                      voidedVersions: voided,
+                    }),
+                    `review_retracted:${voided.join(',')}`,
+                  );
+                }
+              } catch (retractError) {
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: review retraction on rework failed (best-effort): ` +
+                  `${retractError instanceof Error ? retractError.message : String(retractError)}`,
+                );
+              }
             }
             if (updated.status === 'review') {
               // Improvement #2 (v1.3): the rework stamp's job is done — this

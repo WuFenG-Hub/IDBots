@@ -807,6 +807,30 @@ export function buildSourceSessionAnomalyNotice(input: {
   ].join('\n');
 }
 
+/**
+ * Task #83 audit (F2a): owner-facing retraction notice — a review→executing
+ * rework voided the acceptance summary the owner was already notified about.
+ * Rides the anomaly rail so the owner's card never silently points at a
+ * review that no longer stands.
+ */
+export function buildSourceSessionReviewRetractedNotice(input: {
+  title: string;
+  status: string;
+  voidedVersions: number[];
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const versions = input.voidedVersions.map((version) => `v${version}`).join(', ');
+  return buildSourceSessionAnomalyNotice({
+    title: input.title,
+    status: input.status,
+    summary: language === 'en'
+      ? `The chair reopened the task for rework. Acceptance summary ${versions} — already delivered to you — is ` +
+        'no longer authoritative and has been marked superseded; a fresh summary and acceptance card are ' +
+        'generated at the next review entry.'
+      : `chair 已将任务打回返工。此前送达你的验收摘要 ${versions} 已作废（已标记 superseded），不再代表当前状态；` +
+        '下一次进入验收时会生成新的摘要与验收卡。',
+  }, language);
+}
+
 export function copyRespondingPlaceholder(language: AppLanguage = groupTaskLanguage()): string {
   return pickCopy('响应中…', 'Responding…', language);
 }

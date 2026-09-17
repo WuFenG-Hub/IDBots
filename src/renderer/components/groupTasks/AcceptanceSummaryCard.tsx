@@ -64,6 +64,11 @@ const AcceptanceSummaryCard: React.FC<{
         <span className="shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
           v{summary.version}
         </span>
+        {summary.supersededAt && !summary.outcome && (
+          <span className="shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400">
+            {i18nService.t('groupTasksAcceptanceSuperseded')}
+          </span>
+        )}
         {summary.outcome && (
           <span className="shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium bg-gray-500/15 text-gray-600 dark:text-gray-400">
             {summary.outcome}
