@@ -13,6 +13,7 @@ import {
   sessionRoleLabel,
   sourceKindLabel,
 } from './trackedTaskPresentation';
+import { reasonText, suggestionTextForCard } from './trackedTaskFactText';
 
 interface TrackedTaskDrawerProps {
   detail: TrackedCardDetail;
@@ -68,6 +69,10 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
   const jumpToSession = (sessionId: string) => {
     window.dispatchEvent(new CustomEvent('scheduledTask:viewSession', { detail: { sessionId } }));
   };
+
+  // 摘要与建议：结构化事实 → i18n 文案；后端 reasons 仅作 fallback（日志串，不是 UI 文案）。
+  const summaryLines = (detail.reasonCodes?.length ? detail.reasonCodes.slice(0, 5).map((fact, index) => reasonText(fact, detail.reasons?.[index])) : (detail.reasons ?? []).slice(0, 5));
+  const suggestion = suggestionTextForCard(detail, detail.deliverables.length);
 
   const ownerName = personName(detail.owner.twinMetabotId, metabotNames);
   // 参与席 = 后端给的 participants（metabotId 列表）；负责人来自 owner.twinMetabotId。
@@ -138,19 +143,19 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
 
           {/* 2 当前权威状态摘要（≤5 行，来源 = 台账投影 reasons） */}
           <Section labelKey="trackedTask.drawer.statusSummary">
-            {detail.reasons.length === 0 ? (
+            {summaryLines.length === 0 ? (
               <Empty />
             ) : (
               <ol className="space-y-1">
-                {detail.reasons.slice(0, 5).map((reason, index) => (
+                {summaryLines.map((line, index) => (
                   <li
-                    key={`${index}-${reason}`}
+                    key={`${index}-${line}`}
                     className="flex gap-2 text-xs leading-snug dark:text-claude-darkText text-claude-text"
                   >
                     <span className="shrink-0 font-mono dark:text-claude-darkTextSecondary text-claude-textSecondary">
                       {index + 1}
                     </span>
-                    <span className="break-words">{reason}</span>
+                    <span className="break-words">{line}</span>
                   </li>
                 ))}
               </ol>
@@ -163,9 +168,9 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
                 )}
               </div>
             )}
-            {detail.closureSuggestion && (
+            {suggestion && (
               <div className="mt-2 rounded-md border border-dashed border-red-500/40 bg-red-500/5 px-2 py-1 text-[11px] leading-snug text-red-500">
-                {detail.closureSuggestion}
+                {suggestion}
               </div>
             )}
           </Section>

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import { CheckCircleIcon } from '@heroicons/react/24/outline';
 import type { TrackedCardSummary } from '../../types/trackedTask';
+import { suggestionTextForCard } from './trackedTaskFactText';
 
 interface CloseTaskModalProps {
   card: TrackedCardSummary;
@@ -26,6 +27,8 @@ const CloseTaskModal: React.FC<CloseTaskModalProps> = ({
   const [conclusion, setConclusion] = useState('');
   const [by, setBy] = useState<'owner' | 'twin'>('owner');
   const trimmed = conclusion.trim();
+  // 建议按钮用的是 renderer 渲染的文案（后端只回 suggestion code），填入的也是这句。
+  const suggestion = suggestionTextForCard(card);
 
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center" onClick={onCancel}>
@@ -61,13 +64,13 @@ const CloseTaskModal: React.FC<CloseTaskModalProps> = ({
           className="mt-1 w-full resize-y rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg px-2.5 py-2 text-sm dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent"
         />
 
-        {card.closureSuggestion && (
+        {suggestion && (
           <button
             type="button"
-            onClick={() => setConclusion(card.closureSuggestion)}
+            onClick={() => setConclusion(suggestion)}
             className="mt-1.5 w-full rounded-md border border-dashed dark:border-claude-darkBorder border-claude-border px-2 py-1 text-left text-[11px] leading-snug dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
           >
-            {i18nService.t('trackedTask.close.useSuggestion')}：{card.closureSuggestion}
+            {i18nService.t('trackedTask.close.useSuggestion')}：{suggestion}
           </button>
         )}
 

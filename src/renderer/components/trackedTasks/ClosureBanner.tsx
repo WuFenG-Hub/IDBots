@@ -3,6 +3,7 @@ import { i18nService } from '../../services/i18n';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import type { TrackedCardCounts, TrackedCardSummary } from '../../types/trackedTask';
 import { TRACKED_DUE_LEVEL_LABEL_KEYS } from '../../types/trackedTask';
+import { suggestionTextForCard } from './trackedTaskFactText';
 
 interface ClosureBannerProps {
   cards: TrackedCardSummary[];
@@ -32,7 +33,7 @@ const ClosureBanner: React.FC<ClosureBannerProps> = ({
   const dueCards = cards.filter((card) => card.closureDue && card.state !== 'closed');
   if (counts.closureDue === 0 || dueCards.length === 0) return null;
 
-  const suggestion = dueCards.find((card) => card.closureSuggestion)?.closureSuggestion ?? '';
+  const suggestion = dueCards.map((card) => suggestionTextForCard(card)).find(Boolean) ?? '';
 
   const levels: Array<{ key: keyof TrackedCardCounts; className: string }> = [
     { key: 'zombieLevel', className: 'border-red-500/40 bg-red-500/10 text-red-500' },

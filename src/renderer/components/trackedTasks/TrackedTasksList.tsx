@@ -9,6 +9,7 @@ import {
   formatIdleDays,
   sourceKindLabel,
 } from './trackedTaskPresentation';
+import { reasonText } from './trackedTaskFactText';
 
 interface TrackedTasksListProps {
   cards: TrackedCardSummary[];
@@ -64,7 +65,9 @@ const TrackedTasksList: React.FC<TrackedTasksListProps> = ({ cards, onOpenCard, 
             </span>
 
             <span className="truncate text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              {card.reasons[0] ?? '—'}
+              {card.reasonCodes?.[0]
+                ? reasonText(card.reasonCodes[0], card.reasons?.[0])
+                : card.reasons?.[0] ?? '—'}
             </span>
 
             <span className="truncate text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">

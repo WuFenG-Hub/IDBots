@@ -31,6 +31,35 @@ export const TRACKED_DUE_LEVEL_LABEL_KEYS: Record<TrackedClosureDueLevel, string
   sessions_ended: 'trackedTask.dueLevel.sessionsEnded',
 };
 
+/** 状态摘要事实的 code（主进程 TrackedReasonCode 的逐字镜像）。 */
+export type TrackedReasonCode =
+  | 'ledger_review'
+  | 'steps_waiting_input'
+  | 'open_checkpoints'
+  | 'blocked_unmet_dependencies'
+  | 'steps_active'
+  | 'attempts_open'
+  | 'deliverables_verifiable'
+  | 'terminal_without_conclusion'
+  | 'idle_days'
+  | 'linked_sessions';
+
+/** 一句话收口建议的 code（主进程 TrackedSuggestionCode 的逐字镜像）。 */
+export type TrackedSuggestionCode =
+  | 'terminal_no_conclusion'
+  | 'deliverables_verifiable'
+  | 'unresolved_dependencies'
+  | 'session_ended'
+  | 'stale_inactivity';
+
+export type TrackedFactCode = TrackedReasonCode | TrackedSuggestionCode;
+
+/** 结构化事实：code + 参数。**界面文案由 renderer 按 i18n 渲染**，不直接显示后端英文串。 */
+export interface TrackedFact {
+  code: TrackedFactCode;
+  args: Record<string, string | number>;
+}
+
 /** 台账原生 status 的取值域（不改 CHECK 的 6 值）。 */
 export type TrackedLedgerStatus =
   | 'planning'
@@ -84,7 +113,10 @@ export interface TrackedCardSummary {
   closureWarn: boolean;
   closureDue: boolean;
   closureDueLevel: TrackedClosureDueLevel | null;
+  /** 后端事实串（英文，供日志/排障）；界面文案一律由 reasonCodes 渲染。 */
   closureSuggestion: string;
+  /** 结构化收口建议 code —— 界面文案归 renderer。 */
+  closureSuggestionCode: TrackedSuggestionCode | null;
   closureConclusion: string | null;
   /** 计算出的活动锚点（多源 max）；永不落库，也不由心跳喂。 */
   activityAtMs: number | null;
@@ -100,8 +132,10 @@ export interface TrackedCardSummary {
   needsOwnerAction: boolean;
   /** 「需要我出手」的权威排序键（后端给出），前端只用它排序。 */
   actionRank: number;
-  /** 当前权威状态摘要（后端硬截前 5 条）。 */
+  /** 当前权威状态摘要的**事实串**（英文，硬截前 5 条）；界面显示请用 reasonCodes。 */
   reasons: string[];
+  /** 当上摘要的结构化事实，与 reasons 一一对应。 */
+  reasonCodes: TrackedFact[];
   /** 被 ≤5 硬截断丢掉的条数——抽屉显示「…另有 N 条」。 */
   reasonOverflow: number;
 }

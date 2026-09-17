@@ -8,6 +8,7 @@ import {
 import { TRACKED_DUE_LEVEL_LABEL_KEYS } from '../../types/trackedTask';
 import type { TrackedCardSummary } from '../../types/trackedTask';
 import { STATE_CHIP_CLASS, columnLabel, formatIdleDays, sourceKindLabel } from './trackedTaskPresentation';
+import { reasonText, suggestionTextForCard } from './trackedTaskFactText';
 
 interface TrackedTaskCardItemProps {
   card: TrackedCardSummary;
@@ -27,7 +28,14 @@ const TrackedTaskCardItem: React.FC<TrackedTaskCardItemProps> = ({
   columnLabelKey,
   onOpen,
   onClose,
-}) => (
+}) => {
+  // 摘要与建议都走结构化事实 → i18n 文案（后端只回 code + args）。
+  const headline = card.reasonCodes?.[0]
+    ? reasonText(card.reasonCodes[0], card.reasons?.[0])
+    : card.reasons?.[0] ?? '';
+  const suggestion = suggestionTextForCard(card);
+
+  return (
   <div
     role="button"
     tabIndex={0}
@@ -74,9 +82,9 @@ const TrackedTaskCardItem: React.FC<TrackedTaskCardItemProps> = ({
       {card.title}
     </div>
 
-    {card.reasons[0] && (
+    {headline && (
       <div className="mt-1 text-xs leading-snug dark:text-claude-darkTextSecondary text-claude-textSecondary line-clamp-2 break-words">
-        {card.reasons[0]}
+        {headline}
       </div>
     )}
 
@@ -90,9 +98,9 @@ const TrackedTaskCardItem: React.FC<TrackedTaskCardItemProps> = ({
       </span>
     </div>
 
-    {card.closureSuggestion && (
+    {suggestion && (
       <div className="mt-2 rounded-md border border-dashed dark:border-claude-darkBorder border-claude-border px-2 py-1 text-[11px] leading-snug dark:text-claude-darkTextSecondary text-claude-textSecondary">
-        {card.closureSuggestion}
+        {suggestion}
       </div>
     )}
 
@@ -109,6 +117,7 @@ const TrackedTaskCardItem: React.FC<TrackedTaskCardItemProps> = ({
       </button>
     )}
   </div>
-);
+  );
+};
 
 export default TrackedTaskCardItem;
