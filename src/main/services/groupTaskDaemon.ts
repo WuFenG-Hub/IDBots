@@ -1041,6 +1041,15 @@ const DEFAULT_NO_PROGRESS_NUDGE_MS = 20 * 60_000;
  */
 const DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS = 60_000;
 const DEFAULT_REPLY_BUDGET = 40;
+/**
+ * Task #83 audit (F1): the budget is a ROLLING one-hour window, not a per-run
+ * cumulative total. The old cumulative cap was hit inside one hour by a
+ * high-velocity task (124 group messages / 95 min) and muted the chair until
+ * an app restart — an anti-loop guard that had become a failure mode. The
+ * window keeps loop insurance (at most N charged replies per hour per bot)
+ * while the lockout self-heals as charges age out.
+ */
+const REPLY_BUDGET_WINDOW_MS = 60 * 60_000;
 const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 3;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 /** P0-2: minutes of silence before an assigned/working member is auto-marked unreachable. */
@@ -2308,14 +2317,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   // Loop prevention state (in-memory, per loop instance; no new DB columns).
   const lastReplyAtByKey = new Map<string, number>();
-  const replyCountByKey = new Map<string, number>();
-  // GT#72: the budget counts LOGICAL replies (one charge per (task, bot,
-  // trigger message)). A re-dispatch of the same trigger — a failed turn's
-  // durable-queue retry, a wedged-turn force-settle requeue, a coalesced
-  // backlog drain — is the SAME committed reply, not new spend. Charging
-  // every dispatch attempt is what silently muted a verification-heavy chair
-  // after ~22 logical replies (40 dispatch charges) and parked GT#72 in
-  // executing until a supervisor nudge rescued it.
+  // Task #83 audit (F1): charge timestamps per (task, bot) — the budget counts
+  // only charges inside the rolling REPLY_BUDGET_WINDOW_MS, so a busy task
+  // refills instead of permanently muting the member. GT#72: the budget counts
+  // LOGICAL replies (one charge per (task, bot, trigger message)). A
+  // re-dispatch of the same trigger — a failed turn's durable-queue retry, a
+  // wedged-turn force-settle requeue, a coalesced backlog drain — is the SAME
+  // committed reply, not new spend. Charging every dispatch attempt is what
+  // silently muted a verification-heavy chair after ~22 logical replies (40
+  // dispatch charges) and parked GT#72 in executing until a supervisor nudge
+  // rescued it.
+  const replyChargesByKey = new Map<string, number[]>();
+  const recentReplyChargeCount = (key: string): number => {
+    const charges = replyChargesByKey.get(key);
+    if (!charges || charges.length === 0) return 0;
+    const cutoff = now() - REPLY_BUDGET_WINDOW_MS;
+    const fresh = charges.filter((chargedAt) => chargedAt >= cutoff);
+    if (fresh.length !== charges.length) replyChargesByKey.set(key, fresh);
+    return fresh.length;
+  };
   const replyBudgetChargedMessages = new Set<string>();
   const replyBudgetChargeKey = (key: string, messageId: number): string => `${key}:${messageId}`;
   const keyOf = (taskId: number, metabotId: number): string => `${taskId}:${metabotId}`;
@@ -3967,14 +3987,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
-   * GT#72: a (task, bot) that exhausted its reply budget is PERMANENTLY
-   * silent for the rest of this app run — pending triggers (deliverable
-   * verdicts, assignments, owner questions) are dropped at the dispatch gates.
-   * That lockout previously left nothing but a daemon log line: the chair of
-   * GT#72 sat muted for 12 minutes with a finished, verified release candidate
-   * until a supervisor nudge rescued it. Raise ONE owner-visible anomaly per
-   * (task, bot) — the origin session (the owner's Twin) is the rail that
-   * actually reacted last time, so route the fact there.
+   * GT#72: a (task, bot) that exhausted its reply budget goes silent —
+   * pending triggers (deliverable verdicts, assignments) are dropped at the
+   * dispatch gates. That lockout previously left nothing but a daemon log
+   * line: the chair of GT#72 sat muted for 12 minutes with a finished,
+   * verified release candidate until a supervisor nudge rescued it. Raise ONE
+   * owner-visible anomaly per (task, bot) — the origin session (the owner's
+   * Twin) is the rail that actually reacted last time, so route the fact
+   * there.
+   * Task #83 audit (F1): the budget is a rolling one-hour window now, so the
+   * lockout self-heals as charges age out, and owner messages are exempt from
+   * the gates — the notice explains the window instead of prescribing an app
+   * restart.
    */
   const alertReplyBudgetExhausted = (
     task: GroupTask,
@@ -3991,10 +4015,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         title: task.title,
         status: deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status,
         summary:
-          `The ${roleText} (${label}) exhausted its per-task reply budget (${replyBudget} replies) — ` +
-          `its turns are now dropped until the app restarts, and nothing (assignments, deliverable verdicts, ` +
-          'or even owner mentions) can wake it in this task. If the task still needs this member, restart the ' +
-          'app so the in-memory budget resets; otherwise close the task out.',
+          `The ${roleText} (${label}) exhausted its per-task reply budget ` +
+          `(${replyBudget} replies within the rolling one-hour window) — its new turns are dropped until the ` +
+          'oldest charges age out of the window. Owner messages still reach it. If the task keeps needing a ' +
+          'higher cadence, consider splitting the work or closing the task out.',
       }),
       `reply_budget_exhausted:bot:${bot.id}`,
     );
@@ -6984,7 +7008,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const chargeKey = replyBudgetChargeKey(key, message.id);
       if (!replyBudgetChargedMessages.has(chargeKey)) {
         replyBudgetChargedMessages.add(chargeKey);
-        replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
+        const charges = replyChargesByKey.get(key) ?? [];
+        charges.push(now());
+        replyChargesByKey.set(key, charges);
       }
     }
     emitLog(
@@ -10357,15 +10383,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           deferReply(entry); // still cooling down; keep waiting
           continue;
         }
-        // R6: chat groups run unmetered — a 40-reply task budget would
-        // permanently silence a long conversation. Loop insurance stays via
+        // R6: chat groups run unmetered — a 40-reply hourly budget would
+        // silence a long conversation. Loop insurance stays via
         // cooldown + prompt etiquette + [NO_REPLY].
         // GT#72: a trigger ALREADY charged (its first dispatch spent the
         // budget) is a retry of committed work — it drains even at the cap,
         // so a failed turn can never be stranded by the budget it paid.
+        // Task #83 audit (F1): the owner's message ALWAYS reaches the chair —
+        // the budget never gates it (the old cumulative cap dropped owner
+        // turns too, leaving the task with no authoritative voice at all).
         if (
           task.mode !== 'chat'
-          && (replyCountByKey.get(key) ?? 0) >= replyBudget
+          && entry.reason !== 'chair_owner_message'
+          && recentReplyChargeCount(key) >= replyBudget
           && !replyBudgetChargedMessages.has(replyBudgetChargeKey(key, entry.messageId))
         ) {
           emitLog(
@@ -10686,9 +10716,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             });
             continue;
           }
+          // Task #83 audit (F1): the owner's message always reaches the chair
+          // (same exemption as the deferred-queue drain above).
           if (
             task.mode !== 'chat'
-            && (replyCountByKey.get(key) ?? 0) >= replyBudget
+            && decision.reason !== 'chair_owner_message'
+            && recentReplyChargeCount(key) >= replyBudget
             && !replyBudgetChargedMessages.has(replyBudgetChargeKey(key, message.id))
           ) {
             emitLog(`[GroupTaskDaemon] Task ${task.id}: bot ${decision.metabotId} reply budget exhausted; skipping`);

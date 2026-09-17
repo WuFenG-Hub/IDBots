@@ -1454,6 +1454,76 @@ test('loop prevention: reply budget per (task, bot)', async () => {
   }
 });
 
+test('Task #83 F1: the budget is a rolling one-hour window — charges age out and the member answers again', async () => {
+  const h = await createHarness({ replyBudget: 1 });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'f1-w1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot one',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+
+    // Inside the window: still capped (storm insurance unchanged).
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'f1-w2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot two',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'a fresh charge inside the window stays capped');
+
+    // Past the window: the old charge aged out — no restart needed.
+    h.state.nowMs += 61 * 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'f1-w3-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot three',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, 'the budget refills as charges age out of the window');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 F1: an exhausted budget never blocks the owner\u2019s message to the chair', async () => {
+  const h = await createHarness({ replyBudget: 1 });
+  try {
+    h.createTask([2]);
+    // Charge the chair's budget once via an owner message...
+    insertGroupMessage(h.db, {
+      pinId: 'f1-boss-1-i0', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: 'chair, status?',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.filter((s) => s.metabotId === 1).length, 1, 'the first owner message got its chair answer');
+
+    // ...then exhaust it with a worker-triggered chair turn so the NEXT
+    // budget check sees a spent budget.
+    insertGroupMessage(h.db, {
+      pinId: 'f1-w1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] pin://' + 'e'.repeat(64) + 'i0',
+    });
+    h.state.nowMs += 60_000;
+    await h.loop.runTick();
+
+    // The owner's follow-up must STILL wake the chair even at the cap.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'f1-boss-2-i0', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: 'chair, verdict?',
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.filter((s) => s.metabotId === 1).length >= 2,
+      'the owner message dispatches the chair even with the budget exhausted',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT#72: the reply budget counts LOGICAL replies — a failed turn retry is never blocked by the budget it already charged', async () => {
   // One-shot LLM failure: the first dispatch charges the message's logical
   // reply and fails; the durable-queue retry is the SAME reply, so it must
@@ -1530,7 +1600,8 @@ test('GT#72: reply budget exhaustion raises one owner-visible anomaly (the chair
     );
     assert.equal(budgetAnomalies.length, 1, 'exactly one exhaustion anomaly per (task, bot)');
     assert.match(budgetAnomalies[0].message, /exhausted its per-task reply budget/);
-    assert.match(budgetAnomalies[0].message, /restart/);
+    // F1 (task #83): the window refills — the notice no longer prescribes a restart.
+    assert.match(budgetAnomalies[0].message, /rolling one-hour window/);
   } finally {
     h.cleanup();
   }
