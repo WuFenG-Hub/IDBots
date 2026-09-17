@@ -1374,3 +1374,39 @@ test('the two v1.1 UI entries are wired end to end (archive read-only, reversibl
     assert.equal(countKey(key), 2, `${key}: expected the key in exactly EN + ZH, saw ${countKey(key)}`);
   }
 });
+
+test('a missing `admitted` input cannot produce a non-boolean closureDue (F-A)', async () => {
+  const mod = await import('../dist-electron/main/services/trackedTaskBoard.js');
+  const { deriveCardState } = mod;
+
+  const nowMs = Date.parse('2026-09-17T06:00:00.000Z');
+  const task = {
+    id: 'no-admission', ownerIntent: 'x', enrichedGoal: null, acceptanceCriteria: [],
+    sourceSessionId: null, twinMetabotId: 1, ownerGlobalMetaId: 'owner',
+    status: 'failed', planVersion: 1,
+    createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-14T06:00:00.000Z', completedAt: null,
+  };
+  const base = {
+    task,
+    steps: [],
+    attempts: [],
+    openCheckpointCount: 0,
+    verifiableDeliverableCount: 0,
+    closureConclusion: null,
+    scheduled: null,
+    sessionStatuses: ['idle'],
+    activityAtMs: [Date.parse('2026-09-14T06:00:00.000Z')],
+    nowMs,
+  };
+
+  // Positive control first: WITH the input the gate is open, so the assertion
+  // below is about the missing-argument case and not about a dead code path.
+  const admitted = deriveCardState({ ...base, admitted: true });
+  assert.equal(admitted.closureDue, true, 'an admitted terminal row must be due for closure');
+
+  const omitted = deriveCardState(base);
+  assert.equal(omitted.closureDue, false, 'a missing `admitted` must fail closed to a real boolean');
+  assert.equal(typeof omitted.closureDue, 'boolean', 'closureDue must never be undefined');
+  assert.equal(omitted.closureDueLevel, null);
+  assert.equal(omitted.closureSuggestionCode, null);
+});

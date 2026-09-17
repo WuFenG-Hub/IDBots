@@ -369,7 +369,12 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
   // produce no closureDue and no suggestion at ANY level — not even zombie or
   // sessions_ended. This is the gate that stops the v1 board from projecting
   // the whole delegation ledger into "needs closure".
-  const closureDue = input.admitted && !closed
+  //
+  // `admitted` is coerced, not trusted: it is a required input, but a caller that
+  // omits it must NOT produce a non-boolean `closureDue`. It fails closed to
+  // `false` — the quiet direction, so a missed argument can never masquerade as
+  // "nothing needs closure" through a truthy accident.
+  const closureDue = input.admitted === true && !closed
     && (zombie || terminalWithoutConclusion || sessionsEnded);
   const closureDueLevel: TrackedClosureDueLevel | null = !closureDue
     ? null
