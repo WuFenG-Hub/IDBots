@@ -1,6 +1,7 @@
 import type { McpServerConfig, McpServerFormData } from './mcp';
 import type { ProjectFormData, ProjectRecord } from './project';
 import type { GroupChatTranscriptMessage } from './groupTask';
+import type { TrackedCardBoard, TrackedCardCloseResult, TrackedCardDetail } from './trackedTask';
 import type { OpenTeamCollabSummary, OpenTeamGuestInvite } from './openTeamCollab';
 import type {
   BrowserCommandResult as CoreBrowserCommandResult,
@@ -1421,6 +1422,46 @@ interface IElectronAPI {
     listAllRuns: (limit?: number, offset?: number) => Promise<any>;
     onStatusUpdate: (callback: (data: any) => void) => () => void;
     onRunUpdate: (callback: (data: any) => void) => () => void;
+  };
+  /**
+   * 长期任务看板读/写路径（架构契约 v1.4 [SEC-05]）。
+   * 主进程实现在 src/main/services/trackedTaskBoard.ts，channel 前缀 `trackedTask:*`。
+   * 卡面状态、排序权重、closureDue 级别一律由主进程投影给出，renderer 只消费。
+   */
+  trackedTask: {
+    list: (input?: {
+      ownerGlobalMetaId?: string;
+      scope?: 'default' | 'all';
+      limit?: number;
+      offset?: number;
+    }) => Promise<{
+      success: boolean;
+      board?: TrackedCardBoard;
+      error?: string;
+    }>;
+    detail: (input: { cardId: string }) => Promise<{
+      success: boolean;
+      detail?: TrackedCardDetail;
+      code?: string;
+      error?: string;
+    }>;
+    cardsForSession: (input: { sessionId: string }) => Promise<{
+      success: boolean;
+      cards?: Array<{ cardId: string; role: string }>;
+      error?: string;
+    }>;
+    close: (input: {
+      cardId: string;
+      conclusion: string;
+      by: 'owner' | 'twin';
+      targetStatus?: 'completed' | 'cancelled';
+      pinId?: string | null;
+    }) => Promise<TrackedCardCloseResult>;
+    /**
+     * `seq` 进程内单调：丢弃 `seq <= lastSeenSeq` 的帧，只增量重取 `taskIds`；
+     * 漏推时 30s 轮询兜底。
+     */
+    onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => () => void;
   };
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) => Promise<any>;

@@ -285,6 +285,7 @@ import { withChainWriteBudget } from './libs/chainWriteBudget';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
 import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
+import { TrackedTaskBoardService } from './services/trackedTaskBoard';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
   CoworkTurnSubmissionController,
@@ -3749,6 +3750,10 @@ const startSqliteDaemons = (): void => {
     // P1-2: the daemon's stuck-session reclaim stops the inert worker session
     // through the runner (working directory + artifacts preserved).
     stopWorkerSession: (sessionId) => getCoworkRunner().stopSession(sessionId, { finalStatus: 'stopped' }),
+    // Task #83: the existing daemon tick carries the tracking-board zombie
+    // assessment (read-only) plus the kv process beat, throttled to once an
+    // hour inside the daemon so the 5s tick never becomes a write storm.
+    sweepTrackedCards: () => { getTrackedTaskBoard().sweep(); },
     // Task #60: ground-truth "a turn is still executing on this session" probe
     // for the skill-turn watchdog latch and the session-busy dispatch hold —
     // the session status column can transiently read 'error' while the runner
@@ -6635,6 +6640,36 @@ const getGroupTaskOrchestrationBridge = () => {
     });
   }
   return groupTaskOrchestrationBridge;
+};
+
+let trackedTaskBoard: TrackedTaskBoardService | null = null;
+const getTrackedTaskBoard = () => {
+  if (!trackedTaskBoard) {
+    const sqliteStore = getStore();
+    trackedTaskBoard = new TrackedTaskBoardService({
+      db: sqliteStore.getDatabase(),
+      orchestrationStore: getOrchestrationStore(),
+      saveDb: sqliteStore.getSaveFunction(),
+    });
+  }
+  return trackedTaskBoard;
+};
+
+/**
+ * Broadcast a `trackedTask:update` event so an open board refreshes after a
+ * write that changes card state (currently: closing a card). The payload
+ * carries a monotonic `seq` so the renderer can drop out-of-order frames, and
+ * `taskIds` is the incremental refetch hint.
+ */
+const broadcastTrackedTaskUpdate = (taskIds: string[], reason: string): void => {
+  const payload = { seq: getTrackedTaskBoard().nextSeq(), taskIds, reason };
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) {
+      try {
+        win.webContents.send('trackedTask:update', payload);
+      } catch { /* ignore */ }
+    }
+  });
 };
 
 const getTwinOrchestrationService = () => new TwinOrchestrationService({
@@ -11615,6 +11650,91 @@ if (!gotTheLock) {
     }
   });
 
+  // ==================== Tracked Task (long-task board) IPC ====================
+  // The board reads the single authoritative ledger (orchestration_tasks). The
+  // renderer never touches sqlite and never derives card state itself.
+
+  ipcMain.handle('trackedTask:list', async (_event, input?: {
+    ownerGlobalMetaId?: string;
+    scope?: 'default' | 'all';
+    limit?: number;
+    offset?: number;
+  }) => {
+    try {
+      const board = getTrackedTaskBoard().listCards(input ?? {});
+      return { success: true, board };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list tracked cards' };
+    }
+  });
+
+  ipcMain.handle('trackedTask:detail', async (_event, input: { cardId: string }) => {
+    try {
+      const detail = getTrackedTaskBoard().getCard(input?.cardId);
+      if (!detail) return { success: false, code: 'NOT_FOUND', error: 'Card not found' };
+      return { success: true, detail };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the card' };
+    }
+  });
+
+  ipcMain.handle('trackedTask:cardsForSession', async (_event, input: { sessionId: string }) => {
+    try {
+      const cards = getTrackedTaskBoard().listCardsForSession(input?.sessionId);
+      return { success: true, cards };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to resolve the card for this session' };
+    }
+  });
+
+  ipcMain.handle('trackedTask:unattachedScheduledTasks', async () => {
+    try {
+      return { success: true, tasks: getTrackedTaskBoard().listUnattachedScheduledTasks() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list scheduled tasks' };
+    }
+  });
+
+  ipcMain.handle('trackedTask:attachScheduledTasks', async (_event, input: { scheduledTaskIds: string[] }) => {
+    try {
+      const twin = getMetabotStore().listMetabots().find((bot) => bot.metabot_type === 'twin' && bot.enabled);
+      if (!twin) return { attached: [], skipped: [], error: 'No enabled local Twin Bot to own the cards.' };
+      const ownerGlobalMetaId = getUserIdentityStore().get()?.globalmetaid ?? '';
+      const result = getTrackedTaskBoard().attachScheduledTasks({
+        scheduledTaskIds: input?.scheduledTaskIds ?? [],
+        ownerGlobalMetaId,
+        twinMetabotId: twin.id,
+      });
+      if (result.attached.length > 0) {
+        broadcastTrackedTaskUpdate(result.attached.map((entry) => entry.cardId), 'scheduled_attached');
+      }
+      return result;
+    } catch (error) {
+      return { attached: [], skipped: [], error: error instanceof Error ? error.message : 'Failed to attach' };
+    }
+  });
+
+  ipcMain.handle('trackedTask:close', async (_event, input: {
+    cardId: string;
+    conclusion: string;
+    by: 'owner' | 'twin';
+    targetStatus?: 'completed' | 'cancelled';
+    pinId?: string | null;
+  }) => {
+    try {
+      const result = getTrackedTaskBoard().closeCard({
+        taskId: input?.cardId,
+        conclusion: input?.conclusion,
+        by: input?.by,
+        targetStatus: input?.targetStatus,
+        pinId: input?.pinId ?? null,
+      });
+      if (result.ok) broadcastTrackedTaskUpdate([input.cardId], 'closed');
+      return result;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Failed to close the card' };
+    }
+  });
   // ==================== Scheduled Task IPC Handlers ====================
 
   ipcMain.handle('scheduledTask:list', async () => {

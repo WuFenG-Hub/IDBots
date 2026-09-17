@@ -36,6 +36,8 @@ import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice'
 import { setPreferredMetabotId } from './store/slices/coworkSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
 import { setActiveSkillIds } from './store/slices/skillSlice';
+import { selectCard as selectTrackedCard } from './store/slices/trackedTaskSlice';
+import { trackedTaskService } from './services/trackedTask';
 import { selectTask as selectGroupTask } from './store/slices/groupTasksSlice';
 import type { ApiConfig } from './services/api';
 import type { MetaAppRecord } from './types/metaApp';
@@ -1017,6 +1019,21 @@ const App: React.FC = () => {
     window.addEventListener('scheduledTask:viewSession', handleViewSession);
     return () => window.removeEventListener('scheduledTask:viewSession', handleViewSession);
   }, []);
+
+  // 监听「打开看板里的这张卡」事件（会话侧 chip → 跟踪任务页）
+  useEffect(() => {
+    const handleViewTrackedCard = (event: Event) => {
+      const detail = (event as CustomEvent).detail ?? {};
+      const cardId = typeof detail.cardId === 'string' ? detail.cardId.trim() : '';
+      if (!cardId) return;
+      botBrowserShell.switchToHome();
+      setMainView('scheduledTasks');
+      dispatch(selectTrackedCard(cardId));
+      void trackedTaskService.loadCard(cardId);
+    };
+    window.addEventListener('trackedTask:viewCard', handleViewTrackedCard);
+    return () => window.removeEventListener('trackedTask:viewCard', handleViewTrackedCard);
+  }, [botBrowserShell.switchToHome, dispatch]);
 
   useEffect(() => {
     const handleViewSession = async (event: Event) => {

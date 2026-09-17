@@ -968,6 +968,11 @@ export class SqliteStore {
     // R1 (OpenTeam chat scenario): group mode 'task' | 'chat'. Legacy rows and
     // untouched callers default to 'task' — byte-identical behavior.
     this.migrateGroupTasksModeColumn();
+    // Long-task board (task #83): the board reuses orchestration_tasks as the
+    // single authoritative ledger. Two ADD COLUMN migrations only — the board
+    // must never introduce a fourth table.
+    this.migrateScheduledTaskOrchestrationLink();
+    this.migrateOrchestrationTaskClosureColumns();
 
     // G-04: supervisor intervention ledger (nudge / flag / pause / resume) —
     // structured signals recorded from the Twin supervisor channel, visible
@@ -2904,6 +2909,57 @@ export class SqliteStore {
       this.save();
     } catch (error) {
       console.warn('migrateGroupTaskOrchestrationLink:', error);
+    }
+  }
+
+  /**
+   * Migration (long-task board, task #83): give `scheduled_tasks` the same
+   * at-most-one-card binding `group_tasks` already has, so a scheduled task can
+   * hang on the shared ledger card. ADD COLUMN only — no fourth table.
+   * Existing rows get NULL, which the board reads as "not on a card yet".
+   */
+  private migrateScheduledTaskOrchestrationLink(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(scheduled_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('orchestration_task_id')) {
+        this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN orchestration_task_id TEXT');
+      }
+      this.db.run(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_tasks_orchestration_task
+          ON scheduled_tasks(orchestration_task_id)
+      `);
+      this.save();
+    } catch (error) {
+      console.warn('migrateScheduledTaskOrchestrationLink:', error);
+    }
+  }
+
+  /**
+   * Migration (long-task board, task #83): the closing conclusion is an
+   * authoritative property of the card, so it lives on the single ledger row.
+   * All four columns are NULLABLE with no CHECK — a NULL conclusion means
+   * "not closed yet", and altering a CHECK would force a table rebuild of the
+   * shared Twin orchestration ledger.
+   */
+  private migrateOrchestrationTaskClosureColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(orchestration_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      const additions: Array<[string, string]> = [
+        ['closure_conclusion', 'TEXT'],
+        ['closure_by', 'TEXT'],
+        ['closure_at', 'TEXT'],
+        ['closure_pin_id', 'TEXT'],
+      ];
+      for (const [name, type] of additions) {
+        if (!columns.includes(name)) {
+          this.db.run(`ALTER TABLE orchestration_tasks ADD COLUMN ${name} ${type}`);
+        }
+      }
+      this.save();
+    } catch (error) {
+      console.warn('migrateOrchestrationTaskClosureColumns:', error);
     }
   }
 
