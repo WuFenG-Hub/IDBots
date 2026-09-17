@@ -12,15 +12,16 @@ const {
   metawebInteractions,
   metawebPinVersions,
   metawebProtocols,
+  agentpediaPins,
   isBatchErrorEntry,
 } = await import('../dist-electron/main/services/metawebSurfReadsService.js');
 
 /** Minimal envelope responder: records the request, returns the given envelope. */
-const makeFetch = (envelope, calls = []) => async (url, init = {}) => {
+const makeFetch = (envelope, calls = [], status = 200) => async (url, init = {}) => {
   calls.push({ url: String(url), init });
   if (envelope instanceof Error) throw envelope;
   return {
-    status: 200,
+    status,
     json: async () => envelope,
   };
 };
@@ -390,4 +391,71 @@ test('metaweb_pin_versions renders the chain with attribution guidance and maps 
   const missing = await byNameMissing.metaweb_pin_versions.handler({ pinId: 'nope' });
   assert.equal(missing.isError, undefined, 'a missing pin is a normal answer, not a tool error');
   assert.match(missing.content[0].text, /No MetaWeb pin matches "nope"/);
+});
+
+
+// ---------------------------------------------------------------------------
+// Agentpedia pins feed (live-audit R6 endpoint)
+// ---------------------------------------------------------------------------
+
+test('agentpediaPins builds the query and normalizes the CURRENT bare shape', async () => {
+  const calls = [];
+  // Production today: top-level {items, hasMore, nextCursor}, no envelope.
+  const fetchImpl = makeFetch({
+    items: [
+      {
+        pinId: 'rev-1', path: '/protocols/agentpedia/rev', chainName: 'mvc',
+        timestamp: 1789617710, genesisHeight: 189837, txIndex: 25,
+        globalMetaId: 'idq-author', address: 'addr-a',
+        title: '世界计算机宪章', summary: 'v0.3.1 修订', contentExcerpt: '《宪章》正文开头…', type: 'rev',
+      },
+      { pinId: 'rev-2', path: '/protocols/agentpedia/rev', timestamp: 1789617000 },
+    ],
+    hasMore: true,
+    nextCursor: 'cur-2',
+  }, calls);
+  const page = await agentpediaPins(
+    { path: '/protocols/agentpedia/rev', since: 1789400000, size: 50, cursor: 'cur-1' },
+    { fetchImpl, timeoutMs: 5000 },
+  );
+  const url = new URL(calls[0].url);
+  assert.equal(url.origin + url.pathname, `${DEFAULT_METAWEB_SURF_READS_BASE_URL}/api/agentpedia/pins`);
+  assert.equal(url.searchParams.get('path'), '/protocols/agentpedia/rev');
+  assert.equal(url.searchParams.get('since'), '1789400000');
+  assert.equal(url.searchParams.get('size'), '50');
+  assert.equal(url.searchParams.get('cursor'), 'cur-1');
+  assert.equal(page.items.length, 2);
+  assert.equal(page.items[0].title, '世界计算机宪章');
+  assert.equal(page.items[0].timestamp, 1789617710);
+  assert.equal(page.items[1].title, '', 'missing optional fields → empty strings, never throws');
+  assert.equal(page.hasMore, true);
+  assert.equal(page.nextCursor, 'cur-2');
+});
+
+test('agentpediaPins accepts the ALIGNED envelope shape (metaso fix pending)', async () => {
+  const fetchImpl = makeFetch({
+    code: 0,
+    message: '',
+    data: {
+      items: [{ pinId: 'rev-9', path: '/protocols/agentpedia/rev', timestamp: 1 }],
+      hasMore: false,
+      nextCursor: '',
+    },
+  });
+  const page = await agentpediaPins({ size: 10 }, { fetchImpl, timeoutMs: 5000 });
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0].pinId, 'rev-9');
+  assert.equal(page.hasMore, false);
+  assert.equal(page.nextCursor, null, 'empty cursor string → null');
+});
+
+test('agentpediaPins maps bare and envelope error bodies to actionable messages', async () => {
+  await assert.rejects(
+    agentpediaPins({ cursor: 'garbage' }, { fetchImpl: makeFetch({ error: 'invalid cursor' }, [], 400), timeoutMs: 5000 }),
+    /invalid cursor/,
+  );
+  await assert.rejects(
+    agentpediaPins({}, { fetchImpl: makeFetch({ code: 40000, message: 'bad size' }, [], 200), timeoutMs: 5000 }),
+    /MetaWeb surf-reads API error: bad size/,
+  );
 });
