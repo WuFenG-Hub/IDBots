@@ -788,6 +788,32 @@ export function buildSourceSessionCheckpointNotice(input: {
   ].join('\n');
 }
 
+/**
+ * Task #83 audit (F3): re-reminder when an open checkpoint has waited with NO
+ * owner reply for a long stretch — the opening notice may have been missed,
+ * and the whole group stays paused meanwhile.
+ */
+export function buildSourceSessionCheckpointStallNotice(input: {
+  title: string;
+  status: string;
+  topic: string | null;
+  waitingMinutes: number;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const topic = (input.topic ?? '').trim();
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_CHECKPOINT] Group task "${input.title}" (status: ${input.status}) is still paused at a decision point${topic ? ` (${topic})` : ''} — no reply from you for ~${input.waitingMinutes} min.`,
+      'The group cannot resume until you rule. Reply in the task group or to the chair directly; if this wait is intentional, no action is needed (this reminder fires once per checkpoint).',
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_CHECKPOINT] 群任务「${input.title}」（状态：${input.status}）仍停在人工检查点${topic ? `（${topic}）` : ''}——已约 ${input.waitingMinutes} 分钟未收到你的裁定。`,
+    '在你裁定之前整组保持暂停。请在任务群内回复或直接回复 chair；若有意搁置可忽略（每个检查点只提醒一次）。',
+    taskPanelPointerLine(language),
+  ].join('\n');
+}
+
 export function buildSourceSessionAnomalyNotice(input: {
   title: string;
   status: string;

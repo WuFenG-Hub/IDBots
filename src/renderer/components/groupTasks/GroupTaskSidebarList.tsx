@@ -184,6 +184,14 @@ const GroupTaskSidebarRow: React.FC<GroupTaskSidebarRowProps> = ({
               </span>
             )}
             <GroupTaskTypeBadge openTeam={isOpenTeam} />
+            {task.hasOpenCheckpoint ? (
+              <span
+                className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                title={i18nService.t('groupTasksCheckpointAwaitingOwner')}
+              >
+                ⏸ {i18nService.t('groupTasksCheckpointAwaitingOwner')}
+              </span>
+            ) : null}
             <span
               className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${groupTaskStatusBadgeClass(task.status)}`}
             >

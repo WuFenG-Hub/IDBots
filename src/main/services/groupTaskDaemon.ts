@@ -55,6 +55,7 @@ import {
   buildMemberJoinWelcomeText,
   buildSourceSessionAnomalyNotice,
   buildSourceSessionCheckpointNotice,
+  buildSourceSessionCheckpointStallNotice,
   buildSourceSessionCreatedNotice,
   buildSourceSessionDispatchNotice,
   buildSourceSessionReviewRetractedNotice,
@@ -773,6 +774,23 @@ export const GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX = 'group_task_review_notified:
  * checkpoint (`group_task_checkpoint_reported:<taskId>:<checkpointId>`).
  */
 const GROUP_TASK_CHECKPOINT_REPORTED_KV_PREFIX = 'group_task_checkpoint_reported:';
+/**
+ * Task #83 audit (F3): liveness watch for an OPEN human checkpoint. Every
+ * member-facing monitor stands down while the gate is closed, so nothing else
+ * notices when the PAUSE itself goes stale (task #84: the owner ruled, the
+ * chair relayed it without [CHECKPOINT_RESOLVED:], and the group idled 24 min
+ * with every status field reading "executing").
+ * - Activity after the opening (owner reply and/or chair speech) but no
+ *   resolution for CHECKPOINT_STALL_NOTE_MS → one host environment note to the
+ *   chair (`group_task_checkpoint_stall_noted:<taskId>:<checkpointId>`).
+ * - No owner reply at all for CHECKPOINT_OWNER_REMIND_MS → one re-reminder to
+ *   the owner's origin session
+ *   (`group_task_checkpoint_owner_reminded:<taskId>:<checkpointId>`).
+ */
+const CHECKPOINT_STALL_NOTE_MS = 10 * 60_000;
+const CHECKPOINT_OWNER_REMIND_MS = 45 * 60_000;
+const CHECKPOINT_STALL_NOTED_KV_PREFIX = 'group_task_checkpoint_stall_noted:';
+const CHECKPOINT_OWNER_REMINDED_KV_PREFIX = 'group_task_checkpoint_owner_reminded:';
 const ACK_PENDING_PREFIX = 'group_task_ack_pending:';
 const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
 /**
@@ -9373,6 +9391,103 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * Task #83 audit (F3): liveness watch for an OPEN human checkpoint. Every
+   * member-facing monitor stands down while the gate is closed (the silence is
+   * enforced), so nothing else notices when the pause itself goes stale —
+   * task #84 idled 24 min: the owner's ruling came in, the chair relayed it
+   * without [CHECKPOINT_RESOLVED:], and every status field read "executing".
+   * Two rails, each once per checkpoint:
+   *  - activity after the opening (owner reply and/or chair speech) but no
+   *    resolution for CHECKPOINT_STALL_NOTE_MS → host note to the chair (the
+   *    checkpoint_stall kind is let through the human-gate deferral);
+   *  - no owner reply at all for CHECKPOINT_OWNER_REMIND_MS → one re-reminder
+   *    to the owner's origin session (the opening report may have been missed).
+   */
+  const monitorCheckpointLiveness = (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+  ): void => {
+    if (task.status !== 'executing' && task.status !== 'planning') return;
+    const sqlite = deps.getStore();
+    const store = deps.getGroupTaskStore();
+    const checkpoint = store.getOpenCheckpoint(task.id);
+    if (!checkpoint || !task.groupId) return;
+    const openedAtMs = parseSqliteUtcMs(checkpoint.createdAt ?? null);
+    if (openedAtMs == null) return;
+    const chairMember = members.find((member) => member.role === 'chair');
+    const chairBot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
+    const ownerGmid = (chairBot?.boss_global_metaid ?? '').trim().toLowerCase();
+    const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
+    const latestSpeechMs = (gmid: string): number | null => {
+      if (!gmid) return null;
+      try {
+        const result = sqlite.getDatabase().exec(
+          'SELECT MAX(chain_timestamp) FROM group_chat_messages WHERE group_id = ? AND sender_global_metaid = ?',
+          [task.groupId, gmid],
+        );
+        const sec = Number(result[0]?.values?.[0]?.[0]);
+        return Number.isFinite(sec) && sec > 0 ? sec * 1000 : null;
+      } catch {
+        return null; // transient read failure — retry next tick
+      }
+    };
+    const ownerLastMs = latestSpeechMs(ownerGmid);
+    const chairLastMs = latestSpeechMs(chairGmid);
+    const ownerReplied = ownerLastMs != null && ownerLastMs >= openedAtMs;
+    // Chair speech strictly after the opening message (1s tie margin) means
+    // the chair has been active while the gate stayed closed.
+    const chairSpokeAfterOpen = chairLastMs != null && chairLastMs > openedAtMs + 1000;
+    const nowMs = now();
+    if (ownerReplied || chairSpokeAfterOpen) {
+      const activityMs = Math.max(openedAtMs, ownerLastMs ?? 0, chairSpokeAfterOpen ? (chairLastMs ?? 0) : 0);
+      if (nowMs - activityMs < CHECKPOINT_STALL_NOTE_MS) return;
+      const noteKey = `${CHECKPOINT_STALL_NOTED_KV_PREFIX}${task.id}:${checkpoint.id}`;
+      if (sqlite.get<string>(noteKey) != null) return;
+      sqlite.set(noteKey, '1');
+      store.recordHostNote({
+        taskId: task.id,
+        kind: 'checkpoint_stall',
+        target: chairMember?.name ?? 'chair',
+        dedupeKey: `checkpoint_stall:${task.id}:${checkpoint.id}`,
+        body:
+          `Checkpoint #${checkpoint.id}${checkpoint.topic ? ` (${checkpoint.topic})` : ''} is still open: ` +
+          `${ownerReplied ? 'the owner has replied' : 'you have spoken'} since it opened, but no ` +
+          '[CHECKPOINT_RESOLVED: …] followed, and the group is paused meanwhile. If the decision is in, post ' +
+          '[CHECKPOINT_RESOLVED: <decision>] to resume work; if you are still waiting on the owner, ' +
+          'no action is needed (this reminder fires once per checkpoint).',
+      });
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: checkpoint #${checkpoint.id} still open ` +
+        `${Math.round((nowMs - activityMs) / 60_000)} min after the latest activity — reminded the chair`,
+      );
+      return;
+    }
+    if (nowMs - openedAtMs >= CHECKPOINT_OWNER_REMIND_MS) {
+      const remindKey = `${CHECKPOINT_OWNER_REMINDED_KV_PREFIX}${task.id}:${checkpoint.id}`;
+      if (sqlite.get<string>(remindKey) != null) return;
+      sqlite.set(remindKey, '1');
+      // Best-effort (the milestone rail is itself subject-guarded per
+      // checkpoint): re-remind the owner that the group is still paused.
+      notifySourceSessionMilestone(
+        task,
+        'checkpoint',
+        buildSourceSessionCheckpointStallNotice({
+          title: task.title,
+          status: task.status,
+          topic: checkpoint.topic,
+          waitingMinutes: Math.round((nowMs - openedAtMs) / 60_000),
+        }),
+        `checkpoint_stall:${checkpoint.id}`,
+      );
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: checkpoint #${checkpoint.id} open ` +
+        `${Math.round((nowMs - openedAtMs) / 60_000)} min with no owner reply — re-reminded the owner`,
+      );
+    }
+  };
+
+  /**
    * P0-4: multi-source on-chain existence check. MAN (local sqlite + manapi)
    * is always queried via deps.readPinForVerification; the metafile-indexer
    * is queried when deps.readPinSecondaryForVerification is wired. A 404 from
@@ -10162,11 +10277,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       // Single-commander: pending environment notes drive ONE chair turn
       // (facts only — the host itself never speaks in the group). Same
-      // human-gate deferral as supervisor signals.
+      // human-gate deferral as supervisor signals — EXCEPT checkpoint_stall
+      // notes (Task #83 audit, F3): those are ABOUT the open checkpoint, so
+      // deferring them until it resolves would make the watchdog toothless.
+      const pendingHostNotes = store.listPendingHostNotes(task.id);
       if (
         chairMemberId != null
-        && !checkpointOpenAtTick
-        && store.listPendingHostNotes(task.id).length > 0
+        && pendingHostNotes.length > 0
+        && (!checkpointOpenAtTick || pendingHostNotes.some((note) => note.kind === 'checkpoint_stall'))
       ) {
         runTurnAsync(
           keyOf(task.id, chairMemberId),
@@ -10175,6 +10293,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           { taskId: task.id, metabotId: chairMemberId, isChair: true },
         );
       }
+    }
+
+    // Task #83 audit (F3): an OPEN checkpoint is the pause every member-facing
+    // monitor stands down for — watch the pause itself (stale unresolved
+    // checkpoint → chair note; no owner reply at all → owner re-reminder).
+    if (checkpointOpenAtTick && !isChatModeTask) {
+      monitorCheckpointLiveness(task, members, botsById);
     }
 
     // G-01: no-progress stall — a task with no new group message and no new

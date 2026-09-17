@@ -299,6 +299,11 @@ export interface GroupTaskSummary extends GroupTask {
   memberNames: string[];
   /** Per-member preview for list avatars and the hover summary. */
   members: GroupTaskMemberPreview[];
+  /**
+   * Task #83 audit (F3): a human checkpoint is currently open — the row badges
+   * "awaiting owner decision" even though the status still reads executing.
+   */
+  hasOpenCheckpoint?: boolean;
 }
 
 export interface GroupTaskMemberPreview {

@@ -1222,6 +1222,12 @@ export interface GroupTaskSummary extends GroupTask {
   chairName: string | null;
   memberNames: string[];
   members: GroupTaskMemberPreview[];
+  /**
+   * Task #83 audit (F3): a human checkpoint is currently open — the task is
+   * paused awaiting the owner's decision even though `status` still reads
+   * executing/planning. The sidebar badges it so the pause is never invisible.
+   */
+  hasOpenCheckpoint: boolean;
 }
 
 export interface GroupTaskMemberPreview {
@@ -1251,6 +1257,7 @@ function toTaskSummary(
   task: GroupTask,
   members: GroupTaskMember[],
   avatarById: Map<number, string | null>,
+  hasOpenCheckpoint: boolean,
 ): GroupTaskSummary {
   const previews: GroupTaskMemberPreview[] = members.map((member) => ({
     name: (member.name ?? member.displayName ?? '').trim(),
@@ -1265,6 +1272,7 @@ function toTaskSummary(
     chairName: members.find((member) => member.role === 'chair')?.name ?? null,
     memberNames: previews.map((member) => member.name).filter(Boolean),
     members: previews,
+    hasOpenCheckpoint,
   };
 }
 
@@ -1278,7 +1286,8 @@ export async function listGroupTaskSummaries(
   const tasks = store.listTasks({ ...filter, includeArchived: false });
   const membersByTask = tasks.map((task) => store.listMembers(task.id));
   const avatarById = buildMetabotAvatarMap(membersByTask.flat().map((member) => member.metabotId));
-  return tasks.map((task, index) => toTaskSummary(task, membersByTask[index] ?? [], avatarById));
+  return tasks.map((task, index) =>
+    toTaskSummary(task, membersByTask[index] ?? [], avatarById, store.getOpenCheckpoint(task.id) != null));
 }
 
 /** Archived tasks (Settings restore panel), newest archive first. */
@@ -1289,7 +1298,8 @@ export async function listArchivedGroupTasks(
   const tasks = store.listArchivedTasks(options);
   const membersByTask = tasks.map((task) => store.listMembers(task.id));
   const avatarById = buildMetabotAvatarMap(membersByTask.flat().map((member) => member.metabotId));
-  return tasks.map((task, index) => toTaskSummary(task, membersByTask[index] ?? [], avatarById));
+  return tasks.map((task, index) =>
+    toTaskSummary(task, membersByTask[index] ?? [], avatarById, store.getOpenCheckpoint(task.id) != null));
 }
 
 export async function countArchivedGroupTasks(): Promise<number> {

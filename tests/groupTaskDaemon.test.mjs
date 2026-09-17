@@ -6908,6 +6908,85 @@ test('P1-2: a dispatch swallowed by an open checkpoint posts a dispatch_held not
   }
 });
 
+test('Task #83 F3: an open checkpoint gone stale after the owner\'s reply reminds the chair (once)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    h.groupTaskStore.openCheckpoint({
+      taskId: task.id, topic: 'UI 范围与删除授权', msgPinId: 'pin-f3-open',
+    });
+    // The owner replies in the group with a ruling, but nobody posts
+    // [CHECKPOINT_RESOLVED:] — the gate stays closed (task #84's 24-min idle).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-f3-ruling', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: '范围按 A 方案，删除授权批准。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const stallNotes = () => Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'checkpoint_stall'",
+      [task.id],
+    )[0].values[0][0]);
+    assert.equal(stallNotes(), 0, 'inside the grace window the pause is legitimate');
+
+    h.state.nowMs += 11 * 60_000;
+    await h.loop.runTick();
+    assert.equal(stallNotes(), 1, 'a stale unresolved checkpoint after the owner reply reaches the chair');
+    const note = h.db.exec(
+      "SELECT body FROM group_task_host_notes WHERE task_id = ? AND kind = 'checkpoint_stall'",
+      [task.id],
+    )[0].values[0][0];
+    assert.match(note, /CHECKPOINT_RESOLVED/);
+    assert.match(note, /UI 范围与删除授权/, 'the note names the checkpoint topic');
+
+    // kv-guarded: the same checkpoint never re-notes.
+    h.state.nowMs += 60_000;
+    await h.loop.runTick();
+    assert.equal(stallNotes(), 1, 'one stall note per checkpoint');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 F3: an open checkpoint with NO owner reply re-reminds the owner once', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: (m) => { milestones.push(m); return true; },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-f3', task.id]);
+    h.state.nowMs = Date.now();
+    h.groupTaskStore.openCheckpoint({
+      taskId: task.id, topic: 'draft approval', msgPinId: 'pin-f3b-open',
+    });
+    await h.loop.runTick();
+    assert.equal(milestones.filter((m) => m.subject?.startsWith('checkpoint_stall:')).length, 0);
+
+    // 46 min of total silence: the opening notice may have been missed.
+    h.state.nowMs += 46 * 60_000;
+    await h.loop.runTick();
+    const reminders = milestones.filter(
+      (m) => m.kind === 'checkpoint' && typeof m.subject === 'string' && m.subject.startsWith('checkpoint_stall:'),
+    );
+    assert.equal(reminders.length, 1, 'one owner re-reminder per checkpoint');
+    assert.match(reminders[0].message, /draft approval/);
+
+    h.state.nowMs += 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      milestones.filter((m) => m.subject?.startsWith('checkpoint_stall:')).length,
+      1,
+      'no repeated re-reminder',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('P1-2: a review-phase dispatch posts a dispatch_held notice with the reopen instruction', async () => {
   const h = await createHarness();
   try {
