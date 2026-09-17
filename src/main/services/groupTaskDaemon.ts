@@ -790,6 +790,15 @@ const ACK_SEEN_PREFIX = 'group_task_ack_seen:';
  */
 const ACK_DEFERRED_INFLIGHT_PREFIX = 'group_task_ack_deferred_inflight:';
 const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
+/**
+ * Task #83 audit (P3): a chair-stated [DEADLINE] whose member is still
+ * upstream-blocked is recorded here as a SUSPENDED clock
+ * (`group_task_expected_delivery_suspended:<taskId>:<metabotId>` =
+ * `{minutes, assignmentMessageId, declaredAt}`) instead of being dropped.
+ * monitorDeliveryDeadlines activates it (dueAt = lift + minutes) once the
+ * dependency clears; a deliverable or a directly-armed deadline retires it.
+ */
+const EXPECTED_DELIVERY_SUSPENDED_PREFIX = 'group_task_expected_delivery_suspended:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 /**
  * Default delivery deadline armed when a worker ACKs [WORKING] without an ETA
@@ -4619,6 +4628,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           );
           if (delivererMember?.metabotId != null) {
             deps.getStore().delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${delivererMember.metabotId}`);
+            deps.getStore().delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${delivererMember.metabotId}`);
             deps.getStore().delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${delivererMember.metabotId}`);
           }
         }
@@ -8436,9 +8446,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // cannot start (and need not ACK) until the upstream deliverable
               // lands, so arming the 3-min no-ACK watch here would misreport
               // the #21-style false "did not ACK" warnings.
+              // Task #83 audit (P3): keep the chair-stated deadline as a
+              // SUSPENDED clock instead of dropping it — the deadline sweep
+              // starts it when the upstream lands, even if the worker never
+              // re-[WORKING]s.
+              const suspendedMinutes = parseChairDeadlineMinutes(memberClause);
+              if (suspendedMinutes != null && suspendedMinutes > 0) {
+                sqlite.set(
+                  `${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`,
+                  JSON.stringify({
+                    minutes: suspendedMinutes,
+                    assignmentMessageId: message.id,
+                    declaredAt: now(),
+                  }),
+                );
+              }
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: derived assignment to ${member.name ?? member.metabotId} ` +
-                  `(message #${message.id}) upstream not delivered; dependency-wait, no ACK watch`,
+                  `(message #${message.id}) upstream not delivered; dependency-wait, no ACK watch` +
+                  (suspendedMinutes != null && suspendedMinutes > 0
+                    ? ` — chair-stated deadline suspended (${suspendedMinutes}m, starts when the upstream lands)`
+                    : ''),
               );
             }
             continue;
@@ -8460,6 +8488,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             const retroMinutes = parseChairDeadlineMinutes(clause);
             if (retroMinutes != null && retroMinutes > 0) {
               sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+              sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
               sqlite.set(
                 `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
                 JSON.stringify({
@@ -8484,6 +8513,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // `assignedAt` postdated the worker's actual reply and then
           // false-alarm a member who had demonstrably engaged.
           sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
+          // A fresh assignment supersedes any suspended clock from the
+          // previous one — the new clause re-creates it via its own path.
+          sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
           sqlite.set(
             pendingKey,
             JSON.stringify({
@@ -8627,6 +8659,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // deadline would otherwise skip the next reminder and drop the member
           // straight onto the reclaim ladder after one grace window.
           sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+          sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
           sqlite.set(
             `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
             JSON.stringify({
@@ -8646,6 +8679,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           );
         }
       } else {
+        // Task #83 audit (P3): a blocked ACK used to drop the chair-stated
+        // deadline entirely — nothing re-armed it when the upstream landed
+        // unless the worker re-[WORKING]ed. Keep it as a suspended clock; the
+        // deadline sweep activates it when the dependency clears.
+        let suspendedMinutes: number | null = null;
+        if (!opts?.humanGateActive && !acksHostNotice && assignmentOnRecord && (awaitingUpstream || workerDeclaredWait)) {
+          const blockedContent = resolveAssignmentContent(task, assignmentMessageId, message.replyPin);
+          const blockedClause = extractMemberDispatchClause(blockedContent, memberBot?.name)
+            ?? extractMemberDispatchClause(blockedContent, member.name)
+            ?? blockedContent;
+          const parsed = parseChairDeadlineMinutes(blockedClause);
+          if (parsed != null && parsed > 0) {
+            suspendedMinutes = parsed;
+            sqlite.set(
+              `${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`,
+              JSON.stringify({
+                minutes: parsed,
+                assignmentMessageId: assignmentMessageId ?? null,
+                declaredAt: now(),
+              }),
+            );
+          }
+        }
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
           (opts?.humanGateActive
@@ -8657,7 +8713,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 : workerDeclaredWait
                   ? 'declaring a conditional upstream wait (ETA suspended until the upstream lands)'
                   : 'with no assignment on record') +
-          ' — liveness only, no delivery deadline armed',
+          (suspendedMinutes != null
+            ? ` — liveness only; chair-stated deadline suspended (${suspendedMinutes}m, starts when the upstream lands)`
+            : ' — liveness only, no delivery deadline armed'),
         );
       }
       return;
@@ -9461,6 +9519,72 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const store = deps.getGroupTaskStore();
     const nowMs = now();
     const reclaimNotes: string[] = [];
+    // Task #83 audit (P3): activate suspended chair-stated deadlines whose
+    // upstream wait has lifted. Blocked assignments/ACKs record the clock as
+    // suspended instead of dropping it; without this sweep the chair's
+    // [DEADLINE] was monitored only if the worker happened to re-[WORKING].
+    for (const member of members) {
+      if (member.role !== 'worker' || member.metabotId == null) continue;
+      const suspendedKey = `${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`;
+      const rawSuspended = sqlite.get<string>(suspendedKey);
+      if (!rawSuspended) continue;
+      if (sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`) != null) {
+        sqlite.delete(suspendedKey); // an armed clock supersedes the suspended one
+        continue;
+      }
+      let suspended: { minutes?: number; assignmentMessageId?: number | null };
+      try {
+        suspended = JSON.parse(rawSuspended);
+      } catch {
+        sqlite.delete(suspendedKey);
+        continue;
+      }
+      if (!suspended || typeof suspended.minutes !== 'number' || suspended.minutes <= 0) {
+        sqlite.delete(suspendedKey);
+        continue;
+      }
+      // fix-v2 P0-1 symmetry: a parked (standby) member has no active
+      // assignment — keep the clock frozen until the chair reactivates it.
+      if (member.status === 'standby') continue;
+      const suspendedGmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const deliveredWhileSuspended = Boolean(suspendedGmid)
+        && store.listDeliverables(task.id).some(
+          (deliverable) =>
+            (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === suspendedGmid
+            && deliverable.status !== 'rejected',
+        );
+      if (deliveredWhileSuspended) {
+        sqlite.delete(suspendedKey);
+        continue;
+      }
+      const suspensionDepWait = checkMemberDependencyWait(
+        task,
+        member,
+        members.find((candidate) => candidate.role === 'chair'),
+      );
+      // fix-v2 P0-1 symmetry: only STRUCTURED (ledger-verifiable) pending
+      // tokens keep the clock suspended. A prose wait never self-lifts, so it
+      // must not freeze the clock — it gates the downstream reminder/escalation
+      // through the time-capped exemption instead (same rule as the reminder
+      // path below).
+      const suspensionPendingStructured = (suspensionDepWait?.pendingTokens ?? [])
+        .filter((token) => token !== '(prose-declared upstream)');
+      if (suspensionPendingStructured.length > 0) continue;
+      sqlite.delete(suspendedKey);
+      sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+      sqlite.set(
+        `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+        JSON.stringify({
+          dueAt: nowMs + suspended.minutes * 60_000,
+          ackedAt: nowMs,
+          taskDescription: null,
+        }),
+      );
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId}'s upstream wait has lifted — ` +
+        `activated the suspended chair-stated deadline: ${suspended.minutes}m from now`,
+      );
+    }
     for (const member of members) {
       if (member.role !== 'worker' || member.metabotId == null) continue;
       const raw = sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);

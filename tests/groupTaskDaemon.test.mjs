@@ -8511,6 +8511,61 @@ test('Task #83 P2: a foreign clause\'s [DEPENDS_ON] never masks this member\'s u
   }
 });
 
+test('Task #83 P3: a chair-stated deadline on an upstream-blocked assignment is suspended, then activated when the upstream lands', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const upstreamPin = `${'f'.repeat(64)}i0`;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-p3-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: `@Coder Bot 你负责 S4 推广，[DEPENDS_ON: ${upstreamPin}] 等 S3 交付后开始。[DEADLINE: 45m]`,
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_expected_delivery:1:2'), undefined, 'a blocked assignment arms no clock');
+    assert.ok(h.store.get('group_task_expected_delivery_suspended:1:2'), 'the chair-stated deadline is suspended, not dropped');
+
+    // The worker ACKs while blocked: the clock stays suspended, never ticking.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-p3-ack', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，等 S3', replyPin: 'pin-p3-assign',
+      chainTimestamp: Math.floor(startMs / 1000) + 30,
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_expected_delivery:1:2'), undefined, 'a blocked ACK does not start the clock');
+    assert.ok(h.store.get('group_task_expected_delivery_suspended:1:2'), 'the suspended clock survives the blocked ACK');
+
+    // Way past the nominal 45m with the upstream still missing: nothing fires.
+    const deadlineNotes = () => Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'deadline'",
+      [task.id],
+    )[0].values[0][0]);
+    h.state.nowMs = startMs + 60 * 60_000;
+    await h.loop.runTick();
+    assert.equal(deadlineNotes(), 0, 'a suspended clock never rings while blocked');
+
+    // The upstream lands: the sweep activates the chair-stated clock.
+    h.groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'pin-p3-upstream', authorGlobalmetaid: 'gmid-w3',
+      kind: 'pinid', uri: `pin://${upstreamPin}`,
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_expected_delivery_suspended:1:2'), undefined, 'the suspended record is retired');
+    const armed = JSON.parse(h.store.get('group_task_expected_delivery:1:2'));
+    assert.equal(armed.dueAt, startMs + 60 * 60_000 + 45 * 60_000, 'the clock starts when the wait lifts');
+
+    // Past the activated dueAt with no delivery: the deadline bell rings.
+    h.state.nowMs = armed.dueAt + 60_000;
+    await h.loop.runTick();
+    assert.equal(deadlineNotes(), 1, 'the activated deadline is monitored like any other');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('speedup R-06: review entry stamps the time breakdown onto the record and the closing message renders it', async () => {
   const h = await createHarness();
   try {
