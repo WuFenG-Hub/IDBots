@@ -527,12 +527,22 @@ export function parseGroupTaskStuckReclaimMode(raw: string | null | undefined): 
  * grants is additionally time-capped (PROSE_DEPENDENCY_EXEMPTION_MAX_MS)
  * because prose declarations, unlike ledger-verified [DEPENDS_ON] tokens,
  * can never self-lift.
+ *
+ * Task #83 audit (P2b): direction awareness. "缺一项下游就要返工" or "下游依赖
+ * 这份契约" say the DOWNSTREAM depends on the member's output — the member is
+ * the upstream, not the waiter. The bare 依赖/前置/上游 branches now reject
+ * reverse-direction context, and 上游 can no longer match inside 下游 (task
+ * 83's live miss parked loop — the blocking member itself — under a prose
+ * exemption for 3 hours).
  */
 const PROSE_NEGATION_LOOKBEHIND = '(?<!(?:不|无|未|勿|莫|别|没|休|免|非|何|没有|无需|不必|不用|不存在))';
 const PROSE_NEGATION_LOOKBEHIND_EN = '(?<!(?:\\bno\\s+|\\bnot\\s+|\\bwithout\\s+|\\bnever\\s+|\\bindependen(?:t|tly)\\s+(?:of\\s+)?))';
+const PROSE_REVERSE_DIRECTION_LOOKBEHIND = '(?<!(?:下游|后续|别人|他人|其它|其他|大家).{0,6})';
 const PROSE_DEPENDENCY_RE = new RegExp(
   '(?:'
-  + `${PROSE_NEGATION_LOOKBEHIND}依赖|${PROSE_NEGATION_LOOKBEHIND}前置|${PROSE_NEGATION_LOOKBEHIND}上游|`
+  + `${PROSE_NEGATION_LOOKBEHIND}${PROSE_REVERSE_DIRECTION_LOOKBEHIND}依赖|`
+  + `${PROSE_NEGATION_LOOKBEHIND}${PROSE_REVERSE_DIRECTION_LOOKBEHIND}前置|`
+  + `${PROSE_NEGATION_LOOKBEHIND}(?<!下)上游|`
   + `${PROSE_NEGATION_LOOKBEHIND}在[^，。；\\n]{1,24}之后|`
   + `${PROSE_NEGATION_LOOKBEHIND}等[^，。；\\n]{1,24}(?:交付|完成|产出|落地)|`
   + `${PROSE_NEGATION_LOOKBEHIND}待[^，。；\\n]{1,24}(?:交付|完成|产出|落地)|`
@@ -850,8 +860,11 @@ export const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
  * deadline verdicts: a genuinely dead member cannot hide behind a stale prose
  * sentence forever. A NEW chair assignment (different message id) re-arms
  * the window.
+ * Task #83 audit (P2c): 180 min was far too generous — a misclassified member
+ * (see the direction-aware regex fix) sat outside every silence monitor for 3
+ * hours. 45 min still covers a real upstream delivery window.
  */
-export const PROSE_DEPENDENCY_EXEMPTION_MAX_MS = 180 * 60_000;
+export const PROSE_DEPENDENCY_EXEMPTION_MAX_MS = 45 * 60_000;
 /**
  * G-04 retry budget: failed chair-answer attempts per supervisor signal
  * (`group_task_sup_sig_attempts:<signalId>` = count). At 3 attempts the signal
@@ -8401,7 +8414,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // step continues, so a fresh no-ACK watch would misreport a worker
           // who is demonstrably working. Inherit only when the referenced
           // upstream pinid resolves to a message this worker ACKed.
-          const derived = resolveDerivedAssignmentUpstream(task, message, sqlite);
+          // Task #83 audit (P2): scope the lookup to THIS member's dispatch
+          // clause — the first [DEPENDS_ON] in a multi-member message may
+          // govern someone else's step (task 83: the tag lived in 阿码/小昆's
+          // clauses and masked loop's own upstream-free assignment as
+          // "upstream not delivered"). Whole-message fallback covers
+          // mention-array-only dispatches, same as checkMemberDependencyWait.
+          const memberClause = extractMemberDispatchClause(contentText, bot.name)
+            ?? extractMemberDispatchClause(contentText, member.name)
+            ?? contentText;
+          const derived = resolveDerivedAssignmentUpstream(task, { content: memberClause }, sqlite);
           if (derived !== null) {
             if (derived) {
               sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${message.id}`, '1');

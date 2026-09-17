@@ -40,6 +40,7 @@ const {
   hasProseDependencyDeclaration,
   hasWorkerUpstreamWait,
   adjudicateStatusDirectives,
+  PROSE_DEPENDENCY_EXEMPTION_MAX_MS,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 const { SkillTurnTimeoutError } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
@@ -707,6 +708,19 @@ test('release-review P1: negated prose statements do NOT read as dependency decl
   assert.equal(hasProseDependencyDeclaration('never waiting for the design'), false);
 });
 
+test('Task #83 P2b: reverse-direction prose ("others depend on me") does NOT read as a wait declaration', () => {
+  // The live task-83 miss: "缺一项下游就要返工" inside the upstream member's
+  // own clause parked the blocker itself under a prose exemption.
+  assert.equal(hasProseDependencyDeclaration('@loop 缺一项下游就要返工'), false);
+  assert.equal(hasProseDependencyDeclaration('下游依赖这份契约，必须先定稿'), false);
+  assert.equal(hasProseDependencyDeclaration('其他成员依赖我的规格'), false);
+  assert.equal(hasProseDependencyDeclaration('后续步骤都依赖 S3 的产物'), false);
+  // Forward-direction (this member waits) still reads true.
+  assert.equal(hasProseDependencyDeclaration('依赖上游的交付'), true);
+  assert.equal(hasProseDependencyDeclaration('等上游交付后开始'), true);
+  assert.equal(hasProseDependencyDeclaration('@小新 开始 S5，依赖 S4 的交付'), true);
+});
+
 test('fix-v2 B2: default stuck verdict is alert-only — the session is never stopped', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
@@ -820,9 +834,9 @@ test('release-review P1: a prose dependency-wait exemption expires — monitorin
     assert.equal(member.status, 'working', 'within the cap the prose waiter stays exempt');
     assert.ok(h.store.get('group_task_dep_wait_exempt:1:2'), 'exemption note present');
 
-    // Past the 3-hour cap with the SAME chair assignment: the exemption
+    // Past the cap with the SAME chair assignment: the exemption
     // lifts and the normal unreachable verdict stamps the silent member.
-    h.state.nowMs = startMs + 180 * 60_000 + 60_000;
+    h.state.nowMs = startMs + PROSE_DEPENDENCY_EXEMPTION_MAX_MS + 60_000;
     await h.loop.runTick();
     member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
     assert.equal(member.status, 'unreachable', 'after the cap the silent member is flagged again');
@@ -8468,6 +8482,35 @@ test('speedup R-02: the delivery reminder stays suspended while the assignment i
   }
 });
 
+test('Task #83 P2: a foreign clause\'s [DEPENDS_ON] never masks this member\'s upstream-free assignment', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Coder Bot's clause carries the [DEPENDS_ON] tag; Designer Bot's clause
+    // has none. Task 83's live miss: the whole-message read found the foreign
+    // tag and silently dependency-parked the upstream-free member (no watch).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-p2-mixed-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: `@Coder Bot 你负责 S4 推广，[DEPENDS_ON: ${'f'.repeat(64)}i0] 等 S3 交付后开始。\n\n@Designer Bot 你负责 S5 视觉，直接开工。`,
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get('group_task_ack_pending:1:2'), undefined,
+      'the [DEPENDS_ON]-gated member waits on its upstream — no ACK watch',
+    );
+    assert.ok(
+      h.store.get('group_task_ack_pending:1:3'),
+      'the upstream-free member gets a normal ACK watch — the foreign tag does not mask it',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('speedup R-06: review entry stamps the time breakdown onto the record and the closing message renders it', async () => {
   const h = await createHarness();
   try {
@@ -8835,7 +8878,7 @@ test('fix-v2 P1-3: the stuck alert cites verifiable evidence and never mislabels
 
     // Past the cap: the alert fires — and it must NOT read "no upstream
     // dependency declared" (task #57's mislabel): a prose wait WAS declared.
-    h.state.nowMs = startMs + 180 * 60_000 + 60_000;
+    h.state.nowMs = startMs + PROSE_DEPENDENCY_EXEMPTION_MAX_MS + 60_000;
     await h.loop.runTick();
     assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'the stuck alert fires after the cap');
     const anomaly = milestones.find((entry) => entry.kind === 'anomaly' && /looks stuck/.test(entry.message));
