@@ -1,4 +1,9 @@
-export const DEFAULT_METABOT_LIMIT = 20;
+/**
+ * Fleet-size ceiling for one machine. Re-estimated 2026-09-17 (audit F1: quota
+ * defaults must assume "bots run autonomously, many tasks, fast cadence", not
+ * human-hand pace); the fleet had reached 19/20 with one create left.
+ */
+export const DEFAULT_METABOT_LIMIT = 100;
 export const METABOT_LIMIT_REACHED_ERROR = 'METABOT_LIMIT_REACHED';
 
 const normalizeCount = (value: number): number => {

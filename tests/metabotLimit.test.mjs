@@ -9,11 +9,11 @@ const limitPath = path.join(projectRoot, 'src', 'main', 'shared', 'metabotLimit.
 const managerPath = path.join(projectRoot, 'src', 'renderer', 'components', 'metabots', 'MetabotsManager.tsx');
 const mainPath = path.join(projectRoot, 'src', 'main', 'main.ts');
 
-test('MetaBot creation limit is shared at 20 across renderer and main create paths', () => {
+test('MetaBot creation limit is shared at 100 across renderer and main create paths', () => {
   assert.ok(fs.existsSync(limitPath), 'shared metabot limit module should exist');
 
   const limitSource = fs.readFileSync(limitPath, 'utf8');
-  assert.match(limitSource, /DEFAULT_METABOT_LIMIT\s*=\s*20/);
+  assert.match(limitSource, /DEFAULT_METABOT_LIMIT\s*=\s*100/);
   assert.match(limitSource, /METABOT_LIMIT_REACHED_ERROR/);
 
   const managerSource = fs.readFileSync(managerPath, 'utf8');
