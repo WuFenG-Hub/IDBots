@@ -1266,3 +1266,45 @@ test('the startup backfill closes pre-upgrade terminal rows once, and only those
     reopened.close();
   }
 });
+
+test('scope is a real three-value axis and an unknown scope is never silently default (H6)', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const archived = board.listCards({ scope: 'archived' });
+    assert.equal(archived.scopeApplied, 'archived', 'H6: archived must be a REAL scope, not a default fallback');
+    assert.equal(archived.scopeRequested, 'archived');
+    assert.equal(archived.scopeFallback, false);
+
+    // The archived view is exactly ¬admitted, and it is not the default view.
+    const admittedIds = new Set(board.listCards({ scope: 'all' }).cards.map((card) => card.id));
+    assert.ok(archived.cards.length > 0, 'the fixture must seed archived rows or this proves nothing');
+    assert.equal(
+      archived.cards.every((card) => card.admitted === false),
+      true,
+      'every archived row must be unadmitted',
+    );
+    assert.equal(archived.cards.some((card) => admittedIds.has(card.id)), false);
+    assert.notDeepEqual(
+      archived.cards.map((card) => card.id).sort(),
+      board.listCards().cards.map((card) => card.id).sort(),
+      'the archived view must not be the default view',
+    );
+
+    const omitted = board.listCards();
+    assert.equal(omitted.scopeRequested, null, 'an omitted scope is documented, not a fallback');
+    assert.equal(omitted.scopeApplied, 'default');
+    assert.equal(omitted.scopeFallback, false);
+
+    // An unrecognised value is reported, never quietly answered with `default`.
+    const bogus = board.listCards({ scope: 'nonsense' });
+    assert.equal(bogus.scopeRequested, 'nonsense');
+    assert.equal(bogus.scopeFallback, true, 'an unknown scope must be flagged, not silently reshaped');
+    assert.equal(bogus.scopeApplied, 'default');
+
+    for (const scope of ['default', 'all', 'archived']) {
+      assert.equal(board.listCards({ scope }).scopeFallback, false, `${scope} must be recognised`);
+    }
+  } finally {
+    sqliteStore.close();
+  }
+});

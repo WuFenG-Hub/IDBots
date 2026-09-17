@@ -599,8 +599,17 @@ export interface TrackedCardCounts {
 export interface TrackedCardBoard {
   ledger: 'orchestration_tasks';
   generatedAtMs: number;
+  /** Exactly what the caller asked for; `null` when the scope was omitted. */
+  scopeRequested: string | null;
   /** Echoed back so the UI can label the filter and offer a one-click clear. */
   scopeApplied: TrackedCardScope;
+  /**
+   * True when `scopeRequested` was not one of the three known scopes. The
+   * fallback to `default` is then EXPLICIT — never a silent re-shaping of the
+   * board, which is exactly how the v1 build answered `scope:'archived'` with
+   * the default view.
+   */
+  scopeFallback: boolean;
   scopeWindowMs: number;
   /** Monotonic per-process sequence for renderer-side event de-duplication. */
   seq: number;
@@ -655,6 +664,8 @@ export interface TrackedCardDetail extends TrackedCardSummary {
  * failed admission (kept queryable, never in the closure queue).
  */
 export type TrackedCardScope = 'default' | 'all' | 'archived';
+
+export const TRACKED_CARD_SCOPES: readonly TrackedCardScope[] = ['default', 'all', 'archived'];
 
 export interface TrackedCardListInput {
   ownerGlobalMetaId?: string;
@@ -797,9 +808,14 @@ export class TrackedTaskBoardService {
 
   listCards(input: TrackedCardListInput = {}): TrackedCardBoard {
     const nowMs = Date.now();
-    const scope: TrackedCardScope = input.scope === 'all' || input.scope === 'archived'
-      ? input.scope
-      : 'default';
+    // A scope is only ever one of the three declared values. An omitted scope is
+    // the documented default; anything else is reported as `scopeFallback`
+    // rather than being quietly answered with the default view.
+    const scopeRequested = typeof input.scope === 'string' && input.scope.trim() !== '' ? input.scope : null;
+    const scopeFallback = scopeRequested !== null && !TRACKED_CARD_SCOPES.includes(scopeRequested as TrackedCardScope);
+    const scope: TrackedCardScope = scopeFallback || scopeRequested === null
+      ? 'default'
+      : (scopeRequested as TrackedCardScope);
     const rows = input.ownerGlobalMetaId
       ? this.getAll(
         'SELECT id FROM orchestration_tasks WHERE owner_global_meta_id = ? ORDER BY updated_at DESC',
@@ -842,7 +858,9 @@ export class TrackedTaskBoardService {
     return {
       ledger: 'orchestration_tasks',
       generatedAtMs: nowMs,
+      scopeRequested,
       scopeApplied: scope,
+      scopeFallback,
       scopeWindowMs: TRACKED_CARD_SCOPE_WINDOW_MS,
       seq: this.nextSeq(),
       columns: TRACKED_CARD_STATE_ORDER.map((state) => ({
