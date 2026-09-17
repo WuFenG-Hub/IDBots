@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import { extractPinidToken, validateDeliverableLines } from './groupTaskDeliverableParser';
 import {
@@ -311,6 +312,196 @@ export function isClosedStatus(status: OrchestrationTaskStatus, conclusion: stri
   return isTerminalStatus(status) && Boolean(conclusion?.trim());
 }
 
+/* ------------------------------------------------------------------------- *
+ * v1.2 (task #86 / owner ruling B): the closing conclusion is an INSTRUCTION.
+ *
+ * The card row carries both halves of a two-state cursor — the conclusion and
+ * its processing mark — so "still pending" is DERIVED at read time and the
+ * queue can never drift from the ledger. A read has no side effects; the write
+ * is ONE CAS statement. `closureDue` (this card needs closing) and
+ * `closurePending` (this conclusion needs executing) stay two orthogonal facts
+ * and are never merged (freeze doc §1 / §3).
+ * ------------------------------------------------------------------------- */
+
+/** Audit-only side channel. Written, never judged: it is NOT a state source (§3 rule 2). */
+export const TRACKED_CLOSURE_ACK_LOG_KV_KEY = 'tracked_closure_ack_log';
+
+/** Ring-buffer size for the audit side channel; the oldest entry is dropped (§2.2). */
+export const TRACKED_CLOSURE_ACK_LOG_LIMIT = 200;
+
+/** Receipts are one-liners; the cap keeps a runaway model from writing a novel. */
+export const TRACKED_CLOSURE_RECEIPT_MAX_CHARS = 1000;
+
+export const TRACKED_PENDING_CLOSURE_DEFAULT_LIMIT = 50;
+export const TRACKED_PENDING_CLOSURE_HARD_LIMIT = 200;
+
+/** An explicit "nothing to do" receipt is a complete receipt (§4 step 1). */
+export const TRACKED_CLOSURE_NO_ACTION_MARKER_ZH = '仅记录、无需动作';
+export const TRACKED_CLOSURE_NO_ACTION_MARKER_EN = 'record-only, no action required';
+
+/**
+ * Who may be recorded as having executed a conclusion. `system_backfill` is
+ * deliberately absent: a migration-written conclusion is not an instruction, so
+ * it can never be a pending item nor be marked processed (freeze doc §3.1 T2).
+ */
+export type TrackedClosureProcessedBy = 'owner' | 'twin';
+
+/**
+ * `sha256(conclusion.trim(), utf8)` lower-case hex. Computed in JS, never in
+ * SQL, so the browser and the daemon agree byte for byte (freeze doc §2.2).
+ */
+export function closureHash(conclusion: string): string {
+  return createHash('sha256').update(conclusion.trim(), 'utf8').digest('hex');
+}
+
+/**
+ * Conservative destructive-action lexicon (freeze doc §5). Substring scan,
+ * case-insensitive. Deliberately over-eager: its job is to CUT the silent path,
+ * not to judge intent — one extra confirmation is cheap, one silent delete is not.
+ */
+export const TRACKED_DESTRUCTIVE_CLOSURE_TERMS: readonly string[] = [
+  // Deletion
+  '删除', '移除', '清理', '卸载', 'delete', 'remove', 'uninstall', 'rm -rf',
+  // Money
+  '转账', '打款', '付款', '支付', '发币', '空投', 'transfer', 'pay', 'payment', 'airdrop',
+  // Public publishing
+  '发布', '上链', '发帖', '公开', '广播', 'publish', 'post', 'broadcast', 'upload',
+  // Irreversible state changes
+  '撤销', '撤销授权', '关闭', '停用', '覆盖', '重置', '回滚',
+  'revoke', 'cancel', 'overwrite', 'reset', 'rollback',
+];
+
+export function classifyClosureConclusion(conclusion: string): {
+  destructive: boolean;
+  reasons: string[];
+} {
+  const haystack = (conclusion ?? '').toLowerCase();
+  const reasons = TRACKED_DESTRUCTIVE_CLOSURE_TERMS
+    .filter((term) => haystack.includes(term.toLowerCase()));
+  return { destructive: reasons.length > 0, reasons };
+}
+
+/**
+ * THE queue predicate (freeze doc §3, single implementation — every downstream
+ * reader must delegate here; a second derivation is forbidden).
+ *
+ * Three conditions, all necessary:
+ *  - a non-blank conclusion: an empty card can never produce a pending item (T3);
+ *  - `closure_by ∈ {owner, twin}`: the v1.1 startup backfill writes
+ *    `system_backfill` and must never flood the queue on upgrade (T2);
+ *  - the mark's hash differs from the CURRENT conclusion's hash: a card that was
+ *    already acked and then closed again with a NEW conclusion re-enters the
+ *    queue instead of being silently swallowed (T1).
+ */
+export function isClosurePending(row: {
+  closureConclusion: string | null;
+  closureBy: string | null;
+  closureProcessedHash: string | null;
+}): boolean {
+  const conclusion = row.closureConclusion?.trim() ?? '';
+  if (!conclusion) return false;
+  if (row.closureBy !== 'owner' && row.closureBy !== 'twin') return false;
+  return closureHash(conclusion) !== (row.closureProcessedHash ?? null);
+}
+
+/** A receipt is complete with an evidence URI, or with the explicit no-action marker. */
+export function closureReceiptIsComplete(receipt: string, evidenceUri?: string | null): boolean {
+  if (evidenceUri?.trim()) return true;
+  const text = receipt ?? '';
+  return text.includes(TRACKED_CLOSURE_NO_ACTION_MARKER_ZH)
+    || text.toLowerCase().includes(TRACKED_CLOSURE_NO_ACTION_MARKER_EN);
+}
+
+export interface TrackedPendingClosure {
+  cardId: string;
+  title: string;
+  status: OrchestrationTaskStatus;
+  /** The conclusion verbatim — the instruction to execute. */
+  conclusion: string;
+  closureBy: 'owner' | 'twin';
+  closureAt: string | null;
+  closurePinId: string | null;
+  conclusionHash: string;
+  destructive: boolean;
+  /** Which lexicon entries matched; reported so the caller can explain the gate. */
+  destructiveReasons: string[];
+}
+
+export interface TrackedPendingClosureList {
+  generatedAt: string;
+  /** The queue's REAL size, even when `items` was truncated by `limit`. */
+  count: number;
+  truncated: boolean;
+  items: TrackedPendingClosure[];
+}
+
+export interface TrackedClosureAckInput {
+  taskId: string;
+  processedBy: TrackedClosureProcessedBy;
+  /** How it was handled + the evidence, or the explicit no-action marker. */
+  receipt: string;
+  evidenceUri?: string | null;
+  /** Proof the EXISTING safety gate cleared this action; a new channel is never opened. */
+  confirmationRef?: string | null;
+}
+
+export type TrackedClosureAckCode =
+  | 'VALIDATION'
+  | 'NOT_FOUND'
+  | 'NO_CONCLUSION'
+  | 'RECEIPT_INCOMPLETE'
+  | 'CONFIRMATION_REQUIRED';
+
+export interface TrackedClosureAckResult {
+  ok: boolean;
+  code?: TrackedClosureAckCode;
+  error?: string;
+  /** `true` when the CAS matched 0 rows: the conclusion was already executed. */
+  alreadyProcessed: boolean;
+  processedAt: string | null;
+  processedBy: TrackedClosureProcessedBy | null;
+  receipt: string | null;
+}
+
+/** Every non-null mark currently on the row, in one shape. */
+export interface TrackedCardClosureProcessing {
+  pending: boolean;
+  processedAt: string | null;
+  processedBy: TrackedClosureProcessedBy | null;
+  receipt: string | null;
+  receiptPinId: string | null;
+}
+
+/** One audit row of the side channel; `evidence` is a URI, a commit sha or a confirmation ref. */
+export interface TrackedClosureAckAuditEntry {
+  cardId: string;
+  conclusionHash: string;
+  at: string;
+  by: TrackedClosureProcessedBy;
+  evidence: string | null;
+}
+
+/**
+ * Malformed audit JSON reads as an empty log, never a throw — same discipline as
+ * `parseLongTaskRegistry`. Only the append path is best-effort-logged; reading a
+ * broken side channel must not take the board down.
+ */
+export function parseClosureAckLog(raw: string | null): TrackedClosureAckAuditEntry[] {
+  const asText = raw?.trim();
+  if (!asText) return [];
+  try {
+    const parsed = JSON.parse(asText);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is TrackedClosureAckAuditEntry => (
+      Boolean(entry) && typeof entry === 'object'
+      && typeof (entry as TrackedClosureAckAuditEntry).cardId === 'string'
+      && typeof (entry as TrackedClosureAckAuditEntry).conclusionHash === 'string'
+    ));
+  } catch {
+    return [];
+  }
+}
+
 /** Pure derivation. No IO, no clock read — `nowMs` is an input. */
 export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardDerivation {
   const { task, steps, attempts, nowMs } = input;
@@ -561,6 +752,16 @@ export interface TrackedCardSummary {
   closureSuggestionCode: TrackedSuggestionCode | null;
   closureSuggestionParams: Record<string, string | number> | null;
   closureConclusion: string | null;
+  /**
+   * v1.2 read-time projection (freeze doc §2.3): the conclusion has NOT been
+   * executed yet. Orthogonal to `closureDue` — this one asks "is there an
+   * instruction still waiting?", that one asks "should this card be closed?".
+   */
+  closurePending: boolean;
+  closureProcessedAt: string | null;
+  closureProcessedBy: TrackedClosureProcessedBy | null;
+  closureReceipt: string | null;
+  closureReceiptPinId: string | null;
   /** Computed activity anchor — never persisted, never fed by the daemon heartbeat. */
   activityAtMs: number | null;
   lastActivityAtMs: number | null;
@@ -1151,8 +1352,17 @@ export class TrackedTaskBoardService {
       }
     }
 
+    // T1 (freeze doc §3.1): writing a NEW conclusion must reset the processing
+    // mark and the receipt IN THE SAME statement. A card that was already acked
+    // and is closed again carries a different conclusion, so it has to re-enter
+    // the execution queue — leaving the old mark in place would silently swallow
+    // the new instruction. One UPDATE, so no reader can observe a half-reset row.
     this.deps.db.run(
-      'UPDATE orchestration_tasks SET closure_conclusion = ?, closure_by = ?, closure_at = ?, closure_pin_id = ? WHERE id = ?',
+      `UPDATE orchestration_tasks
+          SET closure_conclusion = ?, closure_by = ?, closure_at = ?, closure_pin_id = ?,
+              closure_processed_at = NULL, closure_processed_by = NULL, closure_processed_hash = NULL,
+              closure_receipt = NULL, closure_receipt_pin_id = NULL
+        WHERE id = ?`,
       [conclusion, input.by, new Date().toISOString(), input.pinId ?? null, input.taskId],
     );
     this.deps.saveDb();
@@ -1160,6 +1370,194 @@ export class TrackedTaskBoardService {
     return card
       ? { ok: true, card, statusMoved, statusNote }
       : { ok: false, code: 'NOT_FOUND', error: 'card vanished after close' };
+  }
+
+  /**
+   * THE read entry for "conclusions still waiting to be executed" (freeze doc
+   * §3 / §6). The Twin's routine sweep calls this; the agent tool and the
+   * optional IPC handler are thin wrappers over THIS method — a second
+   * derivation anywhere else is a defect.
+   *
+   * Read-only by contract: no write, no mark, no chain write. Two consecutive
+   * reads over the same rows agree field for field, `generatedAt` aside, so a
+   * third party can re-run the queue and compare.
+   */
+  listPendingClosures(input: { limit?: number } = {}): TrackedPendingClosureList {
+    const requested = input?.limit;
+    const limit = typeof requested === 'number' && Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.floor(requested), TRACKED_PENDING_CLOSURE_HARD_LIMIT)
+      : TRACKED_PENDING_CLOSURE_DEFAULT_LIMIT;
+    // The SQL narrows, `isClosurePending` decides — the hash comparison lives in
+    // the one pure function above, never duplicated here.
+    const rows = this.getAll(
+      `SELECT id, owner_intent, status, closure_conclusion, closure_by, closure_at,
+              closure_pin_id, closure_processed_hash
+         FROM orchestration_tasks
+        WHERE closure_conclusion IS NOT NULL AND trim(closure_conclusion) <> ''
+          AND closure_by IN ('owner', 'twin')
+        ORDER BY closure_at ASC, id ASC`,
+    );
+    const items = rows
+      .filter((row) => isClosurePending({
+        closureConclusion: text(row.closure_conclusion),
+        closureBy: text(row.closure_by),
+        closureProcessedHash: text(row.closure_processed_hash),
+      }))
+      .map((row) => this.toPendingClosure(row));
+    return {
+      generatedAt: new Date().toISOString(),
+      // `count` is the QUEUE's size, not the page's: a truncated list must never
+      // read as "the queue is done".
+      count: items.length,
+      truncated: items.length > limit,
+      items: items.slice(0, limit),
+    };
+  }
+
+  private toPendingClosure(row: Row): TrackedPendingClosure {
+    const conclusion = text(row.closure_conclusion) ?? '';
+    const verdict = classifyClosureConclusion(conclusion);
+    return {
+      cardId: String(row.id),
+      title: String(row.owner_intent ?? ''),
+      status: String(row.status) as OrchestrationTaskStatus,
+      conclusion,
+      closureBy: text(row.closure_by) === 'twin' ? 'twin' : 'owner',
+      closureAt: text(row.closure_at),
+      closurePinId: text(row.closure_pin_id),
+      conclusionHash: closureHash(conclusion),
+      destructive: verdict.destructive,
+      destructiveReasons: verdict.reasons,
+    };
+  }
+
+  /**
+   * Mark one conclusion as executed and file its receipt (freeze doc §4).
+   *
+   * Order is the contract: validate → refuse an incomplete receipt → refuse an
+   * unconfirmed destructive action → ONE CAS statement. Every refusal returns
+   * before the write, so a rejected ack leaves the row byte-identical — there is
+   * deliberately no "in progress" state to get stuck in.
+   *
+   * `changes === 0` is NOT an error: it means another reader already executed
+   * this exact conclusion. The existing mark is read back and reported.
+   */
+  acknowledgeClosure(input: TrackedClosureAckInput): TrackedClosureAckResult {
+    const refused = (code: TrackedClosureAckCode, error: string): TrackedClosureAckResult => ({
+      ok: false,
+      code,
+      error,
+      alreadyProcessed: false,
+      processedAt: null,
+      processedBy: null,
+      receipt: null,
+    });
+
+    const receipt = input?.receipt?.trim() ?? '';
+    if (!receipt || receipt.length > TRACKED_CLOSURE_RECEIPT_MAX_CHARS) {
+      return refused(
+        'VALIDATION',
+        `receipt must be 1..${TRACKED_CLOSURE_RECEIPT_MAX_CHARS} characters`,
+      );
+    }
+    if (input.processedBy !== 'owner' && input.processedBy !== 'twin') {
+      return refused('VALIDATION', "processedBy must be 'owner' or 'twin'");
+    }
+
+    const row = this.getOne(
+      `SELECT id, closure_conclusion, closure_processed_at, closure_processed_by,
+              closure_processed_hash, closure_receipt, closure_receipt_pin_id
+         FROM orchestration_tasks WHERE id = ?`,
+      [input.taskId],
+    );
+    if (!row) return refused('NOT_FOUND', `orchestration task ${input.taskId} not found`);
+    const conclusion = text(row.closure_conclusion);
+    if (!conclusion) {
+      return refused('NO_CONCLUSION', 'the card carries no closing conclusion to execute');
+    }
+
+    const evidenceUri = input.evidenceUri?.trim() || null;
+    if (!closureReceiptIsComplete(receipt, evidenceUri)) {
+      return refused(
+        'RECEIPT_INCOMPLETE',
+        'a receipt needs an evidence URI, or the explicit "'
+          + TRACKED_CLOSURE_NO_ACTION_MARKER_ZH + '" / "'
+          + TRACKED_CLOSURE_NO_ACTION_MARKER_EN + '" marker',
+      );
+    }
+
+    const verdict = classifyClosureConclusion(conclusion);
+    const confirmationRef = input.confirmationRef?.trim() || null;
+    if (verdict.destructive && !confirmationRef) {
+      return refused(
+        'CONFIRMATION_REQUIRED',
+        'this conclusion looks destructive (' + verdict.reasons.join(', ')
+          + '); it must go through the existing safety confirmation first — a conclusion never bypasses the gate',
+      );
+    }
+
+    const hash = closureHash(conclusion);
+    const at = new Date().toISOString();
+    const evidence = evidenceUri ?? confirmationRef;
+    this.deps.db.run(
+      `UPDATE orchestration_tasks
+          SET closure_processed_at = ?, closure_processed_by = ?, closure_processed_hash = ?,
+              closure_receipt = ?, closure_receipt_pin_id = ?
+        WHERE id = ?
+          AND (closure_processed_hash IS NULL OR closure_processed_hash <> ?)`,
+      [at, input.processedBy, hash, receipt, evidence, input.taskId, hash],
+    );
+    const changes = this.deps.db.getRowsModified?.() ?? 0;
+
+    if (changes === 0) {
+      const current = this.getOne(
+        `SELECT closure_processed_at, closure_processed_by, closure_receipt
+           FROM orchestration_tasks WHERE id = ?`,
+        [input.taskId],
+      );
+      return {
+        ok: true,
+        alreadyProcessed: true,
+        processedAt: text(current?.closure_processed_at),
+        processedBy: (text(current?.closure_processed_by) as TrackedClosureProcessedBy | null) ?? null,
+        receipt: text(current?.closure_receipt),
+      };
+    }
+
+    this.deps.saveDb();
+    this.appendClosureAckAudit({
+      cardId: input.taskId,
+      conclusionHash: hash,
+      at,
+      by: input.processedBy,
+      evidence,
+    });
+    return {
+      ok: true,
+      alreadyProcessed: false,
+      processedAt: at,
+      processedBy: input.processedBy,
+      receipt,
+    };
+  }
+
+  /**
+   * Best-effort audit trail (freeze doc §2.2 / §4 step 5). The mark and the
+   * receipt are already committed on the card row by the time this runs, so a
+   * failure here must never fail the ack — but it is logged, never swallowed
+   * silently. Auditors read this; the queue never does.
+   */
+  private appendClosureAckAudit(entry: TrackedClosureAckAuditEntry): void {
+    try {
+      const next = [...this.readClosureAckAuditLog(), entry].slice(-TRACKED_CLOSURE_ACK_LOG_LIMIT);
+      this.writeKv(TRACKED_CLOSURE_ACK_LOG_KV_KEY, JSON.stringify(next));
+    } catch (error) {
+      console.warn('appendClosureAckAudit:', error);
+    }
+  }
+
+  readClosureAckAuditLog(): TrackedClosureAckAuditEntry[] {
+    return parseClosureAckLog(this.readKv(TRACKED_CLOSURE_ACK_LOG_KV_KEY));
   }
 
   /** Daemon liveness only; carries no card state (`[SEC-07]`). */
@@ -1321,16 +1719,35 @@ export class TrackedTaskBoardService {
     };
   }
 
-  private readClosure(taskId: string): TrackedCardDetail['closure'] {
+  /**
+   * The closure half of a card. v1.2 reads the processing mark alongside the
+   * conclusion so a projection can derive `closurePending` without a second
+   * query and without ever persisting the derived flag.
+   */
+  private readClosure(taskId: string): TrackedCardDetail['closure'] & TrackedCardClosureProcessing {
     const row = this.getOne(
-      'SELECT closure_conclusion, closure_by, closure_at, closure_pin_id FROM orchestration_tasks WHERE id = ?',
+      `SELECT closure_conclusion, closure_by, closure_at, closure_pin_id,
+              closure_processed_at, closure_processed_by, closure_processed_hash,
+              closure_receipt, closure_receipt_pin_id
+         FROM orchestration_tasks WHERE id = ?`,
       [taskId],
     );
+    const conclusion = text(row?.closure_conclusion);
+    const closureBy = text(row?.closure_by);
     return {
-      conclusion: text(row?.closure_conclusion),
-      by: text(row?.closure_by),
+      conclusion,
+      by: closureBy,
       at: text(row?.closure_at),
       pinId: text(row?.closure_pin_id),
+      pending: isClosurePending({
+        closureConclusion: conclusion,
+        closureBy,
+        closureProcessedHash: text(row?.closure_processed_hash),
+      }),
+      processedAt: text(row?.closure_processed_at),
+      processedBy: (text(row?.closure_processed_by) as TrackedClosureProcessedBy | null) ?? null,
+      receipt: text(row?.closure_receipt),
+      receiptPinId: text(row?.closure_receipt_pin_id),
     };
   }
 
@@ -1458,6 +1875,11 @@ export class TrackedTaskBoardService {
       closureSuggestionCode: derivation.closureSuggestionCode,
       closureSuggestionParams: derivation.closureSuggestionParams,
       closureConclusion: closure.conclusion,
+      closurePending: closure.pending,
+      closureProcessedAt: closure.processedAt,
+      closureProcessedBy: closure.processedBy,
+      closureReceipt: closure.receipt,
+      closureReceiptPinId: closure.receiptPinId,
       activityAtMs: derivation.lastActivityAtMs,
       lastActivityAtMs: derivation.lastActivityAtMs,
       idleMs: derivation.idleMs,

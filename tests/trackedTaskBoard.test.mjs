@@ -1525,7 +1525,7 @@ test('a missing `admitted` input cannot produce a non-boolean closureDue (F-A)',
   }
 });
 
-test('the closing modal says the conclusion is recorded, never executed', async () => {
+test('the closing modal says Twin executes the conclusion as the final close-out', async () => {
   const fs = await import('node:fs');
   const read = (relative) => fs.readFileSync(relative, 'utf8');
 
@@ -1534,7 +1534,7 @@ test('the closing modal says the conclusion is recorded, never executed', async 
   assert.match(
     modal,
     /trackedTask\.close\.recordOnlyHint/,
-    'the record-only note must be rendered in the closing modal',
+    'the close-out note must be rendered in the closing modal',
   );
   // Measured inside the JSX return, so the header comment that documents the key
   // cannot substitute for the rendered element.
@@ -1545,9 +1545,12 @@ test('the closing modal says the conclusion is recorded, never executed', async 
   assert.ok(textareaAt > -1 && hintAt > textareaAt, 'the note must sit below the conclusion textarea');
 
   const i18n = read('src/renderer/services/i18n.ts');
+  // The frozen EN copy contains an escaped apostrophe ("card's"), so the capture
+  // must survive `\'` instead of stopping on it — otherwise one key would yield
+  // two truncated matches and the "exactly EN + ZH" check would misfire.
   const copyFor = (key) => [...i18n.matchAll(
-    new RegExp(`'${key.replace(/\./g, '\\.')}':\\s*'([^']*)'`, 'g'),
-  )].map((match) => match[1]);
+    new RegExp(`'${key.replace(/\./g, '\\.')}':\\s*'((?:[^'\\\\]|\\\\.)*)'`, 'g'),
+  )].map((match) => match[1].replace(/\\'/g, "'"));
   // Positive control FIRST: prove the extractor can see absence, otherwise the
   // "exactly EN + ZH" check below could pass on an extractor that sees nothing.
   assert.equal(copyFor('trackedTask.thisKeyDoesNotExist').length, 0, 'the copy extractor must be able to see 0');
@@ -1566,19 +1569,445 @@ test('the closing modal says the conclusion is recorded, never executed', async 
     assert.equal(values.length, 2, `${key}: expected exactly EN + ZH, saw ${values.length}`);
   }
 
-  // Both languages state it outright.
-  const hint = copyFor('trackedTask.close.recordOnlyHint');
-  assert.ok(hint.some((text) => text.includes('不会自动执行')), 'zh hint must say it is not executed automatically');
+  // ---------------------------------------------------------------------
+  // D7 (spec v1.2.2): the copy is frozen as SEMANTIC anchors, not verbatim
+  // strings — the verbatim strings are read off the FINAL HEAD by S3 and
+  // recorded there. So the assertions below check must-contain / must-not
+  // anchors only; no second verbatim authority lives in this file.
+  // ---------------------------------------------------------------------
+  // The three forbidden tokens are assembled from fragments so this file never
+  // carries the literal and the repo-wide zero-hit scan further down cannot
+  // trip over its own lexicon. Positive controls for each follow.
+  const FORBIDDEN_ZH = ['不会自动', '执行'].join('');
+  const FORBIDDEN_EN = ['will not be ', 'executed automatically'].join('');
+  const FORBIDDEN_RECORDED_ONLY = ['recorded', ' only'].join('');
+  const supersededZh = ['这段结论会被记录，不会自动', '执行。'].join('');
+  const supersededEn = ['This conclusion is recorded', ' only — it will not be ', 'executed automatically.'].join('');
+  assert.ok(supersededZh.includes(FORBIDDEN_ZH), 'the zh absence predicate must see the superseded wording');
   assert.ok(
-    hint.some((text) => /will not be executed automatically/.test(text)),
-    'en hint must say it is not executed automatically',
+    new RegExp(FORBIDDEN_EN).test(supersededEn),
+    'the en absence predicate must see the superseded wording',
+  );
+  assert.ok(
+    FORBIDDEN_RECORDED_ONLY.length > 0 && supersededEn.includes(FORBIDDEN_RECORDED_ONLY),
+    'the recorded-only predicate must see a hit on the superseded wording',
   );
 
-  // The strings the owner read as "whoever records it will act on it" must no
-  // longer read as an action: neither a close-out verb nor an executor.
-  for (const key of ['trackedTask.close.confirm', 'trackedTask.closure.byOwner', 'trackedTask.closure.byTwin']) {
-    for (const text of copyFor(key)) {
-      assert.doesNotMatch(text, /收口|closed by|confirm close/i, `${key}: "${text}" still reads as a close-out action`);
+  // D7 must-contain / must-not-contain, per key, per language.
+  const anchors = [
+    {
+      key: 'trackedTask.close.recordOnlyHint',
+      mustContain: { zh: ['执行', 'Twin', '确认'], en: [/execut/i, /confirm/i, /Twin/] },
+      mustNot: { zh: [FORBIDDEN_ZH], en: [new RegExp(FORBIDDEN_EN), new RegExp(FORBIDDEN_RECORDED_ONLY)] },
+    },
+    {
+      key: 'trackedTask.close.by',
+      mustContain: { zh: ['收口'], en: [/Closed by/] },
+      mustNot: { zh: ['记录人'], en: [/Recorded by/] },
+    },
+    {
+      key: 'trackedTask.close.confirm',
+      mustContain: { zh: ['收口'], en: [/[Cc]los/] },
+      mustNot: { zh: ['确认记录'], en: [/Record it/] },
+    },
+    {
+      key: 'trackedTask.closure.byOwner',
+      mustContain: { zh: ['收口'], en: [/[Cc]los/] },
+      mustNot: { zh: ['记录'], en: [/[Rr]ecord/] },
+    },
+    {
+      key: 'trackedTask.closure.byTwin',
+      mustContain: { zh: ['收口'], en: [/[Cc]los/] },
+      mustNot: { zh: ['记录'], en: [/[Rr]ecord/] },
+    },
+    {
+      key: 'trackedTask.receipt.statusKept',
+      mustContain: { zh: ['收口'], en: [/[Cc]los/] },
+      mustNot: { zh: ['结论已记录'], en: [/recorded/] },
+    },
+  ];
+  for (const anchor of anchors) {
+    const values = copyFor(anchor.key);
+    assert.equal(values.length, 2, `${anchor.key}: expected exactly EN + ZH, saw ${values.length}`);
+    const [zh, en] = values;
+    for (const needle of anchor.mustContain.zh) {
+      assert.ok(zh.includes(needle), `${anchor.key}: zh "${zh}" must contain "${needle}"`);
+    }
+    for (const pattern of anchor.mustContain.en) {
+      assert.match(en, pattern, `${anchor.key}: en "${en}" must match ${pattern}`);
+    }
+    for (const needle of anchor.mustNot.zh) {
+      assert.equal(zh.includes(needle), false, `${anchor.key}: zh "${zh}" must not contain "${needle}"`);
+    }
+    for (const pattern of anchor.mustNot.en) {
+      assert.doesNotMatch(en, pattern, `${anchor.key}: en "${en}" must not match ${pattern}`);
     }
   }
+
+  // D8: the paired surface is 8 keys. The two that carry no wording requirement
+  // this round still must exist exactly once per language.
+  for (const key of ['trackedTask.close.title', 'trackedTask.close.conclusionPlaceholder']) {
+    const values = copyFor(key);
+    assert.equal(values.length, 2, `${key}: expected exactly EN + ZH, saw ${values.length}`);
+    assert.ok(values[0] && values[1], `${key}: both languages must carry non-empty copy`);
+  }
+});
+
+/* ------------------------------------------------------------------------- *
+ * v1.2 (task #86 / owner ruling B): the closing conclusion is an INSTRUCTION.
+ * Spec pin: pin://06d96a7046f98f9111ff446bf19043df8214af1a96f12df2b87a9b85040a8da1i0
+ * §9 maps every acceptance item to one of the assertions below.
+ * ------------------------------------------------------------------------- */
+
+const v12 = require('../dist-electron/main/services/trackedTaskBoard.js');
+
+/** Raw row read, for "did anything actually change" comparisons. */
+function rawRow(db, sql, params) {
+  return db.exec(sql, params)[0]?.values?.[0] ?? [];
+}
+
+/** The projection the queue promises, straight off SQL — the cross-check source. */
+const QUEUE_SQL = `SELECT id FROM orchestration_tasks
+  WHERE closure_conclusion IS NOT NULL AND trim(closure_conclusion) <> ''
+    AND closure_by IN ('owner', 'twin') ORDER BY closure_at ASC, id ASC`;
+
+function queueIds(db) {
+  return (db.exec(QUEUE_SQL)[0]?.values ?? []).map((values) => String(values[0]));
+}
+
+/** Clear the fixture's own conclusions so a test can assert absolute numbers. */
+function clearClosures(db) {
+  db.run(
+    'UPDATE orchestration_tasks SET closure_conclusion = NULL, closure_by = NULL, closure_at = NULL,'
+    + ' closure_processed_at = NULL, closure_processed_by = NULL, closure_processed_hash = NULL,'
+    + ' closure_receipt = NULL, closure_receipt_pin_id = NULL',
+  );
+}
+
+test('v1.2 §3: the pending predicate is the single queue rule, with its negatives controlled', () => {
+  const { isClosurePending, closureHash } = v12;
+  // T3 — no conclusion, or only whitespace, can never produce a pending item.
+  assert.equal(isClosurePending({ closureConclusion: null, closureBy: 'twin', closureProcessedHash: null }), false);
+  assert.equal(isClosurePending({ closureConclusion: '   ', closureBy: 'twin', closureProcessedHash: null }), false);
+  // T2 — a migration-written conclusion is not an instruction.
+  assert.equal(
+    isClosurePending({ closureConclusion: 'migration text', closureBy: 'system_backfill', closureProcessedHash: null }),
+    false,
+  );
+  // Positive control for BOTH negatives above: an allowed shape IS pending, so
+  // those two `false`s are the whitelist talking, not a predicate that never fires.
+  assert.equal(isClosurePending({ closureConclusion: 'run it', closureBy: 'twin', closureProcessedHash: null }), true);
+  assert.equal(isClosurePending({ closureConclusion: 'run it', closureBy: 'owner', closureProcessedHash: null }), true);
+  // Acked: the mark's hash equals the conclusion's hash.
+  assert.equal(
+    isClosurePending({ closureConclusion: 'run it', closureBy: 'twin', closureProcessedHash: closureHash('run it') }),
+    false,
+  );
+  // T1 — a DIFFERENT conclusion against an older mark is pending again.
+  assert.equal(
+    isClosurePending({ closureConclusion: 'run it again', closureBy: 'twin', closureProcessedHash: closureHash('run it') }),
+    true,
+  );
+  // The hash binds the TRIMMED text: re-closing with only extra spaces is not a
+  // new instruction.
+  assert.equal(
+    isClosurePending({ closureConclusion: '  run it  ', closureBy: 'owner', closureProcessedHash: closureHash('run it') }),
+    false,
+  );
+});
+
+test('v1.2 §5: the destructive lexicon is conservative and reports which term hit', () => {
+  const { classifyClosureConclusion } = v12;
+  const samples = [
+    '删除旧卡',
+    'transfer 1 SPACE',
+    'publish the report',
+    'PUBLISH now',
+    '重置状态',
+    ['rm -', 'rf /tmp/x'].join(''),
+  ];
+  for (const text of samples) {
+    const verdict = classifyClosureConclusion(text);
+    assert.equal(verdict.destructive, true, `"${text}" must be flagged`);
+    assert.ok(verdict.reasons.length > 0, `"${text}" must report which term hit`);
+  }
+  // Positive control for the other direction: a genuinely benign conclusion must
+  // NOT be flagged, or the gate would be noise nobody reads.
+  for (const text of ['no further work needed', '仅记录、无需动作']) {
+    assert.equal(classifyClosureConclusion(text).destructive, false, `"${text}" must not be flagged`);
+  }
+});
+
+test('v1.2 §3: the queue equals the ledger projection, and a conclusion-less card never joins it', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    assert.ok(board.listCards({ scope: 'all' }).cards.length > 5, 'the fixture must carry rows');
+    const expected = queueIds(db);
+    assert.ok(expected.length > 0, 'positive control: the fixture carries conclusions to find');
+
+    const queue = board.listPendingClosures();
+    assert.deepEqual(queue.items.map((item) => item.cardId), expected, 'the queue IS the ledger projection');
+    assert.equal(queue.count, expected.length);
+    assert.equal(queue.truncated, false);
+    assert.equal(typeof queue.generatedAt, 'string');
+    assert.ok(queue.items.every((item) => item.conclusion.trim().length > 0));
+
+    const blankSql = "SELECT id FROM orchestration_tasks WHERE closure_conclusion IS NULL OR trim(closure_conclusion) = ''";
+    const blankIds = (db.exec(blankSql)[0]?.values ?? []).map((values) => String(values[0]));
+    assert.ok(blankIds.length > 0, 'positive control: there ARE conclusion-less rows');
+    const queued = new Set(queue.items.map((item) => item.cardId));
+    for (const id of blankIds) {
+      assert.equal(queued.has(id), false, `${id} has no conclusion and must not queue`);
+    }
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('v1.2 §3.1 T1: a new conclusion on an already-acked card re-enters the queue', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    clearClosures(sqliteStore.getDatabase());
+    const first = board.closeCard({ taskId: 'seed-task-01', conclusion: 'first conclusion', by: 'owner' });
+    assert.equal(first.ok, true, first.error);
+    assert.equal(first.card.closurePending, true, 'a fresh conclusion is pending');
+    let queue = board.listPendingClosures();
+    assert.equal(queue.count, 1);
+    assert.equal(queue.items[0].cardId, 'seed-task-01');
+    assert.equal(queue.items[0].conclusion, 'first conclusion');
+    assert.equal(queue.items[0].closureBy, 'owner');
+    assert.ok(queue.items[0].closureAt, 'closure_at must be reported');
+    assert.equal(queue.items[0].closurePinId, null);
+
+    const ack = board.acknowledgeClosure({
+      taskId: 'seed-task-01',
+      processedBy: 'twin',
+      receipt: 'handled it',
+      evidenceUri: 'pin://first',
+    });
+    assert.equal(ack.ok, true, ack.error);
+    assert.equal(ack.alreadyProcessed, false);
+    assert.equal(board.listPendingClosures().count, 0, 'an acked conclusion leaves the queue');
+
+    // T1: the SAME card is closed again with a different conclusion. The old
+    // mark must not swallow the new instruction.
+    const second = board.closeCard({ taskId: 'seed-task-01', conclusion: 'second conclusion', by: 'twin' });
+    assert.equal(second.ok, true, second.error);
+    assert.equal(second.card.closurePending, true, 'the new conclusion is pending again');
+    assert.equal(second.card.closureReceipt, null, 'the old receipt is cleared in the same write');
+    assert.equal(second.card.closureProcessedAt, null);
+    queue = board.listPendingClosures();
+    assert.equal(queue.count, 1, 'the new conclusion must not be swallowed by the old mark');
+    assert.equal(queue.items[0].conclusion, 'second conclusion');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('v1.2 §4: acknowledging is a single-statement CAS — the repeat is a no-op', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    clearClosures(db);
+    board.closeCard({ taskId: 'seed-task-01', conclusion: 'execute me', by: 'owner' });
+    const markSql = 'SELECT closure_processed_at, closure_processed_by, closure_processed_hash, closure_receipt FROM orchestration_tasks WHERE id = ?';
+
+    const input = {
+      taskId: 'seed-task-01',
+      processedBy: 'twin',
+      receipt: 'handled it',
+      evidenceUri: 'pin://evidence',
+    };
+    const first = board.acknowledgeClosure(input);
+    assert.equal(first.ok, true, first.error);
+    assert.equal(first.alreadyProcessed, false);
+    const before = rawRow(db, markSql, ['seed-task-01']);
+
+    const second = board.acknowledgeClosure({ ...input, receipt: 'a DIFFERENT receipt', evidenceUri: 'pin://other' });
+    assert.equal(second.ok, true, 'a repeat is not an error');
+    assert.equal(second.alreadyProcessed, true);
+    assert.equal(second.receipt, 'handled it', 'the EXISTING mark is read back, not overwritten');
+    assert.deepEqual(rawRow(db, markSql, ['seed-task-01']), before, 'the mark must not move on a repeat');
+    assert.equal(board.listPendingClosures().count, 0);
+
+    // The audit side channel recorded the ONE real execution, never the no-op.
+    const log = board.readClosureAckAuditLog();
+    assert.equal(log.length, 1);
+    assert.equal(log[0].cardId, 'seed-task-01');
+    assert.equal(log[0].by, 'twin');
+    assert.equal(log[0].evidence, 'pin://evidence');
+    assert.equal(log[0].conclusionHash, v12.closureHash('execute me'));
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('v1.2 §5: a destructive conclusion is refused without the existing safety gate', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    clearClosures(db);
+    board.closeCard({ taskId: 'seed-task-03', conclusion: '删除旧卡并清空目录', by: 'owner' });
+    const item = board.listPendingClosures().items.find((entry) => entry.cardId === 'seed-task-03');
+    assert.ok(item, 'the destructive conclusion must still be VISIBLE in the queue');
+    assert.equal(item.destructive, true, 'the lexicon must flag it');
+    assert.ok(item.destructiveReasons.length > 0);
+    const markSql = 'SELECT closure_processed_at, closure_receipt FROM orchestration_tasks WHERE id = ?';
+
+    const refused = board.acknowledgeClosure({
+      taskId: 'seed-task-03',
+      processedBy: 'twin',
+      receipt: 'took it down',
+      evidenceUri: 'pin://x',
+    });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.code, 'CONFIRMATION_REQUIRED');
+    assert.deepEqual(rawRow(db, markSql, ['seed-task-03']), [null, null], 'a refused ack must write nothing');
+    assert.equal(board.listPendingClosures().count, 1, 'it stays pending — no silent execution');
+    assert.equal(board.readClosureAckAuditLog().length, 0, 'a refusal is not an execution');
+
+    const allowed = board.acknowledgeClosure({
+      taskId: 'seed-task-03',
+      processedBy: 'twin',
+      receipt: 'took it down after the owner confirmed',
+      evidenceUri: 'pin://evidence',
+      confirmationRef: 'pin://owner-confirmation',
+    });
+    assert.equal(allowed.ok, true, allowed.error);
+    assert.equal(board.listPendingClosures().count, 0);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('v1.2 §4: a receipt without evidence and without the no-op marker is refused', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    clearClosures(db);
+    board.closeCard({ taskId: 'seed-task-04', conclusion: 'looked into it', by: 'owner' });
+    const markSql = 'SELECT closure_processed_at, closure_receipt FROM orchestration_tasks WHERE id = ?';
+
+    const empty = board.acknowledgeClosure({ taskId: 'seed-task-04', processedBy: 'twin', receipt: '   ' });
+    assert.equal(empty.ok, false);
+    assert.equal(empty.code, 'VALIDATION');
+
+    const incomplete = board.acknowledgeClosure({ taskId: 'seed-task-04', processedBy: 'twin', receipt: 'did some work' });
+    assert.equal(incomplete.ok, false);
+    assert.equal(incomplete.code, 'RECEIPT_INCOMPLETE');
+    assert.deepEqual(rawRow(db, markSql, ['seed-task-04']), [null, null], 'an incomplete receipt writes nothing');
+
+    const badActor = board.acknowledgeClosure({
+      taskId: 'seed-task-04',
+      processedBy: 'system_backfill',
+      receipt: 'done',
+      evidenceUri: 'pin://x',
+    });
+    assert.equal(badActor.ok, false);
+    assert.equal(badActor.code, 'VALIDATION');
+
+    // The explicit no-op marker IS a complete receipt (§4 step 1).
+    const noAction = board.acknowledgeClosure({
+      taskId: 'seed-task-04',
+      processedBy: 'twin',
+      receipt: '仅记录、无需动作',
+    });
+    assert.equal(noAction.ok, true, noAction.error);
+    assert.equal(board.listPendingClosures().count, 0);
+    // ... and it is reported verbatim on the card, so a reader can audit WHY.
+    assert.equal(board.getCard('seed-task-04').closureReceipt, '仅记录、无需动作');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('v1.2 §3.1 T2: the real startup backfill never floods the execution queue', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    const before = board.listPendingClosures().count;
+    // Replay the upgrade path on a database that already holds terminal rows.
+    const result = sqliteStore.migrateTrackedTaskClosureBackfill();
+    assert.ok(result.backfilled >= 1, 'the migration must have written at least one conclusion');
+    const row = rawRow(db, 'SELECT closure_by, closure_conclusion FROM orchestration_tasks WHERE id = ?', ['seed-task-18']);
+    assert.equal(row[0], 'system_backfill', 'the migration writes its own actor');
+    assert.ok(String(row[1]).length > 0, 'and a non-empty conclusion');
+    assert.equal(board.listPendingClosures().count, before, 'T2: a migration conclusion is never an instruction');
+    assert.equal(
+      board.listPendingClosures().items.some((item) => item.cardId === 'seed-task-18'),
+      false,
+    );
+
+    // Positive control: the SAME row with an allowed actor IS visible, so the
+    // exclusion above is the whitelist and not an empty queue.
+    db.run("UPDATE orchestration_tasks SET closure_by = 'twin' WHERE id = ?", ['seed-task-18']);
+    const visible = board.listPendingClosures();
+    assert.equal(visible.count, before + 1);
+    assert.ok(visible.items.some((item) => item.cardId === 'seed-task-18'));
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('v1.2 §3: the queue is oldest-first, deterministic, and reports its real size when truncated', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    clearClosures(db);
+    board.closeCard({ taskId: 'seed-task-01', conclusion: 'alpha', by: 'owner' });
+    board.closeCard({ taskId: 'seed-task-03', conclusion: 'beta', by: 'owner' });
+    board.closeCard({ taskId: 'seed-task-04', conclusion: 'gamma', by: 'owner' });
+    // Pin the timestamps so the order is a fact rather than a scheduling race.
+    db.run('UPDATE orchestration_tasks SET closure_at = ? WHERE id = ?', ['2026-01-03T00:00:00.000Z', 'seed-task-04']);
+    db.run('UPDATE orchestration_tasks SET closure_at = ? WHERE id = ?', ['2026-01-01T00:00:00.000Z', 'seed-task-01']);
+    db.run('UPDATE orchestration_tasks SET closure_at = ? WHERE id = ?', ['2026-01-02T00:00:00.000Z', 'seed-task-03']);
+
+    const full = board.listPendingClosures();
+    assert.deepEqual(full.items.map((item) => item.cardId), ['seed-task-01', 'seed-task-03', 'seed-task-04']);
+    assert.equal(full.count, 3);
+    assert.equal(full.truncated, false);
+
+    const page = board.listPendingClosures({ limit: 2 });
+    assert.equal(page.items.length, 2);
+    assert.equal(page.count, 3, 'count is the QUEUE size, never the page size');
+    assert.equal(page.truncated, true);
+    assert.deepEqual(page.items.map((item) => item.cardId), ['seed-task-01', 'seed-task-03']);
+
+    // Two reads over the same rows agree field for field — a third party can
+    // re-run the queue and compare.
+    assert.deepEqual(board.listPendingClosures().items, full.items);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('v1.2 §7: no shipped file still requires the superseded copy', async () => {
+  const fsMod = await import('node:fs');
+  const pathMod = await import('node:path');
+  // Assembled from fragments so this test's own tokens never appear literally.
+  const absentTokens = [
+    ['不会自动', '执行'].join(''),
+    ['not be executed ', 'automatically'].join(''),
+    ['recorded', ' only'].join(''),
+    ['never ', 'executed'].join(''),
+  ];
+  const scan = (body) => absentTokens.filter((token) => body.includes(token));
+  // Positive control FIRST: the scan can see a hit when one exists, otherwise
+  // the zero-hit result below would be vacuous.
+  assert.equal(scan(`x ${['不会自动', '执行'].join('')} y`).length, 1, 'the scan must see a hit');
+  assert.deepEqual(scan('a perfectly clean line'), []);
+
+  const offenders = [];
+  const walk = (dir) => {
+    for (const entry of fsMod.readdirSync(dir, { withFileTypes: true })) {
+      const full = pathMod.join(dir, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      if (!/\.(ts|tsx|mjs|js|json)$/.test(entry.name)) continue;
+      const body = fsMod.readFileSync(full, 'utf8');
+      if (scan(body).length > 0) offenders.push(full);
+    }
+  };
+  for (const root of ['src', 'tests']) walk(root);
+  assert.deepEqual(offenders, [], 'no file may still require the superseded close-out copy');
 });

@@ -45,6 +45,12 @@ export const TRACKED_DUE_LEVEL_LABEL_KEYS: Record<TrackedClosureDueLevel, string
   sessions_ended: 'trackedTask.dueLevel.sessionsEnded',
 };
 
+/**
+ * v1.2：把结论标为「已处理」的人。不含 `system_backfill` —— 迁移补写的结论
+ * 不是指令，永不入待执行队列（冻结件 §3.1 T2）。
+ */
+export type TrackedClosureProcessedBy = 'owner' | 'twin';
+
 /** 状态摘要事实的 code（主进程 TrackedReasonCode 的逐字镜像）。 */
 export type TrackedReasonCode =
   | 'ledger_review'
@@ -143,6 +149,15 @@ export interface TrackedCardSummary {
   /** 收口建议参数；code 为 null 时为 null（附录 B B-5.3）。 */
   closureSuggestionParams: TrackedSuggestionParams | null;
   closureConclusion: string | null;
+  /**
+   * v1.2 读时投影（冻结件 §2.3）：这条结论**尚未被执行**。
+   * 与 `closureDue`（该收口了）正交 —— 一个问「还有指令没执行」，一个问「该收口了吗」。
+   */
+  closurePending: boolean;
+  closureProcessedAt: string | null;
+  closureProcessedBy: TrackedClosureProcessedBy | null;
+  closureReceipt: string | null;
+  closureReceiptPinId: string | null;
   /** 计算出的活动锚点（多源 max）；永不落库，也不由心跳喂。 */
   activityAtMs: number | null;
   lastActivityAtMs: number | null;
