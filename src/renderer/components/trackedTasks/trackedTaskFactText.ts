@@ -9,8 +9,8 @@ import type {
 /**
  * 结构化事实 → 界面文案（**文案归 renderer**）。
  *
- * 主进程只回事实：`reasonCodes: [{ code, args }]` 与
- * `closureSuggestionCode + closureSuggestionArgs`。
+ * 主进程只回事实：`reasonCodes: [{ code, params }]` 与
+ * `closureSuggestionCode + closureSuggestionParams`。
  * 文案一律在这里按 i18n 渲染；**不直接显示后端返回的 `reasons` / `closureSuggestion` 原文**
  * ——那两个字段已降级为诊断串（日志/排障用），不是 UI 文案。
  *
@@ -63,10 +63,10 @@ export const TRACKED_SUGGESTION_I18N_KEY: Record<TrackedSuggestionCode, string> 
 };
 
 /** 极小的模板填充：只认 `{name}` 占位，不做表达式。缺值时保留占位符（便于发现）。 */
-function fill(template: string, args: Record<string, string | number> | undefined): string {
-  if (!args) return template;
+function fill(template: string, params: Record<string, string | number> | undefined): string {
+  if (!params) return template;
   return template.replace(/\{(\w+)\}/g, (whole, key: string) => {
-    const value = args[key];
+    const value = params[key];
     if (value === undefined || value === null) return whole;
     return typeof value === 'number' ? formatNumber(value) : String(value);
   });
@@ -81,42 +81,42 @@ function formatNumber(value: number): string {
 export function reasonText(fact: TrackedFact, fallback?: string): string {
   const key = TRACKED_REASON_I18N_KEY[fact?.code as TrackedReasonCode];
   if (!key) return fallback ?? String(fact?.code ?? '');
-  return fill(i18nService.t(key), fact.args);
+  return fill(i18nService.t(key), fact.params);
 }
 
 /** 一句话收口建议的文案；code 为空表示无建议。 */
 export function suggestionText(
   code: TrackedSuggestionCode | null | undefined,
-  args?: Record<string, string | number> | null
+  params?: Record<string, string | number> | null
 ): string {
   if (!code) return '';
   const key = TRACKED_SUGGESTION_I18N_KEY[code];
   if (!key) return String(code);
-  return fill(i18nService.t(key), args ?? undefined);
+  return fill(i18nService.t(key), params ?? undefined);
 }
 
 /**
  * 带参数的收口建议。
- * 参数优先用后端给的 `closureSuggestionArgs`（权威）；缺失时从卡自身的 `idleMs`
+ * 参数优先用后端给的 `closureSuggestionParams`（权威）；缺失时从卡自身的 `idleMs`
  * 与 `reasonCodes` 里补（不新起统计），再不行才留空占位。
  */
 export function suggestionTextForCard(card: {
   closureSuggestionCode: TrackedSuggestionCode | null;
-  closureSuggestionArgs?: Record<string, string | number> | null;
+  closureSuggestionParams?: Record<string, string | number> | null;
   idleMs: number | null;
   reasonCodes?: TrackedFact[];
 }): string {
   const code = card.closureSuggestionCode;
   if (!code) return '';
 
-  const args: Record<string, string | number> = { ...(card.closureSuggestionArgs ?? {}) };
-  if (args.days === undefined && card.idleMs !== null) {
-    args.days = Math.round((card.idleMs / 86_400_000) * 10) / 10;
+  const params: Record<string, string | number> = { ...(card.closureSuggestionParams ?? {}) };
+  if (params.days === undefined && card.idleMs !== null) {
+    params.days = Math.round((card.idleMs / 86_400_000) * 10) / 10;
   }
-  if (args.count === undefined) {
+  if (params.count === undefined) {
     const fromFacts = card.reasonCodes?.find((fact) => fact.code === 'deliverables_verifiable')
-      ?.args?.count;
-    if (typeof fromFacts === 'number') args.count = fromFacts;
+      ?.params?.count;
+    if (typeof fromFacts === 'number') params.count = fromFacts;
   }
-  return suggestionText(code, args);
+  return suggestionText(code, params);
 }

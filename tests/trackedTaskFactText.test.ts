@@ -106,7 +106,7 @@ test('建议侧映射覆盖全部建议 code，且与理由侧措辞分开', asy
 
   // 共用 code 的两侧措辞必须不同（否则就是把理由文案当建议输出）
   const shared = 'deliverables_verifiable';
-  const asReason = reasonText({ code: shared as never, args: { count: 3 } });
+  const asReason = reasonText({ code: shared as never, params: { count: 3 } });
   const asSuggestion = suggestionText(shared as never, { count: 3 });
   assert.notEqual(
     asReason,
@@ -135,7 +135,7 @@ test('文案参数用 {name} 占位，且不把 code 名当文案', async () => 
   const service = i18nService as unknown as { currentLanguage: string };
   service.currentLanguage = 'zh';
 
-  const reason = reasonText({ code: 'open_checkpoints', args: { count: 2 } });
+  const reason = reasonText({ code: 'open_checkpoints', params: { count: 2 } });
   assert.ok(reason.includes('2'), `计数参数未注入：${reason}`);
   assert.ok(!reason.includes('{'), `占位符未替换：${reason}`);
   assert.ok(!reason.includes('open_checkpoints'), `把 code 当文案渲染了：${reason}`);
@@ -143,4 +143,60 @@ test('文案参数用 {name} 占位，且不把 code 名当文案', async () => 
   const suggestion = suggestionText('stale_inactivity', { days: 2.5 });
   assert.ok(suggestion.includes('2.5'), `天数参数未注入：${suggestion}`);
   assert.equal(suggestionText(null), '', '无 code 时必须为空串');
+});
+
+
+/**
+ * 跨端字段名一致性 —— **行为断言**，不是词频统计。
+ *
+ * 做法：从主进程源码里读出 `TrackedFact` **接口声明位**上的字段名（`params` / `args`），
+ * 用这个名字**构造载荷**再喂给 renderer 的 `reasonText`，断言参数被真正插值。
+ * renderer 只要读错字段名，载荷就取不到值 → 模板残留 `{count}` → 本条即红。
+ *
+ * 为什么不用 grep 计数：`grep -c params` 命中的是全文词频，扫到别处的同名词就会给出
+ * 假 PASS/假 FAIL（本组今天已实测过两次）。判据必须落在**声明位 ↔ 消费位**这一对上。
+ */
+test('跨端字段名一致：按主进程声明位构造载荷，renderer 必须真的取到值', async () => {
+  const board = fs.readFileSync(path.join(ROOT, 'src/main/services/trackedTaskBoard.ts'), 'utf-8');
+  const iface = board.match(/export interface TrackedFact\s*\{([\s\S]*?)\n\}/);
+  assert.ok(iface, '未能现取 TrackedFact 接口声明');
+
+  const declared = iface![1]
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('/') && !line.startsWith('*'))
+    .map((line) => line.match(/^([A-Za-z_]+)\s*:/)?.[1])
+    .filter((name): name is string => Boolean(name));
+
+  assert.deepEqual(
+    declared,
+    ['code', 'params'],
+    `主进程 TrackedFact 的声明位应为 [code, params]，实测 [${declared.join(', ')}]`
+  );
+
+  const globalAny = globalThis as unknown as Record<string, unknown>;
+  if (!globalAny.localStorage) {
+    globalAny.localStorage = { getItem: () => null, setItem: () => undefined, removeItem: () => undefined, clear: () => undefined };
+  }
+  const { i18nService } = await import('../src/renderer/services/i18n');
+  (i18nService as unknown as { currentLanguage: string }).currentLanguage = 'zh';
+  const { reasonText, suggestionTextForCard } = await import(
+    '../src/renderer/components/trackedTasks/trackedTaskFactText'
+  );
+
+  // 字段名按主进程声明位取用：BE 改名字，这里就跟着改名，renderer 不跟就是红。
+  const payload = { code: 'open_checkpoints', [declared[1]]: { count: 4 } } as never;
+  const text = reasonText(payload);
+  assert.ok(text.includes('4'), `renderer 未读到主进程声明的「${declared[1]}」字段：${text}`);
+  assert.ok(!text.includes('{'), `模板占位残留，说明字段名不匹配：${text}`);
+
+  // 建议侧同理：closureSuggestionParams 是主进程声明位上的名字。
+  const suggestionDocs = board.match(/closureSuggestionParams\s*:/g) ?? [];
+  assert.ok(suggestionDocs.length > 0, '主进程未声明 closureSuggestionParams');
+  const suggestion = suggestionTextForCard({
+    closureSuggestionCode: 'stale_inactivity',
+    closureSuggestionParams: { days: 3.5 },
+    idleMs: null,
+  } as never);
+  assert.ok(suggestion.includes('3.5'), `建议侧未读到 closureSuggestionParams：${suggestion}`);
 });

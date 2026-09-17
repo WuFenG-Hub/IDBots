@@ -55,17 +55,19 @@ export type TrackedSuggestionCode =
 export type TrackedFactCode = TrackedReasonCode | TrackedSuggestionCode;
 
 /**
- * 结构化事实：code + args（字段名以 ON-PATH 主进程契约为准 ——
- * `TrackedFact.args` / `closureSuggestionArgs`）。
+ * 结构化事实：code + **`params`**（字段名 = 契约字面，定稿于 chair 14:45 改判；
+ * 主进程同名字段见 `TrackedFact.params` / `closureSuggestionParams`）。
  * **界面文案由 renderer 按 i18n 渲染**，不直接显示后端英文串。
+ * 跨端字段名一致性由 `tests/trackedTaskFactText.test.ts` 的行为断言守住（按主进程
+ * 声明的字段名构造载荷再喂给 renderer，读错字段就取不到值、测试即红）。
  */
 export interface TrackedFact {
   code: TrackedFactCode;
-  args: Record<string, string | number>;
+  params: Record<string, string | number>;
 }
 
 /** 收口建议 code 的参数（与 code 一同构成权威事实）；无建议时为 null。 */
-export type TrackedSuggestionArgs = Record<string, string | number>;
+export type TrackedSuggestionParams = Record<string, string | number>;
 
 /** 台账原生 status 的取值域（不改 CHECK 的 6 值）。 */
 export type TrackedLedgerStatus =
@@ -125,7 +127,7 @@ export interface TrackedCardSummary {
   /** 结构化收口建议 code —— 界面文案归 renderer。 */
   closureSuggestionCode: TrackedSuggestionCode | null;
   /** 收口建议参数；code 为 null 时为 null（附录 B B-5.3）。 */
-  closureSuggestionArgs: TrackedSuggestionArgs | null;
+  closureSuggestionParams: TrackedSuggestionParams | null;
   closureConclusion: string | null;
   /** 计算出的活动锚点（多源 max）；永不落库，也不由心跳喂。 */
   activityAtMs: number | null;
