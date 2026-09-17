@@ -1,7 +1,7 @@
 import type { McpServerConfig, McpServerFormData } from './mcp';
 import type { ProjectFormData, ProjectRecord } from './project';
 import type { GroupChatTranscriptMessage } from './groupTask';
-import type { TrackedCardBoard, TrackedCardCloseResult, TrackedCardDetail } from './trackedTask';
+import type { TrackedCardArchiveResult, TrackedCardBoard, TrackedCardCloseResult, TrackedCardDetail } from './trackedTask';
 import type { OpenTeamCollabSummary, OpenTeamGuestInvite } from './openTeamCollab';
 import type {
   BrowserCommandResult as CoreBrowserCommandResult,
@@ -1485,6 +1485,12 @@ interface IElectronAPI {
       targetStatus?: 'completed' | 'cancelled';
       pinId?: string | null;
     }) => Promise<TrackedCardCloseResult>;
+    /**
+     * v1.3 手工归档 override：既有 kv 表单行、可逆、不动台账行本身。
+     * archived:true 把卡移进归档投影（admitted := admitted ∧ ¬override），
+     * 行保留可查，admitted+archived===total 不变量不受影响。
+     */
+    archiveCard: (input: { cardId: string; archived: boolean }) => Promise<TrackedCardArchiveResult>;
     /**
      * `seq` 进程内单调：丢弃 `seq <= lastSeenSeq` 的帧，只增量重取 `taskIds`；
      * 漏推时 30s 轮询兜底。

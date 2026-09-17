@@ -480,6 +480,10 @@ test('liveness lives in kv only: no heartbeat column is added to the ledger', as
     // v1.1: `tracked_long_task_registry` is the ONE documented card-id carrier
     // in kv (ADM-1). It is data, not liveness — and it is deliberately the only
     // exception, so a new card-level key would still fail this assertion.
+    // v1.3 amendment: the manual archive override (`tracked_card_archive_override`)
+    // is the second sanctioned card-level kv row — one row, reversible, no DDL.
+    // The assertion above only inspects the BEAT value, so it still guards
+    // "liveness never carries card ids"; it does not police the two data keys.
     const registry = kvKeys.find((row) => String(row[0]) === 'tracked_long_task_registry');
     assert.ok(registry, 'the v1.1 registration key must exist');
     assert.deepEqual(
@@ -2010,4 +2014,197 @@ test('v1.2 §7: no shipped file still requires the superseded copy', async () =>
   };
   for (const root of ['src', 'tests']) walk(root);
   assert.deepEqual(offenders, [], 'no file may still require the superseded close-out copy');
+});
+
+/* ------------------------------------------------------------------------- *
+ * v1.3 manual archive override (owner ruling 2026-09-18)
+ *
+ * The read-only archive view gains ONE write path: archive a closed card.
+ * Design constraints under test:
+ *   - storage is ONE kv row (`tracked_card_archive_override`), no new column,
+ *     no new table, reversible via `archived: false`;
+ *   - the ledger row itself is untouched (facts stay facts);
+ *   - the projection shifts to `admitted := admitted ∧ ¬override`, so
+ *     `admitted + archived === total` keeps holding and closureDue dies with
+ *     the archive;
+ *   - the matched admission rules survive on the card (facts, not state).
+ * ------------------------------------------------------------------------- */
+
+test('archiveCard: one kv-row override moves an admitted card into the archive and keeps the counts invariant', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const before = board.listCards({ scope: 'all' });
+    assert.equal(before.counts.admitted + before.counts.archived, before.counts.total);
+    const target = before.cards.find((card) => card.admitted) ?? null;
+    assert.ok(target, 'the seed must contain at least one admitted card');
+
+    // The ledger row must be byte-identical before/after: the override is a
+    // projection shift, never a ledger write.
+    const ledgerBefore = rawRow(
+      sqliteStore.getDatabase(),
+      'SELECT id, status, updated_at, closure_conclusion FROM orchestration_tasks WHERE id = ?',
+      [target.id],
+    );
+
+    const result = board.archiveCard({ cardId: target.id, archived: true });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.card.admitted, false, 'the refreshed summary already reads archived');
+
+    const ledgerAfter = rawRow(
+      sqliteStore.getDatabase(),
+      'SELECT id, status, updated_at, closure_conclusion FROM orchestration_tasks WHERE id = ?',
+      [target.id],
+    );
+    assert.deepEqual(ledgerAfter, ledgerBefore, 'the override must never touch the ledger row');
+
+    const after = board.listCards({ scope: 'all' });
+    assert.equal(after.counts.admitted, before.counts.admitted - 1, 'admitted count drops by one');
+    assert.equal(after.counts.archived, before.counts.archived + 1, 'archived count rises by one');
+    assert.equal(
+      after.counts.admitted + after.counts.archived,
+      after.counts.total,
+      'admitted + archived === total must survive the override',
+    );
+    assert.ok(
+      !after.cards.some((card) => card.id === target.id),
+      'the override-archived card leaves the admitted scope',
+    );
+
+    const archived = board.listCards({ scope: 'archived' });
+    const archivedCard = archived.cards.find((card) => card.id === target.id);
+    assert.ok(archivedCard, 'the override-archived card is queryable through scope:archived');
+    assert.equal(archivedCard.admitted, false);
+    assert.equal(archivedCard.closureDue, false, 'an override-archived card never queues for closure');
+    assert.equal(archivedCard.closureDueLevel, null, 'an override-archived card carries no closure level');
+    assert.deepEqual(
+      archivedCard.admissionMatched,
+      target.admissionMatched,
+      'matched rules are admission facts: the override layers on top without erasing them',
+    );
+
+    // Default scope must hide it exactly like any other archived row.
+    const defaultBoard = board.listCards({ scope: 'default' });
+    assert.ok(
+      !defaultBoard.cards.some((card) => card.id === target.id),
+      'the override-archived card must not resurface in the default scope',
+    );
+
+    // The detail read path reflects the same projection.
+    const detail = board.getCard(target.id);
+    assert.ok(detail);
+    assert.equal(detail.admitted, false);
+    assert.equal(detail.closureDue, false);
+
+    // Storage: ONE kv row, JSON object cardId -> ISO timestamp. No new column.
+    const kvRow = rawRow(
+      sqliteStore.getDatabase(),
+      'SELECT value FROM kv WHERE key = ?',
+      ['tracked_card_archive_override'],
+    );
+    assert.ok(kvRow.length > 0, 'the override kv row must exist after archiving');
+    const parsed = JSON.parse(String(kvRow[0]));
+    assert.ok(parsed[target.id], 'the override row records the cardId');
+    assert.ok(!Number.isNaN(Date.parse(parsed[target.id])), 'the override value is a timestamp');
+
+    const ledgerColumns = sqliteStore.getDatabase()
+      .exec('PRAGMA table_info(orchestration_tasks)')[0].values.map((row) => row[1]);
+    assert.equal(
+      ledgerColumns.includes('archive_override'),
+      false,
+      'the override must stay out of the ledger schema (no DDL)',
+    );
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('archiveCard is reversible and a repeated archive does not rewrite the kv row', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const target = board.listCards({ scope: 'all' }).cards.find((card) => card.admitted);
+    assert.ok(target);
+
+    assert.equal(board.archiveCard({ cardId: target.id, archived: true }).ok, true);
+    const first = JSON.parse(String(rawRow(
+      sqliteStore.getDatabase(),
+      'SELECT value FROM kv WHERE key = ?',
+      ['tracked_card_archive_override'],
+    )[0]));
+
+    assert.equal(board.archiveCard({ cardId: target.id, archived: true }).ok, true);
+    const second = JSON.parse(String(rawRow(
+      sqliteStore.getDatabase(),
+      'SELECT value FROM kv WHERE key = ?',
+      ['tracked_card_archive_override'],
+    )[0]));
+    assert.deepEqual(second, first, 'an idempotent re-archive must not rewrite the override row');
+
+    assert.equal(board.archiveCard({ cardId: target.id, archived: false }).ok, true);
+    const restored = board.listCards({ scope: 'all' });
+    assert.equal(
+      restored.counts.admitted,
+      board.listCards({ scope: 'default' }).counts.total - restored.counts.archived,
+      'counts stay consistent after the revert',
+    );
+    assert.ok(
+      restored.cards.some((card) => card.id === target.id && card.admitted === true),
+      'archived:false removes the override and the card returns to the admitted projection',
+    );
+    const rowAfterRevert = rawRow(
+      sqliteStore.getDatabase(),
+      'SELECT value FROM kv WHERE key = ?',
+      ['tracked_card_archive_override'],
+    );
+    assert.ok(
+      rowAfterRevert.length === 0 || !JSON.parse(String(rowAfterRevert[0]))[target.id],
+      'the reverted cardId leaves the override row',
+    );
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('archiveCard validates input and reports a missing card as NOT_FOUND', async () => {
+  const { sqliteStore, board } = await openBoard();
+  try {
+    const blank = board.archiveCard({ cardId: '   ', archived: true });
+    assert.equal(blank.ok, false);
+    assert.equal(blank.code, 'VALIDATION');
+
+    const badType = board.archiveCard({ cardId: 'seed-task-01', archived: 'yes' });
+    assert.equal(badType.ok, false);
+    assert.equal(badType.code, 'VALIDATION');
+
+    const missing = board.archiveCard({ cardId: 'no-such-task', archived: true });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.code, 'NOT_FOUND');
+
+    // Nothing was written by any rejected call.
+    const row = rawRow(
+      sqliteStore.getDatabase(),
+      'SELECT value FROM kv WHERE key = ?',
+      ['tracked_card_archive_override'],
+    );
+    assert.equal(row.length, 0, 'rejected archive calls must not write the override row');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('parseArchiveOverrides: malformed input reads as an empty override set, never a throw', () => {
+  const { parseArchiveOverrides } = v12;
+  assert.deepEqual(parseArchiveOverrides(null), {});
+  assert.deepEqual(parseArchiveOverrides(''), {});
+  assert.deepEqual(parseArchiveOverrides('   '), {});
+  assert.deepEqual(parseArchiveOverrides('not json {'), {});
+  assert.deepEqual(parseArchiveOverrides('[]'), {}, 'a bare array carries no overrides');
+  assert.deepEqual(parseArchiveOverrides('42'), {});
+  assert.deepEqual(parseArchiveOverrides('{"seed-task-01":"2026-09-18T00:00:00.000Z"}'), {
+    'seed-task-01': '2026-09-18T00:00:00.000Z',
+  });
+  assert.deepEqual(
+    parseArchiveOverrides('{"bad-entry":42,"good":"2026-09-18T00:00:00.000Z"}'),
+    { good: '2026-09-18T00:00:00.000Z' },
+    'non-string values are dropped, not trusted',
+  );
 });

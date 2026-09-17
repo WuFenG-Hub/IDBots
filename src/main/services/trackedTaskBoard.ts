@@ -25,7 +25,10 @@ import {
  *  - **Storage holds facts (inputs) only; every derived value is computed at
  *    read time.** `cardState`, `closureDue`, `closureSuggestion`, `activityAtMs`
  *    and v1.1's `admitted` / `archived` are never persisted — the archive is a
- *    projection (`archived := ¬admitted`), not a column.
+ *    projection (`archived := ¬admitted`), not a column. The single v1.3
+ *    exception is a manual archive OVERRIDE as one `kv` row
+ *    (`tracked_card_archive_override`): reversible, no DDL, it only shifts the
+ *    projection (`admitted := admitted ∧ ¬override`), never the ledger.
  *  - `deriveCardState` and `trackAdmission` are pure functions: all inputs come
  *    from the ledger and its linked tables, `nowMs` is injected, so a third
  *    party recomputes the same verdict.
@@ -79,6 +82,36 @@ export const TRACKED_LONG_TASK_REGISTRY_KV_KEY = 'tracked_long_task_registry';
 
 /** `wide` (default) = ADM-1 ∨ ADM-2 ∨ ADM-3 ∨ ADM-4 ∨ ADM-5; `strict` = ADM-1 ∨ ADM-3. */
 export const TRACKED_ADMISSION_MODE_KV_KEY = 'tracked_admission_mode';
+
+/**
+ * v1.3 manual archive override (owner ruling 2026-09-18): ONE `kv` row shaped
+ * `{ [cardId]: archivedAtIso }`. No new column, no new table, reversible by
+ * writing `archived:false` — the same pattern as `tracked_admission_mode`. It
+ * is the second sanctioned card-level kv carrier next to the v1.1 registry.
+ * The override only ever pushes a card INTO the archive: the projection below
+ * computes `admitted := admitted ∧ ¬override` and `archived := ¬admitted`, so
+ * `admitted + archived === total` keeps holding and an override-archived card
+ * can never queue for closure (freeze doc §4: `admitted` is a NECESSARY
+ * condition of `closureDue`).
+ */
+export const TRACKED_CARD_ARCHIVE_OVERRIDE_KV_KEY = 'tracked_card_archive_override';
+
+/** Malformed JSON reads as an empty override set, never a throw (registry rule). */
+export function parseArchiveOverrides(raw: string | null): Record<string, string> {
+  const asText = raw?.trim();
+  if (!asText) return {};
+  try {
+    const parsed = JSON.parse(asText);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const overrides: Record<string, string> = {};
+    for (const [cardId, archivedAt] of Object.entries(parsed as Record<string, unknown>)) {
+      if (cardId !== '' && typeof archivedAt === 'string') overrides[cardId] = archivedAt;
+    }
+    return overrides;
+  } catch {
+    return {};
+  }
+}
 
 export const TRACKED_ADMISSION_MODES = ['wide', 'strict'] as const;
 
@@ -774,10 +807,11 @@ export interface TrackedCardSummary {
   scheduledTaskId: string | null;
   /**
    * v1.1 read-time projection (freeze doc §6): `archived := ¬admitted`. Nothing
-   * is written, moved or deleted — this flag IS the archive.
+   * is written, moved or deleted — this flag IS the archive. v1.3: the manual
+   * kv override additionally forces `false` (see TRACKED_CARD_ARCHIVE_OVERRIDE_KV_KEY).
    */
   admitted: boolean;
-  /** Which admission rules matched; empty exactly when the card is archived. */
+  /** Which admission rules matched; empty only for ¬admitted cards WITHOUT the v1.3 override. */
   admissionMatched: TrackedAdmissionRule[];
   /** Diagnostic: the admission input was not a boolean for this card. Must be false. */
   admissionInputMissing: boolean;
@@ -916,6 +950,15 @@ export interface TrackedCardCloseResult {
   statusNote?: string;
 }
 
+/** v1.3 manual archive override (kv single row, reversible, ledger untouched). */
+export interface TrackedCardArchiveResult {
+  ok: boolean;
+  code?: 'NOT_FOUND' | 'VALIDATION';
+  error?: string;
+  /** The refreshed summary; `admitted` is already false when archived. */
+  card?: TrackedCardSummary;
+}
+
 export interface TrackedScheduledAttachInput {
   scheduledTaskIds: string[];
   ownerGlobalMetaId: string;
@@ -1021,18 +1064,27 @@ export class TrackedTaskBoardService {
   }
 
   /**
-   * The two v1.1 kv facts, read ONCE per board read (registry + mode). No DDL:
-   * the whole admission switch lives in the existing `kv` table (I-3).
+   * The v1.1/v1.3 kv facts, read ONCE per board read (registry + mode +
+   * archive override). No DDL: the whole admission switch and the manual
+   * archive live in the existing `kv` table (I-3).
    */
-  private readAdmissionContext(): { registeredIds: Set<string>; mode: TrackedAdmissionMode } {
-    const rows = this.getAll('SELECT key, value FROM kv WHERE key IN (?, ?)', [
+  private readAdmissionContext(): {
+    registeredIds: Set<string>;
+    mode: TrackedAdmissionMode;
+    archivedIds: Set<string>;
+  } {
+    const rows = this.getAll('SELECT key, value FROM kv WHERE key IN (?, ?, ?)', [
       TRACKED_LONG_TASK_REGISTRY_KV_KEY,
       TRACKED_ADMISSION_MODE_KV_KEY,
+      TRACKED_CARD_ARCHIVE_OVERRIDE_KV_KEY,
     ]);
     const byKey = new Map(rows.map((row) => [String(row.key), text(row.value)]));
     return {
       registeredIds: new Set(parseLongTaskRegistry(byKey.get(TRACKED_LONG_TASK_REGISTRY_KV_KEY) ?? null)),
       mode: resolveAdmissionMode(byKey.get(TRACKED_ADMISSION_MODE_KV_KEY) ?? null),
+      archivedIds: new Set(
+        Object.keys(parseArchiveOverrides(byKey.get(TRACKED_CARD_ARCHIVE_OVERRIDE_KV_KEY) ?? null)),
+      ),
     };
   }
 
@@ -1629,6 +1681,43 @@ export class TrackedTaskBoardService {
   }
 
   /**
+   * v1.3 manual archive write path (owner ruling 2026-09-18): archive the
+   * closed card from the drawer, or undo it with `archived: false` (reversible
+   * by design even though the read-only archive view exposes no unarchive UI).
+   * ONE kv row per the admission-mode pattern — no new column, no new table —
+   * and the ledger row itself is untouched: admission stays a read-time
+   * projection, the override only shifts it (`admitted := admitted ∧ ¬override`).
+   * A no-op call writes nothing.
+   */
+  archiveCard(input: { cardId: string; archived: boolean }): TrackedCardArchiveResult {
+    const cardId = typeof input?.cardId === 'string' ? input.cardId.trim() : '';
+    if (!cardId) {
+      return { ok: false, code: 'VALIDATION', error: "archiveCard: 'cardId' is required." };
+    }
+    if (typeof input?.archived !== 'boolean') {
+      return { ok: false, code: 'VALIDATION', error: "archiveCard: 'archived' must be a boolean." };
+    }
+    const task = this.deps.orchestrationStore.getTask(cardId);
+    if (!task) {
+      return { ok: false, code: 'NOT_FOUND', error: `orchestration task ${cardId} not found` };
+    }
+    const overrides = parseArchiveOverrides(this.readKv(TRACKED_CARD_ARCHIVE_OVERRIDE_KV_KEY));
+    if (input.archived) {
+      if (!(cardId in overrides)) {
+        overrides[cardId] = new Date().toISOString();
+        this.writeKv(TRACKED_CARD_ARCHIVE_OVERRIDE_KV_KEY, JSON.stringify(overrides));
+      }
+    } else if (cardId in overrides) {
+      delete overrides[cardId];
+      this.writeKv(TRACKED_CARD_ARCHIVE_OVERRIDE_KV_KEY, JSON.stringify(overrides));
+    }
+    const card = this.buildSummary(cardId, Date.now(), this.readAdmissionContext());
+    return card
+      ? { ok: true, card }
+      : { ok: false, code: 'NOT_FOUND', error: 'card vanished after archive' };
+  }
+
+  /**
    * Scheduled tasks that are not on a card yet — the D2 batch-confirm list.
    * Historical rows are NEVER backfilled automatically; the owner confirms.
    */
@@ -1754,7 +1843,7 @@ export class TrackedTaskBoardService {
   private buildSummary(
     taskId: string,
     nowMs: number,
-    admission: { registeredIds: Set<string>; mode: TrackedAdmissionMode },
+    admission: { registeredIds: Set<string>; mode: TrackedAdmissionMode; archivedIds?: Set<string> },
   ): TrackedCardSummary | null {
     const task = this.deps.orchestrationStore.getTask(taskId);
     if (!task) return null;
@@ -1792,6 +1881,12 @@ export class TrackedTaskBoardService {
       ownerInitiated: Number(admissionFacts.owner_initiated ?? 0) > 0,
       mode: admission.mode,
     });
+    // v1.3 manual archive override: the DERIVATION sees the effective verdict,
+    // so closureDue dies with the archive (an archived card is never queued for
+    // closure) with zero second derivation. The matched rules stay on the card:
+    // they are admission facts, the override is a layer on top.
+    const overrideArchived = admission.archivedIds?.has(taskId) ?? false;
+    const admitted = admissionVerdict.admitted && !overrideArchived;
 
     const openCheckpointCount = groupTaskId === null
       ? 0
@@ -1826,7 +1921,7 @@ export class TrackedTaskBoardService {
       openCheckpointCount,
       verifiableDeliverableCount,
       closureConclusion: closure.conclusion,
-      admitted: admissionVerdict.admitted,
+      admitted,
       scheduled: scheduled
         ? {
           enabled: Number(scheduled.enabled) === 1,
@@ -1889,7 +1984,7 @@ export class TrackedTaskBoardService {
       sourceKind,
       groupTaskId,
       scheduledTaskId,
-      admitted: admissionVerdict.admitted,
+      admitted,
       admissionMatched: admissionVerdict.matched,
       admissionInputMissing: derivation.admissionInputMissing,
       needsOwnerAction: derivation.cardState === 'waiting_decision' || derivation.closureDue,
