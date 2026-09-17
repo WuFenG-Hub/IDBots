@@ -54,7 +54,13 @@ export function classifyRecord(record: RsiLadderChainRecord): 'registration' | '
   if (asString(payload?.taskkey) !== RSI_LADDER_TASKKEY) return null;
   const kind = asString(payload?.kind);
   if (kind === 'status' && asString(payload?.step) === RSI_LADDER_STEP) return 'registration';
-  if (kind === 'review' && asString(payload?.summary).startsWith('抽验')) return 'review';
+  if (kind === 'review') {
+    // 普通回写：抽验 <通过|无效> …；更正回写：「更正：」前缀 + 指向被更正
+    // review（多回写确定性口径③）。两类都必须进 review 模型。
+    const summary = asString(payload?.summary);
+    if (summary.startsWith('抽验')) return 'review';
+    if (summary.startsWith('更正') && summary.includes('抽验')) return 'review';
+  }
   return null;
 }
 
@@ -136,7 +142,14 @@ export function buildRegistration(record: RsiLadderChainRecord): RsiLadderRegist
 /** 抽验回写记录 → review 视图模型（§1.5 步骤5：summary=抽验 <通过|无效> improvement_id=<id>）。 */
 export function buildReview(record: RsiLadderChainRecord): RsiLadderReview {
   const summary = asString(record.payload?.summary);
-  const verdict = summary.includes('无效') ? ('无效' as const) : summary.includes('通过') ? ('通过' as const) : null;
+  const verdictMatch = /抽验\s*(通过|无效)/.exec(summary);
+  const verdict = verdictMatch
+    ? (verdictMatch[1] as '通过' | '无效')
+    : summary.includes('无效')
+      ? ('无效' as const)
+      : summary.includes('通过')
+        ? ('通过' as const)
+        : null;
   const idMatch = /improvement_id=([0-9a-f]{64}(?:i0)?)/.exec(summary);
   let improvementId = idMatch ? idMatch[1] : '';
   const extra = (record.payload?.extra ?? null) as Record<string, unknown> | null;
@@ -148,6 +161,7 @@ export function buildReview(record: RsiLadderChainRecord): RsiLadderReview {
     source: record.source,
     verdict,
     improvementId: improvementId || null,
+    summary,
     refs: Array.isArray(record.payload?.refs)
       ? (record.payload.refs as unknown[]).map((ref) => asString(ref)).filter(Boolean)
       : [],
@@ -192,7 +206,43 @@ export function markDuplicateSuperseded(registrations: RsiLadderRegistration[]):
   return superseded;
 }
 
-/** 抽验效力（§1.5）：任一「无效」→ 永久无效（不得复活）；有「通过」且无「无效」→ 通过。 */
+/**
+ * 多回写确定性口径（loop 裁定，冻结稿未覆盖缝隙，待 §5.7 meta 登记并入文档）：
+ * 同一 improvement_id 的多条 review 回写按链上时间走历史——
+ *   · 普通复验只允许 有效→无效（普通「通过」不得把无效翻回）；
+ *   · 无效→有效必须走「更正：」前缀 + refs 指向被更正 review 回写：
+ *     更正把它指向的那条 review 从生效集里撤回，再按剩余历史走结果。
+ * 实现为：撤回被更正目标 → 按 (createdAtMs, pinId) 时间序走剩余回写 → 终态。
+ */
+const CORRECTION_SUMMARY_RE = /^更正\s*[:：]/;
+
+export function resolveReviewSequence(reviews: RsiLadderReview[]): RsiLadderRegistration['reviewState'] {
+  const chronological = [...reviews]
+    .filter((review) => review.verdict !== null)
+    .sort((a, b) => a.createdAtMs - b.createdAtMs || (a.pinId < b.pinId ? -1 : 1));
+  const earlierPinIds = new Set(chronological.map((review) => review.pinId));
+  const retracted = new Set<string>();
+  for (const review of chronological) {
+    if (!CORRECTION_SUMMARY_RE.test(review.summary)) continue;
+    const target = review.refs.find((ref) => {
+      const bare = ref.startsWith('pin://') ? ref.slice('pin://'.length) : ref;
+      return earlierPinIds.has(bare);
+    });
+    if (target) retracted.add(target.startsWith('pin://') ? target.slice('pin://'.length) : target);
+  }
+  let state: RsiLadderRegistration['reviewState'] = 'unverified';
+  for (const review of chronological) {
+    if (retracted.has(review.pinId)) continue;
+    if (review.verdict === '无效') {
+      state = 'invalid';
+    } else if (state !== 'invalid') {
+      state = 'passed';
+    }
+  }
+  return state;
+}
+
+/** 抽验效力（§1.5 + 多回写确定性口径）：按登记 improvement_id 聚合回写后取终态。 */
 export function applyReviews(registrations: RsiLadderRegistration[], reviews: RsiLadderReview[]): void {
   const byId = new Map<string, RsiLadderReview[]>();
   for (const review of reviews) {
@@ -204,11 +254,7 @@ export function applyReviews(registrations: RsiLadderRegistration[], reviews: Rs
   for (const registration of registrations) {
     const list = byId.get(registration.improvementId);
     if (!list) continue;
-    if (list.some((review) => review.verdict === '无效')) {
-      registration.reviewState = 'invalid';
-    } else if (list.some((review) => review.verdict === '通过')) {
-      registration.reviewState = 'passed';
-    }
+    registration.reviewState = resolveReviewSequence(list);
   }
 }
 

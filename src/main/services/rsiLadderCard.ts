@@ -24,7 +24,13 @@ import { readReceipts, registrationIndexPathFor } from './rsiLadderIndex';
 const MANAPI_BASE = 'https://manapi.metaid.io';
 const SIMPLELOG_PATH = '/protocols/simplelog';
 const PAGE_SIZE = 100;
-const MAX_PAGES = 5;
+/**
+ * 全量回填（loop 裁定必须项②）：从登记链头部翻到 cursor 耗尽，不做任何时间
+ * 过滤——该键自冻结稿启用，天然无更早数据，且幂等复算（§1.5 步骤4）需要全史。
+ * 50 页 × 100 = 5000 条只是防御性上限（防止异常 indexer 永不耗尽 cursor），
+ * 当前链上 simplelog 总量 17 条，远低于上限。
+ */
+const MAX_PAGES = 50;
 const FETCH_TIMEOUT_MS = 15_000;
 /** 缓存新鲜度：超过该时长后下次 snapshot 会重取链上（手动刷新永远强取）。 */
 const CACHE_STALE_MS = 5 * 60_000;
