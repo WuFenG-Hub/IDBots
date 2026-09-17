@@ -22,6 +22,12 @@
  * has no URI verdict, the FIRST non-blank line right below it may supply the
  * URI — the "description line + blank line + URI line" delivery format.
  */
+import {
+  isSimpleLogRecord,
+  normalizeChainUriToken,
+  parseSimpleLogPayloadText,
+} from '../libs/simpleLogProtocol';
+
 export type DeliverableKind = 'metaapp' | 'metafile' | 'url' | 'pinid' | 'text';
 
 export interface ParsedDeliverable {
@@ -493,4 +499,58 @@ export function parseIntegrityDeclaration(content: string | null | undefined): I
 /** True when the message declares a correction of the sender's own earlier output. */
 export function isCorrectionDeclaration(content: string | null | undefined): boolean {
   return parseIntegrityDeclaration(content) === 'correction';
+}
+
+// ---------------------------------------------------------------------------
+// SimpleLog intake (/protocols/simplelog, protocol v1)
+// ---------------------------------------------------------------------------
+// A SimpleLog record carries `deliverables` as an ARRAY OF BARE CHAIN URIs —
+// exactly the shape the ledger wants: no [DELIVERABLE] tag to hunt for, no
+// prose to guess from. The uri discipline (complete 64-hex+i0, no truncation,
+// no Web2) lives in libs/simpleLogProtocol, the same module the write tool
+// validates through, so writer and reader cannot drift apart.
+
+function chainUriKind(uri: string): DeliverableKind {
+  if (uri.startsWith('metaapp://')) return 'metaapp';
+  if (uri.startsWith('metafile://')) return 'metafile';
+  return 'pinid';
+}
+
+/** Best-effort kind for a rejected item, so the note reads in the right colour. */
+function chainUriKindHint(item: unknown): DeliverableKind {
+  const text = typeof item === 'string' ? item.trim() : '';
+  if (/^metaapp:\/\//i.test(text)) return 'metaapp';
+  if (/^metafile:\/\//i.test(text)) return 'metafile';
+  return 'pinid';
+}
+
+/**
+ * Deliverables of a SimpleLog record, one candidate per array item.
+ *
+ * The value may be the record object itself or the raw message body (the
+ * record is then located with parseSimpleLogPayloadText, which treats fenced
+ * code blocks as documentation). The common MetaWeb dressing is unwrapped to
+ * the bare URI — `[pin://<x>](pin://<x>)`, backticks, angle brackets — because
+ * the wrapper is presentation and the link TARGET is the artifact: a broken or
+ * truncated URI stays invalid however prettily it is wrapped. Returns [] when
+ * the body carries no valid record or no deliverables array.
+ */
+export function parseSimpleLogDeliverables(content: unknown): ParsedDeliverable[] {
+  const record =
+    content != null && typeof content === 'object' && !Array.isArray(content)
+      ? (content as Record<string, unknown>)
+      : parseSimpleLogPayloadText(content);
+  if (!record || !isSimpleLogRecord(record)) return [];
+  const raw = record.deliverables;
+  if (!Array.isArray(raw)) return [];
+  const candidates: ParsedDeliverable[] = [];
+  for (const item of raw) {
+    const { uri, reason } = normalizeChainUriToken(item);
+    if (!uri) {
+      candidates.push(invalid(chainUriKindHint(item), reason ?? 'invalid chain URI'));
+      continue;
+    }
+    candidates.push(valid(chainUriKind(uri), uri));
+  }
+  return candidates;
 }

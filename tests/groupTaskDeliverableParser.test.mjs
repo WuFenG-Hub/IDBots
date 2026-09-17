@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const {
   parseDeliverableLines,
   parseDeliverableSegments,
+  parseSimpleLogDeliverables,
   isTextDeliverable,
   hasDeliverableTagLine,
   extractPinidToken,
@@ -679,4 +680,93 @@ test('task #63: extractPinidToken treats scheme/suffix variants as ONE artifact 
   assert.equal(extractPinidToken(`pin://${pin.toUpperCase()}I0`.toLowerCase()), `${pin}i0`);
   assert.equal(extractPinidToken('https://example.com/a'), null);
   assert.equal(extractPinidToken(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// SimpleLog intake (/protocols/simplelog v1): the record's deliverables array
+// IS the ledger input — bare chain URIs, no tag, no prose.
+// ---------------------------------------------------------------------------
+
+const LOG_TASKID = 'b0eb2dd4203bec74a641fa4b09f7370bf88504f83467f78ea5c40ff7aa1cd92di0';
+
+const simpleLogBody = (deliverables, extra = {}) =>
+  JSON.stringify({
+    v: 1,
+    kind: 'status',
+    summary: '第一棒完成',
+    taskid: LOG_TASKID,
+    ...extra,
+    ...(deliverables == null ? {} : { deliverables }),
+  });
+
+test('simplelog intake: bare chain URI array → one candidate per item, kinds by scheme', () => {
+  const candidates = parseSimpleLogDeliverables(
+    simpleLogBody([`pin://${PIN_A}`, `metaapp://${PIN_B}`, `metafile://${PIN_C}.zip`]),
+  );
+  assert.deepEqual(candidates, [
+    { kind: 'pinid', uri: `pin://${PIN_A}`, valid: true, note: null },
+    { kind: 'metaapp', uri: `metaapp://${PIN_B}`, valid: true, note: null },
+    { kind: 'metafile', uri: `metafile://${PIN_C}.zip`, valid: true, note: null },
+  ]);
+});
+
+test('simplelog intake: markdown-wrapped URIs are unwrapped, never returned dirty', () => {
+  const candidates = parseSimpleLogDeliverables(
+    simpleLogBody([
+      `[pin://${PIN_A}](pin://${PIN_A})`,
+      `\`metaapp://${PIN_B}\``,
+      `<metafile://${PIN_C}.zip>`,
+    ]),
+  );
+  assert.deepEqual(candidates.map((candidate) => candidate.uri), [
+    `pin://${PIN_A}`,
+    `metaapp://${PIN_B}`,
+    `metafile://${PIN_C}.zip`,
+  ]);
+  assert.ok(candidates.every((candidate) => candidate.valid));
+});
+
+test('simplelog intake: a dressed-up but broken URI is still rejected (dressing is not validation)', () => {
+  const candidates = parseSimpleLogDeliverables(
+    simpleLogBody([
+      `[pin://${PIN_A}](pin://${PIN_A.slice(0, 24)}…)`,
+      `pin://${PIN_B.slice(0, 40)}`,
+      'https://openagentinternet.org/browser/metaapp/x',
+      '<pin://placeholder>',
+    ]),
+  );
+  assert.equal(candidates.length, 4);
+  assert.ok(candidates.every((candidate) => candidate.valid === false));
+  assert.match(candidates[0].note, /truncated/);
+  assert.match(candidates[1].note, /not a complete chain URI/);
+  assert.match(candidates[2].note, /Web2 URL/);
+  assert.match(candidates[3].note, /placeholder|not a complete chain URI/);
+});
+
+test('simplelog intake: a record inside a fenced block is documentation, and non-records yield nothing', () => {
+  assert.deepEqual(
+    parseSimpleLogDeliverables(`示例：\n\n\`\`\`json\n${simpleLogBody([`pin://${PIN_A}`])}\n\`\`\`\n`),
+    [],
+  );
+  // A record without a task anchor is not a record the ledger may trust.
+  assert.deepEqual(
+    parseSimpleLogDeliverables(
+      JSON.stringify({ v: 1, kind: 'status', summary: 's', deliverables: [`pin://${PIN_A}`] }),
+    ),
+    [],
+  );
+  // A record without deliverables contributes rows to nobody.
+  assert.deepEqual(parseSimpleLogDeliverables(simpleLogBody(null)), []);
+  assert.deepEqual(parseSimpleLogDeliverables('普通文本，无记录'), []);
+  // The record object may also be handed in directly (no JSON round-trip).
+  assert.equal(
+    parseSimpleLogDeliverables({
+      v: 1,
+      kind: 'close',
+      summary: '收口',
+      taskid: LOG_TASKID,
+      deliverables: [`pin://${PIN_A}`],
+    }).length,
+    1,
+  );
 });
