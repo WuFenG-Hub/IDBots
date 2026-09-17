@@ -532,7 +532,7 @@ app.setName(APP_NAME);
 const LEGACY_APP_NAMES = ['OctoBot', 'octobot'];
 const INVALID_FILE_NAME_PATTERN = /[<>:"/\\|?*\u0000-\u001F]/g;
 const MIN_MEMORY_USER_MEMORIES_MAX_ITEMS = 1;
-const MAX_MEMORY_USER_MEMORIES_MAX_ITEMS = 60;
+const MAX_MEMORY_USER_MEMORIES_MAX_ITEMS = 120; // quota audit 2026-09-17 (F1): was 60 (keep in sync with coworkStore.ts)
 const IPC_MESSAGE_CONTENT_MAX_CHARS = 120_000;
 const IPC_UPDATE_CONTENT_MAX_CHARS = 120_000;
 const IPC_STRING_MAX_CHARS = 4_000;

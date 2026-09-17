@@ -30,7 +30,7 @@ export const GROUP_TASK_HARD_TEAM_SIZE = 8;
  * can still override afterwards — a revise or cancel reply after propose
  * always blocks the auto-start.
  */
-export const GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS = 4;
+export const GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS = 6; // quota audit 2026-09-17 (F1): was 4
 
 export type GroupTaskStaffingProposalStatus =
   | 'pending'

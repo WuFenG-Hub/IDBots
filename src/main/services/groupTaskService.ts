@@ -2540,7 +2540,7 @@ export async function recordGroupTaskIntegrityEvent(
  */
 /** P1-4: hard cap on external deliveries per close — the chair summarizes,
  * not dumps; a runaway list must never flood the ledger. */
-const MAX_EXTERNAL_DELIVERIES_PER_CLOSE = 10;
+const MAX_EXTERNAL_DELIVERIES_PER_CLOSE = 50; // quota audit 2026-09-17 (F1): was 10
 
 /**
  * P1-4 (task #39): record deliverables produced outside the group session

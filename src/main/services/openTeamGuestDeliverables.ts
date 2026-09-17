@@ -30,7 +30,7 @@ import { buildMetafileUri } from './serviceDeliveryArtifacts.js';
 const { DEFAULT_MAX_FILE_SIZE_BYTES, inferContentTypeFromFilePath } = metaFileUploadShared;
 
 /** Default cap on files delivered per guest turn (each upload costs the guest bot's own fees). */
-export const DEFAULT_MAX_DELIVERABLE_FILES = 3;
+export const DEFAULT_MAX_DELIVERABLE_FILES = 10; // quota audit 2026-09-17 (F1): was 3
 
 /**
  * Deliverable file extensions. Same categories as serviceDeliveryArtifacts,

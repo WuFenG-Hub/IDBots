@@ -410,7 +410,7 @@ test('private chat prompt includes recent A2A context and topic-ending policy', 
   assert.equal(shouldSkipPrivateChatAutoReplyText('[NO_REPLY] 好的，等我消息'), false);
   assert.equal(isPrivateChatNoReplySentinel('[NO_REPLY] 好的，等我消息'), false);
   assert.match(prompt, /say exactly "bye"/i);
-  assert.match(prompt, /30 turns/i);
+  assert.match(prompt, /50 turns/i);
   assert.match(prompt, /Peer Bot: 我们讨论一下比特币生态的索引器吧/);
   assert.match(prompt, /Local Bot: 可以，先从链上数据可用性说起。/);
   assert.match(prompt, /Peer Bot: 那缓存策略呢？/);
@@ -908,10 +908,12 @@ function buildIncomingA2AMessages(count, startTimestamp = 1_770_000_000_000) {
 test('a2a chat limit helpers normalize to selectable options and derive closing phase', () => {
   assert.equal(normalizeA2AMaxIncomingTurns(30), 30);
   assert.equal(normalizeA2AMaxIncomingTurns(200), 200);
-  assert.equal(normalizeA2AMaxIncomingTurns(31), 30);
-  assert.equal(normalizeA2AMaxIncomingTurns(undefined), 30);
-  assert.equal(normalizeA2AMaxIncomingTurns(null), 30);
-  assert.equal(normalizeA2AMaxIncomingTurns('abc'), 30);
+  // 31 is not a selectable option: it falls back to the default (not snap-to-nearest).
+  assert.equal(normalizeA2AMaxIncomingTurns(31), 50);
+  // Quota audit 2026-09-17 (F1): default raised 30 -> 50.
+  assert.equal(normalizeA2AMaxIncomingTurns(undefined), 50);
+  assert.equal(normalizeA2AMaxIncomingTurns(null), 50);
+  assert.equal(normalizeA2AMaxIncomingTurns('abc'), 50);
 
   assert.equal(normalizeA2AByeCooldownMs(60_000), 60_000);
   assert.equal(normalizeA2AByeCooldownMs(3_600_000), 3_600_000);
@@ -927,7 +929,7 @@ test('a2a chat limit helpers normalize to selectable options and derive closing 
 test('private chat A2A analysis honors per-bot max incoming turns', () => {
   const messages20 = buildIncomingA2AMessages(20);
 
-  // Default limit stays 30: 20 incoming turns do not force a bye.
+  // Default limit is now 50: 20 incoming turns do not force a bye.
   assert.equal(analyzePrivateChatA2AConversation({ messages: messages20 }).shouldForceBye, false);
   // Per-bot limit of 20: exactly 20 incoming turns forces a bye.
   assert.equal(
@@ -939,9 +941,9 @@ test('private chat A2A analysis honors per-bot max incoming turns', () => {
     analyzePrivateChatA2AConversation({ messages: buildIncomingA2AMessages(50), maxIncomingTurns: 200 }).shouldForceBye,
     false,
   );
-  // Invalid stored values fall back to the default 30-turn limit.
+  // Invalid stored values fall back to the default 50-turn limit.
   assert.equal(
-    analyzePrivateChatA2AConversation({ messages: buildIncomingA2AMessages(35), maxIncomingTurns: 999 }).shouldForceBye,
+    analyzePrivateChatA2AConversation({ messages: buildIncomingA2AMessages(55), maxIncomingTurns: 999 }).shouldForceBye,
     true,
   );
 });
@@ -957,7 +959,7 @@ test('private chat prompt reflects the per-bot max turns limit and closing phase
     });
 
   const defaultPrompt = buildPrompt(1, undefined);
-  assert.match(defaultPrompt, /1\/30 turns/);
+  assert.match(defaultPrompt, /1\/50 turns/);
 
   const customPrompt = buildPrompt(5, 100);
   assert.match(customPrompt, /5\/100 turns/);

@@ -28,7 +28,7 @@ export type MetawebStudyJobStatus = 'pending' | 'running' | 'done' | 'failed';
  */
 export type MetawebStudyJobKind = 'topic' | 'qa-surf';
 
-export const DEFAULT_STUDY_PIN_BUDGET_PER_NIGHT = 20;
+export const DEFAULT_STUDY_PIN_BUDGET_PER_NIGHT = 50; // quota audit 2026-09-17 (F1): was 20
 /** Safety bound so a topic with an ever-growing corpus cannot run forever. */
 export const MAX_STUDY_RUNS_PER_JOB = 10;
 /** A failing job stays pending (retried next nights) until this many consecutive failures. */

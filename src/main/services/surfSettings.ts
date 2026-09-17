@@ -19,8 +19,8 @@ export const SURF_BEFORE_DREAM_ENABLED_KEY = 'surf_before_dream_enabled';
 /** Integer string; chain-writing interactions allowed per surf run. */
 export const SURF_INTERACTION_BUDGET_KEY = 'surf_interaction_budget';
 
-export const DEFAULT_SURF_INTERACTION_BUDGET = 20;
-export const MAX_SURF_INTERACTION_BUDGET = 100;
+export const DEFAULT_SURF_INTERACTION_BUDGET = 50; // quota audit 2026-09-17 (F1): autonomous-bots baseline, was 20
+export const MAX_SURF_INTERACTION_BUDGET = 500; // ceiling raised with the default; was 100
 
 export const normalizeSurfBudgetValue = (value: unknown): string | null => {
   const num = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;

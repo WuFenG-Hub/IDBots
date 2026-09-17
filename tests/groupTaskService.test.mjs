@@ -1561,26 +1561,40 @@ test('an all-local small slate auto-starts without owner confirmation', async ()
   }
 });
 
-test('five all-local seats still require owner confirmation', async () => {
+test('seven all-local seats still require owner confirmation (cap is six)', async () => {
   const h = await createHarness();
   try {
     setGroupTaskServiceStaffingSessionMessagesLoader(() => [
       { type: 'user', content: '帮我开个群任务做技能介绍', timestamp: 1_000 },
     ]);
-    const proposed = proposeGroupTaskStaffing({
+    const localSeat = (role, name, id, domainLabel) =>
+      domainLabel
+        ? { role: 'domain', domainLabel, candidateName: name, metabotId: id, source: 'local', reason: 'local' }
+        : { role, candidateName: name, metabotId: id, source: 'local', reason: 'local' };
+    // Quota audit 2026-09-17: cap raised 4 -> 6, so the boundary case moves to seven.
+    // seatKey = coarse role, domain seats key on their label — all seven keys differ.
+    const sevenSeats = [
+      localSeat('content', 'Coder Bot', 2),
+      localSeat('design', 'Designer Bot', 3),
+      localSeat('engineering', 'Coder Bot', 2),
+      localSeat('promotion', 'Designer Bot', 3),
+      localSeat('domain', 'Coder Bot', 2, 'legal'),
+      localSeat('domain', 'Designer Bot', 3, 'finance'),
+      localSeat('domain', 'Coder Bot', 2, 'ops'),
+    ];
+    const atCap = await proposeGroupTaskStaffing({
       title: '技能介绍',
       goal: '写出介绍并发布',
-      plan: {
-        stages: [],
-        seats: [
-          { role: 'content', candidateName: 'Coder Bot', metabotId: 2, source: 'local', reason: 'local' },
-          { role: 'design', candidateName: 'Designer Bot', metabotId: 3, source: 'local', reason: 'local' },
-          { role: 'engineering', candidateName: 'Coder Bot', metabotId: 2, source: 'local', reason: 'local' },
-          { role: 'promotion', candidateName: 'Designer Bot', metabotId: 3, source: 'local', reason: 'local' },
-          { role: 'domain', domainLabel: 'legal', candidateName: 'Coder Bot', metabotId: 2, source: 'local', reason: 'local' },
-        ],
-      },
-      sourceSessionId: 'session-five-local',
+      plan: { stages: [], seats: sevenSeats.slice(0, 6) },
+      sourceSessionId: 'session-six-local',
+    });
+    // Six all-local seats sit exactly at the cap: auto-start, no owner gate.
+    assert.equal(atCap.ownerConfirmRequired, false);
+    const proposed = await proposeGroupTaskStaffing({
+      title: '技能介绍',
+      goal: '写出介绍并发布',
+      plan: { stages: [], seats: sevenSeats },
+      sourceSessionId: 'session-seven-local',
     });
     assert.equal(proposed.ownerConfirmRequired, true);
     assert.equal(proposed.proposal.status, 'pending');
