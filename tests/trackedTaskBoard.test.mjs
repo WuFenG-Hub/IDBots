@@ -444,7 +444,8 @@ test('session-ended raises closureDue without closing or moving the card', async
     assert.equal(card.closureDueLevel, 'sessions_ended');
     assert.equal(card.state, 'in_progress', 'R3 assesses closure; it never moves the card');
     assert.equal(orchestrationStore.getTask('seed-task-26').status, 'running');
-    assert.match(card.closureSuggestion, /day\(s\)/);
+    assert.equal(card.closureSuggestionCode, 'session_ended');
+    assert.match(card.closureSuggestion, /session has ended/i);
 
     const counts = board.listCards({ scope: 'all' }).counts;
     assert.equal(counts.sessionsEndedLevel, 1);
@@ -635,4 +636,73 @@ test('the two orchestration_tasks DDL definitions declare the same column set (R
     fromStore,
     'the two DDL copies must declare identical column sets: whichever runs first wins and drift is silent',
   );
+});
+
+test('structured facts are authoritative and the diagnostic strings derive from them (A-6)', async () => {
+  const { sqliteStore, board, orchestrationStore } = await openBoard();
+  try {
+    const mod = await import('../dist-electron/main/services/trackedTaskBoard.js');
+    const KEY_REGISTRY = mod.TRACKED_FACT_CODE_I18N_KEY;
+    const RENDER = mod.renderTrackedSuggestion;
+
+    for (const card of board.listCards({ scope: 'all' }).cards) {
+      // Rule 1/3: one structured fact per diagnostic line, same length and order.
+      assert.equal(card.reasonCodes.length, card.reasons.length, `${card.id}: codes/reasons length mismatch`);
+      for (const [index, fact] of card.reasonCodes.entries()) {
+        assert.equal(typeof fact.code, 'string', `${card.id}[${index}]: code missing`);
+        assert.ok(KEY_REGISTRY[fact.code], `${card.id}[${index}]: code ${fact.code} has no i18n key`);
+        assert.equal(typeof fact.args, 'object', `${card.id}[${index}]: args missing`);
+      }
+      // Rule 4: a suggestion exists exactly when the card is due for closure.
+      assert.equal(
+        card.closureSuggestionCode !== null,
+        card.closureDue,
+        `${card.id}: suggestion presence must match closureDue`,
+      );
+      if (card.closureSuggestionCode !== null) {
+        assert.ok(KEY_REGISTRY[card.closureSuggestionCode], `${card.id}: suggestion code has no i18n key`);
+        assert.equal(
+          card.closureSuggestion,
+          RENDER(card.closureSuggestionCode, card.closureSuggestionArgs),
+          `${card.id}: the diagnostic string must be derived from code+args, never written twice`,
+        );
+      } else {
+        assert.equal(card.closureSuggestion, '', `${card.id}: no due -> no suggestion text`);
+      }
+    }
+
+    // The suggestion is a pure function of the structured fact.
+    const due = cardById(board, 'seed-task-14');
+    assert.equal(due.closureDue, true);
+    assert.equal(due.closureSuggestionCode, 'stale_inactivity');
+    assert.equal(typeof due.closureSuggestionArgs.days, 'number');
+    assert.match(due.closureSuggestion, /day\(s\)/);
+
+    const clean = cardById(board, 'seed-task-05');
+    assert.equal(clean.closureDue, false);
+    assert.equal(clean.closureSuggestionCode, null);
+    assert.equal(clean.closureSuggestion, '');
+
+    // Terminal without a conclusion is the most actionable fact.
+    const terminal = cardById(board, 'seed-task-18');
+    assert.equal(terminal.closureSuggestionCode, 'terminal_no_conclusion');
+
+    // Every code the derivation can emit is registered.
+    const emitted = new Set(
+      board.listCards({ scope: 'all' }).cards.flatMap((card) => [
+        ...card.reasonCodes.map((fact) => fact.code),
+        ...(card.closureSuggestionCode ? [card.closureSuggestionCode] : []),
+      ]),
+    );
+    assert.ok(emitted.size > 0);
+    for (const code of emitted) assert.ok(KEY_REGISTRY[code], `unregistered code ${code}`);
+
+    // The reason codes are a real projection of the same rows, not decoration.
+    const withSessions = cardById(board, 'seed-task-23');
+    assert.ok(withSessions.reasonCodes.some((fact) => fact.code === 'deliverables_verifiable'));
+    assert.ok(withSessions.reasonCodes.some((fact) => fact.code === 'linked_sessions'));
+    assert.equal(orchestrationStore.getTask('seed-task-23').status, 'running');
+  } finally {
+    sqliteStore.close();
+  }
 });
