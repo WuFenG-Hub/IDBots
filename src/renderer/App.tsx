@@ -33,7 +33,7 @@ import {
 } from './services/appUpdateUi';
 import { defaultConfig, type ModelOptions } from './config';
 import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice';
-import { setPreferredMetabotId } from './store/slices/coworkSlice';
+import { setDraftPrompt, setPreferredMetabotId } from './store/slices/coworkSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
 import { setActiveSkillIds } from './store/slices/skillSlice';
 import { selectCard as selectTrackedCard } from './store/slices/trackedTaskSlice';
@@ -468,7 +468,7 @@ const App: React.FC = () => {
     };
   }, [isSidebarResizing]);
 
-  const handleNewChat = useCallback((preselectSkillId?: unknown) => {
+  const handleNewChat = useCallback((preselectSkillId?: unknown, draftText?: string) => {
     const shouldClearInput = mainView === 'cowork' || !!currentSessionId;
     const normalizedPreselectSkillId = normalizePreselectedSkillId(preselectSkillId);
     coworkService.clearSession();
@@ -476,11 +476,30 @@ const App: React.FC = () => {
     if (normalizedPreselectSkillId) {
       dispatch(setActiveSkillIds([normalizedPreselectSkillId]));
     }
+    // 带草稿的新对话：先落全局草稿（无 scope 的 composer 挂载时会读它——
+    // focus-input 可能在 composer 挂载前派发，store 是晚挂载场景的兜底）。
+    if (draftText) {
+      dispatch(setDraftPrompt(draftText));
+    }
     setMainView('cowork');
     window.setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('cowork:focus-input', {
-        detail: { clear: shouldClearInput },
-      }));
+      const dispatchFocus = () => {
+        window.dispatchEvent(new CustomEvent('cowork:focus-input', {
+          detail: { clear: shouldClearInput, text: draftText },
+        }));
+      };
+      dispatchFocus();
+      // composer 可能在本派发之后才挂载（会话状态异步就绪）：短暂重发直到
+      // textarea 拿到焦点（handleFocusInput 对同一文本幂等）。
+      let tries = 0;
+      const retry = window.setInterval(() => {
+        tries += 1;
+        if (document.activeElement instanceof HTMLTextAreaElement || tries >= 10) {
+          window.clearInterval(retry);
+          return;
+        }
+        dispatchFocus();
+      }, 200);
     }, 0);
   }, [dispatch, mainView, currentSessionId]);
 
@@ -565,6 +584,19 @@ const App: React.FC = () => {
     window.addEventListener('botBrowser:openUri', handler);
     return () => window.removeEventListener('botBrowser:openUri', handler);
   }, [botBrowserShell.openUri]);
+
+  // 「长期任务 → 新建任务」：切到 cowork 新对话并预填 composer 草稿。草稿文本
+  // 只走 focus-input 的 detail，由 CoworkPromptInput 在清空逻辑之后经版本化
+  // 草稿字段写入并落回 setDraftPrompt。
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ text?: unknown }>).detail;
+      const text = typeof detail?.text === 'string' && detail.text.trim() ? detail.text : undefined;
+      handleNewChat(undefined, text);
+    };
+    window.addEventListener('cowork:newChatWithDraft', handler);
+    return () => window.removeEventListener('cowork:newChatWithDraft', handler);
+  }, [handleNewChat]);
 
   useEffect(() => {
     return window.electron.botBrowser.onTabCommand(({ requestId, command }) => {

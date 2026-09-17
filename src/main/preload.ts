@@ -886,6 +886,13 @@ contextBridge.exposeInMainWorld('electron', {
       pinId?: string | null;
     }) => ipcRenderer.invoke('trackedTask:close', input),
     /**
+     * v1.3 manual archive override: one `kv` row, reversible, ledger untouched.
+     * `archived: true` moves the card into the archive projection; the row
+     * stays queryable and nothing is deleted.
+     */
+    archiveCard: (input: { cardId: string; archived: boolean }) =>
+      ipcRenderer.invoke('trackedTask:archiveCard', input),
+    /**
      * `seq` is monotonic per process: drop any frame with `seq <= lastSeenSeq`
      * and refetch only `taskIds`. Poll once every 30s as a fallback for a
      * missed push.

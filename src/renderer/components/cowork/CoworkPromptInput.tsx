@@ -492,14 +492,28 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   }, [scopeKey, sessionDrafts, draftPrompt]);
 
   useEffect(() => {
-    const handleFocusInput = () => {
+    const handleFocusInput = (event: Event) => {
       // Navigation events (New Chat, session shortcuts) only focus the input;
       // they must never clear it. Drafts are owned by their scope: the New
       // Task composer keeps the global draft and each session keeps its own
       // stored draft. They are cleared only by a successful submit or when
       // the session itself is deleted.
+      //
+      // 「新建任务」预填（长期任务看板反馈⑤）：detail.text 在清空逻辑之后
+      // 应用（App.tsx 在 clearSession/clearSelection 之后的 setTimeout(0) 里
+      // 才派发本事件），经版本化草稿字段写入并落回全局 setDraftPrompt；
+      // 聚焦后光标落在 textarea 末尾。
+      const text = (event as CustomEvent<{ text?: unknown }>).detail?.text;
       requestAnimationFrame(() => {
+        if (typeof text === 'string' && text) {
+          draftFieldRef.current?.set(text);
+        }
         textareaRef.current?.focus();
+        const textarea = textareaRef.current;
+        if (textarea && typeof text === 'string' && text) {
+          const end = textarea.value.length;
+          textarea.setSelectionRange(end, end);
+        }
       });
     };
     window.addEventListener('cowork:focus-input', handleFocusInput);

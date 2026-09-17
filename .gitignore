@@ -460,3 +460,7 @@ man_base_data_pebble/
 
 # bye-closed private chat reopen regression (local-re-engagement)
 !tests/privateChatClosedReopen.test.mjs
+!tests/trackedTaskBoardUiWiring.test.mjs
+!tests/manual/
+!tests/manual/electron-drag-region-harness.mjs
+!tests/manual/run-drag-harness.mjs

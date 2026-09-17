@@ -170,10 +170,14 @@ export interface TrackedCardSummary {
   scheduledTaskId: string | null;
   /**
    * v1.1 准入判定（后端读时投影）：`archived := ¬admitted`。
+   * v1.3 起手工归档 override 也把本位压成 false（kv 单行，可逆）。
    * 归档卡不出现在看板/全量视图，但仍可经 `scope:'archived'` 与 `getCard` 查到。
    */
   admitted: boolean;
-  /** 命中的准入规则（ADM-1..ADM-5）；归档卡为空数组。 */
+  /**
+   * 命中的准入规则（ADM-1..ADM-5）。¬admitted 且无 v1.3 override 时为空数组；
+   * 手工归档的卡保留命中记录——准入判定是事实，override 只是叠加开关。
+   */
   admissionMatched: TrackedAdmissionRule[];
   /** 诊断位：本卡的准入输入不是布尔（漏传）。正常路径恒为 false。 */
   admissionInputMissing: boolean;
@@ -290,6 +294,18 @@ export interface TrackedCardCloseResult {
   /** status 是否真的推进了；结论列无论状态是否推进都会写。 */
   statusMoved?: boolean;
   statusNote?: string;
+}
+
+/**
+ * v1.3 手工归档结果（主进程 trackedTaskBoard.archiveCard 的逐字镜像）。
+ * kv 单行 override：无新列新表、可逆，ledger 行本身不动。
+ */
+export interface TrackedCardArchiveResult {
+  ok: boolean;
+  code?: 'NOT_FOUND' | 'VALIDATION';
+  error?: string;
+  /** 刷新后的卡摘要；归档成功时 admitted 已经是 false。 */
+  card?: TrackedCardSummary;
 }
 
 /** 收口入参（经主进程白名单写入，前端不直写 status）。 */

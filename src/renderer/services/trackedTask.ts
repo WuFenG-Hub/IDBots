@@ -225,6 +225,27 @@ class TrackedTaskService {
       return { error: err instanceof Error ? err.message : String(err), receipt: null };
     }
   }
+
+  /**
+   * v1.3 手工归档（kv 单行 override，可逆）。成功后整块重取看板——
+   * 归档改变准入种群与 counts，不是局部补丁（与 setAdmissionMode 同一口径）。
+   */
+  async archiveCard(input: { cardId: string; archived: boolean }): Promise<{ error: string | null }> {
+    const api = this.api();
+    if (!api || typeof api.archiveCard !== 'function') {
+      return { error: 'window.electron.trackedTask is missing on this build.' };
+    }
+    try {
+      const result = await api.archiveCard({ cardId: input.cardId, archived: input.archived });
+      if (result?.ok) {
+        void this.loadBoard();
+        return { error: null };
+      }
+      return { error: result?.error ?? 'Failed to archive the card' };
+    } catch (err: unknown) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  }
 }
 
 export const trackedTaskService = new TrackedTaskService();

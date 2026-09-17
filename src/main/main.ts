@@ -11795,6 +11795,22 @@ if (!gotTheLock) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to set the admission mode' };
     }
   });
+
+  // v1.3 手工归档（kv 单行 override，可逆）：只动投影，不动台账行本身。
+  ipcMain.handle('trackedTask:archiveCard', async (_event, input: { cardId: string; archived: boolean }) => {
+    try {
+      const result = getTrackedTaskBoard().archiveCard({
+        cardId: input?.cardId,
+        archived: input?.archived,
+      });
+      // The override shifts the admitted/archived population and counts:
+      // refresh open boards the same way an admission-mode switch does.
+      if (result.ok) broadcastTrackedTaskUpdate([input.cardId], 'archived');
+      return result;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Failed to archive the card' };
+    }
+  });
   // ==================== Scheduled Task IPC Handlers ====================
 
   ipcMain.handle('scheduledTask:list', async () => {

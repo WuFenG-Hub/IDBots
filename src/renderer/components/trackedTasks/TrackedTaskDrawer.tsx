@@ -14,6 +14,7 @@ import {
   sourceKindLabel,
 } from './trackedTaskPresentation';
 import { reasonText, suggestionTextForCard } from './trackedTaskFactText';
+import MetaWebUriLink from './MetaWebUriLink';
 
 interface TrackedTaskDrawerProps {
   detail: TrackedCardDetail;
@@ -21,7 +22,61 @@ interface TrackedTaskDrawerProps {
   metabotNames: Map<number, string>;
   onClose: () => void;
   onRequestCloseCard: (cardId: string) => void;
+  /** v1.3 手工归档：仅 state==='closed' 且未归档的卡展示入口。 */
+  onArchiveCard?: (cardId: string) => void;
+  archiving?: boolean;
 }
+
+/** 「目标」节默认截断行数（owner 2026-09-18 反馈②：约 6 行）。 */
+const GOAL_COLLAPSED_LINES = 6;
+
+/**
+ * 目标文案：whitespace-pre-wrap 保留原始换行；默认 -webkit-line-clamp 截断，
+ * 是否给展开/收起由 ref 实测（scrollHeight > clientHeight）决定，不用字数启发式。
+ * 展开期间保留上一次的实测值，按钮不闪烁；text 变化（换卡）时用 key 重挂载复位。
+ */
+const ExpandableGoal: React.FC<{ text: string }> = ({ text }) => {
+  const ref = React.useRef<HTMLParagraphElement | null>(null);
+  const [expanded, setExpanded] = React.useState(false);
+  const [collapsedOverflow, setCollapsedOverflow] = React.useState(false);
+
+  React.useLayoutEffect(() => {
+    if (expanded) return;
+    const el = ref.current;
+    if (!el) return;
+    setCollapsedOverflow(el.scrollHeight > el.clientHeight + 1);
+  }, [text, expanded]);
+
+  return (
+    <div>
+      <p
+        ref={ref}
+        className="break-words whitespace-pre-wrap text-sm leading-snug dark:text-claude-darkText text-claude-text"
+        style={
+          expanded
+            ? undefined
+            : {
+                display: '-webkit-box',
+                WebkitBoxOrient: 'vertical',
+                WebkitLineClamp: GOAL_COLLAPSED_LINES,
+                overflow: 'hidden',
+              }
+        }
+      >
+        {text}
+      </p>
+      {(expanded || collapsedOverflow) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((prev) => !prev)}
+          className="mt-1 text-[11px] text-claude-accent transition-colors hover:underline"
+        >
+          {i18nService.t(expanded ? 'trackedTask.drawer.collapse' : 'trackedTask.drawer.expand')}
+        </button>
+      )}
+    </div>
+  );
+};
 
 /** 抽屉里的一节：统一节奏，避免九节各写一套间距。 */
 const Section: React.FC<{ labelKey: string; children: React.ReactNode }> = ({ labelKey, children }) => (
@@ -64,6 +119,8 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
   metabotNames,
   onClose,
   onRequestCloseCard,
+  onArchiveCard,
+  archiving,
 }) => {
   /** 卡 → 会话跳转：复用既有 scheduledTask:viewSession 通道（App.tsx 已在监听）。 */
   const jumpToSession = (sessionId: string) => {
@@ -96,7 +153,10 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
     });
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
+    // non-draggable：抽屉盖住 48px 拖拽头条带（ScheduledTasksView header），
+    // 不标 no-drag 的话整个 fixed 覆盖层里的点击仍落在窗口拖拽区里——
+    // 右上角 X 恰好在条带内，点击被拖拽吞掉（owner 2026-09-18 反馈①）。
+    <div className="non-draggable fixed inset-0 z-50 flex justify-end">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
       <div className="relative flex h-full w-[560px] max-w-[92vw] flex-col border-l dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg shadow-2xl">
         <div className="flex shrink-0 items-start gap-2 border-b dark:border-claude-darkBorder border-claude-border px-4 py-3">
@@ -128,14 +188,13 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 pb-4">
-          {/* 1 目标 */}
+        {/* min-h-0：flex 列子项默认 min-height:auto，缺它时超长内容把抽屉（连同窗口）撑大而不滚动（反馈②）。 */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+          {/* 1 目标：默认截断 + 溢出实测展开；原始换行用 pre-wrap 保留 */}
           <Section labelKey="trackedTask.drawer.goal">
-            <p className="break-words text-sm leading-snug dark:text-claude-darkText text-claude-text">
-              {detail.goal}
-            </p>
+            <ExpandableGoal key={detail.id} text={detail.goal} />
             {detail.enrichedGoal && detail.enrichedGoal !== detail.goal && (
-              <p className="mt-1 break-words text-xs leading-snug dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              <p className="mt-1 break-words whitespace-pre-wrap text-xs leading-snug dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 {detail.enrichedGoal}
               </p>
             )}
@@ -309,7 +368,7 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
                       {item.kind || item.status || '—'}
                     </span>
                     <span className="min-w-0 flex-1 break-all font-mono text-[11px] dark:text-claude-darkText text-claude-text">
-                      {item.uri}
+                      <MetaWebUriLink text={item.uri} />
                     </span>
                   </li>
                 ))}
@@ -362,7 +421,8 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
                 </p>
                 {detail.closure.pinId && (
                   <p className="mt-1 break-all font-mono text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {detail.closure.pinId}
+                    {/* 裸 pinId 由 MetaWebUriLink 拼成 pin://<pinId> 打开 */}
+                    <MetaWebUriLink text={detail.closure.pinId} />
                   </p>
                 )}
               </div>
@@ -370,7 +430,7 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
           )}
         </div>
 
-        {/* 收口入口（验收⑥：单按钮，不做验收/拒绝二选一） */}
+        {/* 收口入口（验收⑥：单按钮，不做验收/拒绝二选一）；已收口的卡给「归档」（反馈⑥） */}
         <div className="flex shrink-0 items-center gap-2 border-t dark:border-claude-darkBorder border-claude-border px-4 py-3">
           <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
             {i18nService.t('trackedTask.drawer.footerHint')}
@@ -382,6 +442,18 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
               className="btn-idchat-primary-filled ml-auto px-3 py-1.5 text-sm font-medium"
             >
               {i18nService.t('trackedTask.close.button')}
+            </button>
+          )}
+          {detail.state === 'closed' && detail.admitted && onArchiveCard && (
+            <button
+              type="button"
+              disabled={archiving}
+              onClick={() => onArchiveCard(detail.id)}
+              className="ml-auto rounded-lg border dark:border-claude-darkBorder border-claude-border px-3 py-1.5 text-sm dark:text-claude-darkText text-claude-text transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {archiving
+                ? i18nService.t('trackedTask.archive.archiving')
+                : i18nService.t('trackedTask.archive.action')}
             </button>
           )}
         </div>
