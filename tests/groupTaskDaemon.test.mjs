@@ -3577,6 +3577,10 @@ test('prompts: task #65 — the current group id is listed and mid-turn speech i
   });
   assert.match(chairPrompt, /ONE VOICE PER TURN/);
   assert.match(chairPrompt, /never repeat the same content as the turn's final reply/);
+  // Task #83 audit (P5): the chair playbook carries the verdict-snapshot
+  // discipline (rule on a freshly measured HEAD, no same-evidence reversals).
+  assert.match(chairPrompt, /VERDICT SNAPSHOT DISCIPLINE/);
+  assert.match(chairPrompt, /never rule from a stale snapshot or from memory/);
 
   // No group id on the task row → the line is omitted, nothing misleading.
   const noIdPrompt = buildGroupTaskSystemPrompt({
