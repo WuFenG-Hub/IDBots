@@ -47,7 +47,7 @@ test('enqueue normalizes, defaults the budget, and dedupes active jobs by finger
   const first = service.enqueueStudyJob(7, { topic: '  Game   Development ' });
   assert.equal(first.created, true);
   assert.equal(first.job.topic, 'Game Development');
-  assert.equal(first.job.budgetPins, 20);
+  assert.equal(first.job.budgetPins, 50);
   const dupe = service.enqueueStudyJob(7, { topic: 'game development' });
   assert.equal(dupe.created, false);
   assert.equal(dupe.job.id, first.job.id);

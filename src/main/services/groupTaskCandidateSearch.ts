@@ -25,7 +25,7 @@ import {
 } from './botSearchService';
 
 export const GROUP_TASK_SEARCH_DEFAULT_LIMIT = 10;
-export const GROUP_TASK_SEARCH_MAX_LIMIT = 20;
+export const GROUP_TASK_SEARCH_MAX_LIMIT = 50; // quota audit 2026-09-17 (F1): was 20
 /** When |local − remote| is within this margin, local sorts first. */
 export const LOCAL_TIE_MARGIN = 4;
 

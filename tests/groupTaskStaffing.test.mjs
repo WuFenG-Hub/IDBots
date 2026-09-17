@@ -143,7 +143,7 @@ const remoteSeat = (role, name) => ({
 });
 
 test('isLocalOnlySmallSlate: all-local at or under the cap, empty/remote/big slates excluded', () => {
-  assert.equal(GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS, 4);
+  assert.equal(GROUP_TASK_LOCAL_AUTO_START_MAX_SEATS, 6);
   const fourLocal = {
     stages: [],
     seats: [
@@ -161,7 +161,26 @@ test('isLocalOnlySmallSlate: all-local at or under the cap, empty/remote/big sla
       { role: 'domain', domainLabel: 'legal', candidateName: 'E', source: 'local', reason: 'local' },
     ],
   };
-  assert.equal(isLocalOnlySmallSlate(fiveLocal), false);
+  // Quota audit 2026-09-17: cap raised 4 -> 6, so five all-local seats now fit.
+  assert.equal(isLocalOnlySmallSlate(fiveLocal), true);
+  const sixLocal = {
+    stages: [],
+    seats: [
+      ...fiveLocal.seats,
+      { role: 'domain', domainLabel: 'finance', candidateName: 'F', source: 'local', reason: 'local' },
+    ],
+  };
+  // At the cap: still auto-startable.
+  assert.equal(isLocalOnlySmallSlate(sixLocal), true);
+  const sevenLocal = {
+    stages: [],
+    seats: [
+      ...sixLocal.seats,
+      { role: 'domain', domainLabel: 'ops', candidateName: 'G', source: 'local', reason: 'local' },
+    ],
+  };
+  // One over the cap: excluded again.
+  assert.equal(isLocalOnlySmallSlate(sevenLocal), false);
   const withRemote = {
     stages: [],
     seats: [localSeat('content', 'A'), remoteSeat('design', 'B')],

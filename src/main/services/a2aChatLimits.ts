@@ -8,7 +8,7 @@
 
 /** Selectable max incoming turns per active A2A session before forcing "bye". */
 export const A2A_MAX_INCOMING_TURNS_OPTIONS: readonly number[] = [20, 30, 50, 80, 100, 150, 200];
-export const DEFAULT_A2A_MAX_INCOMING_TURNS = 30;
+export const DEFAULT_A2A_MAX_INCOMING_TURNS = 50; // quota audit 2026-09-17 (F1): was 30
 
 /** Selectable cooldown after an auto-bye before the conversation may reopen. */
 export const A2A_BYE_COOLDOWN_MS_OPTIONS: readonly number[] = [

@@ -1060,7 +1060,7 @@ const DEFAULT_NO_PROGRESS_NUDGE_MS = 20 * 60_000;
  * different message. 0 disables the window check.
  */
 const DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS = 60_000;
-const DEFAULT_REPLY_BUDGET = 40;
+const DEFAULT_REPLY_BUDGET = 80; // quota audit 2026-09-17 (F1): was 40; rolling 1h window (see below) keeps loop insurance
 /**
  * Task #83 audit (F1): the budget is a ROLLING one-hour window, not a per-run
  * cumulative total. The old cumulative cap was hit inside one hour by a
@@ -1070,7 +1070,7 @@ const DEFAULT_REPLY_BUDGET = 40;
  * while the lockout self-heals as charges age out.
  */
 const REPLY_BUDGET_WINDOW_MS = 60 * 60_000;
-const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 3;
+const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 5; // quota audit 2026-09-17 (F1): was 3
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 /** P0-2: minutes of silence before an assigned/working member is auto-marked unreachable. */
 const DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES = 30;
