@@ -67,7 +67,7 @@ function card(over: Record<string, unknown>): any {
     actionRank: 3,
     reasons: [],
     reasonCodes: [],
-    closureSuggestionParams: {},
+    closureSuggestionArgs: null,
     reasonOverflow: 0,
     closureSuggestionCode: null,
     ...over,
@@ -99,15 +99,15 @@ const CARD_GROUP = card({
     'linked sessions: idle, idle, idle',
   ],
   reasonCodes: [
-    { code: 'ledger_review', params: {} },
-    { code: 'open_checkpoints', params: { count: 2 } },
-    { code: 'deliverables_verifiable', params: { count: 3 } },
-    { code: 'idle_days', params: { days: 2.4 } },
-    { code: 'linked_sessions', params: { count: 3 } },
+    { code: 'ledger_review', args: {} },
+    { code: 'open_checkpoints', args: { count: 2 } },
+    { code: 'deliverables_verifiable', args: { count: 3 } },
+    { code: 'idle_days', args: { days: 2.4 } },
+    { code: 'linked_sessions', args: { count: 3 } },
   ],
   reasonOverflow: 2,
   closureSuggestionCode: 'deliverables_verifiable',
-  closureSuggestionParams: { count: 3 },
+  closureSuggestionArgs: { count: 3 },
 });
 
 const CARD_TERMINAL = card({
@@ -126,11 +126,11 @@ const CARD_TERMINAL = card({
   actionRank: 1,
   reasons: ['terminal status without a closing conclusion', 'idle for 1.2 day(s)'],
   reasonCodes: [
-    { code: 'terminal_without_conclusion', params: {} },
-    { code: 'idle_days', params: { days: 1.2 } },
+    { code: 'terminal_without_conclusion', args: {} },
+    { code: 'idle_days', args: { days: 1.2 } },
   ],
   closureSuggestionCode: 'terminal_no_conclusion',
-  closureSuggestionParams: {},
+  closureSuggestionArgs: {},
 });
 
 const CARD_BLOCKED_A = card({
@@ -142,8 +142,8 @@ const CARD_BLOCKED_A = card({
   lastActivityAtMs: NOW - 0.6 * DAY,
   reasons: ['2 blocked step(s) with unmet dependencies', 'linked sessions: idle'],
   reasonCodes: [
-    { code: 'blocked_unmet_dependencies', params: { count: 2 } },
-    { code: 'linked_sessions', params: { count: 1 } },
+    { code: 'blocked_unmet_dependencies', args: { count: 2 } },
+    { code: 'linked_sessions', args: { count: 1 } },
   ],
   actionRank: 2,
 });
@@ -162,11 +162,11 @@ const CARD_BLOCKED_B = card({
   closureSuggestion: 'No activity for 3.1 day(s); close it or redefine the acceptance criteria.',
   reasons: ['1 blocked step(s) with unmet dependencies', 'idle for 3.1 day(s)'],
   reasonCodes: [
-    { code: 'blocked_unmet_dependencies', params: { count: 1 } },
-    { code: 'idle_days', params: { days: 3.1 } },
+    { code: 'blocked_unmet_dependencies', args: { count: 1 } },
+    { code: 'idle_days', args: { days: 3.1 } },
   ],
   closureSuggestionCode: 'unresolved_dependencies',
-  closureSuggestionParams: { days: 3.1 },
+  closureSuggestionArgs: { days: 3.1 },
   needsOwnerAction: true,
   actionRank: 0,
 });
@@ -178,9 +178,9 @@ const CARD_RUNNING_A = card({
   lastActivityAtMs: NOW - 0.1 * DAY,
   reasons: ['3 step(s) ready/queued/running', '1 attempt(s) queued/running', 'linked sessions: running'],
   reasonCodes: [
-    { code: 'steps_active', params: { count: 3 } },
-    { code: 'attempts_open', params: { count: 1 } },
-    { code: 'linked_sessions', params: { count: 1 } },
+    { code: 'steps_active', args: { count: 3 } },
+    { code: 'attempts_open', args: { count: 1 } },
+    { code: 'linked_sessions', args: { count: 1 } },
   ],
 });
 
@@ -191,7 +191,7 @@ const CARD_RUNNING_B = card({
   idleMs: 0.3 * DAY,
   lastActivityAtMs: NOW - 0.3 * DAY,
   reasons: ['1 step(s) ready/queued/running'],
-  reasonCodes: [{ code: 'steps_active', params: { count: 1 } }],
+  reasonCodes: [{ code: 'steps_active', args: { count: 1 } }],
 });
 
 const CARD_CLOSED = card({
@@ -204,7 +204,7 @@ const CARD_CLOSED = card({
   idleMs: 0.9 * DAY,
   lastActivityAtMs: NOW - 0.9 * DAY,
   reasons: ['linked sessions: idle'],
-  reasonCodes: [{ code: 'linked_sessions', params: { count: 1 } }],
+  reasonCodes: [{ code: 'linked_sessions', args: { count: 1 } }],
   actionRank: 4,
 });
 
@@ -297,8 +297,8 @@ const DETAIL_7 = {
   reasons: [...DETAIL_BASE.reasons, '6 verifiable deliverable(s)', '7 step(s) ready/queued/running'],
   reasonCodes: [
     ...DETAIL_BASE.reasonCodes,
-    { code: 'deliverables_verifiable', params: { count: 6 } },
-    { code: 'steps_active', params: { count: 7 } },
+    { code: 'deliverables_verifiable', args: { count: 6 } },
+    { code: 'steps_active', args: { count: 7 } },
   ],
   reasonOverflow: 2,
 };

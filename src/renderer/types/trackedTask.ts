@@ -55,16 +55,17 @@ export type TrackedSuggestionCode =
 export type TrackedFactCode = TrackedReasonCode | TrackedSuggestionCode;
 
 /**
- * 结构化事实：code + params（字段名以契约为准，见附录 B / chair 裁定 ⑤-a）。
+ * 结构化事实：code + args（字段名以 ON-PATH 主进程契约为准 ——
+ * `TrackedFact.args` / `closureSuggestionArgs`）。
  * **界面文案由 renderer 按 i18n 渲染**，不直接显示后端英文串。
  */
 export interface TrackedFact {
   code: TrackedFactCode;
-  params: Record<string, string | number>;
+  args: Record<string, string | number>;
 }
 
-/** 收口建议 code 的参数（与 code 一同构成权威事实）。 */
-export type TrackedSuggestionParams = Record<string, string | number>;
+/** 收口建议 code 的参数（与 code 一同构成权威事实）；无建议时为 null。 */
+export type TrackedSuggestionArgs = Record<string, string | number>;
 
 /** 台账原生 status 的取值域（不改 CHECK 的 6 值）。 */
 export type TrackedLedgerStatus =
@@ -123,8 +124,8 @@ export interface TrackedCardSummary {
   closureSuggestion: string;
   /** 结构化收口建议 code —— 界面文案归 renderer。 */
   closureSuggestionCode: TrackedSuggestionCode | null;
-  /** 收口建议参数；code 为 null 时为空对象（附录 B B-5.3）。 */
-  closureSuggestionParams: TrackedSuggestionParams;
+  /** 收口建议参数；code 为 null 时为 null（附录 B B-5.3）。 */
+  closureSuggestionArgs: TrackedSuggestionArgs | null;
   closureConclusion: string | null;
   /** 计算出的活动锚点（多源 max）；永不落库，也不由心跳喂。 */
   activityAtMs: number | null;

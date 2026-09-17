@@ -18,14 +18,11 @@ import path from 'node:path';
 
 const ROOT = process.cwd();
 
-/** 从主进程源码里现取权威常量（现取 = 不落中间快照）。 */
-function readMainProcessKeyTable(): Record<string, string> {
-  const src = fs.readFileSync(
-    path.join(ROOT, 'src/main/services/trackedTaskBoard.ts'),
-    'utf-8'
-  );
-  const block = src.match(/TRACKED_FACT_CODE_I18N_KEY[^=]*=\s*\{([\s\S]*?)\n\};/);
-  assert.ok(block, '未能在主进程源码里找到 TRACKED_FACT_CODE_I18N_KEY 常量');
+/** 从主进程源码里现取权威表（现取 = 不落中间快照）。 */
+function readMainProcessTable(constName: string): Record<string, string> {
+  const src = fs.readFileSync(path.join(ROOT, 'src/main/services/trackedTaskBoard.ts'), 'utf-8');
+  const block = src.match(new RegExp(`^export const ${constName}\\b[^=]*=\\s*\\{([\\s\\S]*?)\\n\\};`, 'm'));
+  assert.ok(block, `未能在主进程源码里找到 ${constName}`);
   const table: Record<string, string> = {};
   for (const line of block![1].split('\n')) {
     const match = line.match(/^\s*([a-z_]+):\s*'([^']+)'/);
@@ -34,17 +31,20 @@ function readMainProcessKeyTable(): Record<string, string> {
   return table;
 }
 
-test('renderer 镜像与主进程常量逐条一致（code + key 名）', async () => {
-  const main = readMainProcessKeyTable();
-  const { TRACKED_FACT_CODE_I18N_KEY } = await import(
+test('renderer 的按侧表与主进程的按侧表逐条一致（reason 10 + suggestion 5）', async () => {
+  const mainReason = readMainProcessTable('TRACKED_REASON_I18N_KEY');
+  const mainSuggestion = readMainProcessTable('TRACKED_SUGGESTION_I18N_KEY');
+  assert.ok(Object.keys(mainReason).length >= 10, `主进程 reason 表异常：${Object.keys(mainReason).length}`);
+  assert.ok(
+    Object.keys(mainSuggestion).length >= 5,
+    `主进程 suggestion 表异常：${Object.keys(mainSuggestion).length}`
+  );
+
+  const { TRACKED_REASON_I18N_KEY, TRACKED_SUGGESTION_I18N_KEY } = await import(
     '../src/renderer/components/trackedTasks/trackedTaskFactText'
   );
-  assert.deepEqual(
-    Object.keys(TRACKED_FACT_CODE_I18N_KEY).sort(),
-    Object.keys(main).sort(),
-    'code 集合不一致：主进程与 renderer 镜像必须同集合'
-  );
-  assert.deepEqual(TRACKED_FACT_CODE_I18N_KEY, main, 'code → i18n key 的映射必须逐条一致');
+  assert.deepEqual(TRACKED_REASON_I18N_KEY, mainReason, '理由侧 code → key 必须逐条一致');
+  assert.deepEqual(TRACKED_SUGGESTION_I18N_KEY, mainSuggestion, '建议侧 code → key 必须逐条一致');
 });
 
 test('每个 code 在 zh / en 两套文案里都有键（缺键即红）', async () => {
@@ -61,14 +61,18 @@ test('每个 code 在 zh / en 两套文案里都有键（缺键即红）', async
   if (!globalAny.navigator) globalAny.navigator = { language: 'zh-CN' };
 
   const { i18nService } = await import('../src/renderer/services/i18n');
-  const { TRACKED_FACT_CODE_I18N_KEY } = await import(
+  const { TRACKED_REASON_I18N_KEY, TRACKED_SUGGESTION_I18N_KEY } = await import(
     '../src/renderer/components/trackedTasks/trackedTaskFactText'
   );
   const service = i18nService as unknown as { currentLanguage: string; t: (k: string) => string };
+  const allKeys = {
+    ...TRACKED_REASON_I18N_KEY,
+    ...TRACKED_SUGGESTION_I18N_KEY,
+  } as Record<string, string>;
 
   for (const language of ['zh', 'en'] as const) {
     service.currentLanguage = language;
-    for (const [code, key] of Object.entries(TRACKED_FACT_CODE_I18N_KEY)) {
+    for (const [code, key] of Object.entries(allKeys)) {
       const text = service.t(key);
       assert.notEqual(text, key, `[${language}] 缺键：${code} → ${key}`);
       assert.ok(text.trim().length > 0, `[${language}] 空文案：${code} → ${key}`);
@@ -86,11 +90,11 @@ test('建议侧映射覆盖全部建议 code，且与理由侧措辞分开', asy
     .sort();
   assert.ok(suggestionCodes.length >= 4, `建议 code 集合异常：${suggestionCodes.join(',')}`);
 
-  const { TRACKED_SUGGESTION_CODE_I18N_KEY, reasonText, suggestionText } = await import(
+  const { TRACKED_SUGGESTION_I18N_KEY, reasonText, suggestionText } = await import(
     '../src/renderer/components/trackedTasks/trackedTaskFactText'
   );
   assert.deepEqual(
-    Object.keys(TRACKED_SUGGESTION_CODE_I18N_KEY).sort(),
+    Object.keys(TRACKED_SUGGESTION_I18N_KEY).sort(),
     suggestionCodes,
     '建议侧映射必须与主进程常量里的 suggestion.* 条目同集合'
   );
@@ -102,7 +106,7 @@ test('建议侧映射覆盖全部建议 code，且与理由侧措辞分开', asy
 
   // 共用 code 的两侧措辞必须不同（否则就是把理由文案当建议输出）
   const shared = 'deliverables_verifiable';
-  const asReason = reasonText({ code: shared as never, params: { count: 3 } });
+  const asReason = reasonText({ code: shared as never, args: { count: 3 } });
   const asSuggestion = suggestionText(shared as never, { count: 3 });
   assert.notEqual(
     asReason,
@@ -131,7 +135,7 @@ test('文案参数用 {name} 占位，且不把 code 名当文案', async () => 
   const service = i18nService as unknown as { currentLanguage: string };
   service.currentLanguage = 'zh';
 
-  const reason = reasonText({ code: 'open_checkpoints', params: { count: 2 } });
+  const reason = reasonText({ code: 'open_checkpoints', args: { count: 2 } });
   assert.ok(reason.includes('2'), `计数参数未注入：${reason}`);
   assert.ok(!reason.includes('{'), `占位符未替换：${reason}`);
   assert.ok(!reason.includes('open_checkpoints'), `把 code 当文案渲染了：${reason}`);
