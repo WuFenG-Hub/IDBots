@@ -5424,6 +5424,60 @@ test('P0-3 (single-commander): missing ACK past the timeout records ONE host env
   }
 });
 
+test('Task #83 P1: a worker whose turn is still in flight defers the no-ACK note; it fires once the turn settles silent', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Coder Bot's chat turn hangs until the test releases it, keeping the
+    // daemon-side turn in flight across ticks (the live task-83 false positive:
+    // the 3-min ACK soak lapsed mid-turn and the chair got a bogus no-ack note).
+    let turnStarted;
+    let resolveTurn;
+    const turnPromise = new Promise((resolve) => { resolveTurn = resolve; });
+    const turnStartedPromise = new Promise((resolve) => { turnStarted = resolve; });
+    const basePerformChat = h.deps.performChat;
+    h.deps.performChat = async (systemPrompt, userMessage, llmId) => {
+      if (llmId === 'llm-2') {
+        turnStarted();
+        return turnPromise;
+      }
+      return basePerformChat(systemPrompt, userMessage, llmId);
+    };
+    const noteCount = (kind) => Number(h.db.exec(
+      'SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = ?',
+      [task.id, kind],
+    )[0].values[0][0]);
+    // Raw loop (no drain): the hanging turn must stay in flight after the tick.
+    const rawLoop = createGroupTaskDaemonLoop(h.deps);
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-inflight', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the board',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await rawLoop.runTick();
+    await turnStartedPromise;
+
+    // Past the ACK timeout with the turn STILL running: deferred, watch kept.
+    h.state.nowMs = startMs + 200_000;
+    await rawLoop.runTick();
+    assert.equal(noteCount('no_ack'), 0, 'a turn in flight defers the no-ACK note');
+    assert.ok(h.store.get('group_task_ack_pending:1:2'), 'the watch survives the defer');
+
+    // The turn settles without the worker ever speaking: NOW the note fires.
+    resolveTurn('[NO_REPLY]');
+    await rawLoop.whenIdle();
+    await rawLoop.runTick();
+    assert.equal(noteCount('no_ack'), 1, 'the no-ACK note fires after the silent turn settles');
+
+    await rawLoop.runTick();
+    assert.equal(noteCount('no_ack'), 1, 'still exactly one note (kv-guarded)');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('P0-3: [STANDBY] marker sets standby; ordinary worker speech is an implicit ACK', async () => {
   const h = await createHarness();
   try {

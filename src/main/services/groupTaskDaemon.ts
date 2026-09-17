@@ -772,6 +772,13 @@ const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
  * a re-processed assignment message (cursor retry) never re-arms the watch.
  */
 const ACK_SEEN_PREFIX = 'group_task_ack_seen:';
+/**
+ * Task #83 audit (P1): one-shot log marker for a no-ACK watch deferred
+ * because the member still has a live (non-latched) turn running —
+ * `group_task_ack_deferred_inflight:<taskId>:<metabotId>`. Cleared wherever
+ * the watch resolves or re-arms so the next defer episode logs again.
+ */
+const ACK_DEFERRED_INFLIGHT_PREFIX = 'group_task_ack_deferred_inflight:';
 const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 /**
@@ -8454,6 +8461,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // a tick blocked by a slow turn used to arm watches whose
           // `assignedAt` postdated the worker's actual reply and then
           // false-alarm a member who had demonstrably engaged.
+          sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
           sqlite.set(
             pendingKey,
             JSON.stringify({
@@ -8493,6 +8501,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
       }
       sqlite.delete(pendingKey);
+      sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
       if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
     };
     // Speedup hardening: tokens quoted inside code fences/backticks are
@@ -8997,6 +9006,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       if (!entry || typeof entry.assignedAt !== 'number') continue;
       if (now() - entry.assignedAt < ackTimeoutMs) continue;
+      // Task #83 audit (P1): a member with a live (non-latched) turn is by
+      // definition working on the assignment — a slow first turn can outlast
+      // the 3-min ACK soak without speaking yet. Defer the no-ACK note while
+      // the turn runs; if it settles without speech, the watch fires on a
+      // later pass. (monitorNoProgressStall already applies the same
+      // in-flight suppression; the task-83 false no-ACK note + public chair
+      // nudge for 小昆 came from this gap.)
+      const memberTurnKey = keyOf(task.id, member.metabotId);
+      if (turnInFlight.has(memberTurnKey) && !latchedTurnKeys.has(memberTurnKey)) {
+        const deferKey = `${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`;
+        if (sqlite.get<string>(deferKey) == null) {
+          sqlite.set(deferKey, '1');
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} has a turn in flight ` +
+            `(assignment #${entry.messageId}); no-ACK note deferred until the turn settles`,
+          );
+        }
+        continue;
+      }
       // P1-4: a worker who spoke ANYTHING after the assignment is engaged —
       // implicit ACK. The pending watch was either missed (cursor retry /
       // member-match gap) or the worker is mid-work; clear it, record
@@ -9047,6 +9075,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (spokeAfterAssignment) {
           sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${entry.messageId}`, '1');
           sqlite.delete(pendingKey);
+          sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
           if (sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`) != null) {
             sqlite.delete(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
           }
@@ -9074,6 +9103,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           && deliverable.status !== 'rejected');
       if (hasValidDeliverable) {
         sqlite.delete(pendingKey);
+        sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
         const remindedRaw = sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
         if (remindedRaw != null) {
           sqlite.delete(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
@@ -9106,6 +9136,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       });
       if (lastActivityMs >= now() - ackEngagedRecentMs || hasRecentDeliverable) {
         sqlite.delete(pendingKey);
+        sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
         if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} engaged on a long turn ` +
