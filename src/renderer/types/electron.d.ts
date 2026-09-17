@@ -1834,6 +1834,7 @@ interface IElectronAPI {
         llmId: string | null;
         dreamVersion: number;
         error: string | null;
+        telemetry: Record<string, unknown> | null;
         startedAt: number;
         completedAt: number | null;
         /** Failed runs only: when the scheduler's backoff makes the date eligible again. */
