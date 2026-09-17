@@ -291,6 +291,22 @@ function migrateLegacyServiceOrdersTable(db: SqliteDatabase): void {
   }
 }
 
+/**
+ * Result of the v1.1 startup backfill. It is the reproducible evidence the
+ * acceptance step re-reads: on a pre-upgrade database `backfilled` must equal
+ * the number of terminal-without-conclusion rows, and a second run must be 0.
+ */
+export interface TrackedClosureBackfillResult {
+  snapshotAt: string;
+  scanned: number;
+  backfilled: number;
+  skippedAlreadyConcluded: number;
+  skippedNonTerminal: number;
+}
+
+/** The `closure_by` value written by the startup backfill (freeze doc §3). */
+export const TRACKED_CLOSURE_BACKFILL_BY = 'system_backfill';
+
 export class SqliteStore {
   private db: SqliteDatabase;
   private dbPath: string;
@@ -973,6 +989,9 @@ export class SqliteStore {
     // must never introduce a fourth table.
     this.migrateScheduledTaskOrchestrationLink();
     this.migrateOrchestrationTaskClosureColumns();
+    // Long-task board v1.1 (task #84): the columns above must exist before the
+    // backfill runs. Ordering matters — the backfill's UPDATE names all four.
+    this.migrateTrackedTaskClosureBackfill();
 
     // G-04: supervisor intervention ledger (nudge / flag / pause / resume) —
     // structured signals recorded from the Twin supervisor channel, visible
@@ -2960,6 +2979,65 @@ export class SqliteStore {
       this.save();
     } catch (error) {
       console.warn('migrateOrchestrationTaskClosureColumns:', error);
+    }
+  }
+
+  /**
+   * Migration (long-task board v1.1, task #84 §3): rows that were ALREADY
+   * terminal before this upgrade and still carry no closing conclusion are
+   * backfilled as closed, so an upgrading user is not flooded with the
+   * `terminal_no_conclusion` false positives the v1 board raised for them.
+   *
+   * Idempotent and re-entrant by construction: the UPDATE's own `conclusion
+   * empty` predicate matches 0 rows on a second run, and it can never overwrite
+   * a conclusion that is already there (owner/twin included).
+   *
+   * Invariants: writes ONLY the four `closure_*` columns — never `status`,
+   * never `updated_at` (the activity anchor and the zombie/scope semantics must
+   * not move), never a DELETE.
+   */
+  migrateTrackedTaskClosureBackfill(): TrackedClosureBackfillResult {
+    const snapshotAt = new Date().toISOString();
+    const result: TrackedClosureBackfillResult = {
+      snapshotAt,
+      scanned: 0,
+      backfilled: 0,
+      skippedAlreadyConcluded: 0,
+      skippedNonTerminal: 0,
+    };
+    try {
+      const counts = this.db.exec(`
+        SELECT
+          COUNT(*),
+          SUM(CASE WHEN status IN ('completed','failed','cancelled') THEN 1 ELSE 0 END),
+          SUM(CASE WHEN status IN ('completed','failed','cancelled')
+                    AND (closure_conclusion IS NULL OR trim(closure_conclusion) = '') THEN 1 ELSE 0 END)
+        FROM orchestration_tasks
+      `);
+      const row = counts[0]?.values?.[0] ?? [];
+      const total = Number(row[0] ?? 0);
+      const terminal = Number(row[1] ?? 0);
+      result.scanned = Number(row[2] ?? 0);
+      result.skippedNonTerminal = total - terminal;
+      result.skippedAlreadyConcluded = terminal - result.scanned;
+
+      this.db.run(
+        `UPDATE orchestration_tasks
+            SET closure_conclusion = '系统迁移：升级前该行已处于终态（' || status
+                  || '）且无收口结论，来源：v1.1 启动迁移 migrateTrackedTaskClosureBackfill。',
+                closure_by = ?,
+                closure_at = ?,
+                closure_pin_id = NULL
+          WHERE status IN ('completed','failed','cancelled')
+            AND (closure_conclusion IS NULL OR trim(closure_conclusion) = '')`,
+        [TRACKED_CLOSURE_BACKFILL_BY, snapshotAt],
+      );
+      result.backfilled = this.db.getRowsModified?.() ?? 0;
+      if (result.backfilled > 0) this.save();
+      return result;
+    } catch (error) {
+      console.warn('migrateTrackedTaskClosureBackfill:', error);
+      return result;
     }
   }
 
