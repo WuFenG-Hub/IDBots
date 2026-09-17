@@ -30,6 +30,13 @@ import {
   pickCounterfactualLesson,
 } from '../libs/counterfactualReplayPrompt';
 import {
+  WEEKLY_DREAM_MIN_DAYS,
+  buildWeeklyDreamPrompt,
+  getPreviousIsoWeekRange,
+  parseWeeklyDreamOutput,
+  type WeeklyDreamTelemetryDigest,
+} from '../libs/weeklyDreamPrompt';
+import {
   chunkDreamActivity,
   estimateDreamActivityTokens,
   summariesToActivity,
@@ -535,6 +542,21 @@ export class DreamService {
     }
   }
 
+  /** Latest weekly long-dream review rendered as one prompt block; '' when none. */
+  private buildWeeklyReviewText(metabotId: number): string {
+    try {
+      const weekly = this.deps.dreamStore.getLatestWeeklySummary(metabotId);
+      if (!weekly) return '';
+      const lines = [
+        `${weekly.weekStart} ~ ${weekly.weekEnd}: ${weekly.summaryText}`,
+        ...weekly.patterns.map((pattern) => `跨天模式: ${pattern}`),
+      ];
+      return lines.join('\n');
+    } catch {
+      return '';
+    }
+  }
+
   private async prepareDreamPromptAndOutput(
     metabot: DreamMetabotLike,
     date: string,
@@ -543,9 +565,16 @@ export class DreamService {
     impressionSubjects: ReturnType<DreamService['buildDreamImpressionSubjects']>,
     existingKnowledge: DreamKnowledgeExisting[],
     surfReport?: string | null,
-  ): Promise<{ prompt: { system: string; user: string }; output: DreamOutput }> {
+  ): Promise<{
+    prompt: { system: string; user: string };
+    output: DreamOutput;
+    meta: { estimatedInputTokens: number; fragmentCount: number };
+  }> {
     const budgets = this.resolveDreamBudgets(brain.llmId);
     const estimatedTokens = estimateDreamActivityTokens(activity);
+    // The weekly long-dream review rides every nightly dream as cross-day
+    // context (P2b) — reference, not constraint.
+    const weeklyReview = this.buildWeeklyReviewText(metabot.id);
     if (estimatedTokens <= budgets.fastPathInputTokens) {
       const prompt = buildDreamPrompt({
         botName: metabot.name,
@@ -557,6 +586,7 @@ export class DreamService {
         impressionSubjects,
         existingKnowledge,
         surfReport,
+        weeklyReview,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -564,7 +594,7 @@ export class DreamService {
         brain,
         budgets.maxOutputTokens,
       );
-      return { prompt, output };
+      return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: 0 } };
     }
 
     const chunks = chunkDreamActivity(activity, budgets.fragmentInputTokens);
@@ -579,9 +609,10 @@ export class DreamService {
         impressionSubjects,
         existingKnowledge,
         surfReport,
+        weeklyReview,
       });
       const output = await this.generateAndParse(prompt.system, prompt.user, brain, budgets.maxOutputTokens);
-      return { prompt, output };
+      return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: 0 } };
     }
 
     const summaries: DreamFragmentSummary[] = [];
@@ -614,6 +645,7 @@ export class DreamService {
       impressionSubjects,
       existingKnowledge,
       surfReport,
+      weeklyReview,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -621,7 +653,7 @@ export class DreamService {
       brain,
       budgets.maxOutputTokens,
     );
-    return { prompt, output };
+    return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: chunks.length } };
   }
 
   private async runDream(metabotId: number, date: string, isRepair = false): Promise<void> {
@@ -634,6 +666,7 @@ export class DreamService {
 
     this.dreamingBots.add(metabotId);
     this.emitDreaming(metabotId, true);
+    const runStartedAtMs = Date.now();
     const brain = this.resolveDreamBrain(metabot);
     this.deps.dreamStore.beginRun(metabotId, date, brain.llmId, DREAM_VERSION);
     try {
@@ -670,9 +703,18 @@ export class DreamService {
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
         // Pending capability drafts can still be validated against older
         // diaries even when today added no new activity.
-        await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
+        const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
         // Empty days have no negative decision points, so the replay no-ops.
-        await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+        const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+        const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
+        this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
+          emptyDay: true,
+          estimatedActivityTokens: 0,
+          validation,
+          replay,
+          weeklyLongDream,
+          durationMs: Date.now() - runStartedAtMs,
+        });
         return;
       }
 
@@ -700,8 +742,21 @@ export class DreamService {
       this.writeDreamResults(metabotId, date, output, activity, brain.llmId, isRepair, impressionSubjects, metabot.globalmetaid);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
-      await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
-      await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+      const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
+      const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+      const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
+      // P2a telemetry: the dream policy becomes tunable once it is measurable.
+      this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
+        emptyDay: false,
+        fastPath: prepared.meta.fragmentCount === 0,
+        fragmentCount: prepared.meta.fragmentCount,
+        estimatedActivityTokens: prepared.meta.estimatedInputTokens,
+        outputChars: JSON.stringify(output).length,
+        validation,
+        replay,
+        weeklyLongDream,
+        durationMs: Date.now() - runStartedAtMs,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
@@ -773,13 +828,14 @@ export class DreamService {
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
-  ): Promise<void> {
+  ): Promise<{ checked: number; validated: number; rejected: number }> {
+    const zero = { checked: 0, validated: 0, rejected: 0 };
     try {
       const pending = this.deps.coworkStore.listCapabilityDrafts(metabot.id, {
         status: 'draft',
         limit: CAPABILITY_VALIDATION_MAX_DRAFTS,
       });
-      if (pending.length === 0) return;
+      if (pending.length === 0) return zero;
       const recentSummaries = this.deps.dreamStore.listDailySummaries(
         metabot.id,
         CAPABILITY_VALIDATION_SUMMARY_DAYS,
@@ -803,7 +859,7 @@ export class DreamService {
       const parsed = parseCapabilityValidationOutput(raw, new Set(pending.map((draft) => draft.id)));
       if (!parsed.ok) {
         console.warn(`[DreamService] Capability validation parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
-        return;
+        return { ...zero, checked: pending.length };
       }
       let validated = 0;
       let rejected = 0;
@@ -826,10 +882,12 @@ export class DreamService {
           `[DreamService] Capability validation for metabot ${metabot.id}: validated=${validated}, rejected=${rejected}, checked=${pending.length}`,
         );
       }
+      return { checked: pending.length, validated, rejected };
     } catch (error) {
       console.warn(
         `[DreamService] Capability validation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
+      return zero;
     }
   }
 
@@ -847,10 +905,11 @@ export class DreamService {
     brain: DreamBrainPair,
     date: string,
     activity: DreamDayActivity,
-  ): Promise<void> {
+  ): Promise<{ points: number; lessons: number }> {
+    const zero = { points: 0, lessons: 0 };
     try {
       const points = extractNegativeDecisionPoints(activity);
-      if (points.length === 0) return;
+      if (points.length === 0) return zero;
       const prompt = buildCounterfactualReplayPrompt({
         botName: metabot.name,
         date,
@@ -860,7 +919,7 @@ export class DreamService {
       const parsed = parseCounterfactualReplayOutput(raw, new Set(points.map((point) => point.id)));
       if (!parsed.ok) {
         console.warn(`[DreamService] Counterfactual replay parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
-        return;
+        return { points: points.length, lessons: 0 };
       }
       const seenLessons = new Set<string>();
       let written = 0;
@@ -886,10 +945,95 @@ export class DreamService {
           `[DreamService] Counterfactual replay for metabot ${metabot.id} date ${date}: points=${points.length}, lessons=${written}`,
         );
       }
+      return { points: points.length, lessons: written };
     } catch (error) {
       console.warn(
         `[DreamService] Counterfactual replay failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
       );
+      return zero;
+    }
+  }
+
+  /**
+   * P2b weekly "long dream": once per closed ISO week, replay the week's daily
+   * diaries plus the week's run telemetry as one history pool and distill
+   * cross-day patterns. Runs at most once per week (UNIQUE(metabot_id,
+   * week_start) is the idempotency anchor), needs at least WEEKLY_DREAM_MIN_DAYS
+   * diaries, and never affects the nightly run's outcome.
+   */
+  private async maybeRunWeeklyLongDream(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+  ): Promise<boolean> {
+    try {
+      const range = getPreviousIsoWeekRange(date);
+      if (!range) return false;
+      if (this.deps.dreamStore.getWeeklySummary(metabot.id, range.weekStart)) return false;
+      const weekSummaries = this.deps.dreamStore
+        .listDailySummaries(metabot.id, 14)
+        .filter((summary) => summary.summaryDate >= range.weekStart && summary.summaryDate <= range.weekEnd);
+      if (weekSummaries.length < WEEKLY_DREAM_MIN_DAYS) return false;
+
+      const weekRuns = this.deps.dreamStore.listRunsInRange(metabot.id, range.weekStart, range.weekEnd);
+      const numberField = (run: (typeof weekRuns)[number], key: string, sub: string): number => {
+        const bag = run.telemetry?.[key];
+        const value = bag && typeof bag === 'object' ? (bag as Record<string, unknown>)[sub] : undefined;
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      const telemetry: WeeklyDreamTelemetryDigest = {
+        completedRuns: weekRuns.filter((run) => run.status === 'completed').length,
+        totalEstimatedActivityTokens: weekRuns.reduce(
+          (sum, run) => sum + (Number(run.telemetry?.estimatedActivityTokens) || 0),
+          0,
+        ),
+        draftsChecked: weekRuns.reduce((sum, run) => sum + numberField(run, 'validation', 'checked'), 0),
+        draftsValidated: weekRuns.reduce((sum, run) => sum + numberField(run, 'validation', 'validated'), 0),
+        draftsRejected: weekRuns.reduce((sum, run) => sum + numberField(run, 'validation', 'rejected'), 0),
+        replayPoints: weekRuns.reduce((sum, run) => sum + numberField(run, 'replay', 'points'), 0),
+        replayLessons: weekRuns.reduce((sum, run) => sum + numberField(run, 'replay', 'lessons'), 0),
+      };
+      const pendingDrafts = this.deps.coworkStore
+        .listCapabilityDrafts(metabot.id, { status: 'draft', limit: 10 })
+        .map((draft) => ({ title: draft.title, dreamDate: draft.dreamDate }));
+
+      const prompt = buildWeeklyDreamPrompt({
+        botName: metabot.name,
+        weekStart: range.weekStart,
+        weekEnd: range.weekEnd,
+        summaries: weekSummaries.map((summary) => ({
+          summaryDate: summary.summaryDate,
+          summaryText: summary.summaryText,
+        })),
+        telemetry,
+        pendingDrafts,
+      });
+      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
+      const parsed = parseWeeklyDreamOutput(raw);
+      if (!parsed.ok) {
+        console.warn(`[DreamService] Weekly long dream parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
+        return false;
+      }
+      this.deps.dreamStore.upsertWeeklySummary({
+        metabotId: metabot.id,
+        weekStart: range.weekStart,
+        weekEnd: range.weekEnd,
+        summaryText: parsed.summary,
+        patterns: parsed.focusForNextWeek
+          ? [...parsed.patterns, `下周焦点: ${parsed.focusForNextWeek}`]
+          : parsed.patterns,
+        llmId: brain.llmId,
+      });
+      console.log(
+        `[DreamService] Weekly long dream for metabot ${metabot.id}: week ${range.weekStart}~${range.weekEnd}, days=${weekSummaries.length}, patterns=${parsed.patterns.length}`,
+      );
+      return true;
+    } catch (error) {
+      console.warn(
+        `[DreamService] Weekly long dream failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
     }
   }
 

@@ -619,11 +619,27 @@ export class SqliteStore {
         attempt_count INTEGER NOT NULL DEFAULT 1,
         llm_id TEXT,
         error TEXT,
+        telemetry_json TEXT,
         started_at INTEGER NOT NULL,
         completed_at INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE(metabot_id, dream_date)
+      );
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_weekly_summaries (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        week_start TEXT NOT NULL,
+        week_end TEXT NOT NULL,
+        summary_text TEXT NOT NULL,
+        patterns_json TEXT NOT NULL DEFAULT '[]',
+        llm_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(metabot_id, week_start)
       );
     `);
 
