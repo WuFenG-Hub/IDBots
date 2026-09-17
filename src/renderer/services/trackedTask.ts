@@ -7,21 +7,38 @@ import {
   upsertDetail,
   mergeCardSummary,
 } from '../store/slices/trackedTaskSlice';
-import type { TrackedCardClosureInput } from '../types/trackedTask';
+import type {
+  TrackedCardClosureInput,
+  TrackedCardClosureReceipt,
+  TrackedCardListInput,
+} from '../types/trackedTask';
+
+const FALLBACK_POLL_MS = 30_000;
+
+export interface TrackedCloseOutcome {
+  error: string | null;
+  receipt: TrackedCardClosureReceipt | null;
+}
 
 /**
  * 长期任务看板的前端服务层 —— 只做「调 IPC + 落 Redux」，不做任何推导。
  *
- * 读路径：`window.electron.trackedTask`（单数），由主进程按架构规格 §1.1/§2.2/§4 实现
- * （见 src/main/services/trackedTaskBoard.ts 与 src/main/preload.ts 的 trackedTask 块）。
- * 卡面状态 / actionRank / needsOwnerAction 一律取自后端投影，前端不重算（§2.1 零漂移）。
+ * 读路径：`window.electron.trackedTask`，由主进程按契约 v1.4 [SEC-05] 实现
+ * （`src/main/services/trackedTaskBoard.ts`）。卡面状态 / 排序权重 / closureDue 级别
+ * 一律取自后端投影，前端不重算。
  *
- * 写路径：收口只调 `close`，由主进程走
- * `orchestrationStore.updateTaskStatus + TASK_TRANSITIONS` 白名单并落 closure_* 四列。
+ * 写路径：只调 `close`，由主进程做 F1 两段写（永远写收口四列；仅当白名单含目标状态才动 status）。
+ *
+ * 事件：`onUpdate({ seq, taskIds, reason })` —— `seq` 进程内单调，丢弃过期帧，
+ * 只增量重取 `taskIds`；漏推时 30s 轮询兜底。
  */
 class TrackedTaskService {
   private cleanupFns: (() => void)[] = [];
   private initialized = false;
+  private lastSeenSeq = 0;
+  private lastPushAtMs = 0;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private lastScope: 'default' | 'all' = 'default';
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -38,12 +55,17 @@ class TrackedTaskService {
     }
 
     this.setupListeners(api);
+    this.startFallbackPolling();
     await this.loadBoard();
   }
 
   destroy(): void {
     this.cleanupFns.forEach((fn) => fn());
     this.cleanupFns = [];
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     this.initialized = false;
   }
 
@@ -54,16 +76,34 @@ class TrackedTaskService {
   private setupListeners(api: NonNullable<Window['electron']['trackedTask']>): void {
     if (typeof api.onUpdate !== 'function') return;
     const cleanup = api.onUpdate((data) => {
+      // seq 去重：迟到的帧直接丢弃（契约 [SEC-05] 事件去重口径）。
+      if (typeof data?.seq === 'number') {
+        if (data.seq <= this.lastSeenSeq) return;
+        this.lastSeenSeq = data.seq;
+      }
+      this.lastPushAtMs = Date.now();
+
       void this.loadBoard();
+
       const openCardId = store.getState().trackedTask.selectedCardId;
-      if (data?.cardId && data.cardId === openCardId) {
-        void this.loadCard(data.cardId);
+      const taskIds = Array.isArray(data?.taskIds) ? data.taskIds : [];
+      if (openCardId && (taskIds.length === 0 || taskIds.includes(openCardId))) {
+        void this.loadCard(openCardId);
       }
     });
     this.cleanupFns.push(cleanup);
   }
 
-  async loadBoard(): Promise<void> {
+  private startFallbackPolling(): void {
+    if (this.pollTimer) return;
+    this.pollTimer = setInterval(() => {
+      // 只在「最近的推送已经过期」时兜底，避免 push 正常时重复重拉。
+      if (Date.now() - this.lastPushAtMs < FALLBACK_POLL_MS) return;
+      void this.loadBoard();
+    }, FALLBACK_POLL_MS);
+  }
+
+  async loadBoard(input?: TrackedCardListInput): Promise<void> {
     const api = this.api();
     if (!api) {
       store.dispatch(
@@ -74,11 +114,15 @@ class TrackedTaskService {
       return;
     }
 
+    if (input?.scope) this.lastScope = input.scope;
+
     store.dispatch(setLoading(true));
     try {
-      // ownerGlobalMetaId 留空 = 读全部归属人的卡（本机单 owner 场景）。
-      const result = await api.list();
+      const result = await api.list({ scope: this.lastScope, ...input });
       if (result?.success && result.board) {
+        if (typeof result.board.seq === 'number' && result.board.seq > this.lastSeenSeq) {
+          this.lastSeenSeq = result.board.seq;
+        }
         store.dispatch(setBoard(result.board));
       } else {
         store.dispatch(setError(result?.error ?? 'Failed to read the long-task board'));
@@ -106,14 +150,16 @@ class TrackedTaskService {
 
   /**
    * 收口并写一句结论（验收⑥：单入口，不做验收/拒绝二选一）。
-   * 返回错误文案（已含主进程的 code 语义）；null 表示收口成功。
+   * 回执区分「状态已推进」（statusMoved=true）与「结论已记录、状态保留」。
    */
-  async closeCard(input: TrackedCardClosureInput): Promise<string | null> {
+  async closeCard(input: TrackedCardClosureInput): Promise<TrackedCloseOutcome> {
     const api = this.api();
-    if (!api) return 'window.electron.trackedTask is missing on this build.';
+    if (!api) return { error: 'window.electron.trackedTask is missing on this build.', receipt: null };
 
     const conclusion = input.conclusion.trim();
-    if (!conclusion) return 'A one-line closing conclusion is required.';
+    if (!conclusion) {
+      return { error: 'A one-line closing conclusion is required.', receipt: null };
+    }
 
     try {
       const result = await api.close({
@@ -127,11 +173,18 @@ class TrackedTaskService {
           store.dispatch(mergeCardSummary(result.card));
         }
         void this.loadCard(input.cardId);
-        return null;
+        return {
+          error: null,
+          receipt: {
+            cardId: input.cardId,
+            statusMoved: Boolean(result.statusMoved),
+            statusNote: result.statusNote ?? '',
+          },
+        };
       }
-      return result?.error ?? 'Failed to close the card';
+      return { error: result?.error ?? 'Failed to close the card', receipt: null };
     } catch (err: unknown) {
-      return err instanceof Error ? err.message : String(err);
+      return { error: err instanceof Error ? err.message : String(err), receipt: null };
     }
   }
 }

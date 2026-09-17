@@ -1,7 +1,9 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 import type {
   TrackedCardBoard,
+  TrackedCardClosureReceipt,
   TrackedCardDetail,
+  TrackedCardScope,
   TrackedCardSummary,
   TrackedTaskViewMode,
   TrackingTabId,
@@ -31,6 +33,10 @@ interface TrackedTaskState {
   selectedCardId: string | null;
   /** 清单视图：只看需要我出手。 */
   onlyOwnerAction: boolean;
+  /** 看板范围：default = 近期活动 ∪ 全部 closureDue；all = 不折叠（D3 显式筛选）。 */
+  scope: TrackedCardScope;
+  /** 最近一次收口回执（UI 区分「状态已推进」与「结论已记录、状态保留」）。 */
+  receipt: TrackedCardClosureReceipt | null;
 }
 
 const initialState: TrackedTaskState = {
@@ -44,6 +50,8 @@ const initialState: TrackedTaskState = {
   viewMode: 'board',
   selectedCardId: null,
   onlyOwnerAction: false,
+  scope: 'default',
+  receipt: null,
 };
 
 const trackedTaskSlice = createSlice({
@@ -104,6 +112,12 @@ const trackedTaskSlice = createSlice({
     setOnlyOwnerAction(state, action: PayloadAction<boolean>) {
       state.onlyOwnerAction = action.payload;
     },
+    setScope(state, action: PayloadAction<TrackedCardScope>) {
+      state.scope = action.payload;
+    },
+    setReceipt(state, action: PayloadAction<TrackedCardClosureReceipt | null>) {
+      state.receipt = action.payload;
+    },
   },
 });
 
@@ -119,6 +133,8 @@ export const {
   setViewMode,
   selectCard,
   setOnlyOwnerAction,
+  setScope,
+  setReceipt,
 } = trackedTaskSlice.actions;
 
 export default trackedTaskSlice.reducer;

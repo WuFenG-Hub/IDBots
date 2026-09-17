@@ -5,6 +5,7 @@ import {
   CubeIcon,
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
+import { TRACKED_DUE_LEVEL_LABEL_KEYS } from '../../types/trackedTask';
 import type { TrackedCardSummary } from '../../types/trackedTask';
 import { STATE_CHIP_CLASS, columnLabel, formatIdleDays, sourceKindLabel } from './trackedTaskPresentation';
 
@@ -46,7 +47,14 @@ const TrackedTaskCardItem: React.FC<TrackedTaskCardItemProps> = ({
         {columnLabel(columnLabelKey || card.stateLabelKey, card.state)}
       </span>
       {card.closureDue && (
-        <span className="shrink-0 inline-flex items-center gap-0.5 rounded-full border border-red-500/40 bg-red-500/10 text-red-500 px-1.5 py-[1px] text-[10px] font-semibold">
+        <span
+          title={
+            card.closureDueLevel
+              ? i18nService.t(TRACKED_DUE_LEVEL_LABEL_KEYS[card.closureDueLevel])
+              : undefined
+          }
+          className="shrink-0 inline-flex items-center gap-0.5 rounded-full border border-red-500/40 bg-red-500/10 text-red-500 px-1.5 py-[1px] text-[10px] font-semibold"
+        >
           <ExclamationTriangleIcon className="w-3 h-3" />
           {i18nService.t('trackedTask.badge.closureDue')}
         </span>

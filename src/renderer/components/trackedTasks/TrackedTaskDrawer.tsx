@@ -70,14 +70,25 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
   };
 
   const ownerName = personName(detail.owner.twinMetabotId, metabotNames);
-  const participants = detail.steps
-    .filter((step) => step.assigneeMetabotId !== null)
-    .map((step) => ({
-      key: `${step.id}`,
-      name: personName(step.assigneeMetabotId, metabotNames) ?? '',
-      stepTitle: step.title,
-      status: step.status,
-    }));
+  // 参与席 = 后端给的 participants（metabotId 列表）；负责人来自 owner.twinMetabotId。
+  const stepsByAssignee = new Map<number, { title: string; status: string }>();
+  detail.steps.forEach((step) => {
+    if (step.assigneeMetabotId === null) return;
+    if (!stepsByAssignee.has(step.assigneeMetabotId)) {
+      stepsByAssignee.set(step.assigneeMetabotId, { title: step.title, status: step.status });
+    }
+  });
+  const participants = detail.participants
+    .filter((metabotId) => metabotId !== detail.owner.twinMetabotId)
+    .map((metabotId) => {
+      const step = stepsByAssignee.get(metabotId);
+      return {
+        key: `participant-${metabotId}`,
+        name: personName(metabotId, metabotNames) ?? `#${metabotId}`,
+        stepTitle: step?.title ?? '',
+        status: step?.status ?? '',
+      };
+    });
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
@@ -144,6 +155,14 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
                 ))}
               </ol>
             )}
+            {detail.reasonOverflow > 0 && (
+              <div className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('trackedTask.reasonOverflow').replace(
+                  '{count}',
+                  String(detail.reasonOverflow)
+                )}
+              </div>
+            )}
             {detail.closureSuggestion && (
               <div className="mt-2 rounded-md border border-dashed border-red-500/40 bg-red-500/5 px-2 py-1 text-[11px] leading-snug text-red-500">
                 {detail.closureSuggestion}
@@ -184,7 +203,7 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
               {participants.map((person) => (
                 <span
                   key={person.key}
-                  title={`${person.stepTitle} · ${person.status}`}
+                  title={person.stepTitle ? `${person.stepTitle} · ${person.status}` : undefined}
                   className="inline-flex items-center gap-1 rounded-full border dark:border-claude-darkBorder border-claude-border px-2 py-[2px] text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary"
                 >
                   {person.name}
@@ -282,7 +301,7 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
                     className="flex items-start gap-2 rounded-md border dark:border-claude-darkBorder border-claude-border px-2 py-1.5"
                   >
                     <span className="shrink-0 rounded border dark:border-claude-darkBorder border-claude-border px-1 py-[1px] text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                      {item.status || '—'}
+                      {item.kind || item.status || '—'}
                     </span>
                     <span className="min-w-0 flex-1 break-all font-mono text-[11px] dark:text-claude-darkText text-claude-text">
                       {item.uri}

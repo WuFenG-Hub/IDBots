@@ -1,24 +1,36 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../../store';
-import { setViewMode, selectCard, setOnlyOwnerAction } from '../../store/slices/trackedTaskSlice';
+import {
+  setViewMode,
+  selectCard,
+  setOnlyOwnerAction,
+  setScope,
+  setReceipt,
+} from '../../store/slices/trackedTaskSlice';
 import { trackedTaskService } from '../../services/trackedTask';
 import { i18nService } from '../../services/i18n';
-import { Squares2X2Icon, ListBulletIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import {
+  Squares2X2Icon,
+  ListBulletIcon,
+  ArrowPathIcon,
+  FunnelIcon,
+  CheckCircleIcon,
+} from '@heroicons/react/24/outline';
 import TrackedTasksBoard from './TrackedTasksBoard';
 import TrackedTasksList from './TrackedTasksList';
 import TrackedTaskDrawer from './TrackedTaskDrawer';
 import CloseTaskModal from './CloseTaskModal';
 import ClosureBanner from './ClosureBanner';
 import { filterNeedsOwnerAction } from './trackedTaskRanking';
-import type { TrackedCardSummary } from '../../types/trackedTask';
+import type { TrackedCardScope, TrackedCardSummary } from '../../types/trackedTask';
 
 /**
- * 「长期任务」Tab 的主体：看板 / 清单两视图 + 任务卡抽屉 + 收口入口。
+ * 「长期任务」Tab 的主体：看板 / 清单两视图 + 范围筛选 + 待收口横条 + 任务卡抽屉 + 收口入口。
  *
- * 事实源 = orchestration_tasks（经 `trackedTask:*` 读路径投影）。本组件不做任何状态推导：
- * 列顺序、列名 key、state / actionRank / needsOwnerAction / closureDue / reasons 全部用后端字段。
- * 读路径缺席时渲染明确的「读不到」空态，而不是伪造一张空台账。
+ * 事实源 = orchestration_tasks（经 `trackedTask:*` 投影）。本组件不做任何状态推导：
+ * 列顺序、列名 key、state / actionRank / needsOwnerAction / closureDue 级别 / reasons
+ * 全部用后端字段；范围筛选把 `scope` 回传后端并回显 `scopeApplied`（D3：显式、可一键清除）。
  */
 const TrackedTasksSection: React.FC = () => {
   const dispatch = useDispatch();
@@ -32,6 +44,8 @@ const TrackedTasksSection: React.FC = () => {
     viewMode,
     selectedCardId,
     onlyOwnerAction,
+    scope,
+    receipt,
   } = useSelector((state: RootState) => state.trackedTask);
 
   const [closeTargetId, setCloseTargetId] = useState<string | null>(null);
@@ -83,25 +97,37 @@ const TrackedTasksSection: React.FC = () => {
     setCloseTargetId(cardId);
   }, []);
 
+  const changeScope = useCallback(
+    (next: TrackedCardScope) => {
+      dispatch(setScope(next));
+      void trackedTaskService.loadBoard({ scope: next });
+    },
+    [dispatch]
+  );
+
   const submitClose = useCallback(
     async (input: { conclusion: string; by: 'owner' | 'twin' }) => {
       if (!closeTarget) return;
       setSubmitting(true);
       setCloseError(null);
-      const failure = await trackedTaskService.closeCard({
+      const outcome = await trackedTaskService.closeCard({
         cardId: closeTarget.id,
         conclusion: input.conclusion,
         by: input.by,
       });
       setSubmitting(false);
-      if (failure) {
-        setCloseError(failure);
+      if (outcome.error) {
+        setCloseError(outcome.error);
         return;
       }
+      dispatch(setReceipt(outcome.receipt));
       setCloseTargetId(null);
     },
-    [closeTarget]
+    [closeTarget, dispatch]
   );
+
+  const foldedCount = board?.counts.folded ?? 0;
+  const scopeIsDefault = (board?.scopeApplied ?? scope) === 'default';
 
   const toolbar = (
     <div className="flex shrink-0 items-center gap-2 border-b dark:border-claude-darkBorder border-claude-border px-4 py-2">
@@ -131,8 +157,32 @@ const TrackedTasksSection: React.FC = () => {
         })}
       </div>
 
+      {/* D3：范围必须显式可见、一键可清，折叠掉的卡不许静默隐藏 */}
+      <button
+        type="button"
+        onClick={() => changeScope(scopeIsDefault ? 'all' : 'default')}
+        title={scopeIsDefault
+          ? i18nService.t('trackedTask.scope.default')
+          : i18nService.t('trackedTask.scope.backToDefault')}
+        className={`inline-flex items-center gap-1 rounded-full border px-2 py-[2px] text-[11px] transition-colors ${
+          scopeIsDefault
+            ? 'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary'
+            : 'border-claude-accent/60 bg-claude-accent/10 dark:text-claude-darkText text-claude-text'
+        }`}
+      >
+        <FunnelIcon className="w-3 h-3" />
+        {i18nService.t(scopeIsDefault ? 'trackedTask.scope.default' : 'trackedTask.scope.all')}
+        {scopeIsDefault && foldedCount > 0
+          ? ` · ${i18nService.t('trackedTask.scope.folded').replace('{count}', String(foldedCount))}`
+          : ''}
+        <span className="opacity-70">
+          {scopeIsDefault ? i18nService.t('trackedTask.scope.showAll') : i18nService.t('trackedTask.scope.backToDefault')}
+        </span>
+      </button>
+
       <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
         {i18nService.t('trackedTask.cardTotal').replace('{count}', String(cards.length))}
+        {board?.hasMore ? '+' : ''}
       </span>
 
       <button
@@ -179,10 +229,34 @@ const TrackedTasksSection: React.FC = () => {
         </div>
       )}
 
+      {/* 收口回执：区分「状态已推进」与「结论已记录、状态保留」（F1 两段写） */}
+      {receipt && (
+        <div className="flex shrink-0 items-center gap-2 border-b dark:border-claude-darkBorder border-claude-border bg-emerald-500/5 px-4 py-1.5">
+          <CheckCircleIcon className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+          <span className="text-xs text-emerald-500">
+            {i18nService.t(
+              receipt.statusMoved ? 'trackedTask.receipt.statusMoved' : 'trackedTask.receipt.statusKept'
+            )}
+          </span>
+          {receipt.statusNote && (
+            <span className="truncate text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {receipt.statusNote}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => dispatch(setReceipt(null))}
+            className="ml-auto text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary hover:underline"
+          >
+            {i18nService.t('close')}
+          </button>
+        </div>
+      )}
+
       {board && (
         <ClosureBanner
           cards={board.cards}
-          closureDueCount={board.closureDueCount}
+          counts={board.counts}
           onlyOwnerAction={onlyOwnerAction}
           onToggleOnlyOwnerAction={(next) => dispatch(setOnlyOwnerAction(next))}
           onOpenCard={openCard}
