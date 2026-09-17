@@ -3032,6 +3032,43 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * Task #83 audit (P4): the pinids a turn posted MID-TURN through the
+   * group_chat send_group_message tool — pairs each send tool_use with the
+   * next tool_result and reads its `- pinId:` line. A chair/worker that
+   * answered via the tool and closed with [NO_REPLY]/empty DID speak; the
+   * host ledger (host notes, supervisor signals) must link that response
+   * instead of stamping a null pin and logging "stayed silent".
+   */
+  const findMidTurnGroupSendPinIds = (
+    coworkStore: CoworkStore,
+    sessionId: string,
+    afterMessageId: string,
+  ): string[] => {
+    try {
+      const messages = coworkStore.getSession(sessionId)?.messages ?? [];
+      const startIndex = messages.findIndex((message) => message.id === afterMessageId);
+      if (startIndex < 0) return [];
+      const pins: string[] = [];
+      let awaitingSendResult = false;
+      for (let i = startIndex + 1; i < messages.length; i += 1) {
+        const message = messages[i];
+        if (message.type === 'tool_use') {
+          const meta = (message.metadata ?? {}) as { toolName?: unknown; toolInput?: { action?: unknown } };
+          awaitingSendResult = meta.toolName === 'group_chat' && meta.toolInput?.action === 'send_group_message';
+          continue;
+        }
+        if (message.type !== 'tool_result' || !awaitingSendResult) continue;
+        awaitingSendResult = false;
+        const match = /pinId:\s*([0-9a-f]{64}i0)/i.exec(message.content ?? '');
+        if (match) pins.push(match[1]);
+      }
+      return pins;
+    } catch {
+      return [];
+    }
+  };
+
+  /**
    * Task #66 (fix A): true when the chair has already dispatched work in its
    * own voice — any chair-authored group message beyond the auto-kickoff
    * ([GROUP TASK] prefix) that @-mentions a seated worker. The bootstrap
@@ -5952,7 +5989,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const canRunSkillTurn = Boolean(
         routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
       );
-      coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
+      const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
       let reply = '';
       if (canRunSkillTurn) {
         const skillSystemPrompt = [
@@ -5989,6 +6026,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
       }
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
+        // Task #83 audit (P4): a supervisor turn that posted through the
+        // group_chat tool mid-turn and closed with [NO_REPLY]/empty DID answer
+        // — mark the signals processed with the mid-turn pin instead of
+        // failing the delivery and retrying an already-answered signal.
+        const midTurnPins = findMidTurnGroupSendPinIds(coworkStore, session.id, turnUserMessage.id);
+        if (midTurnPins.length > 0) {
+          store.markSupervisorSignalsProcessed(pendingIds, midTurnPins[0]);
+          for (const id of pendingIds) {
+            sqlite.delete(`${GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX}${id}`);
+          }
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: chair answered ${pending.length} supervisor signal(s) ` +
+            `mid-turn via group_chat (pin ${midTurnPins[0]}); the [NO_REPLY] tail is the ONE VOICE closer`,
+          );
+          return;
+        }
         throw new Error('supervisor signal turn produced no usable reply');
       }
       const posted = await postGroupMessage(task.id, bot.id, reply);
@@ -6237,7 +6290,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const canRunSkillTurn = Boolean(
         routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
       );
-      coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
+      const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
       let reply = '';
       if (canRunSkillTurn) {
         const skillSystemPrompt = [
@@ -6278,13 +6331,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         rememberDaemonChairPin(task.id, posted.pinId);
         postedPin = posted.pinId || null;
       }
-      store.markHostNotesConsumed(pendingIds, postedPin);
+      // Task #83 audit (P4): a chair that answered through the group_chat
+      // tool mid-turn and closed with [NO_REPLY]/empty DID reply — link the
+      // notes to the mid-turn pin instead of stamping a null response and
+      // logging "stayed silent by choice".
+      const midTurnPins = findMidTurnGroupSendPinIds(coworkStore, session.id, turnUserMessage.id);
+      const responsePin = postedPin ?? midTurnPins[0] ?? null;
+      store.markHostNotesConsumed(pendingIds, responsePin);
       for (const id of pendingIds) {
         sqlite.delete(`${GROUP_TASK_HOST_NOTE_ATTEMPTS_PREFIX}${id}`);
       }
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: chair handled ${pending.length} host environment note(s) ` +
-        `(${postedPin ? `replied, pin ${postedPin}` : 'stayed silent by choice'})`,
+        `(${postedPin
+          ? `replied, pin ${postedPin}`
+          : responsePin
+            ? `replied mid-turn via group_chat, pin ${responsePin}`
+            : 'stayed silent by choice'})`,
       );
     } catch (error) {
       // Retry budget, supervisor-signal style: 3 failed deliveries close the
@@ -6523,9 +6586,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (orchestrationAttemptId && deps.orchestrationBridge) {
         deps.orchestrationBridge.completeWorkerAttemptNoReply(orchestrationAttemptId);
       }
+      // Task #83 audit (P4): the [NO_REPLY] tail may close a turn that already
+      // spoke via the group_chat tool — log the delivery, not a false silence.
+      const midTurnSends = countMidTurnGroupSends(coworkStore, session.id, turnUserMessage.id);
       emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} answered [NO_REPLY]; ` +
-        'on-chain send suppressed (debug)',
+        midTurnSends > 0
+          ? `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} delivered ${midTurnSends} group message(s) ` +
+            'mid-turn via group_chat and closed with [NO_REPLY] — turn delivered'
+          : `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} answered [NO_REPLY]; ` +
+            'on-chain send suppressed (debug)',
       );
       return;
     }

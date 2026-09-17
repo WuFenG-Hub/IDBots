@@ -5492,6 +5492,89 @@ test('Task #83 P1: a worker whose turn is still in flight defers the no-ACK note
   }
 });
 
+test('Task #83 P4: a chair answer posted mid-turn via group_chat links the host note to the real pin', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const midPin = `${'a'.repeat(64)}i0`;
+    h.state.routing = { prompt: 'ACTIVE SKILLS: metabot-group-task', activeSkillIds: ['metabot-group-task'] };
+    h.state.skillReply = '[NO_REPLY]';
+    const baseRunSkillTurn = h.deps.runSkillTurn;
+    h.deps.runSkillTurn = async (params) => {
+      // The model speaks through the group_chat tool, then closes [NO_REPLY].
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_use', content: '',
+        metadata: { toolName: 'group_chat', toolInput: { action: 'send_group_message' } },
+      });
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_result',
+        content: `Group message sent (SimpleGroupChat).\n- pinId: ${midPin}\n- txids: ${'b'.repeat(64)}`,
+      });
+      return baseRunSkillTurn(params);
+    };
+    insertGroupMessage(h.db, {
+      pinId: 'pin-p4-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.sends.length = 0;
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick(); // records the no_ack note
+    await h.loop.runTick(); // the chair answers it — mid-turn, closing [NO_REPLY]
+    const row = h.db.exec(
+      'SELECT chair_response_pin_id, consumed_at FROM group_task_host_notes WHERE task_id = ?',
+      [task.id],
+    )[0].values[0];
+    assert.equal(row[0], midPin, 'the note links the pin the chair actually posted mid-turn');
+    assert.ok(row[1] != null, 'the note is consumed');
+    assert.equal(
+      h.sends.filter((send) => send.metabotId === 1).length,
+      0,
+      'no duplicate trailing post — the [NO_REPLY] tail stayed suppressed',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 P4: a supervisor signal answered mid-turn via group_chat is marked processed, not retried', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const midPin = `${'c'.repeat(64)}i0`;
+    h.state.routing = { prompt: 'ACTIVE SKILLS: metabot-group-task', activeSkillIds: ['metabot-group-task'] };
+    h.state.skillReply = '[NO_REPLY]';
+    const baseRunSkillTurn = h.deps.runSkillTurn;
+    h.deps.runSkillTurn = async (params) => {
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_use', content: '',
+        metadata: { toolName: 'group_chat', toolInput: { action: 'send_group_message' } },
+      });
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_result',
+        content: `Group message sent (SimpleGroupChat).\n- pinId: ${midPin}`,
+      });
+      return baseRunSkillTurn(params);
+    };
+    h.groupTaskStore.addSupervisorSignal({ taskId: task.id, kind: 'nudge', note: 'check the ledger' });
+    await h.loop.runTick();
+    const row = h.db.exec(
+      'SELECT processed_at, chair_response_pin_id FROM group_task_supervisor_signals WHERE task_id = ?',
+      [task.id],
+    )[0].values[0];
+    assert.ok(row[0] != null, 'the signal is processed');
+    assert.equal(row[1], midPin, 'processed with the mid-turn pin');
+    const sendsAfter = h.sends.length;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, sendsAfter, 'no retry of an already-answered signal');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('P0-3: [STANDBY] marker sets standby; ordinary worker speech is an implicit ACK', async () => {
   const h = await createHarness();
   try {
