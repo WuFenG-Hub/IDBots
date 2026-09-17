@@ -3958,6 +3958,21 @@ const startSqliteDaemons = (): void => {
     );
   }
 
+  // Task #83 audit (P6): stamp comm stats for legacy closed tasks that
+  // predated close-time stamping (42/71 done + 5/11 cancelled rows were NULL).
+  // Idempotent and additive — safe on every boot.
+  try {
+    const stamped = getGroupTaskStore().backfillTaskCommStats();
+    if (stamped > 0) {
+      console.log(`[GroupTask] comm-stats backfill stamped ${stamped} closed task(s)`);
+    }
+  } catch (error) {
+    console.error(
+      '[GroupTask] comm-stats backfill failed:',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
   // OpenTeam (M1): guest-side wiring. The guest service answers OpenTeam
   // invite envelopes intercepted by the private-chat daemon (join the external
   // group + ACCEPT/DECLINE reply); the guest daemon then lets the invited bot

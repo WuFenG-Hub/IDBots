@@ -237,6 +237,43 @@ test('task comm stats: stamped at close and listed for the trend view', async ()
   }
 });
 
+test('Task #83 P6: comm-stats backfill stamps only closed tasks with NULL stats, idempotently', async () => {
+  const harness = await createSqliteStore();
+  try {
+    const { db } = harness;
+    const { GroupTaskStore: GroupTaskStoreCtor } = await import('../dist-electron/main/groupTaskStore.js');
+    const store = new GroupTaskStoreCtor(db, () => {});
+    // A legacy done task with NULL stats, an executing task (must stay NULL —
+    // it gets stamped at close), and an already-stamped done task.
+    db.run(
+      `INSERT INTO group_tasks (id, group_id, title, goal, chair_metabot_id, status, updated_at)
+       VALUES (41, 'grp-bf-a', 'A', 'ga', 1, 'done', '2026-08-25 10:00:00'),
+              (42, 'grp-bf-b', 'B', 'gb', 1, 'executing', '2026-08-25 10:00:00'),
+              (43, 'grp-bf-c', 'C', 'gc', 1, 'done', '2026-08-25 10:00:00')`,
+    );
+    for (const [groupId, text] of [['grp-bf-a', 'hello'], ['grp-bf-b', 'ignored'], ['grp-bf-c', '已统计']] ) {
+      db.run(
+        `INSERT INTO group_chat_messages (pin_id, group_id, sender_metaid, sender_global_metaid, protocol, content, chain_timestamp)
+         VALUES (?, ?, 'm', 'g', 'simplechat', ?, 1)`,
+        [`pin-bf-${groupId}`, groupId, text],
+      );
+    }
+    store.recordTaskCommStats(43, 'grp-bf-c'); // pre-stamped — backfill must not double-count
+
+    assert.equal(store.backfillTaskCommStats(), 1, 'only the legacy NULL-stat close is stamped');
+    const stats = (id) => db.exec(
+      'SELECT comm_total_bytes, comm_message_count FROM group_tasks WHERE id = ?', [id],
+    )[0].values[0];
+    assert.equal(Number(stats(41)[0]), 5, 'ASCII bytes recomputed from history');
+    assert.equal(Number(stats(41)[1]), 1);
+    assert.equal(stats(42)[0], null, 'executing tasks are left for close-time stamping');
+    assert.equal(Number(stats(43)[1]), 1, 'the pre-stamped row is untouched');
+    assert.equal(store.backfillTaskCommStats(), 0, 'second run is a no-op');
+  } finally {
+    harness.cleanup();
+  }
+});
+
 test('prompt block respects the line budget, always closes the tag, and honors the master switch', async () => {
   const harness = await createSqliteStore();
   try {

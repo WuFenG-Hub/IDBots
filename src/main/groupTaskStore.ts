@@ -2806,6 +2806,28 @@ export class GroupTaskStore {
     return true;
   }
 
+  /**
+   * Task #83 audit (P6): one-time repair for legacy closes that predated
+   * close-time comm stamping — closed tasks with NULL comm stats get them
+   * recomputed from their group's message history. Additive and idempotent:
+   * already-stamped rows are never touched, so this is safe on every boot.
+   */
+  backfillTaskCommStats(): number {
+    const rows = this.getAll<{ id: number; group_id: string | null }>(
+      `SELECT id, group_id FROM group_tasks
+       WHERE status IN ('done', 'cancelled') AND comm_total_bytes IS NULL AND group_id IS NOT NULL`,
+    );
+    let stamped = 0;
+    for (const row of rows) {
+      try {
+        if (this.recordTaskCommStats(row.id, row.group_id)) stamped += 1;
+      } catch {
+        // best-effort repair — one bad row never blocks the rest
+      }
+    }
+    return stamped;
+  }
+
   listRecentTaskCommStats(limit = 15): Array<{
     taskId: number;
     title: string;
