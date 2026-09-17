@@ -13,6 +13,7 @@ import { i18nService } from '../../services/i18n';
 import {
   Squares2X2Icon,
   ListBulletIcon,
+  ArchiveBoxIcon,
   ArrowPathIcon,
   FunnelIcon,
   CheckCircleIcon,
@@ -23,7 +24,7 @@ import TrackedTaskDrawer from './TrackedTaskDrawer';
 import CloseTaskModal from './CloseTaskModal';
 import ClosureBanner from './ClosureBanner';
 import { filterNeedsOwnerAction } from './trackedTaskRanking';
-import type { TrackedCardScope, TrackedCardSummary } from '../../types/trackedTask';
+import type { TrackedCardScope, TrackedCardSummary, TrackedTaskViewMode } from '../../types/trackedTask';
 
 /**
  * 「长期任务」Tab 的主体：看板 / 清单两视图 + 范围筛选 + 待收口横条 + 任务卡抽屉 + 收口入口。
@@ -105,6 +106,27 @@ const TrackedTasksSection: React.FC = () => {
     [dispatch]
   );
 
+  /**
+   * v1.1 归档视图是**只读列表**：它读 `scope:'archived'`（恰好 ¬admitted 的行），
+   * 也是三个 scope 里唯一的归档入口。离开归档视图时回到 default，避免把归档
+   * 误当成长任务的常规筛选。
+   */
+  const changeView = useCallback(
+    (mode: TrackedTaskViewMode) => {
+      dispatch(setViewMode(mode));
+      if (mode === 'archive') {
+        dispatch(setScope('archived'));
+        void trackedTaskService.loadBoard({ scope: 'archived' });
+        return;
+      }
+      if (scope === 'archived') {
+        dispatch(setScope('default'));
+        void trackedTaskService.loadBoard({ scope: 'default' });
+      }
+    },
+    [dispatch, scope]
+  );
+
   const submitClose = useCallback(
     async (input: { conclusion: string; by: 'owner' | 'twin' }) => {
       if (!closeTarget) return;
@@ -128,18 +150,20 @@ const TrackedTasksSection: React.FC = () => {
 
   const foldedCount = board?.counts.folded ?? 0;
   const scopeIsDefault = (board?.scopeApplied ?? scope) === 'default';
+  const inArchiveView = viewMode === 'archive';
+  const archivedCount = board?.counts.archived ?? 0;
 
   const toolbar = (
     <div className="flex shrink-0 items-center gap-2 border-b dark:border-claude-darkBorder border-claude-border px-4 py-2">
       <div className="flex rounded-lg border dark:border-claude-darkBorder border-claude-border p-0.5">
-        {(['board', 'list'] as const).map((mode) => {
+        {(['board', 'list', 'archive'] as const).map((mode) => {
           const active = viewMode === mode;
           return (
             <button
               key={mode}
               type="button"
               aria-pressed={active}
-              onClick={() => dispatch(setViewMode(mode))}
+              onClick={() => changeView(mode)}
               className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors ${
                 active
                   ? 'bg-claude-accent/10 dark:text-claude-darkText text-claude-text'
@@ -148,16 +172,27 @@ const TrackedTasksSection: React.FC = () => {
             >
               {mode === 'board' ? (
                 <Squares2X2Icon className="w-3.5 h-3.5" />
-              ) : (
+              ) : mode === 'list' ? (
                 <ListBulletIcon className="w-3.5 h-3.5" />
+              ) : (
+                <ArchiveBoxIcon className="w-3.5 h-3.5" />
               )}
-              {i18nService.t(mode === 'board' ? 'trackedTask.view.board' : 'trackedTask.view.list')}
+              {i18nService.t(
+                mode === 'board'
+                  ? 'trackedTask.view.board'
+                  : mode === 'list'
+                    ? 'trackedTask.view.list'
+                    : 'trackedTask.view.archive'
+              )}
+              {mode === 'archive' && archivedCount > 0 ? ` · ${archivedCount}` : ''}
             </button>
           );
         })}
       </div>
 
-      {/* D3：范围必须显式可见、一键可清，折叠掉的卡不许静默隐藏 */}
+      {/* D3：范围必须显式可见、一键可清，折叠掉的卡不许静默隐藏。
+          归档视图下本按钮不适用（归档不是时间窗，它由准入决定）。 */}
+      {!inArchiveView && (
       <button
         type="button"
         onClick={() => changeScope(scopeIsDefault ? 'all' : 'default')}
@@ -179,6 +214,7 @@ const TrackedTasksSection: React.FC = () => {
           {scopeIsDefault ? i18nService.t('trackedTask.scope.showAll') : i18nService.t('trackedTask.scope.backToDefault')}
         </span>
       </button>
+      )}
 
       <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
         {i18nService.t('trackedTask.cardTotal').replace('{count}', String(cards.length))}
@@ -263,11 +299,36 @@ const TrackedTasksSection: React.FC = () => {
         />
       )}
 
+      {board && inArchiveView && (
+        <div className="shrink-0 border-b dark:border-claude-darkBorder border-claude-border bg-claude-surfaceHover/40 dark:bg-claude-darkSurfaceHover/40 px-4 py-2">
+          <div className="flex items-center gap-2">
+            <ArchiveBoxIcon className="h-3.5 w-3.5 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+            <span className="text-xs font-medium dark:text-claude-darkText text-claude-text">
+              {i18nService.t('trackedTask.archive.title').replace('{count}', String(archivedCount))}
+            </span>
+            <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('trackedTask.archive.readOnly')}
+            </span>
+          </div>
+          <p className="mt-0.5 pl-5 text-[11px] leading-relaxed dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('trackedTask.archive.hint')}
+          </p>
+        </div>
+      )}
+
       <div className="min-h-0 flex-1">
         {!board ? (
           <div className="flex h-full items-center justify-center text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
             {i18nService.t('trackedTask.loading')}
           </div>
+        ) : viewMode === 'archive' ? (
+          <TrackedTasksList
+            cards={board.cards}
+            onOpenCard={openCard}
+            onCloseCard={requestClose}
+            readOnly
+            emptyTextKey="trackedTask.archive.empty"
+          />
         ) : viewMode === 'board' ? (
           <TrackedTasksBoard board={board} onOpenCard={openCard} onCloseCard={requestClose} />
         ) : (

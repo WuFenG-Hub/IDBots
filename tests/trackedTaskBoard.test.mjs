@@ -1308,3 +1308,69 @@ test('scope is a real three-value axis and an unknown scope is never silently de
     sqliteStore.close();
   }
 });
+
+test('the two v1.1 UI entries are wired end to end (archive read-only, reversible mode switch)', async () => {
+  const fs = await import('node:fs');
+  const read = (relative) => fs.readFileSync(relative, 'utf8');
+
+  // 1) Archive entry: a real scope, rendered through the READ-ONLY list.
+  const section = read('src/renderer/components/trackedTasks/TrackedTasksSection.tsx');
+  assert.match(section, /scope: 'archived'/, 'the archive view must request the archived scope');
+  assert.match(section, /viewMode === 'archive'/, 'the archive view must be a rendered branch');
+  assert.match(section, /emptyTextKey="trackedTask\.archive\.empty"/);
+  assert.match(section, /readOnly\b/, 'the archive list must be rendered read-only');
+
+  // The read-only flag is what removes the closing action — assert BOTH halves
+  // (header cell and row cell), a single occurrence would leave the column behind.
+  const list = read('src/renderer/components/trackedTasks/TrackedTasksList.tsx');
+  assert.equal(
+    (list.match(/\{!readOnly && \(/g) ?? []).length,
+    2,
+    'readOnly must gate the action column header AND the per-row action',
+  );
+
+  // 2) Mode switch: reachable from Settings and carried over IPC.
+  const settings = read('src/renderer/components/Settings.tsx');
+  assert.match(settings, /case 'trackedTask':/);
+  assert.match(settings, /key: 'trackedTask'/);
+  const pane = read('src/renderer/components/settings/TrackedTaskSettings.tsx');
+  assert.match(pane, /setAdmissionMode/);
+  assert.match(pane, /\['wide', 'strict'\]/);
+  for (const file of ['src/main/main.ts', 'src/main/preload.ts']) {
+    const source = read(file);
+    assert.match(source, /trackedTask:admissionMode/, `${file}: read channel missing`);
+    assert.match(source, /trackedTask:setAdmissionMode/, `${file}: write channel missing`);
+  }
+
+  // 3) Every new key exists in BOTH languages: exactly two occurrences each.
+  const i18n = read('src/renderer/services/i18n.ts');
+  const keys = [
+    'trackedTask.view.archive',
+    'trackedTask.archive.title',
+    'trackedTask.archive.readOnly',
+    'trackedTask.archive.hint',
+    'trackedTask.archive.empty',
+    'trackedTask.admission.title',
+    'trackedTask.admission.hint',
+    'trackedTask.admission.modeWide',
+    'trackedTask.admission.modeStrict',
+    'trackedTask.admission.reversible',
+    'trackedTask.admission.activeRules',
+    'trackedTask.admission.notAdmitted',
+    'trackedTask.admission.adm1',
+    'trackedTask.admission.adm2',
+    'trackedTask.admission.adm3',
+    'trackedTask.admission.adm4',
+    'trackedTask.admission.adm5',
+    'trackedTaskSettingsTitle',
+  ];
+  const countKey = (key) => (i18n.match(
+    new RegExp(`(['"]${key.replace(/\./g, '\\.')}['"]\\s*:|\\b${key.replace(/\./g, '\\.')}\\s*:)`, 'g'),
+  ) ?? []).length;
+  // Positive control FIRST: prove the counter can see absence, otherwise a
+  // "everything is 2" pass could just be a counter stuck at 2.
+  assert.equal(countKey('trackedTask.thisKeyDoesNotExist'), 0, 'the key counter must be able to see 0');
+  for (const key of keys) {
+    assert.equal(countKey(key), 2, `${key}: expected the key in exactly EN + ZH, saw ${countKey(key)}`);
+  }
+});

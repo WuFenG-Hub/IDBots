@@ -857,10 +857,18 @@ contextBridge.exposeInMainWorld('electron', {
     // The renderer must read card state through these channels only.
     list: (input?: {
       ownerGlobalMetaId?: string;
-      scope?: 'default' | 'all';
+      scope?: 'default' | 'all' | 'archived';
       limit?: number;
       offset?: number;
     }) => ipcRenderer.invoke('trackedTask:list', input),
+    /**
+     * v1.1 admission mode (freeze doc §2). `wide` = ADM-1..ADM-5, `strict` =
+     * ADM-1 v ADM-3. It is one row in the existing `kv` table, so switching is
+     * reversible and changes no stored data shape.
+     */
+    admissionMode: () => ipcRenderer.invoke('trackedTask:admissionMode'),
+    setAdmissionMode: (input: { mode: 'wide' | 'strict' }) =>
+      ipcRenderer.invoke('trackedTask:setAdmissionMode', input),
     detail: (input: { cardId: string }) => ipcRenderer.invoke('trackedTask:detail', input),
     cardsForSession: (input: { sessionId: string }) => ipcRenderer.invoke('trackedTask:cardsForSession', input),
     /** D2 batch confirm: list the scheduled tasks that are not on a card yet. */

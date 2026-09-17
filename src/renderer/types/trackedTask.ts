@@ -22,6 +22,20 @@ export const TRACKED_BOARD_COLUMN_FALLBACK: TrackedCardState[] = [
   'closed',
 ];
 
+/** v1.1 准入规则（冻结件 §2）。宽口径 = 任一条；严口径 = ADM-1 ∨ ADM-3。 */
+export type TrackedAdmissionRule = 'ADM-1' | 'ADM-2' | 'ADM-3' | 'ADM-4' | 'ADM-5';
+
+/** 准入口径开关；持久化在既有 `kv` 表，改它不动任何数据结构。 */
+export type TrackedAdmissionMode = 'wide' | 'strict';
+
+export const TRACKED_ADMISSION_RULE_LABEL_KEYS: Record<TrackedAdmissionRule, string> = {
+  'ADM-1': 'trackedTask.admission.adm1',
+  'ADM-2': 'trackedTask.admission.adm2',
+  'ADM-3': 'trackedTask.admission.adm3',
+  'ADM-4': 'trackedTask.admission.adm4',
+  'ADM-5': 'trackedTask.admission.adm5',
+};
+
 /** closureDue 的三级来源：跨列正交标志，不是第 5 列（chair D1）。 */
 export type TrackedClosureDueLevel = 'zombie' | 'terminal_no_conclusion' | 'sessions_ended';
 
@@ -139,6 +153,13 @@ export interface TrackedCardSummary {
   sourceKind: TrackedCardSourceKind;
   groupTaskId: number | null;
   scheduledTaskId: string | null;
+  /**
+   * v1.1 准入判定（后端读时投影）：`archived := ¬admitted`。
+   * 归档卡不出现在看板/全量视图，但仍可经 `scope:'archived'` 与 `getCard` 查到。
+   */
+  admitted: boolean;
+  /** 命中的准入规则（ADM-1..ADM-5）；归档卡为空数组。 */
+  admissionMatched: TrackedAdmissionRule[];
   /** 「需要我出手」的权威判定（后端给出），前端不重算。 */
   needsOwnerAction: boolean;
   /** 「需要我出手」的权威排序键（后端给出），前端只用它排序。 */
@@ -156,6 +177,12 @@ export interface TrackedCardCounts {
   visible: number;
   /** 被默认范围折叠掉的卡；必须可达，不得静默隐藏（D3）。 */
   folded: number;
+  /** v1.1：通过准入的卡数；只有它们可能 closureDue。 */
+  admitted: number;
+  /** v1.1：`¬admitted` 的卡数；`admitted + archived === total` 是硬不变量。 */
+  archived: number;
+  /** 诊断用：登记名册里已不存在于台账的 id 数（冻结件 §2 ADM-1）。 */
+  staleRegistration: number;
   closureDue: number;
   /** 第 1 级：超过僵尸阈值。 */
   zombieLevel: number;
@@ -195,8 +222,11 @@ export interface TrackedCardDetail extends TrackedCardSummary {
   closure: { conclusion: string | null; by: string | null; at: string | null; pinId: string | null };
 }
 
-/** 看板范围：`default` = 近期活动 ∪ 全部 closureDue；`all` = 不折叠。 */
-export type TrackedCardScope = 'default' | 'all';
+/**
+ * 看板范围：`default` = 近期活动 ∪ 全部 closureDue；`all` = 全部**已准入**卡（不折叠）；
+ * `archived` = 恰好 `¬admitted` 的行（只读归档视图，永不进收口队列）。
+ */
+export type TrackedCardScope = 'default' | 'all' | 'archived';
 
 export interface TrackedCardListInput {
   ownerGlobalMetaId?: string;
@@ -209,8 +239,12 @@ export interface TrackedCardListInput {
 export interface TrackedCardBoard {
   ledger: 'orchestration_tasks';
   generatedAtMs: number;
+  /** 原样回显调用方所传的范围；省略时为 null。 */
+  scopeRequested: string | null;
   /** 回显实际生效的范围，界面据此标注筛选并提供一键清除。 */
   scopeApplied: TrackedCardScope;
+  /** true = 所传范围不是三个已知值；界面必须显式标注，不得当作正常 default。 */
+  scopeFallback: boolean;
   scopeWindowMs: number;
   /** 进程内单调序列，供 renderer 去重。 */
   seq: number;
@@ -254,8 +288,8 @@ export interface TrackedCardClosureReceipt {
   statusNote: string;
 }
 
-/** 长期任务页的内层视图（看板 / 清单）。 */
-export type TrackedTaskViewMode = 'board' | 'list';
+/** 长期任务页的内层视图（看板 / 清单 / 归档）。归档视图是只读列表。 */
+export type TrackedTaskViewMode = 'board' | 'list' | 'archive';
 
 /** 跟踪任务页的外层 Tab：「长期任务」默认在前，「定时任务」原样保留。 */
 export type TrackingTabId = 'longTerm' | 'scheduled';
