@@ -95,7 +95,7 @@ test('legacy canonical A2A sessions are idempotently backfilled into logical thr
   }
 });
 
-test('split A2A episodes are idempotently consolidated into the original session', async () => {
+test('split A2A episodes persist as generations (no startup consolidation) and aggregate as one thread', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
     const store = createCoworkStore(db);
@@ -106,16 +106,16 @@ test('split A2A episodes are idempotently consolidated into the original session
     const split = store.createSession(
       'Peer Bot', '/tmp/a2a', '', 'local', [], 1, 'a2a', 'idq1peer', 'New Peer', 'new-avatar',
     );
-    const child = store.createSession('Child', '/tmp/a2a', '', 'local');
-    db.run('UPDATE cowork_sessions SET parent_session_id = ? WHERE id = ?', [split.id, child.id]);
-    // Zero-message forks are swept as failed-fork orphans at store construction
-    // (commit 50e8d838), before episode consolidation repoints fork parents;
-    // a real fork always carries at least the fork-point message.
-    store.addMessage(child.id, { type: 'user', content: 'child fork message' });
-    store.addMessage(original.id, { type: 'user', content: 'original history' });
-    store.addMessage(split.id, { type: 'assistant', content: 'split history' });
-    store.setSessionPinned(split.id, true);
-    store.archiveSession(original.id);
+    store.addMessage(original.id, {
+      type: 'user',
+      content: 'original history',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
+    });
+    store.addMessage(split.id, {
+      type: 'assistant',
+      content: 'split history',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing' },
+    });
 
     const firstEpisode = store.registerA2AEpisode({
       sessionId: original.id,
@@ -133,8 +133,9 @@ test('split A2A episodes are idempotently consolidated into the original session
       episodeIndex: 2,
       previousSessionId: original.id,
       startedAt: 200,
-      previousCloseReason: 'message_limit',
+      previousCloseReason: 'rollover',
     });
+    store.updateA2AEpisodeSummary(original.id, 'Topics done. OPEN COMMITTMENTS: deliver results.');
     store.upsertConversationMapping({
       channel: 'metaweb_private',
       externalConversationId: 'metaweb-private:idq1peer',
@@ -144,53 +145,67 @@ test('split A2A episodes are idempotently consolidated into the original session
         a2aThreadId: firstEpisode.threadId,
         episodeIndex: 2,
         previousEpisodeSessionId: original.id,
-        episodeReason: 'message_limit',
         peerName: 'New Peer',
       }),
     });
-    db.run(`
-      INSERT INTO service_orders (
-        id, role, local_metabot_id, counterparty_global_metaid, service_name,
-        payment_txid, payment_chain, payment_amount, payment_currency,
-        cowork_session_id, status, first_response_deadline_at, delivery_deadline_at,
-        created_at, updated_at
-      ) VALUES ('order-split', 'buyer', 1, 'idq1peer', 'Test', 'tx', 'mvc', '1', 'SPACE', ?, 'in_progress', 1, 1, 1, 1)
-    `, [split.id]);
 
+    // Reopen the store: episodes must survive (the retired consolidation
+    // that used to collapse them back into one session is gone).
     const migrated = createCoworkStore(db);
     createCoworkStore(db);
 
-    assert.equal(migrated.getSessionWithoutMessages(split.id), null);
-    assert.equal(migrated.isSessionArchived(original.id), false);
-    assert.equal(migrated.getSessionWithoutMessages(original.id)?.pinned, true);
-    assert.equal(migrated.getSessionWithoutMessages(original.id)?.peerName, 'New Peer');
-    assert.deepEqual(
-      db.exec('SELECT sequence, content FROM cowork_messages WHERE session_id = ? ORDER BY sequence', [original.id])[0].values,
-      [[1, 'original history'], [2, 'split history']],
-    );
+    assert.ok(migrated.getSessionWithoutMessages(split.id));
+    assert.ok(migrated.getSessionWithoutMessages(original.id));
     assert.equal(
       migrated.getConversationMapping('metaweb_private', 'metaweb-private:idq1peer', 1)?.coworkSessionId,
-      original.id,
+      split.id,
     );
-    const mappingMetadata = JSON.parse(
-      migrated.getConversationMapping('metaweb_private', 'metaweb-private:idq1peer', 1)?.metadataJson ?? '{}',
-    );
-    assert.equal(mappingMetadata.episodeIndex, 1);
-    assert.equal(mappingMetadata.previousEpisodeSessionId, undefined);
-    assert.equal(mappingMetadata.episodeReason, undefined);
-    assert.deepEqual(migrated.listA2AConversationEpisodes(original.id).map((episode) => ({
+    assert.deepEqual(migrated.listA2AConversationEpisodes(split.id).map((episode) => ({
       sessionId: episode.sessionId,
       episodeIndex: episode.episodeIndex,
-      previousSessionId: episode.previousSessionId,
-      nextSessionId: episode.nextSessionId,
+      closeReason: episode.closeReason,
+      summary: episode.summary,
     })), [{
       sessionId: original.id,
       episodeIndex: 1,
-      previousSessionId: null,
-      nextSessionId: null,
+      closeReason: 'rollover',
+      summary: 'Topics done. OPEN COMMITTMENTS: deliver results.',
+    }, {
+      sessionId: split.id,
+      episodeIndex: 2,
+      closeReason: null,
+      summary: null,
     }]);
-    assert.equal(db.exec("SELECT cowork_session_id FROM service_orders WHERE id = 'order-split'")[0].values[0][0], original.id);
-    assert.equal(db.exec('SELECT parent_session_id FROM cowork_sessions WHERE id = ?', [child.id])[0].values[0][0], original.id);
+
+    // Thread aggregation in the session list: the superseded episode is not
+    // listed on its own — the latest episode entry represents the thread.
+    const listedIds = migrated.listSessions().map((summary) => summary.id);
+    assert.ok(listedIds.includes(split.id));
+    assert.ok(!listedIds.includes(original.id));
+
+    // getSessionView of the successor advertises earlier episodes even when
+    // its own in-session window is exhausted.
+    const view = migrated.getSessionView(split.id, 10);
+    assert.deepEqual(view?.messages.map((message) => message.content), ['split history']);
+    assert.equal(view?.messageHistory?.hasMoreBefore, true);
+    assert.equal(view?.messageHistory?.beforeSequence, null);
+
+    // Cross-episode paging: the null-null cursor returns the first page
+    // strictly below the successor episode, oldest-first, with a real cursor.
+    const below = migrated.getA2AConversationHistoryPage(split.id, {
+      beforeCursor: { episodeIndex: null, beforeSequence: null },
+      limit: 10,
+    });
+    assert.deepEqual(below?.messages.map((entry) => entry.message.content), ['original history']);
+    assert.equal(below?.messages[0]?.episodeIndex, 1);
+    assert.equal(below?.hasMoreBefore, false);
+    assert.equal(below?.beforeCursor, null);
+
+    // Thread-tail reader spans both generations, oldest-first.
+    assert.deepEqual(
+      migrated.getRecentA2AThreadMessages(split.id, 10).map((message) => message.content),
+      ['original history', 'split history'],
+    );
   } finally {
     cleanup();
   }
@@ -235,6 +250,7 @@ test('message pages use a stable sequence cursor and preserve chronological orde
     assert.deepEqual(view?.messageHistory, {
       hasMoreBefore: true,
       beforeSequence: 5,
+      beforeEpisodeIndex: null,
       pageSize: 3,
     });
     assert.deepEqual(store.getSession(session.id)?.messages.map((message) => message.id), ids);

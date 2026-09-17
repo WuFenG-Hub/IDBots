@@ -599,7 +599,7 @@ test('private chat analysis keeps one active segment within five minutes', () =>
   );
 });
 
-test('private chat analysis requests bye at fifty incoming turns and carries prior context after inactivity', () => {
+test('private chat analysis keeps bye pressure across inactivity gaps (thread-cumulative) and still carries prior context', () => {
   const base = 1_770_000_000_000;
   const longRun = Array.from({ length: 50 }, (_value, index) => ({
     id: `incoming-${index + 1}`,
@@ -616,7 +616,12 @@ test('private chat analysis requests bye at fifty incoming turns and carries pri
   assert.equal(longRunAnalysis.shouldForceBye, true);
   assert.equal(longRunAnalysis.incomingTurnCount, 50);
 
-  const resetAnalysis = analyzePrivateChatA2AConversation({
+  // A conversation gap still splits the CONTEXT segments, but no longer
+  // resets the bye pressure: a long-lived thread cannot outlive the
+  // max-incoming-turns policy by pausing for a few minutes (the 2026-09-16
+  // 249-turn session exploited exactly that reset). Only an outgoing bye
+  // resets the count.
+  const afterGapAnalysis = analyzePrivateChatA2AConversation({
     messages: [
       ...longRun,
       {
@@ -630,10 +635,10 @@ test('private chat analysis requests bye at fifty incoming turns and carries pri
     now: base + 50 * 10_000 + 6 * 60_000,
   });
 
-  assert.equal(resetAnalysis.shouldForceBye, false);
-  assert.equal(resetAnalysis.incomingTurnCount, 1);
+  assert.equal(afterGapAnalysis.shouldForceBye, true);
+  assert.equal(afterGapAnalysis.incomingTurnCount, 51);
   assert.deepEqual(
-    resetAnalysis.contextMessages.map((message) => message.content),
+    afterGapAnalysis.contextMessages.map((message) => message.content),
     [
       ...Array.from({ length: 20 }, (_value, index) => `turn ${31 + index}`),
       'new topic after a long gap',
