@@ -383,11 +383,16 @@ export class SurfService {
       }
       this.store.pruneSeenPins(metabotId, nowIso);
 
+      // Live-audit round 1: the digest used to be appended to
+      // report_markdown, where the 20k report cap silently cut its tail
+      // (inbox/radar sections vanished mid-pin-id). It now lives in its own
+      // column under a larger cap; the report stays report-only.
       const digest = renderSurfBriefingMarkdown(briefing);
       this.store.finishRun(runId, {
         status: 'done',
         stats,
-        reportMarkdown: reportMarkdown ? `${reportMarkdown}\n\n---\n\n${digest}` : digest,
+        reportMarkdown,
+        briefingMarkdown: digest,
         reportJson,
         finishedAtIso: nowIso,
       });

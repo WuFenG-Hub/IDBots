@@ -31,6 +31,8 @@ export interface MetawebSurfRunInfo {
   stats: MetawebSurfRunStats;
   reportMarkdown: string | null;
   reportJson: string | null;
+  /** The briefing digest the session was shown that night (report stored separately). */
+  briefingMarkdown: string | null;
   error: string | null;
   startedAt: string;
   finishedAt: string | null;

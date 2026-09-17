@@ -65,6 +65,7 @@ const SurfReportsPanel: React.FC<SurfReportsPanelProps> = ({ metabotId, refreshT
   const [loaded, setLoaded] = useState(false);
   const [panelError, setPanelError] = useState('');
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [expandedDigestRunId, setExpandedDigestRunId] = useState<string | null>(null);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -91,10 +92,12 @@ const SurfReportsPanel: React.FC<SurfReportsPanelProps> = ({ metabotId, refreshT
   // Collapse any expanded report when switching bots.
   useEffect(() => {
     setExpandedRunId(null);
+    setExpandedDigestRunId(null);
   }, [metabotId]);
 
   const renderRunCard = (run: MetawebSurfRunInfo) => {
     const expanded = expandedRunId === run.id;
+    const digestExpanded = expandedDigestRunId === run.id;
     const statsSummary = formatRunStats(run.stats);
     return (
       <div key={run.id} className={cardClass} data-slot={`surf-report-run-${run.id}`}>
@@ -146,6 +149,28 @@ const SurfReportsPanel: React.FC<SurfReportsPanelProps> = ({ metabotId, refreshT
               </div>
             ) : !run.error ? (
               <p className={hintClass}>—</p>
+            ) : null}
+            {run.briefingMarkdown ? (
+              <div className="rounded-lg border dark:border-claude-darkBorder border-claude-border">
+                <button
+                  type="button"
+                  data-slot={`surf-report-digest-toggle-${run.id}`}
+                  onClick={() => setExpandedDigestRunId(digestExpanded ? null : run.id)}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover rounded-lg transition-colors"
+                >
+                  {digestExpanded ? (
+                    <ChevronDownIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  ) : (
+                    <ChevronRightIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  )}
+                  {i18nService.t('surfReportDigestToggle')}
+                </button>
+                {digestExpanded ? (
+                  <div className="border-t dark:border-claude-darkBorder border-claude-border p-3">
+                    <MarkdownContent content={run.briefingMarkdown} compact />
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}

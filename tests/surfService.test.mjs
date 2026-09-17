@@ -55,8 +55,11 @@ test('digest-only run: report written, watermark advanced, events broadcast', as
 
   assert.equal(run.status, 'done');
   assert.equal(run.stats.fetched, 2);
-  assert.match(run.reportMarkdown, /# Surf digest/);
-  assert.match(run.reportMarkdown, /pin-a/);
+  // Digest-only runs (no injected session) keep the digest in its own
+  // column; the report itself is empty (live-audit round 1 separation).
+  assert.equal(run.reportMarkdown, null);
+  assert.match(run.briefingMarkdown, /# Surf digest/);
+  assert.match(run.briefingMarkdown, /pin-a/);
 
   const state = store.getProtocolState(7, 'alpha');
   assert.equal(state.lastSeenTs, NOW_SEC - 100, 'watermark advances to the oldest kept item (cap defers, never drops)');
@@ -182,7 +185,8 @@ test('injected session overrides digest stats and prepends its report', async ()
   assert.equal(run.stats.savedToKb, 1);
   assert.equal(run.stats.liked, 2);
   assert.match(run.reportMarkdown, /^# Session report/);
-  assert.match(run.reportMarkdown, /# Surf digest/);
+  assert.doesNotMatch(run.reportMarkdown, /# Surf digest/);
+  assert.match(run.briefingMarkdown, /# Surf digest/);
   assert.equal(run.reportJson, '{"liked":2}');
 });
 
@@ -279,7 +283,7 @@ test('a failed run re-presents the same window on the next surf (P1 regression)'
   const retry = await digestOnly.runSurfAndWait(7, 'pre-dream');
   assert.equal(retry.status, 'done');
   assert.equal(retry.stats.fetched, 2, 'the lost window is presented again after the failure');
-  assert.match(retry.reportMarkdown, /pin-a/);
+  assert.match(retry.briefingMarkdown, /pin-a/);
   assert.equal(store.getSeenAction(7, 'pin-a'), 'presented', 'success path marks presented');
   assert.equal(store.getProtocolState(7, 'alpha').lastSeenTs, NOW_SEC - 100, 'watermark lands on the oldest kept item');
 });
@@ -657,7 +661,7 @@ test('radar: fetchProtocolRadar flows into the briefing and a failure still fini
   const run = await service.runSurfAndWait(7, 'manual-ui');
   assert.equal(run.status, 'done');
   assert.equal(seenBriefing.protocolRadar.items.length, 1);
-  assert.match(run.reportMarkdown, /## Protocol radar — 1 registered protocol\(s\)/, 'radar lands in the digest appendix');
+  assert.match(run.briefingMarkdown, /## Protocol radar — 1 registered protocol\(s\)/, 'radar lands in the digest appendix');
 
   const failingRadar = new SurfService({
     store,
@@ -672,5 +676,5 @@ test('radar: fetchProtocolRadar flows into the briefing and a failure still fini
   });
   const second = await failingRadar.runSurfAndWait(7, 'manual-ui');
   assert.equal(second.status, 'done', 'a sick radar backend never fails the run');
-  assert.match(second.reportMarkdown, /radar fetch failed: radar down/);
+  assert.match(second.briefingMarkdown, /radar fetch failed: radar down/);
 });
