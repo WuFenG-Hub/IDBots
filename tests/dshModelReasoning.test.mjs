@@ -38,12 +38,12 @@ test('deepseek-v4 family declares the official chat-completions dialect, vendor 
   }
 })
 
-test('deepseek stays chat-completions-only; anthropic stays undeclared for every family', () => {
+test('deepseek stays chat-completions-only; anthropic declares GLM only', () => {
   assert.equal(dshModelReasoningDeclaration('deepseek-v4-flash', 'responses'), null);
   assert.equal(dshModelReasoningDeclaration('deepseek-v4-flash', 'anthropic'), null);
   assert.equal(dshModelReasoningDeclaration('deepseek-chat', 'responses'), null);
   assert.equal(dshModelReasoningDeclaration('deepseek-chat', 'anthropic'), null);
-  assert.equal(dshModelReasoningDeclaration('glm-5.3-flash', 'anthropic'), null);
+  assert.ok(dshModelReasoningDeclaration('glm-5.3-flash', 'anthropic'));
 })
 
 test('other families stay undeclared — no capability guessing', () => {
@@ -84,6 +84,25 @@ test('GLM on the Responses wire opts into reasoning explicitly (2026-09-03 z.ai 
     assert.deepEqual(declaration.compat, { supportsDeveloperRole: false });
     assert.equal('supportsStore' in declaration.compat, false);
     assert.equal('thinkingFormat' in declaration.compat, false);
+  }
+});
+
+test('GLM on the Anthropic wire speaks adaptive thinking with output_config effort (Ark GLM routes)', () => {
+  for (const id of ['glm-5.3-flash', 'z-ai/glm-5.3-flash', 'glm-4.6-air']) {
+    const declaration = dshModelReasoningDeclaration(id, 'anthropic');
+    assert.ok(declaration, id);
+    // Enabled rungs ride output_config.effort; Ark's accepted vocabulary is
+    // low/medium/high/max (it 400s xhigh), and max stays max here.
+    assert.equal(declaration.reasoningEfforts.off, null);
+    assert.equal(declaration.reasoningEfforts.low, 'low');
+    assert.equal(declaration.reasoningEfforts.high, 'high');
+    assert.equal(declaration.reasoningEfforts.max, 'max');
+    assert.equal('medium' in declaration.reasoningEfforts, false);
+    assert.equal('xhigh' in declaration.reasoningEfforts, false);
+    // Only ANTHROPIC_COMPAT_GATE-offered fields — budget-based thinking
+    // (no forceAdaptiveThinking) would send budget_tokens, which Ark's
+    // GLM-serving endpoint does not document.
+    assert.deepEqual(declaration.compat, { forceAdaptiveThinking: true });
   }
 });
 
