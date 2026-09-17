@@ -209,6 +209,11 @@ export interface GroupTaskAcceptanceSummary {
   generatedAt: string | null;
   publishedGroupPinId: string | null;
   notifiedSession: string | null;
+  /**
+   * Task #83 audit (F2a): set when a review→executing rework voided this
+   * already-notified summary — the card badges it "superseded by rework".
+   */
+  supersededAt?: string | null;
 }
 
 export interface GroupTaskMemberSummary extends GroupTaskMember {
@@ -294,6 +299,11 @@ export interface GroupTaskSummary extends GroupTask {
   memberNames: string[];
   /** Per-member preview for list avatars and the hover summary. */
   members: GroupTaskMemberPreview[];
+  /**
+   * Task #83 audit (F3): a human checkpoint is currently open — the row badges
+   * "awaiting owner decision" even though the status still reads executing.
+   */
+  hasOpenCheckpoint?: boolean;
 }
 
 export interface GroupTaskMemberPreview {

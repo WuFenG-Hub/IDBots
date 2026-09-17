@@ -40,6 +40,7 @@ const {
   hasProseDependencyDeclaration,
   hasWorkerUpstreamWait,
   adjudicateStatusDirectives,
+  PROSE_DEPENDENCY_EXEMPTION_MAX_MS,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 const { SkillTurnTimeoutError } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
@@ -707,6 +708,19 @@ test('release-review P1: negated prose statements do NOT read as dependency decl
   assert.equal(hasProseDependencyDeclaration('never waiting for the design'), false);
 });
 
+test('Task #83 P2b: reverse-direction prose ("others depend on me") does NOT read as a wait declaration', () => {
+  // The live task-83 miss: "缺一项下游就要返工" inside the upstream member's
+  // own clause parked the blocker itself under a prose exemption.
+  assert.equal(hasProseDependencyDeclaration('@loop 缺一项下游就要返工'), false);
+  assert.equal(hasProseDependencyDeclaration('下游依赖这份契约，必须先定稿'), false);
+  assert.equal(hasProseDependencyDeclaration('其他成员依赖我的规格'), false);
+  assert.equal(hasProseDependencyDeclaration('后续步骤都依赖 S3 的产物'), false);
+  // Forward-direction (this member waits) still reads true.
+  assert.equal(hasProseDependencyDeclaration('依赖上游的交付'), true);
+  assert.equal(hasProseDependencyDeclaration('等上游交付后开始'), true);
+  assert.equal(hasProseDependencyDeclaration('@小新 开始 S5，依赖 S4 的交付'), true);
+});
+
 test('fix-v2 B2: default stuck verdict is alert-only — the session is never stopped', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },
@@ -820,9 +834,9 @@ test('release-review P1: a prose dependency-wait exemption expires — monitorin
     assert.equal(member.status, 'working', 'within the cap the prose waiter stays exempt');
     assert.ok(h.store.get('group_task_dep_wait_exempt:1:2'), 'exemption note present');
 
-    // Past the 3-hour cap with the SAME chair assignment: the exemption
+    // Past the cap with the SAME chair assignment: the exemption
     // lifts and the normal unreachable verdict stamps the silent member.
-    h.state.nowMs = startMs + 180 * 60_000 + 60_000;
+    h.state.nowMs = startMs + PROSE_DEPENDENCY_EXEMPTION_MAX_MS + 60_000;
     await h.loop.runTick();
     member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
     assert.equal(member.status, 'unreachable', 'after the cap the silent member is flagged again');
@@ -1440,6 +1454,76 @@ test('loop prevention: reply budget per (task, bot)', async () => {
   }
 });
 
+test('Task #83 F1: the budget is a rolling one-hour window — charges age out and the member answers again', async () => {
+  const h = await createHarness({ replyBudget: 1 });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'f1-w1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot one',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+
+    // Inside the window: still capped (storm insurance unchanged).
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'f1-w2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot two',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'a fresh charge inside the window stays capped');
+
+    // Past the window: the old charge aged out — no restart needed.
+    h.state.nowMs += 61 * 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'f1-w3-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot three',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, 'the budget refills as charges age out of the window');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 F1: an exhausted budget never blocks the owner\u2019s message to the chair', async () => {
+  const h = await createHarness({ replyBudget: 1 });
+  try {
+    h.createTask([2]);
+    // Charge the chair's budget once via an owner message...
+    insertGroupMessage(h.db, {
+      pinId: 'f1-boss-1-i0', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: 'chair, status?',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.filter((s) => s.metabotId === 1).length, 1, 'the first owner message got its chair answer');
+
+    // ...then exhaust it with a worker-triggered chair turn so the NEXT
+    // budget check sees a spent budget.
+    insertGroupMessage(h.db, {
+      pinId: 'f1-w1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] pin://' + 'e'.repeat(64) + 'i0',
+    });
+    h.state.nowMs += 60_000;
+    await h.loop.runTick();
+
+    // The owner's follow-up must STILL wake the chair even at the cap.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'f1-boss-2-i0', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: 'chair, verdict?',
+    });
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.filter((s) => s.metabotId === 1).length >= 2,
+      'the owner message dispatches the chair even with the budget exhausted',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT#72: the reply budget counts LOGICAL replies — a failed turn retry is never blocked by the budget it already charged', async () => {
   // One-shot LLM failure: the first dispatch charges the message's logical
   // reply and fails; the durable-queue retry is the SAME reply, so it must
@@ -1516,7 +1600,8 @@ test('GT#72: reply budget exhaustion raises one owner-visible anomaly (the chair
     );
     assert.equal(budgetAnomalies.length, 1, 'exactly one exhaustion anomaly per (task, bot)');
     assert.match(budgetAnomalies[0].message, /exhausted its per-task reply budget/);
-    assert.match(budgetAnomalies[0].message, /restart/);
+    // F1 (task #83): the window refills — the notice no longer prescribes a restart.
+    assert.match(budgetAnomalies[0].message, /rolling one-hour window/);
   } finally {
     h.cleanup();
   }
@@ -3563,6 +3648,10 @@ test('prompts: task #65 — the current group id is listed and mid-turn speech i
   });
   assert.match(chairPrompt, /ONE VOICE PER TURN/);
   assert.match(chairPrompt, /never repeat the same content as the turn's final reply/);
+  // Task #83 audit (P5): the chair playbook carries the verdict-snapshot
+  // discipline (rule on a freshly measured HEAD, no same-evidence reversals).
+  assert.match(chairPrompt, /VERDICT SNAPSHOT DISCIPLINE/);
+  assert.match(chairPrompt, /never rule from a stale snapshot or from memory/);
 
   // No group id on the task row → the line is omitted, nothing misleading.
   const noIdPrompt = buildGroupTaskSystemPrompt({
@@ -5424,6 +5513,182 @@ test('P0-3 (single-commander): missing ACK past the timeout records ONE host env
   }
 });
 
+test('Task #83 F2a: the on-chain rework hatch supersedes the delivered acceptance summary and retracts it', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: (m) => { milestones.push(m); return true; },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-f2a', task.id]);
+    // Chair drives the task into review — the entry ceremony builds summary v1.
+    insertGroupMessage(h.db, {
+      pinId: 'f2a-rev-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '验收 [STATUS:REVIEW]',
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    assert.ok(h.groupTaskStore.getLatestAcceptanceSummary(task.id), 'review entry generated summary v1');
+
+    // The chair self-reopens (the legal rework hatch) — the delivered summary
+    // must be voided and the owner told.
+    insertGroupMessage(h.db, {
+      pinId: 'f2a-rework-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '交付物未入账，打回返工 [STATUS:EXECUTING]',
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
+    const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
+    assert.ok(summary.supersededAt, 'the review-entry summary is stamped superseded');
+    const retraction = milestones.find(
+      (m) => m.kind === 'anomaly' && typeof m.subject === 'string' && m.subject.startsWith('review_retracted:'),
+    );
+    assert.ok(retraction, 'the origin session received the retraction');
+    assert.match(retraction.message, /作废|no longer authoritative/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 P1: a worker whose turn is still in flight defers the no-ACK note; it fires once the turn settles silent', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Coder Bot's chat turn hangs until the test releases it, keeping the
+    // daemon-side turn in flight across ticks (the live task-83 false positive:
+    // the 3-min ACK soak lapsed mid-turn and the chair got a bogus no-ack note).
+    let turnStarted;
+    let resolveTurn;
+    const turnPromise = new Promise((resolve) => { resolveTurn = resolve; });
+    const turnStartedPromise = new Promise((resolve) => { turnStarted = resolve; });
+    const basePerformChat = h.deps.performChat;
+    h.deps.performChat = async (systemPrompt, userMessage, llmId) => {
+      if (llmId === 'llm-2') {
+        turnStarted();
+        return turnPromise;
+      }
+      return basePerformChat(systemPrompt, userMessage, llmId);
+    };
+    const noteCount = (kind) => Number(h.db.exec(
+      'SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = ?',
+      [task.id, kind],
+    )[0].values[0][0]);
+    // Raw loop (no drain): the hanging turn must stay in flight after the tick.
+    const rawLoop = createGroupTaskDaemonLoop(h.deps);
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-inflight', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the board',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await rawLoop.runTick();
+    await turnStartedPromise;
+
+    // Past the ACK timeout with the turn STILL running: deferred, watch kept.
+    h.state.nowMs = startMs + 200_000;
+    await rawLoop.runTick();
+    assert.equal(noteCount('no_ack'), 0, 'a turn in flight defers the no-ACK note');
+    assert.ok(h.store.get('group_task_ack_pending:1:2'), 'the watch survives the defer');
+
+    // The turn settles without the worker ever speaking: NOW the note fires.
+    resolveTurn('[NO_REPLY]');
+    await rawLoop.whenIdle();
+    await rawLoop.runTick();
+    assert.equal(noteCount('no_ack'), 1, 'the no-ACK note fires after the silent turn settles');
+
+    await rawLoop.runTick();
+    assert.equal(noteCount('no_ack'), 1, 'still exactly one note (kv-guarded)');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 P4: a chair answer posted mid-turn via group_chat links the host note to the real pin', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const midPin = `${'a'.repeat(64)}i0`;
+    h.state.routing = { prompt: 'ACTIVE SKILLS: metabot-group-task', activeSkillIds: ['metabot-group-task'] };
+    h.state.skillReply = '[NO_REPLY]';
+    const baseRunSkillTurn = h.deps.runSkillTurn;
+    h.deps.runSkillTurn = async (params) => {
+      // The model speaks through the group_chat tool, then closes [NO_REPLY].
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_use', content: '',
+        metadata: { toolName: 'group_chat', toolInput: { action: 'send_group_message' } },
+      });
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_result',
+        content: `Group message sent (SimpleGroupChat).\n- pinId: ${midPin}\n- txids: ${'b'.repeat(64)}`,
+      });
+      return baseRunSkillTurn(params);
+    };
+    insertGroupMessage(h.db, {
+      pinId: 'pin-p4-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.sends.length = 0;
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick(); // records the no_ack note
+    await h.loop.runTick(); // the chair answers it — mid-turn, closing [NO_REPLY]
+    const row = h.db.exec(
+      'SELECT chair_response_pin_id, consumed_at FROM group_task_host_notes WHERE task_id = ?',
+      [task.id],
+    )[0].values[0];
+    assert.equal(row[0], midPin, 'the note links the pin the chair actually posted mid-turn');
+    assert.ok(row[1] != null, 'the note is consumed');
+    assert.equal(
+      h.sends.filter((send) => send.metabotId === 1).length,
+      0,
+      'no duplicate trailing post — the [NO_REPLY] tail stayed suppressed',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 P4: a supervisor signal answered mid-turn via group_chat is marked processed, not retried', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const midPin = `${'c'.repeat(64)}i0`;
+    h.state.routing = { prompt: 'ACTIVE SKILLS: metabot-group-task', activeSkillIds: ['metabot-group-task'] };
+    h.state.skillReply = '[NO_REPLY]';
+    const baseRunSkillTurn = h.deps.runSkillTurn;
+    h.deps.runSkillTurn = async (params) => {
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_use', content: '',
+        metadata: { toolName: 'group_chat', toolInput: { action: 'send_group_message' } },
+      });
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_result',
+        content: `Group message sent (SimpleGroupChat).\n- pinId: ${midPin}`,
+      });
+      return baseRunSkillTurn(params);
+    };
+    h.groupTaskStore.addSupervisorSignal({ taskId: task.id, kind: 'nudge', note: 'check the ledger' });
+    await h.loop.runTick();
+    const row = h.db.exec(
+      'SELECT processed_at, chair_response_pin_id FROM group_task_supervisor_signals WHERE task_id = ?',
+      [task.id],
+    )[0].values[0];
+    assert.ok(row[0] != null, 'the signal is processed');
+    assert.equal(row[1], midPin, 'processed with the mid-turn pin');
+    const sendsAfter = h.sends.length;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, sendsAfter, 'no retry of an already-answered signal');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('P0-3: [STANDBY] marker sets standby; ordinary worker speech is an implicit ACK', async () => {
   const h = await createHarness();
   try {
@@ -6638,6 +6903,85 @@ test('P1-2: a dispatch swallowed by an open checkpoint posts a dispatch_held not
     )[0].values[0][0]);
     assert.equal(allHeld, 1, 'note recorded once per held message');
     assert.ok(h.groupTaskStore.getOpenCheckpoint(task.id), 'checkpoint still open');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 F3: an open checkpoint gone stale after the owner\'s reply reminds the chair (once)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    h.groupTaskStore.openCheckpoint({
+      taskId: task.id, topic: 'UI 范围与删除授权', msgPinId: 'pin-f3-open',
+    });
+    // The owner replies in the group with a ruling, but nobody posts
+    // [CHECKPOINT_RESOLVED:] — the gate stays closed (task #84's 24-min idle).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-f3-ruling', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: '范围按 A 方案，删除授权批准。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const stallNotes = () => Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'checkpoint_stall'",
+      [task.id],
+    )[0].values[0][0]);
+    assert.equal(stallNotes(), 0, 'inside the grace window the pause is legitimate');
+
+    h.state.nowMs += 11 * 60_000;
+    await h.loop.runTick();
+    assert.equal(stallNotes(), 1, 'a stale unresolved checkpoint after the owner reply reaches the chair');
+    const note = h.db.exec(
+      "SELECT body FROM group_task_host_notes WHERE task_id = ? AND kind = 'checkpoint_stall'",
+      [task.id],
+    )[0].values[0][0];
+    assert.match(note, /CHECKPOINT_RESOLVED/);
+    assert.match(note, /UI 范围与删除授权/, 'the note names the checkpoint topic');
+
+    // kv-guarded: the same checkpoint never re-notes.
+    h.state.nowMs += 60_000;
+    await h.loop.runTick();
+    assert.equal(stallNotes(), 1, 'one stall note per checkpoint');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 F3: an open checkpoint with NO owner reply re-reminds the owner once', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    deps: {
+      sendMilestoneToSourceSession: (m) => { milestones.push(m); return true; },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-f3', task.id]);
+    h.state.nowMs = Date.now();
+    h.groupTaskStore.openCheckpoint({
+      taskId: task.id, topic: 'draft approval', msgPinId: 'pin-f3b-open',
+    });
+    await h.loop.runTick();
+    assert.equal(milestones.filter((m) => m.subject?.startsWith('checkpoint_stall:')).length, 0);
+
+    // 46 min of total silence: the opening notice may have been missed.
+    h.state.nowMs += 46 * 60_000;
+    await h.loop.runTick();
+    const reminders = milestones.filter(
+      (m) => m.kind === 'checkpoint' && typeof m.subject === 'string' && m.subject.startsWith('checkpoint_stall:'),
+    );
+    assert.equal(reminders.length, 1, 'one owner re-reminder per checkpoint');
+    assert.match(reminders[0].message, /draft approval/);
+
+    h.state.nowMs += 60_000;
+    await h.loop.runTick();
+    assert.equal(
+      milestones.filter((m) => m.subject?.startsWith('checkpoint_stall:')).length,
+      1,
+      'no repeated re-reminder',
+    );
   } finally {
     h.cleanup();
   }
@@ -8414,6 +8758,90 @@ test('speedup R-02: the delivery reminder stays suspended while the assignment i
   }
 });
 
+test('Task #83 P2: a foreign clause\'s [DEPENDS_ON] never masks this member\'s upstream-free assignment', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Coder Bot's clause carries the [DEPENDS_ON] tag; Designer Bot's clause
+    // has none. Task 83's live miss: the whole-message read found the foreign
+    // tag and silently dependency-parked the upstream-free member (no watch).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-p2-mixed-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: `@Coder Bot 你负责 S4 推广，[DEPENDS_ON: ${'f'.repeat(64)}i0] 等 S3 交付后开始。\n\n@Designer Bot 你负责 S5 视觉，直接开工。`,
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get('group_task_ack_pending:1:2'), undefined,
+      'the [DEPENDS_ON]-gated member waits on its upstream — no ACK watch',
+    );
+    assert.ok(
+      h.store.get('group_task_ack_pending:1:3'),
+      'the upstream-free member gets a normal ACK watch — the foreign tag does not mask it',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 P3: a chair-stated deadline on an upstream-blocked assignment is suspended, then activated when the upstream lands', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    const upstreamPin = `${'f'.repeat(64)}i0`;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-p3-assign', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: `@Coder Bot 你负责 S4 推广，[DEPENDS_ON: ${upstreamPin}] 等 S3 交付后开始。[DEADLINE: 45m]`,
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_expected_delivery:1:2'), undefined, 'a blocked assignment arms no clock');
+    assert.ok(h.store.get('group_task_expected_delivery_suspended:1:2'), 'the chair-stated deadline is suspended, not dropped');
+
+    // The worker ACKs while blocked: the clock stays suspended, never ticking.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-p3-ack', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，等 S3', replyPin: 'pin-p3-assign',
+      chainTimestamp: Math.floor(startMs / 1000) + 30,
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_expected_delivery:1:2'), undefined, 'a blocked ACK does not start the clock');
+    assert.ok(h.store.get('group_task_expected_delivery_suspended:1:2'), 'the suspended clock survives the blocked ACK');
+
+    // Way past the nominal 45m with the upstream still missing: nothing fires.
+    const deadlineNotes = () => Number(h.db.exec(
+      "SELECT COUNT(*) FROM group_task_host_notes WHERE task_id = ? AND kind = 'deadline'",
+      [task.id],
+    )[0].values[0][0]);
+    h.state.nowMs = startMs + 60 * 60_000;
+    await h.loop.runTick();
+    assert.equal(deadlineNotes(), 0, 'a suspended clock never rings while blocked');
+
+    // The upstream lands: the sweep activates the chair-stated clock.
+    h.groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'pin-p3-upstream', authorGlobalmetaid: 'gmid-w3',
+      kind: 'pinid', uri: `pin://${upstreamPin}`,
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_expected_delivery_suspended:1:2'), undefined, 'the suspended record is retired');
+    const armed = JSON.parse(h.store.get('group_task_expected_delivery:1:2'));
+    assert.equal(armed.dueAt, startMs + 60 * 60_000 + 45 * 60_000, 'the clock starts when the wait lifts');
+
+    // Past the activated dueAt with no delivery: the deadline bell rings.
+    h.state.nowMs = armed.dueAt + 60_000;
+    await h.loop.runTick();
+    assert.equal(deadlineNotes(), 1, 'the activated deadline is monitored like any other');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('speedup R-06: review entry stamps the time breakdown onto the record and the closing message renders it', async () => {
   const h = await createHarness();
   try {
@@ -8781,7 +9209,7 @@ test('fix-v2 P1-3: the stuck alert cites verifiable evidence and never mislabels
 
     // Past the cap: the alert fires — and it must NOT read "no upstream
     // dependency declared" (task #57's mislabel): a prose wait WAS declared.
-    h.state.nowMs = startMs + 180 * 60_000 + 60_000;
+    h.state.nowMs = startMs + PROSE_DEPENDENCY_EXEMPTION_MAX_MS + 60_000;
     await h.loop.runTick();
     assert.equal(h.store.get('group_task_stuck_alert:1:2'), '1', 'the stuck alert fires after the cap');
     const anomaly = milestones.find((entry) => entry.kind === 'anomaly' && /looks stuck/.test(entry.message));

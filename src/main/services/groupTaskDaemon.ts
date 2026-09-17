@@ -55,8 +55,10 @@ import {
   buildMemberJoinWelcomeText,
   buildSourceSessionAnomalyNotice,
   buildSourceSessionCheckpointNotice,
+  buildSourceSessionCheckpointStallNotice,
   buildSourceSessionCreatedNotice,
   buildSourceSessionDispatchNotice,
+  buildSourceSessionReviewRetractedNotice,
   copyCorrectionApplied,
   copyLocalDeliverableNoPin,
   copyLocalDeliverableOnChain,
@@ -527,12 +529,22 @@ export function parseGroupTaskStuckReclaimMode(raw: string | null | undefined): 
  * grants is additionally time-capped (PROSE_DEPENDENCY_EXEMPTION_MAX_MS)
  * because prose declarations, unlike ledger-verified [DEPENDS_ON] tokens,
  * can never self-lift.
+ *
+ * Task #83 audit (P2b): direction awareness. "缺一项下游就要返工" or "下游依赖
+ * 这份契约" say the DOWNSTREAM depends on the member's output — the member is
+ * the upstream, not the waiter. The bare 依赖/前置/上游 branches now reject
+ * reverse-direction context, and 上游 can no longer match inside 下游 (task
+ * 83's live miss parked loop — the blocking member itself — under a prose
+ * exemption for 3 hours).
  */
 const PROSE_NEGATION_LOOKBEHIND = '(?<!(?:不|无|未|勿|莫|别|没|休|免|非|何|没有|无需|不必|不用|不存在))';
 const PROSE_NEGATION_LOOKBEHIND_EN = '(?<!(?:\\bno\\s+|\\bnot\\s+|\\bwithout\\s+|\\bnever\\s+|\\bindependen(?:t|tly)\\s+(?:of\\s+)?))';
+const PROSE_REVERSE_DIRECTION_LOOKBEHIND = '(?<!(?:下游|后续|别人|他人|其它|其他|大家).{0,6})';
 const PROSE_DEPENDENCY_RE = new RegExp(
   '(?:'
-  + `${PROSE_NEGATION_LOOKBEHIND}依赖|${PROSE_NEGATION_LOOKBEHIND}前置|${PROSE_NEGATION_LOOKBEHIND}上游|`
+  + `${PROSE_NEGATION_LOOKBEHIND}${PROSE_REVERSE_DIRECTION_LOOKBEHIND}依赖|`
+  + `${PROSE_NEGATION_LOOKBEHIND}${PROSE_REVERSE_DIRECTION_LOOKBEHIND}前置|`
+  + `${PROSE_NEGATION_LOOKBEHIND}(?<!下)上游|`
   + `${PROSE_NEGATION_LOOKBEHIND}在[^，。；\\n]{1,24}之后|`
   + `${PROSE_NEGATION_LOOKBEHIND}等[^，。；\\n]{1,24}(?:交付|完成|产出|落地)|`
   + `${PROSE_NEGATION_LOOKBEHIND}待[^，。；\\n]{1,24}(?:交付|完成|产出|落地)|`
@@ -762,6 +774,23 @@ export const GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX = 'group_task_review_notified:
  * checkpoint (`group_task_checkpoint_reported:<taskId>:<checkpointId>`).
  */
 const GROUP_TASK_CHECKPOINT_REPORTED_KV_PREFIX = 'group_task_checkpoint_reported:';
+/**
+ * Task #83 audit (F3): liveness watch for an OPEN human checkpoint. Every
+ * member-facing monitor stands down while the gate is closed, so nothing else
+ * notices when the PAUSE itself goes stale (task #84: the owner ruled, the
+ * chair relayed it without [CHECKPOINT_RESOLVED:], and the group idled 24 min
+ * with every status field reading "executing").
+ * - Activity after the opening (owner reply and/or chair speech) but no
+ *   resolution for CHECKPOINT_STALL_NOTE_MS → one host environment note to the
+ *   chair (`group_task_checkpoint_stall_noted:<taskId>:<checkpointId>`).
+ * - No owner reply at all for CHECKPOINT_OWNER_REMIND_MS → one re-reminder to
+ *   the owner's origin session
+ *   (`group_task_checkpoint_owner_reminded:<taskId>:<checkpointId>`).
+ */
+const CHECKPOINT_STALL_NOTE_MS = 10 * 60_000;
+const CHECKPOINT_OWNER_REMIND_MS = 45 * 60_000;
+const CHECKPOINT_STALL_NOTED_KV_PREFIX = 'group_task_checkpoint_stall_noted:';
+const CHECKPOINT_OWNER_REMINDED_KV_PREFIX = 'group_task_checkpoint_owner_reminded:';
 const ACK_PENDING_PREFIX = 'group_task_ack_pending:';
 const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
 /**
@@ -772,7 +801,23 @@ const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
  * a re-processed assignment message (cursor retry) never re-arms the watch.
  */
 const ACK_SEEN_PREFIX = 'group_task_ack_seen:';
+/**
+ * Task #83 audit (P1): one-shot log marker for a no-ACK watch deferred
+ * because the member still has a live (non-latched) turn running —
+ * `group_task_ack_deferred_inflight:<taskId>:<metabotId>`. Cleared wherever
+ * the watch resolves or re-arms so the next defer episode logs again.
+ */
+const ACK_DEFERRED_INFLIGHT_PREFIX = 'group_task_ack_deferred_inflight:';
 const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
+/**
+ * Task #83 audit (P3): a chair-stated [DEADLINE] whose member is still
+ * upstream-blocked is recorded here as a SUSPENDED clock
+ * (`group_task_expected_delivery_suspended:<taskId>:<metabotId>` =
+ * `{minutes, assignmentMessageId, declaredAt}`) instead of being dropped.
+ * monitorDeliveryDeadlines activates it (dueAt = lift + minutes) once the
+ * dependency clears; a deliverable or a directly-armed deadline retires it.
+ */
+const EXPECTED_DELIVERY_SUSPENDED_PREFIX = 'group_task_expected_delivery_suspended:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 /**
  * Default delivery deadline armed when a worker ACKs [WORKING] without an ETA
@@ -843,8 +888,11 @@ export const GROUP_TASK_DEP_WAIT_EXEMPT_PREFIX = 'group_task_dep_wait_exempt:';
  * deadline verdicts: a genuinely dead member cannot hide behind a stale prose
  * sentence forever. A NEW chair assignment (different message id) re-arms
  * the window.
+ * Task #83 audit (P2c): 180 min was far too generous — a misclassified member
+ * (see the direction-aware regex fix) sat outside every silence monitor for 3
+ * hours. 45 min still covers a real upstream delivery window.
  */
-export const PROSE_DEPENDENCY_EXEMPTION_MAX_MS = 180 * 60_000;
+export const PROSE_DEPENDENCY_EXEMPTION_MAX_MS = 45 * 60_000;
 /**
  * G-04 retry budget: failed chair-answer attempts per supervisor signal
  * (`group_task_sup_sig_attempts:<signalId>` = count). At 3 attempts the signal
@@ -1012,6 +1060,15 @@ const DEFAULT_NO_PROGRESS_NUDGE_MS = 20 * 60_000;
  */
 const DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS = 60_000;
 const DEFAULT_REPLY_BUDGET = 40;
+/**
+ * Task #83 audit (F1): the budget is a ROLLING one-hour window, not a per-run
+ * cumulative total. The old cumulative cap was hit inside one hour by a
+ * high-velocity task (124 group messages / 95 min) and muted the chair until
+ * an app restart — an anti-loop guard that had become a failure mode. The
+ * window keeps loop insurance (at most N charged replies per hour per bot)
+ * while the lockout self-heals as charges age out.
+ */
+const REPLY_BUDGET_WINDOW_MS = 60 * 60_000;
 const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 3;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 /** P0-2: minutes of silence before an assigned/working member is auto-marked unreachable. */
@@ -2289,14 +2346,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   // Loop prevention state (in-memory, per loop instance; no new DB columns).
   const lastReplyAtByKey = new Map<string, number>();
-  const replyCountByKey = new Map<string, number>();
-  // GT#72: the budget counts LOGICAL replies (one charge per (task, bot,
-  // trigger message)). A re-dispatch of the same trigger — a failed turn's
-  // durable-queue retry, a wedged-turn force-settle requeue, a coalesced
-  // backlog drain — is the SAME committed reply, not new spend. Charging
-  // every dispatch attempt is what silently muted a verification-heavy chair
-  // after ~22 logical replies (40 dispatch charges) and parked GT#72 in
-  // executing until a supervisor nudge rescued it.
+  // Task #83 audit (F1): charge timestamps per (task, bot) — the budget counts
+  // only charges inside the rolling REPLY_BUDGET_WINDOW_MS, so a busy task
+  // refills instead of permanently muting the member. GT#72: the budget counts
+  // LOGICAL replies (one charge per (task, bot, trigger message)). A
+  // re-dispatch of the same trigger — a failed turn's durable-queue retry, a
+  // wedged-turn force-settle requeue, a coalesced backlog drain — is the SAME
+  // committed reply, not new spend. Charging every dispatch attempt is what
+  // silently muted a verification-heavy chair after ~22 logical replies (40
+  // dispatch charges) and parked GT#72 in executing until a supervisor nudge
+  // rescued it.
+  const replyChargesByKey = new Map<string, number[]>();
+  const recentReplyChargeCount = (key: string): number => {
+    const charges = replyChargesByKey.get(key);
+    if (!charges || charges.length === 0) return 0;
+    const cutoff = now() - REPLY_BUDGET_WINDOW_MS;
+    const fresh = charges.filter((chargedAt) => chargedAt >= cutoff);
+    if (fresh.length !== charges.length) replyChargesByKey.set(key, fresh);
+    return fresh.length;
+  };
   const replyBudgetChargedMessages = new Set<string>();
   const replyBudgetChargeKey = (key: string, messageId: number): string => `${key}:${messageId}`;
   const keyOf = (taskId: number, metabotId: number): string => `${taskId}:${metabotId}`;
@@ -3009,6 +3077,43 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       return count;
     } catch {
       return 0;
+    }
+  };
+
+  /**
+   * Task #83 audit (P4): the pinids a turn posted MID-TURN through the
+   * group_chat send_group_message tool — pairs each send tool_use with the
+   * next tool_result and reads its `- pinId:` line. A chair/worker that
+   * answered via the tool and closed with [NO_REPLY]/empty DID speak; the
+   * host ledger (host notes, supervisor signals) must link that response
+   * instead of stamping a null pin and logging "stayed silent".
+   */
+  const findMidTurnGroupSendPinIds = (
+    coworkStore: CoworkStore,
+    sessionId: string,
+    afterMessageId: string,
+  ): string[] => {
+    try {
+      const messages = coworkStore.getSession(sessionId)?.messages ?? [];
+      const startIndex = messages.findIndex((message) => message.id === afterMessageId);
+      if (startIndex < 0) return [];
+      const pins: string[] = [];
+      let awaitingSendResult = false;
+      for (let i = startIndex + 1; i < messages.length; i += 1) {
+        const message = messages[i];
+        if (message.type === 'tool_use') {
+          const meta = (message.metadata ?? {}) as { toolName?: unknown; toolInput?: { action?: unknown } };
+          awaitingSendResult = meta.toolName === 'group_chat' && meta.toolInput?.action === 'send_group_message';
+          continue;
+        }
+        if (message.type !== 'tool_result' || !awaitingSendResult) continue;
+        awaitingSendResult = false;
+        const match = /pinId:\s*([0-9a-f]{64}i0)/i.exec(message.content ?? '');
+        if (match) pins.push(match[1]);
+      }
+      return pins;
+    } catch {
+      return [];
     }
   };
 
@@ -3913,14 +4018,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
-   * GT#72: a (task, bot) that exhausted its reply budget is PERMANENTLY
-   * silent for the rest of this app run — pending triggers (deliverable
-   * verdicts, assignments, owner questions) are dropped at the dispatch gates.
-   * That lockout previously left nothing but a daemon log line: the chair of
-   * GT#72 sat muted for 12 minutes with a finished, verified release candidate
-   * until a supervisor nudge rescued it. Raise ONE owner-visible anomaly per
-   * (task, bot) — the origin session (the owner's Twin) is the rail that
-   * actually reacted last time, so route the fact there.
+   * GT#72: a (task, bot) that exhausted its reply budget goes silent —
+   * pending triggers (deliverable verdicts, assignments) are dropped at the
+   * dispatch gates. That lockout previously left nothing but a daemon log
+   * line: the chair of GT#72 sat muted for 12 minutes with a finished,
+   * verified release candidate until a supervisor nudge rescued it. Raise ONE
+   * owner-visible anomaly per (task, bot) — the origin session (the owner's
+   * Twin) is the rail that actually reacted last time, so route the fact
+   * there.
+   * Task #83 audit (F1): the budget is a rolling one-hour window now, so the
+   * lockout self-heals as charges age out, and owner messages are exempt from
+   * the gates — the notice explains the window instead of prescribing an app
+   * restart.
    */
   const alertReplyBudgetExhausted = (
     task: GroupTask,
@@ -3937,10 +4046,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         title: task.title,
         status: deps.getGroupTaskStore().getTaskById(task.id)?.status ?? task.status,
         summary:
-          `The ${roleText} (${label}) exhausted its per-task reply budget (${replyBudget} replies) — ` +
-          `its turns are now dropped until the app restarts, and nothing (assignments, deliverable verdicts, ` +
-          'or even owner mentions) can wake it in this task. If the task still needs this member, restart the ' +
-          'app so the in-memory budget resets; otherwise close the task out.',
+          `The ${roleText} (${label}) exhausted its per-task reply budget ` +
+          `(${replyBudget} replies within the rolling one-hour window) — its new turns are dropped until the ` +
+          'oldest charges age out of the window. Owner messages still reach it. If the task keeps needing a ' +
+          'higher cadence, consider splitting the work or closing the task out.',
       }),
       `reply_budget_exhausted:bot:${bot.id}`,
     );
@@ -4611,6 +4720,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           );
           if (delivererMember?.metabotId != null) {
             deps.getStore().delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${delivererMember.metabotId}`);
+            deps.getStore().delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${delivererMember.metabotId}`);
             deps.getStore().delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${delivererMember.metabotId}`);
           }
         }
@@ -5022,6 +5132,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // [STATUS:REVIEW] verdict arriving within the debounce window is
               // recognized as a stale in-flight turn (task #24).
               deps.getStore().set(`${GROUP_TASK_REWORK_AT_KV_PREFIX}${task.id}`, now());
+              // Task #83 audit (F2a): the rework voids the acceptance summary
+              // the owner was already notified about — stamp it superseded and
+              // retract on the origin-session rail, so the owner's card never
+              // points at a review that no longer stands.
+              try {
+                const voided = store.supersedeOpenAcceptanceSummaries(task.id);
+                if (voided.length > 0) {
+                  notifySourceSessionMilestone(
+                    task,
+                    'anomaly',
+                    buildSourceSessionReviewRetractedNotice({
+                      title: task.title,
+                      status: updated.status,
+                      voidedVersions: voided,
+                    }),
+                    `review_retracted:${voided.join(',')}`,
+                  );
+                }
+              } catch (retractError) {
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: review retraction on rework failed (best-effort): ` +
+                  `${retractError instanceof Error ? retractError.message : String(retractError)}`,
+                );
+              }
             }
             if (updated.status === 'review') {
               // Improvement #2 (v1.3): the rework stamp's job is done — this
@@ -5934,7 +6068,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const canRunSkillTurn = Boolean(
         routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
       );
-      coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
+      const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
       let reply = '';
       if (canRunSkillTurn) {
         const skillSystemPrompt = [
@@ -5971,6 +6105,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
       }
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
+        // Task #83 audit (P4): a supervisor turn that posted through the
+        // group_chat tool mid-turn and closed with [NO_REPLY]/empty DID answer
+        // — mark the signals processed with the mid-turn pin instead of
+        // failing the delivery and retrying an already-answered signal.
+        const midTurnPins = findMidTurnGroupSendPinIds(coworkStore, session.id, turnUserMessage.id);
+        if (midTurnPins.length > 0) {
+          store.markSupervisorSignalsProcessed(pendingIds, midTurnPins[0]);
+          for (const id of pendingIds) {
+            sqlite.delete(`${GROUP_TASK_SUP_SIG_ATTEMPTS_PREFIX}${id}`);
+          }
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: chair answered ${pending.length} supervisor signal(s) ` +
+            `mid-turn via group_chat (pin ${midTurnPins[0]}); the [NO_REPLY] tail is the ONE VOICE closer`,
+          );
+          return;
+        }
         throw new Error('supervisor signal turn produced no usable reply');
       }
       const posted = await postGroupMessage(task.id, bot.id, reply);
@@ -6219,7 +6369,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const canRunSkillTurn = Boolean(
         routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
       );
-      coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
+      const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
       let reply = '';
       if (canRunSkillTurn) {
         const skillSystemPrompt = [
@@ -6260,13 +6410,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         rememberDaemonChairPin(task.id, posted.pinId);
         postedPin = posted.pinId || null;
       }
-      store.markHostNotesConsumed(pendingIds, postedPin);
+      // Task #83 audit (P4): a chair that answered through the group_chat
+      // tool mid-turn and closed with [NO_REPLY]/empty DID reply — link the
+      // notes to the mid-turn pin instead of stamping a null response and
+      // logging "stayed silent by choice".
+      const midTurnPins = findMidTurnGroupSendPinIds(coworkStore, session.id, turnUserMessage.id);
+      const responsePin = postedPin ?? midTurnPins[0] ?? null;
+      store.markHostNotesConsumed(pendingIds, responsePin);
       for (const id of pendingIds) {
         sqlite.delete(`${GROUP_TASK_HOST_NOTE_ATTEMPTS_PREFIX}${id}`);
       }
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: chair handled ${pending.length} host environment note(s) ` +
-        `(${postedPin ? `replied, pin ${postedPin}` : 'stayed silent by choice'})`,
+        `(${postedPin
+          ? `replied, pin ${postedPin}`
+          : responsePin
+            ? `replied mid-turn via group_chat, pin ${responsePin}`
+            : 'stayed silent by choice'})`,
       );
     } catch (error) {
       // Retry budget, supervisor-signal style: 3 failed deliveries close the
@@ -6505,9 +6665,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (orchestrationAttemptId && deps.orchestrationBridge) {
         deps.orchestrationBridge.completeWorkerAttemptNoReply(orchestrationAttemptId);
       }
+      // Task #83 audit (P4): the [NO_REPLY] tail may close a turn that already
+      // spoke via the group_chat tool — log the delivery, not a false silence.
+      const midTurnSends = countMidTurnGroupSends(coworkStore, session.id, turnUserMessage.id);
       emitLog(
-        `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} answered [NO_REPLY]; ` +
-        'on-chain send suppressed (debug)',
+        midTurnSends > 0
+          ? `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} delivered ${midTurnSends} group message(s) ` +
+            'mid-turn via group_chat and closed with [NO_REPLY] — turn delivered'
+          : `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} answered [NO_REPLY]; ` +
+            'on-chain send suppressed (debug)',
       );
       return;
     }
@@ -6897,7 +7063,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const chargeKey = replyBudgetChargeKey(key, message.id);
       if (!replyBudgetChargedMessages.has(chargeKey)) {
         replyBudgetChargedMessages.add(chargeKey);
-        replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
+        const charges = replyChargesByKey.get(key) ?? [];
+        charges.push(now());
+        replyChargesByKey.set(key, charges);
       }
     }
     emitLog(
@@ -8406,7 +8574,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // step continues, so a fresh no-ACK watch would misreport a worker
           // who is demonstrably working. Inherit only when the referenced
           // upstream pinid resolves to a message this worker ACKed.
-          const derived = resolveDerivedAssignmentUpstream(task, message, sqlite);
+          // Task #83 audit (P2): scope the lookup to THIS member's dispatch
+          // clause — the first [DEPENDS_ON] in a multi-member message may
+          // govern someone else's step (task 83: the tag lived in 阿码/小昆's
+          // clauses and masked loop's own upstream-free assignment as
+          // "upstream not delivered"). Whole-message fallback covers
+          // mention-array-only dispatches, same as checkMemberDependencyWait.
+          const memberClause = extractMemberDispatchClause(contentText, bot.name)
+            ?? extractMemberDispatchClause(contentText, member.name)
+            ?? contentText;
+          const derived = resolveDerivedAssignmentUpstream(task, { content: memberClause }, sqlite);
           if (derived !== null) {
             if (derived) {
               sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${message.id}`, '1');
@@ -8419,9 +8596,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // cannot start (and need not ACK) until the upstream deliverable
               // lands, so arming the 3-min no-ACK watch here would misreport
               // the #21-style false "did not ACK" warnings.
+              // Task #83 audit (P3): keep the chair-stated deadline as a
+              // SUSPENDED clock instead of dropping it — the deadline sweep
+              // starts it when the upstream lands, even if the worker never
+              // re-[WORKING]s.
+              const suspendedMinutes = parseChairDeadlineMinutes(memberClause);
+              if (suspendedMinutes != null && suspendedMinutes > 0) {
+                sqlite.set(
+                  `${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`,
+                  JSON.stringify({
+                    minutes: suspendedMinutes,
+                    assignmentMessageId: message.id,
+                    declaredAt: now(),
+                  }),
+                );
+              }
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: derived assignment to ${member.name ?? member.metabotId} ` +
-                  `(message #${message.id}) upstream not delivered; dependency-wait, no ACK watch`,
+                  `(message #${message.id}) upstream not delivered; dependency-wait, no ACK watch` +
+                  (suspendedMinutes != null && suspendedMinutes > 0
+                    ? ` — chair-stated deadline suspended (${suspendedMinutes}m, starts when the upstream lands)`
+                    : ''),
               );
             }
             continue;
@@ -8443,6 +8638,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             const retroMinutes = parseChairDeadlineMinutes(clause);
             if (retroMinutes != null && retroMinutes > 0) {
               sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+              sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
               sqlite.set(
                 `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
                 JSON.stringify({
@@ -8466,6 +8662,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // a tick blocked by a slow turn used to arm watches whose
           // `assignedAt` postdated the worker's actual reply and then
           // false-alarm a member who had demonstrably engaged.
+          sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
+          // A fresh assignment supersedes any suspended clock from the
+          // previous one — the new clause re-creates it via its own path.
+          sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
           sqlite.set(
             pendingKey,
             JSON.stringify({
@@ -8505,6 +8705,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
       }
       sqlite.delete(pendingKey);
+      sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
       if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
     };
     // Speedup hardening: tokens quoted inside code fences/backticks are
@@ -8608,6 +8809,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // deadline would otherwise skip the next reminder and drop the member
           // straight onto the reclaim ladder after one grace window.
           sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+          sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
           sqlite.set(
             `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
             JSON.stringify({
@@ -8627,6 +8829,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           );
         }
       } else {
+        // Task #83 audit (P3): a blocked ACK used to drop the chair-stated
+        // deadline entirely — nothing re-armed it when the upstream landed
+        // unless the worker re-[WORKING]ed. Keep it as a suspended clock; the
+        // deadline sweep activates it when the dependency clears.
+        let suspendedMinutes: number | null = null;
+        if (!opts?.humanGateActive && !acksHostNotice && assignmentOnRecord && (awaitingUpstream || workerDeclaredWait)) {
+          const blockedContent = resolveAssignmentContent(task, assignmentMessageId, message.replyPin);
+          const blockedClause = extractMemberDispatchClause(blockedContent, memberBot?.name)
+            ?? extractMemberDispatchClause(blockedContent, member.name)
+            ?? blockedContent;
+          const parsed = parseChairDeadlineMinutes(blockedClause);
+          if (parsed != null && parsed > 0) {
+            suspendedMinutes = parsed;
+            sqlite.set(
+              `${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`,
+              JSON.stringify({
+                minutes: parsed,
+                assignmentMessageId: assignmentMessageId ?? null,
+                declaredAt: now(),
+              }),
+            );
+          }
+        }
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING] ` +
           (opts?.humanGateActive
@@ -8638,7 +8863,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 : workerDeclaredWait
                   ? 'declaring a conditional upstream wait (ETA suspended until the upstream lands)'
                   : 'with no assignment on record') +
-          ' — liveness only, no delivery deadline armed',
+          (suspendedMinutes != null
+            ? ` — liveness only; chair-stated deadline suspended (${suspendedMinutes}m, starts when the upstream lands)`
+            : ' — liveness only, no delivery deadline armed'),
         );
       }
       return;
@@ -9009,6 +9236,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       if (!entry || typeof entry.assignedAt !== 'number') continue;
       if (now() - entry.assignedAt < ackTimeoutMs) continue;
+      // Task #83 audit (P1): a member with a live (non-latched) turn is by
+      // definition working on the assignment — a slow first turn can outlast
+      // the 3-min ACK soak without speaking yet. Defer the no-ACK note while
+      // the turn runs; if it settles without speech, the watch fires on a
+      // later pass. (monitorNoProgressStall already applies the same
+      // in-flight suppression; the task-83 false no-ACK note + public chair
+      // nudge for 小昆 came from this gap.)
+      const memberTurnKey = keyOf(task.id, member.metabotId);
+      if (turnInFlight.has(memberTurnKey) && !latchedTurnKeys.has(memberTurnKey)) {
+        const deferKey = `${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`;
+        if (sqlite.get<string>(deferKey) == null) {
+          sqlite.set(deferKey, '1');
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} has a turn in flight ` +
+            `(assignment #${entry.messageId}); no-ACK note deferred until the turn settles`,
+          );
+        }
+        continue;
+      }
       // P1-4: a worker who spoke ANYTHING after the assignment is engaged —
       // implicit ACK. The pending watch was either missed (cursor retry /
       // member-match gap) or the worker is mid-work; clear it, record
@@ -9059,6 +9305,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (spokeAfterAssignment) {
           sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${entry.messageId}`, '1');
           sqlite.delete(pendingKey);
+          sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
           if (sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`) != null) {
             sqlite.delete(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
           }
@@ -9086,6 +9333,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           && deliverable.status !== 'rejected');
       if (hasValidDeliverable) {
         sqlite.delete(pendingKey);
+        sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
         const remindedRaw = sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
         if (remindedRaw != null) {
           sqlite.delete(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
@@ -9118,6 +9366,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       });
       if (lastActivityMs >= now() - ackEngagedRecentMs || hasRecentDeliverable) {
         sqlite.delete(pendingKey);
+        sqlite.delete(`${ACK_DEFERRED_INFLIGHT_PREFIX}${task.id}:${member.metabotId}`);
         if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} engaged on a long turn ` +
@@ -9150,6 +9399,103 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    }
+  };
+
+  /**
+   * Task #83 audit (F3): liveness watch for an OPEN human checkpoint. Every
+   * member-facing monitor stands down while the gate is closed (the silence is
+   * enforced), so nothing else notices when the pause itself goes stale —
+   * task #84 idled 24 min: the owner's ruling came in, the chair relayed it
+   * without [CHECKPOINT_RESOLVED:], and every status field read "executing".
+   * Two rails, each once per checkpoint:
+   *  - activity after the opening (owner reply and/or chair speech) but no
+   *    resolution for CHECKPOINT_STALL_NOTE_MS → host note to the chair (the
+   *    checkpoint_stall kind is let through the human-gate deferral);
+   *  - no owner reply at all for CHECKPOINT_OWNER_REMIND_MS → one re-reminder
+   *    to the owner's origin session (the opening report may have been missed).
+   */
+  const monitorCheckpointLiveness = (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+  ): void => {
+    if (task.status !== 'executing' && task.status !== 'planning') return;
+    const sqlite = deps.getStore();
+    const store = deps.getGroupTaskStore();
+    const checkpoint = store.getOpenCheckpoint(task.id);
+    if (!checkpoint || !task.groupId) return;
+    const openedAtMs = parseSqliteUtcMs(checkpoint.createdAt ?? null);
+    if (openedAtMs == null) return;
+    const chairMember = members.find((member) => member.role === 'chair');
+    const chairBot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
+    const ownerGmid = (chairBot?.boss_global_metaid ?? '').trim().toLowerCase();
+    const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
+    const latestSpeechMs = (gmid: string): number | null => {
+      if (!gmid) return null;
+      try {
+        const result = sqlite.getDatabase().exec(
+          'SELECT MAX(chain_timestamp) FROM group_chat_messages WHERE group_id = ? AND sender_global_metaid = ?',
+          [task.groupId, gmid],
+        );
+        const sec = Number(result[0]?.values?.[0]?.[0]);
+        return Number.isFinite(sec) && sec > 0 ? sec * 1000 : null;
+      } catch {
+        return null; // transient read failure — retry next tick
+      }
+    };
+    const ownerLastMs = latestSpeechMs(ownerGmid);
+    const chairLastMs = latestSpeechMs(chairGmid);
+    const ownerReplied = ownerLastMs != null && ownerLastMs >= openedAtMs;
+    // Chair speech strictly after the opening message (1s tie margin) means
+    // the chair has been active while the gate stayed closed.
+    const chairSpokeAfterOpen = chairLastMs != null && chairLastMs > openedAtMs + 1000;
+    const nowMs = now();
+    if (ownerReplied || chairSpokeAfterOpen) {
+      const activityMs = Math.max(openedAtMs, ownerLastMs ?? 0, chairSpokeAfterOpen ? (chairLastMs ?? 0) : 0);
+      if (nowMs - activityMs < CHECKPOINT_STALL_NOTE_MS) return;
+      const noteKey = `${CHECKPOINT_STALL_NOTED_KV_PREFIX}${task.id}:${checkpoint.id}`;
+      if (sqlite.get<string>(noteKey) != null) return;
+      sqlite.set(noteKey, '1');
+      store.recordHostNote({
+        taskId: task.id,
+        kind: 'checkpoint_stall',
+        target: chairMember?.name ?? 'chair',
+        dedupeKey: `checkpoint_stall:${task.id}:${checkpoint.id}`,
+        body:
+          `Checkpoint #${checkpoint.id}${checkpoint.topic ? ` (${checkpoint.topic})` : ''} is still open: ` +
+          `${ownerReplied ? 'the owner has replied' : 'you have spoken'} since it opened, but no ` +
+          '[CHECKPOINT_RESOLVED: …] followed, and the group is paused meanwhile. If the decision is in, post ' +
+          '[CHECKPOINT_RESOLVED: <decision>] to resume work; if you are still waiting on the owner, ' +
+          'no action is needed (this reminder fires once per checkpoint).',
+      });
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: checkpoint #${checkpoint.id} still open ` +
+        `${Math.round((nowMs - activityMs) / 60_000)} min after the latest activity — reminded the chair`,
+      );
+      return;
+    }
+    if (nowMs - openedAtMs >= CHECKPOINT_OWNER_REMIND_MS) {
+      const remindKey = `${CHECKPOINT_OWNER_REMINDED_KV_PREFIX}${task.id}:${checkpoint.id}`;
+      if (sqlite.get<string>(remindKey) != null) return;
+      sqlite.set(remindKey, '1');
+      // Best-effort (the milestone rail is itself subject-guarded per
+      // checkpoint): re-remind the owner that the group is still paused.
+      notifySourceSessionMilestone(
+        task,
+        'checkpoint',
+        buildSourceSessionCheckpointStallNotice({
+          title: task.title,
+          status: task.status,
+          topic: checkpoint.topic,
+          waitingMinutes: Math.round((nowMs - openedAtMs) / 60_000),
+        }),
+        `checkpoint_stall:${checkpoint.id}`,
+      );
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: checkpoint #${checkpoint.id} open ` +
+        `${Math.round((nowMs - openedAtMs) / 60_000)} min with no owner reply — re-reminded the owner`,
+      );
     }
   };
 
@@ -9420,6 +9766,72 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const store = deps.getGroupTaskStore();
     const nowMs = now();
     const reclaimNotes: string[] = [];
+    // Task #83 audit (P3): activate suspended chair-stated deadlines whose
+    // upstream wait has lifted. Blocked assignments/ACKs record the clock as
+    // suspended instead of dropping it; without this sweep the chair's
+    // [DEADLINE] was monitored only if the worker happened to re-[WORKING].
+    for (const member of members) {
+      if (member.role !== 'worker' || member.metabotId == null) continue;
+      const suspendedKey = `${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`;
+      const rawSuspended = sqlite.get<string>(suspendedKey);
+      if (!rawSuspended) continue;
+      if (sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`) != null) {
+        sqlite.delete(suspendedKey); // an armed clock supersedes the suspended one
+        continue;
+      }
+      let suspended: { minutes?: number; assignmentMessageId?: number | null };
+      try {
+        suspended = JSON.parse(rawSuspended);
+      } catch {
+        sqlite.delete(suspendedKey);
+        continue;
+      }
+      if (!suspended || typeof suspended.minutes !== 'number' || suspended.minutes <= 0) {
+        sqlite.delete(suspendedKey);
+        continue;
+      }
+      // fix-v2 P0-1 symmetry: a parked (standby) member has no active
+      // assignment — keep the clock frozen until the chair reactivates it.
+      if (member.status === 'standby') continue;
+      const suspendedGmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const deliveredWhileSuspended = Boolean(suspendedGmid)
+        && store.listDeliverables(task.id).some(
+          (deliverable) =>
+            (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === suspendedGmid
+            && deliverable.status !== 'rejected',
+        );
+      if (deliveredWhileSuspended) {
+        sqlite.delete(suspendedKey);
+        continue;
+      }
+      const suspensionDepWait = checkMemberDependencyWait(
+        task,
+        member,
+        members.find((candidate) => candidate.role === 'chair'),
+      );
+      // fix-v2 P0-1 symmetry: only STRUCTURED (ledger-verifiable) pending
+      // tokens keep the clock suspended. A prose wait never self-lifts, so it
+      // must not freeze the clock — it gates the downstream reminder/escalation
+      // through the time-capped exemption instead (same rule as the reminder
+      // path below).
+      const suspensionPendingStructured = (suspensionDepWait?.pendingTokens ?? [])
+        .filter((token) => token !== '(prose-declared upstream)');
+      if (suspensionPendingStructured.length > 0) continue;
+      sqlite.delete(suspendedKey);
+      sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+      sqlite.set(
+        `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+        JSON.stringify({
+          dueAt: nowMs + suspended.minutes * 60_000,
+          ackedAt: nowMs,
+          taskDescription: null,
+        }),
+      );
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId}'s upstream wait has lifted — ` +
+        `activated the suspended chair-stated deadline: ${suspended.minutes}m from now`,
+      );
+    }
     for (const member of members) {
       if (member.role !== 'worker' || member.metabotId == null) continue;
       const raw = sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
@@ -9877,11 +10289,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       // Single-commander: pending environment notes drive ONE chair turn
       // (facts only — the host itself never speaks in the group). Same
-      // human-gate deferral as supervisor signals.
+      // human-gate deferral as supervisor signals — EXCEPT checkpoint_stall
+      // notes (Task #83 audit, F3): those are ABOUT the open checkpoint, so
+      // deferring them until it resolves would make the watchdog toothless.
+      const pendingHostNotes = store.listPendingHostNotes(task.id);
       if (
         chairMemberId != null
-        && !checkpointOpenAtTick
-        && store.listPendingHostNotes(task.id).length > 0
+        && pendingHostNotes.length > 0
+        && (!checkpointOpenAtTick || pendingHostNotes.some((note) => note.kind === 'checkpoint_stall'))
       ) {
         runTurnAsync(
           keyOf(task.id, chairMemberId),
@@ -9890,6 +10305,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           { taskId: task.id, metabotId: chairMemberId, isChair: true },
         );
       }
+    }
+
+    // Task #83 audit (F3): an OPEN checkpoint is the pause every member-facing
+    // monitor stands down for — watch the pause itself (stale unresolved
+    // checkpoint → chair note; no owner reply at all → owner re-reminder).
+    if (checkpointOpenAtTick && !isChatModeTask) {
+      monitorCheckpointLiveness(task, members, botsById);
     }
 
     // G-01: no-progress stall — a task with no new group message and no new
@@ -10123,15 +10545,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           deferReply(entry); // still cooling down; keep waiting
           continue;
         }
-        // R6: chat groups run unmetered — a 40-reply task budget would
-        // permanently silence a long conversation. Loop insurance stays via
+        // R6: chat groups run unmetered — a 40-reply hourly budget would
+        // silence a long conversation. Loop insurance stays via
         // cooldown + prompt etiquette + [NO_REPLY].
         // GT#72: a trigger ALREADY charged (its first dispatch spent the
         // budget) is a retry of committed work — it drains even at the cap,
         // so a failed turn can never be stranded by the budget it paid.
+        // Task #83 audit (F1): the owner's message ALWAYS reaches the chair —
+        // the budget never gates it (the old cumulative cap dropped owner
+        // turns too, leaving the task with no authoritative voice at all).
         if (
           task.mode !== 'chat'
-          && (replyCountByKey.get(key) ?? 0) >= replyBudget
+          && entry.reason !== 'chair_owner_message'
+          && recentReplyChargeCount(key) >= replyBudget
           && !replyBudgetChargedMessages.has(replyBudgetChargeKey(key, entry.messageId))
         ) {
           emitLog(
@@ -10452,9 +10878,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             });
             continue;
           }
+          // Task #83 audit (F1): the owner's message always reaches the chair
+          // (same exemption as the deferred-queue drain above).
           if (
             task.mode !== 'chat'
-            && (replyCountByKey.get(key) ?? 0) >= replyBudget
+            && decision.reason !== 'chair_owner_message'
+            && recentReplyChargeCount(key) >= replyBudget
             && !replyBudgetChargedMessages.has(replyBudgetChargeKey(key, message.id))
           ) {
             emitLog(`[GroupTaskDaemon] Task ${task.id}: bot ${decision.metabotId} reply budget exhausted; skipping`);

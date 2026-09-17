@@ -13,6 +13,7 @@ import {
   buildSourceSessionAcceptanceNotice,
   buildSourceSessionReviewFallback,
   buildSourceSessionReviewNotice,
+  buildSourceSessionReviewRetractedNotice,
   copyAcceptanceCommentLine,
   copyAcceptanceRatingLine,
   copyDefaultObserverExpectation,
@@ -459,6 +460,40 @@ export function clearSourceSessionMilestoneGuard(
   } catch {
     // kv unavailable — the guard simply stays armed (report skipped once more)
   }
+}
+
+/**
+ * Task #83 audit (F2a): shared rework-hatch retraction. A review→executing
+ * rework voids every acceptance summary the owner was already notified about
+ * (outcome still open): stamp them superseded so the Tasks card shows the
+ * retraction, and tell the origin session that the card it received is no
+ * longer authoritative. Best-effort — the rework itself never fails on this.
+ * Returns the voided versions.
+ */
+export function retractGroupTaskReviewOnRework(task: GroupTask): number[] {
+  let voided: number[] = [];
+  try {
+    voided = getGroupTaskStore().supersedeOpenAcceptanceSummaries(task.id);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Failed to supersede acceptance summaries on rework of task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return [];
+  }
+  if (voided.length > 0) {
+    notifySourceSessionMilestone(
+      task,
+      'anomaly',
+      buildSourceSessionReviewRetractedNotice({
+        title: task.title,
+        status: 'executing',
+        voidedVersions: voided,
+      }),
+      `review_retracted:${voided.join(',')}`,
+    );
+  }
+  return voided;
 }
 
 function getKvStore(): GroupTaskServiceKvStore {
@@ -1187,6 +1222,12 @@ export interface GroupTaskSummary extends GroupTask {
   chairName: string | null;
   memberNames: string[];
   members: GroupTaskMemberPreview[];
+  /**
+   * Task #83 audit (F3): a human checkpoint is currently open — the task is
+   * paused awaiting the owner's decision even though `status` still reads
+   * executing/planning. The sidebar badges it so the pause is never invisible.
+   */
+  hasOpenCheckpoint: boolean;
 }
 
 export interface GroupTaskMemberPreview {
@@ -1216,6 +1257,7 @@ function toTaskSummary(
   task: GroupTask,
   members: GroupTaskMember[],
   avatarById: Map<number, string | null>,
+  hasOpenCheckpoint: boolean,
 ): GroupTaskSummary {
   const previews: GroupTaskMemberPreview[] = members.map((member) => ({
     name: (member.name ?? member.displayName ?? '').trim(),
@@ -1230,6 +1272,7 @@ function toTaskSummary(
     chairName: members.find((member) => member.role === 'chair')?.name ?? null,
     memberNames: previews.map((member) => member.name).filter(Boolean),
     members: previews,
+    hasOpenCheckpoint,
   };
 }
 
@@ -1243,7 +1286,8 @@ export async function listGroupTaskSummaries(
   const tasks = store.listTasks({ ...filter, includeArchived: false });
   const membersByTask = tasks.map((task) => store.listMembers(task.id));
   const avatarById = buildMetabotAvatarMap(membersByTask.flat().map((member) => member.metabotId));
-  return tasks.map((task, index) => toTaskSummary(task, membersByTask[index] ?? [], avatarById));
+  return tasks.map((task, index) =>
+    toTaskSummary(task, membersByTask[index] ?? [], avatarById, store.getOpenCheckpoint(task.id) != null));
 }
 
 /** Archived tasks (Settings restore panel), newest archive first. */
@@ -1254,7 +1298,8 @@ export async function listArchivedGroupTasks(
   const tasks = store.listArchivedTasks(options);
   const membersByTask = tasks.map((task) => store.listMembers(task.id));
   const avatarById = buildMetabotAvatarMap(membersByTask.flat().map((member) => member.metabotId));
-  return tasks.map((task, index) => toTaskSummary(task, membersByTask[index] ?? [], avatarById));
+  return tasks.map((task, index) =>
+    toTaskSummary(task, membersByTask[index] ?? [], avatarById, store.getOpenCheckpoint(task.id) != null));
 }
 
 export async function countArchivedGroupTasks(): Promise<number> {
@@ -2379,6 +2424,10 @@ export async function reworkGroupTask(
       `${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  // Task #83 audit (F2a): the rework voids the acceptance summary the owner
+  // was already notified about — stamp it superseded and retract it on the
+  // origin-session rail.
+  retractGroupTaskReviewOnRework(task);
   // Ledger fix (#14→#16): the chair's reject (rework) is a verdict on the
   // CURRENT deliverables — pending rows become 'rejected' so the acceptance
   // history stays traceable in the ledger; a corrected re-delivery re-opens
@@ -2925,6 +2974,9 @@ export async function reopenGroupTask(
       `${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  // Task #83 audit (F2a): same retraction as the chair rework path — void +
+  // re-notify the already-delivered acceptance summary.
+  retractGroupTaskReviewOnRework(task);
   return getGroupTask(taskId);
 }
 

@@ -441,6 +441,12 @@ export interface GroupTaskAcceptanceSummary {
   publishedGroupPinId: string | null;
   /** Source session that received the R2 acceptance notification, if any. */
   notifiedSession: string | null;
+  /**
+   * Task #83 audit (F2a): set when a review→executing rework voided this
+   * already-notified summary. NULL = still authoritative; the acceptance card
+   * surfaces the stamp so the owner never acts on a retracted review.
+   */
+  supersededAt: string | null;
 }
 
 export interface CreateGroupTaskInput {
@@ -655,6 +661,7 @@ interface GroupTaskAcceptanceSummaryRow {
   generated_at: string | null;
   published_group_pin_id: string | null;
   notified_session: string | null;
+  superseded_at?: string | null;
 }
 
 interface GroupTaskSupervisorSignalRow {
@@ -995,6 +1002,7 @@ function rowToGroupTaskAcceptanceSummary(
     generatedAt: row.generated_at ?? null,
     publishedGroupPinId: row.published_group_pin_id ?? null,
     notifiedSession: row.notified_session ?? null,
+    supersededAt: row.superseded_at ?? null,
   };
 }
 
@@ -1577,6 +1585,30 @@ export class GroupTaskStore {
       [taskId],
     );
     return rows.map(rowToGroupTaskAcceptanceSummary);
+  }
+
+  /**
+   * Task #83 audit (F2a): a review→executing rework voids every summary the
+   * owner was already notified about (outcome still null). Stamp them
+   * superseded so the acceptance card and the audit trail show the
+   * retraction instead of presenting a stale review as current. Returns the
+   * superseded versions (empty when nothing was open — e.g. rework before
+   * the first summary). Idempotent: already-stamped rows are untouched.
+   */
+  supersedeOpenAcceptanceSummaries(taskId: number): number[] {
+    const open = this.getAll<{ id: number; version: number }>(
+      `SELECT id, version FROM group_task_acceptance_summaries
+       WHERE task_id = ? AND outcome IS NULL AND superseded_at IS NULL`,
+      [taskId],
+    );
+    if (open.length === 0) return [];
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries SET superseded_at = datetime('now')
+       WHERE task_id = ? AND outcome IS NULL AND superseded_at IS NULL`,
+      [taskId],
+    );
+    this.saveDb();
+    return open.map((row) => row.version);
   }
 
   /** Record the pin of the group message that published the latest summary. */
@@ -2804,6 +2836,28 @@ export class GroupTaskStore {
     );
     this.saveDb();
     return true;
+  }
+
+  /**
+   * Task #83 audit (P6): one-time repair for legacy closes that predated
+   * close-time comm stamping — closed tasks with NULL comm stats get them
+   * recomputed from their group's message history. Additive and idempotent:
+   * already-stamped rows are never touched, so this is safe on every boot.
+   */
+  backfillTaskCommStats(): number {
+    const rows = this.getAll<{ id: number; group_id: string | null }>(
+      `SELECT id, group_id FROM group_tasks
+       WHERE status IN ('done', 'cancelled') AND comm_total_bytes IS NULL AND group_id IS NOT NULL`,
+    );
+    let stamped = 0;
+    for (const row of rows) {
+      try {
+        if (this.recordTaskCommStats(row.id, row.group_id)) stamped += 1;
+      } catch {
+        // best-effort repair — one bad row never blocks the rest
+      }
+    }
+    return stamped;
   }
 
   listRecentTaskCommStats(limit = 15): Array<{

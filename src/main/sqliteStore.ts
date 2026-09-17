@@ -1209,7 +1209,8 @@ export class SqliteStore {
         generated_by TEXT NOT NULL DEFAULT 'host',
         generated_at TEXT DEFAULT (datetime('now')),
         published_group_pin_id TEXT,
-        notified_session TEXT
+        notified_session TEXT,
+        superseded_at TEXT
       );
     `);
     this.db.run(`
@@ -1225,6 +1226,9 @@ export class SqliteStore {
     // Speedup R-06: time-breakdown snapshot column — idempotent, NULL = not
     // computed (summaries recorded before R-06 stay null).
     this.migrateGroupTaskAcceptanceSummariesTimeBreakdown();
+    // Task #83 audit (F2a): superseded-at column — a review→executing rework
+    // voids the already-notified summary; NULL = still authoritative.
+    this.migrateGroupTaskAcceptanceSummariesSupersededAt();
 
     // Improvement #4 (v1.3): plan-change resolutions the chair posts in-group
     // with a [PLAN_CHANGE: ...] tag (original plan -> blocker -> fallback).
@@ -2672,6 +2676,21 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskAcceptanceSummariesTimeBreakdown:', error);
+    }
+  }
+
+  private migrateGroupTaskAcceptanceSummariesSupersededAt(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_acceptance_summaries)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('superseded_at')) {
+        this.db.run(
+          'ALTER TABLE group_task_acceptance_summaries ADD COLUMN superseded_at TEXT;',
+        );
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskAcceptanceSummariesSupersededAt:', error);
     }
   }
 

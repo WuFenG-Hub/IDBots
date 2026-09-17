@@ -788,6 +788,32 @@ export function buildSourceSessionCheckpointNotice(input: {
   ].join('\n');
 }
 
+/**
+ * Task #83 audit (F3): re-reminder when an open checkpoint has waited with NO
+ * owner reply for a long stretch — the opening notice may have been missed,
+ * and the whole group stays paused meanwhile.
+ */
+export function buildSourceSessionCheckpointStallNotice(input: {
+  title: string;
+  status: string;
+  topic: string | null;
+  waitingMinutes: number;
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const topic = (input.topic ?? '').trim();
+  if (language === 'en') {
+    return [
+      `[GROUP_TASK_CHECKPOINT] Group task "${input.title}" (status: ${input.status}) is still paused at a decision point${topic ? ` (${topic})` : ''} — no reply from you for ~${input.waitingMinutes} min.`,
+      'The group cannot resume until you rule. Reply in the task group or to the chair directly; if this wait is intentional, no action is needed (this reminder fires once per checkpoint).',
+      taskPanelPointerLine(language),
+    ].join('\n');
+  }
+  return [
+    `[GROUP_TASK_CHECKPOINT] 群任务「${input.title}」（状态：${input.status}）仍停在人工检查点${topic ? `（${topic}）` : ''}——已约 ${input.waitingMinutes} 分钟未收到你的裁定。`,
+    '在你裁定之前整组保持暂停。请在任务群内回复或直接回复 chair；若有意搁置可忽略（每个检查点只提醒一次）。',
+    taskPanelPointerLine(language),
+  ].join('\n');
+}
+
 export function buildSourceSessionAnomalyNotice(input: {
   title: string;
   status: string;
@@ -805,6 +831,30 @@ export function buildSourceSessionAnomalyNotice(input: {
     input.summary.trim(),
     taskPanelPointerLine(language),
   ].join('\n');
+}
+
+/**
+ * Task #83 audit (F2a): owner-facing retraction notice — a review→executing
+ * rework voided the acceptance summary the owner was already notified about.
+ * Rides the anomaly rail so the owner's card never silently points at a
+ * review that no longer stands.
+ */
+export function buildSourceSessionReviewRetractedNotice(input: {
+  title: string;
+  status: string;
+  voidedVersions: number[];
+}, language: AppLanguage = groupTaskLanguage()): string {
+  const versions = input.voidedVersions.map((version) => `v${version}`).join(', ');
+  return buildSourceSessionAnomalyNotice({
+    title: input.title,
+    status: input.status,
+    summary: language === 'en'
+      ? `The chair reopened the task for rework. Acceptance summary ${versions} — already delivered to you — is ` +
+        'no longer authoritative and has been marked superseded; a fresh summary and acceptance card are ' +
+        'generated at the next review entry.'
+      : `chair 已将任务打回返工。此前送达你的验收摘要 ${versions} 已作废（已标记 superseded），不再代表当前状态；` +
+        '下一次进入验收时会生成新的摘要与验收卡。',
+  }, language);
 }
 
 export function copyRespondingPlaceholder(language: AppLanguage = groupTaskLanguage()): string {

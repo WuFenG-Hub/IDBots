@@ -47,6 +47,7 @@ const {
   setGroupTaskServiceOpenTeamMembershipStoreGetter,
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
+  setGroupTaskSourceSessionNotifier,
   setGroupTaskServiceStaffingSessionMessagesLoader,
   setGroupTaskServiceStaffingIntentJudge,
   setGroupTaskAcceptanceNotifier,
@@ -884,6 +885,48 @@ test('P0-5: reworkGroupTask moves review→executing with transition log; guards
     const shown = await getGroupTask(detail.id, { view: 'summary' });
     assert.ok(shown.transitions.length >= 2);
   } finally {
+    h.cleanup();
+  }
+});
+
+test('Task #83 F2a: reworkGroupTask supersedes the delivered summary, retracts it once, and stays idempotent', async () => {
+  const h = await createHarness();
+  const milestones = [];
+  try {
+    const detail = await createGroupTask({
+      title: 'F2a retraction', goal: 'void the stale card', memberMetabotIds: [2],
+      createdBy: 'user', sourceSessionId: 'session-f2a',
+    });
+    h.groupTaskStore.updateTaskStatusWithLog(detail.id, 'executing', { actor: 'Twin Bot' });
+    h.groupTaskStore.updateTaskStatusWithLog(detail.id, 'review', { actor: 'Twin Bot' });
+    const summary = h.groupTaskStore.saveAcceptanceSummary({
+      taskId: detail.id, goal: 'g', deliverables: [], members: [], guidance: 'x',
+    });
+    assert.equal(summary.version, 1);
+    setGroupTaskSourceSessionNotifier(({ targetSessionId, message }) => {
+      milestones.push({ targetSessionId, message });
+      return { ok: true };
+    });
+
+    await groupTaskService.reworkGroupTask(detail.id, { actorMetabotId: 1, reason: 'not on the ledger yet' });
+
+    const voided = h.groupTaskStore.getLatestAcceptanceSummary(detail.id);
+    assert.ok(voided.supersededAt, 'the delivered summary is stamped superseded');
+    const retractions = milestones.filter((m) => /作废|no longer authoritative/.test(m.message));
+    assert.equal(retractions.length, 1, 'exactly one retraction reached the origin session');
+    assert.equal(retractions[0].targetSessionId, 'session-f2a');
+
+    // Re-review + re-rework with no NEW open summary: nothing more is voided
+    // or re-notified (the v1 stamp stands; the audit trail is append-only).
+    h.groupTaskStore.updateTaskStatusWithLog(detail.id, 'review', { actor: 'Twin Bot' });
+    await groupTaskService.reworkGroupTask(detail.id, { actorMetabotId: 1, reason: 'again' });
+    assert.equal(
+      milestones.filter((m) => /作废|no longer authoritative/.test(m.message)).length,
+      1,
+      'no open summary → no duplicate retraction',
+    );
+  } finally {
+    setGroupTaskSourceSessionNotifier(null);
     h.cleanup();
   }
 });
