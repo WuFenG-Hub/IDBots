@@ -576,6 +576,7 @@ export interface CoworkMemoryPolicy {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: 'strict' | 'standard' | 'relaxed';
   memoryUserMemoriesMaxItems: number;
+  dreamEnabled: boolean;
   hygieneEnabled: boolean;
   source: 'global' | 'metabot';
 }

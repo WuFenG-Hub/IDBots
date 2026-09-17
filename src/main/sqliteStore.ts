@@ -546,7 +546,8 @@ export class SqliteStore {
     // by the dream pipeline. CREATE TABLE IF NOT EXISTS is the idempotent
     // first-run migration; existing rows are never touched and no skill table
     // is modified (R4.3 — the skill registry stays untouched). `status`
-    // defaults to 'draft'; promotion/validation is a later phase.
+    // defaults to 'draft'; drafts are promoted to 'validated' (or demoted to
+    // 'rejected') by the dream-time capability validation pass.
     this.db.run(`
       CREATE TABLE IF NOT EXISTS capability_drafts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -563,6 +564,22 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_capability_drafts_metabot_created
       ON capability_drafts(metabot_id, created_at DESC);
     `);
+    // Validation metadata for the dream-time replay gate (Dream-RSI P0).
+    // PRAGMA-guarded and additive; pre-existing rows keep NULLs (= unvalidated).
+    try {
+      const draftCols = (this.db.exec('PRAGMA table_info(capability_drafts)')[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!draftCols.includes('validation_score')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN validation_score REAL');
+      }
+      if (!draftCols.includes('validation_notes')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN validation_notes TEXT');
+      }
+      if (!draftCols.includes('validated_at')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN validated_at INTEGER');
+      }
+    } catch (error) {
+      console.warn('migrate capability_drafts validation columns:', error);
+    }
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS metabot_memory_policies (
@@ -602,11 +619,27 @@ export class SqliteStore {
         attempt_count INTEGER NOT NULL DEFAULT 1,
         llm_id TEXT,
         error TEXT,
+        telemetry_json TEXT,
         started_at INTEGER NOT NULL,
         completed_at INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         UNIQUE(metabot_id, dream_date)
+      );
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_weekly_summaries (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        week_start TEXT NOT NULL,
+        week_end TEXT NOT NULL,
+        summary_text TEXT NOT NULL,
+        patterns_json TEXT NOT NULL DEFAULT '[]',
+        llm_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(metabot_id, week_start)
       );
     `);
 

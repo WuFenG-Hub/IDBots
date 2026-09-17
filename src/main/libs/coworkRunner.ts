@@ -5183,10 +5183,26 @@ export class CoworkRunner extends EventEmitter {
       limit: 5,
       offset: 0,
     });
+    // Dream-written work reviews (owner acceptance ratings + review comments)
+    // must guide everyday cowork turns too, not only group-task turns.
+    const workReviewEntries = this.getMemoryBackend().listUserMemories({
+      metabotId,
+      scope: createOwnerMemoryScope(),
+      usageClass: 'work_review',
+      status: 'created',
+      includeDeleted: false,
+      limit: 5,
+      offset: 0,
+    });
     const summaries = this.experienceStore?.listDailySummaries(metabotId, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
+    // Validated capability drafts (Dream-RSI P0): only drafts that survived
+    // the dream-time validation pass are injected as proven techniques.
+    const provenTechniques = this.store.listCapabilityDrafts(metabotId, { status: 'validated', limit: 5 });
     const experienceBlock = composeExperiencePromptBlocks({
       identityText: identityEntry?.text ?? null,
       valueBoundaries: valueBoundaryEntries,
+      workReviews: workReviewEntries,
+      provenTechniques,
       summaries,
     });
     // Knowledge hot-layer: surface the bot's most relevant reusable knowledge

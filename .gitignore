@@ -352,6 +352,11 @@ man_base_data_pebble/
 !tests/skillTurnTimeoutRecovery.test.mjs
 !tests/groupTaskOrchestrationBridge.test.mjs
 !tests/dreamService.test.mjs
+!tests/capabilityValidation.test.mjs
+!tests/counterfactualReplay.test.mjs
+!tests/dreamTelemetryWeekly.test.mjs
+!tests/guidanceBudget.test.mjs
+!tests/implicitSignalsGrounding.test.mjs
 !tests/memoryHygieneService.test.mjs
 !tests/llmFallback.test.mjs
 !tests/systemBrain.test.mjs

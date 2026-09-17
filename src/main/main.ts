@@ -3905,6 +3905,8 @@ const startSqliteDaemons = (): void => {
         offset: 0,
       }).map((entry) => ({ text: entry.text })),
     listDailySummaries: (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
+    listValidatedCapabilityDrafts: (metabotId) =>
+      getCoworkStore().listCapabilityDrafts(metabotId, { status: 'validated', limit: 5 }),
     buildTeamCultureBlock: () => {
       try {
         const cultureStore = getTeamCultureStore();
@@ -11121,6 +11123,7 @@ if (!gotTheLock) {
     memoryLlmJudgeEnabled?: boolean;
     memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems?: number;
+    dreamEnabled?: boolean;
     hygieneEnabled?: boolean;
   }) => {
     try {
@@ -11147,6 +11150,7 @@ if (!gotTheLock) {
             ? input.memoryUserMemoriesMaxItems
             : undefined,
         hygieneEnabled: typeof input?.hygieneEnabled === 'boolean' ? input.hygieneEnabled : undefined,
+        dreamEnabled: typeof input?.dreamEnabled === 'boolean' ? input.dreamEnabled : undefined,
       });
       return { success: true, policy };
     } catch (error) {

@@ -1201,6 +1201,7 @@ interface IElectronAPI {
       memoryLlmJudgeEnabled?: boolean;
       memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
       memoryUserMemoriesMaxItems?: number;
+      dreamEnabled?: boolean;
       hygieneEnabled?: boolean;
     }) => Promise<{ success: boolean; policy?: CoworkMemoryPolicy; error?: string }>;
     getMemoryHygiene: () => Promise<{

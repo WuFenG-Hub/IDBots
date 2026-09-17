@@ -28,8 +28,25 @@ export interface DreamRun {
   /** Algorithm version the run was made with; 0 = legacy, pre-versioning. */
   dreamVersion: number;
   error: string | null;
+  /** P2 telemetry: estimated tokens, fragment/validation/replay counts, duration. */
+  telemetry: Record<string, unknown> | null;
   startedAt: number;
   completedAt: number | null;
+}
+
+/** One weekly "long dream" row — the cross-day thematic consolidation (P2b). */
+export interface WeeklySummary {
+  id: string;
+  metabotId: number;
+  /** Monday of the reviewed week, YYYY-MM-DD. */
+  weekStart: string;
+  /** Sunday of the reviewed week, YYYY-MM-DD. */
+  weekEnd: string;
+  summaryText: string;
+  patterns: string[];
+  llmId: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface DreamFragment {
@@ -167,6 +184,23 @@ export interface DreamChainReadActivity {
   lastReadAtMs: number;
 }
 
+/** Structural implicit-signal kinds (mechanical facts, no sentiment). */
+export type DreamImplicitSignalKind = 'reask' | 'unanswered_burst' | 'repeat_order';
+
+/**
+ * One structural fact collected by the mechanical implicit-signal layer
+ * (libs/implicitSignals.ts). Carries numbers, never a sentiment label — what
+ * the fact means is the dreaming bot's call.
+ */
+export interface DreamImplicitSignal {
+  kind: DreamImplicitSignalKind;
+  sessionId: string | null;
+  /** For reask: index of the SECOND user message (the restated one). */
+  messageIndex?: number;
+  /** Rendered fact with numbers — no sentiment label attached. */
+  text: string;
+}
+
 export interface DreamDayActivity {
   sessions: DreamSessionActivity[];
   taskRuns: DreamTaskRunActivity[];
@@ -180,6 +214,8 @@ export interface DreamDayActivity {
   chainWrites?: DreamChainWriteActivity[];
   /** Chain pins this bot fully read that day (chain content history). */
   chainReads?: DreamChainReadActivity[];
+  /** Structural implicit signals, attached by the dream service post-query. */
+  implicitSignals?: DreamImplicitSignal[];
 }
 
 interface DreamRunRow {
@@ -191,8 +227,21 @@ interface DreamRunRow {
   llm_id: string | null;
   dream_version?: number | string | null;
   error: string | null;
+  telemetry_json?: string | null;
   started_at: number | string;
   completed_at: number | string | null;
+}
+
+interface WeeklySummaryRow {
+  id: string;
+  metabot_id: number | string;
+  week_start: string;
+  week_end: string;
+  summary_text: string;
+  patterns_json: string | null;
+  llm_id: string | null;
+  created_at: number | string;
+  updated_at: number | string;
 }
 
 interface DreamFragmentRow {
@@ -330,6 +379,22 @@ export class DreamStore {
         UNIQUE(metabot_id, dream_date, fragment_key)
       );
     `);
+    // P2b: weekly "long dream" — cross-day thematic consolidation over the
+    // previous ISO week's daily summaries.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_weekly_summaries (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        week_start TEXT NOT NULL,
+        week_end TEXT NOT NULL,
+        summary_text TEXT NOT NULL,
+        patterns_json TEXT NOT NULL DEFAULT '[]',
+        llm_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(metabot_id, week_start)
+      );
+    `);
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_metabot_dream_fragments_date
       ON metabot_dream_fragments(metabot_id, dream_date)
@@ -348,6 +413,10 @@ export class DreamStore {
       const columns = (cols[0]?.values || []).map((row) => String(row[1]));
       if (!columns.includes('dream_version')) {
         this.db.run('ALTER TABLE metabot_dream_runs ADD COLUMN dream_version INTEGER NOT NULL DEFAULT 0;');
+      }
+      // P2a telemetry: per-run estimated tokens + validation/replay counters.
+      if (!columns.includes('telemetry_json')) {
+        this.db.run('ALTER TABLE metabot_dream_runs ADD COLUMN telemetry_json TEXT;');
       }
     } catch (error) {
       console.warn('[DreamStore] Failed to verify metabot_dream_runs columns:', error);
@@ -431,6 +500,17 @@ export class DreamStore {
       llmId: row.llm_id ?? null,
       dreamVersion: parseIdNumber(row.dream_version) ?? 0,
       error: row.error ?? null,
+      telemetry: (() => {
+        if (!row.telemetry_json) return null;
+        try {
+          const parsed = JSON.parse(row.telemetry_json);
+          return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed as Record<string, unknown>
+            : null;
+        } catch {
+          return null;
+        }
+      })(),
       startedAt: Number(row.started_at),
       completedAt: row.completed_at === null ? null : Number(row.completed_at),
     };
@@ -520,6 +600,106 @@ export class DreamStore {
       [metabotId, dreamDate]
     );
     return row ? this.mapRunRow(row) : null;
+  }
+
+  /**
+   * P2a telemetry: attach the run's measured shape (estimated tokens, fragment
+   * count, validation/replay counters, duration) after completion. The dream
+   * policy can only be tuned once it is measurable — this is the evidence base
+   * for future DREAM_VERSION decisions.
+   */
+  updateRunTelemetry(metabotId: number, dreamDate: string, telemetry: Record<string, unknown>): void {
+    try {
+      this.db.run(`
+        UPDATE metabot_dream_runs
+        SET telemetry_json = ?, updated_at = ?
+        WHERE metabot_id = ? AND dream_date = ?
+      `, [JSON.stringify(telemetry), Date.now(), metabotId, dreamDate]);
+      this.saveDb();
+    } catch (error) {
+      console.warn('[DreamStore] Failed to write run telemetry:', error);
+    }
+  }
+
+  /** Newest-first weekly summaries within [dateFrom, dateTo] (YYYY-MM-DD, inclusive). */
+  listRunsInRange(metabotId: number, dateFrom: string, dateTo: string): DreamRun[] {
+    return this.getAll<DreamRunRow>(
+      `SELECT * FROM metabot_dream_runs
+       WHERE metabot_id = ? AND dream_date >= ? AND dream_date <= ?
+       ORDER BY dream_date DESC`,
+      [metabotId, dateFrom, dateTo],
+    ).map((row) => this.mapRunRow(row));
+  }
+
+  private mapWeeklySummaryRow(row: WeeklySummaryRow): WeeklySummary {
+    let patterns: string[] = [];
+    try {
+      const parsed = JSON.parse(row.patterns_json ?? '[]');
+      if (Array.isArray(parsed)) patterns = parsed.map((item) => String(item)).filter(Boolean);
+    } catch {
+      patterns = [];
+    }
+    return {
+      id: row.id,
+      metabotId: parseIdNumber(row.metabot_id) ?? 0,
+      weekStart: row.week_start,
+      weekEnd: row.week_end,
+      summaryText: row.summary_text,
+      patterns,
+      llmId: row.llm_id ?? null,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  /** Idempotent weekly write: one row per bot per ISO week, replaced wholesale. */
+  upsertWeeklySummary(input: {
+    metabotId: number;
+    weekStart: string;
+    weekEnd: string;
+    summaryText: string;
+    patterns: string[];
+    llmId: string | null;
+  }): void {
+    const now = Date.now();
+    this.db.run(`
+      INSERT INTO metabot_weekly_summaries (
+        id, metabot_id, week_start, week_end, summary_text, patterns_json, llm_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(metabot_id, week_start) DO UPDATE SET
+        week_end = excluded.week_end,
+        summary_text = excluded.summary_text,
+        patterns_json = excluded.patterns_json,
+        llm_id = excluded.llm_id,
+        updated_at = excluded.updated_at
+    `, [
+      uuidv4(),
+      input.metabotId,
+      input.weekStart,
+      input.weekEnd,
+      input.summaryText,
+      JSON.stringify(input.patterns),
+      input.llmId,
+      now,
+      now,
+    ]);
+    this.saveDb();
+  }
+
+  getWeeklySummary(metabotId: number, weekStart: string): WeeklySummary | null {
+    const row = this.getOne<WeeklySummaryRow>(
+      'SELECT * FROM metabot_weekly_summaries WHERE metabot_id = ? AND week_start = ? LIMIT 1',
+      [metabotId, weekStart],
+    );
+    return row ? this.mapWeeklySummaryRow(row) : null;
+  }
+
+  getLatestWeeklySummary(metabotId: number): WeeklySummary | null {
+    const row = this.getOne<WeeklySummaryRow>(
+      'SELECT * FROM metabot_weekly_summaries WHERE metabot_id = ? ORDER BY week_start DESC LIMIT 1',
+      [metabotId],
+    );
+    return row ? this.mapWeeklySummaryRow(row) : null;
   }
 
   /**

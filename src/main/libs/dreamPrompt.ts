@@ -403,6 +403,8 @@ export function buildDreamPrompt(input: {
   existingKnowledge?: DreamKnowledgeExisting[];
   /** Pre-dream surf report markdown ("做梦前自动冲浪"); rendered as its own section. */
   surfReport?: string | null;
+  /** P2b: latest weekly long-dream review, rendered as cross-day context. */
+  weeklyReview?: string | null;
 }): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const activityTokenBudget = Math.max(
@@ -493,11 +495,22 @@ export function buildDreamPrompt(input: {
   if (sourceMode !== 'fragment' && input.surfReport?.trim()) {
     sections.push(`## 今夜做梦前的 AI 互联网冲浪报告(你睡前的上网冲浪:新看到的内容、学到的知识、参与的互动——把它当作今晚 freshest 的一段经历来消化)\n${truncateText(input.surfReport.trim(), 2000)}`);
   }
+  if (sourceMode !== 'fragment' && input.weeklyReview?.trim()) {
+    sections.push(`## 上周长梦回顾(你对上一周跨天模式的总结——把今天的经历放进这个更大的脉络里审视,但它是参考而非束缚)\n${truncateText(input.weeklyReview.trim(), 1200)}`);
+  }
   if (input.activity.taskRuns.length > 0) {
     const taskLines = input.activity.taskRuns
       .map((run) => `- ${truncateText(run.taskName, 80)}(结果:${run.status})`)
       .join('\n');
     sections.push(`## 定时任务\n${taskLines}`);
+  }
+  // Implicit signals: mechanical facts only (no sentiment). The dream judges
+  // what they mean with full context; they never carry a verdict of their own.
+  if (sourceMode !== 'fragment' && (input.activity.implicitSignals ?? []).length > 0) {
+    const signalLines = (input.activity.implicitSignals ?? [])
+      .map((signal) => `- ${truncateText(signal.text, 200)}`)
+      .join('\n');
+    sections.push(`## 当日隐式信号(以下只是结构化事实,不代表负面,请结合上方对话上下文自行判断它们意味着什么)\n${signalLines}`);
   }
   const groupTaskItems = sourceMode === 'fragment' ? [] : (input.activity.groupTasks ?? []);
   const acceptedGroupTasks = groupTaskItems.filter((task) => !isActiveGroupTask(task));
@@ -631,7 +644,7 @@ export function buildDreamPrompt(input: {
     '  "important_memories": ["由你自己判断的、值得长期记住的重要事项,每条一句话,最多 5 条;没有值得记的可以给空数组"],',
     '  "value_lessons": [',
     '    {',
-    '      "rule": "从今天经历中蒸馏出的价值边界/行为准则,必须是抽象、范式化的表述——例如「在涉及个人痛苦的话题上要更谨慎」「面对自己不确定的问题,不要不懂装懂」;不要写成「我不该和用户说那句话」这种具体琐事",',
+    '      "rule": "从今天经历中蒸馏出的价值边界,必须是抽象、范式化的表述——例如「在涉及个人痛苦的话题上要更谨慎」「面对自己不确定的问题,不要不懂装懂」;不要写成「我不该和用户说那句话」这种具体琐事。写成「边界」(什么情况不该做、要停下来),不要写成「指令」(什么情况都必须怎么做)——它约束的是已知的坑,给未来的选择保留探索和变化的空间",',
     '      "source": "这条准则蒸馏自今天的哪段具体经历(一句话)"',
     '    }',
     '  ],',
@@ -670,6 +683,7 @@ export function buildDreamPrompt(input: {
     '关于人类逐条消息评价:会话里你的回复若带〔人类评价:赞〕标记,表示人类明确认可这条回复——总结它具体好在哪里,把可复用的做法蒸馏进 important_memories 或写进 work_reviews;若带〔人类评价:踩〕标记,表示人类不认可——work_reviews 与 value_lessons 必须正视这些负反馈,不得回避;附有〔人类留言〕时,留言是改进的第一手依据(ground truth),要对照留言给出具体改进方向。',
     '关于知识点(knowledge_points):只提炼「对未来同类任务有预判帮助、可被复用」的知识点——要么是正面做法(know_how:下次该这么做),要么是坑/反例(pitfall:这个踩过,千万别再踩),要么是通用原则(principle)。不要把今天的琐碎流水、或只对本次有效的临时细节写成知识点。若上方「我已有的知识点」里有某条的结论今天被证伪、补充或修正,请用与那条完全相同的 topic 输出更新版本(系统会按 topic 匹配并升版本);如果是全新的知识点,给一个独立的新 topic。没有值得提炼的就给空数组,不要硬凑。',
     '关于能力候选(capability_learnings):只提炼今天「重复出现过、或验证成功、值得沉淀为可复用技能/工作流/工具模式」的能力,最多 5 条;每条要具体、可操作,能指导下次同类任务,不要写泛泛的自我评价或琐碎流水;没有值得沉淀的就给空数组。',
+    '关于出处(grounding):daily_summary 和 sections 中的具体断言(谁、做了什么、结果如何)必须能在上方记录中找到出处;引用会话或任务时,使用它们的原标题「」;宁可少写一句,也不可编造没有记录支撑的细节。',
     '注意:work_reviews 最多 5 条,且升/降温评价只写人类主人;其他 Bot 的判断写进 impression_updates 的 capabilityTags 与 collaborationFacts(必须带 taskId、title、以及证据里出现过的 PinID,不要编造)。value_lessons 最多 3 条,impression_updates 最多 20 条,knowledge_points 最多 6 条,capability_learnings 最多 5 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
   ].join('\n');
 

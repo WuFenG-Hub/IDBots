@@ -5146,9 +5146,11 @@ async function processOne(
       operatorGuidance,
       maxIncomingTurns: metabot.a2a_max_incoming_turns ?? undefined,
     });
-    // Hot-layer experience injection (self-identity + value boundaries + recent
-    // dream summaries). These describe the bot itself, not the user, so they
-    // are intentionally present in A2A contexts; gated on the same memory policy.
+    // Hot-layer experience injection (self-identity + value boundaries + work
+    // reviews + recent dream summaries). These describe the bot itself, not the
+    // user, so they are intentionally present in A2A contexts; gated on the same
+    // memory policy. Work reviews were previously group-task-only; private chats
+    // benefit from the same acceptance-rating feedback.
     const experienceContext = memoryPolicy.memoryEnabled
       ? composeExperiencePromptBlocks({
           identityText: memoryBackend.listUserMemories({
@@ -5169,6 +5171,18 @@ async function processOne(
             limit: 5,
             offset: 0,
           }),
+          workReviews: memoryBackend.listUserMemories({
+            metabotId: metabot.id,
+            scope: createOwnerMemoryScope(),
+            usageClass: 'work_review',
+            status: 'created',
+            includeDeleted: false,
+            limit: 5,
+            offset: 0,
+          }),
+          // Validated capability drafts (Dream-RSI P0): only drafts that
+          // survived the dream-time validation pass are injected.
+          provenTechniques: coworkStore.listCapabilityDrafts(metabot.id, { status: 'validated', limit: 5 }),
           summaries: getRecentDailySummaries?.(metabot.id, RECENT_SUMMARIES_PROMPT_DAYS) ?? [],
         })
       : '';

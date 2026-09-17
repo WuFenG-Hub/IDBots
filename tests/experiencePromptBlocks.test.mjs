@@ -57,7 +57,7 @@ test('buildValueBoundariesBlock renders the rules block capped by maxItems', () 
   ]);
   assert.ok(block.includes('<value_boundaries>'));
   assert.equal((block.match(/<rule>/g) || []).length, 2, 'blank entries skipped');
-  assert.ok(block.includes('self-grown code of conduct'));
+  assert.ok(block.includes('boundaries, not scripts'));
 
   const capped = buildValueBoundariesBlock(
     Array.from({ length: 8 }, (_, i) => ({ text: `准则${i}` })),

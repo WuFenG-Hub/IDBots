@@ -768,6 +768,24 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     }
   };
 
+  // Per-bot dream participation: same per-bot policy row as hygiene, surfaced
+  // in the Dream diary section where the owner looks for dream controls.
+  const handleToggleBotDream = async (next: boolean) => {
+    if (metabotId == null) return;
+    setDreamRunning(true);
+    setDreamNotice(null);
+    try {
+      const saved = await coworkService.setMemoryPolicy({ metabotId, dreamEnabled: next });
+      if (!saved) throw new Error(i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
+      setPolicy(saved);
+      setDreamNotice(i18nService.t(next ? 'memoryDreamBotEnabled' : 'memoryDreamBotDisabled'));
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
+    } finally {
+      setDreamRunning(false);
+    }
+  };
+
   const handleRunHygieneNow = async () => {
     setHygieneRunning(true);
     setHygieneNotice(null);
@@ -1310,6 +1328,13 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
   const renderDream = () => (
     <div className="space-y-3">
+      <ToggleRow
+        label={i18nService.t('memoryDreamBotToggle')}
+        hint={i18nService.t('memoryDreamBotToggleHint')}
+        checked={policy?.dreamEnabled ?? true}
+        onChange={(value) => { void handleToggleBotDream(value); }}
+        disabled={metabotId == null || dreamRunning}
+      />
       <div className="flex items-center justify-between gap-2">
         <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
           {i18nService.t('memoryDreamHint')}

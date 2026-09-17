@@ -580,6 +580,7 @@ contextBridge.exposeInMainWorld('electron', {
       memoryLlmJudgeEnabled?: boolean;
       memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
       memoryUserMemoriesMaxItems?: number;
+      dreamEnabled?: boolean;
       hygieneEnabled?: boolean;
     }) =>
       ipcRenderer.invoke('cowork:memory:setPolicy', input),

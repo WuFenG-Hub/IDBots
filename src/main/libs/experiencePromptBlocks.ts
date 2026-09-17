@@ -4,17 +4,25 @@ import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 /**
  * Experience prompt blocks — the hot layer of the tiered experience system.
  *
- * Pure builders for the two always-on blocks injected into a bot's system
- * prompt: the protected self-identity entry ("我是谁", written by the dream
- * service) and the last few days' daily summaries. Warm/cold layers are not
- * injected; they are reached through the experience_recall tool, whose query
- * defaults and result formatting also live here.
+ * Pure builders for the always-on blocks injected alongside a bot's prompt:
+ * the protected self-identity entry ("我是谁", written by the dream service),
+ * dream-distilled value boundaries, past work reviews, and the last few days'
+ * daily summaries. Warm/cold layers are not injected; they are reached through
+ * the experience_recall tool, whose query defaults and result formatting also
+ * live here.
  */
 
 export const RECENT_SUMMARIES_PROMPT_DAYS = 7;
 export const RECENT_SUMMARIES_MAX_CHARS = 2000;
 export const RECALL_WARM_DAYS = 30;
 export const RECALL_MAX_LIMIT = 30;
+/**
+ * Dream-RSI §5.1 guardrail: semantic guidance over-constrains behavior when it
+ * crowds the context. The three guidance blocks (value boundaries, work
+ * reviews, proven techniques) share one char budget; when over it, the
+ * least-distilled layer is trimmed first (techniques → reviews → boundaries).
+ */
+export const GUIDANCE_MAX_CHARS = 3000;
 // Dream diaries now scale with the day's activity, so recall must not clip a
 // rich day back to a fixed blurb. 1500 chars still keeps a 30-day recall bounded.
 const RECALL_ENTRY_MAX_CHARS = 1500;
@@ -76,7 +84,8 @@ export function buildValueBoundariesBlock(entries: Array<{ text: string }>, maxI
     '</value_boundaries>',
     '<instruction>',
     'The &lt;value_boundaries&gt; block lists rules you distilled from your own past experiences.',
-    'They are your self-grown code of conduct: honor them in how you act and respond.',
+    'They are boundaries, not scripts: they delimit what to avoid, and you honor them — but when a',
+    'situation genuinely calls for a different approach, adapt deliberately rather than following blindly.',
     '</instruction>',
   ].join('\n');
 }
@@ -140,19 +149,74 @@ export function buildRecentDailySummariesBlock(
   ].join('\n');
 }
 
+/**
+ * Validated capability drafts ("proven techniques"): dream-distilled skills
+ * and workflows that survived the dream-time validation pass against recorded
+ * history. Injected as available options the bot may apply when the situation
+ * matches — never as standing orders (Dream-RSI §5.1: strong semantic
+ * directives over-constrain behavior).
+ */
+export function buildProvenTechniquesBlock(
+  entries: Array<{ title: string; description?: string | null }>,
+  maxItems = 5,
+): string {
+  const items = entries
+    .map((entry) => ({
+      title: entry.title?.trim(),
+      description: entry.description?.trim() ?? '',
+    }))
+    .filter((entry) => Boolean(entry.title))
+    .slice(0, Math.max(1, maxItems));
+  if (items.length === 0) return '';
+  return [
+    '<proven_techniques>',
+    ...items.map((entry) => `  <technique name="${escapeXml(entry.title!)}">${escapeXml(entry.description)}</technique>`),
+    '</proven_techniques>',
+    '<instruction>',
+    'The &lt;proven_techniques&gt; block lists techniques you distilled in past dreams AND validated',
+    'against your own recorded history. When a new task matches one, apply it; when none match, work',
+    'as usual. These are proven options, not standing orders.',
+    '</instruction>',
+  ].join('\n');
+}
+
 export function buildExperiencePromptBlocksXml(input: {
   identityText?: string | null;
   summaries: ExperienceSummaryLike[];
   valueBoundaries?: Array<{ text: string }>;
   workReviews?: Array<{ text: string }>;
+  provenTechniques?: Array<{ title: string; description?: string | null }>;
   maxChars?: number;
 }): string {
-  return [
-    input.identityText ? buildSelfIdentityBlock(input.identityText) : '',
-    buildValueBoundariesBlock(input.valueBoundaries ?? []),
-    buildWorkReviewsBlock(input.workReviews ?? []),
-    buildRecentDailySummariesBlock(input.summaries, input.maxChars),
-  ]
+  const identityBlock = input.identityText ? buildSelfIdentityBlock(input.identityText) : '';
+  const summariesBlock = buildRecentDailySummariesBlock(input.summaries, input.maxChars);
+
+  // §5.1 guardrail (Dream-RSI): semantic guidance over-constrains behavior
+  // when it crowds the context. The three guidance blocks share one char
+  // budget; when over it, trim the least-distilled layer first — techniques,
+  // then reviews, and boundaries last (they are the hardest-won rules).
+  const boundaries = input.valueBoundaries ?? [];
+  const reviews = input.workReviews ?? [];
+  const techniques = input.provenTechniques ?? [];
+  const capLadder: Array<[number, number, number]> = [
+    [5, 5, 5],
+    [5, 5, 3],
+    [5, 3, 0],
+    [3, 0, 0],
+  ];
+  let guidanceBlocks: string[] = [];
+  for (const [boundaryCap, reviewCap, techniqueCap] of capLadder) {
+    // The builders clamp maxItems to ≥1, so a 0 cap must skip the block here.
+    guidanceBlocks = [
+      boundaryCap > 0 ? buildValueBoundariesBlock(boundaries, boundaryCap) : '',
+      reviewCap > 0 ? buildWorkReviewsBlock(reviews, reviewCap) : '',
+      techniqueCap > 0 ? buildProvenTechniquesBlock(techniques, techniqueCap) : '',
+    ];
+    const totalChars = guidanceBlocks.reduce((sum, block) => sum + block.length, 0);
+    if (totalChars <= GUIDANCE_MAX_CHARS) break;
+  }
+
+  return [identityBlock, ...guidanceBlocks, summariesBlock]
     .filter((block) => block.trim())
     .join('\n\n');
 }

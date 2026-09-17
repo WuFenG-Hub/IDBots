@@ -1134,6 +1134,7 @@ class CoworkService {
     memoryLlmJudgeEnabled?: boolean;
     memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
     memoryUserMemoriesMaxItems?: number;
+    dreamEnabled?: boolean;
     hygieneEnabled?: boolean;
   }): Promise<CoworkMemoryPolicy | null> {
     const api = window.electron?.cowork?.setMemoryPolicy;

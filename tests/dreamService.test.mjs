@@ -189,9 +189,11 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
     assert.ok(calls.some((call) => call.user.includes('分块提炼阶段')));
     assert.ok(calls.some((call) => call.user.includes('分块证据摘要')));
     assert.ok(calls.some((call) => call.maxTokens === 4096), 'fragment calls use a compact output budget');
-    assert.equal(calls.at(-1).maxTokens, 32768, 'final synthesis uses the default model output limit');
+    // Post-dream passes (capability validation / counterfactual replay) run
+    // AFTER the dream call, so locate the synthesis by content, not position.
     const synthesisCall = calls.find((call) => call.user.includes('分块证据摘要'));
     assert.ok(synthesisCall, 'fragment synthesis call exists');
+    assert.equal(synthesisCall.maxTokens, 32768, 'final synthesis uses the default model output limit');
     assert.ok(synthesisCall.user.includes('## 当日写入链上的内容'), 'synthesis keeps published chain content');
     assert.ok(synthesisCall.user.includes('今天试了链上记录功能'), 'synthesis renders the write text');
     assert.ok(synthesisCall.user.includes('## 当日阅读的链上内容'), 'synthesis keeps read chain content');
@@ -200,12 +202,14 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
     const callsBefore = calls.length;
 
     await ctx.service.runNow(5, DAY);
-    assert.equal(calls.length, callsBefore + 1, 'a retry reuses completed fragments and only reruns synthesis');
+    // Retry = synthesis + counterfactual replay (the repetitive fixture day
+    // yields an implicit re-ask signal); fragments stay cached.
+    assert.equal(calls.length, callsBefore + 2, 'a retry reuses completed fragments and only reruns synthesis + post-dream passes');
     assert.deepEqual(
       ctx.dreamStore.listDreamFragments(5, DAY).map((fragment) => fragment.attemptCount),
       attemptsBefore,
     );
-    const retriedSynthesis = calls.at(-1);
+    const retriedSynthesis = calls.slice(callsBefore).find((call) => call.user.includes('分块证据摘要'));
     assert.ok(retriedSynthesis.user.includes('## 当日写入链上的内容'), 'retried synthesis still carries chain content');
   } finally {
     ctx.cleanup();

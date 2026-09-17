@@ -1806,6 +1806,8 @@ export interface GroupTaskDaemonDeps {
   chairResponseRedriveMs?: number;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
+  /** Dream-validated capability drafts ("proven techniques") for the experience block. */
+  listValidatedCapabilityDrafts?: (metabotId: number) => Array<{ title: string; description: string }>;
   getMetaIDGroupCognitionPromptBlock?: (input: {
     observerGlobalMetaID: string;
     roster: Array<{ globalMetaID: string | null; name: string; role: 'chair' | 'worker' }>;
@@ -3497,11 +3499,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // Past work reviews (dream-written, aligned with the owner's acceptance
       // ratings) — the recall path that keeps prior group-task feedback in play.
       const workReviews = deps.listUserMemories?.(bot.id, { usageClass: 'work_review', limit: 5 }) ?? [];
+      const provenTechniques = deps.listValidatedCapabilityDrafts?.(bot.id) ?? [];
       const summaries = deps.listDailySummaries?.(bot.id, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
       const block = buildExperiencePromptBlocksXml({
         identityText: identityEntry?.text ?? null,
         valueBoundaries,
         workReviews,
+        provenTechniques,
         summaries,
       }).trim();
       if (!block) return '';
