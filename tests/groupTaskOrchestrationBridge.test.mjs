@@ -412,3 +412,157 @@ test('orphan ready steps (restart-recovery fossils) are auto-cancelled and do NO
     h.sqliteStore.close();
   }
 });
+
+/* ------------------------------------------------------------------------- *
+ * v1.4: acceptance IS closure (owner ruling C) + board-sweep self-heal (D).
+ *   - acceptGroupTask writes the neutral owner closure record when the
+ *     canonical carries none, and never overwrites an existing one;
+ *   - healAcceptedGroupTaskCards catches the detached pre-v1.4 pairs
+ *     (canonical closed by a human, group task still in review), skipping
+ *     any pair it cannot heal instead of throwing.
+ * ------------------------------------------------------------------------- */
+
+test('v1.4: acceptance records the neutral owner closure when the canonical has none', async (t) => {
+  const h = await makeHarness();
+  try {
+    const started = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'Build the MetaApp',
+      sourceMessageKey: 'closure-auto-i0',
+    });
+    h.bridge.markWorkerAttemptRunning(started.attempt.id, 'session-closure-auto');
+    h.bridge.completeWorkerAttempt({
+      attemptId: started.attempt.id,
+      replyText: '[DELIVERABLE] metaapp: metaapp://closure-auto',
+      groupMessagePinId: 'closure-auto-deliverable-i0',
+    });
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'executing');
+    h.bridge.syncStatus(h.groupTask.id);
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'review');
+    h.bridge.syncStatus(h.groupTask.id);
+
+    assert.equal(h.orchestrationStore.hasClosureRecord(started.task.id), false, 'precondition: not closed yet');
+    h.bridge.acceptGroupTask(h.groupTask.id);
+
+    assert.equal(h.orchestrationStore.hasClosureRecord(started.task.id), true, 'acceptance records closure');
+    const mark = h.orchestrationStore.getClosureMark(started.task.id);
+    assert.equal(mark.conclusion, null, 'the acceptance record invents no conclusion');
+    assert.equal(mark.by, 'owner');
+    assert.ok(mark.at, 'closure_at is stamped');
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('v1.4: an existing closure record survives acceptance untouched (idempotent)', async () => {
+  const h = await makeHarness();
+  try {
+    const canonical = h.bridge.ensureCanonicalTask(h.groupTask.id);
+    // The board closed this card earlier with a real instruction.
+    h.orchestrationStore.recordClosure(canonical.id, {
+      conclusion: 'board wrote this first',
+      by: 'owner',
+      pinId: null,
+    });
+    const markBefore = h.orchestrationStore.getClosureMark(canonical.id);
+
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'done', { actor: { kind: 'owner' } });
+    h.bridge.acceptGroupTask(h.groupTask.id);
+
+    const markAfter = h.orchestrationStore.getClosureMark(canonical.id);
+    assert.equal(markAfter.conclusion, 'board wrote this first', 'the earlier conclusion is not overwritten');
+    assert.equal(markAfter.at, markBefore.at, 'even the timestamp is untouched');
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('v1.4: healAcceptedGroupTaskCards catches a detached review pair up to done', async () => {
+  const h = await makeHarness();
+  try {
+    const started = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'Build the MetaApp',
+      sourceMessageKey: 'heal-ok-i0',
+    });
+    h.bridge.markWorkerAttemptRunning(started.attempt.id, 'session-heal-ok');
+    h.bridge.completeWorkerAttempt({
+      attemptId: started.attempt.id,
+      replyText: '[DELIVERABLE] metaapp: metaapp://heal-ok',
+      groupMessagePinId: 'heal-ok-deliverable-i0',
+    });
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'executing');
+    h.bridge.syncStatus(h.groupTask.id);
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'review');
+    h.bridge.syncStatus(h.groupTask.id);
+
+    // The owner closed the canonical through the board; the group task
+    // lagged behind in review (the pre-v1.4 detached state).
+    h.orchestrationStore.recordClosure(started.task.id, { conclusion: null, by: 'owner' });
+
+    const report = h.bridge.healAcceptedGroupTaskCards();
+    assert.deepEqual(report.healed, [{ groupTaskId: h.groupTask.id, canonicalTaskId: started.task.id }]);
+    assert.equal(report.skipped.length, 0);
+    assert.equal(h.groupTaskStore.getTaskById(h.groupTask.id).status, 'done', 'the group task caught up');
+    assert.equal(h.orchestrationStore.getTask(started.task.id).status, 'completed');
+    // Healing is idempotent: a second pass has nothing left to do.
+    const second = h.bridge.healAcceptedGroupTaskCards();
+    assert.equal(second.healed.length, 0);
+    assert.equal(second.skipped.length, 0);
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('v1.4: heal skips unclosed canonicals and refused pairs, and never throws', async () => {
+  const h = await makeHarness();
+  try {
+    // Pair 1: review, canonical NOT closed -> skipped (nothing to catch up).
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'executing');
+    h.bridge.syncStatus(h.groupTask.id);
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'review');
+    h.bridge.syncStatus(h.groupTask.id);
+
+    // Pair 2: review, canonical closed, but a live queued step refuses
+    // acceptance -> the failure is a skip entry, not a throw.
+    const second = h.groupTaskStore.createTask({
+      groupId: 'group-heal-refused',
+      title: 'Refused pair',
+      goal: 'Goal',
+      chairMetabotId: 1,
+      createdBy: 'user',
+    });
+    const secondCanonical = h.bridge.ensureCanonicalTask(second.id);
+    const attempt = h.bridge.beginWorkerAttempt({
+      groupTaskId: second.id,
+      workerMetabotId: 2,
+      objective: 'still working',
+      sourceMessageKey: 'heal-refused-i0',
+    });
+    assert.equal(attempt.attempt.status, 'queued');
+    h.groupTaskStore.updateTaskStatus(second.id, 'executing');
+    h.bridge.syncStatus(second.id);
+    h.groupTaskStore.updateTaskStatus(second.id, 'review');
+    h.bridge.syncStatus(second.id);
+    h.orchestrationStore.recordClosure(secondCanonical.id, { conclusion: null, by: 'owner' });
+
+    const report = h.bridge.healAcceptedGroupTaskCards();
+    assert.equal(report.healed.length, 0);
+    assert.equal(report.skipped.length, 2, 'both pairs are reported as skips');
+    const skip1 = report.skipped.find((entry) => entry.groupTaskId === h.groupTask.id);
+    const skip2 = report.skipped.find((entry) => entry.groupTaskId === second.id);
+    assert.match(skip1.reason, /not closed out yet/);
+    assert.match(skip2.reason, /unfinished canonical step/i);
+    // Nothing moved: both group tasks are still in review, no closure wrote.
+    assert.equal(h.groupTaskStore.getTaskById(h.groupTask.id).status, 'review');
+    assert.equal(h.groupTaskStore.getTaskById(second.id).status, 'review');
+    assert.equal(h.orchestrationStore.hasClosureRecord(
+      h.bridge.ensureCanonicalTask(h.groupTask.id).id,
+    ), false);
+    assert.equal(h.orchestrationStore.getTask(secondCanonical.id).status, 'review');
+  } finally {
+    h.sqliteStore.close();
+  }
+});

@@ -7,6 +7,7 @@ import {
   setOnlyOwnerAction,
   setScope,
   setReceipt,
+  setError,
 } from '../../store/slices/trackedTaskSlice';
 import { trackedTaskService } from '../../services/trackedTask';
 import { i18nService } from '../../services/i18n';
@@ -133,14 +134,15 @@ const TrackedTasksSection: React.FC = () => {
   );
 
   const submitClose = useCallback(
-    async (input: { conclusion: string; by: 'owner' | 'twin' }) => {
+    // v1.4：弹窗收口固定 by='owner'（收口的就是人自己）；结论选填（null＝仅确认验收）。
+    async (input: { conclusion: string | null }) => {
       if (!closeTarget) return;
       setSubmitting(true);
       setCloseError(null);
       const outcome = await trackedTaskService.closeCard({
         cardId: closeTarget.id,
         conclusion: input.conclusion,
-        by: input.by,
+        by: 'owner',
       });
       setSubmitting(false);
       if (outcome.error) {

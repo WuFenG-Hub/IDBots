@@ -511,6 +511,14 @@ export class GroupTaskOrchestrationBridge {
     const closed = groupTask.status === 'done'
       ? groupTask
       : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'done', { actor: actor ?? { kind: 'system' } });
+    // v1.4 (owner ruling C): acceptance IS closure. When the canonical card
+    // carries no closure record yet, write the neutral owner record — the
+    // board flips the card to closed without inventing a conclusion, and the
+    // stale badge dies with it. Idempotent via the closure_at gate: an
+    // existing record (with or without a conclusion) is never overwritten.
+    if (!this.deps.orchestrationStore.hasClosureRecord(canonical.id)) {
+      this.deps.orchestrationStore.recordClosure(canonical.id, { conclusion: null, by: 'owner' });
+    }
     return { groupTask: closed, canonicalTask: canonical };
   }
 
@@ -528,5 +536,49 @@ export class GroupTaskOrchestrationBridge {
       ? groupTask
       : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'cancelled', { actor: actor ?? { kind: 'system' } });
     return { groupTask: cancelledGroup, canonicalTask: cancelledCanonical };
+  }
+
+  /**
+   * v1.4 board-sweep self-heal (owner ruling D): catches the detached pairs the
+   * pre-v1.4 board produced — the canonical card was closed by a human while
+   * the linked group task lagged behind in `review`. When the canonical now
+   * carries a closure record (acceptance happened) and `acceptGroupTask` can
+   * succeed, the group task catches up to `done`.
+   *
+   * Best-effort BY CONTRACT: any failure on one group task is recorded as a
+   * skip and NEVER thrown — the sweep that calls this must not die on one
+   * stuck pair, and unrelated cards must stay untouched.
+   */
+  healAcceptedGroupTaskCards(): {
+    healed: Array<{ groupTaskId: number; canonicalTaskId: string }>;
+    skipped: Array<{ groupTaskId: number; canonicalTaskId: string | null; reason: string }>;
+  } {
+    const healed: Array<{ groupTaskId: number; canonicalTaskId: string }> = [];
+    const skipped: Array<{ groupTaskId: number; canonicalTaskId: string | null; reason: string }> = [];
+    const reviewing = this.deps.groupTaskStore.listTasks({ status: 'review' });
+    for (const groupTask of reviewing) {
+      const canonicalTaskId = groupTask.orchestrationTaskId ?? null;
+      try {
+        if (!canonicalTaskId) {
+          skipped.push({ groupTaskId: groupTask.id, canonicalTaskId: null, reason: 'no canonical orchestration task linked' });
+          continue;
+        }
+        // Only accepted cards heal: a closure record on the canonical is the
+        // human acceptance this sync is catching the group task up with.
+        if (!this.deps.orchestrationStore.hasClosureRecord(canonicalTaskId)) {
+          skipped.push({ groupTaskId: groupTask.id, canonicalTaskId, reason: 'canonical card is not closed out yet' });
+          continue;
+        }
+        this.acceptGroupTask(groupTask.id);
+        healed.push({ groupTaskId: groupTask.id, canonicalTaskId });
+      } catch (error) {
+        skipped.push({
+          groupTaskId: groupTask.id,
+          canonicalTaskId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return { healed, skipped };
   }
 }

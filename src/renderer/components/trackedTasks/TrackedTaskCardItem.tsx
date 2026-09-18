@@ -68,7 +68,10 @@ const TrackedTaskCardItem: React.FC<TrackedTaskCardItemProps> = ({
         </span>
       )}
       {!card.closureDue && card.closureWarn && (
-        <span className="shrink-0 inline-flex items-center gap-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-500 px-1.5 py-[1px] text-[10px] font-semibold">
+        <span
+          title={i18nService.t('trackedTask.badge.closureWarnTooltip')}
+          className="shrink-0 inline-flex items-center gap-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-500 px-1.5 py-[1px] text-[10px] font-semibold"
+        >
           <ClockIcon className="w-3 h-3" />
           {i18nService.t('trackedTask.badge.closureWarn')}
         </span>

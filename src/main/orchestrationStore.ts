@@ -84,6 +84,31 @@ export interface CreateOrchestrationAttemptInput {
   prompt: string;
 }
 
+/**
+ * v1.4 closure semantics (owner ruling A): the closure columns on the ledger
+ * row have EXACTLY ONE writer — `OrchestrationStore.recordClosure`. The board's
+ * closeCard and the group-task acceptance path both go through it, so no second
+ * copy of the closure SQL can drift.
+ *
+ * `conclusion === null` means "accepted with no instruction": the human closed
+ * the card out without leaving a line for the Twin to execute. It never enters
+ * the pending-closure queue.
+ */
+export interface RecordClosureInput {
+  /** Trimmed closing conclusion, or NULL for a conclusion-free acceptance. */
+  conclusion: string | null;
+  by: 'owner' | 'twin';
+  pinId?: string | null;
+}
+
+/** The persisted closure mark as read back by `getClosureMark`. */
+export interface OrchestrationClosureMark {
+  conclusion: string | null;
+  by: string | null;
+  at: string | null;
+  pinId: string | null;
+}
+
 interface Row { [key: string]: unknown }
 
 const TASK_TRANSITIONS: Record<OrchestrationTaskStatus, OrchestrationTaskStatus[]> = {
@@ -316,6 +341,62 @@ export class OrchestrationStore {
     ]);
     this.saveDb();
     return this.getTask(id)!;
+  }
+
+  /**
+   * THE writer of the closure columns (v1.4, owner ruling A). The board's
+   * closeCard and the group-task acceptance path both call this — the closure
+   * SQL exists exactly once.
+   *
+   * One statement writes the four closure columns AND resets the five
+   * processing marks (T1, freeze doc §3.1): a NEW closure must never inherit
+   * the previous conclusion's ack, or a re-closed card's fresh instruction
+   * would be silently swallowed. `updated_at` is deliberately NOT touched —
+   * the idle/warn clock reads activity anchors, and a closure write alone must
+   * not reset it (the accepted card's stale-activity no-warn fix relies on
+   * closure_at, not on fresh activity).
+   */
+  recordClosure(id: string, input: RecordClosureInput): OrchestrationClosureMark {
+    const current = this.getTask(id);
+    if (!current) throw new Error(`Orchestration task ${id} not found`);
+    const conclusion = input.conclusion?.trim() || null;
+    this.db.run(
+      `UPDATE orchestration_tasks
+          SET closure_conclusion = ?, closure_by = ?, closure_at = ?, closure_pin_id = ?,
+              closure_processed_at = NULL, closure_processed_by = NULL, closure_processed_hash = NULL,
+              closure_receipt = NULL, closure_receipt_pin_id = NULL
+        WHERE id = ?`,
+      [conclusion, input.by, new Date().toISOString(), input.pinId ?? null, id],
+    );
+    this.saveDb();
+    return this.getClosureMark(id)!;
+  }
+
+  /** The persisted closure mark, or NULL when the task row does not exist. */
+  getClosureMark(id: string): OrchestrationClosureMark | null {
+    const row = this.getOne<Row>(
+      'SELECT closure_conclusion, closure_by, closure_at, closure_pin_id FROM orchestration_tasks WHERE id = ?',
+      [id],
+    );
+    if (!row) return null;
+    return {
+      conclusion: row.closure_conclusion == null ? null : String(row.closure_conclusion),
+      by: row.closure_by == null ? null : String(row.closure_by),
+      at: row.closure_at == null ? null : String(row.closure_at),
+      pinId: row.closure_pin_id == null ? null : String(row.closure_pin_id),
+    };
+  }
+
+  /**
+   * Whether the card carries a closure record (closure_at IS NOT NULL) — the
+   * v1.4 definition of "closed" (human acceptance recorded). Missing rows are
+   * never closed. Backward compatible: every historical writer (closeCard, the
+   * v1.1 startup backfill) wrote closure_at together with the conclusion, so
+   * no legacy row flips meaning.
+   */
+  hasClosureRecord(id: string): boolean {
+    const row = this.getOne<Row>('SELECT closure_at FROM orchestration_tasks WHERE id = ?', [id]);
+    return row != null && row.closure_at != null && String(row.closure_at) !== '';
   }
 
   createStep(input: CreateOrchestrationStepInput): OrchestrationStep {

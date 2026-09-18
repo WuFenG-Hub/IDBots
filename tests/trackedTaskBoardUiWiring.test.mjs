@@ -357,3 +357,108 @@ test('i18n: every new key exists in BOTH dictionaries', () => {
   assert.ok(!/[\u4e00-\u9fff]/.test(enDraftLine), 'en draft text carries no Chinese');
   assert.match(enDraftLine, /long-running task/, 'en draft keeps the intent');
 });
+
+/* ------------------------------------------------------------------------- *
+ * v1.4 (owner rulings C-G): closing a card IS the human acceptance.
+ * Static wiring pins for the modal, the badge tooltip, and the bridge linkage.
+ * ------------------------------------------------------------------------- */
+
+const itemSrc = read('src', 'renderer', 'components', 'trackedTasks', 'TrackedTaskCardItem.tsx');
+const closeModalSrc = read('src', 'renderer', 'components', 'trackedTasks', 'CloseTaskModal.tsx');
+const rendererTypesSrc = read('src', 'renderer', 'types', 'trackedTask.ts');
+const dtsCloseSrc = read('src', 'renderer', 'types', 'electron.d.ts');
+
+test('v1.4 modal: no close-by selector, empty conclusion submittable, acceptance copy', () => {
+  // The selector row and its state are gone; the modal renders no such control.
+  assert.doesNotMatch(closeModalSrc, /trackedTask\.close\.by/, 'no close-by i18n key rendered');
+  assert.doesNotMatch(closeModalSrc, /useState<'owner' \| 'twin'>/, 'no close-by state remains');
+  assert.doesNotMatch(closeModalSrc, /closure\.byOwner/, 'no owner/twin toggle buttons remain');
+  // The confirm button is gated ONLY by the in-flight submit, not by the text.
+  assert.match(closeModalSrc, /disabled=\{submitting\}/, 'an empty conclusion must be submittable');
+  assert.doesNotMatch(closeModalSrc, /disabled=\{!trimmed/, 'the old require-conclusion gate is gone');
+  // The submit payload normalizes the blank conclusion to null (acceptance only).
+  assert.match(closeModalSrc, /conclusion: conclusion\.trim\(\) \|\| null/, 'blank normalizes to NULL in the payload');
+  // New semantics, per key: title + confirm + placeholder + hint are all rendered.
+  assert.match(closeModalSrc, /'trackedTask\.close\.title'/);
+  assert.match(closeModalSrc, /'trackedTask\.close\.confirm'/);
+  assert.match(closeModalSrc, /'trackedTask\.close\.conclusionPlaceholder'/);
+  const hintAt = closeModalSrc.indexOf("'trackedTask.close.recordOnlyHint'");
+  const placeholderAt = closeModalSrc.indexOf("'trackedTask.close.conclusionPlaceholder'");
+  assert.ok(hintAt > placeholderAt > -1, 'the hint still sits below the conclusion input');
+});
+
+test('v1.4 wiring: the stale badge carries the tooltip key, present in BOTH dictionaries', () => {
+  assert.match(
+    itemSrc,
+    /title=\{i18nService\.t\('trackedTask\.badge\.closureWarnTooltip'\)\}/,
+    'the warn badge renders the tooltip via the i18n key',
+  );
+  const zhStart = i18nSrc.indexOf('  zh: {');
+  const enStart = i18nSrc.indexOf('  en: {');
+  const zhBlock = i18nSrc.slice(zhStart, enStart);
+  const enBlock = i18nSrc.slice(enStart);
+  const zhLine = zhBlock.split('\n').find((line) => line.includes("'trackedTask.badge.closureWarnTooltip'"));
+  const enLine = enBlock.split('\n').find((line) => line.includes("'trackedTask.badge.closureWarnTooltip'"));
+  assert.ok(zhLine, 'zh tooltip exists');
+  assert.ok(enLine, 'en tooltip exists');
+  assert.match(zhLine, /24 小时/, 'zh tooltip explains the 24h idle rule');
+  assert.match(enLine, /24 hours/, 'en tooltip explains the 24h idle rule');
+  // The dueLevel label says NOT closed out (acceptance semantics), not "no conclusion".
+  const zhLevel = zhBlock.split('\n').find((line) => line.includes("'trackedTask.dueLevel.terminalNoConclusion'"));
+  const enLevel = enBlock.split('\n').find((line) => line.includes("'trackedTask.dueLevel.terminalNoConclusion'"));
+  assert.match(zhLevel, /未收口/, 'zh level label uses the unclosed semantics');
+  assert.match(enLevel, /not closed out/i, 'en level label uses the unclosed semantics');
+});
+
+test('v1.4 wiring: the nullable conclusion rides renderer types -> service -> preload -> d.ts -> IPC', () => {
+  // Renderer type: conclusion nullable, by optional (UI pins owner).
+  assert.match(
+    rendererTypesSrc,
+    /conclusion: string \| null;/,
+    'TrackedCardClosureInput.conclusion is nullable',
+  );
+  // The renderer service passes the blank through as null instead of refusing.
+  assert.match(serviceSrc, /conclusion: input\.conclusion\?\.trim\(\) \|\| null/, 'service normalizes to NULL');
+  assert.match(serviceSrc, /by: input\.by \?\? 'owner'/, 'the UI-side close is pinned to the owner');
+  assert.doesNotMatch(
+    serviceSrc,
+    /A one-line closing conclusion is required/,
+    'the client-side empty-conclusion refusal is gone',
+  );
+  // Preload and its d.ts mirror stay nullable.
+  assert.match(preloadSrc, /conclusion: string \| null;/, 'preload close input is nullable');
+  assert.match(dtsCloseSrc, /conclusion: string \| null;/, 'the d.ts close input is nullable');
+  // The IPC handler declares the nullable conclusion too.
+  assert.match(mainSrc, /conclusion: string \| null;/, 'the trackedTask:close IPC input is nullable');
+});
+
+test('v1.4 wiring: the board is wired to the group-task bridge and the sweep self-heals first', () => {
+  // Dependency injection (type-only import, no runtime cycle).
+  assert.match(
+    boardSrc,
+    /import type \{ GroupTaskOrchestrationBridge \} from '\.\/groupTaskOrchestrationBridge';/,
+    'the board imports the bridge as a TYPE only',
+  );
+  assert.match(boardSrc, /resolveGroupTaskBridge\?: \(\) => GroupTaskOrchestrationBridge \| null;/);
+  assert.match(
+    mainSrc,
+    /resolveGroupTaskBridge: \(\) => getGroupTaskOrchestrationBridge\(\)/,
+    'main injects the bridge getter into the board',
+  );
+  // closeCard delegates to the bridge and rejects the whole card on refusal.
+  assert.match(boardSrc, /bridge\.acceptGroupTask\(groupTaskId, \{ kind: 'owner' \}\)/);
+  assert.match(boardSrc, /bridge\.cancelGroupTask\(groupTaskId, \{ kind: 'owner' \}\)/);
+  assert.match(
+    boardSrc,
+    /code: 'VALIDATION',\s*\n\s*error: error instanceof Error \? error\.message : String\(error\)/,
+    'the bridge error surfaces verbatim as a VALIDATION refusal',
+  );
+  // One closure writer: the board calls recordClosure, the inline UPDATE is gone.
+  assert.match(boardSrc, /orchestrationStore\.recordClosure\(/);
+  assert.doesNotMatch(boardSrc, /SET closure_conclusion = \?, closure_by = \?/, 'no second copy of the closure SQL');
+  // The daemon sweep heals the detached pairs BEFORE assessing the board.
+  const sweepAt = mainSrc.indexOf('sweepTrackedCards: () => {');
+  const healAt = mainSrc.indexOf('healAcceptedGroupTaskCards()');
+  const sweepCallAt = mainSrc.indexOf('getTrackedTaskBoard().sweep();', sweepAt);
+  assert.ok(sweepAt > -1 && healAt > sweepAt && sweepCallAt > healAt, 'heal runs before the sweep inside the tick');
+});

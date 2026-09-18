@@ -1480,7 +1480,8 @@ interface IElectronAPI {
     }>;
     close: (input: {
       cardId: string;
-      conclusion: string;
+      /** v1.4：结论可空——空白/留空＝仅确认验收，落库为 NULL。 */
+      conclusion: string | null;
       by: 'owner' | 'twin';
       targetStatus?: 'completed' | 'cancelled';
       pinId?: string | null;

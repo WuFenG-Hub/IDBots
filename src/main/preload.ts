@@ -880,7 +880,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('trackedTask:attachScheduledTasks', input),
     close: (input: {
       cardId: string;
-      conclusion: string;
+      /** v1.4: nullable — a blank/absent conclusion is acceptance without an instruction. */
+      conclusion: string | null;
       by: 'owner' | 'twin';
       targetStatus?: 'completed' | 'cancelled';
       pinId?: string | null;
