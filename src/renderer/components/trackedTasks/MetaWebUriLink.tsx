@@ -14,6 +14,23 @@ const BARE_PINID_PATTERN = '(?<![0-9a-f])[0-9a-f]{64}i0(?![0-9a-f])';
 /** URI 字符类只收 ASCII：CJK 全角标点天然截断，不会把括号、句号吞进候选串。 */
 const TOKEN_SOURCE = `(${METAWEB_URI_PATTERN})|(${BARE_PINID_PATTERN})`;
 
+/**
+ * 链接文字按 scheme 分色（owner 2026-09-18 反馈③，替换原来的统一 accent 色）：
+ * pin（含裸 pinid）= sky / metaapp = violet / metafile = emerald / metaid = amber。
+ */
+const URI_SCHEME_TEXT_CLASS: Record<string, string> = {
+  pin: 'text-sky-500 dark:text-sky-400',
+  metaapp: 'text-violet-500 dark:text-violet-400',
+  metafile: 'text-emerald-500 dark:text-emerald-400',
+  metaid: 'text-amber-500 dark:text-amber-400',
+};
+
+/** 只认四种 scheme；裸 pinId 已由调用侧拼成 pin://，因此无 scheme 时按 pin 处理。 */
+function uriScheme(uri: string): string {
+  const match = /^(pin|metaapp|metafile|metaid):\/\//.exec(uri);
+  return match ? match[1] : 'pin';
+}
+
 /** 用户点击 → 走既有 botBrowser:openUri 通道（App.tsx 已监听），URI 全量透传不截断。 */
 export function openMetaWebUri(uri: string): void {
   window.dispatchEvent(new CustomEvent('botBrowser:openUri', { detail: { uri, newTab: true } }));
@@ -26,7 +43,7 @@ interface MetaWebUriLinkProps {
 /**
  * 把文本中的 MetaWeb URI（pin:// metaapp:// metafile:// metaid://）与裸 pinId
  * （拼成 pin://<pinId>）渲染为可点链接，其余内容原样保留为纯文本。
- * 链接继承容器的 font-mono / break-all，只叠 accent 色、hover 下划线与外链图标。
+ * 链接继承容器的 font-mono / break-all，按 scheme 着色、hover 下划线与外链图标。
  */
 const MetaWebUriLink: React.FC<MetaWebUriLinkProps> = ({ text }) => {
   const nodes: React.ReactNode[] = [];
@@ -46,7 +63,7 @@ const MetaWebUriLink: React.FC<MetaWebUriLinkProps> = ({ text }) => {
           event.preventDefault();
           openMetaWebUri(uri);
         }}
-        className="break-all text-claude-accent hover:underline"
+        className={`break-all ${URI_SCHEME_TEXT_CLASS[uriScheme(uri)]} hover:underline`}
       >
         {token}
         <ArrowTopRightOnSquareIcon className="ml-0.5 inline h-3 w-3" />

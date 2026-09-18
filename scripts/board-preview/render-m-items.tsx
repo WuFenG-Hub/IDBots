@@ -280,7 +280,10 @@ const DETAIL_BASE = {
   deliverables: [
     { uri: 'pin://16cb33915d4443f7f90858808ba4efca94fd2241b49335167953f054ce0e9d1di0', status: 'delivered', confirmation: 'ok', kind: 'pin' },
     { uri: 'pin://b6487c2152d49dc2f8e468788d9162e9574d5f9be53c998a037aa384277ec3c9i0', status: 'delivered', confirmation: 'ok', kind: 'pin' },
-    { uri: 'metafile://9f8e7d6c5b4a39281706f5e4d3c2b1a0998877665544332211009f8e7d6c5b4ai0', status: 'accepted', confirmation: 'ok', kind: 'file' },
+    { uri: 'metafile://9f8e7d6c5b4a39281706f5e4d3c2b1a0998877665544332211009f8e7d6c5b4ai0', status: 'accepted', confirmation: 'ok', kind: 'metafile' },
+    // metaapp 交付物（owner 2026-09-18 反馈③）：kind 取主进程 trackedDeliverableKind 的返回值——
+    // 修复前该函数先命中 pinid 令牌，把 metaapp://<pinid> 标成 'pin'；修复后按 scheme 返回 'metaapp'。
+    { uri: 'metaapp://0c3855f5c73491fc3a3650d99672546e816a037283aa5a079c51a9a780a1a4eei0', status: 'delivered', confirmation: 'ok', kind: 'metaapp' },
   ],
   events: [
     { at: '2026-09-17T05:47:00.000Z', kind: 'card_created', detail: 'plan version 1' },

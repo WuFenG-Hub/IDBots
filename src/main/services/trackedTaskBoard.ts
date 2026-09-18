@@ -1999,12 +1999,20 @@ export class TrackedTaskBoardService {
   }
 }
 
-/** Deliverable kind, delegated to the single parser (`[SEC-11]`). */
+/**
+ * Deliverable kind, delegated to the single parser (`[SEC-11]`).
+ *
+ * Scheme FIRST, then the pinid token (owner 2026-09-18 反馈③): every MetaWeb
+ * scheme carries a pinid in its payload, so probing the token before the
+ * scheme labels `metaapp://<pinid>` as 'pin' and turns the metaapp branch into
+ * dead code. Order: metaapp:// → metafile:// → pinid token → http(s):// → other.
+ */
 export function trackedDeliverableKind(uri: string): string {
   const trimmed = uri.trim();
   if (!trimmed) return 'none';
-  if (extractPinidToken(trimmed)) return trimmed.startsWith('metafile://') ? 'metafile' : 'pin';
   if (trimmed.startsWith('metaapp://')) return 'metaapp';
+  if (trimmed.startsWith('metafile://')) return 'metafile';
+  if (extractPinidToken(trimmed)) return 'pin';
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return 'url';
   return 'other';
 }

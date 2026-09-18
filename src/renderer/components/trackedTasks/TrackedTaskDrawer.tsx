@@ -29,42 +29,59 @@ interface TrackedTaskDrawerProps {
 
 /** 「目标」节默认截断行数（owner 2026-09-18 反馈②：约 6 行）。 */
 const GOAL_COLLAPSED_LINES = 6;
+/** 抽屉标题折叠行数：标题 = owner_intent 原文，可 1600+ 字，必须折叠（owner 2026-09-18 反馈②）。 */
+const TITLE_COLLAPSED_LINES = 3;
+/** 展开态文本容器的限高：长文在区域内自己滚，不把抽屉连同页脚顶出屏幕。 */
+const EXPANDED_TEXT_MAX_HEIGHT_CLASS = 'max-h-[40vh]';
 
 /**
- * 目标文案：whitespace-pre-wrap 保留原始换行；默认 -webkit-line-clamp 截断，
- * 是否给展开/收起由 ref 实测（scrollHeight > clientHeight）决定，不用字数启发式。
- * 展开期间保留上一次的实测值，按钮不闪烁；text 变化（换卡）时用 key 重挂载复位。
+ * 可折叠文本（标题与「目标」共用）：whitespace-pre-wrap 保留原始换行；
+ * 默认 -webkit-line-clamp 截断，是否给展开/收起由 ref 实测（scrollHeight > clientHeight）决定，
+ * 不用字数启发式。展开期间保留上一次的实测值，按钮不闪烁；text 变化（换卡）时用 key 重挂载复位。
+ * 展开态的限高滚动容器只包文本本身，展开/收起按钮渲染在容器之外——按钮永远可见（owner 反馈②）。
  */
-const ExpandableGoal: React.FC<{ text: string }> = ({ text }) => {
-  const ref = React.useRef<HTMLParagraphElement | null>(null);
+const ExpandableText: React.FC<{
+  text: string;
+  /** 折叠行数：标题 3 行 / 目标 6 行。 */
+  collapsedLines: number;
+  textClassName: string;
+  /** 标题保留 h2 语义，正文用 p。 */
+  as?: 'h2' | 'p';
+}> = ({ text, collapsedLines, textClassName, as = 'p' }) => {
+  const textRef = React.useRef<HTMLElement | null>(null);
+  const setTextRef = React.useCallback((node: HTMLElement | null) => {
+    textRef.current = node;
+  }, []);
   const [expanded, setExpanded] = React.useState(false);
   const [collapsedOverflow, setCollapsedOverflow] = React.useState(false);
 
   React.useLayoutEffect(() => {
     if (expanded) return;
-    const el = ref.current;
+    const el = textRef.current;
     if (!el) return;
     setCollapsedOverflow(el.scrollHeight > el.clientHeight + 1);
   }, [text, expanded]);
 
+  const collapsedStyle: React.CSSProperties = {
+    display: '-webkit-box',
+    WebkitBoxOrient: 'vertical',
+    WebkitLineClamp: collapsedLines,
+    overflow: 'hidden',
+  };
+
   return (
     <div>
-      <p
-        ref={ref}
-        className="break-words whitespace-pre-wrap text-sm leading-snug dark:text-claude-darkText text-claude-text"
-        style={
-          expanded
-            ? undefined
-            : {
-                display: '-webkit-box',
-                WebkitBoxOrient: 'vertical',
-                WebkitLineClamp: GOAL_COLLAPSED_LINES,
-                overflow: 'hidden',
-              }
-        }
-      >
-        {text}
-      </p>
+      <div className={expanded ? `${EXPANDED_TEXT_MAX_HEIGHT_CLASS} overflow-y-auto` : undefined}>
+        {as === 'h2' ? (
+          <h2 ref={setTextRef} className={textClassName} style={expanded ? undefined : collapsedStyle}>
+            {text}
+          </h2>
+        ) : (
+          <p ref={setTextRef} className={textClassName} style={expanded ? undefined : collapsedStyle}>
+            {text}
+          </p>
+        )}
+      </div>
       {(expanded || collapsedOverflow) && (
         <button
           type="button"
@@ -77,6 +94,35 @@ const ExpandableGoal: React.FC<{ text: string }> = ({ text }) => {
     </div>
   );
 };
+
+/**
+ * 交付物类型徽章配色（owner 2026-09-18 反馈③）：metaapp 紫 / metafile 绿 / pin 蓝 / url 琥珀；
+ * other/none 走中性边框色。徽章文案走 i18n（中英同键），不在组件里写死英文。
+ */
+const DELIVERABLE_KIND_BADGE_CLASS: Record<string, string> = {
+  metaapp: 'border-violet-500/40 bg-violet-500/10 text-violet-600 dark:text-violet-400',
+  metafile: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+  pin: 'border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-400',
+  url: 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+  other:
+    'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary',
+};
+
+const DELIVERABLE_KIND_LABEL_KEY: Record<string, string> = {
+  metaapp: 'trackedTask.uriKind.metaapp',
+  metafile: 'trackedTask.uriKind.metafile',
+  pin: 'trackedTask.uriKind.pin',
+  url: 'trackedTask.uriKind.url',
+  other: 'trackedTask.uriKind.other',
+};
+
+function deliverableKindBadgeClass(kind: string): string {
+  return DELIVERABLE_KIND_BADGE_CLASS[kind] ?? DELIVERABLE_KIND_BADGE_CLASS.other;
+}
+
+function deliverableKindLabel(kind: string): string {
+  return i18nService.t(DELIVERABLE_KIND_LABEL_KEY[kind] ?? DELIVERABLE_KIND_LABEL_KEY.other);
+}
 
 /** 抽屉里的一节：统一节奏，避免九节各写一套间距。 */
 const Section: React.FC<{ labelKey: string; children: React.ReactNode }> = ({ labelKey, children }) => (
@@ -174,9 +220,14 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
                 {sourceKindLabel(detail.sourceKind)}
               </span>
             </div>
-            <h2 className="mt-1.5 break-words text-sm font-semibold leading-snug dark:text-claude-darkText text-claude-text">
-              {detail.title}
-            </h2>
+            {/* 标题 = owner_intent 原文，可 1600+ 字：3 行折叠 + 实测展开（反馈②）。 */}
+            <ExpandableText
+              key={`title-${detail.id}`}
+              as="h2"
+              text={detail.title}
+              collapsedLines={TITLE_COLLAPSED_LINES}
+              textClassName="mt-1.5 break-words text-sm font-semibold leading-snug dark:text-claude-darkText text-claude-text"
+            />
           </div>
           <button
             type="button"
@@ -192,7 +243,12 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
         <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
           {/* 1 目标：默认截断 + 溢出实测展开；原始换行用 pre-wrap 保留 */}
           <Section labelKey="trackedTask.drawer.goal">
-            <ExpandableGoal key={detail.id} text={detail.goal} />
+            <ExpandableText
+              key={`goal-${detail.id}`}
+              text={detail.goal}
+              collapsedLines={GOAL_COLLAPSED_LINES}
+              textClassName="break-words whitespace-pre-wrap text-sm leading-snug dark:text-claude-darkText text-claude-text"
+            />
             {detail.enrichedGoal && detail.enrichedGoal !== detail.goal && (
               <p className="mt-1 break-words whitespace-pre-wrap text-xs leading-snug dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 {detail.enrichedGoal}
@@ -364,9 +420,18 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
                     key={`${index}-${item.uri}`}
                     className="flex items-start gap-2 rounded-md border dark:border-claude-darkBorder border-claude-border px-2 py-1.5"
                   >
-                    <span className="shrink-0 rounded border dark:border-claude-darkBorder border-claude-border px-1 py-[1px] text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                      {item.kind || item.status || '—'}
+                    {/* 类型徽章（按 URI scheme 分色）取代原来的「kind 原文」chip（反馈③）。 */}
+                    <span
+                      className={`shrink-0 rounded border px-1 py-[1px] text-[10px] font-semibold ${deliverableKindBadgeClass(item.kind)}`}
+                    >
+                      {deliverableKindLabel(item.kind)}
                     </span>
+                    {/* 原状态 chip 保留为次要中性 chip，原信息不丢。 */}
+                    {item.status && (
+                      <span className="shrink-0 rounded border dark:border-claude-darkBorder border-claude-border px-1 py-[1px] text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {item.status}
+                      </span>
+                    )}
                     <span className="min-w-0 flex-1 break-all font-mono text-[11px] dark:text-claude-darkText text-claude-text">
                       <MetaWebUriLink text={item.uri} />
                     </span>
