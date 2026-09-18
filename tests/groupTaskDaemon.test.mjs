@@ -7300,6 +7300,184 @@ test('task #60: a transient error session status never re-dispatches while the r
   }
 });
 
+// ---------------------------------------------------------------------------
+// GT#87 (P1): a watchdog-detached turn keeps running inside the session and
+// appends its final assistant reply on settle — but the dispatching job had
+// already returned, so nobody posted it. GT#87 lost a whole first-bat
+// delivery announcement ([WORKING→完成] + [DELIVERABLE]) this way; only the
+// model's own [CORRECTION] on the deferred re-drive rescued it. On latch
+// release the daemon must harvest the settled reply, deliver it to the
+// group, and retire the durable re-drive entry for the answered trigger.
+// ---------------------------------------------------------------------------
+
+test('GT#87: a settled watchdog-detached turn has its final reply harvested and delivered — no re-drive', async () => {
+  const logs = [];
+  const skillTurnAttempts = [];
+  let runnerActive = false;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      isCoworkSessionActive: () => runnerActive,
+      latchWatchIntervalMs: 15,
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        runnerActive = true; // the detached runner keeps the turn alive past the watchdog
+        throw new SkillTurnTimeoutError('session-timeout-gt87', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    const triggerPin = 'pin-gt87-harvest-i0';
+    insertGroupMessage(h.db, {
+      pinId: triggerPin, senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot implement the first baton',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'the detached turn ran once');
+    let queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'trigger durably re-queued behind the latch');
+
+    // The runner finishes the detached turn: it appends the final assistant
+    // reply to the session, then the session leaves 'running'.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    const finalReply = '[WORKING→完成] first baton landed.\n\n[DELIVERABLE] pin://' + 'ab'.repeat(32) + 'i0';
+    h.coworkStore.addMessage(session.id, { type: 'assistant', content: finalReply });
+    h.coworkStore.updateSession(session.id, { status: 'completed' });
+    runnerActive = false;
+
+    // Wait for the latch watcher (15ms interval) to release + harvest, and
+    // for the detached on-chain send to land.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !h.sends.some((s) => s.content === finalReply)) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const harvested = h.sends.find((s) => s.content === finalReply);
+    assert.ok(harvested, 'the detached turn\'s final reply was harvested and delivered to the group');
+    assert.equal(harvested.metabotId, 2, 'delivered as the worker');
+    assert.equal(harvested.replyPin, triggerPin, 'threaded under the trigger');
+    queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 0, 'the answered trigger\'s re-drive entry retired');
+    assert.ok(
+      logs.some((line) => line.includes("harvested and delivered bot 2's detached-turn final reply")),
+      'harvest is logged',
+    );
+    // And the drain must NOT re-run the turn afterwards.
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'no re-drive after the harvest retired the entry');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a detached turn that settles silent retires the re-drive without posting', async () => {
+  const logs = [];
+  const skillTurnAttempts = [];
+  let runnerActive = false;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      isCoworkSessionActive: () => runnerActive,
+      latchWatchIntervalMs: 15,
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        runnerActive = true; // the detached runner keeps the turn alive past the watchdog
+        throw new SkillTurnTimeoutError('session-timeout-gt87b', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-gt87-silent-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot standby check',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1);
+    // The turn settles with an explicit [NO_REPLY] final.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.coworkStore.addMessage(session.id, { type: 'assistant', content: '[NO_REPLY]' });
+    h.coworkStore.updateSession(session.id, { status: 'completed' });
+    runnerActive = false;
+
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !logs.some((line) => line.includes('re-drive retired'))) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(
+      logs.some((line) => line.includes('settled silent') && line.includes('re-drive retired')),
+      'the silent settle retires the re-drive and says so',
+    );
+    assert.equal(h.sends.length, 0, 'nothing is posted for a silent settle');
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 0, 're-drive entry retired');
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'no re-drive after the silent settle');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a detached turn with NO settled reply keeps the re-drive (pre-fix recovery intact)', async () => {
+  const logs = [];
+  const skillTurnAttempts = [];
+  let runnerActive = false;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      isCoworkSessionActive: () => runnerActive,
+      latchWatchIntervalMs: 15,
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        runnerActive = true; // the detached runner keeps the turn alive past the watchdog
+        throw new SkillTurnTimeoutError('session-timeout-gt87c', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-gt87-noreply-yet-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot another check',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    // The runner dies without settling any final assistant message.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.coworkStore.updateSession(session.id, { status: 'error' });
+    runnerActive = false;
+
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !logs.some((line) => line.includes('left no settled reply'))) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(
+      logs.some((line) => line.includes('left no settled reply')),
+      'the empty settle leaves the re-drive standing',
+    );
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 're-drive entry survives for the drain to recover');
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 2, 'the trigger is re-driven as before');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT-01: a wedged turn (await never settles) is force-settled at the hard cap and the trigger recovers', async () => {
   const logs = [];
   const h = await createHarness({

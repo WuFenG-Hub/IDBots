@@ -1841,6 +1841,11 @@ export interface GroupTaskDaemonDeps {
    */
   isCoworkSessionActive?: (sessionId: string) => boolean;
   /**
+   * GT#87 (P1): poll interval for the post-watchdog in-flight latch watcher
+   * (default 15s). Test seam only — prod never overrides it.
+   */
+  latchWatchIntervalMs?: number;
+  /**
    * P4 (v1.2): inject the review-stage owner report (same body the A2A
    * private chat receives) into the task's origin CoWork session under the
    * [GROUP_TASK_REVIEW] prefix. Best-effort; kv-guarded per review-entry.
@@ -6747,7 +6752,106 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const TURN_LATCH_MAX_MS = 45 * 60_000;
   /** GT-01: resolved hard cap for one in-flight turn guard (see deps). */
   const turnHardCapMs = Math.max(1_000, Math.trunc(deps.turnHardCapMs ?? TURN_LATCH_MAX_MS));
-  const latchInFlightUntilSessionIdle = (key: string, sessionId: string | null, taskId: number, botId: number): void => {
+  /**
+   * GT#87 (P1): harvest the settled reply of a watchdog-detached turn. The
+   * runner keeps executing the original turn after the watchdog fire and
+   * appends its final assistant message to the session — but the dispatching
+   * job already returned, so on settle NOBODY posts that reply. GT#87 lost a
+   * whole first-bat delivery announcement this way ([WORKING→完成] +
+   * [DELIVERABLE] written to the session, never sent to the group); only the
+   * model's own [CORRECTION] on the deferred re-drive rescued it. On latch
+   * release: when the turn settled with a real answer, deliver it as the
+   * member's group reply and RETIRE the durable re-drive entry (the trigger
+   * is answered); when it settled silent/empty-with-mid-turn-sends, retire
+   * the entry too (deliberate ONE VOICE closer); when nothing settled, leave
+   * the re-drive standing (pre-fix behavior).
+   */
+  const harvestDetachedTurnReply = (
+    sessionId: string,
+    taskId: number,
+    botId: number,
+    message: GroupTaskDaemonMessage,
+    memberRole: string | null,
+  ): void => {
+    try {
+      const coworkStore = deps.getCoworkStore();
+      const messages = coworkStore.getSession(sessionId)?.messages ?? [];
+      let lastUserIndex = -1;
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].type === 'user') {
+          lastUserIndex = i;
+          break;
+        }
+      }
+      // The latched guard kept this (task, bot) session single-writer, so the
+      // LAST user message is the detached turn's own trigger turn.
+      const turnUserId = lastUserIndex >= 0 ? messages[lastUserIndex].id : null;
+      let finalAssistant: { id: string; content: string } | null = null;
+      for (let i = messages.length - 1; i > lastUserIndex; i -= 1) {
+        if (messages[i].type === 'assistant') {
+          finalAssistant = messages[i] as { id: string; content: string };
+          break;
+        }
+      }
+      const reply = String(finalAssistant?.content ?? '').trim();
+      const midTurnSends = turnUserId != null
+        ? countMidTurnGroupSends(coworkStore, sessionId, turnUserId)
+        : 0;
+      if (!finalAssistant || (!reply && midTurnSends === 0)) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${taskId}: detached turn for bot ${botId} left no settled reply ` +
+          `(message #${message.id}) — the deferred re-drive stands`,
+        );
+        return;
+      }
+      // The trigger is answered now; remove its durable re-drive entry BEFORE
+      // releasing the guard so the next tick's drain cannot re-ask it.
+      const entries = loadDeferredQueue(taskId).filter(
+        (entry) => !(entry.metabotId === botId && entry.messageId === message.id),
+      );
+      saveDeferredQueue(taskId, entries);
+      if (reply && !isNonAnswerAssistantReply(reply) && !NO_REPLY_PATTERN.test(reply)) {
+        void (async () => {
+          try {
+            const sent = await postGroupMessage(taskId, botId, reply, {
+              replyPin: message.pinId ?? undefined,
+            });
+            if (memberRole === 'chair') rememberDaemonChairPin(taskId, sent.pinId);
+            emitLog(
+              `[GroupTaskDaemon] Task ${taskId}: harvested and delivered bot ${botId}'s detached-turn ` +
+              `final reply (message #${message.id}) — the watchdog-detached turn's answer reached the group`,
+            );
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${taskId}: harvested-reply delivery failed for bot ${botId} ` +
+              `(message #${message.id}): ${error instanceof Error ? error.message : String(error)} ` +
+              '— the deferred re-drive was already retired; check the member session manually',
+            );
+          }
+        })();
+      } else {
+        emitLog(
+          `[GroupTaskDaemon] Task ${taskId}: detached turn for bot ${botId} settled ` +
+          (midTurnSends > 0
+            ? `with ${midTurnSends} mid-turn group message(s)`
+            : 'silent ([NO_REPLY]/non-answer final)') +
+          ` (message #${message.id}) — re-drive retired, nothing to post`,
+        );
+      }
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${taskId}: harvest of bot ${botId}'s detached turn failed ` +
+        `(message #${message.id}): ${error instanceof Error ? error.message : String(error)} — the deferred re-drive stands`,
+      );
+    }
+  };
+  const latchInFlightUntilSessionIdle = (
+    key: string,
+    sessionId: string | null,
+    taskId: number,
+    botId: number,
+    harvest?: { message: GroupTaskDaemonMessage; memberRole: string | null },
+  ): void => {
     if (!sessionId) {
       latchedTurnKeys.delete(key);
       turnInFlight.delete(key);
@@ -6795,6 +6899,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       clearInterval(watcher);
       latchWatchers.delete(watcher);
       latchedTurnKeys.delete(key);
+      // GT#87 (P1): harvest BEFORE the guard release + next-tick drain — the
+      // deferred-entry retirement inside must win the race against the drain
+      // re-driving the now-answered trigger. Safe on the cap-forced release
+      // too: the harvest only posts an actually-settled final assistant
+      // message, and a still-running turn has none after its user message.
+      if (harvest) {
+        harvestDetachedTurnReply(sessionId, taskId, botId, harvest.message, harvest.memberRole);
+      }
       turnInFlight.delete(key);
       emitTurnActivity();
       emitLog(
@@ -6802,7 +6914,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `(session status ${status ?? 'unknown'}${sessionActive ? ', runner turn still active' : ''}${capReached ? ', latch cap reached' : ''}); ` +
         'the deferred queue re-drives the unanswered trigger on the next tick',
       );
-    }, 15_000);
+    }, Math.max(1, Math.trunc(deps.latchWatchIntervalMs ?? 15_000)));
     watcher.unref?.();
     latchWatchers.add(watcher);
   };
@@ -7172,7 +7284,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               verificationNotes: args.verificationNotes,
               failures,
             });
-            latchInFlightUntilSessionIdle(key, sessionId, task.id, bot.id);
+            latchInFlightUntilSessionIdle(key, sessionId, task.id, bot.id, {
+              message,
+              memberRole: member.role ?? null,
+            });
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn hit the skill-turn watchdog ` +
               `(message #${message.id}, attempt ${failures}/${MSG_RETRY_MAX_FAILURES}); the turn keeps ` +
