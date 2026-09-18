@@ -599,6 +599,32 @@ export function hasWorkerUpstreamWait(content: string | null | undefined): boole
  * neither form is literal text (mention-array-only dispatches) — callers
  * then keep whole-message semantics.
  */
+/**
+ * GT#87 (P2-4): a floating deadline segment — a blank-line-separated block
+ * that carries a [DEADLINE:] tag but no @-token (so it is nobody's own
+ * clause). Chairs legitimately format the deadline as a trailing standalone
+ * paragraph of the dispatch ("…交付：可跑索引器骨架＋向量全绿。
+ * [DEADLINE: 140m]"); first-mention clause extraction stopped at the blank
+ * line and silently lost the clock. The first such segment after the
+ * member's clause attaches to it — an @-free block cannot belong to another
+ * member's clause by construction, and a tag-bearing block left unattached
+ * armed nothing at all.
+ */
+const CLAUSE_DEADLINE_TAG = /\[DEADLINE\s*:/i;
+const attachFloatingDeadlineSegment = (text: string, base: string, baseEndIndex: number): string | null => {
+  if (CLAUSE_DEADLINE_TAG.test(base)) return null;
+  const remainder = text.slice(baseEndIndex);
+  const segments = remainder.split(/(?:\r?\n[ \t]*\r?\n)+/);
+  for (const segment of segments) {
+    const trimmed = segment.trim();
+    if (!trimmed) continue;
+    if (trimmed.includes('@')) continue; // someone's clause / a handle citation
+    if (!CLAUSE_DEADLINE_TAG.test(trimmed)) continue;
+    return `${base}\n\n${trimmed}`;
+  }
+  return null;
+};
+
 export function extractMemberDispatchClause(
   content: string | null | undefined,
   botName: string | null | undefined,
@@ -607,11 +633,31 @@ export function extractMemberDispatchClause(
   const name = String(botName ?? '').trim();
   if (!text || !name) return null;
   const clauseEnd = /(?:\r?\n[ \t]*\r?\n)|(?:\r?\n[ \t]*-{3,}[ \t]*$)|(?:\s@)/m;
-  const at = text.toLowerCase().indexOf(`@${name.toLowerCase()}`);
-  if (at >= 0) {
-    const rest = text.slice(at);
-    const end = clauseEnd.exec(rest.slice(1));
-    return end ? rest.slice(0, 1 + end.index) : rest;
+  const lowerText = text.toLowerCase();
+  const lowerName = name.toLowerCase();
+  // GT#87 (P2-4): scan EVERY @-mention clause, not just the first. Chairs
+  // greet a member at the message top ("@小明同学 欢迎入列！…") and dispatch
+  // them in a later numbered paragraph ("④ 验收席 @小明同学：…清单草稿上链
+  // 交付 [DEADLINE: 45m]") — first-mention-wins read the greeting (tagless)
+  // and silently dropped the 45m clock. Prefer the first clause that carries
+  // a deadline tag; fall back to the first clause (original behavior), then
+  // try attaching a floating trailing deadline segment.
+  const atToken = `@${lowerName}`;
+  const atPositions: number[] = [];
+  for (let scanFrom = lowerText.indexOf(atToken); scanFrom >= 0; scanFrom = lowerText.indexOf(atToken, scanFrom + atToken.length)) {
+    atPositions.push(scanFrom);
+  }
+  if (atPositions.length > 0) {
+    const clauses = atPositions.map((at) => {
+      const rest = text.slice(at);
+      const end = clauseEnd.exec(rest.slice(1));
+      return end ? rest.slice(0, 1 + end.index) : rest;
+    });
+    const withDeadline = clauses.find((clause) => CLAUSE_DEADLINE_TAG.test(clause));
+    if (withDeadline) return withDeadline;
+    const first = clauses[0];
+    const attached = attachFloatingDeadlineSegment(text, first, atPositions[0] + first.length);
+    return attached ?? first;
   }
   // GT#72: chairs also address members by BARE full roster name
   // ("Builder阿码 这三点随你第一落一起落进 schema。3. 啊明，下一棒…[DEADLINE:
@@ -619,11 +665,12 @@ export function extractMemberDispatchClause(
   // later member's deadline bleeds into the bare-named member's arming.
   // The bare occurrence may sit INSIDE a longer roster name ("阿码" inside
   // "@Builder阿码") — that slice is equivalent, so no disambiguation needed.
-  const bare = text.toLowerCase().indexOf(name.toLowerCase());
+  const bare = lowerText.indexOf(lowerName);
   if (bare < 0) return null;
   const rest = text.slice(bare);
   const end = clauseEnd.exec(rest.slice(name.length));
-  return end ? rest.slice(0, name.length + end.index) : rest;
+  const clause = end ? rest.slice(0, name.length + end.index) : rest;
+  return attachFloatingDeadlineSegment(text, clause, bare + clause.length) ?? clause;
 }
 /**
  * P2-8: multi-driver mutex — kv heartbeat claim per task

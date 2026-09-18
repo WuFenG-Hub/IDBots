@@ -1325,6 +1325,51 @@ test('parseChairDeadlineMinutes: tag/prose forms parse; ambiguity and junk fall 
   assert.equal(parseChairDeadlineMinutes(null), null);
 });
 
+test('extractMemberDispatchClause (GT#87 P2-4): later deadline-bearing @clause beats the greeting clause', () => {
+  const { extractMemberDispatchClause, parseChairDeadlineMinutes } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  // The #5832 shape: 小明同学 greeted at the top, dispatched in paragraph ④.
+  const content = '@小明同学 欢迎入列！你坐本卡的验收席——独立验收人，与设计实现零重叠。全场请先读需求稿。\n\n'
+    + '分工与顺序如下：\n\n'
+    + '④ 验收席 @小明同学：把需求稿 §4 五条口径逐条转成可执行验收清单，清单草稿上链交付 [DEADLINE: 45m]。保持独立。';
+  const clause = extractMemberDispatchClause(content, '小明同学');
+  assert.ok(clause, 'clause extracted');
+  assert.ok(clause.startsWith('@小明同学：把需求稿'), 'the dispatch clause wins over the greeting');
+  assert.equal(parseChairDeadlineMinutes(clause), 45, 'the 45m is reachable from the clause');
+});
+
+test('extractMemberDispatchClause (GT#87 P2-4): a floating trailing deadline paragraph attaches to the @clause', () => {
+  const { extractMemberDispatchClause, parseChairDeadlineMinutes } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  // The #5861 shape: @loop confirmation paragraph, unrelated middle
+  // paragraphs, deadline as a trailing standalone paragraph.
+  const content = '@loop 冻结稿 v1.1 已逐节复核。确认 v1.1 为本卡冻结版（取代 v1.0）。\n\n'
+    + '[DEPENDS_ON: pin://' + 'ab'.repeat(32) + 'i0]\n\n'
+    + '[CORRECTION] 口径更正：五类事件应为七路径。\n\n'
+    + '派工前还差一次收口（v1.1.1，一次补齐、不再链式），四项：\n① participants[]。\n② C6 判据数值。\n'
+    + 'v1.1.1 作为新 pin 交付、上链后才打首个实现 commit（保 D1 审计干净）。[DEADLINE: 20m]';
+  const clause = extractMemberDispatchClause(content, 'loop');
+  assert.ok(clause, 'clause extracted');
+  assert.equal(parseChairDeadlineMinutes(clause), 20, 'the trailing floating 20m attaches to the @clause');
+
+  // The #5863 shape: single @mention, the dependency + deadline live in the
+  // NEXT paragraph with no @-token.
+  const content2 = '@Builder阿码 六点全部落账：1/2/3 已进 v1.1。\n\n'
+    + '第一棒现在派工。\n范围：冻结稿 v1.2 全量。\n交付：可跑索引器骨架＋向量全绿＋对数演练就绪。[DEADLINE: 140m]（含等的约 20m）';
+  const clause2 = extractMemberDispatchClause(content2, 'Builder阿码');
+  assert.ok(clause2, 'clause extracted');
+  assert.equal(parseChairDeadlineMinutes(clause2), 140, 'the biggest-baton 140m is reachable from the clause');
+});
+
+test('extractMemberDispatchClause (GT#87 P2-4): floating attachment never crosses into another member\'s @clause', () => {
+  const { extractMemberDispatchClause, parseChairDeadlineMinutes } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const content = '@Coder Bot 前置调研，无硬期限。\n\n'
+    + '@Designer Bot，下一棒：组稿预备，现在开工，[DEADLINE: 45m]。\n\n'
+    + '其余事项随后再定。';
+  const coder = extractMemberDispatchClause(content, 'Coder Bot');
+  assert.equal(parseChairDeadlineMinutes(coder), null, "Coder's tagless clause never borrows Designer's 45m");
+  const designer = extractMemberDispatchClause(content, 'Designer Bot');
+  assert.equal(parseChairDeadlineMinutes(designer), 45, "Designer's own clause keeps its 45m");
+});
+
 test('cursor advances on no-reply messages; a failing turn\'s retry coalesces with newer queued triggers (task #64)', async () => {
   // Cooldowns off: this test isolates the retry/ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
@@ -10421,6 +10466,39 @@ test('GT#87: a missed-deadline note carries the clock\'s arming source for chair
     const notes = h.groupTaskStore.listPendingHostNotes(task.id).filter((note) => note.kind === 'deadline');
     assert.equal(notes.length, 1, 'the missed-deadline note fired');
     assert.match(notes[0].body, new RegExp(`clock armed from message #${assignmentId} \\(chair-stated 30m\\)`));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a member greeted at the top and dispatched later still gets their clock armed (e2e)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // The #5832 shape verbatim structure: greeting @mention at the top,
+    // numbered dispatch paragraph with the deadline further down.
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-greet-dispatch-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Designer Bot 欢迎入列！你坐本卡的验收席——独立验收人。全场请先读需求稿。\\n\\n'
+        + '分工与顺序如下：\\n\\n'
+        + '① 架构席 @Coder Bot：冻结稿 [DEADLINE: 60m]。\\n\\n'
+        + '④ 验收席 @Designer Bot：验收清单草稿上链交付 [DEADLINE: 45m]。保持独立。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-greet-dispatch-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单（验收席）：正在读需求稿，预计 40 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:3`);
+    assert.ok(armed, 'the greeting-first member still arms a clock from the later dispatch clause');
+    assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 45 * 60_000, 'the ④ paragraph 45m is the clock');
   } finally {
     h.cleanup();
   }
