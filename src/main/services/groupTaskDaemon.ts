@@ -1016,6 +1016,30 @@ class StaleReviewReentryError extends Error {}
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
 /**
+ * GT#87 (quota stall): fleet-wide token-plan exhaustion ("DSH turn failed:
+ * 429: … Token Plan quota has been exceeded"). Upstream error fingerprint —
+ * matches the provider's literal 429 + quota wording, never natural language.
+ */
+const isQuotaExhaustedError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /\b429\b/.test(message) && /quota/i.test(message);
+};
+/**
+ * GT#87 (quota stall): per-task kv `group_task_quota_stall:<taskId>` =
+ * {since, lastProbeAt}. While set (and younger than QUOTA_STALL_MAX_MS) the
+ * deferred drain holds every entry and releases ONE probe dispatch per
+ * QUOTA_STALL_PROBE_MS; quota failures requeue UNCHARGED so a multi-hour
+ * outage cannot burn MSG_RETRY_MAX_FAILURES and drop real triggers (GT#87's
+ * three closing gates sat at attempt 2/5 when the observation ended). The
+ * first successful turn clears the stall; past the cap the ordinary charged
+ * ladder resumes so the episode still terminates.
+ */
+const QUOTA_STALL_PREFIX = 'group_task_quota_stall:';
+/** Default interval between probe dispatches while a task is quota-stalled. */
+const QUOTA_STALL_PROBE_DEFAULT_MS = 15 * 60_000;
+/** Past this stall age the ordinary charged retry ladder resumes. */
+const QUOTA_STALL_MAX_MS = 24 * 60 * 60_000;
+/**
  * #13 join-welcome bookkeeping (handshake protocol): the first tick snapshots
  * the initially-joined member keys (create-time roster) under
  * `group_task_welcome_initial_joined:<taskId>`; any member whose joined_pin_id
@@ -1324,7 +1348,15 @@ export function decideGroupTaskResponders(
   // notices that merely CITE a member's name stay quiet (task #51: the
   // chair's own "Coder Bot is in a long-running turn" notice must wake
   // nobody).
-  const bareNameWakeEligible = senderIsChair && /\[DEADLINE\s*:/i.test(content);
+  // GT#87 (P2-5): quoted code is citation, not dispatch. The chair's
+  // rebuttal prose restated a deadline inside backticks
+  // ("…`[DEADLINE: 140m]` 时钟照旧…") while naming a member in the third
+  // person — the raw-content tag test read the quoted citation as an
+  // assignment marker and armed a phantom ACK watch that later misfired a
+  // no-ACK note. Test the tag and the roster-name address against
+  // backtick-stripped content (same convention as ACK parsing).
+  const contentUnquoted = stripGroupTaskQuotedCode(content);
+  const bareNameWakeEligible = senderIsChair && /\[DEADLINE\s*:/i.test(contentUnquoted);
 
   // Resolve mention/name hits once per member.
   const hits = new Map<number, boolean>();
@@ -1334,7 +1366,7 @@ export function decideGroupTaskResponders(
     if (!bot) continue;
     const bareNamed = bareNameWakeEligible
       && member.role === 'worker'
-      && contentAddressesRosterName(content, bot.name, rosterNames);
+      && contentAddressesRosterName(contentUnquoted, bot.name, rosterNames);
     hits.set(member.metabotId, isMentioned(message, bot) || bareNamed);
   }
   const chairHit = chairMember?.metabotId != null ? hits.get(chairMember.metabotId) === true : false;
@@ -1894,6 +1926,11 @@ export interface GroupTaskDaemonDeps {
    */
   latchWatchIntervalMs?: number;
   /**
+   * GT#87 (quota stall): interval between probe dispatches while a task is
+   * quota-stalled (default 15 min). Test seam only — prod never overrides it.
+   */
+  quotaStallProbeMs?: number;
+  /**
    * P4 (v1.2): inject the review-stage owner report (same body the A2A
    * private chat receives) into the task's origin CoWork session under the
    * [GROUP_TASK_REVIEW] prefix. Best-effort; kv-guarded per review-entry.
@@ -2104,6 +2141,29 @@ function parseSqliteUtcMs(value: string | null | undefined): number | null {
     Number(match[1]), Number(match[2]) - 1, Number(match[3]),
     Number(match[4]), Number(match[5]), Number(match[6]),
   );
+}
+
+/**
+ * GT#87 (P2-7): prompt-facing absolute times render in the host's LOCAL zone
+ * with an explicit offset — the same convention as the per-turn "Current
+ * time:" line. Bare UTC (toISOString / "HH:MM UTC") next to a local
+ * "Current time" invited cross-zone subtraction: GT#87's chair computed
+ * "stuck in planning for ~8 hours" against the local clock (actual: 7
+ * minutes) and published the false statement to the on-chain group record;
+ * its later deadline-reconciliation turn then failed to match a UTC-rendered
+ * bell against locally-stated deadlines. `withDate` includes the date
+ * (deadline notes); the short form is clock-only (liveness blocks that also
+ * carry a "N min ago" relative anchor).
+ */
+function formatPromptLocalTime(ms: number, withDate: boolean): string {
+  const date = new Date(ms);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const utcOffset = `${sign}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, '0')}`;
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  if (!withDate) return `${clock} (UTC${utcOffset})`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock} (UTC${utcOffset})`;
 }
 
 function toDaemonMessage(row: GroupChatMessageRow): GroupTaskDaemonMessage {
@@ -2931,6 +2991,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       sqlite.set(key, JSON.stringify(entries));
     }
   };
+  /**
+   * GT#87 (quota stall): read/write/clear the per-task stall state. Returns
+   * null when no stall is recorded. `since` anchors the episode (owner notice
+   * + the 24h cap); `lastProbeAt` throttles probe dispatches while held.
+   */
+  const readQuotaStall = (taskId: number): { since: number; lastProbeAt: number } | null => {
+    try {
+      const raw = deps.getStore().get<string>(`${QUOTA_STALL_PREFIX}${taskId}`);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { since?: unknown; lastProbeAt?: unknown };
+      const since = typeof parsed.since === 'number' ? parsed.since : null;
+      if (since == null) return null;
+      return { since, lastProbeAt: typeof parsed.lastProbeAt === 'number' ? parsed.lastProbeAt : 0 };
+    } catch {
+      return null;
+    }
+  };
+  const writeQuotaStall = (taskId: number, stall: { since: number; lastProbeAt: number }): void => {
+    deps.getStore().set(`${QUOTA_STALL_PREFIX}${taskId}`, JSON.stringify(stall));
+  };
+  const clearQuotaStall = (taskId: number): boolean => {
+    const key = `${QUOTA_STALL_PREFIX}${taskId}`;
+    const existed = deps.getStore().get<string>(key) != null;
+    deps.getStore().delete(key);
+    return existed;
+  };
   const deferReply = (entry: DeferredReplyEntry): void => {
     const entries = loadDeferredQueue(entry.taskId);
     // Entries are per (task, bot, message) and drain FIFO by message id: every
@@ -3075,6 +3161,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const picked: DeferredReplyEntry[] = [];
     for (const [metabotId, list] of byBot) {
       const member = members.find((candidate) => candidate.metabotId === metabotId);
+      if (member?.role === 'chair' && list.length > 1) {
+        // GT#87 (P3): the chair's deferred backlog coalesces to the NEWEST
+        // non-owner trigger. A chair turn reads the whole group-log window
+        // and the Task #51 safety net settles every pending trigger up to
+        // its message, so replaying stale triggers one 5-10min turn each
+        // (GT#87: 31-77min-old triggers, mostly answered [NO_REPLY]) buys
+        // nothing but tail latency. Owner messages keep their own dispatch
+        // (#83: they always reach the chair, budget- and coalesce-exempt).
+        const ownerProtected = list.filter((item) => item.entry.reason === 'chair_owner_message');
+        const coalescableChair = list.filter((item) => item.entry.reason !== 'chair_owner_message');
+        const keep = coalescableChair[coalescableChair.length - 1]?.entry ?? null;
+        const dropped = keep != null
+          ? coalescableChair.filter((item) => item.entry !== keep).map((item) => `#${item.entry.messageId}`)
+          : [];
+        if (dropped.length > 0) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: coalesced bot ${metabotId}'s queued backlog into ` +
+            `message #${keep!.messageId} (newest chair trigger; one turn reads the full log window)` +
+            `; superseded: ${dropped.join(', ')}`,
+          );
+        }
+        for (const item of ownerProtected) picked.push(item.entry);
+        if (keep != null) picked.push(keep);
+        continue;
+      }
       const coalescable = Boolean(member && member.role === 'worker') && list.length > 1;
       if (!coalescable) {
         for (const item of list) picked.push(item.entry);
@@ -7267,6 +7378,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           args.remoteStatusBlock,
         );
         lastReplyAtByKey.set(key, now());
+        // GT#87 (quota stall): the first successful turn is the signal that
+        // the token-plan quota is back — lift the stall so the deferred
+        // drain resumes at full cadence.
+        if (clearQuotaStall(task.id)) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: a turn succeeded — quota stall lifted; ` +
+            'the deferred drain resumes at full cadence',
+          );
+        }
         // Task #51 safety net: a completed chair turn answers every pending
         // trigger up to this message; a NEWER trigger survives.
         if (member.role === 'chair') {
@@ -7436,7 +7556,51 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             }
           }
           const failures = (args.entry?.failures ?? 0) + 1;
-          if (failures >= MSG_RETRY_MAX_FAILURES) {
+          if (isQuotaExhaustedError(error)) {
+            // GT#87 (quota stall): fleet-wide token-plan exhaustion is
+            // environmental — each failed attempt already burned ~10min of
+            // provider retry ladders, and charging MSG_RETRY_MAX_FAILURES
+            // drops REAL triggers (GT#87's three closing gates sat at
+            // attempt 2/5 when the observation ended). Requeue UNCHARGED,
+            // arm the per-task stall (the drain then holds entries and
+            // probes once per interval), and tell the owner once per
+            // episode.
+            const existing = readQuotaStall(task.id);
+            const since = existing?.since ?? now();
+            // First arm anchors the probe clock at episode start — lastProbeAt
+            // 0 would let the same tick's drain release an immediate probe.
+            writeQuotaStall(task.id, { since, lastProbeAt: existing?.lastProbeAt ?? since });
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} failed ` +
+              'with token-plan quota exhaustion — requeued UNCHARGED; the task is quota-stalled ' +
+              '(the drain probes once per stall interval; the first successful turn lifts the stall)',
+            );
+            if (!existing) {
+              notifySourceSessionMilestone(
+                task,
+                'anomaly',
+                buildSourceSessionAnomalyNotice({
+                  title: task.title,
+                  status: task.status,
+                  summary:
+                    'Token-plan quota exhausted: every member turn is failing with 429. ' +
+                    'The task is parked (no triggers are dropped while stalled; one probe runs ' +
+                    `every ${Math.round((deps.quotaStallProbeMs ?? QUOTA_STALL_PROBE_DEFAULT_MS) / 60_000)} min) ` +
+                    'and resumes automatically once the quota resets. No action needed unless the ' +
+                    'quota should not be exhausted — then check the provider plan.',
+                }),
+                `quota_stall:${task.id}:${since}`,
+              );
+            }
+            deferReply({
+              taskId: task.id,
+              metabotId: bot.id,
+              messageId: message.id,
+              reason: args.reason,
+              verificationNotes: args.verificationNotes,
+              failures: args.entry?.failures,
+            });
+          } else if (failures >= MSG_RETRY_MAX_FAILURES) {
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} ` +
               `dropped after ${failures} failures: ` +
@@ -7815,7 +7979,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       lastSessionActivityMs: number | null;
     },
   ): string => {
-    const fmtHhMm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
+    // GT#87 (P2-7): local clock with explicit offset (was "HH:MM UTC" —
+    // zone-mixed against the local Current-time line).
+    const fmtHhMm = (ms: number): string => formatPromptLocalTime(ms, false);
     const agoMin = (ms: number): number => Math.max(0, Math.round((now() - ms) / 60_000));
     const parts: string[] = [];
     if (deliverable) {
@@ -8790,12 +8956,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const rosterNames = members.map(
         (candidate) => botsById.get(candidate.metabotId ?? -1)?.name ?? candidate.name ?? null,
       );
-      const bareNameWatchEligible = /\[DEADLINE\s*:/i.test(message.content ?? '');
+      // GT#87 (P2-5): same citation-vs-dispatch rule on the ACK-watch side —
+      // a backtick-quoted [DEADLINE] restatement must not turn prose that
+      // names a member into their assignment.
+      const messageContentUnquoted = stripGroupTaskQuotedCode(message.content ?? '');
+      const bareNameWatchEligible = /\[DEADLINE\s*:/i.test(messageContentUnquoted);
       for (const member of members) {
         if (member.role !== 'worker' || member.metabotId == null) continue;
         const bot = botsById.get(member.metabotId);
         const bareNamed = bareNameWatchEligible
-          && contentAddressesRosterName(message.content, bot?.name, rosterNames);
+          && contentAddressesRosterName(messageContentUnquoted, bot?.name, rosterNames);
         if (!bot || !(isMentioned(message, bot) || bareNamed)) continue;
         // GT#47 R3: during review / an open checkpoint the mention is part of
         // a review-closing or checkpoint message, not a work assignment —
@@ -10342,8 +10512,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           dedupeKey: `deadline:${task.id}:${member.metabotId}:${entry.dueAt}`,
           body:
             `${member.name ?? `bot-${member.metabotId}`}'s estimated delivery ` +
-            `(${new Date(entry.dueAt).toISOString()}) has passed with no [DELIVERABLE] on record ` +
-            `(dependency state: ${reminderDepState}${armedFrom}).`,
+            `(${formatPromptLocalTime(entry.dueAt, true)}) has passed with no [DELIVERABLE] on record ` +
+            `(dependency state: ${reminderDepState}${armedFrom}).`
         });
         sqlite.set(remindedKey, '1');
         emitLog(
@@ -10880,6 +11050,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (checkpointOpenAtTick && !isChair) {
           deferReply(entry);
           continue;
+        }
+        // GT#87 (quota stall): while the task is quota-stalled the drain
+        // holds every entry and releases ONE probe per interval — a dead
+        // quota must not burn a ~10min provider retry ladder per entry per
+        // tick. Past the 24h cap the ordinary charged ladder resumes so the
+        // episode still terminates (drops + anomaly notices).
+        const quotaStall = readQuotaStall(task.id);
+        if (quotaStall) {
+          if (now() - quotaStall.since >= QUOTA_STALL_MAX_MS) {
+            clearQuotaStall(task.id);
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: quota stall exceeded ` +
+              `${Math.round(QUOTA_STALL_MAX_MS / 3_600_000)}h — lifted; the ordinary retry budget governs again`,
+            );
+          } else {
+            const quotaProbeMs = Math.max(30_000, Math.trunc(deps.quotaStallProbeMs ?? QUOTA_STALL_PROBE_DEFAULT_MS));
+            if (now() - quotaStall.lastProbeAt < quotaProbeMs) {
+              deferReply(entry);
+              continue;
+            }
+            writeQuotaStall(task.id, { ...quotaStall, lastProbeAt: now() });
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: quota stall probe — releasing message #${entry.messageId} ` +
+              `for bot ${entry.metabotId} (one dispatch per ${Math.round(quotaProbeMs / 60_000)} min while stalled)`,
+            );
+          }
         }
         const lastReplyAt = lastReplyAtByKey.get(key) ?? 0;
         const cooldownMs = isChair ? chairCooldownMs : workerCooldownMs;

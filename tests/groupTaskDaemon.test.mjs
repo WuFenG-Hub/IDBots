@@ -9446,9 +9446,9 @@ test('fix-v2 P1-3: the stuck alert cites verifiable evidence and never mislabels
     // Evidence pointers: ledger state, last speech, session last write, and
     // the last [WORKING] signal — each with a minutes-ago figure.
     assert.match(anomaly.message, /evidence: no deliverable on the ledger/);
-    assert.match(anomaly.message, /last group speech at \d{2}:\d{2} UTC, \d+ min ago/);
-    assert.match(anomaly.message, /session log last write at \d{2}:\d{2} UTC, \d+ min ago/);
-    assert.match(anomaly.message, /last \[WORKING\] signal at \d{2}:\d{2} UTC, \d+ min ago/);
+    assert.match(anomaly.message, /last group speech at \d{2}:\d{2} \(UTC[+-]\d{2}\), \d+ min ago/);
+    assert.match(anomaly.message, /session log last write at \d{2}:\d{2} \(UTC[+-]\d{2}\), \d+ min ago/);
+    assert.match(anomaly.message, /last \[WORKING\] signal at \d{2}:\d{2} \(UTC[+-]\d{2}\), \d+ min ago/);
   } finally {
     h.cleanup();
   }
@@ -9505,7 +9505,7 @@ test('fix-v2 P1-3: a rejected deliverable still surfaces in the stuck evidence w
     assert.ok(anomaly, 'the stuck alert reached the origin session');
     assert.match(
       anomaly.message,
-      new RegExp(`latest ledger deliverable pin://${rejectedPin}i0 \\(rejected\\) at \\d{2}:\\d{2} UTC, \\d+ min ago`),
+      new RegExp(`latest ledger deliverable pin://${rejectedPin}i0 \\(rejected\\) at \\d{2}:\\d{2} \\(UTC[+-]\\d{2}\\), \\d+ min ago`),
       'the evidence cites the rejected deliverable pin and its time',
     );
     assert.match(anomaly.message, /no upstream dependency declared in the dispatch/, 'plain dispatch: the honest label');
@@ -10230,13 +10230,15 @@ test('GT#87: a deadline restated for another worker never arms the bare-named me
   const h = await createHarness({ emitLog: (message) => logs.push(message) });
   try {
     const task = h.createTask([2, 3]); // Coder Bot + Designer Bot
-    // The #5880 shape: @-addressed lock + restated deadline for Coder Bot,
-    // bare-name praise paragraph for Designer Bot ("无需回执").
+    // The #5880 shape: @-addressed lock + restated deadline for Coder Bot
+    // (unquoted — a quoted restatement is a citation that no longer
+    // bare-name-wakes; that behavior is covered by the P2-5 test), bare-name
+    // praise paragraph for Designer Bot ("无需回执").
     insertGroupMessage(h.db, {
       pinId: 'gt87-cross-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Twin Bot',
       content: '@Coder Bot 状态锁定：实现口径已定，部署断言清单同步抄送 Designer Bot 增补段一份。'
-        + '`[DEADLINE: 140m]` 时钟照旧（5863 起算）。\n\n'
+        + '[DEADLINE: 140m] 时钟照旧（5863 起算）。\n\n'
         + 'Designer Bot（无需回执）：复核干净利落——29 vs 30 两边都对，对表以全绿为准。',
       chainTimestamp: Math.floor(h.state.nowMs / 1000),
     });
@@ -10499,6 +10501,287 @@ test('GT#87: a member greeted at the top and dispatched later still gets their c
     const armed = h.store.get(`group_task_expected_delivery:${task.id}:3`);
     assert.ok(armed, 'the greeting-first member still arms a clock from the later dispatch clause');
     assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 45 * 60_000, 'the ④ paragraph 45m is the clock');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT#87 (quota stall): fleet-wide token-plan exhaustion ("429 ... quota has
+// been exceeded") parked the whole task — every member turn failed, each
+// attempt burned ~10min of provider retry ladders, and MSG_RETRY_MAX_FAILURES
+// was on track to DROP the three closing-gate triggers. Quota failures now
+// requeue UNCHARGED, arm a per-task stall (the drain holds entries, one probe
+// per interval), notify the owner once per episode, and lift automatically on
+// the first successful turn.
+// ---------------------------------------------------------------------------
+
+test('GT#87: quota exhaustion stalls the task without burning the retry budget', async () => {
+  const logs = [];
+  const milestones = [];
+  const skillTurnAttempts = [];
+  let quotaDead = true;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: (input) => (input.metabotId === 2
+      ? { prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }
+      : { prompt: null, activeSkillIds: [] }),
+    deps: {
+      sendMilestoneToSourceSession: (input) => { milestones.push(input); },
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        if (quotaDead) {
+          throw new Error('DSH turn failed: 429: {"message":"Token Plan quota has been exceeded (request_id: req-1)"}');
+        }
+        return { replyText: '[WORKING] 已接单', assistantMessageId: null };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['origin-session-1', task.id]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-quota-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 冒烟验证 [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'the turn ran once and failed on quota');
+    let queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'trigger requeued');
+    assert.equal(queued[0].failures ?? 0, 0, 'requeued UNCHARGED — quota exhaustion is environmental');
+    assert.ok(h.store.get(`group_task_quota_stall:${task.id}`), 'the task is quota-stalled');
+    const quotaNotices = milestones.filter((m) => m.kind === 'anomaly' && m.message.includes('Token-plan quota exhausted'));
+    assert.equal(quotaNotices.length, 1, 'the owner heard about the stall exactly once');
+
+    // Immediate next tick: the stall holds — no new dispatch.
+    h.state.nowMs += 5_000;
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'stalled: no dispatch before the probe interval');
+
+    // After the probe interval: exactly one probe dispatch.
+    h.state.nowMs += 16 * 60_000;
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 2, 'one probe per interval while stalled');
+    queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued[0].failures ?? 0, 0, 'the probe failure stayed uncharged');
+    assert.equal(
+      milestones.filter((m) => m.kind === 'anomaly' && m.message.includes('Token-plan quota exhausted')).length,
+      1,
+      'still one owner notice per episode (probe failure does not re-notify)',
+    );
+
+    // Quota returns: the next probe succeeds and lifts the stall.
+    quotaDead = false;
+    h.state.nowMs += 16 * 60_000;
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 3, 'the probe re-ran');
+    assert.ok(h.sends.some((s) => s.content === '[WORKING] 已接单'), 'the probe delivered the reply');
+    assert.equal(h.store.get(`group_task_quota_stall:${task.id}`) ?? null, null, 'the stall lifted on first success');
+    assert.ok(logs.some((line) => line.includes('quota stall lifted')), 'the lift is logged');
+    assert.equal(JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]').length, 0, 'queue drained');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a non-quota failure still burns the ordinary retry ladder', async () => {
+  const h = await createHarness({
+    deps: {
+      runSkillTurn: async () => { throw new Error('DSH turn failed: 500: internal'); },
+    },
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-nonquota-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot check [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].failures, 1, 'a plain 500 failure charges the retry counter');
+    assert.equal(h.store.get(`group_task_quota_stall:${task.id}`) ?? null, null, 'no stall for non-quota failures');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT#87 (P2-5): quoted code is citation, not dispatch. The chair's 18:29
+// rebuttal restated another worker's deadline inside backticks while naming
+// 阿码 in the third person — the raw-content [DEADLINE] test read the quoted
+// citation as an assignment marker and armed a phantom ACK watch that
+// misfired a no-ACK note 31 minutes later.
+// ---------------------------------------------------------------------------
+
+test('GT#87: a backtick-quoted [DEADLINE] restatement never wakes or arms a phantom assignment', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-quoted-deadline-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '主持人核对：Coder Bot 提出的截止日期提醒与其估算值对不上。但这不是我的安排时间：'
+        + '我分配给他的实际任务是 `[DEADLINE: 140m]`，从派发起算。目前没有任何超时事项，保持静默。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'a quoted tag never wakes the bare-named worker');
+    assert.ok(
+      !logs.some((line) => line.includes('assignment to Coder Bot (message #')),
+      'no phantom ACK watch armed from the quoted restatement',
+    );
+    assert.ok(
+      !logs.some((line) => line.includes('assignment to Designer Bot (message #')),
+      'no phantom watch for any other bare-named member either',
+    );
+
+    // Control: the same message with the tag UNQUOTED keeps the GT#72
+    // bare-name dispatch semantics intact.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-unquoted-deadline-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'Coder Bot，第二棒正式开工 [DEADLINE: 60m]：字段级协议规范，即刻交付。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) => line.includes('assignment to Coder Bot (message #') && line.includes('waiting for [WORKING] ACK')),
+      'an unquoted tag on a bare-name dispatch still arms the watch (GT#72 semantics intact)',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT#87 (P2-7): prompt-facing absolute times must render in the host's LOCAL
+// zone with an explicit offset, matching the per-turn "Current time:" line.
+// GT#87's chair mis-subtracted a UTC stamp against the local clock ("stuck in
+// planning ~8 hours", actual 7 minutes) and published the false statement to
+// the on-chain record; its deadline-reconciliation turn then failed to match
+// a UTC-rendered bell against locally-stated deadlines.
+// ---------------------------------------------------------------------------
+
+test('GT#87: the missed-deadline note renders the due time in the local zone with an offset', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    h.store.set(`group_task_expected_delivery:${task.id}:2`, JSON.stringify({ dueAt: startMs - 5 * 60_000 }));
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    await h.loop.runTick();
+    const notes = h.groupTaskStore.listPendingHostNotes(task.id).filter((note) => note.kind === 'deadline');
+    assert.equal(notes.length, 1, 'the note fired');
+    const timeMatch = /(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \(UTC([+-]\d{2})\)/.exec(notes[0].body);
+    assert.ok(timeMatch, `the due time carries a local stamp with an explicit offset: ${notes[0].body}`);
+    assert.ok(!/T\d{2}:\d{2}:\d{2}(\.\d+)?Z/.test(notes[0].body), 'no bare ISO/UTC rendering remains');
+    // The rendered clock equals the due time converted into the host zone.
+    const dueLocal = new Date(startMs - 5 * 60_000);
+    const pad = (v) => String(v).padStart(2, '0');
+    const expected = `${dueLocal.getFullYear()}-${pad(dueLocal.getMonth() + 1)}-${pad(dueLocal.getDate())} ${pad(dueLocal.getHours())}:${pad(dueLocal.getMinutes())}`;
+    assert.equal(timeMatch[1], expected, 'the clock is local, not UTC-shifted');
+    const offsetMinutes = -dueLocal.getTimezoneOffset();
+    const expectedOffset = `${offsetMinutes >= 0 ? '+' : '-'}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, '0')}`;
+    assert.equal(timeMatch[2], expectedOffset, 'the offset matches the host zone');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT#87 (P3): the chair's deferred backlog coalesces to the newest non-owner
+// trigger. GT#87's convergence tail drained 31-77min-old chair triggers one
+// 5-10min turn each, mostly answered [NO_REPLY] — a chair turn reads the full
+// group-log window and the Task #51 safety net settles every pending trigger
+// up to its message, so the serial replay bought nothing but tail latency.
+// Owner messages keep their own dispatch (they always reach the chair).
+// ---------------------------------------------------------------------------
+
+test('GT#87: stale chair triggers coalesce into the newest; owner messages keep their own dispatch', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-chair-stale-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot 第一轮对齐说明（旧）', chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-chair-stale-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot 第二轮对齐说明（较新）', chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-chair-stale-3-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot 第三轮对齐说明（最新）', chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-chair-owner-i0', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Owner', content: 'owner has a question for the chair', chainTimestamp: Math.floor(startMs / 1000),
+    });
+    const ids = {};
+    for (const pin of ['gt87-chair-stale-1-i0', 'gt87-chair-stale-2-i0', 'gt87-chair-stale-3-i0', 'gt87-chair-owner-i0']) {
+      ids[pin] = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', [pin])[0].values[0][0];
+    }
+    // Advance the cursor past all four and seed the chair's deferred backlog
+    // directly (the stale-trigger replay state GT#87 ended its ticks in).
+    h.groupTaskStore.getStore?.();
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = ? WHERE id = ?', [ids['gt87-chair-owner-i0'], task.id]);
+    h.store.set(`group_task_deferred:${task.id}`, JSON.stringify([
+      { taskId: task.id, metabotId: 1, messageId: ids['gt87-chair-stale-1-i0'], reason: 'chair_mentioned', verificationNotes: [], failures: 1 },
+      { taskId: task.id, metabotId: 1, messageId: ids['gt87-chair-stale-2-i0'], reason: 'chair_mentioned', verificationNotes: [], failures: 1 },
+      { taskId: task.id, metabotId: 1, messageId: ids['gt87-chair-stale-3-i0'], reason: 'chair_mentioned', verificationNotes: [], failures: 1 },
+      { taskId: task.id, metabotId: 1, messageId: ids['gt87-chair-owner-i0'], reason: 'chair_owner_message', verificationNotes: [], failures: 1 },
+    ]));
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) =>
+        line.includes("coalesced bot 1's queued backlog into") &&
+        line.includes(`#${ids['gt87-chair-stale-3-i0']} (newest chair trigger`) &&
+        line.includes(`superseded: #${ids['gt87-chair-stale-1-i0']}, #${ids['gt87-chair-stale-2-i0']}`)),
+      'the three stale chair triggers coalesced into the newest',
+    );
+    // The owner entry dispatched first (never coalesced); the two stale
+    // triggers were superseded (no dispatch for #1/#2); the coalesced newest
+    // trigger re-queued behind the in-flight guard and runs next tick.
+    assert.ok(
+      logs.some((line) => line.includes(`dispatched async chair turn for bot 1 (message #${ids['gt87-chair-owner-i0']}, reason chair_owner_message`)),
+      'the owner message keeps its own dispatch',
+    );
+    for (const stale of ['gt87-chair-stale-1-i0', 'gt87-chair-stale-2-i0']) {
+      assert.ok(
+        !logs.some((line) => line.includes(`message #${ids[stale]}`) && line.includes('dispatched async chair turn')),
+        `superseded stale trigger #${ids[stale]} never dispatched`,
+      );
+    }
+    assert.equal(h.chatCalls.length, 1, 'exactly one chair turn ran this tick');
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'only the coalesced newest trigger remains queued');
+    assert.equal(queued[0].messageId, ids['gt87-chair-stale-3-i0'], 'it is the newest chair trigger');
+    // Next tick: the coalesced newest trigger gets its turn and the queue drains.
+    h.state.nowMs += 60_000;
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) => line.includes(`dispatched async chair turn for bot 1 (message #${ids['gt87-chair-stale-3-i0']}, reason chair_mentioned`)),
+      'the coalesced newest trigger ran',
+    );
+    assert.equal(JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]').length, 0, 'queue drained');
   } finally {
     h.cleanup();
   }
