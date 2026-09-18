@@ -15,7 +15,7 @@
  *   #/metaso                 MetaSO aggregation view
  */
 
-const API_BASE = ""; // e.g. "http://127.0.0.1:18088"; empty = bundled snapshot
+const API_BASE = ""; // empty = bundled snapshot; a live origin may be supplied at runtime via ?api=
 const DATA_DIR = "data";
 
 const apiBase = () => {
@@ -83,6 +83,14 @@ const validityCell = (validity, reason) =>
     ? `<span class="pill warn">不计入${reason ? " · " + esc(reason) : ""}</span>`
     : `<span class="pill ok">有效</span>`;
 
+// Data-source disclosure (red line #6 + snapshot-must-not-fake-online):
+// the package embeds NO deployment endpoint; snapshot mode always labels
+// the data cut-off block from replayMeta.evaluatedAtBlock.
+const modePill = (meta) =>
+  apiBase()
+    ? `<span class="pill ok" title="${esc(apiBase())}">数据源：live 端点</span>`
+    : `<span class="pill dim">数据源：内嵌快照 · 数据截至块高 ${fmtNum(meta?.evaluatedAtBlock)}（非在线）</span>`;
+
 /* ---------- views ---------- */
 async function renderList(el) {
   const t = await getTasks();
@@ -99,6 +107,7 @@ async function renderList(el) {
       <span class="pill">参与 bot ${fmtNum(s.participantsDistinct)}</span>
       <span class="pill warn">重放器块高 ${fmtNum(m.evaluatedAtBlock)}</span>
       <span class="pill">增量游标 tx ${fmtNum(m.cursor?.txIndex)}</span>
+      ${modePill(m)}
       <span class="pill dim">事件 ${fmtNum(m.eventCount)} · ${esc(m.replayAlgoVersion || "")}</span>
     </div>
     <div class="panel">
@@ -175,7 +184,7 @@ async function renderTask(el, root) {
           <div class="k">title / brief</div><div class="v"><b>${esc(p.title)}</b>${p.brief ? ` — <span title="${esc(p.brief)}">${esc(String(p.brief).slice(0, 160))}${String(p.brief).length > 160 ? "…" : ""}</span>` : ""}</div>
           <div class="k">tree / spec</div><div class="v">treeid ${pinLink(p.treeid)} · specid ${pinLink(p.specid)}<br><span class="hint">验证器：${esc(spec.lang || "")} / ${esc(spec.entry || "")}${spec.name ? " · " + esc(spec.name) : ""}${spec.scriptOrScriptPin ? ` · <details style="display:inline"><summary>脚本</summary><pre class="block">${esc(spec.scriptOrScriptPin)}</pre></details>` : ""}</span></div>
           <div class="k">发布者</div><div class="v">${metaLink(p.publisher)}</div>
-          <div class="k">重放快照</div><div class="v"><span class="pill warn">块高 ${fmtNum(m.evaluatedAtBlock)}</span> <span class="pill">事件 ${fmtNum(m.eventCount)}</span> <span class="pill dim">${esc(m.replayAlgoVersion || "")}</span> · 任何 bot 重放同结论</div>
+          <div class="k">重放快照</div><div class="v"><span class="pill warn">块高 ${fmtNum(m.evaluatedAtBlock)}</span> <span class="pill">事件 ${fmtNum(m.eventCount)}</span> <span class="pill dim">${esc(m.replayAlgoVersion || "")}</span> ${modePill(m)}</div>
           <div class="k">进度</div><div class="v"><b>verified ${fmtNum(prog.verified)}</b> / ${fmtNum(prog.total)} · 未认领 ${fmtNum(prog.open)} · 打回 ${fmtNum(prog.rejected)} · 超时 ${fmtNum(prog.expired)}<div class="bar"><span style="width:${done}%"></span></div></div>
           <div class="k">策略</div><div class="v"><span class="pill">verify_quorum ${fmtNum(p.policy?.verify_quorum)}</span> <span class="pill">claim_ttl ${fmtNum(p.policy?.claim_ttl_hours)}h</span> <span class="pill">verify_window ${fmtNum(p.policy?.verify_window_hours)}h</span></div>
           <div class="k">名册</div><div class="v">${(p.participants || []).map((x) =>
@@ -322,6 +331,7 @@ async function renderMetaso(el) {
       <span class="pill dim">${esc(m.replayAlgoVersion || "")}</span>
       <span class="pill">事件 ${fmtNum(m.eventCount)}</span>
       <span class="pill ${(cov.unresolvedCount || 0) > 0 ? "warn" : ""}">未解析票 ${fmtNum(cov.unresolvedCount || 0)}</span>
+      ${modePill(m)}
       <span class="pill">任务 ${fmtNum(s.taskTotal)}</span>
       <span class="pill">参与 bot ${fmtNum(s.participantsDistinct)}</span>
     </div>
