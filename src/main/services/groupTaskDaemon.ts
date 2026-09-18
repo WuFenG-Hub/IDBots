@@ -29,7 +29,7 @@ import type {
 } from '../openTeamMembershipStore';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
-import { contentAddressesRosterName, isMentioned } from './groupChatMentionUtils';
+import { contentAddressesRosterName, contentMentionsBotName, isMentioned, mentionContainsMetaId } from './groupChatMentionUtils';
 import { isOpenTeamProtocolOnlyContent } from './openTeamGuestDaemon';
 import { parsePositionLines } from '../libs/groupTaskPositions';
 import {
@@ -8558,6 +8558,104 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * GT#87 (P1-2): the raw mention column of the same assignment message
+   * resolveAssignmentContent reads — needed by the deadline-arming address
+   * gate (a mention-array hit counts as "the chair addressed the member"
+   * even when the text carries no @-token).
+   */
+  const resolveAssignmentMention = (
+    task: GroupTask,
+    assignmentMessageId: number | null,
+    replyPin: string | null | undefined,
+  ): string | null => {
+    try {
+      const db = deps.getStore().getDatabase();
+      if (assignmentMessageId != null && task.groupId) {
+        const row = queryMessageById(db, task.groupId, assignmentMessageId);
+        if ((row?.content ?? '').trim()) return row?.mention ?? null;
+      }
+      const pin = (replyPin ?? '').trim();
+      if (pin) {
+        const result = db.exec(
+          'SELECT mention FROM group_chat_messages WHERE pin_id = ? LIMIT 1',
+          [pin],
+        );
+        const raw = result[0]?.values?.[0]?.[0];
+        return raw == null ? null : String(raw);
+      }
+    } catch {
+      // best-effort, same contract as resolveAssignmentContent
+    }
+    return null;
+  };
+
+  /**
+   * GT#87 (P1-2): a chair-stated [DEADLINE] may arm a member's delivery
+   * clock ONLY when the chair actually ADDRESSED that member in the
+   * assignment — an @-token in the text, or a mention-array hit. A BARE
+   * roster-name occurrence inside the chair's prose (praise paragraphs,
+   * "新出网依赖进阿力 SOP 增补段", narrative re-statements of someone
+   * ELSE'S deadline) keeps its GT#72 wake/ACK-watch eligibility but must
+   * never arm a clock: GT#87 retro-armed 阿力 with 阿码's 140m through
+   * exactly that shape (message #5880 — the bare-name clause reached across
+   * a paragraph boundary into 阿码's restated `` `[DEADLINE: 140m]` ``), and
+   * the false bell fired 2h20m later with a root cause invisible to every
+   * participant. Single-commander doctrine: prose restatements are not
+   * clocks; chairs re-state deadlines under an @-mention when they want the
+   * host to clock one.
+   */
+  const memberAddressedInAssignment = (
+    content: string,
+    mention: string | null | undefined,
+    botName: string | null | undefined,
+    memberName: string | null | undefined,
+    memberGlobalMetaId: string | null | undefined,
+    botMetaId: string | undefined,
+  ): boolean => {
+    const text = String(content ?? '');
+    if (botName && contentMentionsBotName(text, String(botName))) return true;
+    if (memberName && contentMentionsBotName(text, String(memberName))) return true;
+    return mentionContainsMetaId(mention ?? null, memberGlobalMetaId ?? null, botMetaId);
+  };
+
+  /**
+   * GT#87 (P1-2): parseChairDeadlineMinutes gated by the address check above.
+   * Returns the clause's minutes only when the member was addressed; when a
+   * deadline tag exists but the member was NOT addressed, logs the skip so
+   * future false-bell debriefs can see the arming decision on the record.
+   */
+  const parseAddressedChairDeadlineMinutes = (
+    taskId: number,
+    messageId: number | null,
+    member: GroupTaskMember,
+    bot: GroupTaskDaemonBotFull | undefined,
+    content: string,
+    mention: string | null | undefined,
+    clause: string | null | undefined,
+  ): number | null => {
+    const minutes = parseChairDeadlineMinutes(clause ?? null);
+    if (minutes == null || minutes <= 0) return minutes;
+    if (
+      memberAddressedInAssignment(
+        content,
+        mention,
+        bot?.name ?? null,
+        member.name ?? null,
+        member.globalmetaid ?? null,
+        bot?.metaid,
+      )
+    ) {
+      return minutes;
+    }
+    emitLog(
+      `[GroupTaskDaemon] Task ${taskId}: [DEADLINE:${minutes}m] found for ${member.name ?? member.metabotId} ` +
+      `in message #${messageId ?? '?'} without an @-address or mention-array hit — not arming their clock ` +
+      '(bare-name prose cannot govern a deadline; the chair re-states it under an @-mention to be clocked)',
+    );
+    return null;
+  };
+
+  /**
    * Speedup R-02: does this ACK's replyPin thread under a REAL chair
    * assignment to this member? Used to tell a genuine dispatch response
    * (deadline-worthy) apart from an unprompted/host-posted [WORKING] line
@@ -8732,7 +8830,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // SUSPENDED clock instead of dropping it — the deadline sweep
               // starts it when the upstream lands, even if the worker never
               // re-[WORKING]s.
-              const suspendedMinutes = parseChairDeadlineMinutes(memberClause);
+              const suspendedMinutes = parseAddressedChairDeadlineMinutes(
+                task.id, message.id, member, bot, contentText, message.mention, memberClause,
+              );
               if (suspendedMinutes != null && suspendedMinutes > 0) {
                 sqlite.set(
                   `${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`,
@@ -8767,7 +8867,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             const clause = extractMemberDispatchClause(contentText, bot.name)
               ?? extractMemberDispatchClause(contentText, member.name)
               ?? contentText;
-            const retroMinutes = parseChairDeadlineMinutes(clause);
+            const retroMinutes = parseAddressedChairDeadlineMinutes(
+              task.id, message.id, member, bot, contentText, message.mention, clause,
+            );
             if (retroMinutes != null && retroMinutes > 0) {
               sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
               sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
@@ -8934,7 +9036,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const memberClause = extractMemberDispatchClause(assignmentContent, memberBot?.name)
           ?? extractMemberDispatchClause(assignmentContent, member.name)
           ?? assignmentContent;
-        const chairDeadlineMinutes = parseChairDeadlineMinutes(memberClause);
+        const chairDeadlineMinutes = parseAddressedChairDeadlineMinutes(
+          task.id,
+          assignmentMessageId,
+          member,
+          memberBot,
+          assignmentContent,
+          resolveAssignmentMention(task, assignmentMessageId, message.replyPin),
+          memberClause,
+        );
         if (chairDeadlineMinutes != null && chairDeadlineMinutes > 0) {
           // Arming a fresh deadline starts a fresh reminder cycle — a leftover
           // delivery-reminded flag from the previous (missed or delivered)
@@ -8971,7 +9081,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const blockedClause = extractMemberDispatchClause(blockedContent, memberBot?.name)
             ?? extractMemberDispatchClause(blockedContent, member.name)
             ?? blockedContent;
-          const parsed = parseChairDeadlineMinutes(blockedClause);
+          const parsed = parseAddressedChairDeadlineMinutes(
+            task.id,
+            assignmentMessageId,
+            member,
+            memberBot,
+            blockedContent,
+            resolveAssignmentMention(task, assignmentMessageId, message.replyPin),
+            blockedClause,
+          );
           if (parsed != null && parsed > 0) {
             suspendedMinutes = parsed;
             sqlite.set(

@@ -10166,3 +10166,104 @@ test('GT#72: an ACK that lands just BEFORE the assignment\'s watch arming satisf
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// GT#87 (P1-2): a chair-stated [DEADLINE] arms a member's clock ONLY when
+// the chair @-addressed that member (or listed them in the mention array).
+// GT#87's #5880 replay: the chair locked another worker's baton and RESTATED
+// that worker's `[DEADLINE: 140m]`, while the message's only reference to
+// 阿力 was a bare-name praise paragraph explicitly marked "无需回执" — the
+// bare-name clause reached across into the restated tag and retro-armed
+// 阿力's clock; the false bell fired 2h20m later and the chair burned a
+// public turn trying (and failing) to reconcile it against every deadline it
+// had ever stated. Bare-name prose keeps wake/ACK-watch eligibility but is
+// never a clock source.
+// ---------------------------------------------------------------------------
+
+test('GT#87: a deadline restated for another worker never arms the bare-named member\'s clock', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]); // Coder Bot + Designer Bot
+    // The #5880 shape: @-addressed lock + restated deadline for Coder Bot,
+    // bare-name praise paragraph for Designer Bot ("无需回执").
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-cross-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 状态锁定：实现口径已定，部署断言清单同步抄送 Designer Bot 增补段一份。'
+        + '`[DEADLINE: 140m]` 时钟照旧（5863 起算）。\n\n'
+        + 'Designer Bot（无需回执）：复核干净利落——29 vs 30 两边都对，对表以全绿为准。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    // Both are woken (Coder via @, Designer via the GT#72 bare-name rule on a
+    // deadline-bearing chair message) — wake semantics unchanged.
+    assert.equal(h.chatCalls.length, 2, 'both the @-addressed and bare-named workers got turns');
+
+    // Designer Bot ACKs [WORKING] — pre-fix this armed the 140m restated for
+    // Coder Bot onto Designer's clock via the whole-message clause fallback.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-cross-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单：SOP 增补段 v0.3，预计 20 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:3`) ?? null,
+      null,
+      'the bare-named member never inherits another worker\'s restated deadline',
+    );
+    assert.ok(
+      logs.some((line) =>
+        line.includes('[DEADLINE:140m] found for Designer Bot')
+        && line.includes('without an @-address or mention-array hit — not arming their clock')),
+      'the skipped arming is on the record for future debriefs',
+    );
+
+    // Coder Bot ACKs the SAME message — @-addressed, its own 140m arms.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-cross-ack2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：实现开工，预计 120 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
+    assert.ok(armed, 'the @-addressed worker\'s own deadline still arms');
+    assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 140 * 60_000);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a mention-array hit still arms the clock when the text carries no @-token', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]);
+    // Mention-array-only dispatch (daemon-generated assignment shape): the
+    // text addresses by bare roster name, the mention array carries the ids.
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-mentionarr-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'Designer Bot，下一棒：PRD v0.8 组稿预备，现在开工，[DEADLINE: 45m]。',
+      mention: ['metaid-3'],
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-mentionarr-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单：组稿预备，预计 40 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:3`);
+    assert.ok(armed, 'mention-array dispatch arms the addressed member\'s clock');
+    assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 45 * 60_000);
+    assert.ok(logs.some((line) => line.includes('armed the chair-stated deadline: 45m')));
+  } finally {
+    h.cleanup();
+  }
+});
