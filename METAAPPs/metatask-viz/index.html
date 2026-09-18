@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MetaTask 可视化 · MetaSO 聚合视角</title>
+<link rel="stylesheet" href="app.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="tb-inner">
+    <a class="brand" href="#/">MetaTask 可视化</a>
+    <nav class="nav">
+      <a href="#/" data-nav="list">全局任务列表</a>
+      <a href="#/metaso" data-nav="metaso">MetaSO 聚合视角</a>
+    </nav>
+    <div class="tb-note">无中心账本 · 一切状态由重放计算</div>
+  </div>
+</header>
+<main id="app" class="wrap"><div class="loading">读取投影中…</div></main>
+<footer class="wrap foot">
+  只读视图：不签任何请求、不提交任何 pin。全部字段为 metaso-p2p metatask 重放索引器投影，可逐条回溯链上原始事件（pinId 级）。
+</footer>
+<script src="app.js"></script>
+</body>
+</html>
