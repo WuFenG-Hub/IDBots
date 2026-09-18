@@ -457,6 +457,24 @@ export function hasStandbyMarker(content: string): boolean {
   return /\[STANDBY\]/i.test(String(content ?? ''));
 }
 
+/**
+ * GT#87 (P1-3): the completion-shaped ACK family — `[WORKING→完成]`,
+ * `[WORKING→round-4 正式完成]`, `[WORKING→重构完成]`. The plain [WORKING]
+ * tag regex requires whitespace before any in-tag qualifier, so these never
+ * matched the ACK parser — a plain-speech completion report (no [DELIVERABLE]
+ * tag) left the armed chair-stated delivery clock running, and GT#87's first
+ * false missed-deadline fired exactly through that gap (the prep report was
+ * delivered and acknowledged at 18:00; the 30m clock rang at 18:26 anyway).
+ * The arrow form is a protocol-shaped, language-neutral phase-transition
+ * declaration: callers retire the step's delivery clock on it (the chair
+ * re-states deadlines under a fresh assignment when the next step starts).
+ * Progress heartbeats (`[WORKING long-task, ETA 45 min]`) carry no arrow and
+ * are unaffected.
+ */
+export function hasWorkingTransitionMarker(content: string): boolean {
+  return /\[WORKING[^\]]*?(?:→|->)[^\]]*\]/i.test(String(content ?? ''));
+}
+
 // ---------------------------------------------------------------------------
 // P0-8 → GT#72: integrity declarations (explicit protocol tags only)
 // ---------------------------------------------------------------------------

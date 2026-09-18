@@ -10267,3 +10267,161 @@ test('GT#87: a mention-array hit still arms the clock when the text carries no @
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// GT#87 (P1-3): the delivery clock must die when the step is publicly done.
+// GT#87 replays: (a) the worker's 18:00 prep report ([WORKING→完成], no
+// [DELIVERABLE] tag) never cleared the armed 30m clock — the first false
+// missed-deadline rang at 18:26 anyway; (b) round-2's "already ACKed; no new
+// ACK watch" left round-1's armed clock ticking through the new phase. Plus:
+// a bell that cannot be traced to its arming dispatch cost the chair a public
+// reconciliation turn — the note now carries the clock's source.
+// ---------------------------------------------------------------------------
+
+test('GT#87: a completion-shaped ACK ([WORKING→…]) retires the armed delivery clock', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-comp-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 准备工作：精读协议，回报 worktree+分支名 [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-comp-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：精读协议，预计 25 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get(`group_task_expected_delivery:${task.id}:2`), '30m clock armed on ACK');
+
+    // The plain-speech completion report — no [DELIVERABLE] tag. Pre-fix this
+    // left the 30m clock armed (only deliverable-tagged messages cleared it).
+    h.state.nowMs += 5 * 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-comp-done-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[WORKING→完成] 准备工作全部落地，回报：worktree .worktrees/x @ branch y，测试 ok。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`) ?? null,
+      null,
+      'the completion report retired the armed clock',
+    );
+    assert.ok(
+      logs.some((line) => line.includes('declared a phase transition') && line.includes('clock retired')),
+      'the retirement is on the record',
+    );
+
+    // Jump past the original dueAt: no missed-deadline note fires.
+    h.state.nowMs += 30 * 60_000;
+    await h.loop.runTick();
+    const notes = h.groupTaskStore.listPendingHostNotes(task.id).filter((note) => note.kind === 'deadline');
+    assert.equal(notes.length, 0, 'no false missed-deadline after the completion report');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a fresh chair assignment supersedes the previous phase\'s armed clock', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-phase1-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 第一阶段：准备工作 [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-phase1-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：第一阶段，预计 25 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get(`group_task_expected_delivery:${task.id}:2`), 'phase-1 clock armed');
+
+    // Round 2: a fresh assignment for the next phase lands BEFORE the old
+    // clock's dueAt. Pre-fix the armed 30m survived into the new phase.
+    h.state.nowMs += 5 * 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-phase2-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 第二阶段：实现重放索引器 [DEADLINE: 140m]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`) ?? null,
+      null,
+      'the fresh assignment superseded the previous phase\'s armed clock (no ACK yet → nothing armed)',
+    );
+
+    // ACKing the new assignment arms the NEW clock from the NEW clause.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-phase2-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：第二阶段，预计 120 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
+    assert.ok(armed, 'the new phase ACK arms the new clock');
+    assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 140 * 60_000);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a missed-deadline note carries the clock\'s arming source for chair reconciliation', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-src-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 冒烟验证 [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const assignmentId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['gt87-src-assign-i0'])[0].values[0][0];
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-src-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：冒烟验证，预计 25 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
+    assert.ok(armed, 'clock armed');
+    assert.equal(JSON.parse(armed).assignmentMessageId, assignmentId, 'the KV records the arming source message');
+    assert.equal(JSON.parse(armed).chairStatedMinutes, 30, 'the KV records the chair-stated minutes');
+
+    // Let the clock ring with the member inert (no session activity).
+    h.state.nowMs += 40 * 60_000;
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    await h.loop.runTick();
+    const notes = h.groupTaskStore.listPendingHostNotes(task.id).filter((note) => note.kind === 'deadline');
+    assert.equal(notes.length, 1, 'the missed-deadline note fired');
+    assert.match(notes[0].body, new RegExp(`clock armed from message #${assignmentId} \\(chair-stated 30m\\)`));
+  } finally {
+    h.cleanup();
+  }
+});

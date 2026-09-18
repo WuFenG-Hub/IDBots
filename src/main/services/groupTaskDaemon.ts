@@ -99,6 +99,7 @@ import {
   extractLocalFilePaths,
   parseWorkingAck,
   hasStandbyMarker,
+  hasWorkingTransitionMarker,
   parseIntegrityDeclaration,
   isCorrectionDeclaration,
   type ParsedDeliverable,
@@ -8879,6 +8880,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                   dueAt: now() + retroMinutes * 60_000,
                   ackedAt: recentAckMs,
                   taskDescription: null,
+                  assignmentMessageId: message.id,
+                  chairStatedMinutes: retroMinutes,
                 }),
               );
             }
@@ -8900,6 +8903,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // A fresh assignment supersedes any suspended clock from the
           // previous one — the new clause re-creates it via its own path.
           sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
+          // GT#87 (P1-3): … and the previous ARMED clock too. Round-2's
+          // "already ACKed; no new ACK watch" never touched round-1's armed
+          // 30m clock, so it kept ticking through the new phase and rang a
+          // false missed-deadline mid-implementation. The new assignment's
+          // ACK re-arms from the new clause; between assignment and ACK the
+          // no-ACK watch (pendingKey below) is the liveness backstop.
+          sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+          sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
           sqlite.set(
             pendingKey,
             JSON.stringify({
@@ -8945,6 +8956,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // Speedup hardening: tokens quoted inside code fences/backticks are
     // citations, not protocol input — parse the ACK from stripped content.
     const protocolContent = stripGroupTaskQuotedCode(message.content);
+    // GT#87 (P1-3): a completion-shaped ACK ([WORKING→完成] family) publicly
+    // declares the current step done. The expected-delivery clock is
+    // otherwise cleared ONLY by a [DELIVERABLE]-tagged message, so a
+    // plain-speech completion report left the armed chair-stated clock
+    // running — GT#87's first false missed-deadline fired exactly through
+    // that gap (prep report acknowledged 18:00, the round-1 30m clock rang
+    // 18:26 anyway). Retire the clock on the transition form; the chair
+    // re-states deadlines under a fresh assignment when the next step starts.
+    if (hasWorkingTransitionMarker(protocolContent)) {
+      const hadArmedClock = sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`) != null
+        || sqlite.get<string>(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`) != null;
+      sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+      sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
+      sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+      if (hadArmedClock) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} declared a phase transition ` +
+          '([WORKING→…] completion report) — chair-stated delivery clock retired',
+        );
+      }
+    }
     const ack = parseWorkingAck(protocolContent);
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
@@ -9058,6 +9090,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               dueAt: now() + chairDeadlineMinutes * 60_000,
               ackedAt: now(),
               taskDescription: ack.taskDescription,
+              assignmentMessageId: assignmentMessageId ?? null,
+              chairStatedMinutes: chairDeadlineMinutes,
             }),
           );
           emitLog(
@@ -10075,6 +10109,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           dueAt: nowMs + suspended.minutes * 60_000,
           ackedAt: nowMs,
           taskDescription: null,
+          assignmentMessageId: suspended.assignmentMessageId ?? null,
+          chairStatedMinutes: suspended.minutes,
         }),
       );
       emitLog(
@@ -10086,7 +10122,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (member.role !== 'worker' || member.metabotId == null) continue;
       const raw = sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
       if (!raw) continue;
-      let entry: { dueAt: number };
+      let entry: { dueAt: number; assignmentMessageId?: number | null; chairStatedMinutes?: number | null };
       try {
         entry = JSON.parse(raw);
       } catch {
@@ -10243,6 +10279,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // environment note (the host never posts the ⚠ as the chair). The
       // chair decides whether to nudge the member, extend, or re-assign.
       try {
+        // GT#87 (P1-3): the note carries the clock's ARMING SOURCE (message
+        // id + chair-stated minutes from the KV) so the chair can reconcile
+        // a bell against the dispatch it came from — GT#87's second false
+        // bell cost a public turn precisely because its origin (a restated
+        // deadline in another worker's lock message) was invisible.
+        const armedFrom = entry.assignmentMessageId != null
+          ? `; clock armed from message #${entry.assignmentMessageId}`
+            + (entry.chairStatedMinutes != null ? ` (chair-stated ${entry.chairStatedMinutes}m)` : '')
+          : '';
         store.recordHostNote({
           taskId: task.id,
           kind: 'deadline',
@@ -10251,7 +10296,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           body:
             `${member.name ?? `bot-${member.metabotId}`}'s estimated delivery ` +
             `(${new Date(entry.dueAt).toISOString()}) has passed with no [DELIVERABLE] on record ` +
-            `(dependency state: ${reminderDepState}).`,
+            `(dependency state: ${reminderDepState}${armedFrom}).`,
         });
         sqlite.set(remindedKey, '1');
         emitLog(
