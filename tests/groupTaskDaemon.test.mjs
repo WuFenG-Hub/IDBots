@@ -1325,6 +1325,51 @@ test('parseChairDeadlineMinutes: tag/prose forms parse; ambiguity and junk fall 
   assert.equal(parseChairDeadlineMinutes(null), null);
 });
 
+test('extractMemberDispatchClause (GT#87 P2-4): later deadline-bearing @clause beats the greeting clause', () => {
+  const { extractMemberDispatchClause, parseChairDeadlineMinutes } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  // The #5832 shape: 小明同学 greeted at the top, dispatched in paragraph ④.
+  const content = '@小明同学 欢迎入列！你坐本卡的验收席——独立验收人，与设计实现零重叠。全场请先读需求稿。\n\n'
+    + '分工与顺序如下：\n\n'
+    + '④ 验收席 @小明同学：把需求稿 §4 五条口径逐条转成可执行验收清单，清单草稿上链交付 [DEADLINE: 45m]。保持独立。';
+  const clause = extractMemberDispatchClause(content, '小明同学');
+  assert.ok(clause, 'clause extracted');
+  assert.ok(clause.startsWith('@小明同学：把需求稿'), 'the dispatch clause wins over the greeting');
+  assert.equal(parseChairDeadlineMinutes(clause), 45, 'the 45m is reachable from the clause');
+});
+
+test('extractMemberDispatchClause (GT#87 P2-4): a floating trailing deadline paragraph attaches to the @clause', () => {
+  const { extractMemberDispatchClause, parseChairDeadlineMinutes } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  // The #5861 shape: @loop confirmation paragraph, unrelated middle
+  // paragraphs, deadline as a trailing standalone paragraph.
+  const content = '@loop 冻结稿 v1.1 已逐节复核。确认 v1.1 为本卡冻结版（取代 v1.0）。\n\n'
+    + '[DEPENDS_ON: pin://' + 'ab'.repeat(32) + 'i0]\n\n'
+    + '[CORRECTION] 口径更正：五类事件应为七路径。\n\n'
+    + '派工前还差一次收口（v1.1.1，一次补齐、不再链式），四项：\n① participants[]。\n② C6 判据数值。\n'
+    + 'v1.1.1 作为新 pin 交付、上链后才打首个实现 commit（保 D1 审计干净）。[DEADLINE: 20m]';
+  const clause = extractMemberDispatchClause(content, 'loop');
+  assert.ok(clause, 'clause extracted');
+  assert.equal(parseChairDeadlineMinutes(clause), 20, 'the trailing floating 20m attaches to the @clause');
+
+  // The #5863 shape: single @mention, the dependency + deadline live in the
+  // NEXT paragraph with no @-token.
+  const content2 = '@Builder阿码 六点全部落账：1/2/3 已进 v1.1。\n\n'
+    + '第一棒现在派工。\n范围：冻结稿 v1.2 全量。\n交付：可跑索引器骨架＋向量全绿＋对数演练就绪。[DEADLINE: 140m]（含等的约 20m）';
+  const clause2 = extractMemberDispatchClause(content2, 'Builder阿码');
+  assert.ok(clause2, 'clause extracted');
+  assert.equal(parseChairDeadlineMinutes(clause2), 140, 'the biggest-baton 140m is reachable from the clause');
+});
+
+test('extractMemberDispatchClause (GT#87 P2-4): floating attachment never crosses into another member\'s @clause', () => {
+  const { extractMemberDispatchClause, parseChairDeadlineMinutes } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const content = '@Coder Bot 前置调研，无硬期限。\n\n'
+    + '@Designer Bot，下一棒：组稿预备，现在开工，[DEADLINE: 45m]。\n\n'
+    + '其余事项随后再定。';
+  const coder = extractMemberDispatchClause(content, 'Coder Bot');
+  assert.equal(parseChairDeadlineMinutes(coder), null, "Coder's tagless clause never borrows Designer's 45m");
+  const designer = extractMemberDispatchClause(content, 'Designer Bot');
+  assert.equal(parseChairDeadlineMinutes(designer), 45, "Designer's own clause keeps its 45m");
+});
+
 test('cursor advances on no-reply messages; a failing turn\'s retry coalesces with newer queued triggers (task #64)', async () => {
   // Cooldowns off: this test isolates the retry/ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
@@ -7300,6 +7345,184 @@ test('task #60: a transient error session status never re-dispatches while the r
   }
 });
 
+// ---------------------------------------------------------------------------
+// GT#87 (P1): a watchdog-detached turn keeps running inside the session and
+// appends its final assistant reply on settle — but the dispatching job had
+// already returned, so nobody posted it. GT#87 lost a whole first-bat
+// delivery announcement ([WORKING→完成] + [DELIVERABLE]) this way; only the
+// model's own [CORRECTION] on the deferred re-drive rescued it. On latch
+// release the daemon must harvest the settled reply, deliver it to the
+// group, and retire the durable re-drive entry for the answered trigger.
+// ---------------------------------------------------------------------------
+
+test('GT#87: a settled watchdog-detached turn has its final reply harvested and delivered — no re-drive', async () => {
+  const logs = [];
+  const skillTurnAttempts = [];
+  let runnerActive = false;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      isCoworkSessionActive: () => runnerActive,
+      latchWatchIntervalMs: 15,
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        runnerActive = true; // the detached runner keeps the turn alive past the watchdog
+        throw new SkillTurnTimeoutError('session-timeout-gt87', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    const triggerPin = 'pin-gt87-harvest-i0';
+    insertGroupMessage(h.db, {
+      pinId: triggerPin, senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot implement the first baton',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'the detached turn ran once');
+    let queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'trigger durably re-queued behind the latch');
+
+    // The runner finishes the detached turn: it appends the final assistant
+    // reply to the session, then the session leaves 'running'.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    const finalReply = '[WORKING→完成] first baton landed.\n\n[DELIVERABLE] pin://' + 'ab'.repeat(32) + 'i0';
+    h.coworkStore.addMessage(session.id, { type: 'assistant', content: finalReply });
+    h.coworkStore.updateSession(session.id, { status: 'completed' });
+    runnerActive = false;
+
+    // Wait for the latch watcher (15ms interval) to release + harvest, and
+    // for the detached on-chain send to land.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !h.sends.some((s) => s.content === finalReply)) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const harvested = h.sends.find((s) => s.content === finalReply);
+    assert.ok(harvested, 'the detached turn\'s final reply was harvested and delivered to the group');
+    assert.equal(harvested.metabotId, 2, 'delivered as the worker');
+    assert.equal(harvested.replyPin, triggerPin, 'threaded under the trigger');
+    queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 0, 'the answered trigger\'s re-drive entry retired');
+    assert.ok(
+      logs.some((line) => line.includes("harvested and delivered bot 2's detached-turn final reply")),
+      'harvest is logged',
+    );
+    // And the drain must NOT re-run the turn afterwards.
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'no re-drive after the harvest retired the entry');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a detached turn that settles silent retires the re-drive without posting', async () => {
+  const logs = [];
+  const skillTurnAttempts = [];
+  let runnerActive = false;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      isCoworkSessionActive: () => runnerActive,
+      latchWatchIntervalMs: 15,
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        runnerActive = true; // the detached runner keeps the turn alive past the watchdog
+        throw new SkillTurnTimeoutError('session-timeout-gt87b', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-gt87-silent-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot standby check',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1);
+    // The turn settles with an explicit [NO_REPLY] final.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.coworkStore.addMessage(session.id, { type: 'assistant', content: '[NO_REPLY]' });
+    h.coworkStore.updateSession(session.id, { status: 'completed' });
+    runnerActive = false;
+
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !logs.some((line) => line.includes('re-drive retired'))) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(
+      logs.some((line) => line.includes('settled silent') && line.includes('re-drive retired')),
+      'the silent settle retires the re-drive and says so',
+    );
+    assert.equal(h.sends.length, 0, 'nothing is posted for a silent settle');
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 0, 're-drive entry retired');
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'no re-drive after the silent settle');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a detached turn with NO settled reply keeps the re-drive (pre-fix recovery intact)', async () => {
+  const logs = [];
+  const skillTurnAttempts = [];
+  let runnerActive = false;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      isCoworkSessionActive: () => runnerActive,
+      latchWatchIntervalMs: 15,
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        runnerActive = true; // the detached runner keeps the turn alive past the watchdog
+        throw new SkillTurnTimeoutError('session-timeout-gt87c', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-gt87-noreply-yet-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot another check',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    // The runner dies without settling any final assistant message.
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.coworkStore.updateSession(session.id, { status: 'error' });
+    runnerActive = false;
+
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !logs.some((line) => line.includes('left no settled reply'))) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(
+      logs.some((line) => line.includes('left no settled reply')),
+      'the empty settle leaves the re-drive standing',
+    );
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 're-drive entry survives for the drain to recover');
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 2, 'the trigger is re-driven as before');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT-01: a wedged turn (await never settles) is force-settled at the hard cap and the trigger recovers', async () => {
   const logs = [];
   const h = await createHarness({
@@ -9984,6 +10207,298 @@ test('GT#72: an ACK that lands just BEFORE the assignment\'s watch arming satisf
     );
     const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
     assert.ok(armed, 'expected_delivery armed despite the ACK-before-watch race');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT#87 (P1-2): a chair-stated [DEADLINE] arms a member's clock ONLY when
+// the chair @-addressed that member (or listed them in the mention array).
+// GT#87's #5880 replay: the chair locked another worker's baton and RESTATED
+// that worker's `[DEADLINE: 140m]`, while the message's only reference to
+// 阿力 was a bare-name praise paragraph explicitly marked "无需回执" — the
+// bare-name clause reached across into the restated tag and retro-armed
+// 阿力's clock; the false bell fired 2h20m later and the chair burned a
+// public turn trying (and failing) to reconcile it against every deadline it
+// had ever stated. Bare-name prose keeps wake/ACK-watch eligibility but is
+// never a clock source.
+// ---------------------------------------------------------------------------
+
+test('GT#87: a deadline restated for another worker never arms the bare-named member\'s clock', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]); // Coder Bot + Designer Bot
+    // The #5880 shape: @-addressed lock + restated deadline for Coder Bot,
+    // bare-name praise paragraph for Designer Bot ("无需回执").
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-cross-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 状态锁定：实现口径已定，部署断言清单同步抄送 Designer Bot 增补段一份。'
+        + '`[DEADLINE: 140m]` 时钟照旧（5863 起算）。\n\n'
+        + 'Designer Bot（无需回执）：复核干净利落——29 vs 30 两边都对，对表以全绿为准。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    // Both are woken (Coder via @, Designer via the GT#72 bare-name rule on a
+    // deadline-bearing chair message) — wake semantics unchanged.
+    assert.equal(h.chatCalls.length, 2, 'both the @-addressed and bare-named workers got turns');
+
+    // Designer Bot ACKs [WORKING] — pre-fix this armed the 140m restated for
+    // Coder Bot onto Designer's clock via the whole-message clause fallback.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-cross-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单：SOP 增补段 v0.3，预计 20 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:3`) ?? null,
+      null,
+      'the bare-named member never inherits another worker\'s restated deadline',
+    );
+    assert.ok(
+      logs.some((line) =>
+        line.includes('[DEADLINE:140m] found for Designer Bot')
+        && line.includes('without an @-address or mention-array hit — not arming their clock')),
+      'the skipped arming is on the record for future debriefs',
+    );
+
+    // Coder Bot ACKs the SAME message — @-addressed, its own 140m arms.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-cross-ack2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：实现开工，预计 120 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
+    assert.ok(armed, 'the @-addressed worker\'s own deadline still arms');
+    assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 140 * 60_000);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a mention-array hit still arms the clock when the text carries no @-token', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]);
+    // Mention-array-only dispatch (daemon-generated assignment shape): the
+    // text addresses by bare roster name, the mention array carries the ids.
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-mentionarr-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'Designer Bot，下一棒：PRD v0.8 组稿预备，现在开工，[DEADLINE: 45m]。',
+      mention: ['metaid-3'],
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-mentionarr-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单：组稿预备，预计 40 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:3`);
+    assert.ok(armed, 'mention-array dispatch arms the addressed member\'s clock');
+    assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 45 * 60_000);
+    assert.ok(logs.some((line) => line.includes('armed the chair-stated deadline: 45m')));
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT#87 (P1-3): the delivery clock must die when the step is publicly done.
+// GT#87 replays: (a) the worker's 18:00 prep report ([WORKING→完成], no
+// [DELIVERABLE] tag) never cleared the armed 30m clock — the first false
+// missed-deadline rang at 18:26 anyway; (b) round-2's "already ACKed; no new
+// ACK watch" left round-1's armed clock ticking through the new phase. Plus:
+// a bell that cannot be traced to its arming dispatch cost the chair a public
+// reconciliation turn — the note now carries the clock's source.
+// ---------------------------------------------------------------------------
+
+test('GT#87: a completion-shaped ACK ([WORKING→…]) retires the armed delivery clock', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-comp-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 准备工作：精读协议，回报 worktree+分支名 [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-comp-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：精读协议，预计 25 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get(`group_task_expected_delivery:${task.id}:2`), '30m clock armed on ACK');
+
+    // The plain-speech completion report — no [DELIVERABLE] tag. Pre-fix this
+    // left the 30m clock armed (only deliverable-tagged messages cleared it).
+    h.state.nowMs += 5 * 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-comp-done-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[WORKING→完成] 准备工作全部落地，回报：worktree .worktrees/x @ branch y，测试 ok。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`) ?? null,
+      null,
+      'the completion report retired the armed clock',
+    );
+    assert.ok(
+      logs.some((line) => line.includes('declared a phase transition') && line.includes('clock retired')),
+      'the retirement is on the record',
+    );
+
+    // Jump past the original dueAt: no missed-deadline note fires.
+    h.state.nowMs += 30 * 60_000;
+    await h.loop.runTick();
+    const notes = h.groupTaskStore.listPendingHostNotes(task.id).filter((note) => note.kind === 'deadline');
+    assert.equal(notes.length, 0, 'no false missed-deadline after the completion report');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a fresh chair assignment supersedes the previous phase\'s armed clock', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-phase1-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 第一阶段：准备工作 [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-phase1-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：第一阶段，预计 25 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get(`group_task_expected_delivery:${task.id}:2`), 'phase-1 clock armed');
+
+    // Round 2: a fresh assignment for the next phase lands BEFORE the old
+    // clock's dueAt. Pre-fix the armed 30m survived into the new phase.
+    h.state.nowMs += 5 * 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-phase2-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 第二阶段：实现重放索引器 [DEADLINE: 140m]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:2`) ?? null,
+      null,
+      'the fresh assignment superseded the previous phase\'s armed clock (no ACK yet → nothing armed)',
+    );
+
+    // ACKing the new assignment arms the NEW clock from the NEW clause.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-phase2-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：第二阶段，预计 120 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
+    assert.ok(armed, 'the new phase ACK arms the new clock');
+    assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 140 * 60_000);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a missed-deadline note carries the clock\'s arming source for chair reconciliation', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-src-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Coder Bot 冒烟验证 [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const assignmentId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['gt87-src-assign-i0'])[0].values[0][0];
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-src-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：冒烟验证，预计 25 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
+    assert.ok(armed, 'clock armed');
+    assert.equal(JSON.parse(armed).assignmentMessageId, assignmentId, 'the KV records the arming source message');
+    assert.equal(JSON.parse(armed).chairStatedMinutes, 30, 'the KV records the chair-stated minutes');
+
+    // Let the clock ring with the member inert (no session activity).
+    h.state.nowMs += 40 * 60_000;
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    await h.loop.runTick();
+    const notes = h.groupTaskStore.listPendingHostNotes(task.id).filter((note) => note.kind === 'deadline');
+    assert.equal(notes.length, 1, 'the missed-deadline note fired');
+    assert.match(notes[0].body, new RegExp(`clock armed from message #${assignmentId} \\(chair-stated 30m\\)`));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a member greeted at the top and dispatched later still gets their clock armed (e2e)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // The #5832 shape verbatim structure: greeting @mention at the top,
+    // numbered dispatch paragraph with the deadline further down.
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-greet-dispatch-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Designer Bot 欢迎入列！你坐本卡的验收席——独立验收人。全场请先读需求稿。\\n\\n'
+        + '分工与顺序如下：\\n\\n'
+        + '① 架构席 @Coder Bot：冻结稿 [DEADLINE: 60m]。\\n\\n'
+        + '④ 验收席 @Designer Bot：验收清单草稿上链交付 [DEADLINE: 45m]。保持独立。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-greet-dispatch-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单（验收席）：正在读需求稿，预计 40 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const armed = h.store.get(`group_task_expected_delivery:${task.id}:3`);
+    assert.ok(armed, 'the greeting-first member still arms a clock from the later dispatch clause');
+    assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 45 * 60_000, 'the ④ paragraph 45m is the clock');
   } finally {
     h.cleanup();
   }

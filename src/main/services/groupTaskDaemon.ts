@@ -29,7 +29,7 @@ import type {
 } from '../openTeamMembershipStore';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
-import { contentAddressesRosterName, isMentioned } from './groupChatMentionUtils';
+import { contentAddressesRosterName, contentMentionsBotName, isMentioned, mentionContainsMetaId } from './groupChatMentionUtils';
 import { isOpenTeamProtocolOnlyContent } from './openTeamGuestDaemon';
 import { parsePositionLines } from '../libs/groupTaskPositions';
 import {
@@ -99,6 +99,7 @@ import {
   extractLocalFilePaths,
   parseWorkingAck,
   hasStandbyMarker,
+  hasWorkingTransitionMarker,
   parseIntegrityDeclaration,
   isCorrectionDeclaration,
   type ParsedDeliverable,
@@ -598,6 +599,32 @@ export function hasWorkerUpstreamWait(content: string | null | undefined): boole
  * neither form is literal text (mention-array-only dispatches) — callers
  * then keep whole-message semantics.
  */
+/**
+ * GT#87 (P2-4): a floating deadline segment — a blank-line-separated block
+ * that carries a [DEADLINE:] tag but no @-token (so it is nobody's own
+ * clause). Chairs legitimately format the deadline as a trailing standalone
+ * paragraph of the dispatch ("…交付：可跑索引器骨架＋向量全绿。
+ * [DEADLINE: 140m]"); first-mention clause extraction stopped at the blank
+ * line and silently lost the clock. The first such segment after the
+ * member's clause attaches to it — an @-free block cannot belong to another
+ * member's clause by construction, and a tag-bearing block left unattached
+ * armed nothing at all.
+ */
+const CLAUSE_DEADLINE_TAG = /\[DEADLINE\s*:/i;
+const attachFloatingDeadlineSegment = (text: string, base: string, baseEndIndex: number): string | null => {
+  if (CLAUSE_DEADLINE_TAG.test(base)) return null;
+  const remainder = text.slice(baseEndIndex);
+  const segments = remainder.split(/(?:\r?\n[ \t]*\r?\n)+/);
+  for (const segment of segments) {
+    const trimmed = segment.trim();
+    if (!trimmed) continue;
+    if (trimmed.includes('@')) continue; // someone's clause / a handle citation
+    if (!CLAUSE_DEADLINE_TAG.test(trimmed)) continue;
+    return `${base}\n\n${trimmed}`;
+  }
+  return null;
+};
+
 export function extractMemberDispatchClause(
   content: string | null | undefined,
   botName: string | null | undefined,
@@ -606,11 +633,31 @@ export function extractMemberDispatchClause(
   const name = String(botName ?? '').trim();
   if (!text || !name) return null;
   const clauseEnd = /(?:\r?\n[ \t]*\r?\n)|(?:\r?\n[ \t]*-{3,}[ \t]*$)|(?:\s@)/m;
-  const at = text.toLowerCase().indexOf(`@${name.toLowerCase()}`);
-  if (at >= 0) {
-    const rest = text.slice(at);
-    const end = clauseEnd.exec(rest.slice(1));
-    return end ? rest.slice(0, 1 + end.index) : rest;
+  const lowerText = text.toLowerCase();
+  const lowerName = name.toLowerCase();
+  // GT#87 (P2-4): scan EVERY @-mention clause, not just the first. Chairs
+  // greet a member at the message top ("@小明同学 欢迎入列！…") and dispatch
+  // them in a later numbered paragraph ("④ 验收席 @小明同学：…清单草稿上链
+  // 交付 [DEADLINE: 45m]") — first-mention-wins read the greeting (tagless)
+  // and silently dropped the 45m clock. Prefer the first clause that carries
+  // a deadline tag; fall back to the first clause (original behavior), then
+  // try attaching a floating trailing deadline segment.
+  const atToken = `@${lowerName}`;
+  const atPositions: number[] = [];
+  for (let scanFrom = lowerText.indexOf(atToken); scanFrom >= 0; scanFrom = lowerText.indexOf(atToken, scanFrom + atToken.length)) {
+    atPositions.push(scanFrom);
+  }
+  if (atPositions.length > 0) {
+    const clauses = atPositions.map((at) => {
+      const rest = text.slice(at);
+      const end = clauseEnd.exec(rest.slice(1));
+      return end ? rest.slice(0, 1 + end.index) : rest;
+    });
+    const withDeadline = clauses.find((clause) => CLAUSE_DEADLINE_TAG.test(clause));
+    if (withDeadline) return withDeadline;
+    const first = clauses[0];
+    const attached = attachFloatingDeadlineSegment(text, first, atPositions[0] + first.length);
+    return attached ?? first;
   }
   // GT#72: chairs also address members by BARE full roster name
   // ("Builder阿码 这三点随你第一落一起落进 schema。3. 啊明，下一棒…[DEADLINE:
@@ -618,11 +665,12 @@ export function extractMemberDispatchClause(
   // later member's deadline bleeds into the bare-named member's arming.
   // The bare occurrence may sit INSIDE a longer roster name ("阿码" inside
   // "@Builder阿码") — that slice is equivalent, so no disambiguation needed.
-  const bare = text.toLowerCase().indexOf(name.toLowerCase());
+  const bare = lowerText.indexOf(lowerName);
   if (bare < 0) return null;
   const rest = text.slice(bare);
   const end = clauseEnd.exec(rest.slice(name.length));
-  return end ? rest.slice(0, name.length + end.index) : rest;
+  const clause = end ? rest.slice(0, name.length + end.index) : rest;
+  return attachFloatingDeadlineSegment(text, clause, bare + clause.length) ?? clause;
 }
 /**
  * P2-8: multi-driver mutex — kv heartbeat claim per task
@@ -1840,6 +1888,11 @@ export interface GroupTaskDaemonDeps {
    * the latch falls back to status-only release.
    */
   isCoworkSessionActive?: (sessionId: string) => boolean;
+  /**
+   * GT#87 (P1): poll interval for the post-watchdog in-flight latch watcher
+   * (default 15s). Test seam only — prod never overrides it.
+   */
+  latchWatchIntervalMs?: number;
   /**
    * P4 (v1.2): inject the review-stage owner report (same body the A2A
    * private chat receives) into the task's origin CoWork session under the
@@ -6747,7 +6800,106 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const TURN_LATCH_MAX_MS = 45 * 60_000;
   /** GT-01: resolved hard cap for one in-flight turn guard (see deps). */
   const turnHardCapMs = Math.max(1_000, Math.trunc(deps.turnHardCapMs ?? TURN_LATCH_MAX_MS));
-  const latchInFlightUntilSessionIdle = (key: string, sessionId: string | null, taskId: number, botId: number): void => {
+  /**
+   * GT#87 (P1): harvest the settled reply of a watchdog-detached turn. The
+   * runner keeps executing the original turn after the watchdog fire and
+   * appends its final assistant message to the session — but the dispatching
+   * job already returned, so on settle NOBODY posts that reply. GT#87 lost a
+   * whole first-bat delivery announcement this way ([WORKING→完成] +
+   * [DELIVERABLE] written to the session, never sent to the group); only the
+   * model's own [CORRECTION] on the deferred re-drive rescued it. On latch
+   * release: when the turn settled with a real answer, deliver it as the
+   * member's group reply and RETIRE the durable re-drive entry (the trigger
+   * is answered); when it settled silent/empty-with-mid-turn-sends, retire
+   * the entry too (deliberate ONE VOICE closer); when nothing settled, leave
+   * the re-drive standing (pre-fix behavior).
+   */
+  const harvestDetachedTurnReply = (
+    sessionId: string,
+    taskId: number,
+    botId: number,
+    message: GroupTaskDaemonMessage,
+    memberRole: string | null,
+  ): void => {
+    try {
+      const coworkStore = deps.getCoworkStore();
+      const messages = coworkStore.getSession(sessionId)?.messages ?? [];
+      let lastUserIndex = -1;
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].type === 'user') {
+          lastUserIndex = i;
+          break;
+        }
+      }
+      // The latched guard kept this (task, bot) session single-writer, so the
+      // LAST user message is the detached turn's own trigger turn.
+      const turnUserId = lastUserIndex >= 0 ? messages[lastUserIndex].id : null;
+      let finalAssistant: { id: string; content: string } | null = null;
+      for (let i = messages.length - 1; i > lastUserIndex; i -= 1) {
+        if (messages[i].type === 'assistant') {
+          finalAssistant = messages[i] as { id: string; content: string };
+          break;
+        }
+      }
+      const reply = String(finalAssistant?.content ?? '').trim();
+      const midTurnSends = turnUserId != null
+        ? countMidTurnGroupSends(coworkStore, sessionId, turnUserId)
+        : 0;
+      if (!finalAssistant || (!reply && midTurnSends === 0)) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${taskId}: detached turn for bot ${botId} left no settled reply ` +
+          `(message #${message.id}) — the deferred re-drive stands`,
+        );
+        return;
+      }
+      // The trigger is answered now; remove its durable re-drive entry BEFORE
+      // releasing the guard so the next tick's drain cannot re-ask it.
+      const entries = loadDeferredQueue(taskId).filter(
+        (entry) => !(entry.metabotId === botId && entry.messageId === message.id),
+      );
+      saveDeferredQueue(taskId, entries);
+      if (reply && !isNonAnswerAssistantReply(reply) && !NO_REPLY_PATTERN.test(reply)) {
+        void (async () => {
+          try {
+            const sent = await postGroupMessage(taskId, botId, reply, {
+              replyPin: message.pinId ?? undefined,
+            });
+            if (memberRole === 'chair') rememberDaemonChairPin(taskId, sent.pinId);
+            emitLog(
+              `[GroupTaskDaemon] Task ${taskId}: harvested and delivered bot ${botId}'s detached-turn ` +
+              `final reply (message #${message.id}) — the watchdog-detached turn's answer reached the group`,
+            );
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${taskId}: harvested-reply delivery failed for bot ${botId} ` +
+              `(message #${message.id}): ${error instanceof Error ? error.message : String(error)} ` +
+              '— the deferred re-drive was already retired; check the member session manually',
+            );
+          }
+        })();
+      } else {
+        emitLog(
+          `[GroupTaskDaemon] Task ${taskId}: detached turn for bot ${botId} settled ` +
+          (midTurnSends > 0
+            ? `with ${midTurnSends} mid-turn group message(s)`
+            : 'silent ([NO_REPLY]/non-answer final)') +
+          ` (message #${message.id}) — re-drive retired, nothing to post`,
+        );
+      }
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${taskId}: harvest of bot ${botId}'s detached turn failed ` +
+        `(message #${message.id}): ${error instanceof Error ? error.message : String(error)} — the deferred re-drive stands`,
+      );
+    }
+  };
+  const latchInFlightUntilSessionIdle = (
+    key: string,
+    sessionId: string | null,
+    taskId: number,
+    botId: number,
+    harvest?: { message: GroupTaskDaemonMessage; memberRole: string | null },
+  ): void => {
     if (!sessionId) {
       latchedTurnKeys.delete(key);
       turnInFlight.delete(key);
@@ -6795,6 +6947,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       clearInterval(watcher);
       latchWatchers.delete(watcher);
       latchedTurnKeys.delete(key);
+      // GT#87 (P1): harvest BEFORE the guard release + next-tick drain — the
+      // deferred-entry retirement inside must win the race against the drain
+      // re-driving the now-answered trigger. Safe on the cap-forced release
+      // too: the harvest only posts an actually-settled final assistant
+      // message, and a still-running turn has none after its user message.
+      if (harvest) {
+        harvestDetachedTurnReply(sessionId, taskId, botId, harvest.message, harvest.memberRole);
+      }
       turnInFlight.delete(key);
       emitTurnActivity();
       emitLog(
@@ -6802,7 +6962,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `(session status ${status ?? 'unknown'}${sessionActive ? ', runner turn still active' : ''}${capReached ? ', latch cap reached' : ''}); ` +
         'the deferred queue re-drives the unanswered trigger on the next tick',
       );
-    }, 15_000);
+    }, Math.max(1, Math.trunc(deps.latchWatchIntervalMs ?? 15_000)));
     watcher.unref?.();
     latchWatchers.add(watcher);
   };
@@ -7172,7 +7332,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               verificationNotes: args.verificationNotes,
               failures,
             });
-            latchInFlightUntilSessionIdle(key, sessionId, task.id, bot.id);
+            latchInFlightUntilSessionIdle(key, sessionId, task.id, bot.id, {
+              message,
+              memberRole: member.role ?? null,
+            });
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn hit the skill-turn watchdog ` +
               `(message #${message.id}, attempt ${failures}/${MSG_RETRY_MAX_FAILURES}); the turn keeps ` +
@@ -8443,6 +8606,104 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * GT#87 (P1-2): the raw mention column of the same assignment message
+   * resolveAssignmentContent reads — needed by the deadline-arming address
+   * gate (a mention-array hit counts as "the chair addressed the member"
+   * even when the text carries no @-token).
+   */
+  const resolveAssignmentMention = (
+    task: GroupTask,
+    assignmentMessageId: number | null,
+    replyPin: string | null | undefined,
+  ): string | null => {
+    try {
+      const db = deps.getStore().getDatabase();
+      if (assignmentMessageId != null && task.groupId) {
+        const row = queryMessageById(db, task.groupId, assignmentMessageId);
+        if ((row?.content ?? '').trim()) return row?.mention ?? null;
+      }
+      const pin = (replyPin ?? '').trim();
+      if (pin) {
+        const result = db.exec(
+          'SELECT mention FROM group_chat_messages WHERE pin_id = ? LIMIT 1',
+          [pin],
+        );
+        const raw = result[0]?.values?.[0]?.[0];
+        return raw == null ? null : String(raw);
+      }
+    } catch {
+      // best-effort, same contract as resolveAssignmentContent
+    }
+    return null;
+  };
+
+  /**
+   * GT#87 (P1-2): a chair-stated [DEADLINE] may arm a member's delivery
+   * clock ONLY when the chair actually ADDRESSED that member in the
+   * assignment — an @-token in the text, or a mention-array hit. A BARE
+   * roster-name occurrence inside the chair's prose (praise paragraphs,
+   * "新出网依赖进阿力 SOP 增补段", narrative re-statements of someone
+   * ELSE'S deadline) keeps its GT#72 wake/ACK-watch eligibility but must
+   * never arm a clock: GT#87 retro-armed 阿力 with 阿码's 140m through
+   * exactly that shape (message #5880 — the bare-name clause reached across
+   * a paragraph boundary into 阿码's restated `` `[DEADLINE: 140m]` ``), and
+   * the false bell fired 2h20m later with a root cause invisible to every
+   * participant. Single-commander doctrine: prose restatements are not
+   * clocks; chairs re-state deadlines under an @-mention when they want the
+   * host to clock one.
+   */
+  const memberAddressedInAssignment = (
+    content: string,
+    mention: string | null | undefined,
+    botName: string | null | undefined,
+    memberName: string | null | undefined,
+    memberGlobalMetaId: string | null | undefined,
+    botMetaId: string | undefined,
+  ): boolean => {
+    const text = String(content ?? '');
+    if (botName && contentMentionsBotName(text, String(botName))) return true;
+    if (memberName && contentMentionsBotName(text, String(memberName))) return true;
+    return mentionContainsMetaId(mention ?? null, memberGlobalMetaId ?? null, botMetaId);
+  };
+
+  /**
+   * GT#87 (P1-2): parseChairDeadlineMinutes gated by the address check above.
+   * Returns the clause's minutes only when the member was addressed; when a
+   * deadline tag exists but the member was NOT addressed, logs the skip so
+   * future false-bell debriefs can see the arming decision on the record.
+   */
+  const parseAddressedChairDeadlineMinutes = (
+    taskId: number,
+    messageId: number | null,
+    member: GroupTaskMember,
+    bot: GroupTaskDaemonBotFull | undefined,
+    content: string,
+    mention: string | null | undefined,
+    clause: string | null | undefined,
+  ): number | null => {
+    const minutes = parseChairDeadlineMinutes(clause ?? null);
+    if (minutes == null || minutes <= 0) return minutes;
+    if (
+      memberAddressedInAssignment(
+        content,
+        mention,
+        bot?.name ?? null,
+        member.name ?? null,
+        member.globalmetaid ?? null,
+        bot?.metaid,
+      )
+    ) {
+      return minutes;
+    }
+    emitLog(
+      `[GroupTaskDaemon] Task ${taskId}: [DEADLINE:${minutes}m] found for ${member.name ?? member.metabotId} ` +
+      `in message #${messageId ?? '?'} without an @-address or mention-array hit — not arming their clock ` +
+      '(bare-name prose cannot govern a deadline; the chair re-states it under an @-mention to be clocked)',
+    );
+    return null;
+  };
+
+  /**
    * Speedup R-02: does this ACK's replyPin thread under a REAL chair
    * assignment to this member? Used to tell a genuine dispatch response
    * (deadline-worthy) apart from an unprompted/host-posted [WORKING] line
@@ -8617,7 +8878,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // SUSPENDED clock instead of dropping it — the deadline sweep
               // starts it when the upstream lands, even if the worker never
               // re-[WORKING]s.
-              const suspendedMinutes = parseChairDeadlineMinutes(memberClause);
+              const suspendedMinutes = parseAddressedChairDeadlineMinutes(
+                task.id, message.id, member, bot, contentText, message.mention, memberClause,
+              );
               if (suspendedMinutes != null && suspendedMinutes > 0) {
                 sqlite.set(
                   `${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`,
@@ -8652,7 +8915,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             const clause = extractMemberDispatchClause(contentText, bot.name)
               ?? extractMemberDispatchClause(contentText, member.name)
               ?? contentText;
-            const retroMinutes = parseChairDeadlineMinutes(clause);
+            const retroMinutes = parseAddressedChairDeadlineMinutes(
+              task.id, message.id, member, bot, contentText, message.mention, clause,
+            );
             if (retroMinutes != null && retroMinutes > 0) {
               sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
               sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
@@ -8662,6 +8927,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                   dueAt: now() + retroMinutes * 60_000,
                   ackedAt: recentAckMs,
                   taskDescription: null,
+                  assignmentMessageId: message.id,
+                  chairStatedMinutes: retroMinutes,
                 }),
               );
             }
@@ -8683,6 +8950,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // A fresh assignment supersedes any suspended clock from the
           // previous one — the new clause re-creates it via its own path.
           sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
+          // GT#87 (P1-3): … and the previous ARMED clock too. Round-2's
+          // "already ACKed; no new ACK watch" never touched round-1's armed
+          // 30m clock, so it kept ticking through the new phase and rang a
+          // false missed-deadline mid-implementation. The new assignment's
+          // ACK re-arms from the new clause; between assignment and ACK the
+          // no-ACK watch (pendingKey below) is the liveness backstop.
+          sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+          sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
           sqlite.set(
             pendingKey,
             JSON.stringify({
@@ -8728,6 +9003,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // Speedup hardening: tokens quoted inside code fences/backticks are
     // citations, not protocol input — parse the ACK from stripped content.
     const protocolContent = stripGroupTaskQuotedCode(message.content);
+    // GT#87 (P1-3): a completion-shaped ACK ([WORKING→完成] family) publicly
+    // declares the current step done. The expected-delivery clock is
+    // otherwise cleared ONLY by a [DELIVERABLE]-tagged message, so a
+    // plain-speech completion report left the armed chair-stated clock
+    // running — GT#87's first false missed-deadline fired exactly through
+    // that gap (prep report acknowledged 18:00, the round-1 30m clock rang
+    // 18:26 anyway). Retire the clock on the transition form; the chair
+    // re-states deadlines under a fresh assignment when the next step starts.
+    if (hasWorkingTransitionMarker(protocolContent)) {
+      const hadArmedClock = sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`) != null
+        || sqlite.get<string>(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`) != null;
+      sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+      sqlite.delete(`${EXPECTED_DELIVERY_SUSPENDED_PREFIX}${task.id}:${member.metabotId}`);
+      sqlite.delete(`${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+      if (hadArmedClock) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} declared a phase transition ` +
+          '([WORKING→…] completion report) — chair-stated delivery clock retired',
+        );
+      }
+    }
     const ack = parseWorkingAck(protocolContent);
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
@@ -8819,7 +9115,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const memberClause = extractMemberDispatchClause(assignmentContent, memberBot?.name)
           ?? extractMemberDispatchClause(assignmentContent, member.name)
           ?? assignmentContent;
-        const chairDeadlineMinutes = parseChairDeadlineMinutes(memberClause);
+        const chairDeadlineMinutes = parseAddressedChairDeadlineMinutes(
+          task.id,
+          assignmentMessageId,
+          member,
+          memberBot,
+          assignmentContent,
+          resolveAssignmentMention(task, assignmentMessageId, message.replyPin),
+          memberClause,
+        );
         if (chairDeadlineMinutes != null && chairDeadlineMinutes > 0) {
           // Arming a fresh deadline starts a fresh reminder cycle — a leftover
           // delivery-reminded flag from the previous (missed or delivered)
@@ -8833,6 +9137,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               dueAt: now() + chairDeadlineMinutes * 60_000,
               ackedAt: now(),
               taskDescription: ack.taskDescription,
+              assignmentMessageId: assignmentMessageId ?? null,
+              chairStatedMinutes: chairDeadlineMinutes,
             }),
           );
           emitLog(
@@ -8856,7 +9162,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const blockedClause = extractMemberDispatchClause(blockedContent, memberBot?.name)
             ?? extractMemberDispatchClause(blockedContent, member.name)
             ?? blockedContent;
-          const parsed = parseChairDeadlineMinutes(blockedClause);
+          const parsed = parseAddressedChairDeadlineMinutes(
+            task.id,
+            assignmentMessageId,
+            member,
+            memberBot,
+            blockedContent,
+            resolveAssignmentMention(task, assignmentMessageId, message.replyPin),
+            blockedClause,
+          );
           if (parsed != null && parsed > 0) {
             suspendedMinutes = parsed;
             sqlite.set(
@@ -9842,6 +10156,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           dueAt: nowMs + suspended.minutes * 60_000,
           ackedAt: nowMs,
           taskDescription: null,
+          assignmentMessageId: suspended.assignmentMessageId ?? null,
+          chairStatedMinutes: suspended.minutes,
         }),
       );
       emitLog(
@@ -9853,7 +10169,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (member.role !== 'worker' || member.metabotId == null) continue;
       const raw = sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
       if (!raw) continue;
-      let entry: { dueAt: number };
+      let entry: { dueAt: number; assignmentMessageId?: number | null; chairStatedMinutes?: number | null };
       try {
         entry = JSON.parse(raw);
       } catch {
@@ -10010,6 +10326,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // environment note (the host never posts the ⚠ as the chair). The
       // chair decides whether to nudge the member, extend, or re-assign.
       try {
+        // GT#87 (P1-3): the note carries the clock's ARMING SOURCE (message
+        // id + chair-stated minutes from the KV) so the chair can reconcile
+        // a bell against the dispatch it came from — GT#87's second false
+        // bell cost a public turn precisely because its origin (a restated
+        // deadline in another worker's lock message) was invisible.
+        const armedFrom = entry.assignmentMessageId != null
+          ? `; clock armed from message #${entry.assignmentMessageId}`
+            + (entry.chairStatedMinutes != null ? ` (chair-stated ${entry.chairStatedMinutes}m)` : '')
+          : '';
         store.recordHostNote({
           taskId: task.id,
           kind: 'deadline',
@@ -10018,7 +10343,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           body:
             `${member.name ?? `bot-${member.metabotId}`}'s estimated delivery ` +
             `(${new Date(entry.dueAt).toISOString()}) has passed with no [DELIVERABLE] on record ` +
-            `(dependency state: ${reminderDepState}).`,
+            `(dependency state: ${reminderDepState}${armedFrom}).`,
         });
         sqlite.set(remindedKey, '1');
         emitLog(
