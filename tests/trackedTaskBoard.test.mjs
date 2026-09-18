@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
-const { TrackedTaskBoardService } = require('../dist-electron/main/services/trackedTaskBoard.js');
+const { TrackedTaskBoardService, trackedDeliverableKind } = require('../dist-electron/main/services/trackedTaskBoard.js');
 
 const { seedLongTaskBoard } = await import('./fixtures/longTaskBoardSeed.mjs');
 
@@ -747,6 +747,33 @@ test('card deliverables carry the single parser verdict over the source message 
   } finally {
     sqliteStore.close();
   }
+});
+
+/**
+ * Owner 2026-09-18 feedback ③: every MetaWeb scheme embeds a pinid in its payload,
+ * so probing the pinid token BEFORE the scheme made `metaapp://<pinid>` come back as
+ * 'pin' and left the metaapp branch as dead code. The declared order is now
+ * metaapp:// -> metafile:// -> pinid token -> http(s):// -> other, '' -> 'none'.
+ */
+test('trackedDeliverableKind: the scheme wins over the embedded pinid token (metaapp -> metaapp, not pin)', () => {
+  const pinid = 'a3f1c2d4e5b60718293a4b5c6d7e8f901a2b3c4d5e6f708192a3b4c5d6e7f809i0';
+  // The regression this pins down: at 03069ece this exact call returned 'pin'.
+  assert.equal(trackedDeliverableKind(`metaapp://${pinid}`), 'metaapp');
+  assert.equal(trackedDeliverableKind(`metafile://${pinid}`), 'metafile');
+  assert.equal(trackedDeliverableKind(`pin://${pinid}`), 'pin');
+  assert.equal(trackedDeliverableKind(pinid), 'pin', 'a bare pinid token is a pin');
+  assert.equal(trackedDeliverableKind('http://example.com/report'), 'url');
+  assert.equal(trackedDeliverableKind('https://example.com/report.pdf'), 'url');
+  assert.equal(trackedDeliverableKind(''), 'none');
+  assert.equal(trackedDeliverableKind('   '), 'none', 'whitespace-only trims to none');
+  assert.equal(trackedDeliverableKind('not-a-uri'), 'other');
+  // Scheme branches are matched on the trimmed head, before the token probe.
+  assert.equal(trackedDeliverableKind(`  metaapp://${pinid}?tab=1  `), 'metaapp');
+  assert.equal(trackedDeliverableKind(`  metafile://${pinid}  `), 'metafile');
+  // Consequence of the declared order (unchanged from the parent commit): an http(s)
+  // URL that itself embeds a pinid token still lands in 'pin', because the token
+  // branch precedes the http branch. Locked here so the order stays a decision.
+  assert.equal(trackedDeliverableKind(`https://example.com/${pinid}`), 'pin');
 });
 
 test('the two orchestration_tasks DDL definitions declare the same column set (R4 guard)', async () => {
