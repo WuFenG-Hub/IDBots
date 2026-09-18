@@ -9223,9 +9223,9 @@ test('fix-v2 P1-3: the stuck alert cites verifiable evidence and never mislabels
     // Evidence pointers: ledger state, last speech, session last write, and
     // the last [WORKING] signal — each with a minutes-ago figure.
     assert.match(anomaly.message, /evidence: no deliverable on the ledger/);
-    assert.match(anomaly.message, /last group speech at \d{2}:\d{2} UTC, \d+ min ago/);
-    assert.match(anomaly.message, /session log last write at \d{2}:\d{2} UTC, \d+ min ago/);
-    assert.match(anomaly.message, /last \[WORKING\] signal at \d{2}:\d{2} UTC, \d+ min ago/);
+    assert.match(anomaly.message, /last group speech at \d{2}:\d{2} \(UTC[+-]\d{2}\), \d+ min ago/);
+    assert.match(anomaly.message, /session log last write at \d{2}:\d{2} \(UTC[+-]\d{2}\), \d+ min ago/);
+    assert.match(anomaly.message, /last \[WORKING\] signal at \d{2}:\d{2} \(UTC[+-]\d{2}\), \d+ min ago/);
   } finally {
     h.cleanup();
   }
@@ -9282,7 +9282,7 @@ test('fix-v2 P1-3: a rejected deliverable still surfaces in the stuck evidence w
     assert.ok(anomaly, 'the stuck alert reached the origin session');
     assert.match(
       anomaly.message,
-      new RegExp(`latest ledger deliverable pin://${rejectedPin}i0 \\(rejected\\) at \\d{2}:\\d{2} UTC, \\d+ min ago`),
+      new RegExp(`latest ledger deliverable pin://${rejectedPin}i0 \\(rejected\\) at \\d{2}:\\d{2} \\(UTC[+-]\\d{2}\\), \\d+ min ago`),
       'the evidence cites the rejected deliverable pin and its time',
     );
     assert.match(anomaly.message, /no upstream dependency declared in the dispatch/, 'plain dispatch: the honest label');
@@ -10142,6 +10142,45 @@ test('GT#87: a backtick-quoted [DEADLINE] restatement never wakes or arms a phan
       logs.some((line) => line.includes('assignment to Coder Bot (message #') && line.includes('waiting for [WORKING] ACK')),
       'an unquoted tag on a bare-name dispatch still arms the watch (GT#72 semantics intact)',
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT#87 (P2-7): prompt-facing absolute times must render in the host's LOCAL
+// zone with an explicit offset, matching the per-turn "Current time:" line.
+// GT#87's chair mis-subtracted a UTC stamp against the local clock ("stuck in
+// planning ~8 hours", actual 7 minutes) and published the false statement to
+// the on-chain record; its deadline-reconciliation turn then failed to match
+// a UTC-rendered bell against locally-stated deadlines.
+// ---------------------------------------------------------------------------
+
+test('GT#87: the missed-deadline note renders the due time in the local zone with an offset', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    h.store.set(`group_task_expected_delivery:${task.id}:2`, JSON.stringify({ dueAt: startMs - 5 * 60_000 }));
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    h.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [startMs - 60 * 60_000, session.id]);
+    await h.loop.runTick();
+    const notes = h.groupTaskStore.listPendingHostNotes(task.id).filter((note) => note.kind === 'deadline');
+    assert.equal(notes.length, 1, 'the note fired');
+    const timeMatch = /(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \(UTC([+-]\d{2})\)/.exec(notes[0].body);
+    assert.ok(timeMatch, `the due time carries a local stamp with an explicit offset: ${notes[0].body}`);
+    assert.ok(!/T\d{2}:\d{2}:\d{2}(\.\d+)?Z/.test(notes[0].body), 'no bare ISO/UTC rendering remains');
+    // The rendered clock equals the due time converted into the host zone.
+    const dueLocal = new Date(startMs - 5 * 60_000);
+    const pad = (v) => String(v).padStart(2, '0');
+    const expected = `${dueLocal.getFullYear()}-${pad(dueLocal.getMonth() + 1)}-${pad(dueLocal.getDate())} ${pad(dueLocal.getHours())}:${pad(dueLocal.getMinutes())}`;
+    assert.equal(timeMatch[1], expected, 'the clock is local, not UTC-shifted');
+    const offsetMinutes = -dueLocal.getTimezoneOffset();
+    const expectedOffset = `${offsetMinutes >= 0 ? '+' : '-'}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, '0')}`;
+    assert.equal(timeMatch[2], expectedOffset, 'the offset matches the host zone');
   } finally {
     h.cleanup();
   }

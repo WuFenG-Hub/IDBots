@@ -2090,6 +2090,29 @@ function parseSqliteUtcMs(value: string | null | undefined): number | null {
   );
 }
 
+/**
+ * GT#87 (P2-7): prompt-facing absolute times render in the host's LOCAL zone
+ * with an explicit offset — the same convention as the per-turn "Current
+ * time:" line. Bare UTC (toISOString / "HH:MM UTC") next to a local
+ * "Current time" invited cross-zone subtraction: GT#87's chair computed
+ * "stuck in planning for ~8 hours" against the local clock (actual: 7
+ * minutes) and published the false statement to the on-chain group record;
+ * its later deadline-reconciliation turn then failed to match a UTC-rendered
+ * bell against locally-stated deadlines. `withDate` includes the date
+ * (deadline notes); the short form is clock-only (liveness blocks that also
+ * carry a "N min ago" relative anchor).
+ */
+function formatPromptLocalTime(ms: number, withDate: boolean): string {
+  const date = new Date(ms);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const utcOffset = `${sign}${String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(2, '0')}`;
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  if (!withDate) return `${clock} (UTC${utcOffset})`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock} (UTC${utcOffset})`;
+}
+
 function toDaemonMessage(row: GroupChatMessageRow): GroupTaskDaemonMessage {
   return {
     id: row.id,
@@ -7768,7 +7791,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       lastSessionActivityMs: number | null;
     },
   ): string => {
-    const fmtHhMm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
+    // GT#87 (P2-7): local clock with explicit offset (was "HH:MM UTC" —
+    // zone-mixed against the local Current-time line).
+    const fmtHhMm = (ms: number): string => formatPromptLocalTime(ms, false);
     const agoMin = (ms: number): number => Math.max(0, Math.round((now() - ms) / 60_000));
     const parts: string[] = [];
     if (deliverable) {
@@ -10137,7 +10162,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           dedupeKey: `deadline:${task.id}:${member.metabotId}:${entry.dueAt}`,
           body:
             `${member.name ?? `bot-${member.metabotId}`}'s estimated delivery ` +
-            `(${new Date(entry.dueAt).toISOString()}) has passed with no [DELIVERABLE] on record ` +
+            `(${formatPromptLocalTime(entry.dueAt, true)}) has passed with no [DELIVERABLE] on record ` +
             `(dependency state: ${reminderDepState}).`,
         });
         sqlite.set(remindedKey, '1');
