@@ -1,0 +1,23 @@
+{
+  "boundaryBlock": 189829,
+  "eventCount": 539,
+  "eventCountByPath": {
+    "task": 2,
+    "tree": 2,
+    "spec": 23,
+    "claim": 123,
+    "release": 9,
+    "submission": 124,
+    "verify": 256
+  },
+  "eventSetCanonicalSha256": "52429941508aaf6052b1c7589739da24f84b28c221ce4c7e19d013a88a2e5b42",
+  "canonicalRule": "539 rows of '<short-path>\\t<pinId>\\t<blockHeight>\\t<txIndex>' sorted lexicographically, '\\n'-joined with trailing newline, sha256",
+  "fetchedAt": "2026-09-18T08:38:23+0800",
+  "source": "https://manapi.metaid.io /pin/path/list (7 metatask paths, height <= 189829)",
+  "generator": "metaso-p2p metatask-replay-indexer c896334 local serve (--serve --listen 127.0.0.1:18088 --manapi https://manapi.metaid.io) + curl of /api/metatask/{tasks,tasks/<root>,replay/<root>}",
+  "crossRefs": {
+    "sharedEventsJsonlSha256": "2e56c39706e1773db7ab7a1861a17bde4aecff94871424e68ca34936f10ef083",
+    "independentRecompute": "Builder阿码 2026-09-18: re-crawl from manapi (539 tuples) -> canonical digest equal, canonical list diff == 0 lines vs the acceptance-seat list"
+  },
+  "notes": "Snapshot mode only: data is frozen at the boundary block above and labeled as such in every view; no deployment endpoint is embedded."
+}

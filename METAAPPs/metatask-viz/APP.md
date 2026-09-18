@@ -26,6 +26,7 @@
   2. `curl` 上述三类端点，分别存为 `data/tasks.json`、`data/panorama-<root>.json`、`data/replay-<root>.json`（任务清单来自 `tasks.json` 的 rows）；
   3. 页面即用。**换快照 = 换 data/ 目录**，页面零改动。
 - 快照里没有的字段不显示（例如显示层不做名字解析：投影只有 globalMetaId，名册与榜单按短 id 呈现、`title` 悬浮显示全 id；人名映射属 profile 层，未来可加、不发明新事实）。
+- **溯源块 `data/provenance.json`**（`#/metaso` 投影完整性卡片回显）：边界 B=189829、事件 539 条（task2/tree2/spec23/claim123/release9/submission124/verify256）、事件集 canonical sha256 `52429941508aaf6052b1c7589739da24f84b28c221ce4c7e19d013a88a2e5b42`、抓取时间与生成命令。规范化口径：539 行 `短路径⇥pinId⇥块高⇥txIndex` 字典序排序、`\n` 连接加尾换行、sha256——第三方回链重采七路径至 B 可复算。该恒等键已由工程席自 manapi 独立重采复算（539 条清单与验收席 diff 为 0 行）。
 
 ## 数据源策略（上链版 metaapp:// · 提案，待裁定）
 

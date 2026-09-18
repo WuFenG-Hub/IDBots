@@ -37,6 +37,7 @@ const getPanorama = (root) =>
 const getReplay = (root) =>
   (CACHE["r:" + root] ||= fetchJSON(
     apiBase() ? `${apiBase()}/api/metatask/replay/${root}` : `${DATA_DIR}/replay-${root}.json`));
+const getProvenance = () => (CACHE.prov ||= fetchJSON(`${DATA_DIR}/provenance.json`));
 
 /* ---------- helpers ---------- */
 const esc = (s) =>
@@ -314,7 +315,7 @@ async function renderNode(el, root, nodeId) {
 }
 
 async function renderMetaso(el) {
-  const t = await getTasks();
+  const [t, prov] = await Promise.all([getTasks(), getProvenance().catch(() => null)]);
   const m = t.replayMeta || {};
   const s = t.stats || {};
   const cov = m.coverage || {};
@@ -388,6 +389,9 @@ async function renderMetaso(el) {
               <div class="k">orderFallback</div><div class="v">${cov.orderFallback ? "true" : "false"}</div>
               <div class="k">versionEnum</div><div class="v">${esc(cov.versionEnum || "")}</div>
               <div class="k">事件分布</div><div class="v">${Object.entries(paths).map(([k, v]) => `<span class="pill">${esc(pathShort(k))} ${fmtNum(v)}</span>`).join(" ")}</div>
+              ${prov ? `
+              <div class="k">溯源 · 恒等键</div><div class="v"><span class="mono pin" title="${esc(prov.eventSetCanonicalSha256)}">${esc(shortId(prov.eventSetCanonicalSha256, 12, 10))}</span><div class="hint">事件集 canonical sha256（${fmtNum(prov.eventCount)} 条 · 边界 B=${fmtNum(prov.boundaryBlock)}）· 抓取时间 ${esc(prov.fetchedAt)}</div></div>
+              <div class="k">溯源 · 口径</div><div class="v hint">${esc(prov.canonicalRule || "")}<br>${esc(prov.source || "")}</div>` : ""}
             </div>
           </div>
         </div>
