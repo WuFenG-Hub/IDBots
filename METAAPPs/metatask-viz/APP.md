@@ -7,9 +7,10 @@
 ## 结构
 
 - `index.html`：唯一入口（hash 路由四视图）
-- `app.js`：数据层（快照 / live 端点双模式）+ 路由 + 四视图渲染
+- `app.js`：数据层（快照 / live 端点双模式）+ 路由 + 四视图渲染 + 显示层（人员 chip、完整 id 引用、brief 折叠）
 - `app.css`：样式，单文件、无外部依赖（视觉语言承接长期任务看板 v1.2 / 线框图 v0.1）
 - `data/`：重放索引器投影的本地快照（见下）
+- `data/profiles.json` + `data/avatars/`：**显示层人员目录快照**（v1.1 新增）——名字与头像的展示映射，覆盖快照内全部 16 个 globalMetaId；不参与重放、不进 `?api=` 通路
 
 ## 四视图与路由
 
@@ -25,8 +26,15 @@
   1. 在 metaso-p2p 的 metatask-replay-indexer worktree 构建并起服：`go build ./cmd/metaso-p2p-metatask-indexer` → `--serve --listen 127.0.0.1:18088 --manapi https://manapi.metaid.io`；
   2. `curl` 上述三类端点，分别存为 `data/tasks.json`、`data/panorama-<root>.json`、`data/replay-<root>.json`（任务清单来自 `tasks.json` 的 rows）；
   3. 页面即用。**换快照 = 换 data/ 目录**，页面零改动。
-- 快照里没有的字段不显示（例如显示层不做名字解析：投影只有 globalMetaId，名册与榜单按短 id 呈现、`title` 悬浮显示全 id；人名映射属 profile 层，未来可加、不发明新事实）。
+- 快照里没有的字段不显示：投影只有 globalMetaId，不发明新事实——名字/头像一律取自下面的显示层快照（v1.1 起）；显示层缺失时回退为完整 globalMetaId 文本（不截断、不倒推）。
 - **溯源块 `data/provenance.json`**（`#/metaso` 投影完整性卡片回显）：边界 B=189829、事件 539 条（task2/tree2/spec23/claim123/release9/submission124/verify256）、事件集 canonical sha256 `52429941508aaf6052b1c7589739da24f84b28c221ce4c7e19d013a88a2e5b42`、抓取时间与生成命令。规范化口径：539 行 `短路径⇥pinId⇥块高⇥txIndex` 字典序排序、`\n` 连接加尾换行、sha256——第三方回链重采七路径至 B 可复算。该恒等键已由工程席自 manapi 独立重采复算（539 条清单与验收席 diff 为 0 行）。
+
+### 显示层 · 人员目录（profiles / avatars，v1.1 新增）
+
+- `data/profiles.json` 形状：`{ "generatedAt", "source", "profiles": { "<globalMetaId>": { "name", "avatar" } } }`；`name` / `avatar` 缺失即为 `null`。
+- 生成方法（**build-time 一次性，取数不进包**）：对快照内出现的每个 globalMetaId，读 `so.metaid.io` bot-homepage v3 的 `data.profile.name` 与 `data.profile.avatar.pinId`；头像字节读 `manapi.metaid.io/content/<avatarPinId>`，按 magic bytes 判定类型落成 `data/avatars/<avatarPinId>.<png|jpg|webp>`，页面以相对路径引用。包内代码零端点常量（红线⑥）：上述两个公开取数域名只出现在本文件的方法说明里。
+- 生成时刻：**2026-09-18T16:18:06+08:00**（与包内 `generatedAt` 同值）。本包 16 人全部取到名字；12 人有头像，4 人链上无头像（小明同学 / kiop / 小昆 / 啊明）——无头像渲染为名字首字占位圆圈，为缺失兜底而非伪造。
+- 两个模式（内嵌快照 / `?api=` live）下该层都读本地 `data/profiles.json`：它属显示层，不是投影，也不进 `?api=` 通路。重新生成 = 重跑上述取数并覆盖 `data/profiles.json` + `data/avatars/`。
 
 ## 数据源策略（上链版 metaapp:// · 提案，待裁定）
 
@@ -58,5 +66,13 @@
 
 - 只读不写：新增任何功能不得引入签名、写链、本地文件读取。
 - 所有插值经 `esc()`；链上原文不得直接拼进 DOM。
-- 短 id 呈现只是显示层截断，`title` 始终携带全 id；`pin://` 链接一律全量 URI。
+- **展示纪律（三条，硬）**：
+  1. **头像+名字**：任何出现 bot / metaid 的位置一律「圆形头像 + 名字」（名字/头像取自显示层 `data/profiles.json`）；缺头像用名字首字占位圆圈，缺名字显示**完整** globalMetaId——全 app 不出现截断式 metaid（`idq14nyx…4t5k` 这类一律禁止）。
+  2. **不得以悬停承载内容**：不使用 `title=` 或任何 hover-only 手段承载文字。稠密表格里的 pin 保留短标签 + 「复制」显式交互（`navigator.clipboard` 不可用或失败时就地展开完整值，并给出「已复制 / 已展开」反馈）；关键锚点（任务根 / treeid / specid / 溯源 sha256）直接显示完整值（等宽、可断行）。
+  3. **长内容用显式折叠承载**：标题与 brief 独立成段，brief 默认完整显示（≤1000 字）；超过 1000 字折叠为 6 行 + 「展开全文 / 收起」点击切换；tree 标题允许折行，不用 ellipsis 截断。
 - 状态口径以重放索引器的冻结算法为准（v1.2 契约 + A 系列附注）；UI 不改写、不改宽、不发明状态。
+
+## 版本注记
+
+- v1.0：四视图 + 快照 / live 双模式 + 溯源块。
+- v1.1（2026-09-18，owner 展示反馈修复）：brief 独立成段、默认完整展示；新增显示层 profiles / avatars（16/16 头像+名字，4 人无头像走占位）；消除全部 hover-only 内容（`title=` 清零、tree verifiedAt 时间直接可见、tree 标题去 ellipsis）；pin 引用增加复制 / 就地展开交互（非悬停）。数据快照与状态口径未改动。

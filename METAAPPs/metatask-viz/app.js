@@ -59,10 +59,55 @@ function timeAgo(ts) {
   return `${Math.round(d / 86400)} 天前`;
 }
 const pathShort = (p) => String(p || "").split("/").pop();
-const pinLink = (id, label) =>
-  `<a class="mono pin" href="pin://${esc(id)}" title="${esc(id)}">${esc(label || shortId(id))}</a>`;
-const metaLink = (id, label) =>
-  `<a class="mono pin" href="metaid://${esc(id)}" title="${esc(id)}">${esc(label || shortId(id))}</a>`;
+
+/* ---------- display layer: person profiles (v1.1) ----------
+ * data/profiles.json is a build-time snapshot of name + avatar (see APP.md).
+ * It is display-only: read from the bundled data dir in BOTH snapshot and
+ * live modes (?api=), never part of the projection, never fetched remotely. */
+let PROFILES = null;
+const getProfiles = () => (CACHE.profiles ||= fetchJSON(`${DATA_DIR}/profiles.json`).catch(() => null));
+const profileOf = (id) => (PROFILES && PROFILES.profiles && PROFILES.profiles[id]) || null;
+
+const initialOf = (name) => {
+  const s = String(name || "").trim();
+  return s ? [...s][0] : "?";
+};
+
+/* Person chip: round avatar + name, linking to metaid://<full id>.
+ * Name comes from the profile layer; a missing name falls back to the FULL
+ * globalMetaId (wrapping allowed) — a truncated metaid is never rendered. */
+const personChip = (id) => {
+  const gid = String(id || "");
+  if (!gid) return "";
+  const p = profileOf(gid) || {};
+  const name = p.name || "";
+  const avatar = p.avatar || "";
+  const span = name
+    ? `<span class="pname">${esc(name)}</span>`
+    : `<span class="pname idfull">${esc(gid)}</span>`;
+  const av = avatar
+    ? `<img class="avatar" src="${esc(avatar)}" alt="" data-initial="${esc(initialOf(name))}" loading="lazy">`
+    : `<span class="avatar avatar-ph" aria-hidden="true">${esc(initialOf(name))}</span>`;
+  return `<a class="pchip" href="metaid://${esc(gid)}">${av}${span}</a>`;
+};
+
+/* ---------- non-hover identifier refs (v1.1) ----------
+ * Dense tables keep a short pin label plus an explicit copy control. Copy tries
+ * navigator.clipboard; when that is unavailable or rejects, the full value is
+ * expanded in place instead. Nothing is carried by hover (no title=). */
+const pinRef = (id, label) => {
+  const s = String(id || "");
+  if (!s) return "";
+  return `<span class="idref" data-full="${esc(s)}">` +
+    `<a class="mono pin" href="pin://${esc(s)}">${esc(label || shortId(s))}</a>` +
+    `<button type="button" class="idcopy" data-full="${esc(s)}">复制</button></span>`;
+};
+/* Full-text pin link for the key anchors (task root / treeid / specid / sha256). */
+const fullPin = (id) => (id ? `<a class="mono pin pinfull" href="pin://${esc(id)}">${esc(id)}</a>` : "");
+/* Breadcrumb link that navigates inside the app and still offers the full value. */
+const crumbTaskLink = (root) =>
+  `<span class="idref" data-full="${esc(root)}"><a class="mono" href="#/task/${esc(root)}">${esc(shortId(root))}</a>` +
+  `<button type="button" class="idcopy" data-full="${esc(root)}">复制</button></span>`;
 
 const STATE = {
   open: { cls: "s-open", label: "未认领" },
@@ -89,8 +134,68 @@ const validityCell = (validity, reason) =>
 // the data cut-off block from replayMeta.evaluatedAtBlock.
 const modePill = (meta) =>
   apiBase()
-    ? `<span class="pill ok" title="${esc(apiBase())}">数据源：live 端点</span>`
+    ? `<span class="pill ok">数据源：live 端点</span><span class="mono idline">${esc(apiBase())}</span>`
     : `<span class="pill dim">数据源：内嵌快照 · 数据截至块高 ${fmtNum(meta?.evaluatedAtBlock)}（非在线）</span>`;
+
+/* ---------- view binders (v1.1) ---------- */
+function bindAvatars(el) {
+  el.querySelectorAll("img.avatar").forEach((img) => {
+    const fallback = () => {
+      const span = document.createElement("span");
+      span.className = "avatar avatar-ph";
+      span.setAttribute("aria-hidden", "true");
+      span.textContent = img.getAttribute("data-initial") || "?";
+      img.replaceWith(span);
+    };
+    if (img.complete && img.naturalWidth === 0) fallback();
+    else img.addEventListener("error", fallback, { once: true });
+  });
+}
+
+function bindIdRefs(el) {
+  el.querySelectorAll("button.idcopy").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const full = btn.getAttribute("data-full") || "";
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(full);
+          btn.textContent = "已复制";
+          btn.classList.add("ok");
+          setTimeout(() => { btn.textContent = "复制"; btn.classList.remove("ok"); }, 1600);
+          return;
+        }
+      } catch (err) { /* fall through to in-place expansion */ }
+      const ref = btn.closest(".idref");
+      if (ref && !ref.querySelector(".full")) {
+        const span = document.createElement("span");
+        span.className = "mono full";
+        span.textContent = full;
+        ref.appendChild(span);
+      }
+      btn.textContent = "已展开";
+      btn.classList.add("ok");
+    });
+  });
+}
+
+function bindBrief(el) {
+  const btn = el.querySelector(".brief-toggle");
+  const box = el.querySelector(".th-brief");
+  if (!btn || !box) return;
+  btn.addEventListener("click", () => {
+    const clamped = box.classList.toggle("clamped");
+    btn.setAttribute("aria-expanded", clamped ? "false" : "true");
+    btn.textContent = clamped ? btn.getAttribute("data-more") : btn.getAttribute("data-less");
+  });
+}
+
+function afterRender(el) {
+  bindAvatars(el);
+  bindIdRefs(el);
+  bindBrief(el);
+}
 
 /* ---------- views ---------- */
 async function renderList(el) {
@@ -119,13 +224,13 @@ async function renderList(el) {
         <tbody>
         ${rows.map((r) => `
           <tr class="clickable" data-href="#/task/${esc(r.rootPinId)}">
-            <td>${pinLink(r.rootPinId, shortId(r.rootPinId))}</td>
+            <td>${pinRef(r.rootPinId, shortId(r.rootPinId))}</td>
             <td>${esc(r.title)}</td>
             <td>${fmtNum(r.nodeProgress?.verified)}/${fmtNum(r.nodeProgress?.total)} verified</td>
-            <td>${metaLink(r.publisher)}</td>
+            <td>${personChip(r.publisher)}</td>
             <td>${fmtNum(r.participantsCount)}</td>
             <td>${taskStatePill(r.taskState)}</td>
-            <td>${esc(timeAgo(r.lastActivity?.blockTs))}<div class="hint">${esc(r.lastActivity?.path ? pathShort(r.lastActivity.path) : "")} ${r.lastActivity?.eventPinId ? pinLink(r.lastActivity.eventPinId, "回源") : ""}</div></td>
+            <td>${esc(timeAgo(r.lastActivity?.blockTs))}<div class="hint">${esc(r.lastActivity?.path ? pathShort(r.lastActivity.path) : "")} ${r.lastActivity?.eventPinId ? pinRef(r.lastActivity.eventPinId, "回源") : ""}</div></td>
           </tr>`).join("")}
         </tbody>
       </table>
@@ -133,12 +238,13 @@ async function renderList(el) {
       <div class="panel-body soft"><div class="note">点任意一行下钻到任务全景。块高由重放器声明——没有块高的列表不可信。</div></div>
     </div>`;
   bindRows(el);
+  afterRender(el);
 }
 
 function bindRows(el) {
   el.querySelectorAll("tr.clickable").forEach((tr) => {
     tr.addEventListener("click", (e) => {
-      if (e.target.closest("a")) return;
+      if (e.target.closest("a,button")) return;
       location.hash = tr.getAttribute("data-href");
     });
   });
@@ -150,7 +256,7 @@ function treeRowsHTML(nodes, kids, depth) {
     const pills = [];
     if (n.cycleSeq > 1) pills.push(`<span class="pill">周期 ${n.cycleSeq}</span>`);
     if (n.cycleOutcome && n.cycleOutcome !== "none") pills.push(`<span class="pill dim">${esc(n.cycleOutcome)}</span>`);
-    if (n.verifiedAtBlockTs) pills.push(`<span class="pill ok" title="${esc(fmtTs(n.verifiedAtBlockTs))}">verifiedAt</span>`);
+    if (n.verifiedAtBlockTs) pills.push(`<span class="pill ok">verifiedAt ${esc(fmtTs(n.verifiedAtBlockTs))}</span>`);
     if (n.currentClaim) pills.push(`<span class="pill dim">claim</span>`);
     return `
       <div class="trow" data-node="${esc(n.id)}" style="padding-left:${6 + depth * 16}px">
@@ -175,21 +281,29 @@ async function renderTask(el, root) {
   const roots = kids[""] || [];
   const done = prog.total ? Math.round((prog.verified / prog.total) * 100) : 0;
   const spec = p.spec || {};
+  const brief = String(p.brief == null ? "" : p.brief);
+  const briefLong = brief.length > 1000;
   el.innerHTML = `
-    <div class="crumb"><a href="#/">全局任务列表</a><span class="sep">/</span>${esc(shortId(root))}</div>
+    <div class="crumb"><a href="#/">全局任务列表</a><span class="sep">/</span>${crumbTaskLink(root)}</div>
     <div class="panel">
       <div class="panel-title">任务全景 <span class="sub">3 分钟看懂全貌 · 每个格子都能点回源</span></div>
       <div class="panel-body soft">
+        <div class="task-head">
+          <div class="th-title">${esc(p.title)}</div>
+          ${brief ? `
+          <div class="th-label">简介${briefLong ? ` · ${brief.length} 字` : ""}</div>
+          <div class="th-brief${briefLong ? " clamped" : ""}">${esc(brief)}</div>
+          ${briefLong ? `<button type="button" class="brief-toggle" aria-expanded="false" data-more="展开全文（共 ${brief.length} 字）" data-less="收起">展开全文（共 ${brief.length} 字）</button>` : ""}` : ""}
+        </div>
         <div class="kv">
-          <div class="k">任务根</div><div class="v">${pinLink(root)} ${taskStatePill(p.taskState)}</div>
-          <div class="k">title / brief</div><div class="v"><b>${esc(p.title)}</b>${p.brief ? ` — <span title="${esc(p.brief)}">${esc(String(p.brief).slice(0, 160))}${String(p.brief).length > 160 ? "…" : ""}</span>` : ""}</div>
-          <div class="k">tree / spec</div><div class="v">treeid ${pinLink(p.treeid)} · specid ${pinLink(p.specid)}<br><span class="hint">验证器：${esc(spec.lang || "")} / ${esc(spec.entry || "")}${spec.name ? " · " + esc(spec.name) : ""}${spec.scriptOrScriptPin ? ` · <details style="display:inline"><summary>脚本</summary><pre class="block">${esc(spec.scriptOrScriptPin)}</pre></details>` : ""}</span></div>
-          <div class="k">发布者</div><div class="v">${metaLink(p.publisher)}</div>
+          <div class="k">任务根</div><div class="v">${fullPin(root)} ${taskStatePill(p.taskState)}</div>
+          <div class="k">tree / spec</div><div class="v">treeid ${fullPin(p.treeid)} · specid ${fullPin(p.specid)}<br><span class="hint">验证器：${esc(spec.lang || "")} / ${esc(spec.entry || "")}${spec.name ? " · " + esc(spec.name) : ""}${spec.scriptOrScriptPin ? ` · <details style="display:inline"><summary>脚本</summary><pre class="block">${esc(spec.scriptOrScriptPin)}</pre></details>` : ""}</span></div>
+          <div class="k">发布者</div><div class="v">${personChip(p.publisher)}</div>
           <div class="k">重放快照</div><div class="v"><span class="pill warn">块高 ${fmtNum(m.evaluatedAtBlock)}</span> <span class="pill">事件 ${fmtNum(m.eventCount)}</span> <span class="pill dim">${esc(m.replayAlgoVersion || "")}</span> ${modePill(m)}</div>
           <div class="k">进度</div><div class="v"><b>verified ${fmtNum(prog.verified)}</b> / ${fmtNum(prog.total)} · 未认领 ${fmtNum(prog.open)} · 打回 ${fmtNum(prog.rejected)} · 超时 ${fmtNum(prog.expired)}<div class="bar"><span style="width:${done}%"></span></div></div>
           <div class="k">策略</div><div class="v"><span class="pill">verify_quorum ${fmtNum(p.policy?.verify_quorum)}</span> <span class="pill">claim_ttl ${fmtNum(p.policy?.claim_ttl_hours)}h</span> <span class="pill">verify_window ${fmtNum(p.policy?.verify_window_hours)}h</span></div>
           <div class="k">名册</div><div class="v">${(p.participants || []).map((x) =>
-            `<span style="margin-right:12px;white-space:nowrap">${metaLink(x.metaId, shortId(x.metaId, 8, 4))} <span class="pill dim">认领 ${fmtNum(x.claimed)}</span> <span class="pill dim">提交 ${fmtNum(x.submitted)}</span> <span class="pill dim">贡献 ${fmtNum(x.verifiedContrib)}</span> <span class="pill dim">复核 ${fmtNum(x.reviews)}</span></span>`).join("")}</div>
+            `<span class="roster-item">${personChip(x.metaId)} <span class="pill dim">认领 ${fmtNum(x.claimed)}</span> <span class="pill dim">提交 ${fmtNum(x.submitted)}</span> <span class="pill dim">贡献 ${fmtNum(x.verifiedContrib)}</span> <span class="pill dim">复核 ${fmtNum(x.reviews)}</span></span>`).join("")}</div>
         </div>
       </div>
     </div>
@@ -210,13 +324,14 @@ async function renderTask(el, root) {
       location.hash = `#/task/${root}/node/${r.getAttribute("data-node")}`;
     });
   });
+  afterRender(el);
 }
 
 async function renderNode(el, root, nodeId) {
   const [r, p] = await Promise.all([getReplay(root), getPanorama(root).catch(() => null)]);
   const n = r.nodes?.[nodeId];
   if (!n) {
-    el.innerHTML = `<div class="crumb"><a href="#/">全局任务列表</a><span class="sep">/</span><a href="#/task/${esc(root)}">${esc(shortId(root))}</a></div>
+    el.innerHTML = `<div class="crumb"><a href="#/">全局任务列表</a><span class="sep">/</span>${crumbTaskLink(root)}</div>
       <div class="err">重放投影中没有节点 ${esc(nodeId)}。</div>`;
     return;
   }
@@ -227,7 +342,7 @@ async function renderNode(el, root, nodeId) {
   const votes = n.votes || [];
   const counted = votes.filter((v) => v.counts).length;
   el.innerHTML = `
-    <div class="crumb"><a href="#/">全局任务列表</a><span class="sep">/</span><a href="#/task/${esc(root)}">${esc(shortId(root))}</a><span class="sep">/</span>节点 ${esc(nodeId)}</div>
+    <div class="crumb"><a href="#/">全局任务列表</a><span class="sep">/</span>${crumbTaskLink(root)}<span class="sep">/</span>节点 ${esc(nodeId)}</div>
     <div class="panel">
       <div class="panel-title">节点 ${esc(nodeId)} <span class="sub">${esc(p?.title || r.taskTitle || "")}</span></div>
       <div class="panel-body soft">
@@ -235,8 +350,8 @@ async function renderNode(el, root, nodeId) {
           <div class="k">状态</div><div class="v">${stateCell(n.displayState)} <span class="pill dim">machine ${esc(n.machineState)}</span> ${n.cycleSeq ? `<span class="pill">周期 ${n.cycleSeq}</span>` : ""} ${n.cycleOutcome && n.cycleOutcome !== "none" ? `<span class="pill dim">${esc(n.cycleOutcome)}</span>` : ""}</div>
           <div class="k">kind / title</div><div class="v">${esc(n.kind || "")} · ${esc(n.title || "")}${n.parent ? ` · parent ${esc(n.parent)}` : " · 根节点"}</div>
           <div class="k">verifiedAt</div><div class="v">${n.verifiedAtBlockTs ? `${esc(fmtTs(n.verifiedAtBlockTs))}` : "—"}</div>
-          <div class="k">最近标注</div><div class="v">${n.lastWriteEventPinId ? pinLink(n.lastWriteEventPinId) : "—"} ${n.lastActivityTs ? `<span class="hint">${esc(fmtTs(n.lastActivityTs))}</span>` : ""}</div>
-          <div class="k">重放快照</div><div class="v"><span class="pill warn">块高 ${fmtNum(r.evaluatedAtBlock)}</span> <span class="pill dim">${esc(r.rootPinId ? shortId(r.rootPinId) : "")}</span></div>
+          <div class="k">最近标注</div><div class="v">${n.lastWriteEventPinId ? pinRef(n.lastWriteEventPinId) : "—"} ${n.lastActivityTs ? `<span class="hint">${esc(fmtTs(n.lastActivityTs))}</span>` : ""}</div>
+          <div class="k">重放快照</div><div class="v"><span class="pill warn">块高 ${fmtNum(r.evaluatedAtBlock)}</span> ${r.rootPinId ? fullPin(r.rootPinId) : ""}</div>
         </div>
       </div>
     </div>
@@ -251,9 +366,9 @@ async function renderNode(el, root, nodeId) {
               <tr>
                 <td class="mono">${fmtNum(e.blockHeight)}</td>
                 <td>${esc(e.kind || pathShort(e.path))}<div class="hint">${esc(e.summary || "")}</div></td>
-                <td>${metaLink(e.author)}</td>
+                <td>${personChip(e.author)}</td>
                 <td>${validityCell(e.validity, e.ignoreReason)}</td>
-                <td>${pinLink(e.eventPinId)}</td>
+                <td>${pinRef(e.eventPinId)}</td>
               </tr>`).join("") : `<tr><td colspan="5" class="hint">该节点暂无事件记录（重放未有作用事件）。</td></tr>`}
             </tbody>
           </table></div>
@@ -266,11 +381,11 @@ async function renderNode(el, root, nodeId) {
             ${votes.length ? votes.map((v) => `
               <tr>
                 <td class="mono">${fmtNum(v.blockHeight)}</td>
-                <td>${metaLink(v.voter)}</td>
+                <td>${personChip(v.voter)}</td>
                 <td>${v.verdict === "pass" ? `<span class="pill ok">pass</span>` : v.verdict === "fail" ? `<span class="pill warn">fail</span>` : `<span class="pill">${esc(v.verdict)}</span>`}</td>
                 <td>${v.counts ? `<span class="pill ok">计权</span>` : `<span class="pill warn">不计${v.ignoreReason ? " · " + esc(v.ignoreReason) : ""}</span>`}</td>
                 <td>${v.hasEvidence ? `<span class="flag">evidence</span>` : ""}${v.hasFailreason ? `<span class="flag">failreason</span>` : ""}${v.hasSemanticCheck ? `<span class="flag">semantic_check</span>` : ""}</td>
-                <td>${pinLink(v.verifyPinId)}</td>
+                <td>${pinRef(v.verifyPinId)}</td>
               </tr>`).join("") : `<tr><td colspan="6" class="hint">暂无复核票。</td></tr>`}
             </tbody>
           </table></div>
@@ -281,8 +396,8 @@ async function renderNode(el, root, nodeId) {
         <div class="panel"><div class="panel-body">
           <h4 style="margin:0 0 8px">当前认领 ${claim ? "" : "（无）"}</h4>
           ${claim ? `<div class="kv">
-            <div class="k">claim</div><div class="v">${pinLink(claim.claimPinId)}</div>
-            <div class="k">持有人</div><div class="v">${metaLink(claim.claimant)}</div>
+            <div class="k">claim</div><div class="v">${pinRef(claim.claimPinId)}</div>
+            <div class="k">持有人</div><div class="v">${personChip(claim.claimant)}</div>
             <div class="k">块高 / 时间</div><div class="v">${fmtNum(claim.blockHeight)} · ${esc(fmtTs(claim.blockTs))}</div>
             <div class="k">TTL 截止</div><div class="v">${claim.ttlDeadlineTs ? esc(fmtTs(claim.ttlDeadlineTs)) : "—"}</div>
           </div>` : `<div class="hint">节点当前无生效认领。</div>`}
@@ -290,8 +405,8 @@ async function renderNode(el, root, nodeId) {
         <div class="panel"><div class="panel-body">
           <h4 style="margin:0 0 8px">当前提交 ${sub ? "" : "（无）"}</h4>
           ${sub ? `<div class="kv">
-            <div class="k">submission</div><div class="v">${pinLink(sub.submissionPinId)}</div>
-            <div class="k">提交者</div><div class="v">${metaLink(sub.submitter)}</div>
+            <div class="k">submission</div><div class="v">${pinRef(sub.submissionPinId)}</div>
+            <div class="k">提交者</div><div class="v">${personChip(sub.submitter)}</div>
             <div class="k">块高 / 时间</div><div class="v">${fmtNum(sub.blockHeight)} · ${esc(fmtTs(sub.blockTs))}</div>
             <div class="k">result hash</div><div class="v"><span class="uri">${esc(sub.hash || "")}</span></div>
             <div class="k">contentType</div><div class="v">${sub.contentType ? esc(sub.contentType) : "null"}</div>
@@ -301,17 +416,18 @@ async function renderNode(el, root, nodeId) {
                   ? `<a class="uri" href="${esc(sub.attachment)}">${esc(sub.attachment)}</a>`
                   : `<span class="uri">${esc(sub.attachment)}</span><div class="hint">（非链上 URI，不予直链——包装是渲染形态，目标才是交付物）</div>`
                 : `<span class="hint">该 submission 未附 attachment。交付物以 result/hash 为准，可经原 pin 回源核验。</span>`}</div>
-            ${(sub.childids || []).length ? `<div class="k">childids</div><div class="v">${sub.childids.map((c) => pinLink(c)).join(" ")}</div>` : ""}
+            ${(sub.childids || []).length ? `<div class="k">childids</div><div class="v">${sub.childids.map((c) => pinRef(c)).join(" ")}</div>` : ""}
           </div>` : `<div class="hint">节点当前无生效提交。</div>`}
         </div></div>
         <div class="panel"><div class="panel-body">
           <h4 style="margin:0 0 8px">验证器（spec）</h4>
-          <div class="kv"><div class="k">specid</div><div class="v">${pinLink(n.specid || r.specid || "")}</div></div>
+          <div class="kv"><div class="k">specid</div><div class="v">${fullPin(n.specid || r.specid || "")}</div></div>
           ${p?.spec?.scriptOrScriptPin ? `<details><summary>离线脚本</summary><pre class="block">${esc(p.spec.scriptOrScriptPin)}</pre></details>` : ""}
           <div class="note">验证器离线可跑、输出确定结论——复核成本远低于生成成本。</div>
         </div></div>
       </div>
     </div>`;
+  afterRender(el);
 }
 
 async function renderMetaso(el) {
@@ -344,7 +460,7 @@ async function renderMetaso(el) {
             <thead><tr><th>任务根</th><th>标题</th><th>进度</th><th>状态</th><th>最近动静</th></tr></thead>
             <tbody>${rows.map((r) => `
               <tr class="clickable" data-href="#/task/${esc(r.rootPinId)}">
-                <td>${pinLink(r.rootPinId, shortId(r.rootPinId, 8, 4))}</td>
+                <td>${pinRef(r.rootPinId, shortId(r.rootPinId, 8, 4))}</td>
                 <td>${esc(r.title)}</td>
                 <td>${fmtNum(r.nodeProgress?.verified)}/${fmtNum(r.nodeProgress?.total)}</td>
                 <td>${taskStatePill(r.taskState)}</td>
@@ -355,18 +471,18 @@ async function renderMetaso(el) {
         </div>
         <div class="panel">
           <div class="panel-title">贡献榜 <span class="sub">重放输出 · 链上不写排行 pin（协议明文）</span></div>
-          <table>
+          <div class="tbl-scroll"><table class="lb">
             <thead><tr><th>#</th><th>bot</th><th>contribution（名下 verified submission）</th><th>reviewScore（有效复核票）</th><th>reviewAccuracy</th></tr></thead>
             <tbody>${lb.map((r, i) => `
               <tr>
                 <td class="mono">${i + 1}</td>
-                <td>${metaLink(r.metaId)}</td>
+                <td>${personChip(r.metaId)}</td>
                 <td class="mono">${fmtNum(r.contribution)}</td>
                 <td class="mono">${fmtNum(r.reviewScore)}</td>
                 <td class="mono">${fmtNum(r.reviewAccuracy?.num)}/${fmtNum(r.reviewAccuracy?.den)}${r.reviewAccuracy?.den ? ` · ${Math.round((r.reviewAccuracy.num / r.reviewAccuracy.den) * 100)}%` : ""}</td>
               </tr>`).join("")}
             </tbody>
-          </table>
+          </table></div>
         </div>
       </div>
       <div class="col">
@@ -390,7 +506,7 @@ async function renderMetaso(el) {
               <div class="k">versionEnum</div><div class="v">${esc(cov.versionEnum || "")}</div>
               <div class="k">事件分布</div><div class="v">${Object.entries(paths).map(([k, v]) => `<span class="pill">${esc(pathShort(k))} ${fmtNum(v)}</span>`).join(" ")}</div>
               ${prov ? `
-              <div class="k">溯源 · 恒等键</div><div class="v"><span class="mono pin" title="${esc(prov.eventSetCanonicalSha256)}">${esc(shortId(prov.eventSetCanonicalSha256, 12, 10))}</span><div class="hint">事件集 canonical sha256（${fmtNum(prov.eventCount)} 条 · 边界 B=${fmtNum(prov.boundaryBlock)}）· 抓取时间 ${esc(prov.fetchedAt)}</div></div>
+              <div class="k">溯源 · 恒等键</div><div class="v"><span class="mono pinfull">${esc(prov.eventSetCanonicalSha256)}</span><div class="hint">事件集 canonical sha256（${fmtNum(prov.eventCount)} 条 · 边界 B=${fmtNum(prov.boundaryBlock)}）· 抓取时间 ${esc(prov.fetchedAt)}</div></div>
               <div class="k">溯源 · 口径</div><div class="v hint">${esc(prov.canonicalRule || "")}<br>${esc(prov.source || "")}</div>` : ""}
             </div>
           </div>
@@ -408,6 +524,7 @@ async function renderMetaso(el) {
       </div>
     </div>`;
   bindRows(el);
+  afterRender(el);
 }
 
 /* ---------- router ---------- */
@@ -421,6 +538,7 @@ async function route() {
   const el = document.getElementById("app");
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   try {
+    PROFILES = await getProfiles(); // display layer; null-safe (chips fall back to full ids)
     if (parts.length === 0) {
       setNav("list");
       await renderList(el);

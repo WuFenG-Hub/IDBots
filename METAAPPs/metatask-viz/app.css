@@ -76,6 +76,43 @@ td .pin, th .pin{white-space:nowrap}
 .hint .pin{white-space:nowrap}
 .uri{font-family:Menlo,monospace;font-size:11px;word-break:break-all;background:var(--soft);border:1px dashed var(--dash);border-radius:5px;padding:4px 7px}
 
+/* v1.1 · full-value identifiers: key anchors render the complete value,
+   wrapping instead of truncating (declared after td .pin so it wins). */
+.pinfull, td .pinfull, th .pinfull, .hint .pinfull{white-space:normal;word-break:break-all;overflow-wrap:anywhere}
+.idline{display:inline-block;max-width:100%;white-space:normal;word-break:break-all;color:var(--muted)}
+
+/* v1.1 · non-hover id refs: short label + explicit copy / in-place expand */
+.idref{display:inline;white-space:normal}
+.idref .full{display:inline-block;margin-left:5px;font-size:10.5px;color:#334155;word-break:break-all;overflow-wrap:anywhere;background:var(--soft);border:1px dashed var(--dash);border-radius:5px;padding:1px 6px}
+button.idcopy{font:inherit;font-size:10px;line-height:1.5;color:#5b6472;background:#fff;border:1px solid var(--line);border-radius:5px;padding:0 5px;margin-left:4px;cursor:pointer;vertical-align:baseline;white-space:nowrap}
+button.idcopy:hover{background:var(--soft);border-color:var(--dash)}
+button.idcopy.ok{color:var(--ok);border-color:#a7f3d0;background:var(--okbg)}
+
+/* v1.1 · person chip: round avatar + name (profile layer; no truncated metaid) */
+.pchip{display:inline-flex;align-items:center;gap:6px;vertical-align:middle;max-width:100%;text-decoration:none}
+.pchip:hover{text-decoration:none}
+.pchip .pname{color:var(--accent);font-size:12px;line-height:1.4;white-space:nowrap}
+.pchip:hover .pname{text-decoration:underline}
+.pchip .pname.idfull{font-family:Menlo,SFMono-Regular,Consolas,monospace;font-size:10.5px;white-space:normal;word-break:break-all;overflow-wrap:anywhere}
+img.avatar{width:18px;height:18px;border-radius:50%;object-fit:cover;flex:none;background:#e8ebf0;border:1px solid var(--line);display:inline-block}
+.avatar-ph{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;font-size:9.5px;font-weight:600;color:#64748b;background:#e8ebf0;border:1px solid var(--line);flex:none;line-height:1}
+
+/* v1.1 · task head: title block + standalone brief block (>1000 chars: click to expand) */
+.task-head{padding:2px 0 12px;border-bottom:1px dashed var(--line);margin-bottom:12px}
+.th-title{font-size:15px;font-weight:700;line-height:1.55;word-break:break-word}
+.th-label{font-size:11px;color:var(--faint);margin:10px 0 4px}
+.th-brief{font-size:12px;line-height:1.8;white-space:pre-wrap;word-break:break-word;background:#fff;border:1px dashed var(--dash);border-radius:8px;padding:10px 12px}
+.th-brief.clamped{display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
+.brief-toggle{margin-top:8px;font:inherit;font-size:11.5px;color:var(--accent);background:#fff;border:1px solid var(--line);border-radius:6px;padding:2px 10px;cursor:pointer}
+.brief-toggle:hover{background:var(--soft)}
+.brief-toggle[aria-expanded="true"]{color:var(--muted)}
+
+/* v1.1 · roster item: chip + counters in one inline group */
+.roster-item{display:inline-flex;align-items:center;gap:5px;margin:0 14px 6px 0}
+
+/* v1.1 · leaderboard: headers may wrap so the table never clips in its column */
+.lb th{white-space:normal}
+
 /* kv grid */
 .kv{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;font-size:12px}
 .kv .k{color:var(--faint)}
@@ -88,7 +125,7 @@ td .pin, th .pin{white-space:nowrap}
 .trow:hover{background:#f3f7ff}
 .trow .tid{font-family:Menlo,monospace;font-size:11px;color:#334155;min-width:52px}
 .trow .tkind{font-size:10.5px;color:var(--faint);min-width:64px}
-.trow .ttitle{color:var(--muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px}
+.trow .ttitle{color:var(--muted);font-size:11.5px;max-width:420px;word-break:break-word}
 .trow .tspacer{flex:1}
 
 /* progress bar */
@@ -102,5 +139,5 @@ td .pin, th .pin{white-space:nowrap}
 details>summary{cursor:pointer;color:var(--accent);font-size:12px}
 details[open]>summary{margin-bottom:6px}
 pre.block{background:var(--soft);border:1px dashed var(--dash);border-radius:6px;padding:8px 10px;font-size:11px;overflow:auto;max-height:260px;margin:4px 0 0}
-.hint{color:var(--faint);font-size:11px}
+.hint{color:var(--faint);font-size:11px;overflow-wrap:anywhere}
 .flag{font-family:Menlo,monospace;font-size:10px;color:#475569;background:#f1f5f9;border-radius:4px;padding:0 4px;margin-right:3px}
