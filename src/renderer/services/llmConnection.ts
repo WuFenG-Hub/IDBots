@@ -33,10 +33,15 @@ export function shouldShowApiFormatSelector(provider: string): boolean {
   return getFixedApiFormatForProvider(provider) === null;
 }
 
-const PROVIDER_DEFAULT_BASE_URLS: Record<string, { anthropic: string; openai: string }> = {
+const PROVIDER_DEFAULT_BASE_URLS: Record<string, { anthropic: string; openai: string; responses?: string }> = {
   deepseek: { anthropic: 'https://api.deepseek.com/anthropic', openai: 'https://api.deepseek.com' },
   moonshot: { anthropic: 'https://api.moonshot.cn/anthropic', openai: 'https://api.moonshot.cn/v1' },
-  zhipu: { anthropic: 'https://open.bigmodel.cn/api/anthropic', openai: 'https://open.bigmodel.cn/api/paas/v4/chat/completions' },
+  // Zhipu GLM coding plan: Responses is the default protocol (same as Settings).
+  zhipu: {
+    anthropic: 'https://open.bigmodel.cn/api/anthropic',
+    openai: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    responses: 'https://open.bigmodel.cn/api/v1',
+  },
   minimax: { anthropic: 'https://api.minimaxi.com/anthropic', openai: 'https://api.minimaxi.com/v1' },
   qwen: { anthropic: 'https://dashscope.aliyuncs.com/apps/anthropic', openai: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
   xiaomi: { anthropic: 'https://api.xiaomimimo.com/anthropic', openai: 'https://api.xiaomimimo.com/v1/chat/completions' },
@@ -52,10 +57,14 @@ export function getProviderDefaultBaseUrl(
   provider: string,
   apiFormat: 'anthropic' | 'openai' | 'responses'
 ): string | null {
-  if (apiFormat === 'responses') {
+  const defaults = PROVIDER_DEFAULT_BASE_URLS[provider];
+  if (!defaults) {
     return null;
   }
-  return PROVIDER_DEFAULT_BASE_URLS[provider]?.[apiFormat] ?? null;
+  if (apiFormat === 'responses') {
+    return defaults.responses ?? null;
+  }
+  return defaults[apiFormat];
 }
 
 export function providerRequiresApiKey(provider: string): boolean {

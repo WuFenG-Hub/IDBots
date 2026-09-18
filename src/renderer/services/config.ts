@@ -209,7 +209,7 @@ export const mergeProvidersConfig = (
 // 重要：deepseek 不参与迁移，已配置 DeepSeek 的老用户升级后保持完全不变。
 // ---------------------------------------------------------------------------
 
-export const PROVIDER_MODEL_MIGRATION_VERSION = 1;
+export const PROVIDER_MODEL_MIGRATION_VERSION = 2;
 
 type ProviderModelEntry = NonNullable<NonNullable<AppConfig['providers']>[string]['models']>[number];
 
@@ -288,6 +288,25 @@ const PROVIDER_MODEL_MIGRATIONS: Record<number, ProviderModelMigration> = {
       'google/gemini-3-pro-preview': 'google/gemini-3.1-pro-preview',
     },
   },
+  // v2：Zhipu 预设对齐 GLM-5.3 家族（2026-09-18）。GLM-5.3/5.3-Flash 全线
+  // 1M 上下文（官方 live catalog GET /api/v1/models），Flash 为原生多模态；
+  // 5.3 以下的旧预设（glm-5.1/5/4.7）淘汰，自定义添加的模型不受影响。
+  2: {
+    removed: {
+      zhipu: ['glm-5.1', 'glm-5', 'glm-4.7'],
+    },
+    added: {
+      zhipu: [
+        { id: 'glm-5.3', name: 'GLM-5.3', supportsImage: false, contextWindow: 1_048_576, maxOutputTokens: 32_768 },
+        { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', supportsImage: true, contextWindow: 1_048_576, maxOutputTokens: 32_768 },
+      ],
+    },
+    defaultModelRemap: {
+      'glm-5.1': 'glm-5.3',
+      'glm-5': 'glm-5.3',
+      'glm-4.7': 'glm-5.3',
+    },
+  },
 };
 
 export const applyProviderModelMigrations = (config: AppConfig): AppConfig => {
@@ -355,7 +374,7 @@ export const applyProviderModelMigrations = (config: AppConfig): AppConfig => {
 // （apiKey 为空）的 provider，已自定义配置（填了 key 或改过格式）的用户保持不动。
 // ---------------------------------------------------------------------------
 
-export const PROVIDER_API_FORMAT_MIGRATION_VERSION = 2;
+export const PROVIDER_API_FORMAT_MIGRATION_VERSION = 3;
 
 type ProviderApiFormatValue = 'anthropic' | 'openai' | 'responses';
 
@@ -414,6 +433,36 @@ const migrateDeepseekApiFormatToOpenai = (
   };
 };
 
+/**
+ * v3：Zhipu 默认 API 形态切换到 OpenAI Responses（GLM coding plan 推荐路径，
+ * GLM-5.3 家族在 /api/v1 带 reasoning summaries 与 live catalog）。把仍停留在
+ * 旧出厂默认（anthropic + https://open.bigmodel.cn/api/anthropic）的老配置一次性
+ * 迁到 responses + https://open.bigmodel.cn/api/v1；自定义 Base URL（代理等）或
+ * 已显式选择其他格式的保持不动。
+ */
+const ZHIPU_LEGACY_ANTHROPIC_BASE_URL = 'https://open.bigmodel.cn/api/anthropic';
+const ZHIPU_RESPONSES_BASE_URL = 'https://open.bigmodel.cn/api/v1';
+
+const migrateZhipuApiFormatToResponses = (
+  providers: NonNullable<AppConfig['providers']>,
+): NonNullable<AppConfig['providers']> => {
+  const zhipu = providers.zhipu;
+  if (!zhipu) {
+    return providers;
+  }
+  if ((zhipu.apiFormat as ProviderApiFormatValue | undefined) !== 'anthropic') {
+    return providers;
+  }
+  const baseUrl = String(zhipu.baseUrl ?? '').trim().replace(/\/+$/, '').toLowerCase();
+  if (baseUrl !== ZHIPU_LEGACY_ANTHROPIC_BASE_URL) {
+    return providers;
+  }
+  return {
+    ...providers,
+    zhipu: { ...zhipu, apiFormat: 'responses', baseUrl: ZHIPU_RESPONSES_BASE_URL },
+  };
+};
+
 export const applyProviderApiFormatMigrations = (config: AppConfig): AppConfig => {
   const currentVersion = config.providerApiFormatMigrationVersion ?? 0;
   if (currentVersion >= PROVIDER_API_FORMAT_MIGRATION_VERSION) {
@@ -431,6 +480,11 @@ export const applyProviderApiFormatMigrations = (config: AppConfig): AppConfig =
     if (version === 2) {
       nextProviders = nextProviders
         ? migrateDeepseekApiFormatToOpenai(nextProviders as NonNullable<AppConfig['providers']>)
+        : nextProviders;
+    }
+    if (version === 3) {
+      nextProviders = nextProviders
+        ? migrateZhipuApiFormatToResponses(nextProviders as NonNullable<AppConfig['providers']>)
         : nextProviders;
     }
   }

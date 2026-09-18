@@ -63,11 +63,11 @@ const providerKeys = [
   'deepseek',
   'opencode',
   'commandcode',
+  'zhipu',
   'openai',
   'gemini',
   'anthropic',
   'moonshot',
-  'zhipu',
   'minimax',
   'qwen',
   'volcengine',
@@ -224,7 +224,7 @@ const providerMeta: Record<ProviderType, { label: string; icon: React.ReactNode 
   },
 };
 
-const providerSwitchableDefaultBaseUrls: Partial<Record<ProviderType, { anthropic: string; openai: string }>> = {
+const providerSwitchableDefaultBaseUrls: Partial<Record<ProviderType, { anthropic: string; openai: string; responses?: string }>> = {
   deepseek: {
     anthropic: 'https://api.deepseek.com/anthropic',
     openai: 'https://api.deepseek.com',
@@ -233,9 +233,12 @@ const providerSwitchableDefaultBaseUrls: Partial<Record<ProviderType, { anthropi
     anthropic: 'https://api.moonshot.cn/anthropic',
     openai: 'https://api.moonshot.cn/v1',
   },
+  // Zhipu GLM coding plan (https://docs.bigmodel.cn/cn/coding-plan/quick-start):
+  // one key, three protocol endpoints. Responses is the default.
   zhipu: {
     anthropic: 'https://open.bigmodel.cn/api/anthropic',
-    openai: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    openai: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    responses: 'https://open.bigmodel.cn/api/v1',
   },
   minimax: {
     anthropic: 'https://api.minimaxi.com/anthropic',
@@ -322,11 +325,16 @@ const getProviderDefaultBaseUrl = (
   provider: ProviderType,
   apiFormat: 'anthropic' | 'openai' | 'responses'
 ): string | null => {
-  if (apiFormat === 'responses') {
+  const defaults = providerSwitchableDefaultBaseUrls[provider];
+  if (!defaults) {
     return null;
   }
-  const defaults = providerSwitchableDefaultBaseUrls[provider];
-  return defaults ? defaults[apiFormat] : null;
+  // Providers without a responses-specific endpoint (shared gateway base URL)
+  // keep their current base URL when the responses format is selected.
+  if (apiFormat === 'responses') {
+    return defaults.responses ?? null;
+  }
+  return defaults[apiFormat];
 };
 const shouldAutoSwitchProviderBaseUrl = (provider: ProviderType, currentBaseUrl: string): boolean => {
   const defaults = providerSwitchableDefaultBaseUrls[provider];
@@ -338,6 +346,7 @@ const shouldAutoSwitchProviderBaseUrl = (provider: ProviderType, currentBaseUrl:
   return (
     normalizedCurrent === normalizeBaseUrl(defaults.anthropic)
     || normalizedCurrent === normalizeBaseUrl(defaults.openai)
+    || (defaults.responses !== undefined && normalizedCurrent === normalizeBaseUrl(defaults.responses))
   );
 };
 const buildOpenAICompatibleChatCompletionsUrl = (baseUrl: string, provider: string): string => {
