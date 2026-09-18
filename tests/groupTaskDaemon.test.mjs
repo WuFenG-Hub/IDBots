@@ -10185,3 +10185,87 @@ test('GT#87: the missed-deadline note renders the due time in the local zone wit
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// GT#87 (P3): the chair's deferred backlog coalesces to the newest non-owner
+// trigger. GT#87's convergence tail drained 31-77min-old chair triggers one
+// 5-10min turn each, mostly answered [NO_REPLY] — a chair turn reads the full
+// group-log window and the Task #51 safety net settles every pending trigger
+// up to its message, so the serial replay bought nothing but tail latency.
+// Owner messages keep their own dispatch (they always reach the chair).
+// ---------------------------------------------------------------------------
+
+test('GT#87: stale chair triggers coalesce into the newest; owner messages keep their own dispatch', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-chair-stale-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot 第一轮对齐说明（旧）', chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-chair-stale-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot 第二轮对齐说明（较新）', chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-chair-stale-3-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '@Twin Bot 第三轮对齐说明（最新）', chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-chair-owner-i0', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Owner', content: 'owner has a question for the chair', chainTimestamp: Math.floor(startMs / 1000),
+    });
+    const ids = {};
+    for (const pin of ['gt87-chair-stale-1-i0', 'gt87-chair-stale-2-i0', 'gt87-chair-stale-3-i0', 'gt87-chair-owner-i0']) {
+      ids[pin] = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', [pin])[0].values[0][0];
+    }
+    // Advance the cursor past all four and seed the chair's deferred backlog
+    // directly (the stale-trigger replay state GT#87 ended its ticks in).
+    h.groupTaskStore.getStore?.();
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = ? WHERE id = ?', [ids['gt87-chair-owner-i0'], task.id]);
+    h.store.set(`group_task_deferred:${task.id}`, JSON.stringify([
+      { taskId: task.id, metabotId: 1, messageId: ids['gt87-chair-stale-1-i0'], reason: 'chair_mentioned', verificationNotes: [], failures: 1 },
+      { taskId: task.id, metabotId: 1, messageId: ids['gt87-chair-stale-2-i0'], reason: 'chair_mentioned', verificationNotes: [], failures: 1 },
+      { taskId: task.id, metabotId: 1, messageId: ids['gt87-chair-stale-3-i0'], reason: 'chair_mentioned', verificationNotes: [], failures: 1 },
+      { taskId: task.id, metabotId: 1, messageId: ids['gt87-chair-owner-i0'], reason: 'chair_owner_message', verificationNotes: [], failures: 1 },
+    ]));
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) =>
+        line.includes("coalesced bot 1's queued backlog into") &&
+        line.includes(`#${ids['gt87-chair-stale-3-i0']} (newest chair trigger`) &&
+        line.includes(`superseded: #${ids['gt87-chair-stale-1-i0']}, #${ids['gt87-chair-stale-2-i0']}`)),
+      'the three stale chair triggers coalesced into the newest',
+    );
+    // The owner entry dispatched first (never coalesced); the two stale
+    // triggers were superseded (no dispatch for #1/#2); the coalesced newest
+    // trigger re-queued behind the in-flight guard and runs next tick.
+    assert.ok(
+      logs.some((line) => line.includes(`dispatched async chair turn for bot 1 (message #${ids['gt87-chair-owner-i0']}, reason chair_owner_message`)),
+      'the owner message keeps its own dispatch',
+    );
+    for (const stale of ['gt87-chair-stale-1-i0', 'gt87-chair-stale-2-i0']) {
+      assert.ok(
+        !logs.some((line) => line.includes(`message #${ids[stale]}`) && line.includes('dispatched async chair turn')),
+        `superseded stale trigger #${ids[stale]} never dispatched`,
+      );
+    }
+    assert.equal(h.chatCalls.length, 1, 'exactly one chair turn ran this tick');
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'only the coalesced newest trigger remains queued');
+    assert.equal(queued[0].messageId, ids['gt87-chair-stale-3-i0'], 'it is the newest chair trigger');
+    // Next tick: the coalesced newest trigger gets its turn and the queue drains.
+    h.state.nowMs += 60_000;
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) => line.includes(`dispatched async chair turn for bot 1 (message #${ids['gt87-chair-stale-3-i0']}, reason chair_mentioned`)),
+      'the coalesced newest trigger ran',
+    );
+    assert.equal(JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]').length, 0, 'queue drained');
+  } finally {
+    h.cleanup();
+  }
+});

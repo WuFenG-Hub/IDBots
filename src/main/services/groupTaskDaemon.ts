@@ -3108,6 +3108,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const picked: DeferredReplyEntry[] = [];
     for (const [metabotId, list] of byBot) {
       const member = members.find((candidate) => candidate.metabotId === metabotId);
+      if (member?.role === 'chair' && list.length > 1) {
+        // GT#87 (P3): the chair's deferred backlog coalesces to the NEWEST
+        // non-owner trigger. A chair turn reads the whole group-log window
+        // and the Task #51 safety net settles every pending trigger up to
+        // its message, so replaying stale triggers one 5-10min turn each
+        // (GT#87: 31-77min-old triggers, mostly answered [NO_REPLY]) buys
+        // nothing but tail latency. Owner messages keep their own dispatch
+        // (#83: they always reach the chair, budget- and coalesce-exempt).
+        const ownerProtected = list.filter((item) => item.entry.reason === 'chair_owner_message');
+        const coalescableChair = list.filter((item) => item.entry.reason !== 'chair_owner_message');
+        const keep = coalescableChair[coalescableChair.length - 1]?.entry ?? null;
+        const dropped = keep != null
+          ? coalescableChair.filter((item) => item.entry !== keep).map((item) => `#${item.entry.messageId}`)
+          : [];
+        if (dropped.length > 0) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: coalesced bot ${metabotId}'s queued backlog into ` +
+            `message #${keep!.messageId} (newest chair trigger; one turn reads the full log window)` +
+            `; superseded: ${dropped.join(', ')}`,
+          );
+        }
+        for (const item of ownerProtected) picked.push(item.entry);
+        if (keep != null) picked.push(keep);
+        continue;
+      }
       const coalescable = Boolean(member && member.role === 'worker') && list.length > 1;
       if (!coalescable) {
         for (const item of list) picked.push(item.entry);
