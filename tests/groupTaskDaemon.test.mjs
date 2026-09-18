@@ -9988,3 +9988,110 @@ test('GT#72: an ACK that lands just BEFORE the assignment\'s watch arming satisf
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// GT#87 (quota stall): fleet-wide token-plan exhaustion ("429 ... quota has
+// been exceeded") parked the whole task — every member turn failed, each
+// attempt burned ~10min of provider retry ladders, and MSG_RETRY_MAX_FAILURES
+// was on track to DROP the three closing-gate triggers. Quota failures now
+// requeue UNCHARGED, arm a per-task stall (the drain holds entries, one probe
+// per interval), notify the owner once per episode, and lift automatically on
+// the first successful turn.
+// ---------------------------------------------------------------------------
+
+test('GT#87: quota exhaustion stalls the task without burning the retry budget', async () => {
+  const logs = [];
+  const milestones = [];
+  const skillTurnAttempts = [];
+  let quotaDead = true;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: (input) => (input.metabotId === 2
+      ? { prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }
+      : { prompt: null, activeSkillIds: [] }),
+    deps: {
+      sendMilestoneToSourceSession: (input) => { milestones.push(input); },
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        if (quotaDead) {
+          throw new Error('DSH turn failed: 429: {"message":"Token Plan quota has been exceeded (request_id: req-1)"}');
+        }
+        return { replyText: '[WORKING] 已接单', assistantMessageId: null };
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['origin-session-1', task.id]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-quota-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 冒烟验证 [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'the turn ran once and failed on quota');
+    let queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'trigger requeued');
+    assert.equal(queued[0].failures ?? 0, 0, 'requeued UNCHARGED — quota exhaustion is environmental');
+    assert.ok(h.store.get(`group_task_quota_stall:${task.id}`), 'the task is quota-stalled');
+    const quotaNotices = milestones.filter((m) => m.kind === 'anomaly' && m.message.includes('Token-plan quota exhausted'));
+    assert.equal(quotaNotices.length, 1, 'the owner heard about the stall exactly once');
+
+    // Immediate next tick: the stall holds — no new dispatch.
+    h.state.nowMs += 5_000;
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'stalled: no dispatch before the probe interval');
+
+    // After the probe interval: exactly one probe dispatch.
+    h.state.nowMs += 16 * 60_000;
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 2, 'one probe per interval while stalled');
+    queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued[0].failures ?? 0, 0, 'the probe failure stayed uncharged');
+    assert.equal(
+      milestones.filter((m) => m.kind === 'anomaly' && m.message.includes('Token-plan quota exhausted')).length,
+      1,
+      'still one owner notice per episode (probe failure does not re-notify)',
+    );
+
+    // Quota returns: the next probe succeeds and lifts the stall.
+    quotaDead = false;
+    h.state.nowMs += 16 * 60_000;
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 3, 'the probe re-ran');
+    assert.ok(h.sends.some((s) => s.content === '[WORKING] 已接单'), 'the probe delivered the reply');
+    assert.equal(h.store.get(`group_task_quota_stall:${task.id}`) ?? null, null, 'the stall lifted on first success');
+    assert.ok(logs.some((line) => line.includes('quota stall lifted')), 'the lift is logged');
+    assert.equal(JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]').length, 0, 'queue drained');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87: a non-quota failure still burns the ordinary retry ladder', async () => {
+  const h = await createHarness({
+    deps: {
+      runSkillTurn: async () => { throw new Error('DSH turn failed: 500: internal'); },
+    },
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-nonquota-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot check [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].failures, 1, 'a plain 500 failure charges the retry counter');
+    assert.equal(h.store.get(`group_task_quota_stall:${task.id}`) ?? null, null, 'no stall for non-quota failures');
+  } finally {
+    h.cleanup();
+  }
+});
