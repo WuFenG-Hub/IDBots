@@ -8,20 +8,18 @@ interface CloseTaskModalProps {
   card: TrackedCardSummary;
   submitting: boolean;
   error: string | null;
-  onSubmit: (input: { conclusion: string; by: 'owner' | 'twin' }) => void;
+  onSubmit: (input: { conclusion: string | null }) => void;
   onCancel: () => void;
 }
 
 /**
- * 「收口并写一句结论」（验收⑥）。
- * 只有一个确认动作，没有验收 / 拒绝二选一；结论为空则不允许提交。
+ * 「收口这张卡」（v1.4：收口＝人类验收）。
+ * 只有一个确认动作，没有验收 / 拒绝二选一；结论**选填**——留空就只是确认
+ * 验收（落库 NULL，不进执行队列）；填写后 Twin 会把这段结论当指令执行，
+ * 并把处理结果与证据写回本卡；破坏性动作仍走既有安全确认，不会静默执行。
+ * v1.4 移除「收口人」选择行：在弹窗里收口的就是人自己（owner），历史收口人
+ * 展示仍在抽屉里按记录如实显示。
  * 卡上带一句话收口建议时，按钮把它灌进输入框——人只需按需改一两个字。
- *
- * 结论是**最终收口操作**，不是纯记录：写下的这句话会被 Twin 的例行巡检按字面
- * 意思执行（必要时落成新卡或派工），处理结果与证据写回本卡；破坏性动作仍走
- * 既有安全确认，不会静默执行。选谁收口只决定这条结论由谁写下，不改变执行语义
- *（owner 裁定 B：此处原先那句与执行语义相反的文案已改回）。所以
- * `trackedTask.close.recordOnlyHint` 必须显式摆在输入框下面，而不是靠人推断。
  */
 const CloseTaskModal: React.FC<CloseTaskModalProps> = ({
   card,
@@ -31,8 +29,6 @@ const CloseTaskModal: React.FC<CloseTaskModalProps> = ({
   onCancel,
 }) => {
   const [conclusion, setConclusion] = useState('');
-  const [by, setBy] = useState<'owner' | 'twin'>('owner');
-  const trimmed = conclusion.trim();
   // 建议按钮用的是 renderer 渲染的文案（后端只回 suggestion code），填入的也是这句。
   const suggestion = suggestionTextForCard(card);
 
@@ -83,28 +79,6 @@ const CloseTaskModal: React.FC<CloseTaskModalProps> = ({
           </button>
         )}
 
-        <div className="mt-3 flex items-center gap-1.5">
-          <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            {i18nService.t('trackedTask.close.by')}
-          </span>
-          {(['owner', 'twin'] as const).map((actor) => (
-            <button
-              key={actor}
-              type="button"
-              onClick={() => setBy(actor)}
-              className={`rounded-full border px-2 py-[2px] text-[11px] transition-colors ${
-                by === actor
-                  ? 'border-claude-accent/60 bg-claude-accent/10 dark:text-claude-darkText text-claude-text'
-                  : 'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary'
-              }`}
-            >
-              {i18nService.t(
-                actor === 'owner' ? 'trackedTask.closure.byOwner' : 'trackedTask.closure.byTwin'
-              )}
-            </button>
-          ))}
-        </div>
-
         {error && <p className="mt-2 break-words text-xs text-red-500">{error}</p>}
 
         <div className="mt-4 flex items-center gap-3">
@@ -117,8 +91,8 @@ const CloseTaskModal: React.FC<CloseTaskModalProps> = ({
           </button>
           <button
             type="button"
-            disabled={!trimmed || submitting}
-            onClick={() => onSubmit({ conclusion: trimmed, by })}
+            disabled={submitting}
+            onClick={() => onSubmit({ conclusion: conclusion.trim() || null })}
             className="btn-idchat-primary-filled flex-1 px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
           >
             {submitting

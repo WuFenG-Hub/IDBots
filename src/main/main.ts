@@ -3753,7 +3753,25 @@ const startSqliteDaemons = (): void => {
     // Task #83: the existing daemon tick carries the tracking-board zombie
     // assessment (read-only) plus the kv process beat, throttled to once an
     // hour inside the daemon so the 5s tick never becomes a write storm.
-    sweepTrackedCards: () => { getTrackedTaskBoard().sweep(); },
+    // v1.4: before the assessment, heal the detached group-task pairs the
+    // pre-v1.4 board produced (canonical closed by a human, group task still
+    // in review). Best-effort: a failure on one pair is skipped, never thrown.
+    sweepTrackedCards: () => {
+      try {
+        const heal = getGroupTaskOrchestrationBridge().healAcceptedGroupTaskCards();
+        if (heal.healed.length > 0) {
+          console.log(`[TrackedBoard] self-healed ${heal.healed.length} detached group-task card(s): `
+            + heal.healed.map((entry) => `gt#${entry.groupTaskId}`).join(', '));
+        }
+        if (heal.skipped.length > 0) {
+          console.log(`[TrackedBoard] self-heal skipped ${heal.skipped.length} group-task card(s)`);
+        }
+      } catch (error) {
+        console.warn('[TrackedBoard] group-task self-heal failed (skipped):',
+          error instanceof Error ? error.message : String(error));
+      }
+      getTrackedTaskBoard().sweep();
+    },
     // Task #60: ground-truth "a turn is still executing on this session" probe
     // for the skill-turn watchdog latch and the session-busy dispatch hold —
     // the session status column can transiently read 'error' while the runner
@@ -6673,6 +6691,10 @@ const getTrackedTaskBoard = () => {
       db: sqliteStore.getDatabase(),
       orchestrationStore: getOrchestrationStore(),
       saveDb: sqliteStore.getSaveFunction(),
+      // v1.4: closing a group-task-linked card goes THROUGH the bridge so the
+      // group task and the canonical ledger move together (one closure record,
+      // whole-card rejection when the bridge refuses).
+      resolveGroupTaskBridge: () => getGroupTaskOrchestrationBridge(),
     });
   }
   return trackedTaskBoard;
@@ -11757,7 +11779,8 @@ if (!gotTheLock) {
 
   ipcMain.handle('trackedTask:close', async (_event, input: {
     cardId: string;
-    conclusion: string;
+    /** v1.4: nullable — a blank/absent conclusion is acceptance without an instruction. */
+    conclusion: string | null;
     by: 'owner' | 'twin';
     targetStatus?: 'completed' | 'cancelled';
     pinId?: string | null;

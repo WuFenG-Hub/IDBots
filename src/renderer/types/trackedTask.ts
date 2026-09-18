@@ -311,8 +311,10 @@ export interface TrackedCardArchiveResult {
 /** 收口入参（经主进程白名单写入，前端不直写 status）。 */
 export interface TrackedCardClosureInput {
   cardId: string;
-  conclusion: string;
-  by: 'owner' | 'twin';
+  /** v1.4：结论选填——空/留空归一为 NULL，语义＝仅确认验收、无执行指令。 */
+  conclusion: string | null;
+  /** v1.4：弹窗收口固定 owner；保留字段以兼容历史调用（twin）。 */
+  by?: 'owner' | 'twin';
   targetStatus?: 'completed' | 'cancelled';
 }
 

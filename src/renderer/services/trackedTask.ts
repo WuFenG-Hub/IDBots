@@ -185,23 +185,21 @@ class TrackedTaskService {
   }
 
   /**
-   * 收口并写一句结论（验收⑥：单入口，不做验收/拒绝二选一）。
-   * 回执区分「状态已推进」（statusMoved=true）与「结论已记录、状态保留」。
+   * 收口这张卡（v1.4：收口＝人类验收，单入口，不做验收/拒绝二选一）。
+   * 结论选填：空/留空归一为 NULL（仅确认验收，无执行指令）；填写则是 Twin
+   * 例行巡检会按字面执行的指令。回执区分「状态已推进」（statusMoved=true）
+   * 与「验收已记录、状态保留」。
    */
   async closeCard(input: TrackedCardClosureInput): Promise<TrackedCloseOutcome> {
     const api = this.api();
     if (!api) return { error: 'window.electron.trackedTask is missing on this build.', receipt: null };
 
-    const conclusion = input.conclusion.trim();
-    if (!conclusion) {
-      return { error: 'A one-line closing conclusion is required.', receipt: null };
-    }
-
     try {
       const result = await api.close({
         cardId: input.cardId,
-        conclusion,
-        by: input.by,
+        // 选填：空白归一为 NULL，主进程照收（收口成功，不进执行队列）。
+        conclusion: input.conclusion?.trim() || null,
+        by: input.by ?? 'owner',
         targetStatus: input.targetStatus,
       });
       if (result?.ok) {

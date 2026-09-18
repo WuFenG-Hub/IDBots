@@ -202,9 +202,21 @@ test('closing a card goes through the state machine and persists the conclusion'
     const before = cardById(board, 'seed-task-01');
     assert.equal(before.state, 'waiting_decision');
 
+    // v1.4 (owner ruling B): a blank conclusion is ACCEPTANCE WITHOUT an
+    // instruction — it now SUCCEEDS and persists NULL. The pre-v1.4
+    // VALIDATION refusal is superseded; the queue gate is the empty
+    // conclusion itself, so this card must NOT join the execution queue.
     const empty = board.closeCard({ taskId: 'seed-task-01', conclusion: '   ', by: 'twin' });
-    assert.equal(empty.ok, false);
-    assert.equal(empty.code, 'VALIDATION');
+    assert.equal(empty.ok, true, empty.error);
+    assert.equal(empty.card.closureConclusion, null, 'a blank conclusion persists as NULL');
+    assert.equal(empty.card.state, 'closed', 'acceptance alone closes the card');
+    assert.equal(orchestrationStore.getTask('seed-task-01').status, 'completed');
+    const queueAfterEmpty = board.listPendingClosures();
+    assert.equal(
+      queueAfterEmpty.items.filter((item) => item.cardId === 'seed-task-01').length,
+      0,
+      'a conclusion-less acceptance never enters the pending-closure queue',
+    );
 
     const closed = board.closeCard({ taskId: 'seed-task-01', conclusion: 'shipped: card closed by test', by: 'twin' });
     assert.equal(closed.ok, true, closed.error);
@@ -1274,20 +1286,23 @@ test('a malformed registry reads as an empty set and never blocks the board', as
 test('the startup backfill closes pre-upgrade terminal rows once, and only those', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-tracked-backfill-'));
   const legacy = [
-    ['legacy-a', 'completed', null],
-    ['legacy-b', 'failed', null],
-    ['legacy-c', 'cancelled', '   '],
-    ['legacy-d', 'completed', 'owner already closed this one'],
-    ['legacy-e', 'running', null],
+    // v1.4 fixture-fidelity note: a row the owner already closed ALWAYS carries
+    // closure_at (closeCard wrote conclusion + closure_at in one UPDATE), so
+    // legacy-d seeds the timestamp; under the v1.4 closed rule it stays closed.
+    ['legacy-a', 'completed', null, null],
+    ['legacy-b', 'failed', null, null],
+    ['legacy-c', 'cancelled', '   ', null],
+    ['legacy-d', 'completed', 'owner already closed this one', '2026-09-09T00:00:00.000Z'],
+    ['legacy-e', 'running', null, null],
   ];
-  const insertLegacy = (db, id, status, conclusion) => db.run(
+  const insertLegacy = (db, id, status, conclusion, closureAt) => db.run(
     `INSERT INTO orchestration_tasks
        (id, owner_intent, enriched_goal, acceptance_criteria_json, source_session_id, twin_metabot_id,
         owner_global_meta_id, status, plan_version, created_at, updated_at, completed_at,
         closure_conclusion, closure_by, closure_at, closure_pin_id)
-     VALUES (?, ?, NULL, '[]', NULL, 1, 'idq1t3lzq0q4rec8edujklp4w8hfmgceqxth82a7m9', ?, 1, ?, ?, NULL, ?, ?, NULL, NULL)`,
+     VALUES (?, ?, NULL, '[]', NULL, 1, 'idq1t3lzq0q4rec8edujklp4w8hfmgceqxth82a7m9', ?, 1, ?, ?, NULL, ?, ?, ?, NULL)`,
     [id, `legacy ${id}`, status, '2026-09-01T00:00:00.000Z', '2026-09-10T00:00:00.000Z',
-      conclusion, conclusion ? 'owner' : null],
+      conclusion, conclusion ? 'owner' : null, closureAt],
   );
   const rows = (db, sql) => db.exec(sql)[0].values.map((values) => values.join('\u0001'));
 
@@ -1295,7 +1310,7 @@ test('the startup backfill closes pre-upgrade terminal rows once, and only those
   let result;
   try {
     const db = store.getDatabase();
-    for (const [id, status, conclusion] of legacy) insertLegacy(db, id, status, conclusion);
+    for (const [id, status, conclusion, closureAt] of legacy) insertLegacy(db, id, status, conclusion, closureAt);
     const updatedBefore = rows(db, 'SELECT id, updated_at FROM orchestration_tasks ORDER BY id');
 
     result = store.migrateTrackedTaskClosureBackfill();
@@ -1376,7 +1391,7 @@ test('the startup backfill closes pre-upgrade terminal rows once, and only those
     // Positive control FIRST: a terminal row written AFTER the migration (i.e. a
     // genuinely new post-upgrade failure) must still raise the false-positive
     // signal — otherwise "terminalNoConclusionLevel === 0" proves nothing.
-    insertLegacy(db, 'legacy-new', 'failed', null);
+    insertLegacy(db, 'legacy-new', 'failed', null, null);
     board.registerLongTask('legacy-new');
     assert.equal(board.listCards({ scope: 'all' }).counts.terminalNoConclusionLevel, 1,
       'a post-migration terminal row must still be flagged');
@@ -1567,6 +1582,13 @@ test('the closing modal says Twin executes the conclusion as the final close-out
     /trackedTask\.close\.recordOnlyHint/,
     'the close-out note must be rendered in the closing modal',
   );
+  // v1.4 (owner ruling E): the close-out dialog has NO "closed by" selector —
+  // the person clicking IS the closer (owner). The key is deleted from i18n
+  // and the selector row is gone from the modal; both absences are pinned.
+  assert.doesNotMatch(modal, /trackedTask\.close\.by/, 'the modal must not render a close-by selector');
+  const i18nBody = read('src/renderer/services/i18n.ts');
+  const byKeyHits = [...i18nBody.matchAll(/'trackedTask\.close\.by'/g)].length;
+  assert.equal(byKeyHits, 0, 'trackedTask.close.by is deleted from both dictionaries');
   // Measured inside the JSX return, so the header comment that documents the key
   // cannot substitute for the rendered element.
   const jsxStart = modal.indexOf('return (');
@@ -1591,7 +1613,6 @@ test('the closing modal says Twin executes the conclusion as the final close-out
     'trackedTask.close.conclusionPlaceholder',
     'trackedTask.close.recordOnlyHint',
     'trackedTask.close.confirm',
-    'trackedTask.close.by',
     'trackedTask.closure.byOwner',
     'trackedTask.closure.byTwin',
   ];
@@ -1632,9 +1653,9 @@ test('the closing modal says Twin executes the conclusion as the final close-out
       mustNot: { zh: [FORBIDDEN_ZH], en: [new RegExp(FORBIDDEN_EN), new RegExp(FORBIDDEN_RECORDED_ONLY)] },
     },
     {
+      // v1.4: the "closed by" selector is gone (the clicker is the closer).
       key: 'trackedTask.close.by',
-      mustContain: { zh: ['收口'], en: [/Closed by/] },
-      mustNot: { zh: ['记录人'], en: [/Recorded by/] },
+      absent: true,
     },
     {
       key: 'trackedTask.close.confirm',
@@ -1659,6 +1680,10 @@ test('the closing modal says Twin executes the conclusion as the final close-out
   ];
   for (const anchor of anchors) {
     const values = copyFor(anchor.key);
+    if (anchor.absent) {
+      assert.equal(values.length, 0, `${anchor.key}: the superseded key must be gone from both dictionaries`);
+      continue;
+    }
     assert.equal(values.length, 2, `${anchor.key}: expected exactly EN + ZH, saw ${values.length}`);
     const [zh, en] = values;
     for (const needle of anchor.mustContain.zh) {
@@ -2234,4 +2259,305 @@ test('parseArchiveOverrides: malformed input reads as an empty override set, nev
     { good: '2026-09-18T00:00:00.000Z' },
     'non-string values are dropped, not trusted',
   );
+});
+
+/* ------------------------------------------------------------------------- *
+ * v1.4 (owner rulings A-G): closing a card IS the human acceptance.
+ *   - closed == terminal && closure_at IS NOT NULL (conclusion optional);
+ *   - a closed card never wears the stale badge again, at any idle age;
+ *   - closing a group-task-linked card goes THROUGH the bridge (accept or
+ *     cancel) and rejects the WHOLE card when the bridge refuses;
+ *   - the closure columns have one writer: orchestrationStore.recordClosure.
+ * ------------------------------------------------------------------------- */
+
+const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
+const { GroupTaskOrchestrationBridge } = require('../dist-electron/main/services/groupTaskOrchestrationBridge.js');
+const { deriveCardState } = require('../dist-electron/main/services/trackedTaskBoard.js');
+
+/**
+ * Full harness: the board AND the group-task bridge over one sqlite store, so
+ * closeCard's bridge linkage can be exercised for real (not a stub). Seeds the
+ * enabled twin (id 1) + worker (id 2) rows the bridge's chair/worker checks
+ * require, mirroring tests/groupTaskOrchestrationBridge.test.mjs.
+ */
+async function openBoardWithBridge() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-tracked-close-bridge-'));
+  const sqliteStore = await SqliteStore.create(dir);
+  const db = sqliteStore.getDatabase();
+  // `cowork_sessions.session_type` is added by coworkStore's own idempotent
+  // migration in production; this harness boots the store alone, so it applies
+  // the same guarded ALTER the fixture does (buildSummary's session links read
+  // the column).
+  const sessionColumns = db.exec('PRAGMA table_info(cowork_sessions)')[0].values.map((row) => row[1]);
+  if (!sessionColumns.includes('session_type')) {
+    db.run("ALTER TABLE cowork_sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'standard'");
+  }
+  db.run(
+    `INSERT INTO metabot_wallets (id, mnemonic, path, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [1, 'abandon ability able about above absent absorb abstract absurd abuse access accident bridge', "m/44'/10001'/0'/0/0", 1],
+  );
+  const insertBot = ({ id, name, type }) => {
+    db.run(
+      `INSERT INTO metabots (
+        id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
+        name, enabled, metaid, globalmetaid, metabot_type, created_by, role, soul,
+        boss_global_metaid, created_at, updated_at
+      ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, '0000', ?, ?, ?, 1, 1)`,
+      [
+        id, `mvc-${id}`, `btc-${id}`, `doge-${id}`, `public-${id}`, `chat-public-${id}`,
+        name, `metaid-${id}`, `gmid-${id}`, type, `${name} role`, `${name} soul`,
+      ],
+    );
+  };
+  insertBot({ id: 1, name: 'Twin Bot', type: 'twin' });
+  insertBot({ id: 2, name: 'Builder Bot', type: 'worker' });
+  const metabots = new Map([
+    [1, { id: 1, name: 'Twin Bot', metabot_type: 'twin', enabled: 1, boss_global_metaid: 'gmid-owner' }],
+    [2, { id: 2, name: 'Builder Bot', metabot_type: 'worker', enabled: 1, boss_global_metaid: 'gmid-owner' }],
+  ]);
+  const orchestrationStore = new OrchestrationStore(db, sqliteStore.getSaveFunction());
+  const groupTaskStore = new GroupTaskStore(db, sqliteStore.getSaveFunction());
+  const bridge = new GroupTaskOrchestrationBridge({
+    groupTaskStore,
+    orchestrationStore,
+    getMetabotById: (id) => metabots.get(id) ?? null,
+  });
+  const board = new TrackedTaskBoardService({
+    db,
+    orchestrationStore,
+    saveDb: sqliteStore.getSaveFunction(),
+    resolveGroupTaskBridge: () => bridge,
+  });
+  return { sqliteStore, db, orchestrationStore, groupTaskStore, bridge, board };
+}
+
+/** A terminal status for direct deriveCardState calls (no store roundtrip). */
+function deriveTask(status) {
+  return {
+    id: 'd-1', ownerIntent: 'd', enrichedGoal: null, acceptanceCriteria: [],
+    sourceSessionId: null, twinMetabotId: 1, ownerGlobalMetaId: 'owner',
+    status, planVersion: 1,
+    createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-14T06:00:00.000Z', completedAt: null,
+  };
+}
+
+const DERIVE_BASE = (status) => ({
+  task: deriveTask(status),
+  steps: [],
+  attempts: [],
+  openCheckpointCount: 0,
+  verifiableDeliverableCount: 0,
+  closureConclusion: null,
+  closureAt: null,
+  admitted: true,
+  scheduled: null,
+  sessionStatuses: [],
+  activityAtMs: [Date.parse('2026-09-14T06:00:00.000Z')],
+  nowMs: Date.parse('2026-09-17T06:00:00.000Z'), // 3 days idle
+});
+
+test('v1.4: a closed card (closure_at recorded) never wears the stale badge, at any idle age', () => {
+  // Terminal + acceptance recorded + 3 days idle: closed, no warn, no due.
+  const closed = deriveCardState({ ...DERIVE_BASE('completed'), closureAt: '2026-09-16T00:00:00.000Z' });
+  assert.equal(closed.cardState, 'closed');
+  assert.equal(closed.closureWarn, false, 'the stale badge must die once the card is closed out');
+  assert.equal(closed.closureDue, false, 'a closed card never queues for closure');
+
+  // Same row WITHOUT the closure record: the badge stays honest.
+  const unclosed = deriveCardState(DERIVE_BASE('completed'));
+  assert.equal(unclosed.cardState, 'waiting_decision');
+  assert.equal(unclosed.closureWarn, true, 'an unclosed stale card still warns');
+  assert.equal(unclosed.closureDue, true);
+  // Level priority: terminal-and-unclosed outranks zombie for the same card.
+  assert.equal(unclosed.closureDueLevel, 'terminal_no_conclusion');
+
+  // The old hasConclusion-based rule is superseded: a terminal card WITH a
+  // conclusion text but NO closure record is still NOT closed.
+  const textOnly = deriveCardState({ ...DERIVE_BASE('failed'), closureConclusion: 'some note' });
+  assert.equal(textOnly.cardState, 'waiting_decision', 'text without a closure record is not acceptance');
+  assert.equal(textOnly.closureWarn, true);
+  assert.equal(textOnly.closureDueLevel, 'terminal_no_conclusion');
+});
+
+test('v1.4: the terminal_no_conclusion suggestion reads the closure record (A-6 pairing holds)', () => {
+  // Reason and suggestion must stay the two homes of ONE fact: the derivation
+  // fires both exactly when terminal && closure_at IS NULL.
+  const unclosed = deriveCardState(DERIVE_BASE('failed'));
+  assert.ok(unclosed.reasonCodes.some((fact) => fact.code === 'terminal_without_conclusion'));
+  assert.equal(unclosed.closureSuggestionCode, 'terminal_no_conclusion');
+
+  const closed = deriveCardState({ ...DERIVE_BASE('failed'), closureAt: '2026-09-16T00:00:00.000Z' });
+  assert.equal(closed.closureDue, false);
+  assert.equal(closed.closureSuggestionCode, null);
+  assert.equal(closed.reasonCodes.some((fact) => fact.code === 'terminal_without_conclusion'), false);
+});
+
+/** Drive a group task to `review` with every step settled (waiting_input). */
+function driveGroupTaskToReview(h, suffix) {
+  const groupTask = h.groupTaskStore.createTask({
+    groupId: `gt-${suffix}`,
+    title: `group task ${suffix}`,
+    goal: `goal ${suffix}`,
+    chairMetabotId: 1,
+    createdBy: 'user',
+  });
+  const canonical = h.bridge.ensureCanonicalTask(groupTask.id);
+  // The legal chair-driven path is planning -> executing -> review.
+  h.groupTaskStore.updateTaskStatus(groupTask.id, 'executing');
+  h.bridge.syncStatus(groupTask.id);
+  h.groupTaskStore.updateTaskStatus(groupTask.id, 'review');
+  h.bridge.syncStatus(groupTask.id);
+  return { groupTask, canonical };
+}
+
+test('v1.4: closing a group-task-linked card accepts it through the bridge (acceptance = closure)', async () => {
+  const h = await openBoardWithBridge();
+  try {
+    const { groupTask, canonical } = driveGroupTaskToReview(h, 'accept');
+    // Canonical -> review with no unfinished steps, via the real bridge flow.
+    h.groupTaskStore.updateTaskStatus(groupTask.id, 'review');
+    h.bridge.syncStatus(groupTask.id);
+    assert.equal(h.orchestrationStore.getTask(canonical.id).status, 'review');
+
+    // Owner closes the card with NO conclusion: acceptance only.
+    const result = h.board.closeCard({ taskId: canonical.id, conclusion: null, by: 'owner' });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.card.state, 'closed');
+    assert.equal(result.card.closureConclusion, null, 'acceptance without an instruction stays NULL');
+    assert.equal(h.groupTaskStore.getTaskById(groupTask.id).status, 'done', 'the group task catches up to done');
+    assert.equal(h.orchestrationStore.getTask(canonical.id).status, 'completed');
+    assert.equal(result.statusMoved, true, 'the bridge moved the canonical out of review');
+
+    // The acceptance must NOT join the execution queue.
+    const queue = h.board.listPendingClosures();
+    assert.equal(queue.items.filter((item) => item.cardId === canonical.id).length, 0);
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('v1.4: closing with a conclusion through the bridge keeps the instruction queued (T1)', async () => {
+  const h = await openBoardWithBridge();
+  try {
+    const { groupTask, canonical } = driveGroupTaskToReview(h, 'instruction');
+    h.groupTaskStore.updateTaskStatus(groupTask.id, 'review');
+    h.bridge.syncStatus(groupTask.id);
+
+    const result = h.board.closeCard({
+      taskId: canonical.id,
+      conclusion: 'archive the artifacts, then report back',
+      by: 'owner',
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.card.closureConclusion, 'archive the artifacts, then report back');
+    assert.equal(h.groupTaskStore.getTaskById(groupTask.id).status, 'done');
+
+    // The owner's instruction re-enters (or enters) the execution queue.
+    const queue = h.board.listPendingClosures();
+    const queued = queue.items.find((item) => item.cardId === canonical.id);
+    assert.ok(queued, 'the closing instruction must be queued for the Twin');
+    assert.equal(queued.conclusion, 'archive the artifacts, then report back');
+    assert.equal(queued.closureBy, 'owner');
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('v1.4: a bridge refusal (unfinished steps) rejects the WHOLE card — nothing is written', async () => {
+  const h = await openBoardWithBridge();
+  try {
+    const { groupTask, canonical } = driveGroupTaskToReview(h, 'blocked');
+    // A live queued attempt on the step keeps it "unfinished" for acceptance.
+    const started = h.bridge.beginWorkerAttempt({
+      groupTaskId: groupTask.id,
+      workerMetabotId: 2,
+      objective: 'still working',
+      sourceMessageKey: 'unfinished-i0',
+    });
+    assert.equal(started.attempt.status, 'queued');
+    h.groupTaskStore.updateTaskStatus(groupTask.id, 'review');
+
+    const groupStatusBefore = h.groupTaskStore.getTaskById(groupTask.id).status;
+    const canonicalStatusBefore = h.orchestrationStore.getTask(canonical.id).status;
+    const result = h.board.closeCard({ taskId: canonical.id, conclusion: 'too early', by: 'owner' });
+    assert.equal(result.ok, false, 'an unfinished group task must refuse the close');
+    assert.equal(result.code, 'VALIDATION');
+    assert.match(result.error, /unfinished canonical step/i, 'the bridge error surfaces verbatim');
+
+    // Byte-identical refusal: no closure column, no status change anywhere.
+    const raw = h.db.exec(
+      'SELECT closure_conclusion, closure_by, closure_at FROM orchestration_tasks WHERE id = ?',
+      [canonical.id],
+    )[0].values[0];
+    assert.deepEqual([...raw], [null, null, null], 'no closure column may move on a refused close');
+    assert.equal(h.orchestrationStore.getTask(canonical.id).status, canonicalStatusBefore);
+    assert.equal(h.groupTaskStore.getTaskById(groupTask.id).status, groupStatusBefore);
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('v1.4: closing a group-task card as cancelled rides cancelGroupTask cascade', async () => {
+  const h = await openBoardWithBridge();
+  try {
+    const { groupTask, canonical } = driveGroupTaskToReview(h, 'cancel');
+    const started = h.bridge.beginWorkerAttempt({
+      groupTaskId: groupTask.id,
+      workerMetabotId: 2,
+      objective: 'long running',
+      sourceMessageKey: 'cancel-close-i0',
+    });
+    h.bridge.markWorkerAttemptRunning(started.attempt.id, 'session-cancel');
+
+    const result = h.board.closeCard({
+      taskId: canonical.id,
+      conclusion: null,
+      by: 'owner',
+      targetStatus: 'cancelled',
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(h.groupTaskStore.getTaskById(groupTask.id).status, 'cancelled');
+    assert.equal(h.orchestrationStore.getTask(canonical.id).status, 'cancelled');
+    assert.equal(h.orchestrationStore.getAttempt(started.attempt.id).status, 'cancelled', 'the cascade reaches attempts');
+    assert.equal(result.card.state, 'closed');
+    assert.equal(result.card.closureConclusion, null);
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('v1.4: without a bridge (or without a group-task link) closeCard keeps the legacy behavior', async () => {
+  const h = await openBoardWithBridge();
+  // Deliberately NO resolveGroupTaskBridge: the v1.4 linkage is inert.
+  const legacyBoard = new TrackedTaskBoardService({
+    db: h.db,
+    orchestrationStore: h.orchestrationStore,
+    saveDb: h.sqliteStore.getSaveFunction(),
+  });
+  try {
+    const { groupTask, canonical } = driveGroupTaskToReview(h, 'legacy');
+    h.groupTaskStore.updateTaskStatus(groupTask.id, 'review');
+    h.bridge.syncStatus(groupTask.id);
+
+    const result = legacyBoard.closeCard({ taskId: canonical.id, conclusion: 'legacy close', by: 'owner' });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(h.orchestrationStore.getTask(canonical.id).status, 'completed', 'legacy whitelist move still applies');
+    assert.equal(result.card.closureConclusion, 'legacy close');
+    // The group task is untouched: the group-side sync is the self-heal's job.
+    assert.equal(h.groupTaskStore.getTaskById(groupTask.id).status, 'review');
+
+    // Same for a plain unlinked card: nothing regressed.
+    const plain = h.orchestrationStore.createTask({
+      ownerIntent: 'plain card',
+      twinMetabotId: 1,
+      ownerGlobalMetaId: 'gmid-owner',
+    });
+    const plainClose = legacyBoard.closeCard({ taskId: plain.id, conclusion: null, by: 'owner' });
+    assert.equal(plainClose.ok, true, plainClose.error);
+    assert.equal(plainClose.card.closureConclusion, null);
+    assert.equal(h.orchestrationStore.getTask(plain.id).status, 'completed');
+  } finally {
+    h.sqliteStore.close();
+  }
 });

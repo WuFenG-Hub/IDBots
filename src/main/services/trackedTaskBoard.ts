@@ -1,5 +1,8 @@
 import { createHash } from 'crypto';
 import type { SqliteDatabase as Database } from '../sqliteTypes';
+// Type-only: erased at compile time, so the board never creates a runtime
+// dependency on the group-task bridge (owner ruling C).
+import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import { extractPinidToken, validateDeliverableLines } from './groupTaskDeliverableParser';
 import {
   OrchestrationStore,
@@ -285,8 +288,15 @@ export interface TrackedCardDerivationInput {
   openCheckpointCount: number;
   /** group_task_deliverables rows whose uri is verifiable (contract `[SEC-06]` R2). */
   verifiableDeliverableCount: number;
-  /** Closing conclusion on the ledger row; NULL means the card is NOT closed. */
+  /** Closing conclusion on the ledger row; NULL means no instruction text. */
   closureConclusion: string | null;
+  /**
+   * v1.4: the closure timestamp (closure_at). A non-null value means a human
+   * acceptance was RECORDED — this, not the conclusion text, is what makes a
+   * card closed. Backward compatible: every historical writer set closure_at
+   * together with the conclusion in the same UPDATE.
+   */
+  closureAt: string | null;
   /**
    * v1.1: `trackAdmission(...).admitted`. A NECESSARY condition of
    * `closureDue` — an unadmitted row is archived and never queued for closure
@@ -562,8 +572,15 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
 
   const terminal = isTerminalStatus(task.status);
   const hasConclusion = Boolean(input.closureConclusion?.trim());
-  const closed = terminal && hasConclusion;
-  const terminalWithoutConclusion = terminal && !hasConclusion;
+  // v1.4 (owner ruling): "closed" == the human acceptance is RECORDED, i.e.
+  // closure_at IS NOT NULL — the conclusion text is optional now. Backward
+  // compatible: every historical closure write set closure_at alongside the
+  // conclusion, so no legacy row changes meaning.
+  const closureRecorded = Boolean(input.closureAt);
+  const closed = terminal && closureRecorded;
+  // A terminal card the human has not closed out yet: it lands in
+  // waiting_decision and queues the terminal_no_conclusion suggestion.
+  const terminalUnclosed = terminal && !closureRecorded;
 
   function scheduledAwaitingExternal(): boolean {
     const scheduled = input.scheduled;
@@ -579,7 +596,7 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     || waitingInputSteps.length > 0
     // `review` IS the ledger's "awaiting your decision" landing point (`[SEC-06]`).
     || task.status === 'review'
-    || terminalWithoutConclusion
+    || terminalUnclosed
   ) {
     cardState = 'waiting_decision';
   } else if (unmetDependencySteps.length > 0 || scheduledAwaitingExternal()) {
@@ -588,9 +605,13 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     cardState = 'in_progress';
   }
 
-  // Strictly greater-than: exactly 24h/48h must NOT trip.
-  const closureWarn = idleMs !== null && idleMs > TRACKED_CARD_WARN_MS;
-  const zombie = idleMs !== null && idleMs > TRACKED_CARD_ZOMBIE_MS;
+  // v1.4 fix: the stale badge never fires on a CLOSED card. An accepted card
+  // whose activity anchors stay old (the common case — acceptance does not
+  // touch updated_at) used to keep wearing the 预警 badge forever. The
+  // idle_days fact below is gated by the same flag, so fixing the badge fixes
+  // the fact with it.
+  const closureWarn = !closed && idleMs !== null && idleMs > TRACKED_CARD_WARN_MS;
+  const zombie = !closed && idleMs !== null && idleMs > TRACKED_CARD_ZOMBIE_MS;
   const sessionsEnded =
     input.sessionStatuses.length > 0
     && input.sessionStatuses.every((status) => status === 'idle')
@@ -607,10 +628,10 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
   // "nothing needs closure" through a truthy accident.
   const admissionInputMissing = typeof input.admitted !== 'boolean';
   const closureDue = input.admitted === true && !closed
-    && (zombie || terminalWithoutConclusion || sessionsEnded);
+    && (zombie || terminalUnclosed || sessionsEnded);
   const closureDueLevel: TrackedClosureDueLevel | null = !closureDue
     ? null
-    : terminalWithoutConclusion
+    : terminalUnclosed
       ? 'terminal_no_conclusion'
       : zombie && !closed
         ? 'zombie'
@@ -621,11 +642,11 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
   // suggestion, and the payload keeps only the first five reason lines. If it
   // could be truncated away, the pair's reverse implication (suggestion present
   // => this reason present) would silently stop holding.
-  if (terminalWithoutConclusion) {
+  if (terminalUnclosed) {
     reasonEntries.push({
       code: 'terminal_without_conclusion',
       params: {},
-      text: 'terminal status without a closing conclusion',
+      text: 'terminal status not closed out yet (no acceptance recorded)',
     });
   }
   if (task.status === 'review') {
@@ -699,6 +720,7 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     closureDueLevel,
     terminal,
     hasConclusion,
+    closureRecorded,
     verifiableDeliverableCount: input.verifiableDeliverableCount,
     unmetDependencyCount: unmetDependencySteps.length,
     idleMs,
@@ -734,7 +756,7 @@ export function renderTrackedSuggestion(
   const days = typeof params.days === 'number' ? params.days.toFixed(1) : '0.0';
   switch (code) {
     case 'terminal_no_conclusion':
-      return 'Reached a terminal status without a conclusion; add a one-line closing note.';
+      return 'Reached a terminal status that is not closed out yet; close the card to record the acceptance.';
     case 'deliverables_verifiable':
       return `Deliverables are verifiable (${params.count}); close the card with a one-line conclusion.`;
     case 'unresolved_dependencies':
@@ -752,6 +774,7 @@ function pickClosureSuggestion(input: {
   closureDueLevel: TrackedClosureDueLevel | null;
   terminal: boolean;
   hasConclusion: boolean;
+  closureRecorded: boolean;
   verifiableDeliverableCount: number;
   unmetDependencyCount: number;
   idleMs: number | null;
@@ -759,7 +782,10 @@ function pickClosureSuggestion(input: {
   // A suggestion exists exactly when the card is due for closure (A-6 rule 4).
   if (!input.closureDue || input.cardState === 'closed') return null;
   const days = input.idleMs === null ? 0 : input.idleMs / TRACKED_CARD_WARN_MS;
-  if (input.terminal && !input.hasConclusion) return { code: 'terminal_no_conclusion', params: {} };
+  // Same condition as the `terminal_without_conclusion` REASON (A-6 appendix B:
+  // the two homes of one fact may never diverge), v1.4: it reads the closure
+  // RECORD, not the conclusion text.
+  if (input.terminal && !input.closureRecorded) return { code: 'terminal_no_conclusion', params: {} };
   if (input.verifiableDeliverableCount > 0) {
     return { code: 'deliverables_verifiable', params: { count: input.verifiableDeliverableCount } };
   }
@@ -933,7 +959,13 @@ export interface TrackedCardListInput {
 
 export interface TrackedCardCloseInput {
   taskId: string;
-  conclusion: string;
+  /**
+   * v1.4: OPTIONAL. Closing a card is the human ACCEPTANCE; a blank/whitespace
+   * conclusion normalizes to NULL ("accepted, no instruction") and never
+   * enters the pending-closure queue. A non-blank conclusion stays an
+   * instruction the Twin's sweep executes (T1: it re-enters the queue).
+   */
+  conclusion: string | null;
   by: 'owner' | 'twin';
   /** Only a hint: per the ledger whitelist the status may legitimately stay put. */
   targetStatus?: 'completed' | 'cancelled';
@@ -1042,6 +1074,15 @@ export interface TrackedTaskBoardDeps {
   orchestrationStore: OrchestrationStore;
   saveDb: () => void;
   instanceId?: string;
+  /**
+   * v1.4: the group-task orchestration bridge, injected as a getter so the
+   * board never imports it at runtime (type-only import) and the two services
+   * stay decoupled. When a card is linked to a group task and a bridge is
+   * available, closing goes THROUGH the bridge (accept/cancel) so the group
+   * task and the canonical ledger move together; without the getter (or with
+   * no group-task link) the legacy path applies unchanged.
+   */
+  resolveGroupTaskBridge?: () => GroupTaskOrchestrationBridge | null;
 }
 
 export class TrackedTaskBoardService {
@@ -1369,19 +1410,33 @@ export class TrackedTaskBoardService {
   }
 
   /**
-   * Close a card (`[SEC-10]`), two-stage per the chair's F1 ruling:
-   *  1. always write the four closure columns;
+   * Close a card = record the human ACCEPTANCE (v1.4 semantics), two shapes:
+   *
+   * Group-task-linked card + bridge available (owner ruling B): the close goes
+   * THROUGH the bridge so both models move together —
+   *  - targetStatus=completed (default) -> `acceptGroupTask` (unfinished steps
+   *    or a non-review group task makes it THROW: the whole close is then
+   *    rejected with code=VALIDATION and the card stays byte-identical — never
+   *    half-written);
+   *  - targetStatus=cancelled -> `cancelGroupTask` cascade.
+   * The bridge error text is surfaced verbatim so the UI can show the remedy.
+   *
+   * Unlinked card (or no bridge in this build): the legacy two-stage per the
+   * chair's F1 ruling —
+   *  1. always write the closure columns;
    *  2. move `status` ONLY when the ledger whitelist allows it — otherwise the
-   *     conclusion still closes the card through the terminal-status rule and
+   *     acceptance still closes the card through the terminal-status rule and
    *     the status legitimately stays put (e.g. a `failed` card).
    * `status` is never written directly: the move goes through
    * `orchestrationStore.updateTaskStatus` and its TASK_TRANSITIONS whitelist.
+   *
+   * The closure columns are written by `orchestrationStore.recordClosure` in
+   * BOTH paths (owner ruling A: exactly one writer, and a new close resets the
+   * processing marks — T1 — so a fresh instruction re-enters the queue).
    */
   closeCard(input: TrackedCardCloseInput): TrackedCardCloseResult {
-    const conclusion = input.conclusion?.trim();
-    if (!conclusion) {
-      return { ok: false, code: 'VALIDATION', error: 'A one-line closing conclusion is required.' };
-    }
+    // v1.4: blank/empty normalizes to NULL — acceptance without an instruction.
+    const conclusion = input.conclusion?.trim() || null;
     if (input.by !== 'owner' && input.by !== 'twin') {
       return { ok: false, code: 'VALIDATION', error: "closeCard: 'by' must be 'owner' or 'twin'." };
     }
@@ -1390,8 +1445,54 @@ export class TrackedTaskBoardService {
       return { ok: false, code: 'NOT_FOUND', error: `orchestration task ${input.taskId} not found` };
     }
 
+    // Group-task linkage is checked BEFORE any write, so a rejecting bridge
+    // error can never leave a half-closed card behind.
+    const groupTaskRow = this.getOne(
+      'SELECT id, status FROM group_tasks WHERE orchestration_task_id = ? ORDER BY id ASC LIMIT 1',
+      [input.taskId],
+    );
+    const bridge = groupTaskRow ? (this.deps.resolveGroupTaskBridge?.() ?? null) : null;
+    if (groupTaskRow && bridge) {
+      const groupTaskId = Number(groupTaskRow.id);
+      try {
+        if (input.targetStatus === 'cancelled') {
+          bridge.cancelGroupTask(groupTaskId, { kind: 'owner' });
+        } else {
+          bridge.acceptGroupTask(groupTaskId, { kind: 'owner' });
+        }
+      } catch (error) {
+        // Whole-card rejection: nothing was written by closeCard itself.
+        return {
+          ok: false,
+          code: 'VALIDATION',
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      // The bridge owns the status moves (accept -> completed/done, cancel ->
+      // cancelled cascade). The owner's close still decides the final closure
+      // record: the supplied conclusion (or NULL) plus the T1 mark reset.
+      this.deps.orchestrationStore.recordClosure(input.taskId, {
+        conclusion,
+        by: input.by,
+        pinId: input.pinId ?? null,
+      });
+      this.deps.saveDb();
+      const refreshed = this.deps.orchestrationStore.getTask(input.taskId);
+      const card = this.buildSummary(input.taskId, Date.now(), this.readAdmissionContext());
+      return card
+        ? {
+          ok: true,
+          card,
+          statusMoved: refreshed != null && refreshed.status !== task.status,
+          statusNote: input.targetStatus === 'cancelled'
+            ? `group task ${groupTaskId} cancelled via bridge; the closure record is written.`
+            : `group task ${groupTaskId} accepted via bridge; the closure record is written.`,
+        }
+        : { ok: false, code: 'NOT_FOUND', error: 'card vanished after close' };
+    }
+
     let statusMoved = false;
-    let statusNote = 'ledger status is already terminal; the conclusion alone closes the card.';
+    let statusNote = 'ledger status is already terminal; the acceptance alone closes the card.';
     if (!isTerminalStatus(task.status)) {
       const targetStatus: OrchestrationTaskStatus = input.targetStatus === 'cancelled' ? 'cancelled' : 'completed';
       try {
@@ -1400,23 +1501,21 @@ export class TrackedTaskBoardService {
         statusNote = `ledger status ${task.status} -> ${targetStatus}`;
       } catch (error) {
         statusNote = `ledger transition refused (${error instanceof Error ? error.message : String(error)}); `
-          + 'the conclusion is still recorded.';
+          + 'the acceptance is still recorded.';
       }
     }
 
-    // T1 (freeze doc §3.1): writing a NEW conclusion must reset the processing
+    // T1 (freeze doc §3.1): writing a NEW closure must reset the processing
     // mark and the receipt IN THE SAME statement. A card that was already acked
-    // and is closed again carries a different conclusion, so it has to re-enter
-    // the execution queue — leaving the old mark in place would silently swallow
-    // the new instruction. One UPDATE, so no reader can observe a half-reset row.
-    this.deps.db.run(
-      `UPDATE orchestration_tasks
-          SET closure_conclusion = ?, closure_by = ?, closure_at = ?, closure_pin_id = ?,
-              closure_processed_at = NULL, closure_processed_by = NULL, closure_processed_hash = NULL,
-              closure_receipt = NULL, closure_receipt_pin_id = NULL
-        WHERE id = ?`,
-      [conclusion, input.by, new Date().toISOString(), input.pinId ?? null, input.taskId],
-    );
+    // and is closed again carries a different instruction, so it has to
+    // re-enter the execution queue — leaving the old mark in place would
+    // silently swallow the new instruction. recordClosure is ONE UPDATE, so no
+    // reader can observe a half-reset row.
+    this.deps.orchestrationStore.recordClosure(input.taskId, {
+      conclusion,
+      by: input.by,
+      pinId: input.pinId ?? null,
+    });
     this.deps.saveDb();
     const card = this.buildSummary(input.taskId, Date.now(), this.readAdmissionContext());
     return card
@@ -1921,6 +2020,7 @@ export class TrackedTaskBoardService {
       openCheckpointCount,
       verifiableDeliverableCount,
       closureConclusion: closure.conclusion,
+      closureAt: closure.at,
       admitted,
       scheduled: scheduled
         ? {
