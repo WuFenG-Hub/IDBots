@@ -1661,7 +1661,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
 
       // 统一为两种协议格式：
       // - anthropic: /v1/messages
-      // - openai provider: /v1/responses
+      // - openai provider / 用户选择的 responses 格式: /v1/responses
       // - other openai-compatible providers: /v1/chat/completions
       const useAnthropicFormat = getEffectiveApiFormat(activeProvider, providerConfig.apiFormat) === 'anthropic';
 
@@ -1685,7 +1685,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
           }),
         });
       } else {
-        const useResponsesApi = shouldUseOpenAIResponsesForProvider(activeProvider);
+        // A user-selected 'responses' apiFormat must drive the test through the
+        // Responses endpoint too (mirrors llmConnection.testProviderConnection).
+        // Zhipu's /api/v1 only serves Responses for coding-plan keys — a
+        // chat/completions probe there fails with model_access_denied while
+        // real traffic (api.ts honors apiFormat) works.
+        const useResponsesApi = providerConfig.apiFormat === 'responses'
+          || shouldUseOpenAIResponsesForProvider(activeProvider);
         const openaiUrl = useResponsesApi
           ? buildOpenAIResponsesUrl(normalizedBaseUrl)
           : buildOpenAICompatibleChatCompletionsUrl(normalizedBaseUrl, activeProvider);
