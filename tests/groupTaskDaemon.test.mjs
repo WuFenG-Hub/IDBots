@@ -10095,3 +10095,54 @@ test('GT#87: a non-quota failure still burns the ordinary retry ladder', async (
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// GT#87 (P2-5): quoted code is citation, not dispatch. The chair's 18:29
+// rebuttal restated another worker's deadline inside backticks while naming
+// 阿码 in the third person — the raw-content [DEADLINE] test read the quoted
+// citation as an assignment marker and armed a phantom ACK watch that
+// misfired a no-ACK note 31 minutes later.
+// ---------------------------------------------------------------------------
+
+test('GT#87: a backtick-quoted [DEADLINE] restatement never wakes or arms a phantom assignment', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-quoted-deadline-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '主持人核对：Coder Bot 提出的截止日期提醒与其估算值对不上。但这不是我的安排时间：'
+        + '我分配给他的实际任务是 `[DEADLINE: 140m]`，从派发起算。目前没有任何超时事项，保持静默。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'a quoted tag never wakes the bare-named worker');
+    assert.ok(
+      !logs.some((line) => line.includes('assignment to Coder Bot (message #')),
+      'no phantom ACK watch armed from the quoted restatement',
+    );
+    assert.ok(
+      !logs.some((line) => line.includes('assignment to Designer Bot (message #')),
+      'no phantom watch for any other bare-named member either',
+    );
+
+    // Control: the same message with the tag UNQUOTED keeps the GT#72
+    // bare-name dispatch semantics intact.
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-unquoted-deadline-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: 'Coder Bot，第二棒正式开工 [DEADLINE: 60m]：字段级协议规范，即刻交付。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(
+      logs.some((line) => line.includes('assignment to Coder Bot (message #') && line.includes('waiting for [WORKING] ACK')),
+      'an unquoted tag on a bare-name dispatch still arms the watch (GT#72 semantics intact)',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

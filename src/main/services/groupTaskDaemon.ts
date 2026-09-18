@@ -1300,7 +1300,15 @@ export function decideGroupTaskResponders(
   // notices that merely CITE a member's name stay quiet (task #51: the
   // chair's own "Coder Bot is in a long-running turn" notice must wake
   // nobody).
-  const bareNameWakeEligible = senderIsChair && /\[DEADLINE\s*:/i.test(content);
+  // GT#87 (P2-5): quoted code is citation, not dispatch. The chair's
+  // rebuttal prose restated a deadline inside backticks
+  // ("…`[DEADLINE: 140m]` 时钟照旧…") while naming a member in the third
+  // person — the raw-content tag test read the quoted citation as an
+  // assignment marker and armed a phantom ACK watch that later misfired a
+  // no-ACK note. Test the tag and the roster-name address against
+  // backtick-stripped content (same convention as ACK parsing).
+  const contentUnquoted = stripGroupTaskQuotedCode(content);
+  const bareNameWakeEligible = senderIsChair && /\[DEADLINE\s*:/i.test(contentUnquoted);
 
   // Resolve mention/name hits once per member.
   const hits = new Map<number, boolean>();
@@ -1310,7 +1318,7 @@ export function decideGroupTaskResponders(
     if (!bot) continue;
     const bareNamed = bareNameWakeEligible
       && member.role === 'worker'
-      && contentAddressesRosterName(content, bot.name, rosterNames);
+      && contentAddressesRosterName(contentUnquoted, bot.name, rosterNames);
     hits.set(member.metabotId, isMentioned(message, bot) || bareNamed);
   }
   const chairHit = chairMember?.metabotId != null ? hits.get(chairMember.metabotId) === true : false;
@@ -8637,12 +8645,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const rosterNames = members.map(
         (candidate) => botsById.get(candidate.metabotId ?? -1)?.name ?? candidate.name ?? null,
       );
-      const bareNameWatchEligible = /\[DEADLINE\s*:/i.test(message.content ?? '');
+      // GT#87 (P2-5): same citation-vs-dispatch rule on the ACK-watch side —
+      // a backtick-quoted [DEADLINE] restatement must not turn prose that
+      // names a member into their assignment.
+      const messageContentUnquoted = stripGroupTaskQuotedCode(message.content ?? '');
+      const bareNameWatchEligible = /\[DEADLINE\s*:/i.test(messageContentUnquoted);
       for (const member of members) {
         if (member.role !== 'worker' || member.metabotId == null) continue;
         const bot = botsById.get(member.metabotId);
         const bareNamed = bareNameWatchEligible
-          && contentAddressesRosterName(message.content, bot?.name, rosterNames);
+          && contentAddressesRosterName(messageContentUnquoted, bot?.name, rosterNames);
         if (!bot || !(isMentioned(message, bot) || bareNamed)) continue;
         // GT#47 R3: during review / an open checkpoint the mention is part of
         // a review-closing or checkpoint message, not a work assignment —
