@@ -1,20 +1,21 @@
 /**
- * Official model-list sync for built-in providers that expose an
- * OpenAI-compatible GET /models endpoint (deepseek, opencode, commandcode).
+ * Official model-list sync for built-in providers that expose a
+ * model-listing GET endpoint (deepseek, opencode, commandcode, zhipu).
  *
  * Settings > Models shows a "Fetch Models" button for these providers: one
  * click pulls the provider's live catalog and replaces the stored list, so
  * users pick up renamed/added/retired official models without waiting for an
  * app release. Per-model local settings (thinking options, vision flag,
- * limits) survive the replace for ids that exist in both lists, and
- * DeepSeek's canonical preset re-supplies names/limits for the ids it knows.
+ * limits) survive the replace for ids that exist in both lists, and the
+ * canonical presets (DeepSeek, Zhipu) re-supply names/limits for the ids they
+ * know.
  *
  * The pure pieces (URL building, payload parsing, merge) are exported
  * separately so node:test can cover them without the Electron bridge.
  */
 
 import type { ModelOptions } from '../config';
-import { getDefaultDeepSeekModels } from '../config';
+import { getDefaultDeepSeekModels, getDefaultZhipuModels } from '../config';
 import { buildOpenCodeGoSessionHeaders } from './opencodeGatewayHeaders';
 
 /** One entry of a provider's model catalog after an official-list sync. */
@@ -36,14 +37,19 @@ export interface ExistingProviderModel {
   options?: ModelOptions;
 }
 
-/** Raw entry of the OpenAI-style `data` array the gateways return. */
+/**
+ * Raw entry of the provider model list: the OpenAI-style `data` array the
+ * gateways return, or Zhipu's Responses-catalog `models` array (which also
+ * reports input modalities).
+ */
 export interface FetchedProviderModel {
   id: string;
   name?: string;
+  supportsImage?: boolean;
   contextWindow?: number;
 }
 
-const MODEL_LIST_SYNC_PROVIDERS = ['deepseek', 'opencode', 'commandcode'] as const;
+const MODEL_LIST_SYNC_PROVIDERS = ['deepseek', 'opencode', 'commandcode', 'zhipu'] as const;
 
 /** True when the provider exposes a known GET /models endpoint to sync from. */
 export function providerSupportsModelListSync(providerKey: string): boolean {
@@ -54,7 +60,10 @@ export function providerSupportsModelListSync(providerKey: string): boolean {
  * Models-endpoint URL for a provider base URL. DeepSeek mounts /models at the
  * host root (https://api-docs.deepseek.com/zh-cn/api/list-models) — older
  * configs may carry the /anthropic or /v1 suffix from the Messages /
- * OpenAI-SDK base URL forms, so both are stripped. OpenAI-compatible
+ * OpenAI-SDK base URL forms, so both are stripped. Zhipu serves the live
+ * Responses catalog at https://open.bigmodel.cn/api/v1/models regardless of
+ * which protocol base URL is configured (anthropic / coding/paas/v4 / v1), so
+ * any bigmodel.cn base resolves back to the host origin. OpenAI-compatible
  * gateways (opencode, commandcode) mount /models next to /chat/completions.
  */
 export function buildProviderModelsUrl(baseUrl: string, providerKey: string): string {
@@ -67,32 +76,46 @@ export function buildProviderModelsUrl(baseUrl: string, providerKey: string): st
     const hostRoot = normalized.replace(/\/anthropic$/i, '').replace(/\/v1$/i, '');
     return hostRoot ? `${hostRoot}/models` : '/models';
   }
+  const isZhipuHost = providerKey.trim().toLowerCase() === 'zhipu'
+    || normalized.toLowerCase().includes('bigmodel.cn');
+  if (isZhipuHost) {
+    const originMatch = /^([a-z][a-z0-9+.-]*:\/\/[^/]+)/i.exec(normalized);
+    const origin = originMatch ? originMatch[1] : '';
+    return origin ? `${origin}/api/v1/models` : '/api/v1/models';
+  }
   if (normalized.endsWith('/v1')) return `${normalized}/models`;
   return `${normalized}/v1/models`;
 }
 
 /**
- * Parse the OpenAI-style list payload (`{object: 'list', data: [...]}`).
- * commandcode also reports a display `name` and `context_length` per model;
- * deepseek and opencode return bare ids. Unknown shapes yield an empty list
- * (the caller treats that as a failed sync, never an empty replace).
+ * Parse the provider list payload. OpenAI-style gateways answer
+ * `{object: 'list', data: [...]}`; commandcode also reports a display `name`
+ * and `context_length` per model. Zhipu's Responses catalog answers
+ * `{models: [...]}` with `slug` / `display_name` / `context_window` /
+ * `input_modalities` per entry. Unknown shapes yield an empty list (the caller
+ * treats that as a failed sync, never an empty replace).
  */
 export function parseProviderModelListPayload(payload: unknown): FetchedProviderModel[] {
-  const data = (payload as { data?: unknown } | null)?.data;
-  if (!Array.isArray(data)) return [];
+  const container = payload as { data?: unknown; models?: unknown } | null;
+  const rawList = Array.isArray(container?.data) ? container?.data : container?.models;
+  if (!Array.isArray(rawList)) return [];
   const seen = new Set<string>();
   const models: FetchedProviderModel[] = [];
-  for (const entry of data) {
-    const id = typeof (entry as { id?: unknown })?.id === 'string'
-      ? ((entry as { id: string }).id).trim()
-      : '';
+  for (const entry of rawList) {
+    const record = entry as Record<string, unknown>;
+    const rawId = typeof record?.id === 'string' ? record.id : record?.slug;
+    const id = typeof rawId === 'string' ? rawId.trim() : '';
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    const rawName = (entry as { name?: unknown }).name;
-    const rawContext = (entry as { context_length?: unknown }).context_length;
+    const rawName = record.name ?? record.display_name;
+    const rawContext = record.contextWindow ?? record.context_window ?? record.context_length;
+    const rawModalities = record.input_modalities;
     models.push({
       id,
       name: typeof rawName === 'string' && rawName.trim() ? rawName.trim() : undefined,
+      // Only the Zhipu catalog reports modalities; leave the key absent for
+      // the OpenAI-style gateways so merge falls back to preset/local flags.
+      ...(Array.isArray(rawModalities) ? { supportsImage: rawModalities.includes('image') } : {}),
       contextWindow: typeof rawContext === 'number' && Number.isFinite(rawContext) && rawContext > 0
         ? Math.floor(rawContext)
         : undefined,
@@ -106,8 +129,10 @@ export function parseProviderModelListPayload(payload: unknown): FetchedProvider
  * official list (ids the provider dropped disappear, new ids appear in
  * official order), while ids present in the user's current catalog keep
  * their local `options` (thinking/effort picks) and — when neither the
- * endpoint nor the DeepSeek preset says otherwise — their vision flag,
- * limits and display name.
+ * endpoint nor a canonical preset says otherwise — their vision flag,
+ * limits and display name. Zhipu's catalog reports input modalities, so a
+ * synced `supportsImage` is authoritative there (it flips the flag both ways
+ * when Zhipu ships or retires vision on a SKU).
  */
 export function mergeSyncedProviderModels(
   providerKey: string,
@@ -115,10 +140,14 @@ export function mergeSyncedProviderModels(
   existing: ExistingProviderModel[],
 ): SyncedProviderModel[] {
   type CanonicalModel = ReturnType<typeof getDefaultDeepSeekModels>[number];
+  const normalizedProviderKey = providerKey.trim().toLowerCase();
+  const canonicalModels: CanonicalModel[] = normalizedProviderKey === 'deepseek'
+    ? getDefaultDeepSeekModels()
+    : normalizedProviderKey === 'zhipu'
+      ? getDefaultZhipuModels()
+      : [];
   const canonicalById = new Map<string, CanonicalModel>(
-    providerKey.trim().toLowerCase() === 'deepseek'
-      ? getDefaultDeepSeekModels().map((model) => [model.id, model])
-      : [],
+    canonicalModels.map((model) => [model.id, model]),
   );
   const existingById = new Map(existing.map((model) => [model.id, model]));
   return fetched.map((entry) => {
@@ -126,8 +155,11 @@ export function mergeSyncedProviderModels(
     const current = existingById.get(entry.id);
     return {
       id: entry.id,
-      name: entry.name ?? canonical?.name ?? current?.name ?? entry.id,
-      supportsImage: canonical?.supportsImage ?? current?.supportsImage ?? false,
+      // Canonical preset names win over the fetched raw display names
+      // (Zhipu's catalog reports the bare slug); gateway-provided display
+      // names still apply for ids no preset tracks.
+      name: canonical?.name ?? entry.name ?? current?.name ?? entry.id,
+      supportsImage: entry.supportsImage ?? canonical?.supportsImage ?? current?.supportsImage ?? false,
       contextWindow: entry.contextWindow ?? canonical?.contextWindow ?? current?.contextWindow,
       maxOutputTokens: canonical?.maxOutputTokens ?? current?.maxOutputTokens,
       options: current?.options ?? canonical?.options,

@@ -9,7 +9,7 @@ import {
 } from '../src/renderer/services/providerModels.ts';
 
 test('providerSupportsModelListSync gates the Fetch Models button to the known endpoints', () => {
-  for (const key of ['deepseek', 'opencode', 'commandcode', 'DeepSeek', ' opencode ']) {
+  for (const key of ['deepseek', 'opencode', 'commandcode', 'zhipu', 'DeepSeek', ' opencode ']) {
     assert.equal(providerSupportsModelListSync(key), true, key);
   }
   for (const key of ['metaid-free', 'openai', 'anthropic', 'ollama', 'custom-my-relay', '']) {
@@ -58,6 +58,29 @@ test('buildProviderModelsUrl: OpenAI-compatible gateways mount /models next to /
   );
 });
 
+test('buildProviderModelsUrl: zhipu resolves every protocol base to the Responses catalog', () => {
+  // Default responses base.
+  assert.equal(
+    buildProviderModelsUrl('https://open.bigmodel.cn/api/v1', 'zhipu'),
+    'https://open.bigmodel.cn/api/v1/models',
+  );
+  // Legacy anthropic default from older configs.
+  assert.equal(
+    buildProviderModelsUrl('https://open.bigmodel.cn/api/anthropic', 'zhipu'),
+    'https://open.bigmodel.cn/api/v1/models',
+  );
+  // Chat-completions coding endpoint.
+  assert.equal(
+    buildProviderModelsUrl('https://open.bigmodel.cn/api/coding/paas/v4', 'zhipu'),
+    'https://open.bigmodel.cn/api/v1/models',
+  );
+  // Provider key alone also pins the host when the base URL is bare.
+  assert.equal(
+    buildProviderModelsUrl('https://open.bigmodel.cn', 'zhipu'),
+    'https://open.bigmodel.cn/api/v1/models',
+  );
+});
+
 test('parseProviderModelListPayload reads the OpenAI-style list and keeps gateway extras', () => {
   // commandcode shape: display name + context_length per model.
   const commandCode = parseProviderModelListPayload({
@@ -93,6 +116,33 @@ test('parseProviderModelListPayload reads the OpenAI-style list and keeps gatewa
   assert.deepEqual(parseProviderModelListPayload({}), []);
   assert.deepEqual(parseProviderModelListPayload(null), []);
   assert.deepEqual(parseProviderModelListPayload('not json'), []);
+});
+
+test('parseProviderModelListPayload reads the Zhipu Responses catalog shape', () => {
+  // Live shape of GET https://open.bigmodel.cn/api/v1/models (2026-09-18):
+  // {models: [...]} with slug/display_name/context_window/input_modalities.
+  const zhipu = parseProviderModelListPayload({
+    models: [
+      {
+        slug: 'glm-5.3',
+        display_name: 'glm-5.3',
+        context_window: 1048576,
+        input_modalities: ['text'],
+      },
+      {
+        slug: 'glm-5.3-flash',
+        display_name: 'glm-5.3-flash',
+        context_window: 1048576,
+        input_modalities: ['text', 'image'],
+      },
+      { slug: 'glm-5-turbo', display_name: 'glm-5-turbo', context_window: 204800 },
+    ],
+  });
+  assert.deepEqual(zhipu, [
+    { id: 'glm-5.3', name: 'glm-5.3', supportsImage: false, contextWindow: 1048576 },
+    { id: 'glm-5.3-flash', name: 'glm-5.3-flash', supportsImage: true, contextWindow: 1048576 },
+    { id: 'glm-5-turbo', name: 'glm-5-turbo', contextWindow: 204800 },
+  ]);
 });
 
 test('mergeSyncedProviderModels applies the DeepSeek canonical preset over bare fetched ids', () => {
@@ -179,4 +229,48 @@ test('mergeSyncedProviderModels prefers gateway names and falls back to the id',
   assert.equal(merged[0].contextWindow, 1_000_000);
   assert.equal(merged[1].name, 'kimi-k3');
   assert.equal(merged[1].supportsImage, false);
+});
+
+test('mergeSyncedProviderModels applies the Zhipu canonical preset and honors catalog modalities', () => {
+  // Zhipu sync: the catalog's input_modalities win over both the canonical
+  // preset and stale local flags (flips either way), while the preset
+  // re-supplies names/limits for the GLM-5.3 ids it knows.
+  const merged = mergeSyncedProviderModels(
+    'zhipu',
+    [
+      { id: 'glm-5.3', name: 'glm-5.3', supportsImage: false, contextWindow: 1048576 },
+      { id: 'glm-5.3-flash', name: 'glm-5.3-flash', supportsImage: true, contextWindow: 1048576 },
+      { id: 'glm-5-turbo', name: 'glm-5-turbo', supportsImage: false, contextWindow: 204800 },
+    ],
+    [
+      // A stale local flag (vision shipped later on flash) must be corrected.
+      { id: 'glm-5.3-flash', name: 'GLM Flash (old)', supportsImage: false, contextWindow: 128_000 },
+    ],
+  );
+  assert.deepEqual(merged, [
+    {
+      id: 'glm-5.3',
+      name: 'GLM-5.3',
+      supportsImage: false,
+      contextWindow: 1_048_576,
+      maxOutputTokens: 32_768,
+      options: undefined,
+    },
+    {
+      id: 'glm-5.3-flash',
+      name: 'GLM-5.3 Flash',
+      supportsImage: true,
+      contextWindow: 1_048_576,
+      maxOutputTokens: 32_768,
+      options: undefined,
+    },
+    {
+      id: 'glm-5-turbo',
+      name: 'glm-5-turbo',
+      supportsImage: false,
+      contextWindow: 204_800,
+      maxOutputTokens: undefined,
+      options: undefined,
+    },
+  ]);
 });

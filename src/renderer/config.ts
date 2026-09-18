@@ -270,6 +270,49 @@ export function getDefaultDeepSeekModels(): ModelDefinition[] {
   }));
 }
 
+// Zhipu GLM coding plan (https://docs.bigmodel.cn/cn/coding-plan/quick-start):
+// one key serves three protocol endpoints — Anthropic Messages
+// (https://open.bigmodel.cn/api/anthropic), OpenAI Chat Completions
+// (https://open.bigmodel.cn/api/coding/paas/v4) and OpenAI Responses
+// (https://open.bigmodel.cn/api/v1). Default to Responses: the GLM-5.3 family
+// runs there with reasoning summaries and a live catalog (GET /api/v1/models).
+// The whole GLM-5.3 family shares a 1M context window (1048576 per the live
+// catalog, 2026-09-18). Only glm-5.3-flash reads images — the flagship is
+// text-only per the official docs ("目前仅支持处理文本模态信息") and a live
+// image probe. glm-5.3-flashx matches the flash spec but is not part of coding
+// plan subscriptions, so it stays off the preset (it remains reachable via
+// manual add).
+export const ZHIPU_DEFAULT_MODEL_ID = 'glm-5.3';
+export const ZHIPU_GLM_53_CONTEXT_WINDOW = 1_048_576;
+// The Zhipu API allows up to 128K output tokens for the GLM-5.3 family; the
+// app declares the same 32K ceiling as DeepSeek (aligned with the MetaApp
+// bridge limit). Keep in sync with GLM_MAX_OUTPUT_TOKENS in
+// src/main/libs/coworkModelLimits.ts.
+export const ZHIPU_GLM_53_MAX_OUTPUT_TOKENS = 32_768;
+
+const ZHIPU_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
+  {
+    id: 'glm-5.3',
+    name: 'GLM-5.3',
+    supportsImage: false,
+    contextWindow: ZHIPU_GLM_53_CONTEXT_WINDOW,
+    maxOutputTokens: ZHIPU_GLM_53_MAX_OUTPUT_TOKENS,
+  },
+  {
+    id: 'glm-5.3-flash',
+    name: 'GLM-5.3 Flash',
+    // First natively multimodal model of the GLM-5 series (text/image/video
+    // input); verified live 2026-09-18 through the Responses endpoint.
+    supportsImage: true,
+    contextWindow: ZHIPU_GLM_53_CONTEXT_WINDOW,
+    maxOutputTokens: ZHIPU_GLM_53_MAX_OUTPUT_TOKENS,
+  },
+]);
+
+export function getDefaultZhipuModels(): ModelDefinition[] {
+  return ZHIPU_DEFAULT_MODELS.map((model) => ({ ...model }));
+}
+
 function normalizeDeepSeekModel(model: ModelLike): ModelLike {
   const migrated = DEEPSEEK_LEGACY_MODEL_MIGRATION_MAP[model.id];
   const canonical = DEEPSEEK_DEFAULT_MODELS.find((entry) => entry.id === (migrated?.id ?? model.id));
@@ -626,13 +669,11 @@ export const defaultConfig: AppConfig = {
     zhipu: {
       enabled: false,
       apiKey: '',
-      baseUrl: 'https://open.bigmodel.cn/api/anthropic',
-      apiFormat: 'anthropic',
-      models: [
-        { id: 'glm-5.1', name: 'GLM 5.1', supportsImage: false, contextWindow: 202_800 },
-        { id: 'glm-5', name: 'GLM 5', supportsImage: false, contextWindow: 202_800 },
-        { id: 'glm-4.7', name: 'GLM 4.7', supportsImage: false, contextWindow: 204_800 }
-      ]
+      // Zhipu GLM coding plan, OpenAI Responses protocol — see the
+      // ZHIPU_DEFAULT_MODELS notes above for the three endpoint options.
+      baseUrl: 'https://open.bigmodel.cn/api/v1',
+      apiFormat: 'responses',
+      models: getDefaultZhipuModels()
     },
     minimax: {
       enabled: false,
@@ -734,7 +775,7 @@ export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 
 /** All supported LLM provider keys for the Model settings page. No language filtering. */
 export const ALL_PROVIDER_KEYS = [
-  'metaid-free', 'deepseek', 'opencode', 'commandcode', 'openai', 'gemini', 'anthropic', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama',
+  'metaid-free', 'deepseek', 'opencode', 'commandcode', 'zhipu', 'openai', 'gemini', 'anthropic', 'moonshot', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama',
 ] as const;
 
 /**

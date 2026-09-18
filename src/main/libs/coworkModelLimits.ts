@@ -110,15 +110,17 @@ const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contex
   'gemini-3.1-flash-lite': { contextWindow: 2_000_000, supportsVision: true },
   'kimi-k2.6': { contextWindow: 262_144, supportsVision: true },
   'kimi-k2.5': { contextWindow: 262_144, supportsVision: true },
-  // GLM text models have no image input — aligned with the curated renderer
-  // presets (src/renderer/config.ts: zhipu glm-5.1/5/4.7 and commandcode
-  // z-ai/glm-5.3-flash + zai-org/GLM-5.x all declare supportsImage:false;
-  // Zhipu ships vision under separate SKU ids). The glm-5.3 family is what
-  // group-task bots were re-routed to on 2026-09-03: uncatalogued at the
-  // time, it inherited the old default-true and lost describe_image while
-  // read_image silently dropped pixels (2026-09-04 regression).
-  'glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
-  'glm-5.3': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  // GLM-5.3 family (Zhipu direct): the whole family shares a 1M context
+  // window (1048576 per the live catalog GET /api/v1/models, 2026-09-18).
+  // glm-5.3-flash is natively multimodal — image input verified live through
+  // the Responses endpoint on 2026-09-18 (matches the official GLM-5.3-Flash
+  // docs); the flagship glm-5.3 stays text-only ("目前仅支持处理文本模态信
+  // 息"). Older GLM ids keep the historical no-vision/no-1M entries. Gateway
+  // ids (commandcode z-ai/glm-5.3-flash, zai-org/GLM-*) are NOT verified for
+  // image passthrough, so they stay fail-safe false.
+  'glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true },
+  'glm-5.3-flashx': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true },
+  'glm-5.3': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'glm-5.2': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'glm-5.2-fast': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'z-ai/glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
