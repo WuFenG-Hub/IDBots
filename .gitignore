@@ -58,6 +58,7 @@ tests/*
 !tests/fixtures/
 !tests/fixtures/longTaskBoardSeed.mjs
 !tests/trackedTaskBoard.test.mjs
+!tests/quotaRendererSync.test.mjs
 !tests/rsiLadderCompute.test.ts
 !tests/rsiLadderIndex.test.ts
 !tests/rsiLadderMountStatic.test.ts

@@ -14,11 +14,13 @@ import { i18nService } from '../../services/i18n';
 import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
 import SurfReportsPanel from './SurfReportsPanel';
 
-// Keep in sync with src/main/services/surfSettings.ts.
+// Keep in sync with src/main/services/surfSettings.ts (pinned by
+// tests/quotaRendererSync.test.mjs — the quota audit 2026-09-17 raised the
+// main constants and this copy lagged, clamping users to a phantom ceiling).
 const SURF_BEFORE_DREAM_ENABLED_KEY = 'surf_before_dream_enabled';
 const SURF_INTERACTION_BUDGET_KEY = 'surf_interaction_budget';
-const DEFAULT_SURF_INTERACTION_BUDGET = 20;
-const MAX_SURF_INTERACTION_BUDGET = 100;
+const DEFAULT_SURF_INTERACTION_BUDGET = 50;
+const MAX_SURF_INTERACTION_BUDGET = 500;
 const MIN_SURF_INTERACTION_BUDGET = 0;
 
 // Same row/label/input chrome the edit form uses, so the section blends in
