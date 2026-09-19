@@ -10876,3 +10876,101 @@ test('GT#90: deliberate [NO_REPLY] and mid-turn-delivered turns never requeue', 
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// GT#90 (P1-2): an armed-wait worker must use [STANDBY], and the host must
+// honor it. GT#90's buzz seat declared [WORKING] + a prose trigger condition
+// and went quiet for 45 min while correctly waiting on the chair's final
+// gate — the liveness monitors escalated false unreachable + stale-[WORKING]
+// stuck alerts twice, briefed the OWNER (L3), and burned a re-drive turn that
+// answered [NO_REPLY]. A standby-status member is exempt from both monitors;
+// a stale [WORKING] without standby still escalates (control case).
+// ---------------------------------------------------------------------------
+
+test('GT#90: a standby member in armed wait never draws unreachable/stuck alarms', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    deps: { memberTimeoutAfterMinutes: 20, memberUnreachableAfterMinutes: 30 },
+  });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'gt90-armed-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot buzz 等我终门令再发 [DEADLINE: 30m]。',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt90-armed-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 收到：buzz 准备开工。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    // Prep done → declare the armed wait with [STANDBY], then go quiet.
+    h.state.nowMs += 5 * 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt90-armed-standby-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[STANDBY] armed: buzz 等 chair 终门令触发，二缺一不发。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.db.exec(
+      "SELECT status FROM group_task_members WHERE task_id = ? AND metabot_id = 2", [task.id],
+    )[0].values[0][0], 'standby', 'the [STANDBY] marker parked the member');
+
+    // 60 quiet minutes: both liveness monitors would fire on a stale [WORKING].
+    h.state.nowMs += 60 * 60_000;
+    await h.loop.runTick();
+    const statusNow = h.db.exec(
+      "SELECT status FROM group_task_members WHERE task_id = ? AND metabot_id = 2", [task.id],
+    )[0].values[0][0];
+    assert.equal(statusNow, 'standby', 'a standby member is never marked unreachable');
+    assert.ok(
+      !logs.some((line) => line.includes('Coder Bot') && line.includes('marked unreachable')),
+      'no unreachable stamp',
+    );
+    assert.ok(
+      !logs.some((line) => line.includes("Coder Bot [WORKING] signal stale")),
+      'no stale-working stuck alert',
+    );
+    assert.equal(h.chatCalls.length, 1, 'no wasted re-drive turn (only the original assignment turn ran)');
+
+    // Control: the SAME silence with a stale [WORKING] (no standby) escalates.
+    const h2 = await createHarness({
+      emitLog: (message) => logs.push(message),
+      deps: { memberTimeoutAfterMinutes: 20, memberUnreachableAfterMinutes: 30 },
+    });
+    try {
+      const task2 = h2.createTask([2]);
+      const start2 = Date.now();
+      h2.state.nowMs = start2;
+      insertGroupMessage(h2.db, {
+        pinId: 'gt90-stale-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+        senderName: 'Twin Bot', content: '@Coder Bot buzz 等我终门令再发 [DEADLINE: 30m]。',
+        chainTimestamp: Math.floor(start2 / 1000),
+      });
+      await h2.loop.runTick();
+      h2.state.nowMs += 30_000;
+      insertGroupMessage(h2.db, {
+        pinId: 'gt90-stale-ack-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+        senderName: 'Coder Bot', content: '[WORKING] 收到：buzz 准备开工，等触发。',
+        chainTimestamp: Math.floor(h2.state.nowMs / 1000),
+      });
+      await h2.loop.runTick();
+      h2.state.nowMs += 60 * 60_000;
+      await h2.loop.runTick();
+      assert.ok(
+        logs.some((line) => line.includes('Coder Bot') && line.includes('marked unreachable')),
+        'control: the stale-[WORKING] path still escalates without standby',
+      );
+    } finally {
+      h2.cleanup();
+    }
+  } finally {
+    h.cleanup();
+  }
+});
