@@ -446,8 +446,15 @@ test('v1.4 wiring: the board is wired to the group-task bridge and the sweep sel
     'main injects the bridge getter into the board',
   );
   // closeCard delegates to the bridge and rejects the whole card on refusal.
-  assert.match(boardSrc, /bridge\.acceptGroupTask\(groupTaskId, \{ kind: 'owner' \}\)/);
-  assert.match(boardSrc, /bridge\.cancelGroupTask\(groupTaskId, \{ kind: 'owner' \}\)/);
+  // v1.5: the actor is derived from the closer (owner close = 'owner',
+  // twin self-close = 'chair') — same bridge calls, honest attribution.
+  assert.match(boardSrc, /bridge\.acceptGroupTask\(groupTaskId, actor\)/);
+  assert.match(boardSrc, /bridge\.cancelGroupTask\(groupTaskId, actor\)/);
+  assert.match(
+    boardSrc,
+    /kind: input\.by === 'twin' \? 'chair' as const : 'owner' as const/,
+    'the closer decides the group event attribution',
+  );
   assert.match(
     boardSrc,
     /code: 'VALIDATION',\s*\n\s*error: error instanceof Error \? error\.message : String\(error\)/,
@@ -461,4 +468,95 @@ test('v1.4 wiring: the board is wired to the group-task bridge and the sweep sel
   const healAt = mainSrc.indexOf('healAcceptedGroupTaskCards()');
   const sweepCallAt = mainSrc.indexOf('getTrackedTaskBoard().sweep();', sweepAt);
   assert.ok(sweepAt > -1 && healAt > sweepAt && sweepCallAt > healAt, 'heal runs before the sweep inside the tick');
+});
+
+// ============================================================================
+// v1.5 (谁发起，谁验收) wiring contracts — source-level, same discipline as
+// above: each assertion names the exact file and the load-bearing token.
+// ============================================================================
+
+const cardItemV15Src = read('src', 'renderer', 'components', 'trackedTasks', 'TrackedTaskCardItem.tsx');
+const listV15Src = read('src', 'renderer', 'components', 'trackedTasks', 'TrackedTasksList.tsx');
+const twinServiceV15Src = read('src', 'main', 'services', 'twinOrchestrationService.ts');
+const storeV15Src = read('src', 'main', 'orchestrationStore.ts');
+const sqliteStoreV15Src = read('src', 'main', 'sqliteStore.ts');
+
+test('v1.5 card item: the close button is gated by closerRole and the neutral internal badge renders its own text (no hover承载)', () => {
+  assert.match(
+    cardItemV15Src,
+    /card\.state !== 'closed' && card\.closerRole !== 'twin'/,
+    'TrackedTaskCardItem close button must be hidden for twin-closable cards',
+  );
+  assert.match(
+    cardItemV15Src,
+    /card\.closerRole === 'twin' && \(?\s*\n?\s*<span/,
+    'TrackedTaskCardItem must render the internal marker for twin cards',
+  );
+  assert.match(cardItemV15Src, /trackedTask\.badge\.internal/, 'internal badge key must be referenced');
+});
+
+test('v1.5 list: internal chip beside the state chip and no close button in the action column for twin cards', () => {
+  assert.match(listV15Src, /card\.closerRole === 'twin'/, 'list must branch on closerRole');
+  assert.match(listV15Src, /trackedTask\.badge\.internal/, 'list must render the internal marker key');
+  assert.match(
+    listV15Src,
+    /card\.closerRole === 'twin' \? \(\s*\/\/ v1\.5/,
+    'the action column must take the twin-card branch BEFORE rendering a close button',
+  );
+});
+
+test('v1.5 drawer: header carries the internal marker and the footer close button is closerRole-gated', () => {
+  assert.match(
+    drawerSrc,
+    /detail\.state !== 'closed' && detail\.closerRole !== 'twin'/,
+    'drawer footer close button must be hidden for twin-closable cards',
+  );
+  assert.match(
+    drawerSrc,
+    /detail\.closerRole === 'twin'/,
+    'drawer header must render the internal marker for twin cards',
+  );
+  assert.match(drawerSrc, /trackedTask\.badge\.internal/);
+});
+
+test('v1.5 i18n: the internal marker exists in BOTH locales and carries the full text (no hover-only info)', () => {
+  assert.match(i18nSrc, /'trackedTask\.badge\.internal': '内部卡 · Twin 自收'/, 'zh copy');
+  assert.match(i18nSrc, /'trackedTask\.badge\.internal': 'Internal · Twin-closed'/, 'en copy');
+});
+
+test('v1.5 types mirror: closerRole + closureRecorded exist on the renderer summary type', () => {
+  assert.match(typesSrc, /export type TrackedCardCloserRole = 'owner' | 'twin';/);
+  assert.match(typesSrc, /closerRole: TrackedCardCloserRole;/);
+  assert.match(typesSrc, /closureRecorded: boolean;/);
+});
+
+test('v1.5 backend: the summary projects closerRole + closureRecorded and the guard refuses the wrong side', () => {
+  assert.match(boardSrc, /admitted,\n\s*closerRole,/, 'buildSummary must pass closerRole into the derivation');
+  assert.match(boardSrc, /closureRecorded: derivation\.closureRecorded,\n\s*closerRole,/s, 'summary must surface both v1.5 facts');
+  assert.match(boardSrc, /closable by '\$\{closerRole\}' only/, 'the bidirectional guard message');
+  assert.match(boardSrc, /selfProcessed/, 'twin self-closure writes its own processed mark');
+  assert.match(
+    boardSrc,
+    /created_by = 'user'[\s\S]*closer_group_owner_initiated/,
+    'the ADM-5 criterion is the closerRole criterion (one copy, shared)',
+  );
+});
+
+test('v1.5 backend: the delegation card carries origin=twin_delegate and the store persists it', () => {
+  assert.match(
+    twinServiceV15Src,
+    /origin: 'twin_delegate'/,
+    'delegateLocalWorker must mark its cards twin_delegate',
+  );
+  assert.match(storeV15Src, /origin TEXT NOT NULL DEFAULT 'owner'/, 'the ledger column');
+  assert.match(
+    sqliteStoreV15Src,
+    /14cabbdc-27f0-4a76-9a2c-f7f76c5673a6/,
+    'migration backfills the two known Twin cards by id (first)',
+  );
+  assert.match(
+    sqliteStoreV15Src,
+    /f1128a6c-3559-44ae-b022-8d50d87519b9/,
+    'migration backfills the two known Twin cards by id (second)',
+  );
 });

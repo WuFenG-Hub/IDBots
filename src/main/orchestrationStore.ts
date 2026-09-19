@@ -5,6 +5,15 @@ export type OrchestrationTaskStatus = 'planning' | 'running' | 'review' | 'compl
 export type OrchestrationStepStatus = 'blocked' | 'ready' | 'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'cancelled';
 export type OrchestrationAttemptStatus = 'queued' | 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled';
 
+/**
+ * v1.5 (owner ruling 「谁发起，谁验收」): who initiated the card. `owner` is
+ * the default for every legacy and owner-facing path; only the Twin's local
+ * worker delegation writes `twin_delegate`. The card's closer is DERIVED at
+ * read time (see TrackedTaskBoardService) — this column is the fallback fact,
+ * never the authority for group/scheduled-linked cards.
+ */
+export type OrchestrationTaskOrigin = 'owner' | 'twin_delegate';
+
 export interface OrchestrationTask {
   id: string;
   ownerIntent: string;
@@ -15,6 +24,7 @@ export interface OrchestrationTask {
   ownerGlobalMetaId: string;
   status: OrchestrationTaskStatus;
   planVersion: number;
+  origin: OrchestrationTaskOrigin;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -61,6 +71,8 @@ export interface CreateOrchestrationTaskInput {
   twinMetabotId: number;
   ownerGlobalMetaId: string;
   planVersion?: number;
+  /** v1.5: omitted = 'owner'. Only delegateLocalWorker passes 'twin_delegate'. */
+  origin?: OrchestrationTaskOrigin;
 }
 
 export interface CreateOrchestrationStepInput {
@@ -99,6 +111,16 @@ export interface RecordClosureInput {
   conclusion: string | null;
   by: 'owner' | 'twin';
   pinId?: string | null;
+  /**
+   * v1.5 (owner ruling 「谁发起，谁验收」): when the Twin closes its OWN
+   * delegation card, the closure IS the execution write-off — the SAME
+   * statement that writes the closure must also mark the conclusion processed
+   * (`closure_processed_by='twin'`), so it can never leak into the pending
+   * queue. `hash` binds the mark to the exact conclusion text
+   * (`closureHash(conclusion)` from the board layer, or NULL for a
+   * conclusion-free acceptance, which never queues anyway).
+   */
+  selfProcessed?: { by: 'twin'; hash: string | null };
 }
 
 /** The persisted closure mark as read back by `getClosureMark`. */
@@ -163,6 +185,10 @@ function taskFromRow(row: Row): OrchestrationTask {
     ownerGlobalMetaId: String(row.owner_global_meta_id ?? ''),
     status: status in TASK_TRANSITIONS ? status as OrchestrationTaskStatus : 'planning',
     planVersion: Number(row.plan_version ?? 1),
+    // Fail-safe to 'owner': a NULL/missing origin (pre-migration row read
+    // before the ALTER ran, or a rogue writer) keeps the card owner-closable —
+    // the quiet direction. Only the exact literal is a Twin delegation.
+    origin: row.origin === 'twin_delegate' ? 'twin_delegate' : 'owner',
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     completedAt: row.completed_at == null ? null : String(row.completed_at),
@@ -247,6 +273,7 @@ export class OrchestrationStore {
         owner_global_meta_id TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'planning' CHECK(status IN ('planning','running','review','completed','failed','cancelled')),
         plan_version INTEGER NOT NULL DEFAULT 1,
+        origin TEXT NOT NULL DEFAULT 'owner',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         completed_at TEXT
@@ -298,11 +325,12 @@ export class OrchestrationStore {
     const id = uuidv4();
     const now = new Date().toISOString();
     this.db.run(`INSERT INTO orchestration_tasks
-      (id, owner_intent, enriched_goal, acceptance_criteria_json, source_session_id, twin_metabot_id, owner_global_meta_id, plan_version, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      (id, owner_intent, enriched_goal, acceptance_criteria_json, source_session_id, twin_metabot_id, owner_global_meta_id, plan_version, origin, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       id, input.ownerIntent.trim(), input.enrichedGoal?.trim() || null,
       JSON.stringify(input.acceptanceCriteria ?? []), input.sourceSessionId ?? null,
-      input.twinMetabotId, input.ownerGlobalMetaId.trim(), input.planVersion ?? 1, now, now,
+      input.twinMetabotId, input.ownerGlobalMetaId.trim(), input.planVersion ?? 1,
+      input.origin === 'twin_delegate' ? 'twin_delegate' : 'owner', now, now,
     ]);
     this.saveDb();
     return this.getTask(id)!;
@@ -360,13 +388,21 @@ export class OrchestrationStore {
     const current = this.getTask(id);
     if (!current) throw new Error(`Orchestration task ${id} not found`);
     const conclusion = input.conclusion?.trim() || null;
+    const now = new Date().toISOString();
+    // v1.5: a Twin self-closure writes its own processed mark in THIS statement;
+    // every other close resets the marks to NULL exactly as before (T1).
+    const self = input.selfProcessed;
     this.db.run(
       `UPDATE orchestration_tasks
           SET closure_conclusion = ?, closure_by = ?, closure_at = ?, closure_pin_id = ?,
-              closure_processed_at = NULL, closure_processed_by = NULL, closure_processed_hash = NULL,
+              closure_processed_at = ?, closure_processed_by = ?, closure_processed_hash = ?,
               closure_receipt = NULL, closure_receipt_pin_id = NULL
         WHERE id = ?`,
-      [conclusion, input.by, new Date().toISOString(), input.pinId ?? null, id],
+      [
+        conclusion, input.by, now, input.pinId ?? null,
+        self ? now : null, self?.by ?? null, self?.hash ?? null,
+        id,
+      ],
     );
     this.saveDb();
     return this.getClosureMark(id)!;

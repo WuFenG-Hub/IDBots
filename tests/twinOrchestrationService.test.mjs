@@ -921,3 +921,29 @@ test('cancelTask stops the live worker sessions of the cancelled attempts (UI ne
     sqliteStore.close();
   }
 });
+
+// v1.5 (owner ruling 「谁发起，谁验收」): cards the Twin delegated itself carry
+// origin='twin_delegate' at creation — that is what makes them Twin-closable
+// and keeps them out of the owner's pending-closure queue.
+test('v1.5: delegateLocalWorker creates the card with origin=twin_delegate', async () => {
+  const { sqliteStore, orchestrationStore, service } = await makeService(async () => 'done');
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'Build the internal probe page',
+      idempotencyKey: 'v15-origin-probe-1',
+    });
+    assert.equal(result.reused, false);
+    assert.equal(orchestrationStore.getTask(result.task.id).origin, 'twin_delegate');
+    // Reuse path returns the same card untouched — origin never rewrites.
+    const reused = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'different objective, same key',
+      idempotencyKey: 'v15-origin-probe-1',
+    });
+    assert.equal(reused.reused, true);
+    assert.equal(orchestrationStore.getTask(reused.task.id).origin, 'twin_delegate');
+  } finally {
+    sqliteStore.close();
+  }
+});

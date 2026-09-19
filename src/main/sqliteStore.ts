@@ -307,6 +307,17 @@ export interface TrackedClosureBackfillResult {
 /** The `closure_by` value written by the startup backfill (freeze doc §3). */
 export const TRACKED_CLOSURE_BACKFILL_BY = 'system_backfill';
 
+/**
+ * v1.5: the two Twin-delegated cards created on the night of 2026-09-18
+ * (before the origin column existed) — backfilled to 'twin_delegate' BY ID by
+ * migrateOrchestrationTaskOriginColumn. Exact ids, never a predicate: a
+ * backfill that guesses would flip live owner-queue rows.
+ */
+const TWIN_DELEGATED_CARD_IDS: readonly string[] = [
+  '14cabbdc-27f0-4a76-9a2c-f7f76c5673a6',
+  'f1128a6c-3559-44ae-b022-8d50d87519b9',
+];
+
 export class SqliteStore {
   private db: SqliteDatabase;
   private dbPath: string;
@@ -806,6 +817,7 @@ export class SqliteStore {
         owner_global_meta_id TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'planning' CHECK(status IN ('planning','running','review','completed','failed','cancelled')),
         plan_version INTEGER NOT NULL DEFAULT 1,
+        origin TEXT NOT NULL DEFAULT 'owner',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         completed_at TEXT
@@ -993,6 +1005,10 @@ export class SqliteStore {
     // row must also carry its processing mark and the receipt. Five more ADD
     // COLUMNs on the same ledger — still no fourth table (freeze doc §2.1).
     this.migrateOrchestrationTaskClosureProcessingColumns();
+    // Long-task board v1.5 (谁发起，谁验收): the origin column + the exact-by-id
+    // backfill of the two known Twin-delegated cards. Runs before the closure
+    // backfill so closerRole is derivable from the very first board read.
+    this.migrateOrchestrationTaskOriginColumn();
     // Long-task board v1.1 (task #84): the columns above must exist before the
     // backfill runs. Ordering matters — the backfill's UPDATE names all four.
     this.migrateTrackedTaskClosureBackfill();
@@ -3013,6 +3029,38 @@ export class SqliteStore {
       this.save();
     } catch (error) {
       console.warn('migrateOrchestrationTaskClosureProcessingColumns:', error);
+    }
+  }
+
+  /**
+   * Migration (long-task board v1.5, owner ruling 「谁发起，谁验收」): the
+   * ledger row records WHO initiated the card — `origin` ∈ {'owner',
+   * 'twin_delegate'}, NOT NULL DEFAULT 'owner', no CHECK (same no-rebuild
+   * discipline as the closure columns above). The default keeps every legacy
+   * row in the owner-closable population; only the two known Twin-delegated
+   * cards from 2026-09-18 are backfilled to 'twin_delegate' — BY ID, exactly,
+   * never by predicate, so no existing owner queue row can ever flip.
+   */
+  private migrateOrchestrationTaskOriginColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(orchestration_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('origin')) {
+        this.db.run("ALTER TABLE orchestration_tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'owner'");
+      }
+      // Precise backfill of the two Twin-delegated cards that leaked into the
+      // owner's pending-closure queue on the night of 2026-09-18. Idempotent:
+      // on a re-run the WHERE clause matches only 'owner' rows, so an already
+      // backfilled (or differently-origin'd) row is never touched twice.
+      for (const id of TWIN_DELEGATED_CARD_IDS) {
+        this.db.run(
+          "UPDATE orchestration_tasks SET origin = 'twin_delegate' WHERE id = ? AND origin = 'owner'",
+          [id],
+        );
+      }
+      this.save();
+    } catch (error) {
+      console.warn('migrateOrchestrationTaskOriginColumn:', error);
     }
   }
 

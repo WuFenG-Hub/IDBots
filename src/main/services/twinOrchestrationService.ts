@@ -525,6 +525,10 @@ export class TwinOrchestrationService {
         sourceSessionId,
         twinMetabotId: twin.id,
         ownerGlobalMetaId,
+        // v1.5 (owner ruling 「谁发起，谁验收」): a card the Twin delegated
+        // itself is Twin-closable — it never lands in the owner's pending
+        // closure queue. Every other createTask path omits origin ('owner').
+        origin: 'twin_delegate',
       });
     }
 
