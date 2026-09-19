@@ -322,6 +322,7 @@ const TWIN_DELEGATED_CARD_IDS: readonly string[] = [
   '6f1038f7-7195-4049-aacd-ceab785282ff', // 2026-09-19 morning — v1.5 mainline
   'f1a201c3-0e40-4891-a8b7-2a2c583f534d', // 2026-09-19 morning — ack-entry patch
   '59d0709e-f3ff-4a03-bccd-09b7117c8f10', // 2026-09-19 morning — v1.5 acceptance
+  'a06f8480-ad1a-4ea4-8d3e-bc4f6a490ed2', // 2026-09-19 midday — the backfill-extension card itself, created on the v1.4 binary after the list was first frozen
 ];
 
 export class SqliteStore {
