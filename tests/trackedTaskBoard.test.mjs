@@ -2570,17 +2570,20 @@ test('v1.4: without a bridge (or without a group-task link) closeCard keeps the 
 // a Twin-delegated card.
 // ============================================================================
 
-test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the startup migration backfills the five pre-v1.5 Twin cards BY ID', async () => {
+test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the startup migration backfills the six pre-v1.5 Twin cards BY ID', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-tracked-origin-'));
   // The frozen pre-v1.5 legacy window (TWIN_DELEGATED_CARD_IDS in
   // src/main/sqliteStore.ts): two cards from the 2026-09-18 night + three
-  // created 2026-09-19 morning on the v1.4 binary via delegateLocalWorker.
+  // created 2026-09-19 morning on the v1.4 binary via delegateLocalWorker +
+  // the 2026-09-19 midday backfill-extension card, also created on the v1.4
+  // binary after the list was first frozen at five.
   const legacyRows = [
     ['14cabbdc-27f0-4a76-9a2c-f7f76c5673a6', 'pre-migration twin card A', '2026-09-18T21:00:00.000Z'],
     ['f1128a6c-3559-44ae-b022-8d50d87519b9', 'pre-migration twin card B', '2026-09-18T22:00:00.000Z'],
     ['6f1038f7-7195-4049-aacd-ceab785282ff', 'pre-migration twin card C (v1.5 mainline)', '2026-09-19T03:05:00.000Z'],
     ['f1a201c3-0e40-4891-a8b7-2a2c583f534d', 'pre-migration twin card D (ack-entry patch)', '2026-09-19T03:30:00.000Z'],
     ['59d0709e-f3ff-4a03-bccd-09b7117c8f10', 'pre-migration twin card E (v1.5 acceptance)', '2026-09-19T03:58:00.000Z'],
+    ['a06f8480-ad1a-4ea4-8d3e-bc4f6a490ed2', 'pre-migration twin card F (backfill extension)', '2026-09-19T04:28:30.000Z'],
   ];
   const first = await SqliteStore.create(dir);
   try {
@@ -2605,7 +2608,7 @@ test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the
       const row = db.exec('SELECT origin FROM orchestration_tasks WHERE id = ?', [id]);
       return String(row[0]?.values?.[0]?.[0]);
     };
-    assert.equal(legacyRows.length, 5, 'the fixture stays in lockstep with the frozen five-id legacy-window list');
+    assert.equal(legacyRows.length, 6, 'the fixture stays in lockstep with the frozen six-id legacy-window list');
     for (const [id] of legacyRows) {
       assert.equal(originOf(id), 'twin_delegate', `legacy card ${id} must flip BY ID`);
     }

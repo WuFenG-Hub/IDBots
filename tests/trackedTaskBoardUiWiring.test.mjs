@@ -549,25 +549,26 @@ test('v1.5 backend: the delegation card carries origin=twin_delegate and the sto
     'delegateLocalWorker must mark its cards twin_delegate',
   );
   assert.match(storeV15Src, /origin TEXT NOT NULL DEFAULT 'owner'/, 'the ledger column');
-  // The frozen pre-v1.5 legacy window: all five ids, BY ID, exactly.
+  // The frozen pre-v1.5 legacy window: all six ids, BY ID, exactly.
   const legacyWindowIds = [
     '14cabbdc-27f0-4a76-9a2c-f7f76c5673a6',
     'f1128a6c-3559-44ae-b022-8d50d87519b9',
     '6f1038f7-7195-4049-aacd-ceab785282ff',
     'f1a201c3-0e40-4891-a8b7-2a2c583f534d',
     '59d0709e-f3ff-4a03-bccd-09b7117c8f10',
+    'a06f8480-ad1a-4ea4-8d3e-bc4f6a490ed2',
   ];
   const listBlock = sqliteStoreV15Src.match(/const TWIN_DELEGATED_CARD_IDS[^;]+;/)?.[0] ?? '';
   assert.equal(
     (listBlock.match(/'[0-9a-f-]{36}'/g) ?? []).length,
     legacyWindowIds.length,
-    'the migration list carries exactly the five legacy-window ids (no more, no fewer)',
+    'the migration list carries exactly the six legacy-window ids (no more, no fewer)',
   );
   legacyWindowIds.forEach((id, i) => {
     assert.match(
       listBlock,
       new RegExp(id),
-      `migration backfills the five pre-v1.5 Twin cards by id (${i + 1})`,
+      `migration backfills the six pre-v1.5 Twin cards by id (${i + 1})`,
     );
   });
 });
