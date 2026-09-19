@@ -7348,14 +7348,20 @@ const getSurfService = (): SurfService => {
           // challenged/posted lists are replaced by what the guard actually
           // published on-chain; read/saved stay self-reported.
           report.seenActions = foldSurfReceiptsIntoSeenActions(report.seenActions, writeState);
+          // Release-audit follow-up 2026-09-19: fold the HOST ground-truth
+          // stats into the SUCCESS report too, mirroring the failure path's
+          // surfPartialStats attachment. A turn truncated during final-report
+          // composition (after tools already ran) yields an empty self-report;
+          // the empty-session guard then read all-zero stats and failed an
+          // engaged run with its receipts unbanked. Host-vouched counts
+          // (receipts, deep reads, KB adds, scheduled tasks) win over the
+          // self-report for the same fields; self-report-only fields stay.
+          report.stats = { ...report.stats, ...surfSessionPartialStats(writeState) };
           // Scheduled tasks (surf→work handoff): pure host ground truth — the
           // report contract deliberately has no self-report field for this.
           const tasksScheduled = writeState.tasksScheduled ?? 0;
-          if (tasksScheduled > 0) {
-            report.stats = { ...report.stats, tasksScheduled };
-            if (report.reportMarkdown) {
-              report.reportMarkdown += `\n- Scheduled tasks created: ${tasksScheduled}`;
-            }
+          if (tasksScheduled > 0 && report.reportMarkdown) {
+            report.reportMarkdown += `\n- Scheduled tasks created: ${tasksScheduled}`;
           }
           return report;
         } catch (error) {
