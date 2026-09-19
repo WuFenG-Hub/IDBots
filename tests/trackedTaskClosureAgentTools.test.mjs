@@ -132,3 +132,95 @@ test('an empty cardId is rejected before the delegate is ever called', async () 
   assert.match(result.content[0].text, /cardId/);
   assert.deepEqual(calls, [], 'a malformed call must not reach the board');
 });
+
+/* ------------------------------------------------------------------------- *
+ * v1.5 last mile (owner ruling 「谁发起，谁验收」): the ack channel doubles as
+ * the Twin SELF-CLOSURE entrance. The board's own rules live in
+ * tests/trackedTaskBoard.test.mjs; here we pin the WRAPPER contract: the
+ * envelope is unchanged, a self-closure success is surfaced verbatim, and
+ * self-closure refusals (owner card / non-terminal card) are errors like any
+ * other refusal — never swallowed, never rewritten.
+ * ------------------------------------------------------------------------- */
+
+test('v1.5 last mile: a self-closure ack forwards the SAME envelope and surfaces the success payload verbatim', async () => {
+  const { calls, byName } = makeHarness({
+    ackResult: {
+      ok: true,
+      alreadyProcessed: false,
+      processedAt: '2026-09-18T12:00:00.000Z',
+      processedBy: 'twin',
+      receipt: 'worker delivered; self-closed after re-checking the acceptance criteria',
+    },
+  });
+  const result = await byName.acknowledge_card_closure.handler({
+    cardId: 'card-twin-9',
+    receipt: 'worker delivered; self-closed after re-checking the acceptance criteria',
+    evidenceUri: 'sha256:deadbeef',
+  });
+  assert.equal(result.isError, undefined);
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.processedBy, 'twin');
+  assert.equal(payload.alreadyProcessed, false);
+  // processedBy stays pinned to 'twin' on the self-closure path too — this
+  // tool IS the Twin's channel, on both of its branches.
+  assert.deepEqual(calls, [{
+    method: 'ack',
+    input: {
+      taskId: 'card-twin-9',
+      processedBy: 'twin',
+      receipt: 'worker delivered; self-closed after re-checking the acceptance criteria',
+      evidenceUri: 'sha256:deadbeef',
+      confirmationRef: null,
+    },
+  }]);
+});
+
+test('v1.5 last mile: self-closure refusals pass through as errors, unchanged', async () => {
+  const makeAck = (code, error) => ({
+    ok: false,
+    code,
+    error,
+    alreadyProcessed: false,
+    processedAt: null,
+    processedBy: null,
+    receipt: null,
+  });
+  // The owner card keeps the v1.4 refusal: the Twin never writes the owner's
+  // conclusion, not even from the new entrance.
+  const ownerCard = makeHarness({
+    ackResult: makeAck('NO_CONCLUSION', 'the card carries no closing conclusion to execute'),
+  });
+  const refused = await ownerCard.byName.acknowledge_card_closure.handler({
+    cardId: 'card-owner-1', receipt: 'record-only, no action required',
+  });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /NO_CONCLUSION/);
+
+  // The terminal-only rule: an open twin-delegated card refuses VALIDATION.
+  const openCard = makeHarness({
+    ackResult: makeAck('VALIDATION', 'a twin self-closure needs a terminal card (completed/cancelled/failed), got review'),
+  });
+  const early = await openCard.byName.acknowledge_card_closure.handler({
+    cardId: 'card-twin-open', receipt: 'premature write-off',
+  });
+  assert.equal(early.isError, true);
+  assert.match(early.content[0].text, /VALIDATION/);
+  assert.match(early.content[0].text, /terminal/);
+});
+
+test('v1.5 last mile: the tool surface is compatibility-frozen — same four params, receipt still required, self-closure documented in the description', () => {
+  const { byName } = makeHarness();
+  const tool = byName.acknowledge_card_closure;
+  assert.deepEqual(
+    Object.keys(tool.schema).sort(),
+    ['cardId', 'confirmationRef', 'evidenceUri', 'receipt'],
+    'no new parameter may break the host tool signature',
+  );
+  // The receipt IS the conclusion on the self-closure path: minLength 1 is
+  // the minimum bar for a non-empty write-off.
+  assert.equal(tool.schema.receipt.minLength, 1);
+  // Discoverability: the model can only USE the entrance it can SEE.
+  assert.match(tool.description, /self-closure/);
+  assert.match(tool.description, /never write a conclusion on the owner/);
+});

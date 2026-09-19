@@ -2829,3 +2829,207 @@ test('v1.5 pure derivation: deriveCloserRole precedence is group > scheduled > o
   assert.equal(deriveCloserRole(F(0, 0, 0), undefined), 'owner');
   assert.equal(deriveCloserRole(F(0, 0, 0), 'twin_delegate '), 'owner', 'exact literal only — no trim leniency');
 });
+
+/* ------------------------------------------------------------------------- *
+ * v1.5 last mile (owner ruling 「谁发起，谁验收」): the ACK channel itself
+ * gains the Twin self-closure entrance. closeCard could already write the
+ * twin self-closure, but the Twin's ONLY session tools are
+ * list_pending_card_closures + acknowledge_card_closure — without the ack
+ * entrance a terminal twin-delegated card with no conclusion could never be
+ * closed by anyone. The rules below pin the whole shape: who may, on which
+ * cards, with which receipt, and what can never happen afterwards.
+ * ------------------------------------------------------------------------- */
+
+function insertGroupLink(db, taskId, createdBy) {
+  db.run(
+    `INSERT INTO group_tasks (orchestration_task_id, title, goal, chair_metabot_id, created_by, status)
+     VALUES (?, 'probe group', 'probe goal', 1, ?, 'done')`,
+    [taskId, createdBy],
+  );
+}
+
+test('v1.5 last mile: the ack channel self-closes a terminal twin-delegated card with no conclusion — the receipt IS the conclusion, marked processed in the same statement', async () => {
+  const { closureHash } = v12;
+  const { sqliteStore, board, orchestrationStore } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    clearClosures(db);
+    const twinCard = orchestrationStore.createTask({
+      ownerIntent: 'twin ack self-close probe', twinMetabotId: 1, ownerGlobalMetaId: 'owner-global',
+      sourceSessionId: 'probe-session-ack-self', origin: 'twin_delegate',
+    });
+    orchestrationStore.updateTaskStatus(twinCard.id, 'completed');
+    board.registerLongTask(twinCard.id);
+
+    const RECEIPT = 'worker delivered on session probe-session-ack-self; acceptance criteria re-checked';
+    const first = board.acknowledgeClosure({
+      taskId: twinCard.id,
+      processedBy: 'twin',
+      receipt: RECEIPT,
+      evidenceUri: 'sha256:deadbeef',
+    });
+    assert.equal(first.ok, true, first.error);
+    assert.equal(first.alreadyProcessed, false);
+    assert.equal(first.processedBy, 'twin');
+    assert.ok(first.processedAt);
+    assert.equal(first.receipt, RECEIPT);
+
+    // Same-statement write-off, identical to closeCard's twin branch:
+    // conclusion == receipt, closure_by == processed_by == 'twin', the mark
+    // is hash-bound, and closure_at == processed_at proves ONE statement.
+    const row = db.exec(
+      'SELECT closure_conclusion, closure_by, closure_processed_by, closure_processed_hash,'
+      + ' closure_at, closure_processed_at, closure_receipt FROM orchestration_tasks WHERE id = ?',
+      [twinCard.id],
+    )[0].values[0];
+    assert.equal(row[0], RECEIPT, 'the receipt became the card conclusion');
+    assert.equal(row[1], 'twin');
+    assert.equal(row[2], 'twin');
+    assert.equal(row[3], closureHash(RECEIPT));
+    assert.equal(row[5], row[4], 'closure_at == processed_at: one statement wrote both');
+    assert.equal(row[6], null, 'no separate receipt column: the self-close IS the write-off');
+
+    // THE invariant, pinned: the self-written conclusion is a real ledger row
+    // yet never queues — and after the self-closure the card is gone from
+    // listPendingClosures for good.
+    assert.equal(queueIds(db).includes(twinCard.id), true,
+      'raw candidate: the self-closed conclusion is on the ledger');
+    assert.equal(board.listPendingClosures().items.some((item) => item.cardId === twinCard.id), false,
+      'the derived queue never contains the self-closed card');
+
+    // Idempotence: a repeat ack on the self-closed card reports the existing
+    // mark and rewrites NOTHING (closure_at / processed_at / receipt intact).
+    const before = db.exec(
+      'SELECT closure_at, closure_processed_at, closure_receipt FROM orchestration_tasks WHERE id = ?',
+      [twinCard.id],
+    )[0].values[0];
+    const second = board.acknowledgeClosure({
+      taskId: twinCard.id,
+      processedBy: 'twin',
+      receipt: 'a different retry wording',
+      evidenceUri: 'sha256:deadbeef',
+    });
+    assert.equal(second.ok, true);
+    assert.equal(second.alreadyProcessed, true);
+    assert.equal(second.processedBy, 'twin');
+    assert.equal(second.receipt, null, 'the write-off cleared the receipt column; the read-back is honest');
+    const after = db.exec(
+      'SELECT closure_at, closure_processed_at, closure_receipt FROM orchestration_tasks WHERE id = ?',
+      [twinCard.id],
+    )[0].values[0];
+    assert.deepEqual(after, before, 'the repeat rewrote nothing');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('v1.5 last mile: the ack self-closure reads the SAME closerRole derivation — a group-created card routes by its creator, bidirectionally', async () => {
+  const { sqliteStore, board, orchestrationStore } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    clearClosures(db);
+
+    // A bot-created group link (created_by != 'user') makes the card
+    // twin-closable EVEN THOUGH the ledger origin says 'owner': the link
+    // tables are the authority, exactly as for closeCard.
+    const linkCard = orchestrationStore.createTask({
+      ownerIntent: 'group-created twin card via origin owner', twinMetabotId: 1,
+      ownerGlobalMetaId: 'owner-global', sourceSessionId: 'probe-session-ack-group',
+      origin: 'owner',
+    });
+    orchestrationStore.updateTaskStatus(linkCard.id, 'completed');
+    board.registerLongTask(linkCard.id);
+    insertGroupLink(db, linkCard.id, 'chair-bot');
+    const groupSelf = board.acknowledgeClosure({
+      taskId: linkCard.id, processedBy: 'twin',
+      receipt: 'group task delivered; self-closing the delegation', evidenceUri: 'pin://group-evidence',
+    });
+    assert.equal(groupSelf.ok, true, groupSelf.error);
+    assert.equal(groupSelf.processedBy, 'twin');
+
+    // The mirror: a user-created group link keeps the card owner-only, and
+    // the ack on the other side is refused with nothing written.
+    const ownerLinkCard = orchestrationStore.createTask({
+      ownerIntent: 'user-created group card', twinMetabotId: 1,
+      ownerGlobalMetaId: 'owner-global', sourceSessionId: 'probe-session-ack-group-owner',
+      origin: 'twin_delegate',
+    });
+    orchestrationStore.updateTaskStatus(ownerLinkCard.id, 'completed');
+    board.registerLongTask(ownerLinkCard.id);
+    insertGroupLink(db, ownerLinkCard.id, 'user');
+    const overreach = board.acknowledgeClosure({
+      taskId: ownerLinkCard.id, processedBy: 'twin',
+      receipt: 'twin must not self-close a user-created group card', evidenceUri: 'pin://x',
+    });
+    assert.equal(overreach.ok, false);
+    assert.equal(overreach.code, 'NO_CONCLUSION');
+    assert.equal(orchestrationStore.hasClosureRecord(ownerLinkCard.id), false, 'nothing written');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('v1.5 last mile: every refusal keeps its shape — owner card NO_CONCLUSION (v1.4 verbatim), open twin card VALIDATION, receipts still validated, nothing written', async () => {
+  const { sqliteStore, board, orchestrationStore } = await openBoard();
+  try {
+    const db = sqliteStore.getDatabase();
+    clearClosures(db);
+
+    // owner card, no conclusion: the v1.4 refusal, VERBATIM — the Twin never
+    // writes a conclusion on the owner's behalf, no matter the receipt.
+    for (const processedBy of ['twin', 'owner']) {
+      const refusal = board.acknowledgeClosure({
+        taskId: 'seed-task-01', processedBy,
+        receipt: 'record-only, no action required',
+      });
+      assert.equal(refusal.ok, false, `processedBy=${processedBy}`);
+      assert.equal(refusal.code, 'NO_CONCLUSION', `processedBy=${processedBy}`);
+      assert.match(refusal.error, /no closing conclusion/);
+    }
+    assert.equal(orchestrationStore.hasClosureRecord('seed-task-01'), false, 'nothing written');
+
+    // twin-delegated card that is NOT terminal: VALIDATION — a self-closure
+    // is an execution write-off, and nothing has finished yet.
+    const openTwin = orchestrationStore.createTask({
+      ownerIntent: 'twin ack on an open card', twinMetabotId: 1, ownerGlobalMetaId: 'owner-global',
+      sourceSessionId: 'probe-session-ack-open', origin: 'twin_delegate',
+    });
+    board.registerLongTask(openTwin.id);
+    const openRefusal = board.acknowledgeClosure({
+      taskId: openTwin.id, processedBy: 'twin',
+      receipt: 'premature write-off', evidenceUri: 'pin://y',
+    });
+    assert.equal(openRefusal.ok, false);
+    assert.equal(openRefusal.code, 'VALIDATION');
+    assert.match(openRefusal.error, /terminal/);
+    assert.equal(orchestrationStore.hasClosureRecord(openTwin.id), false, 'nothing written');
+
+    // The receipt contract still applies to a self-closure: blank receipts
+    // and evidence-less receipts are refused before anything is written.
+    for (const bad of [
+      { receipt: '   ', evidenceUri: 'pin://z' },
+      { receipt: 'did the work', evidenceUri: null },
+    ]) {
+      const badReceipt = board.acknowledgeClosure({ taskId: openTwin.id, processedBy: 'twin', ...bad });
+      assert.equal(badReceipt.ok, false);
+      assert.ok(badReceipt.code === 'VALIDATION' || badReceipt.code === 'RECEIPT_INCOMPLETE',
+        `expected a refusal, got ${badReceipt.code}`);
+    }
+    assert.equal(orchestrationStore.hasClosureRecord(openTwin.id), false, 'still nothing written');
+
+    // Positive control on the SAME card: once terminal, the marker receipt
+    // (no evidence needed) self-closes — proving the VALIDATION refusals
+    // above came from the terminal rule, not from the receipt checks.
+    orchestrationStore.updateTaskStatus(openTwin.id, 'completed');
+    const markerSelfClose = board.acknowledgeClosure({
+      taskId: openTwin.id, processedBy: 'twin',
+      receipt: 'record-only, no action required',
+    });
+    assert.equal(markerSelfClose.ok, true, markerSelfClose.error);
+    assert.equal(markerSelfClose.processedBy, 'twin');
+    assert.equal(board.listPendingClosures().items.some((item) => item.cardId === openTwin.id), false,
+      'the marker self-closure never queues either');
+  } finally {
+    sqliteStore.close();
+  }
+});

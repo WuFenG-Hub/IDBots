@@ -1721,7 +1721,75 @@ export class TrackedTaskBoardService {
     if (!row) return refused('NOT_FOUND', `orchestration task ${input.taskId} not found`);
     const conclusion = text(row.closure_conclusion);
     if (!conclusion) {
-      return refused('NO_CONCLUSION', 'the card carries no closing conclusion to execute');
+      // v1.5 last mile (owner ruling 「谁发起，谁验收」): a TERMINAL card with
+      // no conclusion whose closerRole is 'twin' can be self-closed by the
+      // Twin through THIS ack channel — the receipt IS the conclusion, and
+      // the SAME `recordClosure` statement that writes it also marks it
+      // processed (hash-bound): byte-identical semantics to closeCard's twin
+      // branch, and still exactly ONE writer of the closure SQL. Every other
+      // shape keeps the v1.4 refusal verbatim — the Twin NEVER writes a
+      // conclusion on an owner card, and an open card has no execution to
+      // write off yet. No destructive gate here by design: a self-closure
+      // carries a receipt for work the Twin itself just finished, not an
+      // owner instruction to second-guess.
+      const task = this.deps.orchestrationStore.getTask(input.taskId);
+      const closerRole = task ? this.readCloserRole(input.taskId, task) : 'owner';
+      if (input.processedBy !== 'twin' || closerRole !== 'twin') {
+        return refused('NO_CONCLUSION', 'the card carries no closing conclusion to execute');
+      }
+      if (!task || !isTerminalStatus(task.status)) {
+        return refused(
+          'VALIDATION',
+          'a twin self-closure needs a terminal card (completed/cancelled/failed),'
+            + ` got ${task ? task.status : 'a missing row'}`,
+        );
+      }
+      // Idempotence without trusting the T1 invariant: a mark already on the
+      // row means this self-closure already happened — report it, write
+      // nothing, exactly like the CAS path below.
+      if (text(row.closure_processed_hash)) {
+        return {
+          ok: true,
+          alreadyProcessed: true,
+          processedAt: text(row.closure_processed_at),
+          processedBy: (text(row.closure_processed_by) as TrackedClosureProcessedBy | null) ?? null,
+          receipt: text(row.closure_receipt),
+        };
+      }
+      const selfEvidenceUri = input.evidenceUri?.trim() || null;
+      if (!closureReceiptIsComplete(receipt, selfEvidenceUri)) {
+        return refused(
+          'RECEIPT_INCOMPLETE',
+          'a receipt needs an evidence URI, or the explicit "'
+            + TRACKED_CLOSURE_NO_ACTION_MARKER_ZH + '" / "'
+            + TRACKED_CLOSURE_NO_ACTION_MARKER_EN + '" marker',
+        );
+      }
+      const selfHash = closureHash(receipt);
+      const selfAt = new Date().toISOString();
+      // ONE statement: conclusion + by='twin' + the processed marks together —
+      // the self-written conclusion can never leak into the pending queue.
+      this.deps.orchestrationStore.recordClosure(input.taskId, {
+        conclusion: receipt,
+        by: 'twin',
+        pinId: null,
+        selfProcessed: { by: 'twin', hash: selfHash },
+      });
+      this.deps.saveDb();
+      this.appendClosureAckAudit({
+        cardId: input.taskId,
+        conclusionHash: selfHash,
+        at: selfAt,
+        by: 'twin',
+        evidence: selfEvidenceUri,
+      });
+      return {
+        ok: true,
+        alreadyProcessed: false,
+        processedAt: selfAt,
+        processedBy: 'twin',
+        receipt,
+      };
     }
 
     const evidenceUri = input.evidenceUri?.trim() || null;
