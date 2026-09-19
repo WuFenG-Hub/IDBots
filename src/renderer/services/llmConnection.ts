@@ -86,7 +86,9 @@ export function buildOpenAICompatibleChatCompletionsUrl(baseUrl: string, provide
     }
     return `${normalized}/v1beta/openai/chat/completions`;
   }
-  if (normalized.endsWith('/v1')) return `${normalized}/chat/completions`;
+  // Versioned bases (…/v1, …/v4 — e.g. Zhipu's /api/coding/paas/v4) mount
+  // chat/completions directly; only unversioned hosts take the /v1 prefix.
+  if (/\/v\d+$/.test(normalized)) return `${normalized}/chat/completions`;
   return `${normalized}/v1/chat/completions`;
 }
 

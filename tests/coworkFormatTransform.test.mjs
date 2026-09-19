@@ -483,3 +483,24 @@ test('DeepSeek request hydration restores real reasoning when available and does
   assert.equal(hydrateResult.placeholderCount, 0);
   assert.equal(request.messages[0].reasoning_content, 'the real reasoning from this turn');
 });
+
+test('buildOpenAIChatCompletionsURL joins versioned bases without a double suffix', async () => {
+  const { buildOpenAIChatCompletionsURL } = await importCompiled('coworkFormatTransform');
+
+  // Zhipu's OpenAI-format coding base ends in /v4: it must join as
+  // …/v4/chat/completions, never …/v4/v1/chat/completions (the double-suffix
+  // 404 flagged in the 2026-09-19 review).
+  assert.equal(
+    buildOpenAIChatCompletionsURL('https://open.bigmodel.cn/api/coding/paas/v4'),
+    'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions'
+  );
+  // /v1 bases and unversioned hosts keep their existing joins.
+  assert.equal(
+    buildOpenAIChatCompletionsURL('https://opencode.ai/zen/go/v1'),
+    'https://opencode.ai/zen/go/v1/chat/completions'
+  );
+  assert.equal(
+    buildOpenAIChatCompletionsURL('https://gateway.example.com'),
+    'https://gateway.example.com/v1/chat/completions'
+  );
+});

@@ -233,6 +233,11 @@ test('N2: first read of a large file registers without denying', () => {
 // uncatalogued route must deny LOUDLY — the message names describe_image,
 // the relay-backed alternative that works on every route — instead of the
 // silent metadata-only read the glm-5.3-flash incident produced.
+// 2026-09-19: glm-5.3-flash (Zhipu direct) is natively multimodal since the
+// GLM-5.3 launch (image input live-verified on both the Responses and
+// Anthropic endpoints) — it now belongs to the ALLOW side. The DENY side is
+// guarded by the text-only flagship glm-5.3, the incident's gateway spelling
+// z-ai/glm-5.3-flash, and uncatalogued ids.
 // ---------------------------------------------------------------------------
 
 test('regression: guard composed with model limits — vision route allows, non-vision and unknown routes deny explicitly', async () => {
@@ -249,18 +254,31 @@ test('regression: guard composed with model limits — vision route allows, non-
   });
   assert.equal(vision.action, 'allow');
 
-  // The incident model: glm-5.3-flash must deny with an explicit, actionable
-  // message instead of a silent metadata-only result.
-  const incident = evaluateReadImageGuard({
+  // The multimodal flip: Zhipu-direct glm-5.3-flash now reads pixels for real
+  // (live-verified 2026-09-19), so the guard must allow it.
+  const flash = evaluateReadImageGuard({
     toolName: 'read',
     absolutePath: PNG_PATH,
     fileStat: stat(1000, 120000),
     supportsVision: limitsFor('glm-5.3-flash').supportsVision,
   });
-  assert.equal(incident.action, 'deny');
-  assert.equal(incident.reason, 'no-vision-image');
-  assert.match(incident.message, /describe_image/);
-  assert.match(incident.message, /NOT loaded/);
+  assert.equal(flash.action, 'allow');
+
+  // Non-vision routes must deny with an explicit, actionable message instead
+  // of a silent metadata-only result: the text-only flagship (today's default
+  // preset) and the 2026-09-04 incident's gateway spelling.
+  for (const modelId of ['glm-5.3', 'z-ai/glm-5.3-flash']) {
+    const incident = evaluateReadImageGuard({
+      toolName: 'read',
+      absolutePath: PNG_PATH,
+      fileStat: stat(1000, 120000),
+      supportsVision: limitsFor(modelId).supportsVision,
+    });
+    assert.equal(incident.action, 'deny', `${modelId} must deny image reads`);
+    assert.equal(incident.reason, 'no-vision-image');
+    assert.match(incident.message, /describe_image/);
+    assert.match(incident.message, /NOT loaded/);
+  }
 
   // Uncatalogued models fail safe the same way.
   const unknown = evaluateReadImageGuard({
