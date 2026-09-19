@@ -509,6 +509,74 @@ test('daemon absorbs a verbatim retransmission of the previous inbound message w
   assert.equal(session.messages.filter((message) => message.type === 'user').length, 1);
 });
 
+test('daemon escalates the third consecutive identical copy into a real reply turn (insistent re-ask)', async () => {
+  const { db, row, coworkStore, metabotStore, session } = createSentinelDaemonHarness();
+  const externalConversationId = 'metaweb-private:peer-global';
+  row.content = '请把昨天的报告再发一次';
+  // Copy #1 was already answered in a previous turn.
+  session.messages.push({
+    id: 'seed-ask-1',
+    type: 'user',
+    content: '请把昨天的报告再发一次',
+    timestamp: Date.now() - 60_000,
+    metadata: { sourceChannel: 'metaweb_private', direction: 'incoming', externalConversationId },
+  });
+  const logs = [];
+  let createPinCount = 0;
+  let skillTurnAttempts = 0;
+
+  startPrivateChatDaemon(
+    db,
+    () => {},
+    coworkStore,
+    metabotStore,
+    { on() {}, off() {} },
+    async () => {
+      createPinCount += 1;
+      throw new Error('no on-chain pin should be created for a sentinel reply');
+    },
+    (message) => logs.push(message),
+    null,
+    undefined,
+    undefined,
+    () => ({ respondToStrangerPrivateChats: true }),
+    undefined,
+    undefined,
+    undefined,
+    async () => ({
+      prompt: '<available_skills><skill><id>metaid-master-wiki</id></skill></available_skills>',
+      activeSkillIds: ['metaid-master-wiki'],
+    }),
+    async (params) => {
+      skillTurnAttempts += 1;
+      const persisted = coworkStore.addMessage(params.sessionId, {
+        type: 'assistant',
+        content: '[NO_REPLY]',
+        metadata: { isStreaming: false, isFinal: true },
+      });
+      return { replyText: '[NO_REPLY]', assistantMessageId: persisted.id };
+    },
+    async () => '我需要查询一下，请稍等。'
+  );
+
+  try {
+    // Copy #2 is absorbed exactly as before (loop protection intact).
+    await waitFor(() => logs.some((message) => message.includes('identical to the previous inbound message')));
+    // Copy #3 — a NEW chain row with the identical wording — must escalate.
+    row.id = 2;
+    row.pin_id = 'incoming-pin-2';
+    row.is_processed = 0;
+    await waitFor(() => logs.some((message) => message.includes('insistent re-ask')));
+    await waitFor(() => logs.some((message) => message.includes('chose silence')));
+  } finally {
+    await stopPrivateChatDaemon({ waitForTick: true });
+  }
+
+  assert.equal(row.is_processed, 1, 'the escalated copy was processed');
+  assert.equal(skillTurnAttempts, 1, 'the third consecutive identical copy ran a real reply turn');
+  assert.equal(createPinCount, 0, 'the sentinel reply delivered nothing (turn ran, silence chosen)');
+});
+
 test('daemon suppresses a reply that would repeat the last delivered outgoing messages verbatim', async () => {
   const { db, row, coworkStore, metabotStore, session } = createSentinelDaemonHarness();
   const base = Date.now() - 120_000;

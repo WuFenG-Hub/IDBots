@@ -1306,6 +1306,22 @@ export function shouldSkipPrivateChatAutoReplyText(value: string): boolean {
 }
 
 /**
+ * Consecutive-identical-copy escalation threshold for the inbound
+ * retransmission dedup below: the 2nd copy is absorbed (loop protection),
+ * the 3rd consecutive identical copy runs as an insistent re-ask.
+ */
+const PRIVATE_CHAT_REPEAT_ESCALATION_AFTER = 3;
+
+/**
+ * Per-conversation count of consecutive absorbed verbatim duplicates.
+ * Keyed `${metabotId}:${externalConversationId}`; entries reset when a
+ * different plaintext arrives, when the window lapses, or on escalation.
+ * Module-level because processOne runs per row with no daemon-lifetime
+ * closure to hold it; the window check bounds staleness.
+ */
+const inboundRepeatEscalation = new Map<string, { plaintext: string; count: number; firstAt: number }>();
+
+/**
  * True when the inbound plaintext is verbatim-identical to the immediately
  * previous inbound message of the same active conversation segment. The first
  * copy already drove (or is driving) a reply turn, so re-running the model for
@@ -4887,15 +4903,46 @@ async function processOne(
     // new information — the first copy already drove a reply turn — and
     // answering each copy again is what turns leaked silence notes into an
     // endless ping-pong (2026-09-17). Byte-equality only, no wording checks.
+    // Release-audit follow-up 2026-09-19: only the SECOND consecutive
+    // identical copy is absorbed. A peer that keeps re-sending the exact same
+    // wording a third time is insistent, not retransmitting — absorbing it
+    // forever left the peer with no reply, no silence handling, and no wake
+    // (audit P2: "permanently ignored"). The third copy escalates into a real
+    // reply turn; the outbound echo guard independently prevents an identical
+    // reply from being delivered twice in a row, so the loop protection holds.
+    const inboundRepeatKey = `${metabot.id}:${externalConversationId}`;
+    const trackedRepeat = inboundRepeatEscalation.get(inboundRepeatKey);
+    if (
+      trackedRepeat
+      && (trackedRepeat.plaintext !== plaintext.trim()
+        || Date.now() - trackedRepeat.firstAt > A2A_SESSION_CONVERSATION_GAP_MS * 2)
+    ) {
+      inboundRepeatEscalation.delete(inboundRepeatKey);
+    }
     if (mappedSessionId && isRepeatPrivateChatInboundMessage({
       messages: coworkStore.getRecentPrivateA2AMessages(mappedSessionId, 20),
       plaintext,
     })) {
+      const priorRepeats = inboundRepeatEscalation.get(inboundRepeatKey);
+      // Which consecutive identical copy is this, counting the original the
+      // peer already sent: no entry means the absorbed candidate is copy #2.
+      const copyNumber = (priorRepeats?.count ?? 1) + 1;
+      if (copyNumber < PRIVATE_CHAT_REPEAT_ESCALATION_AFTER) {
+        inboundRepeatEscalation.set(inboundRepeatKey, {
+          plaintext: plaintext.trim(),
+          count: copyNumber,
+          firstAt: priorRepeats?.firstAt ?? Date.now(),
+        });
+        emitLog(
+          `[PrivateChat] Skip message ${row.id}: identical to the previous inbound message from ${fromGlobalMetaId.slice(0, 12)}… in this conversation segment; the earlier copy already drove a reply turn.`
+        );
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+      inboundRepeatEscalation.delete(inboundRepeatKey);
       emitLog(
-        `[PrivateChat] Skip message ${row.id}: identical to the previous inbound message from ${fromGlobalMetaId.slice(0, 12)}… in this conversation segment; the earlier copy already drove a reply turn.`
+        `[PrivateChat] Message ${row.id}: third consecutive identical copy from ${fromGlobalMetaId.slice(0, 12)}… — treating it as an insistent re-ask, not a retransmission; running a reply turn.`
       );
-      markProcessed(db, row.id, saveDb);
-      return;
     }
     let currentExperienceEvidenceId: string | null = null;
     try {
