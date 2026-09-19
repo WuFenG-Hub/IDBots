@@ -1388,10 +1388,16 @@ export function analyzePrivateChatA2AConversation(params: {
   let activeSegment: PrivateChatA2AContextMessage[] = [];
   let previousSegmentTail: PrivateChatA2AContextMessage[] = [];
   let previousTimestamp: number | null = null;
-  // Thread-scoped bye pressure: incoming messages since the last outgoing
-  // bye. Deliberately NOT reset by conversation gaps or episode rollovers —
-  // only a real bye (conversation end) resets it. Gap splits above only
-  // govern the context window segmentation.
+  // Conversation-scoped bye pressure: incoming messages since the current
+  // conversation opened. A conversation ends (and the counter resets) on a
+  // >5-min gap or a bye from EITHER side — release-audit follow-up 2026-09-19:
+  // the previous thread-cumulative reading (reset only on our own outgoing
+  // bye) force-byed long-lived threads every maxIncomingTurns CUMULATIVE
+  // inbound messages, which is exactly the twin→owner daily-report pattern:
+  // one short message a day, every conversation well under the cap, and the
+  // thread still got a forced "bye" every 50 cumulative messages, forever.
+  // Continuous chatter still accumulates: a peer keeping the thread hot
+  // without a pause cannot outlive the policy.
   let incomingSinceBye = 0;
 
   for (const message of sortedMessages) {
@@ -1402,6 +1408,7 @@ export function analyzePrivateChatA2AConversation(params: {
     ) {
       previousSegmentTail = activeSegment.slice(-PRIVATE_CHAT_PREVIOUS_SEGMENT_CONTEXT_MESSAGES);
       activeSegment = [];
+      incomingSinceBye = 0;
     }
     previousTimestamp = timestamp;
 
@@ -1411,6 +1418,16 @@ export function analyzePrivateChatA2AConversation(params: {
     const content = String(message.content || '').trim();
     if (!content) continue;
     if (direction === 'outgoing' && isByeText(content)) {
+      previousSegmentTail = [];
+      activeSegment = [];
+      incomingSinceBye = 0;
+      continue;
+    }
+    if (direction === 'incoming' && isByeText(content)) {
+      // The peer ended the conversation — same reset as our own bye: the next
+      // exchange is a new conversation with fresh pressure, and the bye text
+      // itself is neither context nor a counted turn (previously it was
+      // pushed as context AND counted +1 toward our forced bye).
       previousSegmentTail = [];
       activeSegment = [];
       incomingSinceBye = 0;
