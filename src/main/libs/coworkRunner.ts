@@ -185,6 +185,7 @@ import {
   type VisionRelayControl,
 } from './visionRelayAgentTools';
 import { buildMediaToolsAgentTools, type MediaToolsControl } from './mediaToolsAgentTools';
+import { buildMetafileRouteAgentTools } from './metafileRouteAgentTools';
 import {
   buildMetabotManageAgentTools,
   type MetabotManageControl,
@@ -10107,6 +10108,12 @@ export class CoworkRunner extends EventEmitter {
         })
       );
     }
+    // GT#90 (Fix 5): one-call metafile route triage. Free (plain fetches),
+    // read-only, route-agnostic — registered on every cowork surface so
+    // incident response cites one verdict instead of hand-rolled probes.
+    memoryTools.push(
+      ...buildMetafileRouteAgentTools({ tool })
+    );
     // MetaBot management tools:
     // - Twin: full list/create/update/delete + metabot_getinfo
     // - Welcome Bot (initial setup): list/create only
