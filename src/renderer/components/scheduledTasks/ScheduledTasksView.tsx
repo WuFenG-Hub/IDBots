@@ -10,6 +10,7 @@ import TaskDetail from './TaskDetail';
 import AllRunsHistory from './AllRunsHistory';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import { TrackedTasksSection } from '../trackedTasks';
+import RsiLadderCard from './RsiLadderCard';
 import type { TrackingTabId } from '../../types/trackedTask';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
@@ -148,6 +149,9 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
         </div>
         <WindowTitleBar inline />
       </div>
+
+      {/* RSI 爬梯卡：独立顶层星标卡（§2.5），悬于跟踪任务页顶层，不占看板五列表 */}
+      <RsiLadderCard />
 
       {/* L1 tabs：长期任务（默认在前） | 定时任务 */}
       {showTrackingTabs && (
