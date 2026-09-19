@@ -2570,7 +2570,7 @@ test('v1.4: without a bridge (or without a group-task link) closeCard keeps the 
 // a Twin-delegated card.
 // ============================================================================
 
-test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the startup migration backfills the six pre-v1.5 Twin cards BY ID', async () => {
+test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the startup migration flips every pre-v1.5 Twin card', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-tracked-origin-'));
   // The frozen pre-v1.5 legacy window (TWIN_DELEGATED_CARD_IDS in
   // src/main/sqliteStore.ts): two cards from the 2026-09-18 night + three
@@ -2584,11 +2584,18 @@ test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the
     ['f1a201c3-0e40-4891-a8b7-2a2c583f534d', 'pre-migration twin card D (ack-entry patch)', '2026-09-19T03:30:00.000Z'],
     ['59d0709e-f3ff-4a03-bccd-09b7117c8f10', 'pre-migration twin card E (v1.5 acceptance)', '2026-09-19T03:58:00.000Z'],
     ['a06f8480-ad1a-4ea4-8d3e-bc4f6a490ed2', 'pre-migration twin card F (backfill extension)', '2026-09-19T04:28:30.000Z'],
+    // Release audit 2026-09-19: the SAME delegateLocalWorker shape on ANOTHER
+    // upgrading install — an unlinked card the frozen id list can never reach.
+    ['unlinked-row-pre-v15', 'a pre-v1.5 twin delegation card on another install', '2026-09-18T23:30:00.000Z'],
   ];
   const first = await SqliteStore.create(dir);
   try {
     // Rows written BEFORE the origin migration ever saw them: default 'owner'.
-    for (const [id, intent, at] of [...legacyRows, ['owner-row-control', 'an ordinary owner row', '2026-09-18T23:00:00.000Z']]) {
+    for (const [id, intent, at] of [
+      ...legacyRows,
+      ['owner-row-control', 'an ordinary owner row (group-linked)', '2026-09-18T23:00:00.000Z'],
+      ['scheduled-row-control', 'an owner row behind a scheduled task', '2026-09-18T23:10:00.000Z'],
+    ]) {
       first.getDatabase().run(
         `INSERT INTO orchestration_tasks
            (id, owner_intent, twin_metabot_id, owner_global_meta_id, status, created_at, updated_at)
@@ -2596,6 +2603,20 @@ test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the
         [id, intent, at, at],
       );
     }
+    // The two owner-side controls carry the links their production creation
+    // paths always write synchronously — these anchors are exactly what the
+    // structural predicate keys on.
+    first.getDatabase().run(
+      `INSERT INTO group_tasks
+         (orchestration_task_id, group_id, title, goal, status, chair_metabot_id, created_by, created_at, updated_at)
+       VALUES ('owner-row-control', 'seed-origin-group-1', 'g', 'g', 'executing', 1, 'user', '2026-09-18T23:00:00.000Z', '2026-09-18T23:00:00.000Z')`,
+    );
+    first.getDatabase().run(
+      `INSERT INTO scheduled_tasks
+         (id, name, schedule_json, prompt, working_directory, system_prompt, execution_mode,
+          orchestration_task_id, created_at, updated_at)
+       VALUES ('sched-1', 's', '{}', 'p', '/tmp', '', 'auto', 'scheduled-row-control', '2026-09-18T23:10:00.000Z', '2026-09-18T23:10:00.000Z')`,
+    );
   } finally {
     first.close();
   }
@@ -2608,12 +2629,14 @@ test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the
       const row = db.exec('SELECT origin FROM orchestration_tasks WHERE id = ?', [id]);
       return String(row[0]?.values?.[0]?.[0]);
     };
-    assert.equal(legacyRows.length, 6, 'the fixture stays in lockstep with the frozen six-id legacy-window list');
+    assert.equal(legacyRows.length, 7, 'six frozen ids + the other-install unlinked shape');
     for (const [id] of legacyRows) {
-      assert.equal(originOf(id), 'twin_delegate', `legacy card ${id} must flip BY ID`);
+      assert.equal(originOf(id), 'twin_delegate', `legacy card ${id} must flip`);
     }
     assert.equal(originOf('owner-row-control'), 'owner',
-      'the backfill is precise: no other row may flip');
+      'a group-linked card keeps the group creator as its closing authority (never flipped by the unlinked predicate)');
+    assert.equal(originOf('scheduled-row-control'), 'owner',
+      'a scheduled-linked card stays owner (the conservative branch)');
 
     // The store API: explicit origin persists, omitted origin defaults.
     const orchestrationStore = new OrchestrationStore(db, second.getSaveFunction());
@@ -2634,7 +2657,7 @@ test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the
 
   // Idempotency gate: a THIRD startup over the already-migrated database must
   // move nothing — backfilled rows no longer match `origin = 'owner'`, and the
-  // control row still reads owner.
+  // linked control rows still read owner.
   const third = await SqliteStore.create(dir);
   try {
     const db3 = third.getDatabase();
@@ -2646,7 +2669,9 @@ test('v1.5 origin: createTask persists twin_delegate, defaults to owner, and the
       assert.equal(originOf3(id), 'twin_delegate', `idempotent re-run keeps ${id} flipped exactly once`);
     }
     assert.equal(originOf3('owner-row-control'), 'owner',
-      'idempotent re-run keeps the control row owner');
+      'idempotent re-run keeps the group-linked control row owner');
+    assert.equal(originOf3('scheduled-row-control'), 'owner',
+      'idempotent re-run keeps the scheduled-linked control row owner');
   } finally {
     third.close();
   }

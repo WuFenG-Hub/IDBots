@@ -310,11 +310,19 @@ export const TRACKED_CLOSURE_BACKFILL_BY = 'system_backfill';
 /**
  * v1.5: the Twin-delegated cards created BEFORE the origin column existed —
  * backfilled to 'twin_delegate' BY ID by migrateOrchestrationTaskOriginColumn.
- * Exact ids, never a predicate: a backfill that guesses would flip live
- * owner-queue rows. v1.5 起 delegateLocalWorker 建卡即打标
- * (origin='twin_delegate')，此名单仅覆盖 v1.5 前的存量窗口：2026-09-18 晚两卡 +
- * 2026-09-19 晨三卡（v1.4 二进制运行时经 delegateLocalWorker 创建、origin 落
- * 默认 'owner'）。名单随 v1.5 上线即冻结，新卡不再进入此名单。
+ * The frozen historical record of the dev install's legacy window: 2026-09-18
+ * 晚两卡 + 2026-09-19 晨三卡（v1.4 二进制运行时经 delegateLocalWorker 创建、origin 落
+ * 默认 'owner'）+ the 2026-09-19 midday backfill-extension card. 名单随 v1.5 上线即冻结，
+ * 新卡不再进入此名单。 v1.5 起 delegateLocalWorker 建卡即打标
+ * (origin='twin_delegate').
+ *
+ * Release-audit follow-up 2026-09-19: these exact ids only ever covered THIS
+ * machine's database. The migration now ALSO flips any unlinked card (no
+ * group_tasks / scheduled_tasks link) via a structural predicate — by
+ * construction such cards can only be Twin-delegated (see the migration's
+ * comment for the call-site enumeration) — so other upgrading installs get
+ * the same v1.5 guarantee. The list stays as the auditable record of the
+ * original legacy window and as a redundant fast path.
  */
 const TWIN_DELEGATED_CARD_IDS: readonly string[] = [
   '14cabbdc-27f0-4a76-9a2c-f7f76c5673a6', // 2026-09-18 night
@@ -3045,10 +3053,13 @@ export class SqliteStore {
    * ledger row records WHO initiated the card — `origin` ∈ {'owner',
    * 'twin_delegate'}, NOT NULL DEFAULT 'owner', no CHECK (same no-rebuild
    * discipline as the closure columns above). The default keeps every legacy
-   * row in the owner-closable population; only the known Twin-delegated
-   * cards from before v1.5 (TWIN_DELEGATED_CARD_IDS) are backfilled to
-   * 'twin_delegate' — BY ID, exactly,
-   * never by predicate, so no existing owner queue row can ever flip.
+   * row in the owner-closable population; pre-v1.5 Twin-delegated cards are
+   * backfilled to 'twin_delegate' by the frozen legacy-window id list AND by
+   * the structural predicate below (release audit 2026-09-19: the id list
+   * only ever covered the dev install, so the same cards on any OTHER
+   * upgrading database kept origin='owner' and the v1.5 guarantee — "an
+   * internal Twin card never reaches the owner's closure queue" — silently
+   * did not apply there).
    */
   private migrateOrchestrationTaskOriginColumn(): void {
     try {
@@ -3068,6 +3079,25 @@ export class SqliteStore {
           [id],
         );
       }
+      // Release-audit follow-up 2026-09-19 — the STRUCTURAL predicate: a card
+      // with NO group_tasks link and NO scheduled_tasks link is, by
+      // construction, a Twin-delegated internal card. Every owner-reachable
+      // creation path links the card at creation time: the group bridge calls
+      // linkOrchestrationTask in the same synchronous block, and the board's
+      // scheduled attach writes the scheduled_tasks link immediately after
+      // createTask (both verified back to v0.9.4 — the only unlinked creator
+      // that has ever existed is delegateLocalWorker). This flips the
+      // pre-v1.5 delegation cards on OTHER upgrading installs, which the
+      // frozen id list (dev-machine ids only) could never reach; cards with
+      // any link keep the read-time closerRole derivation as their authority.
+      // Idempotent: only 'owner' rows match, and flipping removes the match.
+      this.db.run(`
+        UPDATE orchestration_tasks
+           SET origin = 'twin_delegate'
+         WHERE origin = 'owner'
+           AND NOT EXISTS (SELECT 1 FROM group_tasks g WHERE g.orchestration_task_id = orchestration_tasks.id)
+           AND NOT EXISTS (SELECT 1 FROM scheduled_tasks s WHERE s.orchestration_task_id = orchestration_tasks.id)
+      `);
       this.save();
     } catch (error) {
       console.warn('migrateOrchestrationTaskOriginColumn:', error);
