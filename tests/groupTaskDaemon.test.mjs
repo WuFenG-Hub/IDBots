@@ -10786,3 +10786,93 @@ test('GT#87: stale chair triggers coalesce into the newest; owner messages keep 
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// GT#90 (P1-1): a turn that produced NOTHING group-visible (empty reply, no
+// mid-turn sends, no [NO_REPLY]) must NOT settle as answered. GT#90's plan-B
+// pre-check turn stalled on its first tool call; the empty branch returned,
+// the cursor advanced, and the assignment evaporated (rescued only by the
+// supervisor's own initiative 30 minutes later). The empty handoff now enters
+// the ordinary bounded retry ladder: requeue charged, drop + anomaly on
+// exhaustion. Deliberate silence ([NO_REPLY]) and delivered turns
+// (mid-turn sends) keep their existing settle paths.
+// ---------------------------------------------------------------------------
+
+test('GT#90: an empty-handoff turn requeues instead of evaporating the trigger', async () => {
+  const logs = [];
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    skillReply: '',
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'gt90-empty-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot plan-B precheck: headless render + route rewrite',
+    });
+    await h.loop.runTick();
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'the empty-handoff trigger was requeued, not settled');
+    assert.equal(queued[0].failures, 1, 'the requeue is charged like an ordinary failure');
+    assert.ok(
+      logs.some((line) => line.includes('failed (attempt 1/5); requeued')),
+      'the failure is on the record',
+    );
+
+    // The requeue re-drives on a later tick and, once the model recovers, the
+    // same trigger delivers.
+    h.deps.runSkillTurn = async () => ({ replyText: '[WORKING] 已接单：plan-B 预检开工', assistantMessageId: null });
+    h.state.nowMs += 60_000;
+    await h.loop.runTick();
+    assert.ok(
+      h.sends.some((send) => send.content === '[WORKING] 已接单：plan-B 预检开工'),
+      'the re-driven trigger delivered once the turn produced output',
+    );
+    assert.equal(JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]').length, 0, 'queue drained');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#90: deliberate [NO_REPLY] and mid-turn-delivered turns never requeue', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'gt90-noreply-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot FYI only',
+    });
+    h.deps.runSkillTurn = async () => ({ replyText: '[NO_REPLY]', assistantMessageId: null });
+    await h.loop.runTick();
+    assert.equal(JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]').length, 0, '[NO_REPLY] settles silently — no retry');
+
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt90-midturn-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot second check',
+    });
+    h.deps.runSkillTurn = async (params) => {
+      // Record the send as the real runner would (the daemon counts session
+      // group_chat tool_use rows, not dep calls).
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_use', content: 'Using tool: group_chat',
+        metadata: { toolName: 'group_chat', toolInput: { action: 'send_group_message' }, toolUseId: 'tu-gc-1' },
+      });
+      h.deps.postGroupTaskMessage(task.id, 2, 'mid-turn delivery', {});
+      h.coworkStore.addMessage(params.sessionId, {
+        type: 'tool_result', content: '- pinId: mid-turn-pin', metadata: { toolUseId: 'tu-gc-1', toolResult: '- pinId: mid-turn-pin' },
+      });
+      return { replyText: '', assistantMessageId: null };
+    };
+    await h.loop.runTick();
+    assert.ok(h.sends.some((send) => send.content === 'mid-turn delivery'), 'mid-turn send delivered');
+    assert.equal(JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]').length, 0, 'ONE VOICE closer settles as delivered — no retry');
+  } finally {
+    h.cleanup();
+  }
+});
