@@ -6569,6 +6569,9 @@ const getIMGatewayManager = () => {
               baseUrl: providerConfig.baseUrl,
               model: model,
               provider: providerName,
+              // The IM fallback handler needs the user-selected protocol to
+              // pick the right endpoint (Zhipu /api/v1 only serves Responses).
+              apiFormat: providerConfig.apiFormat,
             };
           }
         }

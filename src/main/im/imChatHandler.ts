@@ -16,6 +16,10 @@ interface LLMConfig {
   baseUrl: string;
   model?: string;
   provider?: string;
+  // User-selected API format from the provider config. 'responses' must drive
+  // the request through the Responses endpoint — Zhipu's /api/v1 only serves
+  // Responses, so a chat/completions POST there fails with model_access_denied.
+  apiFormat?: 'anthropic' | 'openai' | 'responses';
 }
 
 export interface IMChatHandlerOptions {
@@ -85,6 +89,7 @@ export class IMChatHandler {
    */
   private detectProvider(config: LLMConfig): 'anthropic' | 'openai' {
     if (config.provider === 'anthropic') return 'anthropic';
+    if (config.apiFormat === 'anthropic') return 'anthropic';
     if (config.baseUrl.includes('anthropic')) return 'anthropic';
     if (config.model?.startsWith('claude')) return 'anthropic';
     return 'openai';
@@ -139,7 +144,10 @@ export class IMChatHandler {
   }
 
   private shouldUseOpenAIResponsesApi(config: LLMConfig): boolean {
-    return config.provider?.toLowerCase() === 'openai';
+    // A user-selected 'responses' apiFormat wins (same rule as
+    // llmConnection.testProviderConnection and the Settings test handler).
+    return config.apiFormat === 'responses'
+      || config.provider?.toLowerCase() === 'openai';
   }
 
   private shouldUseMaxCompletionTokens(config: LLMConfig): boolean {
