@@ -464,3 +464,4 @@ man_base_data_pebble/
 !tests/manual/
 !tests/manual/electron-drag-region-harness.mjs
 !tests/manual/run-drag-harness.mjs
+!tests/coworkSessionA2aDmOrdering.test.mjs
