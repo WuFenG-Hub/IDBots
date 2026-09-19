@@ -7045,7 +7045,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       } catch {
         status = null;
       }
-      const capReached = now() - startedAt >= TURN_LATCH_MAX_MS;
+      const capReached = now() - startedAt >= turnHardCapMs;
       if (status === 'running' && !capReached) return;
       // Task #60: a non-'running' status read is NOT proof the turn ended. The
       // skill-turn bridge stamps the session 'error' at the watchdog fire
@@ -7077,11 +7077,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       latchedTurnKeys.delete(key);
       // GT#87 (P1): harvest BEFORE the guard release + next-tick drain — the
       // deferred-entry retirement inside must win the race against the drain
-      // re-driving the now-answered trigger. Safe on the cap-forced release
-      // too: the harvest only posts an actually-settled final assistant
-      // message, and a still-running turn has none after its user message.
-      if (harvest) {
+      // re-driving the now-answered trigger.
+      // Release-audit follow-up: harvest ONLY on the settled path. The old
+      // "a still-running turn has none after its user message" invariant was
+      // wrong — the runner appends INTERIM assistant messages during a turn,
+      // so on a cap-forced release while the turn still runs, the harvest
+      // would post an interim narration as the member's final answer AND
+      // retire the durable re-drive, orphaning the real final reply (the
+      // GT#87 P1 loss on a rarer timing). Still-running releases skip the
+      // harvest; the re-drive stands and delivers when the turn truly settles.
+      const turnPossiblyStillRunning = sessionActive || status === 'running';
+      if (harvest && !turnPossiblyStillRunning) {
         harvestDetachedTurnReply(sessionId, taskId, botId, harvest.message, harvest.memberRole);
+      } else if (harvest) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${taskId}: latch cap reached while bot ${botId}'s turn may still be ` +
+          `running (message #${harvest.message.id}) — harvest skipped: an interim assistant message is ` +
+          'not a final reply; the deferred re-drive stands',
+        );
       }
       turnInFlight.delete(key);
       emitTurnActivity();

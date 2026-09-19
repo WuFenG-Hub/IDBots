@@ -7496,6 +7496,69 @@ test('GT#87: a detached turn that settles silent retires the re-drive without po
   }
 });
 
+test('GT#87 audit: a cap-forced latch release while the turn still runs skips the harvest — an interim message is not the final reply', async () => {
+  const logs = [];
+  const skillTurnAttempts = [];
+  let runnerActive = false;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      isCoworkSessionActive: () => runnerActive,
+      latchWatchIntervalMs: 15,
+      turnHardCapMs: 120, // force the cap while the detached runner is still going
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        runnerActive = true; // and it NEVER settles inside this test
+        throw new SkillTurnTimeoutError('session-timeout-gt87cap', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-gt87-cap-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot deliver the second baton',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'the detached turn ran once');
+
+    // The runner streams an INTERIM narration mid-turn (every text event is
+    // appended as an assistant message while the turn keeps executing).
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    const interim = '进度：正在核对断言清单……';
+    h.coworkStore.addMessage(session.id, { type: 'assistant', content: interim });
+    // Session stays active; only the latch cap releases the guard. The daemon
+    // clock is the harness's frozen state clock, so advance it past the cap.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !logs.some((line) => line.includes('harvest skipped'))) {
+      h.state.nowMs += 50;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(
+      logs.some((line) => line.includes('harvest skipped') && line.includes('not a final reply')),
+      'the skip is on the record',
+    );
+    assert.ok(
+      !h.sends.some((s) => s.content === interim),
+      'the interim narration must never be posted as the member\'s answer',
+    );
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'the durable re-drive stands so the real final reply still gets delivered');
+
+    // When the re-drive later runs, the trigger is not lost.
+    runnerActive = false;
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 2, 'the deferred re-drive picks the trigger back up');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT#87: a detached turn with NO settled reply keeps the re-drive (pre-fix recovery intact)', async () => {
   const logs = [];
   const skillTurnAttempts = [];
