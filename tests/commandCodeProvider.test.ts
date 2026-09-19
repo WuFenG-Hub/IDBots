@@ -64,6 +64,22 @@ test('commandcode preset base URL joins into the gateway Chat Completions endpoi
   );
 });
 
+test('zhipu preset base URLs join into their live protocol endpoints', () => {
+  // All three per-format switchable defaults must resolve to real POST
+  // targets. The OpenAI-format coding base ends in /v4 (not /v1): it must
+  // join as …/v4/chat/completions, never …/v4/v1/chat/completions (the
+  // double-suffix 404 flagged in the 2026-09-19 review).
+  assert.equal(
+    buildOpenAICompatibleChatCompletionsUrl('https://open.bigmodel.cn/api/coding/paas/v4', 'zhipu'),
+    'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions'
+  );
+  // The unversioned host still takes the conventional /v1 prefix.
+  assert.equal(
+    buildOpenAICompatibleChatCompletionsUrl('https://open.bigmodel.cn', 'zhipu'),
+    'https://open.bigmodel.cn/v1/chat/completions'
+  );
+});
+
 test('existing users get commandcode merged in without losing stored providers', () => {
   const legacyProviders = {
     deepseek: {
