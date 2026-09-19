@@ -284,7 +284,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
           // sandbox: the iframe (and its sandbox attribute) is built at runtime
           // by the ABC browser client from htmlFrameSandbox(url), so a string
           // rewrite here cannot reach it. The allow-forms token is added at the
-          // source via patches/@openagentinternet+agent-browser-ui+0.5.5.patch.
+          // source via patches/@openagentinternet+agent-browser-ui+0.6.0.patch.
           const html = await renderBrowserPageHtml(
             definition,
             getBrowserLanguagePreference(),

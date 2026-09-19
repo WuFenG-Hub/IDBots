@@ -431,7 +431,7 @@ export function buildBrowserIframeBridgeScript(): string {
  * the rendered HTML to re-add allow-same-origin: it would contradict the
  * upstream "same-origin frames stay opaque" design and cannot reach the
  * runtime-built attribute anyway. The token list is extended with allow-forms
- * via patches/@openagentinternet+agent-browser-ui+0.5.5.patch.
+ * via patches/@openagentinternet+agent-browser-ui+0.6.0.patch.
  */
 export function injectBrowserIframeBridge(
   definition: BrowserPageDefinition,
