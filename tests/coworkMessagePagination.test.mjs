@@ -211,6 +211,87 @@ test('split A2A episodes persist as generations (no startup consolidation) and a
   }
 });
 
+test('cross-episode history pages spend their budget on VISIBLE messages only', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    insertMetabot(db, 1, 'idq1local');
+    const original = store.createSession(
+      'Peer Bot', '/tmp/a2a', '', 'local', [], 1, 'a2a', 'idq1peer', 'Old Peer',
+    );
+    const split = store.createSession(
+      'Peer Bot', '/tmp/a2a', '', 'local', [], 1, 'a2a', 'idq1peer', 'New Peer',
+    );
+    const firstEpisode = store.registerA2AEpisode({
+      sessionId: original.id,
+      localMetabotId: 1,
+      localGlobalMetaId: 'idq1local',
+      peerGlobalMetaId: 'idq1peer',
+      episodeIndex: 1,
+      startedAt: 100,
+    });
+    store.registerA2AEpisode({
+      sessionId: split.id,
+      localMetabotId: 1,
+      localGlobalMetaId: 'idq1local',
+      peerGlobalMetaId: 'idq1peer',
+      episodeIndex: 2,
+      previousSessionId: original.id,
+      startedAt: 200,
+      previousCloseReason: 'rollover',
+    });
+    store.upsertConversationMapping({
+      channel: 'metaweb_private',
+      externalConversationId: 'metaweb-private:idq1peer',
+      metabotId: 1,
+      coworkSessionId: split.id,
+      metadataJson: JSON.stringify({
+        a2aThreadId: firstEpisode.threadId,
+        episodeIndex: 2,
+        previousEpisodeSessionId: original.id,
+        peerName: 'New Peer',
+      }),
+    });
+    // A skill-heavy old episode: hidden internals (tool_use / tool_result /
+    // system / thinking) interleaved with the three visible bubbles. Pre-fix,
+    // a hidden row consumed the page budget and "load earlier" rendered an
+    // empty page while hasMoreBefore burned down.
+    const seed = [
+      { type: 'tool_use', content: 'run web-search' },
+      { type: 'user', content: 'visible-1' },
+      { type: 'tool_result', content: 'search results…' },
+      { type: 'system', content: 'internal notice' },
+      { type: 'assistant', content: 'visible-2' },
+      { type: 'assistant', content: 'thinking-only', metadata: { isThinking: true } },
+      { type: 'assistant', content: 'visible-3' },
+    ];
+    for (const message of seed) {
+      store.addMessage(original.id, message);
+    }
+    store.addMessage(split.id, { type: 'assistant', content: 'split history' });
+
+    // First cross-episode page, limit 2: only visible rows, newest first,
+    // hasMore true, cursor points BELOW the last returned visible row.
+    const page1 = store.getA2AConversationHistoryPage(split.id, {
+      beforeCursor: { episodeIndex: null, beforeSequence: null },
+      limit: 2,
+    });
+    assert.deepEqual(page1.messages.map((entry) => entry.message.content), ['visible-2', 'visible-3']);
+    assert.equal(page1.hasMoreBefore, true);
+    assert.ok(page1.beforeCursor, 'a real cursor continues the chain');
+
+    const page2 = store.getA2AConversationHistoryPage(split.id, {
+      beforeCursor: page1.beforeCursor,
+      limit: 2,
+    });
+    assert.deepEqual(page2.messages.map((entry) => entry.message.content), ['visible-1']);
+    assert.equal(page2.hasMoreBefore, false, 'raw history exhausted — chain ends cleanly');
+    assert.equal(page2.beforeCursor, null);
+  } finally {
+    cleanup();
+  }
+});
+
 test('message pages use a stable sequence cursor and preserve chronological order', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
