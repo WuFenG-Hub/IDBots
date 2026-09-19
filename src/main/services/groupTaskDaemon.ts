@@ -612,14 +612,17 @@ export function hasWorkerUpstreamWait(content: string | null | undefined): boole
  */
 const CLAUSE_DEADLINE_TAG = /\[DEADLINE\s*:/i;
 const attachFloatingDeadlineSegment = (text: string, base: string, baseEndIndex: number): string | null => {
-  if (CLAUSE_DEADLINE_TAG.test(base)) return null;
+  if (CLAUSE_DEADLINE_TAG.test(stripGroupTaskQuotedCode(base))) return null;
   const remainder = text.slice(baseEndIndex);
   const segments = remainder.split(/(?:\r?\n[ \t]*\r?\n)+/);
   for (const segment of segments) {
     const trimmed = segment.trim();
     if (!trimmed) continue;
     if (trimmed.includes('@')) continue; // someone's clause / a handle citation
-    if (!CLAUSE_DEADLINE_TAG.test(trimmed)) continue;
+    // GT#87 release-audit follow-up: the tag test runs on the quote-stripped
+    // segment — a floating block whose only [DEADLINE:] is backticked or
+    // fenced is a citation of someone else's clock, not this member's.
+    if (!CLAUSE_DEADLINE_TAG.test(stripGroupTaskQuotedCode(trimmed))) continue;
     return `${base}\n\n${trimmed}`;
   }
   return null;
@@ -8851,6 +8854,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * Returns the clause's minutes only when the member was addressed; when a
    * deadline tag exists but the member was NOT addressed, logs the skip so
    * future false-bell debriefs can see the arming decision on the record.
+   *
+   * GT#87 release-audit follow-up: the minutes are parsed from the
+   * quote-stripped clause. A `[DEADLINE: …]` inside backticks or a fenced
+   * block is a CITATION (the chair quoting another worker's clock), never a
+   * clock source — the wake gate and the ACK-watch gate already honor this
+   * rule; the arming parse must too, or "@阿力 注意阿码的 `[DEADLINE: 140m]`
+   * 时钟照旧" arms 阿力 with 阿码's 140m the moment 阿力 ACKs.
    */
   const parseAddressedChairDeadlineMinutes = (
     taskId: number,
@@ -8861,7 +8871,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     mention: string | null | undefined,
     clause: string | null | undefined,
   ): number | null => {
-    const minutes = parseChairDeadlineMinutes(clause ?? null);
+    const minutes = parseChairDeadlineMinutes(stripGroupTaskQuotedCode(clause ?? null));
     if (minutes == null || minutes <= 0) return minutes;
     if (
       memberAddressedInAssignment(

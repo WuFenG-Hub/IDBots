@@ -1370,6 +1370,29 @@ test('extractMemberDispatchClause (GT#87 P2-4): floating attachment never crosse
   assert.equal(parseChairDeadlineMinutes(designer), 45, "Designer's own clause keeps its 45m");
 });
 
+test('extractMemberDispatchClause (GT#87 audit): a floating segment whose only [DEADLINE] is a quoted citation never attaches', () => {
+  const { extractMemberDispatchClause, parseChairDeadlineMinutes } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  // The chair's own playbook discipline: quote a restated tag in backticks so
+  // the host reads it as a citation. Pre-fix, the floating attach tested the
+  // RAW segment, so a trailing "clock reference sample" paragraph armed the
+  // tagless member's clock with the cited minutes.
+  const content = '@Coder Bot 冻结稿 v1.1 已逐节复核，交付随你节奏。\n\n'
+    + '参考（引用样例，非你的时钟）：阿码的 `[DEADLINE: 140m]` 时钟照旧（5863 起算）。';
+  const clause = extractMemberDispatchClause(content, 'Coder Bot');
+  assert.equal(parseChairDeadlineMinutes(clause), null,
+    'a floating block whose only tag is a backtick citation never attaches to the member\'s clause');
+  // Fence-quoted citations behave the same as inline backticks.
+  const fenced = '@Coder Bot 冻结稿 v1.1 已逐节复核，交付随你节奏。\n\n'
+    + '参考：\n```\n[DEADLINE: 90m] 他人时钟\n```';
+  const fencedClause = extractMemberDispatchClause(fenced, 'Coder Bot');
+  assert.equal(parseChairDeadlineMinutes(fencedClause), null,
+    'a fenced citation paragraph never attaches either');
+  // Control: an UNQUOTED floating trailing deadline still attaches (P2-4).
+  const real = '@Coder Bot 冻结稿 v1.1 已逐节复核。\n\n[DEADLINE: 20m]';
+  assert.equal(parseChairDeadlineMinutes(extractMemberDispatchClause(real, 'Coder Bot')), 20,
+    'the unquoted floating tag keeps its P2-4 attachment');
+});
+
 test('cursor advances on no-reply messages; a failing turn\'s retry coalesces with newer queued triggers (task #64)', async () => {
   // Cooldowns off: this test isolates the retry/ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
@@ -10279,6 +10302,43 @@ test('GT#87: a deadline restated for another worker never arms the bare-named me
     const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
     assert.ok(armed, 'the @-addressed worker\'s own deadline still arms');
     assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 140 * 60_000);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87 audit: a backtick-quoted [DEADLINE] citation never arms the @-addressed member\'s own clock', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]);
+    // @-addressed dispatch for Designer Bot, but the ONLY [DEADLINE] in the
+    // message is a backticked citation of Coder Bot's clock — the chair
+    // playbook's own "quote restatements in backticks" discipline. Pre-fix,
+    // the ACK-arming parse read the RAW clause, so Designer's [WORKING] ACK
+    // armed Coder's 140m onto Designer's clock (the GT#87 phantom-clock shape
+    // the branch claimed to close; the wake and ACK-watch gates got the
+    // quote-strip, the arming parse did not).
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-quoted-cite-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Designer Bot 状态锁定：部署断言清单由你复核，现在开工。'
+        + '注意阿码的 `[DEADLINE: 140m]` 时钟照旧（5863 起算），那是他的实现时钟，与你的复核无关。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-quoted-cite-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单：复核开工，预计 30 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:3`) ?? null,
+      null,
+      'a quoted [DEADLINE] citation of another worker\'s clock never arms the @-addressed member',
+    );
   } finally {
     h.cleanup();
   }
