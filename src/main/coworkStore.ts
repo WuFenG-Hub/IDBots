@@ -3394,15 +3394,23 @@ export class CoworkStore implements MemoryBackend {
         s.cwd,
         s.created_at,
         s.updated_at,
-        -- Sort by the LAST USER MESSAGE time (fixed once a turn is sent), not
-        -- the newest assistant stream message: while tasks run, stream updates
-        -- no longer reshuffle the session list top (no more flickering).
-        -- Sessions without a user message fall back to newest message, then
+        -- Sort by the LAST CONVERSATION EVENT time (a user message OR an
+        -- on-chain A2A private DM synced into the session), not the newest
+        -- assistant stream message: while tasks run, stream updates no longer
+        -- reshuffle the session list top (no more flickering). Local stream
+        -- chunks carry no sourceChannel metadata, so the LIKE keeps them out;
+        -- daemon-synced metaweb_private messages are atomic inserts (bot DMs
+        -- to a peer/owner, e.g. morning reports) and MUST bump the session —
+        -- sorting by the last user message alone sank bot-driven threads to
+        -- the list bottom (owner could not find the bot's DM conversation).
+        -- Sessions without either fall back to newest message, then
         -- updated_at. Stable tie-breakers keep the order deterministic.
         COALESCE((
           SELECT m.created_at
           FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
-          WHERE m.session_id = s.id AND m.type = 'user'
+          WHERE m.session_id = s.id
+            AND (m.type = 'user'
+                 OR m.metadata LIKE '%"sourceChannel":"metaweb_private"%')
           ORDER BY m.created_at DESC
           LIMIT 1
         ), (
