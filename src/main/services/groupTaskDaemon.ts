@@ -1013,6 +1013,19 @@ export function clearGroupTaskReviewDeliveryGuards(kv: GroupTaskDriverKv, taskId
  * rest of the message processing.
  */
 class StaleReviewReentryError extends Error {}
+/**
+ * GT#90 (P1-1): the turn produced NOTHING group-visible — no final reply, no
+ * mid-turn sends, and no deliberate [NO_REPLY]. GT#90's plan-B pre-check turn
+ * stalled on its first tool call (dshTurnStalled abort 10 min in); the empty
+ * branch recorded the canonical failure and RETURNED, so the daemon settled
+ * the trigger as answered — cursor advanced, no requeue, no alarm — and the
+ * assignment evaporated (the ACK watch had also retired on the member's OLD
+ * deliverable). Throwing routes the empty handoff into the ordinary bounded
+ * retry ladder: requeue with failures+1, drop + origin anomaly on exhaustion.
+ * Deliberate silence is distinguished upstream ([NO_REPLY]) and turns that
+ * spoke mid-turn settle as delivered before this point.
+ */
+class EmptyHandoffError extends Error {}
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
 /**
@@ -6827,12 +6840,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const activity = summarizeSessionActivity(
         readTaskSessionActivityMessages(coworkStore, session.id),
       );
-      failCanonicalAttempt(
-        hasSubstantiveActivity(activity)
-          ? formatWorkerEmptyHandoffError(activity)
-          : WORKER_EMPTY_HANDOFF,
-      );
-      return;
+      const emptySummary = hasSubstantiveActivity(activity)
+        ? formatWorkerEmptyHandoffError(activity)
+        : WORKER_EMPTY_HANDOFF;
+      failCanonicalAttempt(emptySummary);
+      // GT#90 (P1-1): requeue through the bounded failure ladder instead of
+      // settling silently — see EmptyHandoffError.
+      throw new EmptyHandoffError(emptySummary);
     }
 
     // [NO_REPLY] escape hatch: the model opted to stay silent. The assistant
