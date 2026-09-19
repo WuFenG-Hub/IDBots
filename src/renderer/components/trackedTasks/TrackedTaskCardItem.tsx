@@ -76,6 +76,13 @@ const TrackedTaskCardItem: React.FC<TrackedTaskCardItemProps> = ({
           {i18nService.t('trackedTask.badge.closureWarn')}
         </span>
       )}
+      {card.closerRole === 'twin' && (
+        <span
+          className="shrink-0 inline-flex items-center rounded-full border dark:border-claude-darkBorder border-claude-border px-1.5 py-[1px] text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary"
+        >
+          {i18nService.t('trackedTask.badge.internal')}
+        </span>
+      )}
       <span className="ml-auto shrink-0 text-[10px] font-mono dark:text-claude-darkTextSecondary text-claude-textSecondary">
         {card.ledgerStatus}
       </span>
@@ -107,7 +114,8 @@ const TrackedTaskCardItem: React.FC<TrackedTaskCardItemProps> = ({
       </div>
     )}
 
-    {card.state !== 'closed' && (
+    {/* v1.5：twin 自收卡不出收口按钮（守卫在后端，按钮在前端就不出现） */}
+    {card.state !== 'closed' && card.closerRole !== 'twin' && (
       <button
         type="button"
         onClick={(e) => {

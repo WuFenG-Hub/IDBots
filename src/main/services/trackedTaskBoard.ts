@@ -303,6 +303,15 @@ export interface TrackedCardDerivationInput {
    * (freeze doc §4). Supplied by the caller, never read from storage.
    */
   admitted: boolean;
+  /**
+   * v1.5: who may close this card (see deriveCloserRole). OPTIONAL and
+   * defaulting to 'owner' — v1.4 behavior for every caller that predates the
+   * ruling. A twin-closable card is NEVER closureDue: the owner is not asked
+   * to close a card the Twin initiated and will accept itself (no red badge,
+   * no banner count, no suggestion), while the card stays visible in its
+   * own state column.
+   */
+  closerRole?: TrackedCardCloserRole;
   /** Linked scheduled task, when the card is attached to one. */
   scheduled: { enabled: boolean; nextRunAtMs: number | null; running: boolean } | null;
   /** Every linked session status, for the "session ended" rule. */
@@ -327,6 +336,12 @@ export interface TrackedCardDerivation {
   closureDue: boolean;
   closureWarn: boolean;
   closureDueLevel: TrackedClosureDueLevel | null;
+  /**
+   * v1.4 P2 fix: the closure RECORD fact (closure_at IS NOT NULL) leaves the
+   * derivation as a first-class output, so the summary can surface it without
+   * a second copy of the `Boolean(closureAt)` derivation.
+   */
+  closureRecorded: boolean;
   /** ENGLISH DIAGNOSTIC ONLY — never render this in the UI (appendix B). */
   closureSuggestion: string;
   closureSuggestionCode: TrackedSuggestionCode | null;
@@ -446,6 +461,40 @@ export function isClosurePending(row: {
   if (row.closureBy !== 'owner' && row.closureBy !== 'twin') return false;
   return closureHash(conclusion) !== (row.closureProcessedHash ?? null);
 }
+
+/**
+ * v1.5 (owner ruling 「谁发起，谁验收」): who is ENTITLED to close a card.
+ * Derived at READ time, never persisted — the ledger's `origin` column is the
+ * fallback fact, the link tables are the authority:
+ *  1. group-linked card → the group's creator (`created_by='user'` → owner,
+ *     anything else → twin) — the SAME criterion as admission's ADM-5
+ *     owner_initiated fact, never a second standard;
+ *  2. scheduled-linked card → owner (conservative: the daemon's runs are the
+ *     owner's errands even if some future writer marks them twin-delegated);
+ *  3. otherwise → the ledger `origin` column ('twin_delegate' → twin).
+ * The close guard is BIDIRECTIONAL: a card closable by one side cannot be
+ * closed by the other.
+ */
+export type TrackedCardCloserRole = 'owner' | 'twin';
+
+export function deriveCloserRole(
+  facts: { groupLinks: number; groupOwnerInitiated: number; scheduledLinks: number },
+  origin: string | null | undefined,
+): TrackedCardCloserRole {
+  if (facts.groupLinks > 0) return facts.groupOwnerInitiated > 0 ? 'owner' : 'twin';
+  if (facts.scheduledLinks > 0) return 'owner';
+  return origin === 'twin_delegate' ? 'twin' : 'owner';
+}
+
+/**
+ * The one SQL that produces deriveCloserRole's inputs. Both buildSummary and
+ * closeCard read it — the ADM-5 criterion (`created_by = 'user'`) appears
+ * EXACTLY once, so the guard and the display can never disagree.
+ */
+const CLOSER_ROLE_FACTS_SELECT = `
+  (SELECT COUNT(*) FROM group_tasks WHERE orchestration_task_id = ? AND created_by = 'user') AS closer_group_owner_initiated,
+  (SELECT COUNT(*) FROM group_tasks WHERE orchestration_task_id = ?) AS closer_group_links,
+  (SELECT COUNT(*) FROM scheduled_tasks WHERE orchestration_task_id = ?) AS closer_scheduled_links`;
 
 /** A receipt is complete with an evidence URI, or with the explicit no-action marker. */
 export function closureReceiptIsComplete(receipt: string, evidenceUri?: string | null): boolean {
@@ -627,7 +676,10 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
   // `false` — the quiet direction, so a missed argument can never masquerade as
   // "nothing needs closure" through a truthy accident.
   const admissionInputMissing = typeof input.admitted !== 'boolean';
-  const closureDue = input.admitted === true && !closed
+  // v1.5: omitted closerRole fails open to 'owner' — identical to v1.4 for
+  // every caller that predates the ruling; the board always supplies it.
+  const closableByOwner = (input.closerRole ?? 'owner') !== 'twin';
+  const closureDue = input.admitted === true && closableByOwner && !closed
     && (zombie || terminalUnclosed || sessionsEnded);
   const closureDueLevel: TrackedClosureDueLevel | null = !closureDue
     ? null
@@ -732,6 +784,9 @@ export function deriveCardState(input: TrackedCardDerivationInput): TrackedCardD
     closureDue,
     closureWarn,
     closureDueLevel,
+    // v1.4 P2 (小明验收报告): the closure RECORD fact leaves the derivation
+    // here so buildSummary can surface it without recomputing it.
+    closureRecorded,
     // Derived from the structured facts below, never written twice by hand.
     closureSuggestion: suggestion ? renderTrackedSuggestion(suggestion.code, suggestion.params) : '',
     closureSuggestionCode: suggestion?.code ?? null,
@@ -805,6 +860,21 @@ export interface TrackedCardSummary {
   closureWarn: boolean;
   closureDue: boolean;
   closureDueLevel: TrackedClosureDueLevel | null;
+  /**
+   * v1.4 P2 fix (小明验收报告): the closure RECORD fact (closure_at IS NOT
+   * NULL — the v1.4 definition of "closed"). deriveCardState already produced
+   * it; the summary just never surfaced it. Read-only projection, never
+   * persisted.
+   */
+  closureRecorded: boolean;
+  /**
+   * v1.5 (谁发起，谁验收): who may close this card, derived at READ time by
+   * `deriveCloserRole` (group creator → scheduled link → ledger origin). The
+   * close guard rejects the other side bidirectionally; the renderer hides
+   * the close affordance for 'twin' cards and shows the neutral internal
+   * marker instead.
+   */
+  closerRole: TrackedCardCloserRole;
   /** ENGLISH DIAGNOSTIC ONLY — never render this in the UI (appendix B). */
   closureSuggestion: string;
   /** Structured facts for the renderer; `null` when nothing is due. */
@@ -1445,6 +1515,28 @@ export class TrackedTaskBoardService {
       return { ok: false, code: 'NOT_FOUND', error: `orchestration task ${input.taskId} not found` };
     }
 
+    // v1.5 (owner ruling 「谁发起，谁验收」): BIDIRECTIONAL guard. The card's
+    // closerRole is derived at read time (group creator → scheduled link →
+    // origin); a close attempt by the OTHER side is a VALIDATION refusal and
+    // nothing at all is written — checked BEFORE the group-task linkage so a
+    // rejected close can never reach the bridge either.
+    const closerRole = this.readCloserRole(input.taskId, task);
+    if (input.by !== closerRole) {
+      return {
+        ok: false,
+        code: 'VALIDATION',
+        error: `closeCard: card ${input.taskId} is closable by '${closerRole}' only`
+          + ` (v1.5 谁发起，谁验收), got by='${input.by}'.`,
+      };
+    }
+    // A Twin self-closure IS the execution write-off: the SAME statement that
+    // writes the closure also marks the conclusion processed (hash-bound), so
+    // the twin-written conclusion can never leak into the pending queue. The
+    // invariant is pinned by tests; do not "optimize" the marks away.
+    const selfProcessed = input.by === 'twin'
+      ? { by: 'twin' as const, hash: conclusion ? closureHash(conclusion) : null }
+      : undefined;
+
     // Group-task linkage is checked BEFORE any write, so a rejecting bridge
     // error can never leave a half-closed card behind.
     const groupTaskRow = this.getOne(
@@ -1454,11 +1546,14 @@ export class TrackedTaskBoardService {
     const bridge = groupTaskRow ? (this.deps.resolveGroupTaskBridge?.() ?? null) : null;
     if (groupTaskRow && bridge) {
       const groupTaskId = Number(groupTaskRow.id);
+      // Honest attribution in the group event log: an owner close is 'owner',
+      // the Twin accepting its own delegation is the chair.
+      const actor = { kind: input.by === 'twin' ? 'chair' as const : 'owner' as const };
       try {
         if (input.targetStatus === 'cancelled') {
-          bridge.cancelGroupTask(groupTaskId, { kind: 'owner' });
+          bridge.cancelGroupTask(groupTaskId, actor);
         } else {
-          bridge.acceptGroupTask(groupTaskId, { kind: 'owner' });
+          bridge.acceptGroupTask(groupTaskId, actor);
         }
       } catch (error) {
         // Whole-card rejection: nothing was written by closeCard itself.
@@ -1475,6 +1570,7 @@ export class TrackedTaskBoardService {
         conclusion,
         by: input.by,
         pinId: input.pinId ?? null,
+        selfProcessed,
       });
       this.deps.saveDb();
       const refreshed = this.deps.orchestrationStore.getTask(input.taskId);
@@ -1515,6 +1611,7 @@ export class TrackedTaskBoardService {
       conclusion,
       by: input.by,
       pinId: input.pinId ?? null,
+      selfProcessed,
     });
     this.deps.saveDb();
     const card = this.buildSummary(input.taskId, Date.now(), this.readAdmissionContext());
@@ -1624,7 +1721,75 @@ export class TrackedTaskBoardService {
     if (!row) return refused('NOT_FOUND', `orchestration task ${input.taskId} not found`);
     const conclusion = text(row.closure_conclusion);
     if (!conclusion) {
-      return refused('NO_CONCLUSION', 'the card carries no closing conclusion to execute');
+      // v1.5 last mile (owner ruling 「谁发起，谁验收」): a TERMINAL card with
+      // no conclusion whose closerRole is 'twin' can be self-closed by the
+      // Twin through THIS ack channel — the receipt IS the conclusion, and
+      // the SAME `recordClosure` statement that writes it also marks it
+      // processed (hash-bound): byte-identical semantics to closeCard's twin
+      // branch, and still exactly ONE writer of the closure SQL. Every other
+      // shape keeps the v1.4 refusal verbatim — the Twin NEVER writes a
+      // conclusion on an owner card, and an open card has no execution to
+      // write off yet. No destructive gate here by design: a self-closure
+      // carries a receipt for work the Twin itself just finished, not an
+      // owner instruction to second-guess.
+      const task = this.deps.orchestrationStore.getTask(input.taskId);
+      const closerRole = task ? this.readCloserRole(input.taskId, task) : 'owner';
+      if (input.processedBy !== 'twin' || closerRole !== 'twin') {
+        return refused('NO_CONCLUSION', 'the card carries no closing conclusion to execute');
+      }
+      if (!task || !isTerminalStatus(task.status)) {
+        return refused(
+          'VALIDATION',
+          'a twin self-closure needs a terminal card (completed/cancelled/failed),'
+            + ` got ${task ? task.status : 'a missing row'}`,
+        );
+      }
+      // Idempotence without trusting the T1 invariant: a mark already on the
+      // row means this self-closure already happened — report it, write
+      // nothing, exactly like the CAS path below.
+      if (text(row.closure_processed_hash)) {
+        return {
+          ok: true,
+          alreadyProcessed: true,
+          processedAt: text(row.closure_processed_at),
+          processedBy: (text(row.closure_processed_by) as TrackedClosureProcessedBy | null) ?? null,
+          receipt: text(row.closure_receipt),
+        };
+      }
+      const selfEvidenceUri = input.evidenceUri?.trim() || null;
+      if (!closureReceiptIsComplete(receipt, selfEvidenceUri)) {
+        return refused(
+          'RECEIPT_INCOMPLETE',
+          'a receipt needs an evidence URI, or the explicit "'
+            + TRACKED_CLOSURE_NO_ACTION_MARKER_ZH + '" / "'
+            + TRACKED_CLOSURE_NO_ACTION_MARKER_EN + '" marker',
+        );
+      }
+      const selfHash = closureHash(receipt);
+      const selfAt = new Date().toISOString();
+      // ONE statement: conclusion + by='twin' + the processed marks together —
+      // the self-written conclusion can never leak into the pending queue.
+      this.deps.orchestrationStore.recordClosure(input.taskId, {
+        conclusion: receipt,
+        by: 'twin',
+        pinId: null,
+        selfProcessed: { by: 'twin', hash: selfHash },
+      });
+      this.deps.saveDb();
+      this.appendClosureAckAudit({
+        cardId: input.taskId,
+        conclusionHash: selfHash,
+        at: selfAt,
+        by: 'twin',
+        evidence: selfEvidenceUri,
+      });
+      return {
+        ok: true,
+        alreadyProcessed: false,
+        processedAt: selfAt,
+        processedBy: 'twin',
+        receipt,
+      };
     }
 
     const evidenceUri = input.evidenceUri?.trim() || null;
@@ -1908,6 +2073,28 @@ export class TrackedTaskBoardService {
   }
 
   /**
+   * v1.5: `deriveCloserRole`'s inputs for ONE card, read straight from the
+   * link tables through the SHARED `CLOSER_ROLE_FACTS_SELECT` — the ADM-5
+   * `created_by = 'user'` criterion exists exactly once in this file. Used by
+   * the close guard; buildSummary derives the same role from its own
+   * admissionFacts query, which embeds the same fragment.
+   */
+  private readCloserRole(taskId: string, task: OrchestrationTask): TrackedCardCloserRole {
+    const facts = this.getOne(
+      `SELECT ${CLOSER_ROLE_FACTS_SELECT}`,
+      [taskId, taskId, taskId],
+    ) ?? {};
+    return deriveCloserRole(
+      {
+        groupOwnerInitiated: Number(facts.closer_group_owner_initiated ?? 0),
+        groupLinks: Number(facts.closer_group_links ?? 0),
+        scheduledLinks: Number(facts.closer_scheduled_links ?? 0),
+      },
+      task.origin,
+    );
+  }
+
+  /**
    * The closure half of a card. v1.2 reads the processing mark alongside the
    * conclusion so a projection can derive `closurePending` without a second
    * query and without ever persisting the derived flag.
@@ -1962,14 +2149,26 @@ export class TrackedTaskBoardService {
     // Admission facts, straight off the ledger and its linked tables. The two
     // EXISTS-style branches (owner-initiated, checkpoints) ignore the LIMIT 1
     // pick above on purpose — the freeze doc words them as EXISTS.
+    // v1.5: the owner-initiated subselect IS CLOSER_ROLE_FACTS_SELECT's first
+    // column — ADM-5 and the closerRole derivation share ONE copy of the
+    // `created_by = 'user'` criterion, so the guard and the display can never
+    // drift apart.
     const admissionFacts = this.getOne(
       `SELECT
-         (SELECT COUNT(*) FROM group_tasks WHERE orchestration_task_id = ? AND created_by = 'user') AS owner_initiated,
+         ${CLOSER_ROLE_FACTS_SELECT},
          (SELECT COUNT(*) FROM group_task_checkpoints c
             JOIN group_tasks g ON g.id = c.task_id
            WHERE g.orchestration_task_id = ?) AS checkpoint_count`,
-      [taskId, taskId],
+      [taskId, taskId, taskId, taskId],
     ) ?? {};
+    const closerRole = deriveCloserRole(
+      {
+        groupOwnerInitiated: Number(admissionFacts.closer_group_owner_initiated ?? 0),
+        groupLinks: Number(admissionFacts.closer_group_links ?? 0),
+        scheduledLinks: Number(admissionFacts.closer_scheduled_links ?? 0),
+      },
+      task.origin,
+    );
     const admissionVerdict = trackAdmission({
       registered: admission.registeredIds.has(taskId),
       stepCount: steps.length,
@@ -1977,7 +2176,7 @@ export class TrackedTaskBoardService {
       scheduledTaskLinked: scheduledTaskId !== null,
       hasDependencies: steps.some((step) => step.dependencyStepIds.length > 0),
       hasCheckpoints: Number(admissionFacts.checkpoint_count ?? 0) > 0,
-      ownerInitiated: Number(admissionFacts.owner_initiated ?? 0) > 0,
+      ownerInitiated: Number(admissionFacts.closer_group_owner_initiated ?? 0) > 0,
       mode: admission.mode,
     });
     // v1.3 manual archive override: the DERIVATION sees the effective verdict,
@@ -2022,6 +2221,7 @@ export class TrackedTaskBoardService {
       closureConclusion: closure.conclusion,
       closureAt: closure.at,
       admitted,
+      closerRole,
       scheduled: scheduled
         ? {
           enabled: Number(scheduled.enabled) === 1,
@@ -2066,6 +2266,8 @@ export class TrackedTaskBoardService {
       closureWarn: derivation.closureWarn,
       closureDue: derivation.closureDue,
       closureDueLevel: derivation.closureDueLevel,
+      closureRecorded: derivation.closureRecorded,
+      closerRole,
       closureSuggestion: derivation.closureSuggestion,
       closureSuggestionCode: derivation.closureSuggestionCode,
       closureSuggestionParams: derivation.closureSuggestionParams,

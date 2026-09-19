@@ -71,6 +71,11 @@ const TrackedTasksList: React.FC<TrackedTasksListProps> = ({
               >
                 {columnLabel(card.stateLabelKey, card.state)}
               </span>
+              {card.closerRole === 'twin' && (
+                <span className="inline-flex items-center whitespace-nowrap rounded-full border dark:border-claude-darkBorder border-claude-border px-1.5 py-[1px] text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('trackedTask.badge.internal')}
+                </span>
+              )}
             </span>
 
             <span className="min-w-0">
@@ -103,6 +108,10 @@ const TrackedTasksList: React.FC<TrackedTasksListProps> = ({
                   <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('trackedTask.list.closedMark')}
                   </span>
+                ) : card.closerRole === 'twin' ? (
+                  // v1.5：twin 自收卡没有 owner 可执行的动作——操作列留空，
+                  // 内部标记已在状态列出现，不重复堆徽章。
+                  null
                 ) : (
                   <button
                     type="button"

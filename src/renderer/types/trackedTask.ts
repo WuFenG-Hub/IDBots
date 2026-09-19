@@ -51,6 +51,14 @@ export const TRACKED_DUE_LEVEL_LABEL_KEYS: Record<TrackedClosureDueLevel, string
  */
 export type TrackedClosureProcessedBy = 'owner' | 'twin';
 
+/**
+ * v1.5（谁发起，谁验收）：这张卡**谁有权收口**。主进程读时派生
+ * （群任务建卡人 → 定时任务关联 → 台账 origin 列），永不落库；收口守卫双向：
+ * 一侧发起的卡另一侧收口被拒（VALIDATION）。渲染层据此对 'twin' 卡隐藏收口
+ * 按钮、不显示待收口红徽章，改出中性「内部」标记——文案由 i18n 承载。
+ */
+export type TrackedCardCloserRole = 'owner' | 'twin';
+
 /** 状态摘要事实的 code（主进程 TrackedReasonCode 的逐字镜像）。 */
 export type TrackedReasonCode =
   | 'ledger_review'
@@ -142,6 +150,17 @@ export interface TrackedCardSummary {
   closureWarn: boolean;
   closureDue: boolean;
   closureDueLevel: TrackedClosureDueLevel | null;
+  /**
+   * v1.4 P2 修正：收口**记录**在案的事实（closure_at IS NOT NULL —— v1.4 的
+   * 「已收口」定义）。主进程派生早已产出，v1.5 起透出到本投影。
+   */
+  closureRecorded: boolean;
+  /**
+   * v1.5（谁发起，谁验收）：本卡谁有权收口（主进程读时派生，见
+   * TrackedCardCloserRole）。'twin' 卡不出收口按钮、不进催收口面，
+   * 显示中性「内部」标记。
+   */
+  closerRole: TrackedCardCloserRole;
   /** 后端事实串（英文，供日志/排障）；界面文案一律由 reasonCodes 渲染。 */
   closureSuggestion: string;
   /** 结构化收口建议 code —— 界面文案归 renderer。 */

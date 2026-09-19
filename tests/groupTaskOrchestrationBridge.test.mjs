@@ -566,3 +566,28 @@ test('v1.4: heal skips unclosed canonicals and refused pairs, and never throws',
     h.sqliteStore.close();
   }
 });
+
+// v1.5 (owner ruling 「谁发起，谁验收」): canonical cards of group tasks stay
+// origin='owner' — the group's creator (created_by) decides who closes, via
+// the board's read-time closerRole derivation. The origin column is the
+// FALLBACK for plain cards only; the bridge must not encode closers in it.
+test('v1.5: canonical cards keep origin=owner for both creator variants', async () => {
+  const h = await makeHarness();
+  try {
+    const canonical = h.bridge.ensureCanonicalTask(h.groupTask.id);
+    assert.equal(canonical.origin, 'owner', 'user-created group canonical stays origin=owner');
+
+    // A twin-created group task gets the same treatment: no origin encoding.
+    const twinGroup = h.groupTaskStore.createTask({
+      groupId: 'group-bridge-twin',
+      title: 'Twin-initiated build',
+      goal: 'Build something the Twin will verify itself',
+      chairMetabotId: 1,
+      createdBy: 'twin',
+    });
+    const twinCanonical = h.bridge.ensureCanonicalTask(twinGroup.id);
+    assert.equal(twinCanonical.origin, 'owner', 'twin-created group canonical ALSO stays origin=owner');
+  } finally {
+    h.sqliteStore.close();
+  }
+});

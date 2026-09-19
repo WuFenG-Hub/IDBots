@@ -219,6 +219,11 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
               <span className="rounded border dark:border-claude-darkBorder border-claude-border px-1 py-[1px] text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 {sourceKindLabel(detail.sourceKind)}
               </span>
+              {detail.closerRole === 'twin' && (
+                <span className="rounded border dark:border-claude-darkBorder border-claude-border px-1 py-[1px] text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('trackedTask.badge.internal')}
+                </span>
+              )}
             </div>
             {/* 标题 = owner_intent 原文，可 1600+ 字：3 行折叠 + 实测展开（反馈②）。 */}
             <ExpandableText
@@ -495,12 +500,13 @@ const TrackedTaskDrawer: React.FC<TrackedTaskDrawerProps> = ({
           )}
         </div>
 
-        {/* 收口入口（验收⑥：单按钮，不做验收/拒绝二选一）；已收口的卡给「归档」（反馈⑥） */}
+        {/* 收口入口（验收⑥：单按钮，不做验收/拒绝二选一）；已收口的卡给「归档」（反馈⑥）。
+            v1.5：twin 自收卡不出现收口按钮——内部标记已在头部，owner 侧无动作。 */}
         <div className="flex shrink-0 items-center gap-2 border-t dark:border-claude-darkBorder border-claude-border px-4 py-3">
           <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
             {i18nService.t('trackedTask.drawer.footerHint')}
           </span>
-          {detail.state !== 'closed' && (
+          {detail.state !== 'closed' && detail.closerRole !== 'twin' && (
             <button
               type="button"
               onClick={() => onRequestCloseCard(detail.id)}
