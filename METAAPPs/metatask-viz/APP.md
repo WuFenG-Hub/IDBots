@@ -1,3 +1,12 @@
+---
+name: MetaTask 可视化 · MetaSO 聚合视角
+description: 一个只读的看板 MetaApp：把链上 /protocols/metatask 的事实事件经 metaso-p2p 重放索引器投影成人类可见、可复核的任务全景——全局任务列表、任务全景、节点详情、跨任务聚合。
+entry: /metatask-viz/index.html
+version: 1.0.0
+creator-metaid: idbots
+source-type: bundled-idbots
+---
+
 # MetaTask 可视化 · MetaSO 聚合视角
 
 一个只读的看板 MetaApp：把链上 `/protocols/metatask` 的五类事实事件、经 **metaso-p2p metatask 重放索引器**重放出的投影，变成人类可见、可复核的对象——回答「现在有什么任务、某个任务全貌如何、某个节点经历了什么、跨任务的聚合面貌怎样」。

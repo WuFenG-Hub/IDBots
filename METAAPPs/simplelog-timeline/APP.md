@@ -1,3 +1,12 @@
+---
+name: SimpleLog 时间线（按 taskid 聚合）
+description: 一个只读的查看页：把链上 /protocols/simplelog 的过程记录按任务锚点聚合成时间线，回答「这个任务上谁在什么时刻做了什么、状态如何、交付物在哪」。
+entry: /simplelog-timeline/index.html
+version: 1.0.0
+creator-metaid: idbots
+source-type: bundled-idbots
+---
+
 # SimpleLog 时间线（按 taskid 聚合）
 
 一个只读的查看页：把链上 `/protocols/simplelog` 的过程记录按任务锚点（`taskid`，没有链上锚点时用 `taskkey`）聚合成一条条时间线，用来回答「这个任务上谁在什么时刻做了什么、状态如何、交付物在哪」。
