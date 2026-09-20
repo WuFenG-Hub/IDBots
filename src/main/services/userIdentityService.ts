@@ -292,7 +292,7 @@ export async function createUserIdentity(
     name,
     avatar,
     subsidy_state: subsidyState,
-    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'MVC subsidy request failed.'),
+    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'Traffic subsidy request failed.'),
     sync_state: subsidy.success ? 'pending' : 'failed',
     sync_error: subsidy.success ? null : 'MVC subsidy must be claimed before syncing to chain.',
   });
@@ -412,7 +412,7 @@ export async function importUserIdentity(
     name,
     avatar,
     subsidy_state: subsidyState,
-    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'MVC subsidy request failed.'),
+    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'Traffic subsidy request failed.'),
     sync_state: subsidy.success ? 'pending' : 'failed',
     sync_error: subsidy.success ? null : 'MVC subsidy must be claimed before syncing to chain.',
   });
@@ -455,7 +455,7 @@ export async function retryUserIdentitySubsidy(
   );
   const updated = userStore.update({
     subsidy_state: subsidy.success ? 'claimed' : 'failed',
-    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'MVC subsidy request failed.'),
+    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'Traffic subsidy request failed.'),
     sync_state: subsidy.success ? 'pending' : 'failed',
     sync_error: subsidy.success
       ? null
@@ -489,7 +489,7 @@ export async function resumeUserIdentitySetup(
     );
     userStore.update({
       subsidy_state: subsidy.success ? 'claimed' : 'failed',
-      subsidy_error: subsidy.success ? null : (subsidy.error ?? 'MVC subsidy request failed.'),
+      subsidy_error: subsidy.success ? null : (subsidy.error ?? 'Traffic subsidy request failed.'),
       sync_state: subsidy.success ? 'pending' : 'failed',
       sync_error: subsidy.success
         ? null
