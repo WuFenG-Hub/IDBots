@@ -105,7 +105,9 @@ function main() {
   }
   const patchFiles = fs
     .readdirSync(PATCHES_DIR)
-    .filter((name) => name.endsWith('.patch'))
+    // `._foo.patch` are macOS AppleDouble sidecars the exFAT worktree volume
+    // writes next to real files — never patches (see AGENTS.md Worktree Closeout).
+    .filter((name) => name.endsWith('.patch') && !name.startsWith('._'))
     .sort();
   if (patchFiles.length === 0) {
     console.log('[dsh-kernel-patches] no kernel patches present — nothing to do');

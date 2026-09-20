@@ -45,6 +45,12 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - Regular maintenance entry point: `scripts/prune-worktrees.sh` lists every worktree whose branch is fully merged into `main` and, after confirmation, removes the worktrees and deletes the branches. `--dry-run` only lists; `--force` also removes merged worktrees that have uncommitted changes.
 - A fresh worktree needs `pnpm install` in the root before building (the postinstall covers `dsh-runtime/` and `SKILLs/web-search/`); thanks to the shared pnpm store the install is fast and adds almost no new disk usage.
 
+### Worktrees live on the external SSD
+
+- Worktrees physically live on an external SSD: `.worktrees` is a symlink to `/Volumes/Seagate/MacWork/worktrees/IDBots`. Always create worktrees as `git worktree add .worktrees/<name> ...` — the symlink puts them on the SSD automatically; never invent other temp directories.
+- While the `Seagate` volume is unmounted, every worktree add/remove/status operation over `.worktrees/` fails with a path error. That is expected behavior — remount the same-named volume and everything resumes; no repair is needed.
+- The SSD is exFAT, which needs two accommodations on every fresh worktree: (1) the volume has no POSIX mode bits, so immediately after `git worktree add` run `git config extensions.worktreeConfig true` (once per clone) and `git -C .worktrees/<name> config --worktree core.filemode false` — otherwise every tracked file shows as phantom-modified; (2) macOS writes `._*` AppleDouble sidecar files next to real files — they are git-ignored via `.gitignore` and skipped by the kernel-patch scanner, so do not "clean them up" and never feed them to tools. pnpm installs on the SSD fall back from hard links to copy mode (the pnpm store stays on the internal disk and must NOT be moved) — slower installs are the expected tradeoff for the disk relief.
+
 ## Important Runtime Rules
 
 - Windows NSIS uninstall policy is to preserve user data (`electron-builder.json` -> `nsis.deleteAppDataOnUninstall=false`); do not flip this unless a release explicitly requires destructive uninstall behavior.
