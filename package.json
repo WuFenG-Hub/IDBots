@@ -89,7 +89,7 @@
     "test:rsi-ladder": "npx tsx --test tests/rsiLadderCompute.test.ts tests/rsiLadderIndex.test.ts tests/rsiLadderMountStatic.test.ts tests/rsiLadderRegistryCli.test.ts tests/rsiLadderRegistryE2e.test.ts",
     "rsi-ladder:dedup": "npx tsx scripts/rsi-ladder-registry.ts dedup",
     "rsi-ladder:receipt": "npx tsx scripts/rsi-ladder-registry.ts receipt",
-    "test": "node --test tests/llmSafeText.test.mjs && pnpm run test:tracked-task && node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs && pnpm run test:workspace-instructions && pnpm run test:pinned-skills && pnpm run test:release-regressions && pnpm run test:memory && pnpm run test:metaweb"
+    "test": "pnpm run compile:electron && node --test tests/llmSafeText.test.mjs && pnpm run test:tracked-task && node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs && pnpm run test:workspace-instructions && pnpm run test:pinned-skills && pnpm run test:release-regressions && pnpm run test:memory && pnpm run test:metaweb"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
