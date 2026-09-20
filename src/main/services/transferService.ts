@@ -741,7 +741,7 @@ export async function executeTransfer(
                 console.warn('[Transfer] MVC: fresh funding request after stale transfer inputs failed', {
                   metabotId: params.metabotId,
                   mvcAddress,
-                  error: subsidy.error || 'MVC gas subsidy request failed',
+                  error: subsidy.error || 'Traffic subsidy request failed',
                 });
                 return false;
               }
