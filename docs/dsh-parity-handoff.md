@@ -131,7 +131,7 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 **Done in session 4 (branch `feat/dsh-p2-parity`):**
 
 9. ✅ **P2 — DSH plugin install flow** (`f69675e0`): dshPluginManager owns
-   `userData/dsh-plugins` — npm install with --legacy-peer-deps (no nested
+   `userData/dsh-plugins` — pnpm install with --legacy-peer-deps (no nested
    cordis), a peer-symlink farm pointing peers at the runtime's copies, a
    registry.json beside the packages (the DIRECTORY is the source of truth —
    a manually populated dir works without npm), and a resolver emitting
@@ -198,7 +198,7 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 
 ## 5. Testing infrastructure & gotchas
 
-- App-side: `npm run test:dsh` (rimraf dist → compile:electron → 7 test
+- App-side: `pnpm run test:dsh` (rimraf dist → compile:electron → 7 test
   files → dsh-runtime suite). dsh-runtime: `cd dsh-runtime && npm test`
   (12 files — attachment-store, mcp-bridge, ask-bridge, plugin-mount;
   mock-gateway based, no keys needed).
@@ -209,11 +209,11 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
   (self-poisoning hang loop; fixed in both fixtures 2026-08-16).
 - Orphan processes (mock servers on 487xx ports, runtime-bin) from killed
   runs poison later runs: `pkill -f runtime-bin; lsof -ti :4879x | xargs kill`.
-- Dev instance: `npm run electron:dev:dsh` (port 5185, isolated
+- Dev instance: `pnpm run electron:dev:dsh` (port 5185, isolated
   `.dev-userdata-dsh`, UI toggle is the single truth source — env override
   removed). Real-instance logs: `~/Library/Application Support/IDBots/logs/cowork.log`;
   DSH session logs: `~/Library/Application Support/IDBots/dsh-sessions/v0/`.
-- Packaging: full chain `npm run build && npm run compile:electron && npx
+- Packaging: full chain `pnpm run build && pnpm run compile:electron && npx
   cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --dir`;
   verify `release/mac-arm64/IDBots.app/Contents/Resources/dsh-runtime/`.
 - python patch scripts MUST assert anchors (silent no-ops burned us 3×).
@@ -256,7 +256,7 @@ PLUGINS="$HOME/Library/Application Support/IDBots/dsh-plugins"   # or .dev-userd
 RUNTIME_NM="<repo>/dsh-runtime/node_modules"                     # packaged: IDBots.app/Contents/Resources/dsh-runtime/node_modules
 mkdir -p "$PLUGINS" && cd "$PLUGINS"
 [ -f package.json ] || echo '{"name":"idbots-dsh-plugins","private":true,"version":"0.0.1"}' > package.json
-npm install @deepseek-ai/dsh-time-context --legacy-peer-deps --no-audit --no-fund
+pnpm install @deepseek-ai/dsh-time-context --legacy-peer-deps --no-audit --no-fund
 # Peer symlinks — the external package MUST resolve peers against the runtime's copies:
 for pj in node_modules/@deepseek-ai/*/package.json; do
   node -e "console.log(Object.keys(require('./' + process.argv[1]).peerDependencies || {}).join('\n'))" "$pj"

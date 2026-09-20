@@ -217,7 +217,7 @@ Expected: PASS.
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 ```
 
 Expected: PASS.
@@ -278,7 +278,7 @@ test('ensureServiceOrderObserverSession indexes orders to the canonical peer pri
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/serviceOrderObserverSessionUnified.test.mjs
 ```
 
@@ -303,7 +303,7 @@ In `privateChatDaemon.ts`:
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/serviceOrderObserverSessionUnified.test.mjs
 node --test tests/a2aSimplemsgMetadataBackfill.test.mjs
 ```
@@ -425,7 +425,7 @@ Use the actual service-order store/lifecycle access pattern available in this mo
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 npx tsx --test tests/simplemsgPeerConversation.test.ts
 node --test tests/serviceOrderStoreActiveOrder.test.mjs
 node --test tests/privateChatActiveOrderSuppression.test.mjs
@@ -480,7 +480,7 @@ For each case, configure the ordinary private-chat path so it would normally ski
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/privateChatUnifiedOrderRouting.test.mjs
 ```
 
@@ -528,7 +528,7 @@ For `[ORDER_STATUS]`, `[DELIVERY]`, `[NeedsRating]`, `[ORDER_END]` from seller t
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/privateChatUnifiedOrderRouting.test.mjs
 node --test tests/privateChatOrderCoworkDeliveryArtifacts.test.mjs
 node --test tests/privateChatOrderCoworkTimeout.test.mjs
@@ -620,7 +620,7 @@ Update every display-message writer discovered in Step 1, including refund/failu
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/privateChatOrderCoworkDeliveryArtifacts.test.mjs
 npx tsx --test tests/a2aMessageItem.test.tsx
 rg -n "sourceChannel\\s*[:=]\\s*['\\\"]metaweb_order['\\\"]" src/main
@@ -686,7 +686,7 @@ Extend the migration test file with required cases:
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/coworkUnifiedSessionMigration.test.mjs
 ```
 
@@ -737,7 +737,7 @@ De-duplication order:
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/coworkUnifiedSessionMigration.test.mjs
 node --test tests/a2aSimplemsgMetadataBackfill.test.mjs
 ```
@@ -816,7 +816,7 @@ Run:
 ```bash
 npx tsx --test tests/a2aMessageItem.test.tsx
 npx tsx --test tests/coworkOrderFocus.test.tsx
-npm run compile:electron
+pnpm run compile:electron
 ```
 
 Expected: PASS.
@@ -844,7 +844,7 @@ Post a Codex `metabot-post-buzz` development journal after the commit.
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 npx tsx --test tests/simplemsgPeerConversation.test.ts
 node --test tests/serviceOrderObserverSessionUnified.test.mjs
 node --test tests/privateChatUnifiedOrderRouting.test.mjs
@@ -920,5 +920,5 @@ Report:
 - dev command:
 
 ```bash
-cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots/.worktrees/codex/order-protocol-boundary && npm run electron:dev
+cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots/.worktrees/codex/order-protocol-boundary && pnpm run electron:dev
 ```

@@ -6,7 +6,7 @@
 
 **Architecture:** Keep UI behavior in the renderer session item, put direct session read/write semantics in a focused main-process cross-session service, and expose that service through the existing Cowork Runner host-tool MCP path. Add a per-target continuation queue inside `CoworkRunner` so cross-session writes do not interrupt active runs and do not duplicate the persisted user message.
 
-**Tech Stack:** Electron main process, React renderer, TypeScript, existing `CoworkStore`, Claude Agent SDK MCP tools, sandbox host-tool bridge, `node:test`, `npm run compile:electron`.
+**Tech Stack:** Electron main process, React renderer, TypeScript, existing `CoworkStore`, Claude Agent SDK MCP tools, sandbox host-tool bridge, `node:test`, `pnpm run compile:electron`.
 
 **Repository note:** Current `.gitignore` ignores `docs/*` and `tests/*`. Any task that adds plan/test files must use `git add -f` for those files, otherwise verification can pass locally while the commit omits the plan or tests.
 
@@ -288,7 +288,7 @@ test('warns when source and target are the same session', () => {
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/coworkCrossSessionService.test.mjs
+pnpm run compile:electron && node --test tests/coworkCrossSessionService.test.mjs
 ```
 
 Expected: FAIL because `dist-electron/services/coworkCrossSession.js` does not exist and `CoworkStore.getSessionLatestMessage` is not implemented.
@@ -554,7 +554,7 @@ export class CoworkCrossSessionService {
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/coworkCrossSessionService.test.mjs
+pnpm run compile:electron && node --test tests/coworkCrossSessionService.test.mjs
 ```
 
 Expected: PASS.
@@ -862,7 +862,7 @@ test('active target sessions process queued cross-session continuations in order
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/coworkCrossSessionRunner.test.mjs
+pnpm run compile:electron && node --test tests/coworkCrossSessionRunner.test.mjs
 ```
 
 Expected: FAIL because the new host tools and queue do not exist.
@@ -1242,7 +1242,7 @@ In `buildMemoryStrategyPrompt()`, append these lines to `memoryRecallPrompt`:
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/coworkCrossSessionRunner.test.mjs
+pnpm run compile:electron && node --test tests/coworkCrossSessionRunner.test.mjs
 ```
 
 Expected: PASS.
@@ -1552,7 +1552,7 @@ Run:
 
 ```bash
 node --test tests/coworkSessionLink.test.mjs tests/coworkSessionItemCopyMenu.test.mjs
-npm run build
+pnpm run build
 ```
 
 Expected: PASS.
@@ -1578,7 +1578,7 @@ After the commit, publish a development journal with Codex's `metabot-post-buzz`
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/coworkCrossSessionService.test.mjs tests/coworkCrossSessionRunner.test.mjs tests/runtimeDependencyContract.test.mjs
 node --test tests/coworkSessionLink.test.mjs tests/coworkSessionItemCopyMenu.test.mjs
 ```
@@ -1590,7 +1590,7 @@ Expected: PASS.
 Run:
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 Expected: PASS.
@@ -1600,7 +1600,7 @@ Expected: PASS.
 Run:
 
 ```bash
-npm run lint
+pnpm run lint
 ```
 
 Expected: PASS. If lint fails on unrelated pre-existing files, capture exact output and inspect whether any failure comes from files changed by this plan.
@@ -1610,7 +1610,7 @@ Expected: PASS. If lint fails on unrelated pre-existing files, capture exact out
 Run:
 
 ```bash
-npm run electron:dev
+pnpm run electron:dev
 ```
 
 Use the app to verify:
@@ -1636,10 +1636,10 @@ Implemented commits:
 - <commit> feat: copy cowork session links
 
 Verification:
-- npm run compile:electron
+- pnpm run compile:electron
 - node --test ...
-- npm run build
-- npm run lint
+- pnpm run build
+- pnpm run lint
 - manual Electron acceptance
 
 Known remaining state:

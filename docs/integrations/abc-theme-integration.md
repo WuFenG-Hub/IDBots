@@ -111,8 +111,8 @@ Add focused regression coverage for:
 Run the repository gates with Node.js 24:
 
 ```bash
-npm run build
-npm run compile:electron
+pnpm run build
+pnpm run compile:electron
 ```
 
 Also run the focused Bot Browser tests and inspect the real Electron UI in both light and dark modes. Cover at least the Welcome page, Bot Page, PIN page, settings/modal state, Bot Home switch, and collapsed navigation state.

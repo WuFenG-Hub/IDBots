@@ -154,23 +154,23 @@ GitHub 仓库是项目的主要公开事实源。
 
 ## 开发说明
 
-- **环境要求：** Node.js `>=24 <25`，npm
-- **安装：** `npm install`
-- **开发运行：** `npm run electron:dev`
-- **构建：** `npm run build`
+- **环境要求：** Node.js `>=24 <25`，pnpm（通过 `packageManager` 固定版本；首次使用先 `corepack enable`）
+- **安装：** `pnpm install`
+- **开发运行：** `pnpm run electron:dev`
+- **构建：** `pnpm run build`
 
 其他常用命令：
 
 ```bash
 # 编译 Electron TypeScript
-npm run compile:electron
+pnpm run compile:electron
 
 # 从兄弟仓库同步 man-p2p 二进制
-npm run sync:man-p2p
+pnpm run sync:man-p2p
 
 # 打包发布构建
-npm run dist:mac
-npm run dist:win
+pnpm run dist:mac
+pnpm run dist:win
 
 # 运行 node-based 测试
 node --test tests/*.test.mjs
@@ -178,7 +178,8 @@ node --test tests/*.test.mjs
 
 说明：
 
-- `npm run electron:dev` 仅用于开发态运行。
+- `pnpm run electron:dev` 仅用于开发态运行。
+- 嵌套的 `dsh-runtime/` 与 `SKILLs/web-search/` 包由根目录 `postinstall` 自动安装；拉取了涉及它们的改动后，可运行 `pnpm --dir dsh-runtime install` / `pnpm --dir SKILLs/web-search install`。
 - 发布验证应以打包后的应用构建为准，而不应只依赖 dev runtime。
 - 克隆后首次运行，请先完成 onboarding，并至少配置一个 LLM provider，再使用 Cowork 等依赖 LLM 的功能。
 - 待对接事项：[ABC 主题功能对接文档](docs/integrations/abc-theme-integration.md)。

@@ -270,7 +270,7 @@ npx eslint src/renderer/components/agentGame src/renderer/services/agentGame.ts 
           src/renderer/store/slices/agentGameSlice.ts src/renderer/types/agentGame.ts
 
 # Full electron compile (the build's compile step)
-npm run compile:electron
+pnpm run compile:electron
 ```
 
 The per-module smoke tests were ad-hoc node scripts run during development

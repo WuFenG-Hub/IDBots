@@ -52,12 +52,12 @@
 
 ### Verification commands used throughout
 
-- `npm run compile:electron`
+- `pnpm run compile:electron`
 - `node --test tests/gigSquareRefundsService.test.mjs`
 - `npx tsx --test tests/gigSquareRefundsModal.test.tsx tests/gigSquareHeaderActions.test.tsx`
 - `node --test tests/coworkServiceOrderPresentation.test.mjs`
-- `npm run lint`
-- `npm run electron:dev`
+- `pnpm run lint`
+- `pnpm run electron:dev`
 
 ---
 
@@ -378,7 +378,7 @@ test('processRefundOrder only allows seller refund_pending rows to hit settlemen
 Run:
 
 ```bash
-npx rimraf dist-electron && npm run compile:electron && node --test tests/gigSquareRefundsService.test.mjs
+npx rimraf dist-electron && pnpm run compile:electron && node --test tests/gigSquareRefundsService.test.mjs
 ```
 
 Expected:
@@ -503,7 +503,7 @@ export class GigSquareRefundsService {
 Run:
 
 ```bash
-npx rimraf dist-electron && npm run compile:electron && node --test tests/gigSquareRefundsService.test.mjs
+npx rimraf dist-electron && pnpm run compile:electron && node --test tests/gigSquareRefundsService.test.mjs
 ```
 
 Expected:
@@ -570,7 +570,7 @@ test('processRefundOrder returns settlement fields needed by the renderer refres
 Run:
 
 ```bash
-npx rimraf dist-electron && npm run compile:electron && node --test tests/gigSquareRefundsService.test.mjs
+npx rimraf dist-electron && pnpm run compile:electron && node --test tests/gigSquareRefundsService.test.mjs
 ```
 
 Expected:
@@ -700,13 +700,13 @@ interface IElectronAPI {
 Run:
 
 ```bash
-npx rimraf dist-electron && npm run compile:electron && node --test tests/gigSquareRefundsService.test.mjs
+npx rimraf dist-electron && pnpm run compile:electron && node --test tests/gigSquareRefundsService.test.mjs
 ```
 
 Expected:
 
 - PASS for the service test suite
-- `npm run compile:electron` succeeds with the new preload and renderer types
+- `pnpm run compile:electron` succeeds with the new preload and renderer types
 
 - [ ] **Step 5: Commit**
 
@@ -1232,14 +1232,14 @@ Run:
 
 ```bash
 npx tsx --test tests/gigSquareRefundsModal.test.tsx tests/gigSquareHeaderActions.test.tsx
-npm run lint
-npm run electron:dev
+pnpm run lint
+pnpm run electron:dev
 ```
 
 Expected:
 
 - Both renderer tests PASS
-- `npm run lint` exits cleanly
+- `pnpm run lint` exits cleanly
 - In `electron:dev`, Bot Hub still keeps the existing manual refresh button, shows `服务退款` beside `我的服务`, re-fetches refunds on modal-open, and processing a seller pending row refreshes the badge and row state without changing A2A behavior
 
 - [ ] **Step 5: Commit**

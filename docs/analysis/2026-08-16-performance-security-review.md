@@ -198,7 +198,7 @@ Performance blockers are moderate and mostly localized:
 | P4 | Stream batching | Medium | S | Round 2 |
 | P5/P6/P7 | Polling/background throttling | Low-Med | S | Round 3 |
 
-Each round should: implement in this branch → run the project's real verification (`npm run lint`, `npm run compile:electron`, targeted `node --test` suites, `npm run build`, `npm audit`) → one commit per change → manual smoke of affected flows before release.
+Each round should: implement in this branch → run the project's real verification (`pnpm run lint`, `pnpm run compile:electron`, targeted `node --test` suites, `pnpm run build`, `npm audit`) → one commit per change → manual smoke of affected flows before release.
 
 ---
 
@@ -246,6 +246,6 @@ Executed on `perf/performance-review` (`6aed20ce` → `chore(deps)`).
   - `elliptic`/`bitcore-lib`/`@metalet/utxo-wallet-*`/`@opcat-labs/opcat`/`meta-contract`/`mvc-lib`/`mvc-scrypt`: "risky cryptographic primitive" advisories with no patched release (npm's suggested fix downgrades `@metalet/utxo-wallet-service` to 0.2.4 / `meta-contract` to 0.0.8, which is not applicable). Accepted; monitor upstream.
 
 ### Verification
-- `npm run compile:electron` ✅ (Electron 41 types)
-- `npm run build` (renderer + main + preload) ✅
+- `pnpm run compile:electron` ✅ (Electron 41 types)
+- `pnpm run build` (renderer + main + preload) ✅
 - Targeted suites: RPC (19) + skill (19) + wallet/metaidCore + runtime contracts — all pass except 4 pre-existing failures that also fail on un-upgraded `main` (`metaidCoreMvcRecovery.test.mjs` ×2, `metabotLimit.test.mjs` + `runtimePaths.test.mjs` ×2, worktree/environment-related, unrelated to S2).

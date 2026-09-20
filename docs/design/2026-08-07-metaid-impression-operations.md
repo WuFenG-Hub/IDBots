@@ -119,7 +119,7 @@ There is no downgrade path that discards user data.
 Per-commit and final verification:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metaidCognitionContext.test.mjs tests/metaidDreamImpressionService.test.mjs \
   tests/metaidExperienceStore.test.mjs tests/metaidExperienceRecorder.test.mjs \
   tests/metaidExperienceBackfillService.test.mjs tests/metaidImpressionStore.test.mjs \

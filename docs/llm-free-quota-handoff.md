@@ -61,7 +61,7 @@
 
 ## 5. 验证状态（如实汇报）
 
-- `compile:electron`、renderer `tsc`、`npm run build`、scoped eslint 全绿。
+- `compile:electron`、renderer `tsc`、`pnpm run build`、scoped eslint 全绿。
 - 新增/相关测试 36/36 通过（含真实助记词验签）。
 - **未做真机联调**：没有连真实后端跑过完整首启流程；bootstrap→落地配置→发消息扣额度这条链路只在单测层面验证过。
 - 存量问题（main 上就有，与本分支无关）：全量 `tests/*.test.mjs` 在本环境大面积红（dist-electron 路径漂移）；全量 lint 有 2 个 unused-disable 报错（`opcatInscribe.ts`、`MetaBotEditTabs.tsx`）；源旁 `.ts` 测试扩展名解析失败。
@@ -69,7 +69,7 @@
 ## 6. 下一步（接力顺序）
 
 1. 后端先按其后端 handoff 第 7 节部署 testnet（yaml `llm:` 段 + `sql/update.sql` + 真实 DeepSeek key）。
-2. 本 worktree 里 `npm run electron:dev` 走真实首启：
+2. 本 worktree 里 `pnpm run electron:dev` 走真实首启：
    - 应看到：静默建身份（不卡 onboarding）→ bootstrap 成功 → 欢迎 Bot 会话出现 → 可直接聊天。
    - 后端地址从哪来：`metaid-free` provider 的 baseUrl（`src/renderer/config.ts` 与 bootstrap 请求里的后端地址），testnet 联调时确认指向测试环境。
 3. 验证：额度随对话扣减（FreeQuotaCard 数字变化 / 后端 usage 表）；把后端额度改小触发 429，看聊天页引导横幅；Settings 卡片手动启用/禁用。

@@ -29,7 +29,7 @@ Add `tests/mvcSpend.test.mjs` to cover:
 
 - [ ] **Step 2: Run the new test to verify it fails**
 
-Run: `npm run compile:electron && node --test tests/mvcSpend.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/mvcSpend.test.mjs`
 
 Expected: FAIL because `mvcSpend.ts` does not yet expose the normalized request/result helpers and classification API required by the test.
 
@@ -47,7 +47,7 @@ Keep this module focused on reusable MVC spend primitives, not business workflow
 
 - [ ] **Step 4: Run the shared-core tests to verify they pass**
 
-Run: `npm run compile:electron && node --test tests/mvcSpend.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/mvcSpend.test.mjs`
 
 Expected: PASS.
 
@@ -78,7 +78,7 @@ Add tests that assert:
 
 - [ ] **Step 2: Run the coordinator tests to verify they fail**
 
-Run: `npm run compile:electron && node --test tests/mvcSpendCoordinator.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/mvcSpendCoordinator.test.mjs`
 
 Expected: FAIL because the coordinator service does not exist yet.
 
@@ -94,7 +94,7 @@ Hook `metaidCore` and `transferService` only enough to prove the coordinator can
 
 - [ ] **Step 4: Run the coordinator tests to verify they pass**
 
-Run: `npm run compile:electron && node --test tests/mvcSpendCoordinator.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/mvcSpendCoordinator.test.mjs`
 
 Expected: PASS.
 
@@ -129,7 +129,7 @@ Extend tests to cover:
 
 Run:
 ```bash
-npm run compile:electron && node --test tests/createPinWorker.test.mjs tests/providerPingService.test.mjs tests/heartbeatService.test.mjs
+pnpm run compile:electron && node --test tests/createPinWorker.test.mjs tests/providerPingService.test.mjs tests/heartbeatService.test.mjs
 ```
 
 Expected: FAIL on the new coordinator/serialization assertions.
@@ -149,7 +149,7 @@ Update ping and heartbeat paths only as needed so their MVC sends now share the 
 
 Run:
 ```bash
-npm run compile:electron && node --test tests/createPinWorker.test.mjs tests/providerPingService.test.mjs tests/heartbeatService.test.mjs
+pnpm run compile:electron && node --test tests/createPinWorker.test.mjs tests/providerPingService.test.mjs tests/heartbeatService.test.mjs
 ```
 
 Expected: PASS.
@@ -183,7 +183,7 @@ Extend or add tests to cover:
 
 Run:
 ```bash
-npm run compile:electron && node --test tests/transferMvcWorker.test.mjs tests/orderPayment.test.mjs
+pnpm run compile:electron && node --test tests/transferMvcWorker.test.mjs tests/orderPayment.test.mjs
 ```
 
 Expected: FAIL on the new payment governance assertions.
@@ -198,7 +198,7 @@ Update `main.ts` Gig Square payment call sites only enough to rely on the govern
 
 Run:
 ```bash
-npm run compile:electron && node --test tests/transferMvcWorker.test.mjs tests/orderPayment.test.mjs
+pnpm run compile:electron && node --test tests/transferMvcWorker.test.mjs tests/orderPayment.test.mjs
 ```
 
 Expected: PASS.
@@ -231,7 +231,7 @@ Add tests that cover:
 
 Run:
 ```bash
-npm run compile:electron && node --test tests/metaFileUploadMvcSpend.test.mjs
+pnpm run compile:electron && node --test tests/metaFileUploadMvcSpend.test.mjs
 ```
 
 Expected: FAIL because `uploadLargeFileWorker.ts` still has its own confirmed-first/random `pickUtxos` and does not use shared governance.
@@ -251,7 +251,7 @@ Keep direct uploads on the same governed `createPin` path introduced earlier.
 
 Run:
 ```bash
-npm run compile:electron && node --test tests/metaFileUploadMvcSpend.test.mjs
+pnpm run compile:electron && node --test tests/metaFileUploadMvcSpend.test.mjs
 ```
 
 Expected: PASS.
@@ -309,10 +309,10 @@ Then manually smoke-check in the app or worker CLI with AI_Sunny:
 
 Run:
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/mvcSpend.test.mjs tests/mvcSpendCoordinator.test.mjs tests/createPinWorker.test.mjs tests/transferMvcWorker.test.mjs tests/providerPingService.test.mjs tests/heartbeatService.test.mjs tests/orderPayment.test.mjs tests/metaFileUploadMvcSpend.test.mjs
-npm run lint
-npm run build
+pnpm run lint
+pnpm run build
 ```
 
 Expected: PASS, with any known unrelated failures called out explicitly if they remain outside this scope.
