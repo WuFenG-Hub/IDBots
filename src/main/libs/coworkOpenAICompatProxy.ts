@@ -25,6 +25,7 @@ import {
   type RequestHeadFingerprint,
 } from './coworkRequestHeadWatch';
 import { modelSupportsVision } from './coworkModelLimits';
+import { modelAlwaysThinks, responsesEffortForThinkingOff, thinkingWireFamily } from './modelThinking';
 import type { ScheduledTaskStore, ScheduledTaskInput } from '../scheduledTaskStore';
 import type { Scheduler } from './scheduler';
 
@@ -1450,6 +1451,27 @@ function convertChatCompletionsRequestToResponsesRequest(
       ? (normalizeDeepSeekResponsesEffort(rawEffort) ?? (rawEffort ? 'none' : 'high'))
       : 'none';
     request.reasoning = { effort };
+  } else if (thinkingWireFamily(toString(chatRequest.model)) === 'glm') {
+    // GLM family on a Responses endpoint (zhipu open.bigmodel.cn, z.ai, and
+    // any relay serving glm-* ids). The 2026-09-20 dream-fragment outage: this
+    // branch did not exist, so a caller's thinking:{type:'disabled'} was
+    // silently dropped, GLM-5.x kept thinking at its default effort, and the
+    // hidden reasoning consumed the whole max_output_tokens budget
+    // (stop_reason=max_tokens, blocks=none). Map the toggle explicitly —
+    // GLM-5.x cannot disable (effort 'none' is a 400, code 1210), so "off"
+    // becomes the lowest tier; GLM-4.x honors 'none'. An enabled toggle with
+    // a small budget_tokens maps to 'low' so a caller's low-effort intent
+    // survives the wire translation.
+    const glmModel = toString(chatRequest.model);
+    const thinking = toOptionalObject(chatRequest.thinking);
+    const thinkingType = toString(thinking?.type).toLowerCase();
+    const thinkingBudget = toNumber((thinking as { budget_tokens?: unknown } | null)?.budget_tokens);
+    if (thinkingType === 'disabled') {
+      const effort = responsesEffortForThinkingOff(glmModel);
+      if (effort) request.reasoning = { effort };
+    } else if (thinkingType === 'enabled' && thinkingBudget != null && thinkingBudget > 0) {
+      request.reasoning = { effort: thinkingBudget <= 4_000 ? 'low' : 'high' };
+    }
   }
 
   const maxOutputTokens = toNumber(chatRequest.max_output_tokens)
@@ -3880,6 +3902,21 @@ async function handleRequest(
 
   if (upstreamAPIType === 'chat_completions') {
     normalizeMaxTokensFieldForOpenAIProvider(openAIRequest, upstream.provider);
+    // GLM-5.x chat endpoints reject thinking:{type:'disabled'} outright (zhipu
+    // 400 code 1210 「该模型始终思考，不支持关闭思考」). Drop the toggle for
+    // always-thinking models instead of failing the request; the output budget
+    // at the caller is thinking-aware (modelThinking.budgetAssumesThinking),
+    // and a disabled toggle on a model that cannot disable was never going to
+    // be honored anyway.
+    if (modelAlwaysThinks(toString(openAIRequest.model))) {
+      const thinking = toOptionalObject(openAIRequest.thinking);
+      if (toString(thinking?.type).toLowerCase() === 'disabled') {
+        delete openAIRequest.thinking;
+        coworkLog('INFO', 'thinking-toggle', 'dropped thinking:disabled for always-thinking model on chat path', {
+          model: toString(openAIRequest.model),
+        });
+      }
+    }
   }
 
   const upstreamRequest = upstreamAPIType === 'responses'
