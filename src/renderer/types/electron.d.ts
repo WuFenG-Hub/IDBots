@@ -1376,6 +1376,7 @@ interface IElectronAPI {
     bindAllBots: () => Promise<{ success: boolean; summary?: TrafficBindSummaryInfo; error?: string }>;
     getLocalJournal: (input?: { limit?: number; botAddress?: string }) => Promise<{ success: boolean; entries?: TrafficSpendJournalEntryInfo[]; error?: string }>;
     getPricing: () => Promise<{ success: boolean; plans?: TrafficPricingPlanInfo[]; error?: string }>;
+    getRechargeGateway: () => Promise<{ success: boolean; gateway?: 'paypal' | 'mock'; error?: string }>;
     createRechargeOrder: (input: { planId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderInfo; error?: string }>;
     getRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
     mockConfirmRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;

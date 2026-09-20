@@ -863,6 +863,27 @@ export interface TrafficRechargeOrderStatus {
   creditedAt?: number;
 }
 
+/** Recharge gateways the backend payment-gateway seam can accept. */
+export const RECHARGE_GATEWAYS = ['paypal', 'mock'] as const;
+export type RechargeGateway = (typeof RECHARGE_GATEWAYS)[number];
+
+/**
+ * Gateway used for new recharge orders. Packaged builds always go through the
+ * real PayPal gateway — the mock gateway must never be able to credit traffic
+ * in production (Phase 4 requirement). Dev builds and plain-node tests resolve
+ * to 'mock' (Electron is loaded lazily here, same pattern as
+ * getTrafficClientVersion: outside Electron require('electron') yields no app).
+ */
+export function resolveRechargeGateway(): RechargeGateway {
+  try {
+    const { app } = require('electron');
+    if (app?.isPackaged) return 'paypal';
+  } catch {
+    // electron unavailable — fall through to the mock gateway
+  }
+  return 'mock';
+}
+
 /** Public rate table; no identity signature required. */
 export async function getTrafficPricing(): Promise<TrafficPricingPlan[]> {
   const data = await trafficRequestJson({
@@ -889,14 +910,20 @@ export async function getTrafficPricing(): Promise<TrafficPricingPlan[]> {
 }
 
 /**
- * Create a recharge order for the local identity's account. The gateway is
- * hardcoded to 'mock' for the development rollout; Phase 4 swaps in real
- * payment gateways (Stripe/Alipay) behind this same call site.
+ * Create a recharge order for the local identity's account. The gateway comes
+ * from resolveRechargeGateway() (mock in dev/tests, paypal in packaged builds)
+ * and is validated against RECHARGE_GATEWAYS before hitting the backend.
  */
-export async function createRechargeOrder(planId: string): Promise<TrafficRechargeOrder> {
+export async function createRechargeOrder(
+  planId: string,
+  gateway: RechargeGateway = resolveRechargeGateway(),
+): Promise<TrafficRechargeOrder> {
   const normalizedPlanId = normalizeText(planId);
   if (!normalizedPlanId) {
     throw new TrafficApiError({ stage: 'recharge', message: 'planId is required' });
+  }
+  if (!RECHARGE_GATEWAYS.includes(gateway)) {
+    throw new TrafficApiError({ stage: 'recharge', message: `Unsupported recharge gateway: ${String(gateway)}` });
   }
   const identity = requireIdentity();
   const account = await requireAccount();
@@ -907,7 +934,7 @@ export async function createRechargeOrder(planId: string): Promise<TrafficRechar
     stage: 'recharge',
     method: 'POST',
     path: '/v1/traffic/recharge/orders',
-    body: { planId: normalizedPlanId, gateway: 'mock' },
+    body: { planId: normalizedPlanId, gateway },
     identity: { address: identity.mvcAddress, timestamp, signature },
   });
   const record = data as Record<string, unknown>;
@@ -1368,6 +1395,13 @@ export function registerTrafficAccountIpcHandlers(deps: { ipcMain: IpcMainLike }
   ipcMain.handle('traffic:getPricing', async () => {
     try {
       return { success: true, plans: await getTrafficPricing() };
+    } catch (error) {
+      return { success: false, error: getErrorMessage(error) };
+    }
+  });
+  ipcMain.handle('traffic:getRechargeGateway', async () => {
+    try {
+      return { success: true, gateway: resolveRechargeGateway() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }

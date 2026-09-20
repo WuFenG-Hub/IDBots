@@ -753,6 +753,7 @@ contextBridge.exposeInMainWorld('electron', {
     getLocalJournal: (input?: { limit?: number; botAddress?: string }) =>
       ipcRenderer.invoke('traffic:getLocalJournal', input ?? {}),
     getPricing: () => ipcRenderer.invoke('traffic:getPricing'),
+    getRechargeGateway: () => ipcRenderer.invoke('traffic:getRechargeGateway'),
     createRechargeOrder: (input: { planId: string }) => ipcRenderer.invoke('traffic:createRechargeOrder', input),
     getRechargeOrder: (input: { orderId: string }) => ipcRenderer.invoke('traffic:getRechargeOrder', input),
     mockConfirmRechargeOrder: (input: { orderId: string }) => ipcRenderer.invoke('traffic:mockConfirmRechargeOrder', input),

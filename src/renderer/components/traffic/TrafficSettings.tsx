@@ -1,12 +1,13 @@
 /**
  * Traffic Settings panel.
  * Sections in one tab: billing-mode toggle (account quota vs MetaBot
- * self-pay), available quota with the free-grant claim banner, redeem-code
+ * self-pay), available quota with the free-grant claim banner, PayPal recharge
+ * (plan picker → order → browser checkout → status polling), redeem-code
  * entry, and usage (per-bot daily table, 30-day summary, ledger).
  * UI copy goes through i18nService (zh/en), same as Settings/UserSettings.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowPathIcon,
   BoltIcon,
@@ -109,6 +110,87 @@ const LEDGER_KIND_KEYS: Record<string, string> = {
 const LEDGER_SOURCE_TYPE_KEYS: Record<string, string> = {
   free_grant: 'trafficSourceFreeGrant',
   recharge_code: 'trafficSourceRechargeCode',
+  recharge_order: 'trafficSourceRechargeOrder',
+};
+
+// Recharge order status values delivered by the backend (mirrors
+// TRAFFIC_RECHARGE_STATUS in main/services/trafficAccountService.ts).
+const RECHARGE_STATUS_CREDITED = 3;
+const RECHARGE_STATUS_CLOSED = 4;
+
+type RechargeOrderPhase = 'pick' | 'paying' | 'credited' | 'closed';
+
+type TrafficPricingPlanInfo = {
+  planId: string;
+  chain: string;
+  payCurrency: string;
+  payAmount: number;
+  trafficBytes: number;
+  status: number;
+  remark: string;
+};
+
+type TrafficRechargeOrderStatusInfo = {
+  orderId: string;
+  status: number;
+  paidAt?: number;
+  creditedAt?: number;
+};
+
+type ActiveRechargeOrder = {
+  orderId: string;
+  gateway: 'paypal' | 'mock';
+  /** PayPal checkout URL extracted from gatewayParams ('' for mock orders). */
+  approvalUrl: string;
+  payAmount: number;
+  payCurrency: string;
+  trafficBytes: number;
+};
+
+const RECHARGE_POLL_INTERVAL_MS = 4_000;
+const RECHARGE_POLL_WINDOW_MS = 10 * 60_000;
+
+const CURRENCY_SYMBOLS: Record<string, string> = { USD: '$', CNY: '¥', EUR: '€', GBP: '£' };
+
+const formatPlanPrice = (currency: string, amount: number): string => {
+  const code = String(currency || '').toUpperCase();
+  const symbol = CURRENCY_SYMBOLS[code];
+  const value = Number.isFinite(amount) ? amount : 0;
+  const text = value.toLocaleString(undefined, {
+    minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
+  return symbol ? `${symbol}${text}` : `${code} ${text}`;
+};
+
+// The PayPal approval link lives in gatewayParams; accept the likely key
+// variants until the backend contract (phase4-paypal-backend-requirements.md)
+// is delivered and locked.
+const extractApprovalUrl = (gatewayParams: unknown): string => {
+  if (!gatewayParams || typeof gatewayParams !== 'object') return '';
+  const record = gatewayParams as Record<string, unknown>;
+  for (const key of ['approvalUrl', 'approval_url', 'approveLink', 'approve_url', 'paymentUrl']) {
+    const value = record[key];
+    if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
+  }
+  return '';
+};
+
+const hasMockToken = (gatewayParams: unknown): boolean => {
+  if (!gatewayParams || typeof gatewayParams !== 'object') return false;
+  return typeof (gatewayParams as Record<string, unknown>).mockToken === 'string';
+};
+
+// Backend rejects a gateway it doesn't support (e.g. paypal before the Phase 4
+// adapter ships) with a plain message — map it to friendly copy.
+const GATEWAY_UNSUPPORTED_PATTERN = /gateway.*unsupported|unsupported.*gateway|gateway.*unavailable/i;
+
+const describeRechargeError = (raw: string, fallbackKey: string): string => {
+  const text = String(raw || '').trim();
+  if (text && GATEWAY_UNSUPPORTED_PATTERN.test(text)) {
+    return i18nService.t('trafficRechargeUnavailable');
+  }
+  return describeTrafficError(raw, fallbackKey);
 };
 
 // Backend data.errorCode values mapped to friendly i18n copy (Phase 3b).
@@ -260,7 +342,18 @@ const TrafficSettings: React.FC = () => {
   const [claimNotice, setClaimNotice] = useState('');
   const [redeemOpen, setRedeemOpen] = useState(false);
   const [tariffOpen, setTariffOpen] = useState(false);
-  const [rechargeNotice, setRechargeNotice] = useState('');
+  const [rechargeOpen, setRechargeOpen] = useState(false);
+  const [rechargeGateway, setRechargeGateway] = useState<'paypal' | 'mock' | null>(null);
+  const [pricingPlans, setPricingPlans] = useState<TrafficPricingPlanInfo[] | null>(null);
+  const [pricingLoading, setPricingLoading] = useState(false);
+  const [pricingError, setPricingError] = useState('');
+  const [selectedPlanId, setSelectedPlanId] = useState('');
+  const [activeOrder, setActiveOrder] = useState<ActiveRechargeOrder | null>(null);
+  const [orderPhase, setOrderPhase] = useState<RechargeOrderPhase>('pick');
+  const [orderError, setOrderError] = useState('');
+  const [orderBusy, setOrderBusy] = useState(false);
+  const orderPollTimerRef = useRef<number | null>(null);
+  const orderPollDeadlineRef = useRef(0);
   const [redeemCodeInput, setRedeemCodeInput] = useState('');
   const [redeeming, setRedeeming] = useState(false);
   const [redeemError, setRedeemError] = useState('');
@@ -291,16 +384,36 @@ const TrafficSettings: React.FC = () => {
     return unsubscribe;
   }, []);
 
+  const stopOrderPolling = useCallback(() => {
+    if (orderPollTimerRef.current !== null) {
+      window.clearInterval(orderPollTimerRef.current);
+      orderPollTimerRef.current = null;
+    }
+  }, []);
+
+  // Stop an in-flight order poll when the component unmounts.
+  useEffect(() => stopOrderPolling, [stopOrderPolling]);
+
+  const closeRecharge = useCallback(() => {
+    stopOrderPolling();
+    setRechargeOpen(false);
+    setActiveOrder(null);
+    setOrderPhase('pick');
+    setOrderError('');
+    setOrderBusy(false);
+  }, [stopOrderPolling]);
+
   useEffect(() => {
-    if (!redeemOpen && !tariffOpen) return undefined;
+    if (!redeemOpen && !tariffOpen && !rechargeOpen) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setRedeemOpen(false);
       setTariffOpen(false);
+      closeRecharge();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [redeemOpen, tariffOpen]);
+  }, [redeemOpen, tariffOpen, rechargeOpen, closeRecharge]);
 
   const refreshBalance = useCallback(async (forceRefresh = false) => {
     setBalanceLoading(true);
@@ -596,9 +709,155 @@ const TrafficSettings: React.FC = () => {
     setRedeemSuccess(null);
   };
 
-  const notifyRechargeSoon = () => {
-    setRechargeNotice(i18nService.t('trafficRechargeSoon'));
-    window.setTimeout(() => setRechargeNotice(''), 2500);
+  const loadPricingPlans = useCallback(async () => {
+    setPricingLoading(true);
+    setPricingError('');
+    try {
+      const res = await trafficApi.getPricing();
+      if (res.success && res.plans) {
+        const active = res.plans.filter((plan) => plan.status === 1);
+        setPricingPlans(active);
+        setSelectedPlanId((current) => (
+          current && active.some((plan) => plan.planId === current) ? current : (active[0]?.planId ?? '')
+        ));
+      } else {
+        setPricingPlans(null);
+        setPricingError(describeTrafficError(res.error || '', 'trafficErrLoadPricing'));
+      }
+    } catch (error) {
+      setPricingPlans(null);
+      setPricingError(describeTrafficError(error instanceof Error ? error.message : '', 'trafficErrLoadPricing'));
+    } finally {
+      setPricingLoading(false);
+    }
+  }, [trafficApi]);
+
+  const openRecharge = () => {
+    setRechargeOpen(true);
+    setOrderPhase('pick');
+    setActiveOrder(null);
+    setOrderError('');
+    setOrderBusy(false);
+    trafficApi.getRechargeGateway()
+      .then((res) => {
+        if (res?.success && res.gateway) setRechargeGateway(res.gateway);
+      })
+      .catch(() => {});
+    loadPricingPlans();
+  };
+
+  const applyOrderStatus = useCallback((status: TrafficRechargeOrderStatusInfo) => {
+    if (status.status === RECHARGE_STATUS_CREDITED) {
+      stopOrderPolling();
+      setOrderPhase('credited');
+      refreshBalance(true);
+      loadLedger(0);
+    } else if (status.status === RECHARGE_STATUS_CLOSED) {
+      stopOrderPolling();
+      setOrderPhase('closed');
+    }
+  }, [loadLedger, refreshBalance, stopOrderPolling]);
+
+  const checkOrderOnce = useCallback(async (orderId: string): Promise<TrafficRechargeOrderStatusInfo | null> => {
+    try {
+      const res = await trafficApi.getRechargeOrder({ orderId });
+      if (res.success && res.order) return res.order;
+    } catch {
+      // transient failure — the next poll tick retries
+    }
+    return null;
+  }, [trafficApi]);
+
+  const startOrderPolling = useCallback((orderId: string) => {
+    stopOrderPolling();
+    orderPollDeadlineRef.current = Date.now() + RECHARGE_POLL_WINDOW_MS;
+    orderPollTimerRef.current = window.setInterval(() => {
+      if (Date.now() > orderPollDeadlineRef.current) {
+        // Out of the auto-poll window: the waiting UI and manual check stay.
+        stopOrderPolling();
+        return;
+      }
+      void checkOrderOnce(orderId).then((status) => {
+        if (status) applyOrderStatus(status);
+      });
+    }, RECHARGE_POLL_INTERVAL_MS);
+  }, [applyOrderStatus, checkOrderOnce, stopOrderPolling]);
+
+  const handleCreateOrder = async () => {
+    const planId = selectedPlanId;
+    if (orderBusy || !planId) return;
+    setOrderBusy(true);
+    setOrderError('');
+    try {
+      const res = await trafficApi.createRechargeOrder({ planId });
+      if (!res.success || !res.order) {
+        setOrderError(describeRechargeError(res.error || '', 'trafficErrCreateOrder'));
+        return;
+      }
+      const approvalUrl = extractApprovalUrl(res.order.gatewayParams);
+      if (!approvalUrl && !hasMockToken(res.order.gatewayParams)) {
+        // Neither a PayPal link nor a mock token: unexpected gateway response.
+        setOrderError(i18nService.t('trafficRechargeUnavailable'));
+        return;
+      }
+      const order: ActiveRechargeOrder = {
+        orderId: res.order.orderId,
+        gateway: approvalUrl ? 'paypal' : 'mock',
+        approvalUrl,
+        payAmount: res.order.payAmount,
+        payCurrency: res.order.payCurrency,
+        trafficBytes: res.order.trafficBytes,
+      };
+      setActiveOrder(order);
+      setOrderPhase('paying');
+      if (order.gateway === 'paypal') {
+        window.electron.shell.openExternal(order.approvalUrl).catch(() => {});
+        startOrderPolling(order.orderId);
+      }
+    } catch (error) {
+      setOrderError(describeRechargeError(error instanceof Error ? error.message : '', 'trafficErrCreateOrder'));
+    } finally {
+      setOrderBusy(false);
+    }
+  };
+
+  const handleCheckOrderNow = async () => {
+    if (orderBusy || !activeOrder) return;
+    setOrderBusy(true);
+    setOrderError('');
+    const status = await checkOrderOnce(activeOrder.orderId);
+    if (status) {
+      applyOrderStatus(status);
+    } else {
+      setOrderError(describeTrafficError('', 'trafficErrCheckOrder'));
+    }
+    setOrderBusy(false);
+  };
+
+  const handleMockConfirm = async () => {
+    if (orderBusy || !activeOrder) return;
+    setOrderBusy(true);
+    setOrderError('');
+    try {
+      const res = await trafficApi.mockConfirmRechargeOrder({ orderId: activeOrder.orderId });
+      if (res.success && res.order) {
+        applyOrderStatus(res.order);
+      } else {
+        setOrderError(describeTrafficError(res.error || '', 'trafficErrCheckOrder'));
+      }
+    } catch (error) {
+      setOrderError(describeTrafficError(error instanceof Error ? error.message : '', 'trafficErrCheckOrder'));
+    } finally {
+      setOrderBusy(false);
+    }
+  };
+
+  const backToPlanPicker = () => {
+    stopOrderPolling();
+    setActiveOrder(null);
+    setOrderPhase('pick');
+    setOrderError('');
+    setOrderBusy(false);
   };
 
   // Usage table always renders newest-first, regardless of backend row order
@@ -774,7 +1033,7 @@ const TrafficSettings: React.FC = () => {
               <button
                 type="button"
                 className={primaryButtonClass}
-                onClick={notifyRechargeSoon}
+                onClick={openRecharge}
               >
                 <span className="inline-flex items-center gap-1">
                   <BoltIcon className="h-4 w-4" />
@@ -782,9 +1041,6 @@ const TrafficSettings: React.FC = () => {
                 </span>
               </button>
             </div>
-            {rechargeNotice ? (
-              <p className="text-xs text-claude-accent">{rechargeNotice}</p>
-            ) : null}
           </div>
         </div>
         {(canClaimFreeGrant || claimNotice) && (
@@ -1035,6 +1291,186 @@ const TrafficSettings: React.FC = () => {
                 )}
               </div>
             </div>
+          )}
+        </OverlayPanel>
+      )}
+
+      {rechargeOpen && (
+        <OverlayPanel onDismiss={closeRecharge} widthClass="w-[480px]">
+          {orderPhase === 'pick' && (
+            <>
+              <div className="flex items-center gap-2 mb-1">
+                <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                  {i18nService.t('trafficRechargeTitle')}
+                </h4>
+                {rechargeGateway === 'mock' && (
+                  <span className="rounded-full bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 text-[10px] text-amber-600 dark:text-amber-400">
+                    {i18nService.t('trafficRechargeMockGatewayBadge')}
+                  </span>
+                )}
+              </div>
+              <p className={`${hintClass} mb-3`}>{i18nService.t('trafficRechargeDesc')}</p>
+              {pricingLoading && <p className={hintClass}>{i18nService.t('trafficRechargePlansLoading')}</p>}
+              {pricingError && (
+                <div className="flex items-center gap-2 mb-2">
+                  <p className="text-xs text-red-500 flex-1">{pricingError}</p>
+                  <button type="button" className={ghostButtonClass} onClick={loadPricingPlans}>
+                    {i18nService.t('trafficRetry')}
+                  </button>
+                </div>
+              )}
+              {!pricingLoading && !pricingError && pricingPlans && pricingPlans.length === 0 && (
+                <p className={hintClass}>{i18nService.t('trafficRechargePlansEmpty')}</p>
+              )}
+              {pricingPlans && pricingPlans.length > 0 && (
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-0.5">
+                  {pricingPlans.map((plan) => {
+                    const selected = plan.planId === selectedPlanId;
+                    return (
+                      <button
+                        key={plan.planId}
+                        type="button"
+                        onClick={() => setSelectedPlanId(plan.planId)}
+                        className={`w-full flex items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors ${
+                          selected
+                            ? 'border-claude-accent bg-claude-accent/10'
+                            : 'dark:border-claude-darkBorder border-claude-border dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                            {formatTraffic(plan.trafficBytes)}
+                          </div>
+                          {plan.remark ? (
+                            <div className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
+                              {plan.remark}
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="text-sm font-semibold tabular-nums dark:text-claude-darkText text-claude-text shrink-0">
+                          {formatPlanPrice(plan.payCurrency, plan.payAmount)}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {orderError && <p className="text-xs text-red-500 mt-2">{orderError}</p>}
+              <div className="flex justify-end gap-2 mt-4">
+                <button type="button" className={ghostButtonClass} onClick={closeRecharge}>
+                  {i18nService.t('trafficRechargeCancelOrder')}
+                </button>
+                <button
+                  type="button"
+                  className={primaryButtonClass}
+                  onClick={handleCreateOrder}
+                  disabled={orderBusy || !selectedPlanId || pricingLoading}
+                >
+                  {orderBusy ? i18nService.t('trafficRechargeCreating') : i18nService.t('trafficRechargePay')}
+                </button>
+              </div>
+            </>
+          )}
+
+          {orderPhase === 'paying' && activeOrder && (
+            <>
+              <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-1">
+                {i18nService.t('trafficRechargeWaitingTitle')}
+              </h4>
+              <p className={`${hintClass} mb-3`}>
+                {i18nService.t(activeOrder.gateway === 'mock' ? 'trafficRechargeMockWaitingDesc' : 'trafficRechargeWaitingDesc')}
+              </p>
+              <div className={`${cardClass} flex items-center justify-between`}>
+                <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                  {formatTraffic(activeOrder.trafficBytes)}
+                </span>
+                <span className="text-sm font-semibold tabular-nums dark:text-claude-darkText text-claude-text">
+                  {formatPlanPrice(activeOrder.payCurrency, activeOrder.payAmount)}
+                </span>
+              </div>
+              {activeOrder.gateway === 'paypal' && (
+                <div className="flex items-center gap-2 mt-3">
+                  <ArrowPathIcon className="h-4 w-4 animate-spin dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0" />
+                  <span className={hintClass}>{i18nService.t('trafficRechargeChecking')}</span>
+                </div>
+              )}
+              {orderError && <p className="text-xs text-red-500 mt-2">{orderError}</p>}
+              <div className="flex flex-wrap justify-end gap-2 mt-4">
+                {activeOrder.gateway === 'paypal' ? (
+                  <>
+                    <button
+                      type="button"
+                      className={ghostButtonClass}
+                      onClick={() => window.electron.shell.openExternal(activeOrder.approvalUrl).catch(() => {})}
+                    >
+                      {i18nService.t('trafficRechargeReopenLink')}
+                    </button>
+                    <button
+                      type="button"
+                      className={ghostButtonClass}
+                      onClick={handleCheckOrderNow}
+                      disabled={orderBusy}
+                    >
+                      {orderBusy ? i18nService.t('trafficRechargeChecking') : i18nService.t('trafficRechargeCheckNow')}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className={primaryButtonClass}
+                    onClick={handleMockConfirm}
+                    disabled={orderBusy}
+                  >
+                    {orderBusy ? i18nService.t('trafficRechargeChecking') : i18nService.t('trafficRechargeMockConfirm')}
+                  </button>
+                )}
+                <button type="button" className={ghostButtonClass} onClick={backToPlanPicker}>
+                  {i18nService.t('trafficRechargeBackToPlans')}
+                </button>
+              </div>
+            </>
+          )}
+
+          {orderPhase === 'credited' && activeOrder && (
+            <>
+              <div className="flex items-start gap-2">
+                <CheckCircleIcon className="h-5 w-5 text-claude-accent shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                    {i18nService.t('trafficRechargeCredited').replace('{traffic}', formatTraffic(activeOrder.trafficBytes))}
+                  </p>
+                  {balance && (
+                    <p className={`${hintClass} mt-1`}>
+                      {i18nService.t('trafficNewBalance').replace('{balance}', formatTraffic(balance.balanceBytes))}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <div className="flex justify-end mt-4">
+                <button type="button" className={primaryButtonClass} onClick={closeRecharge}>
+                  {i18nService.t('close')}
+                </button>
+              </div>
+            </>
+          )}
+
+          {orderPhase === 'closed' && (
+            <>
+              <div className="flex items-start gap-2">
+                <ExclamationTriangleIcon className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-sm dark:text-claude-darkText text-claude-text">
+                  {i18nService.t('trafficRechargeClosed')}
+                </p>
+              </div>
+              <div className="flex justify-end gap-2 mt-4">
+                <button type="button" className={ghostButtonClass} onClick={closeRecharge}>
+                  {i18nService.t('trafficRechargeCancelOrder')}
+                </button>
+                <button type="button" className={primaryButtonClass} onClick={backToPlanPicker}>
+                  {i18nService.t('trafficRechargeBackToPlans')}
+                </button>
+              </div>
+            </>
           )}
         </OverlayPanel>
       )}
