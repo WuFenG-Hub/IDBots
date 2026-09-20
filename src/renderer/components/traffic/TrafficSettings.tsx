@@ -32,6 +32,8 @@ type TrafficSettingsInfo = {
   fallbackPolicy: 'selfpay' | 'strict';
   /** Configured assist-service base URL override; '' = production default. */
   apiBase: string;
+  /** Recharge gateway override; '' = auto (mock in dev, paypal when packaged). */
+  rechargeGateway: '' | 'paypal' | 'mock';
 };
 type TrafficAccountInfo = {
   accountId: string;
@@ -373,6 +375,8 @@ const TrafficSettings: React.FC = () => {
   const [apiBaseSaving, setApiBaseSaving] = useState(false);
   const [apiBaseError, setApiBaseError] = useState('');
   const [apiBaseNotice, setApiBaseNotice] = useState('');
+  const [gatewaySaving, setGatewaySaving] = useState(false);
+  const [gatewayError, setGatewayError] = useState('');
 
   const trafficApi = window.electron.traffic;
 
@@ -647,6 +651,24 @@ const TrafficSettings: React.FC = () => {
       setApiBaseError(describeTrafficError(error instanceof Error ? error.message : '', 'trafficErrSaveApiBase'));
     } finally {
       setApiBaseSaving(false);
+    }
+  };
+
+  const handleSaveGateway = async (value: string) => {
+    if (gatewaySaving || !settings) return;
+    setGatewaySaving(true);
+    setGatewayError('');
+    try {
+      const res = await trafficApi.setSettings({ rechargeGateway: value });
+      if (res.success && res.settings) {
+        setSettings(res.settings);
+      } else {
+        setGatewayError(describeTrafficError(res.error || '', 'trafficErrSaveApiBase'));
+      }
+    } catch (error) {
+      setGatewayError(describeTrafficError(error instanceof Error ? error.message : '', 'trafficErrSaveApiBase'));
+    } finally {
+      setGatewaySaving(false);
     }
   };
 
@@ -1183,7 +1205,7 @@ const TrafficSettings: React.FC = () => {
         )}
       </div>
 
-      {/* Advanced: assist-service endpoint override (integration testing) */}
+      {/* Advanced: assist-service endpoint + recharge-gateway overrides (integration testing) */}
       <div className={cardClass}>
         <button
           type="button"
@@ -1237,6 +1259,24 @@ const TrafficSettings: React.FC = () => {
             </div>
             {apiBaseError && <p className="text-xs text-red-500 mt-2">{apiBaseError}</p>}
             {apiBaseNotice && <p className="text-xs text-claude-accent mt-2">{apiBaseNotice}</p>}
+
+            <div className="mt-4">
+              <span className={labelClass}>{i18nService.t('trafficGatewayLabel')}</span>
+              <p className={`${hintClass} mt-1`}>{i18nService.t('trafficGatewayDesc')}</p>
+              <div className="flex items-center gap-2 mt-2">
+                <select
+                  value={settings?.rechargeGateway ?? ''}
+                  onChange={(event) => handleSaveGateway(event.target.value)}
+                  disabled={gatewaySaving || !settings}
+                  className="rounded-lg dark:bg-claude-darkSurfaceInset bg-claude-surfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors disabled:opacity-50"
+                >
+                  <option value="">{i18nService.t('trafficGatewayAuto')}</option>
+                  <option value="paypal">PayPal</option>
+                  <option value="mock">mock</option>
+                </select>
+              </div>
+              {gatewayError && <p className="text-xs text-red-500 mt-2">{gatewayError}</p>}
+            </div>
           </div>
         )}
       </div>

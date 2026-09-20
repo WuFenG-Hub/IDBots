@@ -165,6 +165,8 @@ interface TrafficSettingsInfo {
   fallbackPolicy: 'selfpay' | 'strict';
   /** Configured assist-service base URL override; '' = production default. */
   apiBase: string;
+  /** Recharge gateway override; '' = auto (mock in dev, paypal when packaged). */
+  rechargeGateway: '' | 'paypal' | 'mock';
 }
 
 interface LlmRelayModelInfo {
@@ -1384,7 +1386,7 @@ interface IElectronAPI {
     claimFreeGrant: () => Promise<{ success: boolean; claim?: TrafficFreeGrantClaimInfo; error?: string; errorCode?: string }>;
     redeemCode: (input: { code: string }) => Promise<{ success: boolean; result?: TrafficRedeemCodeInfo; error?: string; errorCode?: string }>;
     getSettings: () => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
-    setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
+    setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string; rechargeGateway?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
   };
   llmRelay: {
     bootstrap: () => Promise<{ success: boolean; result?: LlmRelayBootstrapInfo; error?: string }>;

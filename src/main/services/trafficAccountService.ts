@@ -26,6 +26,7 @@ import { signMvcAddressMessage, type MvcSponsorTrafficAccount } from './mvcSpons
 import {
   getTrafficPinMode,
   getTrafficSettings,
+  readRechargeGatewayOverride,
   readTrafficApiBase,
   setTrafficSettings,
   type TrafficPinMode,
@@ -870,18 +871,29 @@ export type RechargeGateway = (typeof RECHARGE_GATEWAYS)[number];
 /**
  * Gateway used for new recharge orders. Packaged builds always go through the
  * real PayPal gateway — the mock gateway must never be able to credit traffic
- * in production (Phase 4 requirement). Dev builds and plain-node tests resolve
- * to 'mock' (Electron is loaded lazily here, same pattern as
- * getTrafficClientVersion: outside Electron require('electron') yields no app).
+ * in production (Phase 4 requirement). Dev builds and plain-node tests default
+ * to 'mock' and additionally honor the kvStore `traffic.rechargeGateway`
+ * override (Advanced settings), so a dev build can exercise the real PayPal
+ * flow end-to-end. Electron is loaded lazily here, same pattern as
+ * getTrafficClientVersion: outside Electron require('electron') yields no app.
  */
 export function resolveRechargeGateway(): RechargeGateway {
+  let packaged = false;
   try {
     const { app } = require('electron');
-    if (app?.isPackaged) return 'paypal';
+    packaged = Boolean(app?.isPackaged);
   } catch {
-    // electron unavailable — fall through to the mock gateway
+    // electron unavailable (plain-node tests) — treated as unpackaged
   }
-  return 'mock';
+  if (!packaged) {
+    try {
+      const override = readRechargeGatewayOverride(getKvStore());
+      if (override) return override;
+    } catch {
+      // store unavailable — fall through to the default
+    }
+  }
+  return packaged ? 'paypal' : 'mock';
 }
 
 /** Public rate table; no identity signature required. */
@@ -1123,6 +1135,7 @@ export function setTrafficSettingsSnapshot(input: {
   mode?: unknown;
   fallbackPolicy?: unknown;
   apiBase?: unknown;
+  rechargeGateway?: unknown;
 }): TrafficSettingsSnapshot {
   return setTrafficSettings(getKvStore(), input);
 }
@@ -1455,7 +1468,7 @@ export function registerTrafficAccountIpcHandlers(deps: { ipcMain: IpcMainLike }
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:setSettings', async (_event, input: { mode?: unknown; fallbackPolicy?: unknown; apiBase?: unknown }) => {
+  ipcMain.handle('traffic:setSettings', async (_event, input: { mode?: unknown; fallbackPolicy?: unknown; apiBase?: unknown; rechargeGateway?: unknown }) => {
     try {
       return { success: true, settings: setTrafficSettingsSnapshot(input ?? {}) };
     } catch (error) {

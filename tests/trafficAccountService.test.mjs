@@ -649,6 +649,24 @@ test('resolveRechargeGateway falls back to mock outside packaged Electron', () =
   assert.equal(resolveRechargeGateway(), 'mock');
 });
 
+test('resolveRechargeGateway honors the kvStore override in non-packaged builds only', async () => {
+  const { store } = await makeServiceFixture({ fetchImpl: createFetchStub([]) });
+  assert.equal(resolveRechargeGateway(), 'mock');
+
+  const saved = setTrafficSettingsSnapshot({ rechargeGateway: 'paypal' });
+  assert.equal(saved.rechargeGateway, 'paypal');
+  assert.equal(getTrafficSettingsSnapshot().rechargeGateway, 'paypal');
+  assert.equal(resolveRechargeGateway(), 'paypal');
+
+  setTrafficSettingsSnapshot({ rechargeGateway: '' });
+  assert.equal(resolveRechargeGateway(), 'mock');
+
+  // An invalid stored value degrades to auto; an invalid write is rejected.
+  store.set('traffic.rechargeGateway', 'bogus');
+  assert.equal(resolveRechargeGateway(), 'mock');
+  assert.throws(() => setTrafficSettingsSnapshot({ rechargeGateway: 'stripe' }), /rechargeGateway/);
+});
+
 test('mockConfirmRechargeOrder signs traffic-recharge-confirm and invalidates the balance cache', async () => {
   const confirmCalls = [];
   const fetchImpl = createFetchStub([
@@ -830,18 +848,18 @@ test('redeemTrafficCode surfaces the backend data.errorCode (CODE_USED) and reje
 test('traffic settings snapshot round-trips through the kv store', async () => {
   const { store } = await makeServiceFixture({ fetchImpl: createFetchStub([]) });
 
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '', rechargeGateway: '' });
   setTrafficSettingsSnapshot({ mode: 'selfpay' });
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'selfpay', apiBase: '' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'selfpay', apiBase: '', rechargeGateway: '' });
   setTrafficSettingsSnapshot({ mode: 'traffic' });
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '', rechargeGateway: '' });
   assert.equal(store.get('traffic.mode'), 'traffic');
   // Strict is no longer a user-facing option; writes always fall back to self-pay.
   setTrafficSettingsSnapshot({ fallbackPolicy: 'strict' });
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '', rechargeGateway: '' });
   // Garbage input normalizes back to the account-quota default.
   setTrafficSettingsSnapshot({ mode: 'garbage' });
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '', rechargeGateway: '' });
 });
 
 test('traffic apiBase setting: set/get/validate/clear, and sponsor client wiring', async () => {

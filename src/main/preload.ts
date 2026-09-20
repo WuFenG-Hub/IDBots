@@ -761,7 +761,7 @@ contextBridge.exposeInMainWorld('electron', {
     claimFreeGrant: () => ipcRenderer.invoke('traffic:claimFreeGrant'),
     redeemCode: (input: { code: string }) => ipcRenderer.invoke('traffic:redeemCode', input),
     getSettings: () => ipcRenderer.invoke('traffic:getSettings'),
-    setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => ipcRenderer.invoke('traffic:setSettings', input),
+    setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string; rechargeGateway?: string }) => ipcRenderer.invoke('traffic:setSettings', input),
   },
   llmRelay: {
     bootstrap: () => ipcRenderer.invoke('llmRelay:bootstrap'),
