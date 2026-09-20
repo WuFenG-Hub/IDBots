@@ -56,7 +56,7 @@ export async function createPinWithMvcSubsidyRetry<T>(
       path: toSafeString(params.wallet?.path) || DEFAULT_PATH,
     });
     if (!subsidy.success) {
-      throw new Error(subsidy.error || 'MVC gas subsidy request failed');
+      throw new Error(subsidy.error || 'Traffic subsidy request failed');
     }
 
     return await params.createPin();
