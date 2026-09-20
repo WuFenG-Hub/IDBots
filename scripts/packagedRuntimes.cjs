@@ -81,7 +81,7 @@ function verifySourceRuntimes(root = projectRootFrom()) {
   if (missing.length > 0) {
     throw new Error(
       'Release packaging requires nested runtime dependencies before pack: '
-      + `${missing.join(', ')}. Run npm ci in each runtime directory listed in scripts/packagedRuntimes.cjs.`,
+      + `${missing.join(', ')}. Run pnpm install in each runtime directory listed in scripts/packagedRuntimes.cjs.`,
     );
   }
 }

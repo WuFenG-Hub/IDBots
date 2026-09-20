@@ -128,7 +128,7 @@ export class DshKernel {
     const runtimeDir = this.runtimeDir
     const binPath = join(runtimeDir, 'bin.mjs')
     if (!existsSync(binPath)) {
-      throw new Error(`DshKernel: runtime bin not found at ${binPath} (run npm install in dsh-runtime/)`)
+      throw new Error(`DshKernel: runtime bin not found at ${binPath} (run pnpm --dir dsh-runtime install)`)
     }
 
     const generatorUrl = pathToFileURL(join(runtimeDir, 'lib', 'generate-runtime-config.mjs')).href

@@ -1,0 +1,83 @@
+# pnpm 11 reads pnpm-specific settings (nodeLinker, overrides, patched
+# dependencies, build approvals, lifecycle-script toggles) only from this
+# file — .npmrc keeps registry/auth use only.
+#
+# This is intentionally NOT a multi-package workspace: the root package,
+# dsh-runtime/, and SKILLs/web-search/ keep separate lockfiles and installs
+# (each of those directories has its own pnpm-workspace.yaml). Do not add a
+# `packages` key here.
+#
+# nodeLinker hoisted keeps the npm-style flat node_modules layout that the
+# Electron packaging chain requires:
+# - electron-builder collects production node_modules into the app asar and
+#   copies dsh-runtime/ and SKILLs/ (with their node_modules) as
+#   extraResources; the default isolated linker would ship a symlink farm
+#   pointing into the developer's pnpm store and the packaged app would
+#   crash on machines without that store.
+# - `electron-builder install-app-deps` (root postinstall) and the Electron
+#   ABI rebuild expect an npm-shaped tree.
+# Packages are still hard-linked from the global pnpm store, so per-worktree
+# install cost stays near zero.
+nodeLinker: hoisted
+
+# pnpm does not run npm-era `pre`/`post` scripts by default; IDBots relies on
+# them: preelectron:dev / preelectron:dev:dsh run the check:dsh-deps gate and
+# predist:mac runs the renderer/main/skills build before packaging.
+enablePrePostScripts: true
+
+# Ported verbatim from the npm `overrides` field (package.json) — pin the
+# same transitive versions the npm lockfile enforced. `mvc-scrypt>tmp` is the
+# pnpm spelling of the npm nested override {"mvc-scrypt": {"tmp": ...}}.
+overrides:
+  '@protobufjs/utf8': 1.1.2
+  axios: 1.19.0
+  'bn.js': 4.12.5
+  elliptic: 6.6.1
+  follow-redirects: 1.16.0
+  lodash: 4.18.1
+  lodash-es: 4.18.1
+  protobufjs: 7.6.5
+  'socket.io-parser': 4.2.7
+  undici: 6.28.0
+  ws: 8.21.3
+  'mvc-scrypt>tmp': 0.2.7
+  # mvc-scrypt `require("rimraf")`s rimraf without declaring it (patch-package@6
+  # in its dependency tree needs the v2 rimraf.sync API). The npm-era tree
+  # satisfied this by accident: rimraf@2.7.1 happened to be nested under
+  # node_modules/mvc-scrypt, where the undeclared require found it. pnpm's
+  # hoisting dissolves that nest and the root devDep rimraf@^5 (ESM-only, no
+  # .sync, and stripped from production packaging) would shadow it — breaking
+  # the packaged app's main-process import chain at startup. Pin every rimraf
+  # to the v2 line the npm-era packaged app actually shipped; nothing in the
+  # repo uses rimraf programmatically (CLI-only: `npx rimraf <dir>`).
+  rimraf: 2.7.1
+
+# Replacement for the npm-era `patch-package && ...` postinstall step:
+# patch-package writes patched files in place, which would mutate the
+# hard-linked pnpm store; pnpm instead applies the patch to a private store
+# entry, so fresh installs are patched without a postinstall pass. The patch
+# file below is the former patches/ entry, unchanged (same git-diff format).
+patchedDependencies:
+  '@openagentinternet/agent-browser-ui@0.6.0': patches/@openagentinternet+agent-browser-ui+0.6.0.patch
+
+# Dependencies whose install scripts are allowed to run (pnpm blocks them by
+# default): electron downloads its platform binary, esbuild installs its
+# binary shim, bufferutil/utf-8-validate/fsevents build native addons,
+# mvc-scrypt applies required patches via postinstall, and protobufjs
+# generates runtime shims via postinstall. Same set the npm install executed
+# (formerly documented in package.json allowScripts).
+allowBuilds:
+  bufferutil: true
+  electron: true
+  esbuild: true
+  fsevents: true
+  mvc-scrypt: true
+  protobufjs: true
+  utf-8-validate: true
+
+minimumReleaseAgeExclude:
+  - '@openagentinternet/agent-browser-core@0.6.0'
+  - '@openagentinternet/agent-browser-host-contract@0.6.0'
+  - '@openagentinternet/agent-browser-name-resolvers@0.6.0'
+  - '@openagentinternet/agent-browser-renderers@0.6.0'
+  - '@openagentinternet/agent-browser-ui@0.6.0'

@@ -1,7 +1,7 @@
-diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js
+diff --git a/dist-cjs/browser/app.js b/dist-cjs/browser/app.js
 index 0bc37d0..3263e1b 100644
---- a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js
-+++ b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js
+--- a/dist-cjs/browser/app.js
++++ b/dist-cjs/browser/app.js
 @@ -7667,12 +7667,12 @@ function htmlFrameSandbox(url) {
    // safe only because it is NOT the Browser page origin, so the app can never
    // script the UI or call its same-origin API — plus downloads. Frames served
@@ -17,10 +17,10 @@ index 0bc37d0..3263e1b 100644
    } catch (error) {
      return base;
    }
-diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browserClientScript.js b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browserClientScript.js
+diff --git a/dist-cjs/browserClientScript.js b/dist-cjs/browserClientScript.js
 index 8a43c7f..f7d2d16 100644
---- a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browserClientScript.js
-+++ b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browserClientScript.js
+--- a/dist-cjs/browserClientScript.js
++++ b/dist-cjs/browserClientScript.js
 @@ -86,12 +86,12 @@ function buildBrowserClientScript(input) {
      // safe only because it is NOT the Browser page origin, so the app can never
      // script the UI or call its same-origin API — plus downloads. Frames served
@@ -36,10 +36,10 @@ index 8a43c7f..f7d2d16 100644
      } catch {
        return base;
      }
-diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/renderers.js b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/renderers.js
+diff --git a/dist-cjs/renderers.js b/dist-cjs/renderers.js
 index 190349c..22ccd0b 100644
---- a/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/renderers.js
-+++ b/node_modules/@openagentinternet/agent-browser-ui/dist-cjs/renderers.js
+--- a/dist-cjs/renderers.js
++++ b/dist-cjs/renderers.js
 @@ -97,7 +97,7 @@ function renderUrlRenderer(renderer, className, tag) {
          return '<section class="browser-empty-state"><h2>Renderer URL blocked</h2></section>';
      }
@@ -49,10 +49,10 @@ index 190349c..22ccd0b 100644
      }
      if (tag === 'iframe' && className === 'browser-pdf') {
          // Chrome's PDF viewer needs allow-scripts + allow-same-origin (and
-diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist/browser/app.js b/node_modules/@openagentinternet/agent-browser-ui/dist/browser/app.js
+diff --git a/dist/browser/app.js b/dist/browser/app.js
 index 4cf4ead..953239c 100644
---- a/node_modules/@openagentinternet/agent-browser-ui/dist/browser/app.js
-+++ b/node_modules/@openagentinternet/agent-browser-ui/dist/browser/app.js
+--- a/dist/browser/app.js
++++ b/dist/browser/app.js
 @@ -7664,12 +7664,12 @@ function htmlFrameSandbox(url) {
    // safe only because it is NOT the Browser page origin, so the app can never
    // script the UI or call its same-origin API — plus downloads. Frames served
@@ -68,10 +68,10 @@ index 4cf4ead..953239c 100644
    } catch (error) {
      return base;
    }
-diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist/browserClientScript.js b/node_modules/@openagentinternet/agent-browser-ui/dist/browserClientScript.js
+diff --git a/dist/browserClientScript.js b/dist/browserClientScript.js
 index a470388..69faaf5 100644
---- a/node_modules/@openagentinternet/agent-browser-ui/dist/browserClientScript.js
-+++ b/node_modules/@openagentinternet/agent-browser-ui/dist/browserClientScript.js
+--- a/dist/browserClientScript.js
++++ b/dist/browserClientScript.js
 @@ -83,12 +83,12 @@ export function buildBrowserClientScript(input) {
      // safe only because it is NOT the Browser page origin, so the app can never
      // script the UI or call its same-origin API — plus downloads. Frames served
@@ -87,10 +87,10 @@ index a470388..69faaf5 100644
      } catch {
        return base;
      }
-diff --git a/node_modules/@openagentinternet/agent-browser-ui/dist/renderers.js b/node_modules/@openagentinternet/agent-browser-ui/dist/renderers.js
+diff --git a/dist/renderers.js b/dist/renderers.js
 index 32a98f1..e4d4d44 100644
---- a/node_modules/@openagentinternet/agent-browser-ui/dist/renderers.js
-+++ b/node_modules/@openagentinternet/agent-browser-ui/dist/renderers.js
+--- a/dist/renderers.js
++++ b/dist/renderers.js
 @@ -90,7 +90,7 @@ function renderUrlRenderer(renderer, className, tag) {
          return '<section class="browser-empty-state"><h2>Renderer URL blocked</h2></section>';
      }

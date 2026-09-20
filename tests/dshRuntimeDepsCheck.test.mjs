@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const { checkDshRuntimeDeps } = require('../scripts/check-dsh-runtime-deps.cjs');
+const yaml = require('js-yaml');
 
 // Builds a consistent lockfile from the declared deps: the top-level block
 // mirrors package.json and every exact pin resolves to itself. Individual
@@ -17,13 +18,16 @@ function writeLock(runtimeDir, deps, { lockTopOverrides = {}, resolvedOverrides 
   for (const name of Object.keys(lockTopOverrides)) {
     if (lockTopOverrides[name] === null) delete lockTop[name];
   }
-  const packages = { '': { dependencies: lockTop } };
-  for (const [name, spec] of Object.entries(deps)) {
-    packages[`node_modules/${name}`] = { version: resolvedOverrides[name] ?? spec };
+  // Mirror the pnpm lock importer block: one entry per direct dependency with
+  // the declared specifier and the resolved version.
+  const dependencies = {};
+  for (const [name, spec] of Object.entries(lockTop)) {
+    dependencies[name] = { specifier: spec, version: resolvedOverrides[name] ?? spec };
   }
+  const lock = { lockfileVersion: '9.0', importers: { '.': { dependencies } } };
   fs.writeFileSync(
-    path.join(runtimeDir, 'package-lock.json'),
-    JSON.stringify({ name: 'idbots-dsh-runtime', lockfileVersion: 3, packages }),
+    path.join(runtimeDir, 'pnpm-lock.yaml'),
+    yaml.dump(lock),
   );
 }
 
@@ -110,11 +114,11 @@ test('fails when the lockfile top-level block still pins the previous version (2
   assert.equal(result.ok, false);
   assert.ok(
     result.lockProblems.some((p) =>
-      p.includes('package.json pins 0.1.2-rc.1') && p.includes('top-level block says 0.1.3-alpha.1')),
+      p.includes('package.json pins 0.1.2-rc.1') && p.includes('importer block says 0.1.3-alpha.1')),
   );
 });
 
-test('fails when a declared dependency is absent from the lockfile top-level block', () => {
+test('fails when a declared dependency is absent from the lockfile importer block', () => {
   const root = makeFixture({
     deps: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' },
     installed: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' },
@@ -122,7 +126,7 @@ test('fails when a declared dependency is absent from the lockfile top-level blo
   });
   const result = checkDshRuntimeDeps(root);
   assert.equal(result.ok, false);
-  assert.ok(result.lockProblems.some((p) => p.includes('absent from the lockfile top-level block')));
+  assert.ok(result.lockProblems.some((p) => p.includes('absent from the lockfile importer block')));
 });
 
 test('fails when the lockfile resolves a version other than the exact pin', () => {
@@ -138,10 +142,10 @@ test('fails when the lockfile resolves a version other than the exact pin', () =
 
 test('fails when the lockfile is missing entirely', () => {
   const root = makeFixture({ deps: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' }, installed: null });
-  fs.rmSync(path.join(root, 'dsh-runtime', 'package-lock.json'));
+  fs.rmSync(path.join(root, 'dsh-runtime', 'pnpm-lock.yaml'));
   const result = checkDshRuntimeDeps(root);
   assert.equal(result.ok, false);
-  assert.ok(result.lockProblems.some((p) => p.includes('package-lock.json is missing')));
+  assert.ok(result.lockProblems.some((p) => p.includes('pnpm-lock.yaml is missing')));
 });
 
 test('the real repository checkout currently passes the gate', () => {

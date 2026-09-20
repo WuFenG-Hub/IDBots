@@ -1,0 +1,60 @@
+# Dependencies whose install scripts are allowed to run (pnpm blocks them by
+# default): koffi and node-pty build the native addons the DSH runtime needs
+# for terminal/process handling, @deepseek-ai/dsh-subprocess-local and
+# protobufjs generate runtime shims, @google/genai ships a postinstall.
+# Same set the npm install executed.
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': true
+  koffi: true
+  node-pty: true
+  protobufjs: true
+
+# pnpm 11 reads pnpm-specific settings only from this file. This package is
+# intentionally its own workspace root (no `packages` key): dsh-runtime keeps
+# a separate lockfile from the repository root, mirroring the npm-era
+# dual-package layout (the root postinstall installs it via
+# `pnpm --dir dsh-runtime install --frozen-lockfile`).
+#
+# nodeLinker hoisted is REQUIRED here, not a preference:
+# - electron-builder copies dsh-runtime/ (including node_modules) into the
+#   app as extraResources; the default isolated linker would ship symlinks
+#   pointing into the developer's pnpm store and the packaged app would
+#   crash on machines without that store.
+# - scripts/dsh-kernel-patches/*.patch apply via `git apply`, which writes
+#   through rename — it breaks the hard link instead of mutating the shared
+#   store, so the patched files stay local to this checkout while the store
+#   keeps pristine copies.
+nodeLinker: hoisted
+
+# Ported verbatim from the npm `overrides` field (dsh-runtime/package.json) —
+# forces every transitive @deepseek-ai/* package onto the pinned kernel line.
+# scripts/upgrade-dsh-runtime.cjs rewrites these together with the
+# dsh-runtime/package.json dependency pins; keep both in sync in the SAME
+# commit as dsh-runtime/pnpm-lock.yaml.
+overrides:
+  '@deepseek-ai/dsh-agent-instructions': 0.1.5-rc.2
+  '@deepseek-ai/dsh-anonymous-user-id': 0.1.5-rc.2
+  '@deepseek-ai/dsh-atomic-write': 0.1.5-rc.2
+  '@deepseek-ai/dsh-attachment': 0.1.5-rc.2
+  '@deepseek-ai/dsh-authorization': 0.1.5-rc.2
+  '@deepseek-ai/dsh-brand': 0.1.5-rc.2
+  '@deepseek-ai/dsh-code-runtime': 0.1.5-rc.2
+  '@deepseek-ai/dsh-commands': 0.1.5-rc.2
+  '@deepseek-ai/dsh-compaction': 0.1.5-rc.2
+  '@deepseek-ai/dsh-credentials': 0.1.5-rc.2
+  '@deepseek-ai/dsh-fs': 0.1.5-rc.2
+  '@deepseek-ai/dsh-home-paths': 0.1.5-rc.2
+  '@deepseek-ai/dsh-invariants': 0.1.5-rc.2
+  '@deepseek-ai/dsh-jobs': 0.1.5-rc.2
+  '@deepseek-ai/dsh-llm-deepseek': 0.1.5-rc.2
+  '@deepseek-ai/dsh-sandbox': 0.1.5-rc.2
+  '@deepseek-ai/dsh-sandbox-policy': 0.1.5-rc.2
+  '@deepseek-ai/dsh-scope': 0.1.5-rc.2
+  '@deepseek-ai/dsh-session-persistence': 0.1.5-rc.2
+  '@deepseek-ai/dsh-settings': 0.1.5-rc.2
+  '@deepseek-ai/dsh-shell': 0.1.5-rc.2
+  '@deepseek-ai/dsh-subagent-in-process-driver': 0.1.5-rc.2
+  '@deepseek-ai/dsh-subprocess': 0.1.5-rc.2
+  '@deepseek-ai/dsh-timeout': 0.1.5-rc.2
+  '@deepseek-ai/dsh-typert-protocol': 0.1.5-rc.2
