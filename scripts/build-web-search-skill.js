@@ -13,7 +13,7 @@ const REQUIRED_WEB_SEARCH_PACKAGES = [
   { name: '@types/express', marker: path.join('node_modules', '@types', 'express', 'package.json') },
 ];
 
-const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const pnpmCmd = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 
 function quoteCmdArg(value) {
   const stringValue = String(value);
@@ -58,9 +58,9 @@ function ensureWebSearchDependencies(input = {}) {
   }
 
   log(
-    `[skills] Missing web-search dependencies in current worktree: ${missingPackages.join(', ')}. Running npm ci...`
+    `[skills] Missing web-search dependencies in current worktree: ${missingPackages.join(', ')}. Running pnpm install --frozen-lockfile...`
   );
-  runCommand(npmCmd, ['ci'], {
+  runCommand(pnpmCmd, ['install', '--frozen-lockfile'], {
     platform,
     execFileSyncImpl,
     cwd: skillDir,
@@ -73,7 +73,7 @@ function compileWebSearchSkill(input = {}) {
   const rootDir = input.rootDir || ROOT;
   const execFileSyncImpl = input.execFileSyncImpl || execFileSync;
   const platform = input.platform || process.platform;
-  runCommand(npmCmd, ['exec', '--', 'tsc', '-p', 'SKILLs/web-search/tsconfig.json'], {
+  runCommand(pnpmCmd, ['exec', 'tsc', '-p', 'SKILLs/web-search/tsconfig.json'], {
     platform,
     execFileSyncImpl,
     cwd: rootDir,

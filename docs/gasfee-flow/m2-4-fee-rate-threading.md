@@ -60,7 +60,7 @@ Roadmap ref: `roadmap.md` Phase 2, M2.4.
 
 ## Verification
 
-- `npm run compile:electron` **first** (tests import `dist-electron/`), then
+- `pnpm run compile:electron` **first** (tests import `dist-electron/`), then
   `npx tsx --test tests/trafficAccountService.test.mjs` plus the createPin /
   metaidCore test files, `npx tsc --noEmit` and
   `npx tsc --noEmit -p tsconfig.node.json`.

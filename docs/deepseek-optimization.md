@@ -316,7 +316,7 @@ Responses API for them (expected in a later release).
 Run the relevant test suites:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/coworkFormatTransform.test.mjs \
           tests/cognitiveChatCompletion.test.mjs \
           tests/deepseekResponses.test.mjs \

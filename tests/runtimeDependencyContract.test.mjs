@@ -669,13 +669,18 @@ test('release packaging wires nested DSH runtime install, extraResources, and pa
 
   assert.match(
     workflow,
-    /working-directory:\s*dsh-runtime[\s\S]*?run:\s*npm ci/,
-    'CI must npm ci in dsh-runtime so extraResources can copy node_modules',
+    /working-directory:\s*dsh-runtime[\s\S]*?run:\s*pnpm install --frozen-lockfile/,
+    'CI must pnpm-install dsh-runtime from the committed lockfile so extraResources can copy node_modules',
   );
   assert.match(
     packageJson.scripts.postinstall,
-    /npm install --prefix dsh-runtime/,
+    /pnpm --dir dsh-runtime install/,
     'postinstall must install dsh-runtime so local dist:mac also ships node_modules',
+  );
+  assert.equal(packageJson.packageManager, 'pnpm@11.24.0', 'the repository must pin pnpm via packageManager');
+  assert.ok(
+    fs.existsSync(path.join(process.cwd(), 'pnpm-lock.yaml')) && !fs.existsSync(path.join(process.cwd(), 'package-lock.json')),
+    'pnpm-lock.yaml must be committed and package-lock.json removed',
   );
   assert.ok(dshResource, 'electron-builder extraResources must copy dsh-runtime');
   assert.ok(

@@ -20,7 +20,7 @@ test('resolveMissingWebSearchPackages reports fresh-worktree runtime packages th
   );
 });
 
-test('ensureWebSearchDependencies runs npm ci when required runtime packages are missing', () => {
+test('ensureWebSearchDependencies runs pnpm install --frozen-lockfile when required runtime packages are missing', () => {
   const calls = [];
   const installed = ensureWebSearchDependencies({
     skillDir: '/tmp/web-search',
@@ -33,13 +33,13 @@ test('ensureWebSearchDependencies runs npm ci when required runtime packages are
 
   assert.equal(installed, true);
   assert.equal(calls.length, 1);
-  assert.match(calls[0].cmd, /^npm(\.cmd)?$/);
-  assert.deepEqual(calls[0].args, ['ci']);
+  assert.match(calls[0].cmd, /^pnpm(\.cmd)?$/);
+  assert.deepEqual(calls[0].args, ['install', '--frozen-lockfile']);
   assert.equal(calls[0].options.cwd, '/tmp/web-search');
   assert.equal(calls[0].options.stdio, 'inherit');
 });
 
-test('ensureWebSearchDependencies skips npm ci when required runtime packages already exist', () => {
+test('ensureWebSearchDependencies skips the install when required runtime packages already exist', () => {
   const expectedMarkers = new Set(
     REQUIRED_WEB_SEARCH_PACKAGES.map((pkg) => path.join('/tmp/web-search', pkg.marker)),
   );
@@ -58,7 +58,7 @@ test('ensureWebSearchDependencies skips npm ci when required runtime packages al
   assert.deepEqual(calls, []);
 });
 
-test('compileWebSearchSkill uses npm exec for cross-platform TypeScript invocation', () => {
+test('compileWebSearchSkill uses pnpm exec for cross-platform TypeScript invocation', () => {
   const calls = [];
 
   compileWebSearchSkill({
@@ -69,8 +69,8 @@ test('compileWebSearchSkill uses npm exec for cross-platform TypeScript invocati
   });
 
   assert.equal(calls.length, 1);
-  assert.match(calls[0].cmd, /^npm(\.cmd)?$/);
-  assert.deepEqual(calls[0].args, ['exec', '--', 'tsc', '-p', 'SKILLs/web-search/tsconfig.json']);
+  assert.match(calls[0].cmd, /^pnpm(\.cmd)?$/);
+  assert.deepEqual(calls[0].args, ['exec', 'tsc', '-p', 'SKILLs/web-search/tsconfig.json']);
   assert.equal(calls[0].options.cwd, '/tmp/repo');
   assert.equal(calls[0].options.stdio, 'inherit');
 });
@@ -89,7 +89,7 @@ test('compileWebSearchSkill routes through cmd.exe on win32 to avoid .cmd spawn 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].cmd, 'cmd.exe');
   assert.deepEqual(calls[0].args.slice(0, 3), ['/d', '/s', '/c']);
-  assert.match(calls[0].args[3], /^npm(\.cmd)? exec -- tsc -p SKILLs\/web-search\/tsconfig\.json$/);
+  assert.match(calls[0].args[3], /^pnpm(\.cmd)? exec tsc -p SKILLs\/web-search\/tsconfig\.json$/);
   assert.equal(calls[0].options.cwd, '/tmp/repo');
   assert.equal(calls[0].options.stdio, 'inherit');
 });

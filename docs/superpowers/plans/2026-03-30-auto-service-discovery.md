@@ -67,7 +67,7 @@ In the English (en) section:
 
 - [ ] **Step 3: Verify sidebar labels render correctly**
 
-Run: `npm run electron:dev`
+Run: `pnpm run electron:dev`
 Verify: Sidebar shows "我的Bot" / "My Bots" and "Bot Hub" in both languages.
 
 - [ ] **Step 4: Commit**
@@ -123,7 +123,7 @@ describe('heartbeat_enabled migration', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run compile:electron && node --test tests/heartbeatService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/heartbeatService.test.mjs`
 Expected: FAIL — `heartbeat_enabled` column does not exist yet.
 
 - [ ] **Step 3: Add migration to sqliteStore.ts**
@@ -146,7 +146,7 @@ try {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npm run compile:electron && node --test tests/heartbeatService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/heartbeatService.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -227,7 +227,7 @@ describe('HeartbeatService', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run compile:electron && node --test tests/heartbeatService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/heartbeatService.test.mjs`
 Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement heartbeatService.ts**
@@ -312,7 +312,7 @@ export class HeartbeatService {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npm run compile:electron && node --test tests/heartbeatService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/heartbeatService.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -400,7 +400,7 @@ describe('HeartbeatPollingService', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run compile:electron && node --test tests/heartbeatPollingService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/heartbeatPollingService.test.mjs`
 Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement heartbeatPollingService.ts**
@@ -504,7 +504,7 @@ export async function fetchHeartbeatFromChain(mvcAddress: string): Promise<{ tim
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npm run compile:electron && node --test tests/heartbeatPollingService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/heartbeatPollingService.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -646,7 +646,7 @@ getHeartbeatPollingService().startPolling(() => {
 
 - [ ] **Step 5: Compile and verify**
 
-Run: `npm run compile:electron`
+Run: `pnpm run compile:electron`
 Expected: No compilation errors.
 
 - [ ] **Step 6: Commit**
@@ -697,7 +697,7 @@ In `src/renderer/components/metabots/MetaBotListCard.tsx`, below the avatar area
 
 - [ ] **Step 3: Verify visually**
 
-Run: `npm run electron:dev`
+Run: `pnpm run electron:dev`
 Verify: Each MetaBot card shows a heartbeat toggle below the avatar. Toggling ON shows confirmation dialog. Toggling OFF disables immediately.
 
 - [ ] **Step 4: Commit**
@@ -778,7 +778,7 @@ Add `opacity-60` class to offline service cards:
 
 - [ ] **Step 6: Verify visually**
 
-Run: `npm run electron:dev`
+Run: `pnpm run electron:dev`
 Verify: Bot Hub shows online/offline badges. Online services sort first. Offline cards are dimmed.
 
 - [ ] **Step 7: Commit**
@@ -857,7 +857,7 @@ The `heartbeatPollingService` reference needs to be passed to the cowork runner.
 
 - [ ] **Step 3: Compile and verify**
 
-Run: `npm run compile:electron`
+Run: `pnpm run compile:electron`
 Expected: No compilation errors.
 
 - [ ] **Step 4: Commit**
@@ -919,7 +919,7 @@ describe('[DELEGATE_REMOTE_SERVICE] pattern parsing', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run compile:electron && node --test tests/remoteDelegation.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/remoteDelegation.test.mjs`
 Expected: FAIL — `parseDelegationMessage` not exported.
 
 - [ ] **Step 3: Implement parseDelegationMessage**
@@ -961,7 +961,7 @@ export function parseDelegationMessage(content: string): DelegationRequest | nul
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npm run compile:electron && node --test tests/remoteDelegation.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/remoteDelegation.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Hook detection into message finalization**
@@ -1120,7 +1120,7 @@ In `main.ts`, when creating cowork runner instances, listen for the `delegation:
 
 - [ ] **Step 4: Compile and verify**
 
-Run: `npm run compile:electron`
+Run: `pnpm run compile:electron`
 Expected: No compilation errors.
 
 - [ ] **Step 5: Commit**
@@ -1208,7 +1208,7 @@ In `src/renderer/components/cowork/CoworkSessionDetail.tsx`, check if the sessio
 
 - [ ] **Step 5: Compile and verify**
 
-Run: `npm run compile:electron`
+Run: `pnpm run compile:electron`
 Expected: No compilation errors.
 
 - [ ] **Step 6: Commit**
@@ -1224,17 +1224,17 @@ git commit -m "feat: handle delivery result injection and cowork session unblock
 
 - [ ] **Step 1: Run full test suite**
 
-Run: `npm run compile:electron && node --test tests/*.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/*.test.mjs`
 Expected: All tests pass, including new heartbeat and delegation tests.
 
 - [ ] **Step 2: Run lint**
 
-Run: `npm run lint`
+Run: `pnpm run lint`
 Expected: No errors.
 
 - [ ] **Step 3: Manual E2E verification**
 
-Run: `npm run electron:dev`
+Run: `pnpm run electron:dev`
 
 Verification checklist:
 1. Sidebar shows "我的Bot" and "Bot Hub"

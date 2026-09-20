@@ -154,23 +154,23 @@ Packaged installers are distributed through GitHub Releases.
 
 ## Development
 
-- **Requirements:** Node.js `>=24 <25`, npm
-- **Install:** `npm install`
-- **Dev:** `npm run electron:dev`
-- **Build:** `npm run build`
+- **Requirements:** Node.js `>=24 <25`, pnpm (pinned via `packageManager`; run `corepack enable` once)
+- **Install:** `pnpm install`
+- **Dev:** `pnpm run electron:dev`
+- **Build:** `pnpm run build`
 
 Additional useful commands:
 
 ```bash
 # Compile Electron TypeScript
-npm run compile:electron
+pnpm run compile:electron
 
 # Refresh bundled man-p2p binaries from the sibling repo
-npm run sync:man-p2p
+pnpm run sync:man-p2p
 
 # Package release artifacts
-npm run dist:mac
-npm run dist:win
+pnpm run dist:mac
+pnpm run dist:win
 
 # Run the node-based test suite
 node --test tests/*.test.mjs
@@ -178,7 +178,8 @@ node --test tests/*.test.mjs
 
 Notes:
 
-- `npm run electron:dev` is for development only.
+- `pnpm run electron:dev` is for development only.
+- The nested `dsh-runtime/` and `SKILLs/web-search/` packages are installed automatically by the root `postinstall`; after pulling changes that touch them, run `pnpm --dir dsh-runtime install` / `pnpm --dir SKILLs/web-search install`.
 - Release validation should be done with packaged app builds, not only the dev runtime.
 - On first run after clone, complete onboarding and configure at least one LLM provider before using Cowork and other LLM-dependent features.
 - Pending integrations: [ABC theme integration handoff](docs/integrations/abc-theme-integration.md).

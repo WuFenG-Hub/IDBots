@@ -46,6 +46,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.STORE_PATH }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'dsh-runtime/pnpm-lock.yaml', 'SKILLs/web-search/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
 
       - name: Verify tag matches package version (non-Windows)
         if: startsWith(github.ref, 'refs/tags/v') && runner.os != 'Windows'
@@ -67,25 +80,25 @@ jobs:
           Write-Host ("Tag/package version aligned: {0}" -f $tag)
 
       - name: Install dependencies
-        run: npm install
+        run: pnpm install --frozen-lockfile
 
       - name: Install DSH runtime dependencies
         working-directory: dsh-runtime
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
-      # npm ci above reinstalls dsh-runtime/node_modules from scratch, wiping
-      # the kernel patches the root postinstall applied. Re-apply AFTER the
-      # last dsh-runtime install step: without this the packaged app silently
-      # ships the unpatched kernel (v0.9.3 regression — the shipped Windows
-      # exe still flashed a bash.exe console window while CI stayed green).
+      # Any reinstall of dsh-runtime/node_modules can wipe the kernel patches
+      # the root postinstall applied. Re-apply AFTER the last dsh-runtime
+      # install step: without this the packaged app silently ships the
+      # unpatched kernel (v0.9.3 regression — the shipped Windows exe still
+      # flashed a bash.exe console window while CI stayed green).
       - name: Apply DSH kernel patches
         run: node scripts/apply-dsh-kernel-patches.cjs
 
       - name: Build renderer (Vite)
-        run: npm run build
+        run: pnpm run build
 
       - name: Compile Electron main process
-        run: npm run compile:electron
+        run: pnpm run compile:electron
 
       - name: Run LLM-safe text tests
         run: node --test tests/llmSafeText.test.mjs
@@ -96,7 +109,7 @@ jobs:
       # It sat outside any workflow step until now, so a regression here could
       # ship green.
       - name: Run tracked-task board tests
-        run: node --test tests/trackedTaskBoard.test.mjs && npx tsx --test tests/trackedTaskRanking.test.ts
+        run: node --test tests/trackedTaskBoard.test.mjs && pnpm exec tsx --test tests/trackedTaskRanking.test.ts
 
       - name: Validate runtime dependency contracts
         run: |
@@ -115,26 +128,26 @@ jobs:
       # Static source-contract tests for the pinned-skill backstop and the
       # bot-internet composer reuse (pure file-read assertions, no compile).
       - name: Run pinned-skill contract tests
-        run: npm run test:pinned-skills
+        run: pnpm run test:pinned-skills
 
       # Behavioral regression suites for the review-round fixes: group-task
       # daemon/staffing/entropy, per-bot skill assignment, cowork proxy.
       # Each script runs compile:electron first (project convention).
       - name: Run group-task / skill-assignment / cowork-proxy regression tests
-        run: npm run test:release-regressions
+        run: pnpm run test:release-regressions
 
       - name: Run memory and team-culture tests
-        run: npm run test:memory
+        run: pnpm run test:memory
 
       - name: Run MetaWeb agent-tool tests
-        run: npm run test:metaweb
+        run: pnpm run test:metaweb
 
       - name: Install web-search skill dependencies
         working-directory: SKILLs/web-search
-        run: npm install
+        run: pnpm install --frozen-lockfile
 
       - name: Build web-search skill
-        run: npm run build:skill:web-search
+        run: pnpm run build:skill:web-search
 
       # Windows: 下载捆绑的 PortableGit
       - name: Setup MinGit (Windows)
@@ -241,7 +254,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           IDBOTS_SKIP_NOTARIZE: 1
         run: >
-          npx electron-builder ${{ matrix.build_args }}
+          pnpm exec electron-builder ${{ matrix.build_args }}
           --publish never
 
       - name: Build Electron app package (Windows signed)
@@ -256,7 +269,7 @@ jobs:
             Write-Error "Missing WIN_CERT_SHA1 secret for Windows code signing."
             exit 1
           }
-          npx electron-builder ${{ matrix.build_args }} --publish never
+          pnpm exec electron-builder ${{ matrix.build_args }} --publish never
 
       - name: Verify Windows signatures
         if: runner.os == 'Windows'
@@ -324,7 +337,7 @@ jobs:
           PATH="$PWD/.tmp-bin:$PATH"
           mkdir -p .tmp-bin
           ln -sf /usr/bin/python3 .tmp-bin/python
-          npx electron-builder --mac dmg --arm64 --prepackaged "release/mac-arm64/IDBots.app" --publish never
+          pnpm exec electron-builder --mac dmg --arm64 --prepackaged "release/mac-arm64/IDBots.app" --publish never
 
       - name: Codesign + notarize DMG (macOS)
         if: runner.os == 'macOS'

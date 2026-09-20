@@ -32,7 +32,7 @@ assert.equal(typeof exposedApi.metaapps?.onChanged, 'function');
 
 - [ ] **Step 2: Run the targeted test to verify it fails**
 
-Run: `npm run compile:electron && node --test tests/metaAppCoworkPrompt.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/metaAppCoworkPrompt.test.mjs`
 
 Expected: FAIL because preload / main / type contract does not expose the new MetaApp API surface yet.
 
@@ -77,7 +77,7 @@ class MetaAppService {
 
 - [ ] **Step 4: Run the targeted test to verify it passes**
 
-Run: `npm run compile:electron && node --test tests/metaAppCoworkPrompt.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/metaAppCoworkPrompt.test.mjs`
 
 Expected: PASS with the expanded MetaApp renderer contract available.
 
@@ -235,7 +235,7 @@ assert.equal(typeof metaAppService.openMetaApp, 'function');
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metaAppPresentation.test.mjs tests/metaAppCoworkPrompt.test.mjs tests/metaAppOpenService.test.mjs
 ```
 
@@ -263,9 +263,9 @@ if (session) setMainView('cowork');
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metaAppCoworkPrompt.test.mjs tests/metaAppPresentation.test.mjs tests/metaAppOpenService.test.mjs tests/metaAppLocalServer.test.mjs tests/quickActionPresentation.test.mjs
-npm run lint
+pnpm run lint
 ```
 
 Expected:

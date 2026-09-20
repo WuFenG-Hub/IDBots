@@ -230,7 +230,7 @@ total), stale-claim takeover, own-lease refresh.
 
 ## Verification evidence
 
-- `npm run compile:electron` — clean.
+- `pnpm run compile:electron` — clean.
 - `npx tsc -p tsconfig.json --noEmit` — clean.
 - `node --test tests/groupTask*.test.mjs tests/openTeam*.test.mjs` — **190/190 pass**.
 - Test run summary (full suite): `ℹ tests 190 / pass 190 / fail 0`.

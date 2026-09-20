@@ -29,6 +29,22 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - The defaults above apply unless the user explicitly requests another language for that specific artifact.
 - When replying to the user or otherwise communicating with them, always use the user's own language.
 
+## Package Manager
+
+- Supported Node.js: `>=24 <25`.
+- Package manager: pnpm only (pinned via `packageManager` in `package.json`; run `corepack enable` once). `pnpm-lock.yaml` is committed; never reintroduce `package-lock.json`.
+- Three packages, three lockfiles: the repository root, `dsh-runtime/`, and `SKILLs/web-search/` are installed separately (`pnpm install` in each; the root `postinstall` covers the two nested ones automatically). pnpm settings live in each directory's `pnpm-workspace.yaml` (root and nested: hoisted `nodeLinker` + overrides + build approvals) — pnpm 11 ignores `.npmrc` for settings, so do not move them there.
+- `nodeLinker: hoisted` is a hard requirement, not a preference: electron-builder packages production `node_modules` into the app and copies `dsh-runtime/` + `SKILLs/` (with their `node_modules`) as extraResources — the default isolated linker would ship symlinks into the developer's pnpm store and break the packaged app. Packages are still hard-linked from the global pnpm store, so per-worktree install cost stays near zero.
+- Never call `npm install` / `npm ci` anywhere in this repository (root, CI, scripts, or nested packages); use `pnpm install --frozen-lockfile` so installs stay deterministic and store-backed.
+
+## Worktree Closeout
+
+- Every task branch lives in a git worktree under `.worktrees/<branch>`.
+- Every automated verification flow (gate, wt, gt, rsi-audit, and similar agent-driven task runners) MUST remove its own worktree with `git worktree remove` when the task finishes — success or failure alike. Leftover worktrees are the main source of disk bloat; each one that survives keeps a full dependency checkout.
+- After a branch merges back to `main`, remove its worktree and delete the branch immediately: `git worktree remove .worktrees/<branch> && git branch -d <branch>`.
+- Regular maintenance entry point: `scripts/prune-worktrees.sh` lists every worktree whose branch is fully merged into `main` and, after confirmation, removes the worktrees and deletes the branches. `--dry-run` only lists; `--force` also removes merged worktrees that have uncommitted changes.
+- A fresh worktree needs `pnpm install` in the root before building (the postinstall covers `dsh-runtime/` and `SKILLs/web-search/`); thanks to the shared pnpm store the install is fast and adds almost no new disk usage.
+
 ## Important Runtime Rules
 
 - Windows NSIS uninstall policy is to preserve user data (`electron-builder.json` -> `nsis.deleteAppDataOnUninstall=false`); do not flip this unless a release explicitly requires destructive uninstall behavior.
@@ -36,16 +52,16 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## DSH Runtime Dependencies
 
-- `dsh-runtime/` is a nested npm package with its own `package.json` / lockfile / `node_modules`; the root `npm install` only reinstalls it via `postinstall`, and a plain `git pull` or merge does NOT reinstall it.
-- After pulling, merging, or switching to any commit that touches `dsh-runtime/package.json` or `dsh-runtime/package-lock.json`, immediately run `npm install --prefix dsh-runtime` (or `npm ci --prefix dsh-runtime`). A stale `dsh-runtime/node_modules` crashes the spawned DSH runtime process at plugin-load time (`ERR_MODULE_NOT_FOUND` / "JSON-RPC input closed").
-- ANY command that reinstalls `dsh-runtime/node_modules` (`npm install`/`npm ci` `--prefix dsh-runtime`, including manual invocations) wipes the kernel patches under `scripts/dsh-kernel-patches/`. Re-run `node scripts/apply-dsh-kernel-patches.cjs` after it — the root `postinstall` does this automatically, but a manual prefix install does NOT. A missing patch keeps builds and tests green and only shows up as a Windows runtime regression in the shipped package (the v0.9.3 bash.exe console-flash incident); `npm run check:dsh-deps` and `node scripts/apply-dsh-kernel-patches.cjs --check` both detect it.
-- `npm run check:dsh-deps` (scripts/check-dsh-runtime-deps.cjs) verifies installed dsh-runtime packages match `package.json` AND that `dsh-runtime/package-lock.json` is in sync with it (top-level specs both ways + resolved versions for exact pins); it is wired as a pre-hook of `electron:dev` / `electron:dev:dsh`. Any commit that bumps dsh-runtime dependencies must keep this gate green.
+- `dsh-runtime/` is a nested pnpm package with its own `package.json` / `pnpm-lock.yaml` / `node_modules`; the root `pnpm install` only reinstalls it via `postinstall`, and a plain `git pull` or merge does NOT reinstall it.
+- After pulling, merging, or switching to any commit that touches `dsh-runtime/package.json`, `dsh-runtime/pnpm-workspace.yaml`, or `dsh-runtime/pnpm-lock.yaml`, immediately run `pnpm --dir dsh-runtime install`. A stale `dsh-runtime/node_modules` crashes the spawned DSH runtime process at plugin-load time (`ERR_MODULE_NOT_FOUND` / "JSON-RPC input closed").
+- ANY command that reinstalls `dsh-runtime/node_modules` (`pnpm --dir dsh-runtime install`, including manual invocations) wipes the kernel patches under `scripts/dsh-kernel-patches/`. Re-run `node scripts/apply-dsh-kernel-patches.cjs` after it — the root `postinstall` does this automatically, but a manual install does NOT. A missing patch keeps builds and tests green and only shows up as a Windows runtime regression in the shipped package (the v0.9.3 bash.exe console-flash incident); `pnpm run check:dsh-deps` and `node scripts/apply-dsh-kernel-patches.cjs --check` both detect it.
+- `pnpm run check:dsh-deps` (scripts/check-dsh-runtime-deps.cjs) verifies installed dsh-runtime packages match `package.json` AND that `dsh-runtime/pnpm-lock.yaml` is in sync with it (importer-block specs both ways + resolved versions for exact pins); it is wired as a pre-hook of `electron:dev` / `electron:dev:dsh`. Any commit that bumps dsh-runtime dependencies must keep this gate green.
 
 ### Upgrading the DSH runtime version
 
-- To bump the `@deepseek-ai/*` kernel versions, use the one-command path: `npm run upgrade:dsh -- <version>` (rewrites all pins, regenerates the lockfile via `npm install --prefix dsh-runtime`, re-runs the gate). Do NOT hand-edit `dsh-runtime/package.json` or `dsh-runtime/package-lock.json` — every historical DSH upgrade incident (stale-lock ERESOLVE, the 0.1.3-alpha.1 lockfile left behind by the 0.1.2-rc.1 pin) came from manual partial edits.
-- `dsh-runtime/package.json` and `dsh-runtime/package-lock.json` must be committed together in the SAME commit; never commit one without the other.
-- Before committing a dsh-runtime version change, `npm run check:dsh-deps` must pass (it also validates the lockfile sync, so an inconsistent bump cannot land silently).
+- To bump the `@deepseek-ai/*` kernel versions, use the one-command path: `pnpm run upgrade:dsh -- <version>` (rewrites all pins in `dsh-runtime/package.json` plus the override lines in `dsh-runtime/pnpm-workspace.yaml`, regenerates the lockfile via `pnpm --dir dsh-runtime install`, re-runs the gate). Do NOT hand-edit `dsh-runtime/package.json`, `dsh-runtime/pnpm-workspace.yaml`, or `dsh-runtime/pnpm-lock.yaml` — every historical DSH upgrade incident (stale-lock ERESOLVE, the 0.1.3-alpha.1 lockfile left behind by the 0.1.2-rc.1 pin) came from manual partial edits.
+- `dsh-runtime/package.json`, `dsh-runtime/pnpm-workspace.yaml`, and `dsh-runtime/pnpm-lock.yaml` must be committed together in the SAME commit; never commit one without the others.
+- Before committing a dsh-runtime version change, `pnpm run check:dsh-deps` must pass (it also validates the lockfile sync, so an inconsistent bump cannot land silently).
 
 ## Database Upgrade Safety
 

@@ -75,7 +75,7 @@ test('metaweb private sessions read contact scope and safe owner operational pre
 
 - [ ] **Step 2: Run the resolver test to verify it fails**
 
-Run: `npm run compile:electron && node --test tests/memoryScopeResolver.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/memoryScopeResolver.test.mjs`
 Expected: FAIL because `memoryScopeResolver.js` and the new scope API do not exist yet
 
 - [ ] **Step 3: Implement the shared scope domain**
@@ -99,7 +99,7 @@ Implement:
 
 - [ ] **Step 4: Run the resolver test to verify it passes**
 
-Run: `npm run compile:electron && node --test tests/memoryScopeResolver.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/memoryScopeResolver.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Commit the scoped-memory domain**
@@ -140,7 +140,7 @@ test('dedupe and delete matching stay inside one metabot + scope bucket', async 
 
 - [ ] **Step 2: Run the migration/storage tests to verify they fail**
 
-Run: `npm run compile:electron && node --test tests/memoryMigrationInference.test.mjs tests/memoryScopedCrud.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/memoryMigrationInference.test.mjs tests/memoryScopedCrud.test.mjs`
 Expected: FAIL because scope columns, backfill logic, and scope-bounded CRUD semantics are not implemented
 
 - [ ] **Step 3: Implement schema migration and scoped persistence**
@@ -168,7 +168,7 @@ In `CoworkStore`:
 
 - [ ] **Step 4: Run the migration/storage tests to verify they pass**
 
-Run: `npm run compile:electron && node --test tests/memoryMigrationInference.test.mjs tests/memoryScopedCrud.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/memoryMigrationInference.test.mjs tests/memoryScopedCrud.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Commit the migration layer**
@@ -222,7 +222,7 @@ test('external sessions do not include owner profile facts', () => {
 
 - [ ] **Step 2: Run the prompt-block test to verify it fails**
 
-Run: `npm run compile:electron && node --test tests/memoryScopedRecall.test.mjs tests/memoryPromptBlocks.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/memoryScopedRecall.test.mjs tests/memoryPromptBlocks.test.mjs`
 Expected: FAIL because shared recall/prompt-block helpers do not exist yet
 
 - [ ] **Step 3: Implement scoped recall and prompt composition**
@@ -245,7 +245,7 @@ Update `CoworkRunner` so:
 
 - [ ] **Step 4: Run the prompt-block test to verify it passes**
 
-Run: `npm run compile:electron && node --test tests/memoryScopedRecall.test.mjs tests/memoryPromptBlocks.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/memoryScopedRecall.test.mjs tests/memoryPromptBlocks.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Commit scoped recall and prompt blocks**
@@ -283,7 +283,7 @@ test('private chat prompt does not inject owner profile facts', () => {
 
 - [ ] **Step 2: Run the private-chat regression test to verify it fails**
 
-Run: `npm run compile:electron && node --test tests/privateChatScopedMemory.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/privateChatScopedMemory.test.mjs`
 Expected: FAIL because the current private-chat path still injects raw MetaBot-level memories
 
 - [ ] **Step 3: Implement scoped external write/read behavior**
@@ -311,7 +311,7 @@ Required changes:
 
 - [ ] **Step 4: Run the private-chat regression test to verify it passes**
 
-Run: `npm run compile:electron && node --test tests/privateChatScopedMemory.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/privateChatScopedMemory.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Commit the external-scope integration**
@@ -348,7 +348,7 @@ Add type assertions or renderer-facing tests near the affected modules if lightw
 
 - [ ] **Step 2: Run compile to verify the new scope fields are missing**
 
-Run: `npm run compile:electron`
+Run: `pnpm run compile:electron`
 Expected: FAIL after adding the new typed API surface to one side only
 
 - [ ] **Step 3: Implement scope-aware renderer and preload surfaces**
@@ -368,7 +368,7 @@ Update the Settings memory UI so it:
 
 - [ ] **Step 4: Run compile to verify the UI/API updates pass**
 
-Run: `npm run compile:electron`
+Run: `pnpm run compile:electron`
 Expected: PASS
 
 - [ ] **Step 5: Commit the UI/API layer**
@@ -392,23 +392,23 @@ git commit -m "feat: add scoped memory management ui"
 
 ```json
 {
-  "test:memory": "npm run compile:electron && node --test tests/memoryScopeResolver.test.mjs tests/memoryMigrationInference.test.mjs tests/memoryScopedRecall.test.mjs tests/memoryPromptBlocks.test.mjs tests/privateChatScopedMemory.test.mjs"
+  "test:memory": "pnpm run compile:electron && node --test tests/memoryScopeResolver.test.mjs tests/memoryMigrationInference.test.mjs tests/memoryScopedRecall.test.mjs tests/memoryPromptBlocks.test.mjs tests/privateChatScopedMemory.test.mjs"
 }
 ```
 
 - [ ] **Step 2: Run the memory suite**
 
-Run: `npm run test:memory`
+Run: `pnpm run test:memory`
 Expected: PASS
 
 - [ ] **Step 3: Run lint**
 
-Run: `npm run lint`
+Run: `pnpm run lint`
 Expected: PASS
 
 - [ ] **Step 4: Verify observability output is present**
 
-Run: `npm run test:memory`
+Run: `pnpm run test:memory`
 Expected: PASS and the touched runtime/helpers expose structured scope logs for:
 - migration/backfill counts
 - resolved read/write scope decisions
@@ -431,9 +431,9 @@ git commit -m "test: repair scoped memory regression suite"
 
 ## Verification Checklist
 
-- `npm run compile:electron`
-- `npm run test:memory`
-- `npm run lint`
+- `pnpm run compile:electron`
+- `pnpm run test:memory`
+- `pnpm run lint`
 
 ## Notes for the Implementer
 

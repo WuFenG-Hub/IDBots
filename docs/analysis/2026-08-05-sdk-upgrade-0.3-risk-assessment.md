@@ -57,7 +57,7 @@ Net effect: the upgrade *removes* our need for the Electron-as-node machinery (`
 | Error-string heuristics | Our retries match on strings ("No conversation found", context overflow, DeepSeek `reasoning_content`) — CLI error surfaces changed across 200 releases | Medium | Audit `handleClaudeEvent` result-error branches against new CLI outputs; new SDK exports `USAGE_LIMIT_ERROR_PREFIXES` etc. as a hint of changed surfaces |
 | Windows/Git-Bash paths | cygpath patch dies; native binary path handling unverified on Windows | Medium | Full Windows pass: local mode, sandbox serial mode, Git-Bash shell |
 | Permission / steer / MCP flows | Additive protocol changes; `canUseTool` control-channel dedup logic changed (request_id dedup noted in d.ts) | Low-Med | Regression-run the ~30 cowork test suites + manual permission/steer checks |
-| Sandbox guest SDK | agent-runner inside Alpine must install the musl platform package via `npm ci --omit=dev` | Low-Med | Rebuild image in `scripts/build-sandbox-image-*.sh`; verify `agentd` boot + binary spawn |
+| Sandbox guest SDK | agent-runner inside Alpine must install the musl platform package via `pnpm ci --omit=dev` | Low-Med | Rebuild image in `scripts/build-sandbox-image-*.sh`; verify `agentd` boot + binary spawn |
 
 ## 7. Effort estimate
 

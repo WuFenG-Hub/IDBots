@@ -1,34 +1,34 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 /**
- * Preflight gate: verify dsh-runtime/node_modules AND dsh-runtime/package-lock.json
+ * Preflight gate: verify dsh-runtime/node_modules AND dsh-runtime/pnpm-lock.yaml
  * match dsh-runtime/package.json.
  *
- * The DSH runtime is a nested npm package spawned as a standalone Node process by
+ * The DSH runtime is a nested pnpm package spawned as a standalone Node process by
  * the Electron main process. Its node_modules is NOT tracked in git, so after
  * pulling or merging a commit that bumps dsh-runtime dependencies, the on-disk
- * install is silently stale until someone reruns `npm install --prefix dsh-runtime`
+ * install is silently stale until someone reruns `pnpm --dir dsh-runtime install`
  * (only wired into the root postinstall, which does not run on git pull/merge).
  * A stale install crashes the runtime at plugin-load time with cryptic
  * ERR_MODULE_NOT_FOUND errors. This script fails fast with a clear remediation.
  *
  * The lockfile half (2026-09-06 incident): a version bump edited
- * dsh-runtime/package.json but landed without regenerating package-lock.json,
- * leaving the lock's top-level dependencies block at the old version. That
- * state passes review silently but makes `npm ci --prefix dsh-runtime` fail
- * with EUSAGE. The lockfile IS tracked in git, so its sync with package.json
- * is checked here too — before anyone wastes a cycle on the broken clean
- * reinstall path.
+ * dsh-runtime/package.json but landed without regenerating pnpm-lock.yaml,
+ * leaving the lock's importer block at the old version. That state passes
+ * review silently but makes `pnpm --dir dsh-runtime install --frozen-lockfile`
+ * fail with ERR_PNPM_OUTDATED_LOCKFILE. The lockfile IS tracked in git, so its
+ * sync with package.json is checked here too — before anyone wastes a cycle on
+ * the broken clean reinstall path.
  */
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
 const REMEDIATION =
-  'Run: npm install --prefix dsh-runtime   (or: npm ci --prefix dsh-runtime for a clean reinstall)';
+  'Run: pnpm --dir dsh-runtime install   (or: pnpm --dir dsh-runtime install --frozen-lockfile for a clean reinstall)';
 const REMEDIATION_LOCK =
-  'Regenerate with: npm install --prefix dsh-runtime   ' +
-  '(never hand-edit the lockfile; commit dsh-runtime/package.json and package-lock.json in the SAME commit)';
+  'Regenerate with: pnpm --dir dsh-runtime install   ' +
+  '(never hand-edit the lockfile; commit dsh-runtime/package.json and pnpm-lock.yaml in the SAME commit)';
 const REMEDIATION_PATCH =
   'Run: node scripts/apply-dsh-kernel-patches.cjs   ' +
   '(applies scripts/dsh-kernel-patches/*.patch to the installed kernel packages; ' +
@@ -38,7 +38,23 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
+function readYaml(filePath) {
+  let yaml;
+  try {
+    yaml = require('js-yaml');
+  } catch (err) {
+    throw new Error(`cannot load js-yaml (install root dependencies first): ${err.message}`);
+  }
+  return yaml.load(fs.readFileSync(filePath, 'utf8'));
+}
+
 const EXACT_SPEC = /^\d+\.\d+\.\d+(\S*)$/;
+
+// pnpm records peer-suffix annotations on resolved versions
+// (e.g. `0.1.5-rc.2(zod@4.3.6)`); the plain semver is what gets installed.
+function stripPeerSuffix(version) {
+  return String(version).replace(/\(.*\)$/, '');
+}
 
 /**
  * @param {string} projectRoot repository root containing dsh-runtime/
@@ -55,31 +71,34 @@ function checkDshRuntimeDeps(projectRoot) {
   }
   const declared = readJson(pkgPath).dependencies || {};
 
-  const lockPath = path.join(runtimeDir, 'package-lock.json');
+  const lockPath = path.join(runtimeDir, 'pnpm-lock.yaml');
   if (!fs.existsSync(lockPath)) {
-    lockProblems.push('dsh-runtime/package-lock.json is missing (tracked file — restore it from git)');
+    lockProblems.push('dsh-runtime/pnpm-lock.yaml is missing (tracked file — restore it from git)');
   } else {
-    const lockPackages = readJson(lockPath).packages || {};
-    const lockTop = (lockPackages[''] || {}).dependencies || {};
+    // The importer block is the pnpm equivalent of the npm lock's top-level
+    // `packages[""]` block: one entry per direct dependency carrying both the
+    // declared specifier and the resolved version.
+    const lock = readYaml(lockPath);
+    const lockTop = lock?.importers?.['.']?.dependencies || {};
     for (const [name, spec] of Object.entries(declared)) {
-      const lockSpec = lockTop[name];
+      const lockSpec = lockTop[name]?.specifier;
       if (lockSpec === undefined) {
-        lockProblems.push(`${name}@${spec}: declared in package.json but absent from the lockfile top-level block`);
+        lockProblems.push(`${name}@${spec}: declared in package.json but absent from the lockfile importer block`);
       } else if (lockSpec !== spec) {
-        lockProblems.push(`${name}: package.json pins ${spec} but the lockfile top-level block says ${lockSpec}`);
+        lockProblems.push(`${name}: package.json pins ${spec} but the lockfile importer block says ${lockSpec}`);
       }
     }
     for (const name of Object.keys(lockTop)) {
       if (!(name in declared)) {
-        lockProblems.push(`${name}: in the lockfile top-level block but not declared in package.json`);
+        lockProblems.push(`${name}: in the lockfile importer block but not declared in package.json`);
       }
     }
     // Exact pins must also be what the lock actually resolved and would install.
     for (const [name, spec] of Object.entries(declared)) {
       if (!EXACT_SPEC.test(spec)) continue;
-      const entry = lockPackages[`node_modules/${name}`];
-      if (entry && entry.version !== spec) {
-        lockProblems.push(`${name}: pinned ${spec} but the lockfile resolves ${entry.version}`);
+      const resolved = lockTop[name]?.version;
+      if (resolved !== undefined && stripPeerSuffix(resolved) !== spec) {
+        lockProblems.push(`${name}: pinned ${spec} but the lockfile resolves ${stripPeerSuffix(resolved)}`);
       }
     }
   }
@@ -98,7 +117,7 @@ function checkDshRuntimeDeps(projectRoot) {
     }
     // Exact pins (the @deepseek-ai/* kernel packages) must match exactly — a stale
     // installed version is precisely the failure this gate exists to catch.
-    // Ranged specs (^/~) only require presence; npm already resolves them.
+    // Ranged specs (^/~) only require presence; pnpm already resolves them.
     if (EXACT_SPEC.test(spec)) {
       const installedVersion = readJson(installedPkgPath).version;
       if (installedVersion !== spec) {
@@ -115,7 +134,7 @@ function main() {
   const { ok, problems, lockProblems } = checkDshRuntimeDeps(projectRoot);
   if (!ok) {
     if (lockProblems.length > 0) {
-      console.error('[FAIL] dsh-runtime/package-lock.json is out of sync with package.json:');
+      console.error('[FAIL] dsh-runtime/pnpm-lock.yaml is out of sync with package.json:');
       for (const problem of lockProblems) {
         console.error(`  - ${problem}`);
       }

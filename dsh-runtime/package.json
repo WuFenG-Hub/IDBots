@@ -66,31 +66,5 @@
     "@deepseek-ai/dsh-web-search-deepseek": "0.1.5-rc.2",
     "node-addon-require-builtin": "^0.1.4"
   },
-  "overrides": {
-    "@deepseek-ai/dsh-agent-instructions": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-anonymous-user-id": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-atomic-write": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-attachment": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-authorization": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-brand": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-code-runtime": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-commands": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-compaction": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-credentials": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-fs": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-home-paths": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-invariants": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-jobs": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-llm-deepseek": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-sandbox": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-sandbox-policy": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-scope": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-session-persistence": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-settings": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-shell": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-subagent-in-process-driver": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-subprocess": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-timeout": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-typert-protocol": "0.1.5-rc.2"
-  }
+  "packageManager": "pnpm@11.24.0"
 }

@@ -76,7 +76,7 @@ windows, at the same ~82% intent as the original custom logic.
 
 - Unit tests for the new module (env values for DeepSeek V4 family, Claude models excluded,
   fallback source excluded, >1M windows capped, small windows rejected).
-- Compile (`npm run compile:electron`) and run `node --test tests/coworkSdkAutoCompact.test.mjs`
+- Compile (`pnpm run compile:electron`) and run `node --test tests/coworkSdkAutoCompact.test.mjs`
   plus existing `coworkContextBudget` tests.
 - Manual acceptance on a DeepSeek V4 session: long conversation → `compact_boundary` system
   message appears around 82% of 1M, session continues without an API error, context ring shows

@@ -62,7 +62,7 @@ The fix adds 3 work sources: `groupTask` / `groupChat` / `a2aChat`.
 ### 3.1 Unit tests (28/28 green)
 
 ```
-npm run compile:electron && node --test tests/sleepGuard.test.mjs
+pnpm run compile:electron && node --test tests/sleepGuard.test.mjs
 ℹ tests 28   ℹ pass 28   ℹ fail 0   ℹ duration_ms 627
 ```
 

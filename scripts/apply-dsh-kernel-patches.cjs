@@ -7,9 +7,9 @@
  * Why: some @deepseek-ai kernel packages ship Windows behavior we must fix
  * between releases (e.g. dsh-win32-process creating tool subprocesses via raw
  * CreateProcessW without CREATE_NO_WINDOW, which flashes a console window on
- * every bash tool call). The runtime is a nested npm package, so root-level
+ * every bash tool call). The runtime is a nested pnpm package, so root-level
  * patch-package cannot reach it and hand-editing files would be lost on every
- * `npm install --prefix dsh-runtime`. Committed .patch files + this script
+ * `pnpm --dir dsh-runtime install`. Committed .patch files + this script
  * keep the fixes reproducible across fresh clones, CI builds (electron-builder
  * packages the patched dsh-runtime/node_modules), and kernel upgrades.
  *
@@ -23,7 +23,7 @@
  *   node scripts/apply-dsh-kernel-patches.cjs           # apply (idempotent)
  *   node scripts/apply-dsh-kernel-patches.cjs --check   # verify only, no writes
  *
- * Wired into: root postinstall (after `npm install --prefix dsh-runtime`),
+ * Wired into: root postinstall (after `pnpm --dir dsh-runtime install`),
  * check:dsh-deps gate (--check), and upgrade:dsh (re-apply after reinstall).
  * See scripts/dsh-kernel-patches/README.md for how to add or rebase patches.
  */
@@ -126,7 +126,7 @@ function main() {
     if (!fs.existsSync(installedManifest)) {
       console.error(
         `[dsh-kernel-patches] ${label}: ${target.name} is not installed under dsh-runtime/node_modules — ` +
-        'run: npm install --prefix dsh-runtime',
+        'run: pnpm --dir dsh-runtime install',
       );
       failures += 1;
       continue;

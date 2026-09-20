@@ -484,7 +484,7 @@ async function main() {
   if (command === "next") {
     const phaseMap = {
       local: "Run: node scripts/release-runbook.mjs local  (release-branch worktree, after bump)",
-      bump: "Commit the package.json/package-lock.json bump, post the dev-journal Buzz, merge to main, push, then create annotated tag __TAG__",
+      bump: "Commit the package.json/pnpm-lock.yaml bump, post the dev-journal Buzz, merge to main, push, then create annotated tag __TAG__",
       ci: "After the tag is pushed, run: node scripts/release-runbook.mjs monitor",
       check: "Run: node scripts/release-runbook.mjs check",
       download: "Run: node scripts/release-runbook.mjs download",

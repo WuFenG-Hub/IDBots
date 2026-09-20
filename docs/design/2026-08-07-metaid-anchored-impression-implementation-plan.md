@@ -582,7 +582,7 @@ Acceptance:
 ### 10.1 Required for every implementation commit
 
 - `git diff --check`;
-- `npm run compile:electron`;
+- `pnpm run compile:electron`;
 - focused tests for the changed module;
 - confirmation that unrelated user files are untouched.
 
@@ -614,10 +614,10 @@ Acceptance:
 
 ### 10.5 Final gate
 
-- `npm run test:memory`;
+- `pnpm run test:memory`;
 - all directly affected `node --test` suites;
-- `npm run compile:electron`;
-- `npm run build`;
+- `pnpm run compile:electron`;
+- `pnpm run build`;
 - lint for changed files, then the repository lint command if baseline permits;
 - clean feature worktree with no generated or request files left behind.
 

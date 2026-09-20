@@ -6,7 +6,7 @@
 
 **Architecture:** Treat MetaID pin facts as the chain-level source of truth: 7-tuple version/path/content-type stay outside JSON payloads, pin ids identify records, and protocol payload fields are self-declared display or relation data only. Keep local SQLite order status as runtime state, but add an order pin id bridge so A2A service execution, refund flows, ratings, and UI no longer need payment txid as the order's primary business reference. Preserve legacy v1.0 service pins and old local rows through normalization layers instead of rewriting chain data.
 
-**Tech Stack:** Electron main process, React renderer, TypeScript, sql.js-backed local stores, MetaID `createPin`, encrypted simplemsg, existing Gig Square services, `node:test`, `tsx`, `npm run compile:electron`, `npm run test:gig-square`.
+**Tech Stack:** Electron main process, React renderer, TypeScript, sql.js-backed local stores, MetaID `createPin`, encrypted simplemsg, existing Gig Square services, `node:test`, `tsx`, `pnpm run compile:electron`, `pnpm run test:gig-square`.
 
 ---
 
@@ -327,7 +327,7 @@ Test requirements:
 - `findOrderByOrderPinId` works.
 - `findOrderByPayment` still works for legacy callers.
 
-Run: `npm run compile:electron && node --test tests/serviceOrderStoreOrderPin.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/serviceOrderStoreOrderPin.test.mjs`
 
 Expected: FAIL because `orderPinId` and empty payment txid support do not exist.
 
@@ -391,7 +391,7 @@ Keep old `provider_skill` as a compatibility label and search column.
 
 - [x] **Step 5: Run migration tests**
 
-Run: `npm run compile:electron && node --test tests/serviceOrderStoreOrderPin.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/serviceOrderStoreOrderPin.test.mjs`
 
 Expected: PASS.
 
@@ -400,7 +400,7 @@ Expected: PASS.
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/sqliteNativeStore.test.mjs tests/sqliteRecoveryLifecycle.test.mjs tests/privateChatOrderCoworkDeliveryArtifacts.test.mjs
 ```
 
@@ -449,7 +449,7 @@ and does not include:
 - `paymentChain`
 - `orderId`
 
-Run: `npm run compile:electron && node --test tests/gigSquareServiceMutationService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/gigSquareServiceMutationService.test.mjs`
 
 Expected: FAIL until mutation service supports v1.1 fields.
 
@@ -508,7 +508,7 @@ For modify, keep `operation: "modify"` targeting the current pin but use MetaID 
 
 - [x] **Step 5: Run payload tests**
 
-Run: `npm run compile:electron && node --test tests/gigSquareServiceMutationService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/gigSquareServiceMutationService.test.mjs`
 
 Expected: PASS.
 
@@ -856,7 +856,7 @@ For incoming `[ORDER]`:
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/privateChatOrderCoworkDeliveryArtifacts.test.mjs
 npx tsx --test tests/privateChatRatingPrompt.test.ts
 ```
@@ -938,7 +938,7 @@ The list has no execution-order semantics.
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 npx tsx --test tests/orderPromptBuilder.test.ts
 node --test tests/skillManagerOrderSkillPrompt.test.mjs
 ```
@@ -966,7 +966,7 @@ After commit, post a development-journal buzz.
 - [x] **Step 1: Run focused test suite**
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/skillServiceProtocol.test.mjs
 node --test tests/serviceOrderStoreOrderPin.test.mjs
 node --test tests/gigSquareServiceMutationService.test.mjs
@@ -981,18 +981,18 @@ Expected: PASS.
 - [x] **Step 2: Run existing Gig Square self-test**
 
 ```bash
-npm run test:gig-square
+pnpm run test:gig-square
 ```
 
 Expected: PASS.
 
-Attempted after `npm run compile:electron`; blocked by missing `IDBOTS_METABOT_MNEMONIC`, which the self-test requires to build the wallet transaction.
+Attempted after `pnpm run compile:electron`; blocked by missing `IDBOTS_METABOT_MNEMONIC`, which the self-test requires to build the wallet transaction.
 
 - [x] **Step 3: Run lint/build**
 
 ```bash
-npm run lint
-npm run build
+pnpm run lint
+pnpm run build
 ```
 
 Expected: PASS.
@@ -1002,7 +1002,7 @@ Expected: PASS.
 Run:
 
 ```bash
-npm run electron:dev
+pnpm run electron:dev
 ```
 
 Smoke cases:

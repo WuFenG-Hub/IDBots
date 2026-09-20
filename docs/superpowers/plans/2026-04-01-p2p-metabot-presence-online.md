@@ -61,7 +61,7 @@ export IDBOTS_ROOT=/Users/tusm/Documents/MetaID_Projects/IDBots/IDBots/.worktree
 | `tests/providerDiscoveryService.test.mjs` | Presence-first vs heartbeat-fallback discovery behavior tests |
 | `tests/providerPingService.test.mjs` | `PING/PONG` success/failure timeout regression tests |
 | `tests/heartbeatPollingService.test.mjs` | Keep heartbeat fallback behavior honest while it remains as the phase-1 fallback path |
-| `resources/man-p2p/*` | Bundled updated binaries after `npm run sync:man-p2p` |
+| `resources/man-p2p/*` | Bundled updated binaries after `pnpm run sync:man-p2p` |
 
 ---
 
@@ -357,7 +357,7 @@ test('buildRuntimeConfig injects canonical p2p_presence_global_metaids from hear
 
 - [ ] **Step 2: Run the runtime-config tests to verify they fail**
 
-Run: `npm run compile:electron && node --test tests/p2pConfigService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/p2pConfigService.test.mjs`
 
 Expected: FAIL because `buildRuntimeConfig()` does not yet accept MetaBot presence inputs.
 
@@ -391,7 +391,7 @@ Expected implementation shape:
 - store the migration marker under a separate KV key, not inside the editable bootstrap array, for example `p2p.bootstrap_defaults_migrated.v1`
 - keep the renderer-facing config shape unchanged except for the effective defaulted `p2p_bootstrap_nodes`
 
-Run: `npm run compile:electron && node --test tests/p2pPresenceClient.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/p2pPresenceClient.test.mjs`
 
 Expected: FAIL because the client module does not exist yet.
 
@@ -431,7 +431,7 @@ If the file write succeeds but `POST /api/config/reload` fails:
 
 - [ ] **Step 6: Re-run the focused IDBots tests**
 
-Run: `npm run compile:electron && node --test tests/p2pConfigService.test.mjs tests/p2pRuntimeConfigSync.test.mjs tests/p2pPresenceClient.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/p2pConfigService.test.mjs tests/p2pRuntimeConfigSync.test.mjs tests/p2pPresenceClient.test.mjs`
 
 Expected: PASS
 
@@ -473,7 +473,7 @@ test('provider discovery falls back when presence is unhealthy', async () => {
 
 - [ ] **Step 2: Run the discovery tests to verify they fail**
 
-Run: `npm run compile:electron && node --test tests/providerDiscoveryService.test.mjs tests/heartbeatPollingService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/providerDiscoveryService.test.mjs tests/heartbeatPollingService.test.mjs`
 
 Expected: FAIL because the presence-first orchestrator does not exist.
 
@@ -518,7 +518,7 @@ Emit `heartbeat:discoveryChanged` only when the normalized snapshot materially c
 
 - [ ] **Step 5: Re-run the focused discovery tests**
 
-Run: `npm run compile:electron && node --test tests/providerDiscoveryService.test.mjs tests/heartbeatPollingService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/providerDiscoveryService.test.mjs tests/heartbeatPollingService.test.mjs`
 
 Expected: PASS
 
@@ -553,7 +553,7 @@ test('provider ping resolves false when timeout expires without pong', async () 
 
 - [ ] **Step 2: Run the provider ping tests to verify they fail**
 
-Run: `npm run compile:electron && node --test tests/providerPingService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/providerPingService.test.mjs`
 
 Expected: FAIL because the extracted service does not exist yet.
 
@@ -571,7 +571,7 @@ it('treats a service missing from availableServices as offline even when it stil
 
 - [ ] **Step 4: Run the delegation regression to verify it fails or is missing**
 
-Run: `npm run compile:electron && node --test tests/remoteDelegation.test.mjs tests/providerPingService.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/remoteDelegation.test.mjs tests/providerPingService.test.mjs`
 
 Expected: FAIL until the extracted pre-order gate is wired up.
 
@@ -589,7 +589,7 @@ Do not disable existing heartbeat publishing in phase 1; fallback read-path depe
 
 - [ ] **Step 6: Re-run the focused orderability tests**
 
-Run: `npm run compile:electron && node --test tests/providerPingService.test.mjs tests/remoteDelegation.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/providerPingService.test.mjs tests/remoteDelegation.test.mjs`
 
 Expected: PASS
 
@@ -624,7 +624,7 @@ Run:
 
 ```bash
 cd "$IDBOTS_ROOT"
-npm run sync:man-p2p -- --source "$MAN_P2P_ROOT"
+pnpm run sync:man-p2p -- --source "$MAN_P2P_ROOT"
 ```
 
 Expected: `resources/man-p2p/*` and `resources/man-p2p/bundle-manifest.json` update to the new `man-p2p` commit.
@@ -647,7 +647,7 @@ Run in the testing subagent:
 
 ```bash
 cd "$IDBOTS_ROOT"
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/p2pConfigService.test.mjs tests/p2pRuntimeConfigSync.test.mjs tests/p2pPresenceClient.test.mjs tests/providerDiscoveryService.test.mjs tests/heartbeatPollingService.test.mjs tests/providerPingService.test.mjs tests/remoteDelegation.test.mjs
 ```
 
@@ -661,7 +661,7 @@ Run in a fresh testing subagent after the unrelated build issue is fixed:
 cd "$MAN_P2P_ROOT"
 go test ./...
 cd "$IDBOTS_ROOT"
-npm run lint
+pnpm run lint
 ```
 
 Expected: PASS

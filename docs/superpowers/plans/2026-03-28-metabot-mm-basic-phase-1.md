@@ -97,7 +97,7 @@ test('metabot-mm-basic prompt advertises market making, exact-in, and BTC/SPACE 
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metabotMmBasicSkill.test.mjs
 ```
 
@@ -144,7 +144,7 @@ process.stdout.write(`${JSON.stringify({ mode: 'stub', ok: true })}\n`);
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metabotMmBasicSkill.test.mjs
 ```
 
@@ -639,7 +639,7 @@ test('rpc transfer route rejects unsupported chain or missing fields with 400', 
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metaidRpcWalletRoutes.test.mjs
 ```
 
@@ -673,7 +673,7 @@ const result = await executeTransfer(store, {
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metaidRpcWalletRoutes.test.mjs
 ```
 
@@ -917,7 +917,7 @@ The final `SKILL.md` should clearly:
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metabotMmBasicSkill.test.mjs
 ```
 
@@ -950,7 +950,7 @@ Expected: PASS.
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 ```
 
 Expected: successful TypeScript/Electron compile.
@@ -970,7 +970,7 @@ Expected: PASS for the new skill discovery and transfer route coverage.
 Run:
 
 ```bash
-npm run lint
+pnpm run lint
 ```
 
 Expected: PASS. If unrelated existing lint failures appear, stop and decide whether they are truly pre-existing before proceeding.

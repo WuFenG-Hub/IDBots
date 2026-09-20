@@ -2,13 +2,13 @@
 
 Post-install patches applied to `dsh-runtime/node_modules/**` by
 `scripts/apply-dsh-kernel-patches.cjs` (wired into the root `postinstall`,
-the `check:dsh-deps` gate, and `npm run upgrade:dsh`).
+the `check:dsh-deps` gate, and `pnpm run upgrade:dsh`).
 
-The DSH runtime is a nested npm package, so the root `patch-package` +
+The DSH runtime is a nested pnpm package, so root-level
 `patches/` setup cannot reach it. Patches here exist only when a shipped
 kernel package has a defect we must fix between kernel releases — they are
 technical debt that must be rebased or deleted at the next
-`npm run upgrade:dsh`.
+`pnpm run upgrade:dsh`.
 
 ## Naming
 
@@ -50,5 +50,5 @@ allocation; it does not affect GUI windows.
    labels and save it here as `<name>+<installed-version>.patch`.
 3. Run `node scripts/apply-dsh-kernel-patches.cjs` — it must report
    "already applied", and `--check` must pass.
-4. On the next `npm run upgrade:dsh`, delete or rebase each patch; the
+4. On the next `pnpm run upgrade:dsh`, delete or rebase each patch; the
    script fails the upgrade until every patch matches the new versions.

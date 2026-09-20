@@ -14,7 +14,7 @@
 
 ```bash
 cd .worktrees/gasfee-flow
-npm run dev
+pnpm run dev
 ```
 
 Notes:

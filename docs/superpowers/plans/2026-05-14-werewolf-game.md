@@ -2287,7 +2287,7 @@ Add these entries to the `defaults` object in `SKILLs/skills.config.json`:
 - [ ] **Step 2: Build skills**
 
 ```bash
-npm run build:skills
+pnpm run build:skills
 ```
 Expected: 0 errors
 

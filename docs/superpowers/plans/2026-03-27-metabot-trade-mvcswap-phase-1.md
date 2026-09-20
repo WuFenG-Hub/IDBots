@@ -69,19 +69,19 @@
 
 ### Verification commands used throughout
 
-- `npm install`
-- `npm run compile:electron`
+- `pnpm install`
+- `pnpm run compile:electron`
 - `node --test tests/metabotAccountService.test.mjs tests/metaidRpcWalletRoutes.test.mjs`
 - `node --test tests/walletRawTxService.test.mjs`
 - `node --test tests/metabotTradeMvcswapSkill.test.mjs tests/metabotTradeMvcswapIntent.test.mjs`
 - `node --test tests/metabotTradeMvcswapScript.test.mjs`
-- `npm run lint`
-- `npm run electron:dev`
+- `pnpm run lint`
+- `pnpm run electron:dev`
 
 Note:
 
 - `tests/skillFrontmatter.test.mjs` is a known unrelated baseline failure per `localdocs/gotchas.md`.
-- Keep verification focused on this feature plus `npm run lint`.
+- Keep verification focused on this feature plus `pnpm run lint`.
 
 ---
 
@@ -110,7 +110,7 @@ Run:
 
 ```bash
 cd .worktrees/metabot-trade-mvcswap
-npm install
+pnpm install
 ```
 
 Expected:
@@ -122,7 +122,7 @@ Expected:
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metabotWalletService.test.mjs tests/metaidRpcEndpoint.test.mjs tests/baoyuImageStudioSkill.test.mjs
 ```
 
@@ -200,7 +200,7 @@ test('rpc gateway exposes account-summary, balance, and fee-rate-summary as loca
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotAccountService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
+pnpm run compile:electron && node --test tests/metabotAccountService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 ```
 
 Expected:
@@ -258,7 +258,7 @@ if (req.method === 'GET' && pathname === '/api/idbots/fee-rate-summary') {
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotAccountService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
+pnpm run compile:electron && node --test tests/metabotAccountService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 ```
 
 Expected:
@@ -270,7 +270,7 @@ Expected:
 Run:
 
 ```bash
-npm run lint
+pnpm run lint
 git add src/main/services/metabotAccountService.ts src/main/services/metaidRpcServer.ts src/main/services/addressBalanceService.ts tests/metabotAccountService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 git commit -m "feat: add generic wallet rpc account routes"
 ```
@@ -327,7 +327,7 @@ test('buildMvcTransferRawTx rejects invalid amount_sats before spawning the work
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
+pnpm run compile:electron && node --test tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 ```
 
 Expected:
@@ -366,7 +366,7 @@ Add `POST /api/idbots/wallet/mvc/build-transfer-rawtx` in `metaidRpcServer.ts` w
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
+pnpm run compile:electron && node --test tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 ```
 
 Expected:
@@ -378,7 +378,7 @@ Expected:
 Run:
 
 ```bash
-npm run lint
+pnpm run lint
 git add src/main/services/walletRawTxService.ts src/main/libs/buildMvcTransferRawTxWorker.ts src/main/services/metaidRpcServer.ts tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 git commit -m "feat: add mvc raw tx wallet rpc"
 ```
@@ -427,7 +427,7 @@ test('buildMvcFtTransferRawTx returns raw_tx, amount_check_raw_tx, and output_in
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
+pnpm run compile:electron && node --test tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 ```
 
 Expected:
@@ -476,7 +476,7 @@ Add `POST /api/idbots/wallet/mvc-ft/build-transfer-rawtx` in `metaidRpcServer.ts
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
+pnpm run compile:electron && node --test tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 ```
 
 Expected:
@@ -488,7 +488,7 @@ Expected:
 Run:
 
 ```bash
-npm run lint
+pnpm run lint
 git add src/main/services/walletRawTxService.ts src/main/libs/buildMvcFtTransferRawTxWorker.ts src/main/services/metaidRpcServer.ts tests/walletRawTxService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 git commit -m "feat: add mvc ft raw tx wallet rpc"
 ```
@@ -553,7 +553,7 @@ test('SkillManager lists metabot-trade-mvcswap as an enabled built-in skill', ()
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotTradeMvcswapSkill.test.mjs tests/metabotTradeMvcswapIntent.test.mjs
+pnpm run compile:electron && node --test tests/metabotTradeMvcswapSkill.test.mjs tests/metabotTradeMvcswapIntent.test.mjs
 ```
 
 Expected:
@@ -593,7 +593,7 @@ official: true
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotTradeMvcswapSkill.test.mjs tests/metabotTradeMvcswapIntent.test.mjs
+pnpm run compile:electron && node --test tests/metabotTradeMvcswapSkill.test.mjs tests/metabotTradeMvcswapIntent.test.mjs
 ```
 
 Expected:
@@ -605,7 +605,7 @@ Expected:
 Run:
 
 ```bash
-npm run lint
+pnpm run lint
 git add SKILLs/metabot-trade-mvcswap tests/metabotTradeMvcswapSkill.test.mjs tests/metabotTradeMvcswapIntent.test.mjs
 git commit -m "feat: scaffold mvcswap trade skill"
 ```
@@ -663,7 +663,7 @@ test('preview request returns a confirmation instruction when executeNow is fals
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotTradeMvcswapScript.test.mjs
+pnpm run compile:electron && node --test tests/metabotTradeMvcswapScript.test.mjs
 ```
 
 Expected:
@@ -698,7 +698,7 @@ export async function handleTradeRequest({ input, env, fetchImpl = fetch }) {
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotTradeMvcswapScript.test.mjs
+pnpm run compile:electron && node --test tests/metabotTradeMvcswapScript.test.mjs
 ```
 
 Expected:
@@ -710,7 +710,7 @@ Expected:
 Run:
 
 ```bash
-npm run lint
+pnpm run lint
 git add SKILLs/metabot-trade-mvcswap/scripts tests/metabotTradeMvcswapScript.test.mjs
 git commit -m "feat: add mvcswap quote and preview flow"
 ```
@@ -767,7 +767,7 @@ test('token -> SPACE execute flow builds ft raw tx and mvc fee raw tx before tok
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotTradeMvcswapScript.test.mjs
+pnpm run compile:electron && node --test tests/metabotTradeMvcswapScript.test.mjs
 ```
 
 Expected:
@@ -828,7 +828,7 @@ Ensure final execution:
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotTradeMvcswapScript.test.mjs
+pnpm run compile:electron && node --test tests/metabotTradeMvcswapScript.test.mjs
 ```
 
 Expected:
@@ -840,7 +840,7 @@ Expected:
 Run:
 
 ```bash
-npm run lint
+pnpm run lint
 git add SKILLs/metabot-trade-mvcswap/scripts tests/metabotTradeMvcswapScript.test.mjs
 git commit -m "feat: add mvcswap direct execution flow"
 ```
@@ -867,11 +867,11 @@ Expected:
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/metabotAccountService.test.mjs tests/metaidRpcWalletRoutes.test.mjs
 node --test tests/walletRawTxService.test.mjs
 node --test tests/metabotTradeMvcswapSkill.test.mjs tests/metabotTradeMvcswapIntent.test.mjs tests/metabotTradeMvcswapScript.test.mjs
-npm run lint
+pnpm run lint
 ```
 
 Expected:
@@ -885,7 +885,7 @@ Expected:
 Run:
 
 ```bash
-npm run electron:dev
+pnpm run electron:dev
 ```
 
 Verify manually:

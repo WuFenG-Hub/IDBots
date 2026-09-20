@@ -60,7 +60,7 @@
 
 - **Main-process tests import the compiled bundle** (`dist-electron/main/...`),
   not `src/`. After any merge or main-process edit, run
-  `npm run compile:electron` first, or tests silently exercise stale code.
+  `pnpm run compile:electron` first, or tests silently exercise stale code.
 - Run traffic tests with `npx tsx --test tests/trafficAccountService.test.mjs`
   (plain `node --test` fails); renderer tests: `npx tsx --test tests/<file>.tsx`.
 - `tests/*` is gitignored → new test files need `git add -f`.

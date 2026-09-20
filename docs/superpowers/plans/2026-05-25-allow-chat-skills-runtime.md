@@ -39,7 +39,7 @@ assert.deepEqual(ids, ['weather', 'friendly-skill', 'foo-bar']);
 
 - [ ] **Step 2: Run tests to verify RED**
 
-Run: `npm run compile:electron && node --test tests/chatSkillAuthorization.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/chatSkillAuthorization.test.mjs`
 
 Expected: FAIL because `SkillManager.resolveChatSkillIds(...)` does not exist yet.
 
@@ -73,7 +73,7 @@ Also tighten `buildAutoRoutingPromptForSkillIds(skillIds)` so it builds prompts 
 
 - [ ] **Step 4: Run tests to verify GREEN**
 
-Run: `npm run compile:electron && node --test tests/chatSkillAuthorization.test.mjs tests/skillManagerOrderSkillPrompt.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/chatSkillAuthorization.test.mjs tests/skillManagerOrderSkillPrompt.test.mjs`
 
 Expected: PASS. The order-skill prompt tests must continue to pass.
 
@@ -99,7 +99,7 @@ The fake runner should capture:
 
 - [ ] **Step 2: Run test to verify RED**
 
-Run: `npm run compile:electron && node --test tests/orchestratorCoworkBridgeSkillIds.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/orchestratorCoworkBridgeSkillIds.test.mjs`
 
 Expected: FAIL because the bridge currently creates sessions with `[]` and does not pass skill ids to `startSession`.
 
@@ -121,7 +121,7 @@ Keep existing group-chat mapping behavior. Do not create or overwrite `metaweb_p
 
 - [ ] **Step 4: Run test to verify GREEN**
 
-Run: `npm run compile:electron && node --test tests/orchestratorCoworkBridgeSkillIds.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/orchestratorCoworkBridgeSkillIds.test.mjs`
 
 Expected: PASS.
 
@@ -146,7 +146,7 @@ Test these behaviors through `runTickOnce(...)` with a minimal fake DB:
 
 - [ ] **Step 2: Run test to verify RED**
 
-Run: `npm run compile:electron && node --test tests/groupChatAllowChatSkillsRuntime.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/groupChatAllowChatSkillsRuntime.test.mjs`
 
 Expected: FAIL because group-chat skill execution is currently restricted to `triggerReason === 'Boss'` and does not read `allow_chat_skills`.
 
@@ -187,7 +187,7 @@ Remove the current `ids.length > 0 ? ids : all skills` fallback from the group-c
 
 - [ ] **Step 4: Run test to verify GREEN**
 
-Run: `npm run compile:electron && node --test tests/groupChatAllowChatSkillsRuntime.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/groupChatAllowChatSkillsRuntime.test.mjs`
 
 Expected: PASS.
 
@@ -212,7 +212,7 @@ If practical, also add a small exported helper test proving owner/private-chat p
 
 - [ ] **Step 2: Run test to verify RED**
 
-Run: `npm run compile:electron && node --test tests/privateChatAllowChatSkillsPrompt.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/privateChatAllowChatSkillsPrompt.test.mjs`
 
 Expected: FAIL because the prompt builder cannot accept a skills prompt yet.
 
@@ -267,7 +267,7 @@ In `src/main/main.ts`, pass a private-chat runtime backed by `skillMgr.resolveCh
 
 - [ ] **Step 4: Run test to verify GREEN**
 
-Run: `npm run compile:electron && node --test tests/privateChatAllowChatSkillsPrompt.test.mjs`
+Run: `pnpm run compile:electron && node --test tests/privateChatAllowChatSkillsPrompt.test.mjs`
 
 Expected: PASS.
 
@@ -284,7 +284,7 @@ Expected: PASS.
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test \
   tests/chatSkillAuthorization.test.mjs \
   tests/orchestratorCoworkBridgeSkillIds.test.mjs \
@@ -300,7 +300,7 @@ Expected: PASS.
 Run:
 
 ```bash
-npm run build
+pnpm run build
 git diff --check
 git status --short
 ```

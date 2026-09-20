@@ -69,6 +69,6 @@ Base URL `https://so.metaid.io` (overridable via `IDBOTS_METAWEB_API_BASE_URL`).
 - `GET /api/metaweb/protocols/detail?path=…` or `?pinId=…` — record (with payload) + versions (oldest → newest, `chain`/`local` attribution) + conflicts/invalidModifies.
 - `GET /api/metaweb/pin/:pinId/versions` — modify-chain versions.
 
-The thin client lives in `src/main/services/metaProtocolService.ts`; the tools in `src/main/libs/metaProtocolAgentTools.ts`; wiring in `src/main/libs/coworkRunner.ts` + `src/main/main.ts`. Tests: `tests/metaProtocolAgentTools.test.mjs` (`npm run test:metaprotocol`).
+The thin client lives in `src/main/services/metaProtocolService.ts`; the tools in `src/main/libs/metaProtocolAgentTools.ts`; wiring in `src/main/libs/coworkRunner.ts` + `src/main/main.ts`. Tests: `tests/metaProtocolAgentTools.test.mjs` (`pnpm run test:metaprotocol`).
 
 **Out of scope**: ownership transfer / revoke, registry folding logic client-side (the MetaSo projection is the single authority), changes to the human protocol square MetaApp.

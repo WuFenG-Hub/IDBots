@@ -34,7 +34,7 @@
 - Modify `src/renderer/services/cowork.ts`: add `queueA2AGuidance`, refreshing the session when restart succeeds.
 - Modify `src/renderer/services/i18n.ts`: add Chinese and English A2A guidance strings.
 - Modify `src/renderer/components/cowork/CoworkSessionDetail.tsx`: replace observer-only footer copy with `引导对话`, add compact input panel, submit handler, status/error state, and latest-control-event ended-state logic.
-- Modify `tests/privateChatAllowChatSkillsPrompt.test.mjs`: verify private-chat prompt guidance formatting after `npm run compile:electron`.
+- Modify `tests/privateChatAllowChatSkillsPrompt.test.mjs`: verify private-chat prompt guidance formatting after `pnpm run compile:electron`.
 - Modify `tests/orderPromptBuilder.test.ts`: verify order prompt guidance keeps payment/delivery constraints.
 - Modify `tests/privateChatSkillTurnDeliveryInvariant.test.mjs`: verify queued guidance reaches skill-backed private-chat system prompt once.
 - Modify `tests/privateChatOrderCoworkTimeout.test.mjs`: verify missing-artifact continuation can consume newly queued guidance.
@@ -335,7 +335,7 @@ test('buildOrderPrompts includes local guidance without removing order constrain
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/privateChatAllowChatSkillsPrompt.test.mjs
 npx tsx --test tests/orderPromptBuilder.test.ts
 ```
@@ -426,7 +426,7 @@ Replace the current `const systemPrompt = ...` section with:
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/privateChatAllowChatSkillsPrompt.test.mjs
 npx tsx --test tests/orderPromptBuilder.test.ts
 ```
@@ -595,7 +595,7 @@ test('missing artifact continuation consumes newly queued A2A guidance', async (
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/privateChatSkillTurnDeliveryInvariant.test.mjs tests/privateChatOrderCoworkTimeout.test.mjs
 ```
 
@@ -708,7 +708,7 @@ If Task 3's seller order prompt already consumed guidance before `runOrder`, the
 Run:
 
 ```bash
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/privateChatSkillTurnDeliveryInvariant.test.mjs tests/privateChatOrderCoworkTimeout.test.mjs
 ```
 
@@ -1248,7 +1248,7 @@ Run:
 
 ```bash
 node --test tests/coworkSessionDetailA2AEndUi.test.mjs
-npm run compile:electron
+pnpm run compile:electron
 ```
 
 Expected: both commands pass.
@@ -1567,7 +1567,7 @@ Run:
 
 ```bash
 node --test tests/coworkSessionDetailA2AEndUi.test.mjs
-npm run compile:electron
+pnpm run compile:electron
 ```
 
 Expected: both commands pass.
@@ -1598,7 +1598,7 @@ Run:
 
 ```bash
 npx tsx --test tests/a2aGuidance.test.ts tests/encryptedSimplemsg.test.ts tests/orderPromptBuilder.test.ts
-npm run compile:electron
+pnpm run compile:electron
 node --test tests/privateChatAllowChatSkillsPrompt.test.mjs tests/privateChatSkillTurnDeliveryInvariant.test.mjs tests/privateChatOrderCoworkTimeout.test.mjs tests/coworkSessionDetailA2AEndUi.test.mjs
 git diff --check
 ```
@@ -1606,7 +1606,7 @@ git diff --check
 Expected:
 
 - all test files pass,
-- `npm run compile:electron` exits 0,
+- `pnpm run compile:electron` exits 0,
 - `git diff --check` prints no output.
 
 - [ ] **Step 2: Inspect final diff scope**

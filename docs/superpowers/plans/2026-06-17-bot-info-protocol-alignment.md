@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the current local `metabots` table as the runtime model and move protocol compliance into the on-chain write/read mapping layer. Replace the legacy `/info/bio` JSON bundle with separate Bot Info path writers and readers: `/info/bio`, `/info/persona`, `/info/llm`, and `/info/chatSkills`; keep legacy `/info/bio` JSON parsing only as restore compatibility for already-published bots.
 
-**Tech Stack:** Electron main process, TypeScript, React renderer, sql.js-backed `MetabotStore`, MetaID `create` PIN operations, Node test runner, `npm run compile:electron`.
+**Tech Stack:** Electron main process, TypeScript, React renderer, sql.js-backed `MetabotStore`, MetaID `create` PIN operations, Node test runner, `pnpm run compile:electron`.
 
 **Repository note:** Current repo rules require IDBots edits to stay inside this repository. If a task adds plan or test files under ignored paths, use `git add -f` for those files. Each implementation commit must be followed by a Codex `metabot-post-buzz` development journal entry.
 
@@ -158,7 +158,7 @@ test('normalizeBotInfoStringArrayForTests accepts arrays, JSON arrays, and comma
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotInfoPayload.test.mjs
+pnpm run compile:electron && node --test tests/metabotInfoPayload.test.mjs
 ```
 
 Expected: FAIL because `dist-electron/services/metabotInfoPayload.js` does not exist.
@@ -264,7 +264,7 @@ export const normalizeBotInfoStringArrayForTests = normalizeStringArray;
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotInfoPayload.test.mjs
+pnpm run compile:electron && node --test tests/metabotInfoPayload.test.mjs
 ```
 
 Expected: PASS.
@@ -371,7 +371,7 @@ test('edit sync plan never includes chatpubkey and splits profile fields', () =>
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotInfoSyncSteps.test.mjs
+pnpm run compile:electron && node --test tests/metabotInfoSyncSteps.test.mjs
 ```
 
 Expected: FAIL because the exported planning helpers and new sync flags do not exist.
@@ -525,7 +525,7 @@ Also add `allow_chat_skills?: string[]` to `preload.ts` `addMetaBot(...)` and `c
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotInfoPayload.test.mjs tests/metabotInfoSyncSteps.test.mjs
+pnpm run compile:electron && node --test tests/metabotInfoPayload.test.mjs tests/metabotInfoSyncSteps.test.mjs
 ```
 
 Expected: PASS.
@@ -642,7 +642,7 @@ test('legacy bio JSON still restores old bots', () => {
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotRestoreProtocol.test.mjs
+pnpm run compile:electron && node --test tests/metabotRestoreProtocol.test.mjs
 ```
 
 Expected: FAIL because `parseMetaidRestoreProfileInfoForTests(...)` does not exist and new fields are not parsed.
@@ -741,7 +741,7 @@ return {
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotRestoreProtocol.test.mjs
+pnpm run compile:electron && node --test tests/metabotRestoreProtocol.test.mjs
 ```
 
 Expected: PASS.
@@ -766,7 +766,7 @@ Then post a development-journal Buzz with Codex's `metabot-post-buzz` skill desc
 - Modify: `src/renderer/components/metabots/MetabotsManager.tsx`
 - Modify: `src/renderer/components/metabots/MetaBotCreateSuccessModal.tsx`
 - Modify: `src/renderer/services/i18n.ts`
-- Test: covered by `npm run build` and sync-step tests from Task 2.
+- Test: covered by `pnpm run build` and sync-step tests from Task 2.
 
 - [ ] **Step 1: Split edit sync planning in the renderer**
 
@@ -892,7 +892,7 @@ metabotSyncStepChatSkills: '聊天技能',
 Run:
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 Expected: PASS.
@@ -935,7 +935,7 @@ Expected: output shows runtime consumes local `metabot.allow_chat_skills` and `S
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/privateChatAllowChatSkillsPrompt.test.mjs tests/groupChatAllowChatSkillsRuntime.test.mjs tests/chatSkillAuthorization.test.mjs
+pnpm run compile:electron && node --test tests/privateChatAllowChatSkillsPrompt.test.mjs tests/groupChatAllowChatSkillsRuntime.test.mjs tests/chatSkillAuthorization.test.mjs
 ```
 
 Expected: PASS. If these fail only because i18n labels changed, fix the affected assertions to expect `/info/chatSkills` copy. Do not change private/group runtime authorization semantics in this task.
@@ -984,7 +984,7 @@ Expected: output includes `metabotInfoPayload.ts`, `metaidCore.ts`, restore pars
 Run:
 
 ```bash
-npm run compile:electron && node --test tests/metabotInfoPayload.test.mjs tests/metabotInfoSyncSteps.test.mjs tests/metabotRestoreProtocol.test.mjs tests/privateChatAllowChatSkillsPrompt.test.mjs tests/groupChatAllowChatSkillsRuntime.test.mjs tests/chatSkillAuthorization.test.mjs
+pnpm run compile:electron && node --test tests/metabotInfoPayload.test.mjs tests/metabotInfoSyncSteps.test.mjs tests/metabotRestoreProtocol.test.mjs tests/privateChatAllowChatSkillsPrompt.test.mjs tests/groupChatAllowChatSkillsRuntime.test.mjs tests/chatSkillAuthorization.test.mjs
 ```
 
 Expected: PASS.
@@ -994,7 +994,7 @@ Expected: PASS.
 Run:
 
 ```bash
-npm run build
+pnpm run build
 ```
 
 Expected: PASS.
@@ -1034,4 +1034,4 @@ Then post a development-journal Buzz with Codex's `metabot-post-buzz` skill. If 
 - Restoring a Bot reads new protocol fields first and still supports old bots whose persona data was published as `/info/bio` JSON.
 - Private and group chat skill runtime behavior remains compatible with the existing local `allow_chat_skills` field.
 - Existing user SQLite databases do not require destructive reset or schema replacement.
-- Focused tests and `npm run build` pass before closeout.
+- Focused tests and `pnpm run build` pass before closeout.
