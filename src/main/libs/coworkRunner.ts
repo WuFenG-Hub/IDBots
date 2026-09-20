@@ -88,8 +88,6 @@ import { buildMetabotPersonaPrompt } from './metabotPersonaPrompt';
 import { readBootstrapDoc } from './welcomeBootstrap';
 import {
   clearCoworkSessionUpstream,
-  getCoworkOpenAICompatProxyBaseURL,
-  getCoworkOpenAICompatProxyStatus,
   resetCoworkSnipHeadTokens,
   resolveCoworkBillingSource,
 } from './coworkOpenAICompatProxy';
