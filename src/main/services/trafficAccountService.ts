@@ -883,16 +883,14 @@ export function isPackagedApp(): boolean {
 }
 
 /**
- * Gateway used for new recharge orders. Packaged builds always go through the
- * real PayPal gateway — the mock gateway must never be able to credit traffic
- * in production (Phase 4 requirement). Dev builds and plain-node tests default
- * to 'mock' and additionally honor the kvStore `traffic.rechargeGateway`
- * override (Advanced settings), so a dev build can exercise the real PayPal
- * flow end-to-end.
+ * Gateway used for new recharge orders. Every build defaults to the real
+ * PayPal gateway so the dev experience matches production exactly — the mock
+ * gateway must never be able to credit traffic in production (Phase 4
+ * requirement) and is only reachable in non-packaged builds via the kvStore
+ * `traffic.rechargeGateway` override (Advanced settings / test harnesses).
  */
 export function resolveRechargeGateway(): RechargeGateway {
-  const packaged = isPackagedApp();
-  if (!packaged) {
+  if (!isPackagedApp()) {
     try {
       const override = readRechargeGatewayOverride(getKvStore());
       if (override) return override;
@@ -900,7 +898,7 @@ export function resolveRechargeGateway(): RechargeGateway {
       // store unavailable — fall through to the default
     }
   }
-  return packaged ? 'paypal' : 'mock';
+  return 'paypal';
 }
 
 /** Public rate table; no identity signature required. */
@@ -930,8 +928,9 @@ export async function getTrafficPricing(): Promise<TrafficPricingPlan[]> {
 
 /**
  * Create a recharge order for the local identity's account. The gateway comes
- * from resolveRechargeGateway() (mock in dev/tests, paypal in packaged builds)
- * and is validated against RECHARGE_GATEWAYS before hitting the backend.
+ * from resolveRechargeGateway() (PayPal by default everywhere; the dev-only
+ * kvStore override can force mock) and is validated against RECHARGE_GATEWAYS
+ * before hitting the backend.
  */
 export async function createRechargeOrder(
   planId: string,

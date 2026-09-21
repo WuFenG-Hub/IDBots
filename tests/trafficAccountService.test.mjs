@@ -574,7 +574,7 @@ test('getTrafficPricing normalizes the public rate table', async () => {
   assert.equal(plans[1].trafficBytes, 250000000);
 });
 
-test('createRechargeOrder signs traffic-recharge and parses the order', async () => {
+test('createRechargeOrder signs traffic-recharge and parses the order (default paypal gateway)', async () => {
   let captured = null;
   const fetchImpl = createFetchStub([
     ['/v1/traffic/recharge/orders', (init) => {
@@ -584,7 +584,10 @@ test('createRechargeOrder signs traffic-recharge and parses the order', async ()
         payAmount: 10,
         payCurrency: 'CNY',
         trafficBytes: 100000000,
-        gatewayParams: { mockToken: 'recharge-order-1' },
+        gatewayParams: {
+          approvalUrl: 'https://www.paypal.com/checkoutnow?token=PAYPAL-TOKEN-0',
+          paypalOrderId: 'PAYPAL-TOKEN-0',
+        },
       };
     }],
     ['/v1/traffic/accounts', accountPayload()],
@@ -594,10 +597,13 @@ test('createRechargeOrder signs traffic-recharge and parses the order', async ()
   const order = await createRechargeOrder('cny_10_100mb');
   assert.equal(order.orderId, 'recharge-order-1');
   assert.equal(order.trafficBytes, 100000000);
-  assert.deepEqual(order.gatewayParams, { mockToken: 'recharge-order-1' });
+  assert.deepEqual(order.gatewayParams, {
+    approvalUrl: 'https://www.paypal.com/checkoutnow?token=PAYPAL-TOKEN-0',
+    paypalOrderId: 'PAYPAL-TOKEN-0',
+  });
 
   assert.ok(captured);
-  assert.deepEqual(captured.body, { planId: 'cny_10_100mb', gateway: 'mock' });
+  assert.deepEqual(captured.body, { planId: 'cny_10_100mb', gateway: 'paypal' });
   const timestamp = Number(captured.headers['X-Timestamp']);
   assert.ok(
     verifyMessage(
@@ -646,8 +652,8 @@ test('createRechargeOrder rejects an unsupported gateway before any HTTP call', 
   assert.equal(fetchImpl.calls.length, 0);
 });
 
-test('resolveRechargeGateway falls back to mock outside packaged Electron', () => {
-  assert.equal(resolveRechargeGateway(), 'mock');
+test('resolveRechargeGateway defaults to paypal outside packaged Electron', () => {
+  assert.equal(resolveRechargeGateway(), 'paypal');
 });
 
 test('isPackagedApp reads as unpackaged outside Electron', () => {
@@ -656,19 +662,19 @@ test('isPackagedApp reads as unpackaged outside Electron', () => {
 
 test('resolveRechargeGateway honors the kvStore override in non-packaged builds only', async () => {
   const { store } = await makeServiceFixture({ fetchImpl: createFetchStub([]) });
-  assert.equal(resolveRechargeGateway(), 'mock');
-
-  const saved = setTrafficSettingsSnapshot({ rechargeGateway: 'paypal' });
-  assert.equal(saved.rechargeGateway, 'paypal');
-  assert.equal(getTrafficSettingsSnapshot().rechargeGateway, 'paypal');
   assert.equal(resolveRechargeGateway(), 'paypal');
 
-  setTrafficSettingsSnapshot({ rechargeGateway: '' });
+  const saved = setTrafficSettingsSnapshot({ rechargeGateway: 'mock' });
+  assert.equal(saved.rechargeGateway, 'mock');
+  assert.equal(getTrafficSettingsSnapshot().rechargeGateway, 'mock');
   assert.equal(resolveRechargeGateway(), 'mock');
 
-  // An invalid stored value degrades to auto; an invalid write is rejected.
+  setTrafficSettingsSnapshot({ rechargeGateway: '' });
+  assert.equal(resolveRechargeGateway(), 'paypal');
+
+  // An invalid stored value degrades to the default; an invalid write is rejected.
   store.set('traffic.rechargeGateway', 'bogus');
-  assert.equal(resolveRechargeGateway(), 'mock');
+  assert.equal(resolveRechargeGateway(), 'paypal');
   assert.throws(() => setTrafficSettingsSnapshot({ rechargeGateway: 'stripe' }), /rechargeGateway/);
 });
 

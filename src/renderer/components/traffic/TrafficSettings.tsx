@@ -32,7 +32,7 @@ type TrafficSettingsInfo = {
   fallbackPolicy: 'selfpay' | 'strict';
   /** Configured assist-service base URL override; '' = production default. */
   apiBase: string;
-  /** Recharge gateway override; '' = auto (mock in dev, paypal when packaged). */
+  /** Recharge gateway override; '' = default (PayPal in every build; dev-only override can force mock). */
   rechargeGateway: '' | 'paypal' | 'mock';
 };
 type TrafficAccountInfo = {
