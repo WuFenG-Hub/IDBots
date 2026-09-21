@@ -554,6 +554,79 @@ test('rpc transfer route rejects unsupported chain or missing fields with 400', 
   }
 });
 
+test('rpc transfer route rejects unknown fields with a self-describing field contract', async () => {
+  const transferService = {
+    async executeTransfer() {
+      throw new Error('should not execute');
+    },
+  };
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({ transferService });
+  try {
+    const post = (body) =>
+      fetch(`${baseUrl}/api/idbots/wallet/transfer`, {
+        method: 'POST',
+        headers: RPC_AUTH_HEADERS,
+        body: JSON.stringify(body),
+      });
+
+    // A caller that guessed `amount_sats` (this route takes `amount`, already
+    // denominated in SPACE/DOGE) must be told both the accepted unit and which
+    // key was ignored: a bare "amount must be positive" is indistinguishable
+    // from a genuinely malformed value and costs a blind retry.
+    const unknownFieldRes = await post({
+      metabot_id: 1,
+      chain: 'mvc',
+      to_address: '1recipient',
+      amount_sats: 1000,
+    });
+    const unknownFieldBody = await unknownFieldRes.json();
+    assert.equal(unknownFieldRes.status, 400);
+    assert.match(String(unknownFieldBody.error || ''), /amount must be positive/);
+    assert.match(String(unknownFieldBody.error || ''), /unrecognized field\(s\): amount_sats/);
+    assert.match(String(unknownFieldBody.error || ''), /accepted fields: .*amount/);
+
+    // The contract travels with every rejection, so a caller never has to
+    // discover a field name by trial and error.
+    assert.equal(unknownFieldBody.contract.path, '/api/idbots/wallet/transfer');
+    const contractFields = unknownFieldBody.contract.fields;
+    assert.deepEqual(Object.keys(contractFields), ['metabot_id', 'chain', 'to_address', 'amount', 'fee_rate']);
+    assert.match(String(contractFields.amount || ''), /SPACE/);
+    assert.match(String(contractFields.amount || ''), /sats/);
+    assert.match(String(contractFields.chain || ''), /mvc/);
+    assert.match(String(contractFields.chain || ''), /btc/);
+    assert.match(String(contractFields.chain || ''), /doge/);
+    assert.match(String(contractFields.chain || ''), /space/);
+
+    const missingChainRes = await post({ metabot_id: 1, to_address: '1recipient', amount: '1' });
+    const missingChainBody = await missingChainRes.json();
+    assert.equal(missingChainRes.status, 400);
+    assert.match(String(missingChainBody.error || ''), /chain is required/);
+    // The accepted values live in the contract, not in the message: the message
+    // names only the offending field, so existing callers keep matching it.
+    assert.match(String(missingChainBody.contract.fields.chain || ''), /"space" is an alias/);
+
+    // Unsupported chains read back the offending value alongside the accepted set.
+    const unsupportedChainRes = await post({
+      metabot_id: 1,
+      chain: 'eth',
+      to_address: '0xabc',
+      amount: '1',
+    });
+    const unsupportedChainBody = await unsupportedChainRes.json();
+    assert.equal(unsupportedChainRes.status, 400);
+    assert.match(String(unsupportedChainBody.error || ''), /Unsupported chain "eth"/);
+
+    // Recognized-but-invalid values still name only the offending field.
+    const badAmountRes = await post({ metabot_id: 1, chain: 'btc', to_address: '1recipient', amount: 'abc' });
+    const badAmountBody = await badAmountRes.json();
+    assert.equal(badAmountRes.status, 400);
+    assert.match(String(badAmountBody.error || ''), /amount must be positive/);
+    assert.doesNotMatch(String(badAmountBody.error || ''), /unrecognized field/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('rpc btc signing routes expose sign-message and sign-psbt through metabot wallet context', async () => {
   const calls = [];
   class FakeBtcWallet {
