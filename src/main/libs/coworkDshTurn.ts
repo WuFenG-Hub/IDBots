@@ -395,6 +395,11 @@ export class DshTurnHub {
    *  same stickiness as the pre-split single runtime. */
   private webSearchSeen: { apiKey: string; baseURL: string } | null = null
   private reapTimer: ReturnType<typeof setTimeout> | null = null
+  /** Per-DSH-session turn chain: a runTurn for a session whose previous turn
+   *  is still in flight must queue, never overwrite the live controller —
+   *  the overwrite made the loser's finally delete the winner's event
+   *  registrations, silently dropping a reply the runtime had produced. */
+  private turnChainsByDsh = new Map<string, Promise<void>>()
   /** Set the moment close() begins: turns submitted afterwards fail soft
    *  (DshShutdownError) instead of booting orphan runtimes during shutdown. */
   private closed = false
@@ -451,6 +456,37 @@ export class DshTurnHub {
   /** Start (or reuse) the runtime and run one turn to completion. */
   async runTurn(input: DshTurnInput): Promise<DshTurnOutcome> {
     if (this.closed) throw new DshShutdownError()
+    // One active turn per DSH session: a concurrent runTurn for the same
+    // session must never overwrite the live controller in controllersByDsh —
+    // the overwriting turn's finally also deleted the winner's registrations,
+    // so a turn that completed in the runtime never reached the host. Queue
+    // behind the in-flight turn instead (the loop re-checks after each wake
+    // so multiple waiters chain onto the latest one, not all at once).
+    for (;;) {
+      const prior = this.turnChainsByDsh.get(input.dshSessionId)
+      if (prior === undefined) break
+      this.opts.log?.('info', 'dshTurnHub.turnQueued', {
+        sessionId: input.sessionId,
+        dshSessionId: input.dshSessionId,
+      })
+      await prior
+      if (this.closed) throw new DshShutdownError()
+    }
+    let releaseTurn!: () => void
+    const mine = new Promise<void>((resolve) => { releaseTurn = resolve })
+    this.turnChainsByDsh.set(input.dshSessionId, mine)
+    try {
+      return await this.runTurnExclusive(input)
+    } finally {
+      // Runs after runTurnExclusive's own finally (controller cleanup), so a
+      // queued turn starts only once its predecessor fully settled.
+      if (this.turnChainsByDsh.get(input.dshSessionId) === mine) this.turnChainsByDsh.delete(input.dshSessionId)
+      releaseTurn()
+    }
+  }
+
+  private async runTurnExclusive(input: DshTurnInput): Promise<DshTurnOutcome> {
+    if (this.closed) throw new DshShutdownError()
     const nextKey = dshRuntimeKeyOf(input.provider)
     const prevKey = this.runtimeKeyByDsh.get(input.dshSessionId)
     // Same dsh session id + a new provider key: the old process still holds
@@ -471,8 +507,9 @@ export class DshTurnHub {
     }
     this.kernelByDsh.set(input.dshSessionId, kernel)
     const controller = new DshTurnController(input)
-    // One active turn per cowork session: a stray previous controller (e.g. a
-    // turn that never settled) must not swallow events.
+    // runTurn's per-session queue guarantees no live controller for this dsh
+    // session at this point; the set is a fresh registration, never an
+    // overwrite of an in-flight turn.
     this.controllersByDsh.set(input.dshSessionId, controller)
     this.dshByCowork.set(input.sessionId, input.dshSessionId)
     this.coworkByDsh.set(input.dshSessionId, input.sessionId)
