@@ -29,3 +29,24 @@ const keepalive = setInterval(() => {}, 1 << 30)
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => { clearInterval(keepalive); process.exit(0) })
 }
+
+// Parent-death self-clean: the JSON-RPC stdin pipe EOFs when the spawning
+// main process dies without closing us (crash, SIGKILL). Without this, the
+// keepalive above pins the event loop and the orphaned runtime keeps every
+// session write lock (flock) it holds — the next app instance then wedges on
+// `session "<id>" is already owned by an active write handle` for each of
+// those sessions until the orphan is reaped by hand. On EOF, dispose the root
+// context (write handles flush and release their flocks) and exit; the
+// backstop timer covers a wedged dispose.
+let orphanExitStarted = false
+const exitOnParentGone = () => {
+  if (orphanExitStarted) return
+  orphanExitStarted = true
+  clearInterval(keepalive)
+  const backstop = setTimeout(() => process.exit(0), 10_000)
+  backstop.unref()
+  Promise.resolve(ctx.root.fiber.dispose()).finally(() => process.exit(0))
+}
+for (const event of ['end', 'close', 'error']) {
+  process.stdin.on(event, exitOnParentGone)
+}
