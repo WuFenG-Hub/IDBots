@@ -68,7 +68,7 @@ import { MetaIDContactViewService } from './services/metaidContactViewService';
 import { Scheduler } from './libs/scheduler';
 import { initLogger, getLogFilePath } from './logger';
 import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
-import { shouldAcquireSingleInstanceLock } from './libs/singleInstanceLock';
+import { shouldAcquireSingleInstanceLock, shouldRefuseSharedUserData } from './libs/singleInstanceLock';
 import { mockCreateWalletAndFund, mockPushConfigToChain } from './services/chainActionMock';
 import { createMetaBotWallet, getPrivateKeyBufferForEcdh } from './services/metabotWalletService';
 import { UserIdentityStore } from './userIdentityStore';
@@ -8289,23 +8289,31 @@ const scheduleReload = (reason: string, webContents?: WebContents) => {
 
 // 确保应用程序只有一个实例
 const shouldUseSingleInstanceLock = shouldAcquireSingleInstanceLock();
-const gotTheLock = shouldUseSingleInstanceLock ? app.requestSingleInstanceLock() : true;
 
 // Un-isolated dev instance hazard (DSH integration fix list Task 5): dev
 // start scripts disable the single-instance lock, and without an
-// IDBOTS_USER_DATA_PATH override this instance shares the regular app's
-// user-data directory. Its startup recovery (orchestration
-// recoverAfterRestart + resetRunningSessions) then marks the LIVE instance's
-// in-flight worker attempts RECOVERED_AFTER_RESTART and interrupts them.
-// `electron:dev:fresh` / `electron:dev:dsh` isolate the data dir and are the
-// correct preview entry points — warn loudly when that isolation is missing.
-if (process.env.NODE_ENV === 'development' && !process.env.IDBOTS_USER_DATA_PATH) {
-  console.warn(
-    '[Main] ⚠️  DEV INSTANCE WITHOUT ISOLATED USER DATA: this instance shares the regular app data directory.\n' +
-    '    If another IDBots instance is running, its in-flight worker sessions WILL be reset (RECOVERED_AFTER_RESTART).\n' +
-    '    Use `npm run electron:dev:fresh` (isolated .dev-userdata-fresh) for previews.'
-  );
+// IDBOTS_USER_DATA_PATH / IDBOTS_APP_DATA_PATH override this instance shares
+// the regular app's user-data directory. Beyond the known startup-recovery clash (the dev
+// instance marks the LIVE instance's in-flight worker attempts
+// RECOVERED_AFTER_RESTART), both instances' daemons also dispatch A2A turns
+// for the same bot identity and collide on the DSH session write locks —
+// every turn for a session owned by the other instance fails with
+// 'session "…" is already owned by an active write handle' and the bot
+// appears unresponsive. This used to be warn-only; the A2A lock collisions
+// it produces are not recoverable for the affected conversations, so the
+// misconfiguration is now fatal unless explicitly overridden.
+// `electron:dev:dsh` / `electron:dev:fresh` isolate the data dir and are the
+// correct preview entry points.
+if (shouldRefuseSharedUserData()) {
+  const sharedUserDataMessage =
+    'This IDBots instance was launched with the single-instance lock disabled but WITHOUT an isolated data directory (IDBOTS_USER_DATA_PATH or IDBOTS_APP_DATA_PATH), so it shares the regular app data directory with any other running instance. Two instances on one data directory collide on DSH session write locks (A2A turns fail with "already owned by an active write handle") and reset each other\'s in-flight worker sessions.\n\n' +
+    'Use an isolated dev entry point (`pnpm run electron:dev:dsh` or `pnpm run electron:dev:fresh`), or set IDBOTS_ALLOW_SHARED_USERDATA=1 to force this unsafe mode.';
+  console.error(`[Main] ${sharedUserDataMessage}`);
+  dialog.showErrorBox('IDBots: unsafe shared data directory', sharedUserDataMessage);
+  app.exit(1);
 }
+
+const gotTheLock = shouldUseSingleInstanceLock ? app.requestSingleInstanceLock() : true;
 
 if (!gotTheLock) {
   app.quit();
