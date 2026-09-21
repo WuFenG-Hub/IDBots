@@ -10,6 +10,7 @@ import { resolveApiConfigForModel } from '../libs/claudeSettings';
 import { clearCoworkSessionUpstream } from '../libs/coworkOpenAICompatProxy';
 import { buildOpenCodeGoHeaders } from '../libs/opencodeGatewayHeaders';
 import { effortForAnthropicWire, effortForOpenAiWire, type LlmEffortLevel } from '../libs/llmEffort';
+import { budgetAssumesThinking, modelAlwaysThinks } from '../libs/modelThinking';
 import { runWithLlmFallback } from './llmFallback';
 
 let oneShotPinCounter = 0;
@@ -157,11 +158,38 @@ function resolveDeepSeekResponsesReasoning(
  * ceiling lets max-effort reasoning consume the whole budget and return
  * truncated or empty text (the 2026-08-08 dream-diary failure mode, elsewhere).
  * Thinking-on defaults to 32K (the app-wide ceiling); thinking-off stays at
- * 4K for compact JSON callers. Ceilings only: billing is by actual tokens
+ * 4K for compact JSON callers — but ONLY when the model can actually turn
+ * thinking off. GLM-5.x always thinks, and unknown model families may default
+ * to thinking with no known dialect to disable them (the 2026-09-20
+ * dream-fragment `stop_reason=max_tokens; blocks=none` outage: a 4K
+ * "thinking-off" ceiling plus a silently-dropped toggle burned the whole
+ * budget on hidden reasoning). Ceilings only: billing is by actual tokens
  * used, so short replies cost the same as before.
  */
-function resolveDefaultMaxOutputTokens(thinking: 'enabled' | 'disabled' | undefined): number {
-  return thinking === 'disabled' ? 4_096 : 32_768;
+function resolveDefaultMaxOutputTokens(
+  thinking: 'enabled' | 'disabled' | undefined,
+  model?: string | null
+): number {
+  return budgetAssumesThinking(model, thinking) ? 32_768 : 4_096;
+}
+
+/**
+ * Translate an Anthropic-wire thinking control for the target model. GLM-5.x
+ * endpoints reject {type:'disabled'} outright (zhipu 400 code 1210 「该模型
+ * 始终思考，不支持关闭思考」); the closest expressible intent is the low tier —
+ * enabled with a small budget_tokens, clamped under the output ceiling
+ * (Anthropic requires max_tokens > budget_tokens and budget_tokens >= 1024).
+ */
+function remapAnthropicThinkingForModel(
+  thinking: { type: 'enabled' | 'disabled'; budget_tokens?: number },
+  model: string,
+  maxOutputTokens: number
+): { type: 'enabled'; budget_tokens?: number } | { type: 'disabled' } {
+  if (thinking.type !== 'disabled' || !modelAlwaysThinks(model)) {
+    return thinking;
+  }
+  const lowBudget = Math.min(4_000, Math.max(1_024, maxOutputTokens - 256));
+  return { type: 'enabled', budget_tokens: lowBudget };
 }
 
 function extractAnthropicThinkingText(block: { type?: string; text?: string; thinking?: string }): string {
@@ -459,7 +487,7 @@ async function callAnthropicStyleWithTools(
 
   const body: Record<string, unknown> = {
     model,
-    max_tokens: maxTokens ?? resolveDefaultMaxOutputTokens(thinking),
+    max_tokens: maxTokens ?? resolveDefaultMaxOutputTokens(thinking, model),
     messages: anthropicMessages,
     system: systemParts.join('\n\n'),
   };
@@ -475,11 +503,21 @@ async function callAnthropicStyleWithTools(
     // Model-level brain effort: the ladder maps onto thinking + budget_tokens
     // (off disables; low/high/max enable with tiered budgets).
     const mapped = effortForAnthropicWire(effort);
-    if (mapped.thinking) body.thinking = mapped.thinking;
+    if (mapped.thinking) {
+      body.thinking = remapAnthropicThinkingForModel(
+        mapped.thinking,
+        model,
+        maxTokens ?? resolveDefaultMaxOutputTokens(thinking, model)
+      );
+    }
   } else if (thinking !== undefined) {
     // DeepSeek Anthropic 格式支持 thinking toggle（默认 enabled，effort=high）。
     // 轻量 llm.complete 调用（如下棋走子）显式 disabled 可避免长思考与超时。
-    body.thinking = { type: thinking };
+    body.thinking = remapAnthropicThinkingForModel(
+      thinking === 'disabled' ? { type: 'disabled' as const } : { type: 'enabled' as const },
+      model,
+      maxTokens ?? resolveDefaultMaxOutputTokens(thinking, model)
+    );
   }
 
   const headers: Record<string, string> = {
@@ -560,6 +598,7 @@ export const __cognitiveChatCompletionTestUtils = {
   normalizeDeepSeekResponsesEffort,
   resolveDeepSeekResponsesReasoning,
   resolveDefaultMaxOutputTokens,
+  remapAnthropicThinkingForModel,
 };
 
 /**
@@ -581,7 +620,7 @@ async function callOpenAIStyleWithTools(
   const body: Record<string, unknown> = {
     model,
     messages: toOpenAIMessages(messages),
-    max_tokens: maxTokens ?? resolveDefaultMaxOutputTokens(thinking),
+    max_tokens: maxTokens ?? resolveDefaultMaxOutputTokens(thinking, model),
   };
   if (Array.isArray(tools) && tools.length > 0) {
     body.tools = tools;
@@ -592,10 +631,17 @@ async function callOpenAIStyleWithTools(
     // at high) plus the DeepSeek thinking toggle for relays honoring it.
     const reasoningEffort = effortForOpenAiWire(effort);
     if (reasoningEffort) body.reasoning_effort = reasoningEffort;
-    body.thinking = { type: effort === 'off' ? 'disabled' : 'enabled' };
+    // GLM-5.x chat endpoints reject thinking:{type:'disabled'} (400 code
+    // 1210) — omit the toggle for always-thinking models and let the
+    // thinking-aware output budget carry the headroom instead.
+    if (!(effort === 'off' && modelAlwaysThinks(model))) {
+      body.thinking = { type: effort === 'off' ? 'disabled' : 'enabled' };
+    }
   } else if (thinking !== undefined) {
     // DeepSeek OpenAI 兼容格式同样支持 thinking toggle。
-    body.thinking = { type: thinking };
+    if (!(thinking === 'disabled' && modelAlwaysThinks(model))) {
+      body.thinking = { type: thinking };
+    }
   }
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -765,7 +811,7 @@ async function callDeepSeekResponsesStyle(
   if (instructions.length > 0) {
     body.instructions = instructions.join('\n\n');
   }
-  body.max_output_tokens = maxTokens ?? resolveDefaultMaxOutputTokens(thinking);
+  body.max_output_tokens = maxTokens ?? resolveDefaultMaxOutputTokens(thinking, model);
   if (temperature !== undefined) {
     body.temperature = temperature;
   }

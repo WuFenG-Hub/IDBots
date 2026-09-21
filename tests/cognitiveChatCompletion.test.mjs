@@ -71,10 +71,49 @@ test('DeepSeek Responses reasoning disable must be explicit effort none', () => 
 
 test('default output budget leaves headroom for thinking-mode reasoning', () => {
   // Reasoning shares the output budget: thinking-enabled calls get 32K,
-  // thinking-disabled calls keep the lean 4K default.
-  assert.equal(resolveDefaultMaxOutputTokens('disabled'), 4_096);
-  assert.equal(resolveDefaultMaxOutputTokens('enabled'), 32_768);
-  assert.equal(resolveDefaultMaxOutputTokens(undefined), 32_768);
+  // thinking-disabled calls keep the lean 4K default — but ONLY for models
+  // that can actually turn thinking off. GLM-5.x always thinks and unknown
+  // families may default to thinking (the 2026-09-20 dream-fragment
+  // `stop_reason=max_tokens; blocks=none` outage), so those keep 32K even
+  // with a disabled toggle.
+  assert.equal(resolveDefaultMaxOutputTokens('disabled', 'deepseek-flash'), 4_096);
+  assert.equal(resolveDefaultMaxOutputTokens('disabled', 'glm-4.7-flash'), 4_096);
+  assert.equal(resolveDefaultMaxOutputTokens('disabled', 'glm-5.3-flash'), 32_768);
+  assert.equal(resolveDefaultMaxOutputTokens('disabled', 'zai-org/GLM-5.3'), 32_768);
+  assert.equal(resolveDefaultMaxOutputTokens('disabled', 'some-brand-new-model'), 32_768);
+  assert.equal(resolveDefaultMaxOutputTokens('disabled'), 32_768, 'no model context → assume thinking');
+  assert.equal(resolveDefaultMaxOutputTokens('enabled', 'deepseek-flash'), 32_768);
+  assert.equal(resolveDefaultMaxOutputTokens(undefined, 'deepseek-flash'), 32_768);
+});
+
+test('Anthropic thinking disabled is downgraded to the low tier for always-thinking models', () => {
+  const { remapAnthropicThinkingForModel } = loadTestUtils();
+  // GLM-5.x anthropic-compat endpoints reject {type:'disabled'} (zhipu 400
+  // code 1210): downgrade to enabled with a small budget, clamped under the
+  // output ceiling (Anthropic requires max_tokens > budget_tokens).
+  assert.deepEqual(
+    remapAnthropicThinkingForModel({ type: 'disabled' }, 'glm-5.3-flash', 16_384),
+    { type: 'enabled', budget_tokens: 4_000 },
+  );
+  assert.deepEqual(
+    remapAnthropicThinkingForModel({ type: 'disabled' }, 'glm-5.3-flash', 2_048),
+    { type: 'enabled', budget_tokens: 1_792 },
+    'budget clamps under a small output ceiling',
+  );
+  // Disable-capable models keep the explicit disabled toggle.
+  assert.deepEqual(
+    remapAnthropicThinkingForModel({ type: 'disabled' }, 'deepseek-v4-pro', 32_768),
+    { type: 'disabled' },
+  );
+  assert.deepEqual(
+    remapAnthropicThinkingForModel({ type: 'disabled' }, 'glm-4.7', 32_768),
+    { type: 'disabled' },
+  );
+  // Enabled controls pass through untouched.
+  assert.deepEqual(
+    remapAnthropicThinkingForModel({ type: 'enabled', budget_tokens: 10_000 }, 'glm-5.3-flash', 32_768),
+    { type: 'enabled', budget_tokens: 10_000 },
+  );
 });
 
 test('Responses tools keep the default web_search injection for chat callers', () => {

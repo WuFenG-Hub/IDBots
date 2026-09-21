@@ -188,7 +188,7 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
     assert.ok(fragments.every((fragment) => fragment.status === 'completed'));
     assert.ok(calls.some((call) => call.user.includes('分块提炼阶段')));
     assert.ok(calls.some((call) => call.user.includes('分块证据摘要')));
-    assert.ok(calls.some((call) => call.maxTokens === 4096), 'fragment calls use a compact output budget');
+    assert.ok(calls.some((call) => call.maxTokens === 16384), 'fragment calls on an unknown-family brain (may think) get reasoning headroom (2026-09-20 glm-5.3 empty-output outage)');
     // Post-dream passes (capability validation / counterfactual replay) run
     // AFTER the dream call, so locate the synthesis by content, not position.
     const synthesisCall = calls.find((call) => call.user.includes('分块证据摘要'));
@@ -213,6 +213,49 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
     assert.ok(retriedSynthesis.user.includes('## 当日写入链上的内容'), 'retried synthesis still carries chain content');
   } finally {
     ctx.cleanup();
+  }
+});
+
+test('fragment budget stays compact for a brain that can truly disable thinking', async () => {
+  // Contrast with the unknown-family case above: deepseek-flash honors
+  // thinking:{type:'disabled'} (reasoning effort none), so its fragments keep
+  // the lean 4K ceiling — the thinking-headroom bump applies only to brains
+  // that may think anyway (GLM-5.x, unknown families).
+  const calls = [];
+  const { db, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
+  const dreamStore = new DreamStore(db, () => {});
+  seedActivity(coworkStore, db);
+  const sessionId = firstSessionId(db);
+  for (let index = 0; index < 70; index += 1) {
+    db.run(
+      'INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [`ds-${index}`, sessionId, index % 2 === 0 ? 'user' : 'assistant', `${index % 2 === 0 ? '用户' : '我'}:${'当天的长对话内容'.repeat(140)}`, '{}', DAY_START + 10_000 + index, 10 + index]
+    );
+  }
+  const service = new DreamService({
+    coworkStore,
+    metabotStore: {
+      listMetabots: () => [
+        { id: 5, name: '小火', role: '视频创作者', soul: '认真严谨', llm_id: 'deepseek-flash', enabled: true },
+      ],
+    },
+    dreamStore,
+    performChat: async (system, user, llmId, options) => {
+      calls.push({ llmId, maxTokens: options?.maxTokens });
+      return makePayload();
+    },
+    emitToRenderer: () => {},
+    llmTimeoutMs: 5000,
+    now: () => new Date(2026, 7, 1, 3, 0),
+  });
+  try {
+    await service.runNow(5, DAY);
+    assert.ok(calls.some((call) => call.maxTokens === 4096), 'deepseek brain fragments keep the compact 4K ceiling');
+    assert.ok(calls.every((call) => call.maxTokens !== 16384), 'no thinking-headroom ceiling for a disable-capable brain');
+  } finally {
+    cleanup();
   }
 });
 

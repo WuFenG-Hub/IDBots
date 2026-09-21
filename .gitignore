@@ -170,10 +170,12 @@ tests/*
 !tests/encryptedSimplemsg.test.ts
 !tests/serviceDeliveryArtifacts.test.mjs
 !tests/uploadLargeFileFunding.test.mjs
-!tests/coworkAnthropicDirectRouting.test.mjs
 !tests/coworkProxySessionUpstream.test.mjs
 !tests/coworkProxyScheduledTasksApi.test.mjs
 !tests/coworkProxyBindHost.test.mjs
+!tests/coworkProxyTransientRetry.test.mjs
+!tests/coworkProxyGlmThinking.test.mjs
+!tests/modelThinking.test.mjs
 !tests/coworkStreamForwarding.test.mjs
 !tests/coworkStreamPresentation.test.mjs
 !tests/coworkEmptyTerminalTurn.test.mjs

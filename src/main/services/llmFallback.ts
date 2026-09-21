@@ -16,14 +16,30 @@ export function normalizeMetabotLlmId(value: unknown): string | null {
 
 /**
  * Resolve the effective fallback llm id: the trimmed fallback when it is
- * non-empty and different from the primary id; otherwise null (no retry).
+ * non-empty and names a different brain than the primary; otherwise null (no
+ * retry). "Different brain" compares the (model id, provider) pair, not the
+ * model id alone: a bot whose primary and fallback share a model id on
+ * different providers (e.g. glm-5.3-flash @ zhipu primary, glm-5.3-flash @
+ * volcengine fallback) HAS a meaningful backup — the same id on another
+ * gateway resolves to a different baseURL/apiKey. Id-only comparison silently
+ * discarded that backup, so a single-provider outage failed the run with no
+ * safety net (the 2026-09-20 dream 502s). When either provider is unknown the
+ * legacy id-only rule applies (same id, no fallback).
  */
-export function resolveFallbackLlmId(primaryLlmId: unknown, fallbackLlmId: unknown): string | null {
+export function resolveFallbackLlmId(
+  primaryLlmId: unknown,
+  fallbackLlmId: unknown,
+  primaryLlmProvider?: unknown,
+  fallbackLlmProvider?: unknown
+): string | null {
   const fallback = normalizeMetabotLlmId(fallbackLlmId);
   if (!fallback) return null;
   const primary = normalizeMetabotLlmId(primaryLlmId);
-  if (primary && fallback === primary) return null;
-  return fallback;
+  if (!primary || fallback !== primary) return fallback;
+  const primaryProvider = normalizeMetabotLlmId(primaryLlmProvider);
+  const fallbackProvider = normalizeMetabotLlmId(fallbackLlmProvider);
+  if (!fallbackProvider) return null;
+  return fallbackProvider !== primaryProvider ? fallback : null;
 }
 
 /** The metabot brain pair as used by automation LLM calls (A2A chat, group tasks, dreams, impressions). */
@@ -119,11 +135,13 @@ function withPerAttemptSignal<TOptions extends LlmFallbackCallOptions>(options: 
 /**
  * Run `attempt` with the primary llm id; when it throws (config resolution
  * failure or API call failure), retry exactly once with the fallback llm id
- * when one is configured and differs from the primary. The retry swaps BOTH
- * the model and the effort to the fallback brain's pair. Rethrows the primary
- * error when no fallback is available; when the fallback attempt also fails,
- * throws a combined error naming both failures so callers (dream diary,
- * memory-hygiene stats) can tell the fallback DID run and why it failed.
+ * when one is configured and names a different brain than the primary (model
+ * id, or same id on a different provider — see resolveFallbackLlmId). The
+ * retry swaps BOTH the model and the effort to the fallback brain's pair.
+ * Rethrows the primary error when no fallback is available; when the fallback
+ * attempt also fails, throws a combined error naming both failures so callers
+ * (dream diary, memory-hygiene stats) can tell the fallback DID run and why
+ * it failed.
  */
 export async function runWithLlmFallback<TResult, TOptions extends LlmFallbackCallOptions>(
   options: TOptions,
@@ -133,7 +151,12 @@ export async function runWithLlmFallback<TResult, TOptions extends LlmFallbackCa
   try {
     return await attempt(withPerAttemptSignal(options));
   } catch (primaryError) {
-    const fallbackId = resolveFallbackLlmId(options.llmId, options.fallbackLlmId);
+    const fallbackId = resolveFallbackLlmId(
+      options.llmId,
+      options.fallbackLlmId,
+      options.llmProvider,
+      options.fallbackLlmProvider
+    );
     if (!fallbackId) {
       throw primaryError;
     }
@@ -149,7 +172,9 @@ export async function runWithLlmFallback<TResult, TOptions extends LlmFallbackCa
     }
     const primaryMessage = primaryError instanceof Error ? primaryError.message : String(primaryError);
     const primaryLabel = normalizeMetabotLlmId(options.llmId) ?? 'default';
-    log(`[LLM Fallback] Primary LLM '${primaryLabel}' failed (${primaryMessage}); retrying once with fallback '${fallbackId}'.`);
+    const fallbackProvider = normalizeMetabotLlmId(options.fallbackLlmProvider);
+    const fallbackLabel = fallbackProvider ? `${fallbackId}@${fallbackProvider}` : fallbackId;
+    log(`[LLM Fallback] Primary LLM '${primaryLabel}' failed (${primaryMessage}); retrying once with fallback '${fallbackLabel}'.`);
     try {
       return await attempt(withPerAttemptSignal({
         ...options,
@@ -161,8 +186,8 @@ export async function runWithLlmFallback<TResult, TOptions extends LlmFallbackCa
       }));
     } catch (fallbackError) {
       const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-      console.error(`[LLM Fallback] Fallback LLM '${fallbackId}' also failed: ${fallbackMessage}`);
-      const combined = new Error(`${primaryMessage} (fallback '${fallbackId}' also failed: ${fallbackMessage})`);
+      console.error(`[LLM Fallback] Fallback LLM '${fallbackLabel}' also failed: ${fallbackMessage}`);
+      const combined = new Error(`${primaryMessage} (fallback '${fallbackLabel}' also failed: ${fallbackMessage})`);
       if (primaryError instanceof Error && primaryError.name && primaryError.name !== 'Error') {
         combined.name = primaryError.name;
       }

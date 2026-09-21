@@ -25,6 +25,7 @@ import {
   type RequestHeadFingerprint,
 } from './coworkRequestHeadWatch';
 import { modelSupportsVision } from './coworkModelLimits';
+import { modelAlwaysThinks, responsesEffortForThinkingOff, thinkingWireFamily } from './modelThinking';
 import type { ScheduledTaskStore, ScheduledTaskInput } from '../scheduledTaskStore';
 import type { Scheduler } from './scheduler';
 
@@ -1100,6 +1101,96 @@ function buildUpstreamTargetUrls(baseURL: string, apiType: UpstreamAPIType, prov
   return Array.from(urls);
 }
 
+/**
+ * Transient Chromium network errors worth an immediate retry on a fresh
+ * connection. The proxy's upstream transport is Electron's
+ * `session.defaultSession.fetch` (Chromium network stack), and one closed
+ * socket — server/LB dropping an idle keep-alive mid-request, a network flap,
+ * a relay gateway teardown — surfaces as `net::ERR_CONNECTION_CLOSED`. Until
+ * 2026-09-20 any single transport exception was wrapped straight into a 502
+ * and killed the whole multi-minute caller attempt (three dream runs died on
+ * one zhipu gateway flap), because the proxy had zero transport-level
+ * retries. Match by substring: Electron prefixes these codes with `net::`.
+ */
+const TRANSIENT_UPSTREAM_NETWORK_ERROR_RE = new RegExp(
+  [
+    'ERR_CONNECTION_CLOSED',
+    'ERR_CONNECTION_RESET',
+    'ERR_EMPTY_RESPONSE',
+    'ERR_TIMED_OUT',
+    'ERR_NETWORK_CHANGED',
+    'ERR_NAME_NOT_RESOLVED',
+    'ERR_SOCKET_NOT_CONNECTED',
+    'ERR_TUNNEL_CONNECTION_FAILED',
+    'ERR_INTERNET_DISCONNECTED',
+    'ERR_PROXY_CONNECTION_FAILED',
+    'ERR_ADDRESS_UNREACHABLE',
+  ].join('|')
+);
+
+/** Whether an upstream fetch failure message looks transient (safe to retry on a fresh connection). */
+export function isTransientUpstreamNetworkError(message: string): boolean {
+  return TRANSIENT_UPSTREAM_NETWORK_ERROR_RE.test(message);
+}
+
+/**
+ * Backoff between transient-error retries, in ms. These are sub-second socket
+ * deaths and gateway flaps, not quota errors — long backoffs would just burn
+ * the caller's own timeout window (dreams budget 180s per attempt).
+ */
+const TRANSIENT_UPSTREAM_RETRY_DELAYS_MS = [500, 1500];
+
+/**
+ * Upstream statuses worth one more fresh-connection try before surfacing to
+ * the caller: a gateway's own bad-gateway/unavailable/timeout usually clears
+ * immediately. Deliberately excludes 429 (quota/rate — the caller owns that
+ * backoff) and 500 (request-specific server errors, e.g. prompt rejections
+ * misreported as 500s by some relays).
+ */
+const RETRYABLE_UPSTREAM_STATUSES = new Set([502, 503, 504]);
+
+/**
+ * Send one upstream request, retrying transient failures a bounded number of
+ * times. The request body is a plain JSON string rebuilt per attempt, so every
+ * retry is a fully replayable POST on a fresh connection. Non-transient
+ * exceptions and statuses pass through untouched on the first attempt.
+ */
+export async function sendUpstreamRequestWithTransientRetry(
+  send: (payload: Record<string, unknown>, targetURL: string) => Promise<Response>,
+  payload: Record<string, unknown>,
+  targetURL: string
+): Promise<Response> {
+  const maxAttempts = TRANSIENT_UPSTREAM_RETRY_DELAYS_MS.length + 1;
+  for (let attempt = 0; ; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, TRANSIENT_UPSTREAM_RETRY_DELAYS_MS[attempt - 1]));
+    }
+    let response: Response;
+    try {
+      response = await send(payload, targetURL);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= maxAttempts - 1 || !isTransientUpstreamNetworkError(message)) {
+        throw error;
+      }
+      coworkLog('WARN', 'upstream-transient-retry', `transient network error on attempt ${attempt + 1}/${maxAttempts}; retrying`, {
+        targetURL,
+        error: message,
+      });
+      continue;
+    }
+    if (RETRYABLE_UPSTREAM_STATUSES.has(response.status) && attempt < maxAttempts - 1) {
+      // Drain the error body so the socket is released before retrying.
+      await response.text().catch(() => undefined);
+      coworkLog('WARN', 'upstream-transient-retry', `upstream returned ${response.status} on attempt ${attempt + 1}/${maxAttempts}; retrying`, {
+        targetURL,
+      });
+      continue;
+    }
+    return response;
+  }
+}
+
 function extractTextFromChatContent(content: unknown): string {
   if (typeof content === 'string') {
     return content;
@@ -1360,6 +1451,27 @@ function convertChatCompletionsRequestToResponsesRequest(
       ? (normalizeDeepSeekResponsesEffort(rawEffort) ?? (rawEffort ? 'none' : 'high'))
       : 'none';
     request.reasoning = { effort };
+  } else if (thinkingWireFamily(toString(chatRequest.model)) === 'glm') {
+    // GLM family on a Responses endpoint (zhipu open.bigmodel.cn, z.ai, and
+    // any relay serving glm-* ids). The 2026-09-20 dream-fragment outage: this
+    // branch did not exist, so a caller's thinking:{type:'disabled'} was
+    // silently dropped, GLM-5.x kept thinking at its default effort, and the
+    // hidden reasoning consumed the whole max_output_tokens budget
+    // (stop_reason=max_tokens, blocks=none). Map the toggle explicitly —
+    // GLM-5.x cannot disable (effort 'none' is a 400, code 1210), so "off"
+    // becomes the lowest tier; GLM-4.x honors 'none'. An enabled toggle with
+    // a small budget_tokens maps to 'low' so a caller's low-effort intent
+    // survives the wire translation.
+    const glmModel = toString(chatRequest.model);
+    const thinking = toOptionalObject(chatRequest.thinking);
+    const thinkingType = toString(thinking?.type).toLowerCase();
+    const thinkingBudget = toNumber((thinking as { budget_tokens?: unknown } | null)?.budget_tokens);
+    if (thinkingType === 'disabled') {
+      const effort = responsesEffortForThinkingOff(glmModel);
+      if (effort) request.reasoning = { effort };
+    } else if (thinkingType === 'enabled' && thinkingBudget != null && thinkingBudget > 0) {
+      request.reasoning = { effort: thinkingBudget <= 4_000 ? 'low' : 'high' };
+    }
   }
 
   const maxOutputTokens = toNumber(chatRequest.max_output_tokens)
@@ -3790,6 +3902,21 @@ async function handleRequest(
 
   if (upstreamAPIType === 'chat_completions') {
     normalizeMaxTokensFieldForOpenAIProvider(openAIRequest, upstream.provider);
+    // GLM-5.x chat endpoints reject thinking:{type:'disabled'} outright (zhipu
+    // 400 code 1210 「该模型始终思考，不支持关闭思考」). Drop the toggle for
+    // always-thinking models instead of failing the request; the output budget
+    // at the caller is thinking-aware (modelThinking.budgetAssumesThinking),
+    // and a disabled toggle on a model that cannot disable was never going to
+    // be honored anyway.
+    if (modelAlwaysThinks(toString(openAIRequest.model))) {
+      const thinking = toOptionalObject(openAIRequest.thinking);
+      if (toString(thinking?.type).toLowerCase() === 'disabled') {
+        delete openAIRequest.thinking;
+        coworkLog('INFO', 'thinking-toggle', 'dropped thinking:disabled for always-thinking model on chat path', {
+          model: toString(openAIRequest.model),
+        });
+      }
+    }
   }
 
   const upstreamRequest = upstreamAPIType === 'responses'
@@ -3822,10 +3949,18 @@ async function handleRequest(
       body: JSON.stringify(payload),
     });
   };
+  // Every upstream send goes through the transient-retry wrapper: a single
+  // closed socket (net::ERR_CONNECTION_CLOSED and friends) or a 502/503/504
+  // gateway flap gets up to two immediate retries on a fresh connection
+  // instead of failing the caller's whole attempt.
+  const sendUpstreamRequestWithRetry = (
+    payload: Record<string, unknown>,
+    targetURL: string
+  ): Promise<Response> => sendUpstreamRequestWithTransientRetry(sendUpstreamRequest, payload, targetURL);
 
   let upstreamResponse: Response;
   try {
-    upstreamResponse = await sendUpstreamRequest(upstreamRequest, targetURLs[0]);
+    upstreamResponse = await sendUpstreamRequestWithRetry(upstreamRequest, targetURLs[0]);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Network error';
     lastProxyError = message;
@@ -3838,7 +3973,7 @@ async function handleRequest(
       for (let i = 1; i < targetURLs.length; i += 1) {
         const retryURL = targetURLs[i];
         try {
-          upstreamResponse = await sendUpstreamRequest(upstreamRequest, retryURL);
+          upstreamResponse = await sendUpstreamRequestWithRetry(upstreamRequest, retryURL);
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Network error';
           lastProxyError = message;
@@ -3869,7 +4004,7 @@ async function handleRequest(
           const convertResult = convertMaxTokensToMaxCompletionTokens(upstreamRequest);
           if (convertResult.changed) {
             try {
-              upstreamResponse = await sendUpstreamRequest(upstreamRequest, currentTargetURL);
+              upstreamResponse = await sendUpstreamRequestWithRetry(upstreamRequest, currentTargetURL);
               if (!upstreamResponse.ok) {
                 const retryErrorText = await upstreamResponse.text();
                 firstErrorMessage = extractErrorMessage(retryErrorText);
@@ -3894,7 +4029,7 @@ async function handleRequest(
           const clampResult = clampMaxTokensFromError(upstreamRequest, firstErrorMessage);
           if (clampResult.changed) {
             try {
-              upstreamResponse = await sendUpstreamRequest(upstreamRequest, currentTargetURL);
+              upstreamResponse = await sendUpstreamRequestWithRetry(upstreamRequest, currentTargetURL);
               if (!upstreamResponse.ok) {
                 const retryErrorText = await upstreamResponse.text();
                 firstErrorMessage = extractErrorMessage(retryErrorText);

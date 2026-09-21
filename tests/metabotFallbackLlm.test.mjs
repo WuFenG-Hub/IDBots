@@ -31,6 +31,68 @@ test('resolveFallbackLlmId returns fallback only when set and different from pri
   assert.equal(resolveFallbackLlmId(null, 'ollama'), 'ollama');
 });
 
+test('resolveFallbackLlmId keeps a same-id fallback that names a different provider', () => {
+  // 2026-09-20 dream 502s: AI_Sunny runs glm-5.3-flash @ zhipu primary with
+  // glm-5.3-flash @ volcengine fallback — same model id, different gateway.
+  // Id-only comparison discarded the backup, so a zhipu gateway flap failed
+  // the run with no safety net even though the user configured a working one.
+  assert.equal(resolveFallbackLlmId('glm-5.3-flash', 'glm-5.3-flash', 'zhipu', 'custom-provider'), 'glm-5.3-flash');
+  // Primary provider unknown: the fallback hint still re-routes resolution.
+  assert.equal(resolveFallbackLlmId('glm-5.3-flash', 'glm-5.3-flash', null, 'custom-provider'), 'glm-5.3-flash');
+  // Same provider on both sides is the same brain — no fallback.
+  assert.equal(resolveFallbackLlmId('glm-5.3-flash', 'glm-5.3-flash', 'zhipu', ' zhipu '), null);
+  // Fallback provider unknown → legacy id-only rule (same id, no fallback).
+  assert.equal(resolveFallbackLlmId('glm-5.3-flash', 'glm-5.3-flash', 'zhipu', null), null);
+  assert.equal(resolveFallbackLlmId('glm-5.3-flash', 'glm-5.3-flash', null, null), null);
+  // Different ids keep the fallback regardless of providers.
+  assert.equal(resolveFallbackLlmId('glm-5.3', 'glm-5.3-flash', 'zhipu', 'zhipu'), 'glm-5.3-flash');
+});
+
+test('runWithLlmFallback retries the same model id on the fallback provider', async () => {
+  const calls = [];
+  const result = await runWithLlmFallback(
+    {
+      llmId: 'glm-5.3-flash',
+      llmProvider: 'zhipu',
+      fallbackLlmId: 'glm-5.3-flash',
+      fallbackLlmProvider: 'custom-provider',
+    },
+    async (options) => {
+      calls.push({ llmId: options.llmId, llmProvider: options.llmProvider ?? null });
+      if (options.llmProvider === 'zhipu') {
+        throw new Error('LLM request failed: 502 {"type":"error","error":{"type":"api_error","message":"net::ERR_CONNECTION_CLOSED"}}');
+      }
+      return 'ok';
+    },
+    noopLog,
+  );
+  assert.equal(result, 'ok');
+  assert.deepEqual(calls, [
+    { llmId: 'glm-5.3-flash', llmProvider: 'zhipu' },
+    { llmId: 'glm-5.3-flash', llmProvider: 'custom-provider' },
+  ]);
+});
+
+test('runWithLlmFallback names the fallback provider in the combined error', async () => {
+  await assert.rejects(
+    runWithLlmFallback(
+      {
+        llmId: 'glm-5.3-flash',
+        llmProvider: 'zhipu',
+        fallbackLlmId: 'glm-5.3-flash',
+        fallbackLlmProvider: 'custom-provider',
+      },
+      async () => {
+        throw new Error('down');
+      },
+      noopLog,
+    ),
+    (err) =>
+      err instanceof Error &&
+      err.message.includes("(fallback 'glm-5.3-flash@custom-provider' also failed: down)"),
+  );
+});
+
 test('/info/llm payload maps fallback_llm_id to fallbackProvider', () => {
   const step = buildMetabotInfoPayloads({ llm_id: 'openai', fallback_llm_id: 'ollama' })[2];
   assert.deepEqual(JSON.parse(step.payload), { primaryProvider: 'openai', primaryModel: 'openai', fallbackProvider: 'ollama', fallbackModel: 'ollama' });

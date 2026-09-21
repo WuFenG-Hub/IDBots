@@ -46,6 +46,7 @@ import {
 } from '../libs/dreamFragments';
 import { formatBotWorkspaceDate } from '../libs/botWorkspace';
 import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../libs/claudeSettings';
+import { budgetAssumesThinking } from '../libs/modelThinking';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { metabotBrainOptions } from './llmFallback';
 import {
@@ -75,6 +76,11 @@ const DREAM_LLM_TIMEOUT_MS = 180_000;
 // truncated mid-JSON, and it costs nothing on short days.
 const DREAM_LLM_TARGET_MAX_TOKENS = 32_768;
 const DREAM_FRAGMENT_MAX_TOKENS = 4_096;
+// Fragment ceiling when either brain may think despite the disabled toggle
+// (GLM-5.x always-thinking, unknown families): reasoning rides the same
+// output budget, so the fragment needs headroom for low-effort reasoning
+// plus the summary JSON (see resolveDreamBudgets).
+const DREAM_FRAGMENT_MAX_TOKENS_THINKING = 16_384;
 const DREAM_CONTEXT_RESERVE_TOKENS = 8_000;
 const DREAM_FAST_PATH_MAX_TOKENS = 96_000;
 const DREAM_CHUNK_MAX_TOKENS = 64_000;
@@ -405,7 +411,7 @@ export class DreamService {
       // window — a primary that burns the full budget must not leave the
       // fallback retry a dead shared signal.
       attemptTimeoutMs: this.deps.llmTimeoutMs ?? DREAM_LLM_TIMEOUT_MS,
-      maxTokens: maxTokens ?? this.resolveDreamBudgets(brain.llmId).maxOutputTokens,
+      maxTokens: maxTokens ?? this.resolveDreamBudgets(brain).maxOutputTokens,
       llmProvider: brain.llmProvider,
       fallbackLlmId: brain.fallbackLlmId,
       fallbackLlmProvider: brain.fallbackLlmProvider,
@@ -422,21 +428,37 @@ export class DreamService {
     });
   }
 
-  private resolveDreamBudgets(llmId: string | null): {
+  private resolveDreamBudgets(brain: DreamBrainPair): {
     maxOutputTokens: number;
     fastPathInputTokens: number;
     fragmentInputTokens: number;
     fragmentOutputTokens: number;
   } {
-    const effectiveModelId = resolveAutomationModelOverride(llmId) ?? llmId;
+    const effectiveModelId = resolveAutomationModelOverride(brain.llmId) ?? brain.llmId;
     const limits = resolveCurrentModelLimits(effectiveModelId);
     const maxOutputTokens = Math.max(1, Math.min(DREAM_LLM_TARGET_MAX_TOKENS, limits.maxOutputTokens));
     const usableInputTokens = Math.max(16_000, limits.contextWindow - maxOutputTokens - DREAM_CONTEXT_RESERVE_TOKENS);
+    // Fragment output ceiling: reasoning shares the provider's output budget,
+    // so the lean 4K ceiling is only safe when thinking can actually be turned
+    // off (DeepSeek, GLM-4.x). GLM-5.x always thinks and unknown model families
+    // may default to thinking — those get reasoning headroom, or the fragment
+    // dies as stop_reason=max_tokens with empty content (the 2026-09-20
+    // zhipu glm-5.3-flash outage). The fallback brain must be covered too: the
+    // fallback attempt reuses this ceiling, and a mixed pair (deepseek primary
+    // + glm-5 fallback) would otherwise hand the fallback a guaranteed
+    // truncation. Ceilings only — billing is by actual tokens used.
+    const fallbackModelId = resolveAutomationModelOverride(brain.fallbackLlmId) ?? brain.fallbackLlmId;
+    const eitherBrainMayThink =
+      budgetAssumesThinking(effectiveModelId, 'disabled')
+      || budgetAssumesThinking(fallbackModelId, 'disabled');
+    const fragmentCeiling = eitherBrainMayThink
+      ? DREAM_FRAGMENT_MAX_TOKENS_THINKING
+      : DREAM_FRAGMENT_MAX_TOKENS;
     return {
       maxOutputTokens,
       fastPathInputTokens: Math.min(DREAM_FAST_PATH_MAX_TOKENS, Math.floor(usableInputTokens * 0.5)),
       fragmentInputTokens: Math.min(DREAM_CHUNK_MAX_TOKENS, Math.floor(usableInputTokens * 0.35)),
-      fragmentOutputTokens: Math.min(DREAM_FRAGMENT_MAX_TOKENS, maxOutputTokens),
+      fragmentOutputTokens: Math.min(fragmentCeiling, maxOutputTokens),
     };
   }
 
@@ -571,7 +593,7 @@ export class DreamService {
     output: DreamOutput;
     meta: { estimatedInputTokens: number; fragmentCount: number };
   }> {
-    const budgets = this.resolveDreamBudgets(brain.llmId);
+    const budgets = this.resolveDreamBudgets(brain);
     const estimatedTokens = estimateDreamActivityTokens(activity);
     // The weekly long-dream review rides every nightly dream as cross-day
     // context (P2b) — reference, not constraint.
@@ -741,7 +763,7 @@ export class DreamService {
           prepared.prompt.system,
           prepared.prompt.user,
           brain,
-          this.resolveDreamBudgets(brain.llmId).maxOutputTokens,
+          this.resolveDreamBudgets(brain).maxOutputTokens,
         );
       }
       this.writeDreamResults(metabotId, date, output, activity, brain.llmId, isRepair, impressionSubjects, metabot.globalmetaid);
