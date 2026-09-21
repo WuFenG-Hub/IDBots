@@ -65,6 +65,20 @@ import * as dshToolSubagentControl from '@deepseek-ai/dsh-tool-subagent-control'
 
 const RESPOND_OUTCOMES = new Set(['allowed-once', 'rejected'])
 
+// session/ensure retry budget for SessionAlreadyOwnedError: covers the
+// seconds a superseded/dying runtime takes to exit and release its
+// session.lock flock. Not meant to out-wait a healthy foreign owner.
+const IDBOTS_ENSURE_OWNED_RETRY_DELAYS_MS = [500, 1500, 3000, 5000]
+
+/** True for the persistence write-claim refusal (in-process claim or the
+ * cross-process session.lock flock) — matched by class name with a message
+ * fallback so a re-wrapped error still classifies. */
+function isSessionAlreadyOwnedError(error) {
+  if (error == null) return false
+  if (error.name === 'SessionAlreadyOwnedError') return true
+  return /already owned by an active write handle/.test(String(error.message ?? error))
+}
+
 export const name = 'idbots-sdk-server'
 export const inject = ['agents', 'tools']
 
@@ -98,6 +112,12 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     // mounted the Host-scope subagentModelSelection setting (non-empty
     // allowlist derived from the app provider table).
     this.idbotsSubagentModelSelection = options?.subagentModelSelection === true
+    // session/ensure in-flight dedup, session id → promise. Two concurrent
+    // ensures for one id both miss idbotsAgents before the winner's agent
+    // publishes, and the loser's resume then dies on the winner's in-flight
+    // write claim (SessionAlreadyOwnedError); chaining lands the loser on the
+    // reuse path instead.
+    this.idbotsEnsureInflight = new Map()
 
     ctx.on('agent/created', ({ agent }) => {
       this.idbotsAgents.set(String(agent.id), agent)
@@ -303,9 +323,31 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   }
 
   async idbotsEnsureSession(hostParams) {
+    const id = String(hostParams?.sessionId ?? '')
+    if (id.length === 0) throw new Error('idbots-sdk-server: session/ensure requires sessionId')
+    // Serialize concurrent ensures per session id (see constructor note):
+    // the loser of a resume race awaits the winner, then reuses the published
+    // agent. The loop re-checks after each wake so multiple waiters chain onto
+    // the latest in-flight ensure instead of all releasing at once.
+    for (;;) {
+      const prior = this.idbotsEnsureInflight.get(id)
+      if (prior === undefined) break
+      await prior.catch(() => undefined)
+    }
+    // .then() defers the exclusive call to a microtask so the map entry is
+    // installed before any ensure work runs (waiters must observe it).
+    const run = Promise.resolve().then(() => this.idbotsEnsureSessionExclusive(hostParams))
+    this.idbotsEnsureInflight.set(id, run)
+    try {
+      return await run
+    } finally {
+      if (this.idbotsEnsureInflight.get(id) === run) this.idbotsEnsureInflight.delete(id)
+    }
+  }
+
+  async idbotsEnsureSessionExclusive(hostParams) {
     const { sessionId, provider, model, maxTokens, reasoningEffort, cwd } = hostParams ?? {}
     const id = String(sessionId ?? '')
-    if (id.length === 0) throw new Error('idbots-sdk-server: session/ensure requires sessionId')
     if (this.idbotsAgents.has(id)) {
       const agent = this.idbotsAgents.get(id)
       this.idbotsBindRoute(agent, { provider, model, maxTokens, reasoningEffort })
@@ -324,18 +366,45 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     // when no log exists — that is the fresh-create signal.
     let handle
     let resumed = true
-    try {
-      handle = await this.ctx.agents.resume({ resumeSessionId: id, agentOptions })
-    } catch (error) {
-      if (!/not found/.test(String(error?.message ?? error))) throw error
-      // Prefer the host cowork workspace over initialize's sessionRoot so
-      // bash/fs land in bots/<id>/<date>, not the shared JSONL directory.
-      handle = await this.ctx.agents.create({
-        sessionId: id,
-        meta: { cwd: this.idbotsResolvedCwd(cwd) ?? this.cwd },
-        agentOptions,
-      })
-      resumed = false
+    // The write claim behind SessionAlreadyOwnedError can be transient: a
+    // superseded or dying runtime process releases its session.lock flock the
+    // moment it exits, so a short bounded retry heals the handover (runtime
+    // restart raced a resume, sibling process shutting down). A lock held by
+    // a LONG-LIVED foreign process (a second app instance sharing this
+    // userData, or an orphaned pre-crash runtime) never clears — after the
+    // budget, surface the original error so the failure stays diagnosable.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        handle = await this.ctx.agents.resume({ resumeSessionId: id, agentOptions })
+        break
+      } catch (error) {
+        if (isSessionAlreadyOwnedError(error)) {
+          // The owner may have published the agent here while our attempt was
+          // in flight — prefer reusing the live agent over retrying.
+          const live = this.idbotsAgents.get(id)
+          if (live !== undefined) {
+            this.idbotsBindRoute(live, { provider, model, maxTokens, reasoningEffort })
+            this.idbotsBindWorkspace(live, cwd)
+            return { ensured: true, resumed: false }
+          }
+          if (attempt < IDBOTS_ENSURE_OWNED_RETRY_DELAYS_MS.length) {
+            const waitMs = IDBOTS_ENSURE_OWNED_RETRY_DELAYS_MS[attempt]
+            this.ctx.logger.warn(`idbots-sdk-server: session/ensure "${id}" is write-owned by another live process; retrying in ${waitMs}ms (attempt ${attempt + 1}/${IDBOTS_ENSURE_OWNED_RETRY_DELAYS_MS.length})`)
+            await new Promise((resolve) => setTimeout(resolve, waitMs))
+            continue
+          }
+        }
+        if (!/not found/.test(String(error?.message ?? error))) throw error
+        // Prefer the host cowork workspace over initialize's sessionRoot so
+        // bash/fs land in bots/<id>/<date>, not the shared JSONL directory.
+        handle = await this.ctx.agents.create({
+          sessionId: id,
+          meta: { cwd: this.idbotsResolvedCwd(cwd) ?? this.cwd },
+          agentOptions,
+        })
+        resumed = false
+        break
+      }
     }
     // Per-session surface: prompt sections and host tools registered on the
     // agent's scoped context (shadowing globals, unwound on disposal).
