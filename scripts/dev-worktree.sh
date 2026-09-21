@@ -11,4 +11,4 @@ pnpm run compile:electron
 pnpm run build:skills
 pnpm exec concurrently \
   "vite --host 127.0.0.1 --port ${PORT} --strictPort" \
-  "wait-on http://127.0.0.1:${PORT} && node scripts/wait-electron-dev-build.mjs dist-electron && cross-env NODE_ENV=development IDBOTS_DISABLE_SINGLE_INSTANCE_LOCK=1 ELECTRON_START_URL=http://127.0.0.1:${PORT} electron ."
+  "wait-on http://127.0.0.1:${PORT} && node scripts/wait-electron-dev-build.mjs dist-electron && cross-env NODE_ENV=development ELECTRON_START_URL=http://127.0.0.1:${PORT} electron ."

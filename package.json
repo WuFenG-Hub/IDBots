@@ -55,7 +55,7 @@
     "sync:man-p2p": "node scripts/sync-man-p2p-binary.mjs",
     "build:skills": "node scripts/build-skills.js && node scripts/build-web-search-skill.js",
     "build:skill:web-search": "node scripts/build-web-search-skill.js",
-    "start:electron": "cross-env NODE_ENV=development IDBOTS_DISABLE_SINGLE_INSTANCE_LOCK=1 ELECTRON_START_URL=http://127.0.0.1:5175 electron .",
+    "start:electron": "cross-env NODE_ENV=development ELECTRON_START_URL=http://127.0.0.1:5175 electron .",
     "preelectron:dev": "pnpm run check:dsh-deps",
     "electron:dev": "npx rimraf dist-electron && pnpm run compile:electron && pnpm run build:skills && concurrently \"vite --host 127.0.0.1 --port 5175\" \"wait-on -v -t 120000 -d 10000 http://127.0.0.1:5175 && node scripts/wait-electron-dev-build.mjs dist-electron && pnpm run start:electron\"",
     "electron:dev:fresh": "npx rimraf .dev-userdata-fresh .dev-appdata-fresh && cross-env IDBOTS_USER_DATA_PATH=./.dev-userdata-fresh IDBOTS_APP_DATA_PATH=./.dev-appdata-fresh pnpm run electron:dev",

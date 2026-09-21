@@ -8290,20 +8290,19 @@ const scheduleReload = (reason: string, webContents?: WebContents) => {
 // 确保应用程序只有一个实例
 const shouldUseSingleInstanceLock = shouldAcquireSingleInstanceLock();
 
-// Un-isolated dev instance hazard (DSH integration fix list Task 5): dev
-// start scripts disable the single-instance lock, and without an
-// IDBOTS_USER_DATA_PATH / IDBOTS_APP_DATA_PATH override this instance shares
-// the regular app's user-data directory. Beyond the known startup-recovery clash (the dev
-// instance marks the LIVE instance's in-flight worker attempts
-// RECOVERED_AFTER_RESTART), both instances' daemons also dispatch A2A turns
-// for the same bot identity and collide on the DSH session write locks —
-// every turn for a session owned by the other instance fails with
-// 'session "…" is already owned by an active write handle' and the bot
-// appears unresponsive. This used to be warn-only; the A2A lock collisions
-// it produces are not recoverable for the affected conversations, so the
-// misconfiguration is now fatal unless explicitly overridden.
-// `electron:dev:dsh` / `electron:dev:fresh` isolate the data dir and are the
-// correct preview entry points.
+// Shared-data multi-instance hazard (2026-09-21 A2A incident): two
+// instances on one data directory collide on the DSH session write locks
+// (every turn for a session owned by the other instance fails with
+// 'session "…" is already owned by an active write handle') and reset each
+// other's in-flight worker attempts during startup recovery. Stock dev
+// entry points (`electron:dev`, scripts/dev-worktree.sh) keep the
+// single-instance lock, so a second boot on the real data directory loses
+// the lock and exits with a dialog instead of colliding — ownership of the
+// data directory is serialized by the lock, not statically refused. The
+// isolated entry points (`electron:dev:dsh` / `electron:dev:fresh`) disable
+// the lock WITH a data-dir override, the supported side-by-side mode. The
+// guard below is the backstop for a MANUALLY disabled lock without
+// isolation — that combination is fatal unless explicitly overridden.
 if (shouldRefuseSharedUserData()) {
   const sharedUserDataMessage =
     'This IDBots instance was launched with the single-instance lock disabled but WITHOUT an isolated data directory (IDBOTS_USER_DATA_PATH or IDBOTS_APP_DATA_PATH), so it shares the regular app data directory with any other running instance. Two instances on one data directory collide on DSH session write locks (A2A turns fail with "already owned by an active write handle") and reset each other\'s in-flight worker sessions.\n\n' +
@@ -8316,6 +8315,17 @@ if (shouldRefuseSharedUserData()) {
 const gotTheLock = shouldUseSingleInstanceLock ? app.requestSingleInstanceLock() : true;
 
 if (!gotTheLock) {
+  // Another live instance already owns this data directory. Production keeps
+  // the historical silent quit (the owner's second-instance handler focuses
+  // its window). A dev boot gets an explicit dialog: the dev entry points
+  // rely on this lock to serialize ownership of the shared userData, and a
+  // silent quit would look like `electron:dev` simply not starting.
+  if (isDev) {
+    dialog.showErrorBox(
+      'IDBots: another instance is running',
+      'Another IDBots instance is already running on this data directory. Close it first, then retry — or use an isolated dev entry point (`pnpm run electron:dev:dsh` or `pnpm run electron:dev:fresh`) to run side by side with separate data.',
+    );
+  }
   app.quit();
 } else {
   if (shouldUseSingleInstanceLock) {
