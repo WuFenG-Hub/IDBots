@@ -627,6 +627,60 @@ test('rpc transfer route rejects unknown fields with a self-describing field con
   }
 });
 
+test('rpc transfer route keeps its field contract on non-object bodies and executor failures', async () => {
+  const failingTransferService = {
+    async executeTransfer() {
+      return { success: false, error: 'Insufficient balance' };
+    },
+  };
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({
+    transferService: failingTransferService,
+  });
+  try {
+    const post = (body) =>
+      fetch(`${baseUrl}/api/idbots/wallet/transfer`, {
+        method: 'POST',
+        headers: RPC_AUTH_HEADERS,
+        body,
+      });
+
+    // A literal `null` body used to pass JSON.parse and then throw on the first
+    // field read: the caller got no response at all (it waited until timeout)
+    // and the process saw an unhandled rejection. It must be a plain 400 now.
+    const nullBodyRes = await post('null');
+    const nullBody = await nullBodyRes.json();
+    assert.equal(nullBodyRes.status, 400);
+    assert.match(String(nullBody.error || ''), /Invalid JSON body/);
+    assert.equal(nullBody.contract.path, '/api/idbots/wallet/transfer');
+
+    // Same for a body that is not JSON at all.
+    const malformedRes = await post('{not json');
+    const malformedBody = await malformedRes.json();
+    assert.equal(malformedRes.status, 400);
+    assert.match(String(malformedBody.error || ''), /Invalid JSON body/);
+    assert.equal(malformedBody.contract.path, '/api/idbots/wallet/transfer');
+
+    // The route keeps serving requests after both rejections, and an executor
+    // refusal carries the same contract as a validation refusal.
+    const executorFailureRes = await post(
+      JSON.stringify({ metabot_id: 1, chain: 'btc', to_address: '1recipient', amount: '1' }),
+    );
+    const executorFailureBody = await executorFailureRes.json();
+    assert.equal(executorFailureRes.status, 400);
+    assert.equal(executorFailureBody.error, 'Insufficient balance');
+    assert.equal(executorFailureBody.contract.path, '/api/idbots/wallet/transfer');
+    assert.deepEqual(Object.keys(executorFailureBody.contract.fields), [
+      'metabot_id',
+      'chain',
+      'to_address',
+      'amount',
+      'fee_rate',
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('rpc btc signing routes expose sign-message and sign-psbt through metabot wallet context', async () => {
   const calls = [];
   class FakeBtcWallet {

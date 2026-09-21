@@ -956,7 +956,18 @@ export function startMetaidRpcServer(
         };
       } catch {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        res.end(JSON.stringify(walletTransferRejection('Invalid JSON body: expected a JSON object', {})));
+        return;
+      }
+
+      // `JSON.parse` accepts a literal `null`, and every field read below would
+      // then throw inside this async handler: the caller gets no response at all
+      // (the request hangs until it times out) and the process sees an
+      // unhandled rejection. Reject a non-object body the same way malformed
+      // JSON is rejected.
+      if (parsed === null || typeof (parsed as unknown) !== 'object') {
+        res.writeHead(400);
+        res.end(JSON.stringify(walletTransferRejection('Invalid JSON body: expected a JSON object', {})));
         return;
       }
 
@@ -1015,7 +1026,7 @@ export function startMetaidRpcServer(
         });
         if (!result.success) {
           res.writeHead(400);
-          res.end(JSON.stringify({ success: false, error: result.error || 'Transfer failed' }));
+          res.end(JSON.stringify(walletTransferRejection(result.error || 'Transfer failed', parsed)));
           return;
         }
         res.writeHead(200);
