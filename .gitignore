@@ -58,11 +58,6 @@ tests/*
 !tests/fixtures/
 !tests/fixtures/longTaskBoardSeed.mjs
 !tests/trackedTaskBoard.test.mjs
-!tests/rsiLadderCompute.test.ts
-!tests/rsiLadderIndex.test.ts
-!tests/rsiLadderMountStatic.test.ts
-!tests/rsiLadderRegistryCli.test.ts
-!tests/rsiLadderRegistryE2e.test.ts
 !tests/mvcSponsorCircuitBreaker.test.mjs
 !tests/groupTaskChatMode.test.mjs
 !tests/devWindowLoadRetry.test.mjs
