@@ -1033,7 +1033,7 @@ export function startMetaidRpcServer(
         res.end(JSON.stringify({ success: true, txid: result.txId }));
       } catch (err) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+        res.end(JSON.stringify(walletTransferRejection(String((err as Error)?.message || err), parsed)));
       }
       return;
     }

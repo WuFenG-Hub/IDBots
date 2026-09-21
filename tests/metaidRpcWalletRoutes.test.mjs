@@ -676,6 +676,29 @@ test('rpc transfer route keeps its field contract on non-object bodies and execu
       'amount',
       'fee_rate',
     ]);
+
+    // An executor that throws is a rejection of this route too, so it carries
+    // the contract as well (this branch used to answer without one).
+    const throwing = await startRpcServerForTestWithOverrides({
+      transferService: {
+        async executeTransfer() {
+          throw new Error('executor exploded');
+        },
+      },
+    });
+    try {
+      const thrownRes = await fetch(`${throwing.baseUrl}/api/idbots/wallet/transfer`, {
+        method: 'POST',
+        headers: RPC_AUTH_HEADERS,
+        body: JSON.stringify({ metabot_id: 1, chain: 'mvc', to_address: '1recipient', amount: '1' }),
+      });
+      const thrownBody = await thrownRes.json();
+      assert.equal(thrownRes.status, 400);
+      assert.equal(thrownBody.error, 'executor exploded');
+      assert.equal(thrownBody.contract.path, '/api/idbots/wallet/transfer');
+    } finally {
+      await new Promise((resolve) => throwing.server.close(resolve));
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
