@@ -25,6 +25,7 @@ const {
   getTrafficPricing,
   getTrafficSettingsSnapshot,
   initTrafficAccountService,
+  isPackagedApp,
   listLocalTrafficJournal,
   mockConfirmRechargeOrder,
   recordLocalTrafficSpend,
@@ -647,6 +648,10 @@ test('createRechargeOrder rejects an unsupported gateway before any HTTP call', 
 
 test('resolveRechargeGateway falls back to mock outside packaged Electron', () => {
   assert.equal(resolveRechargeGateway(), 'mock');
+});
+
+test('isPackagedApp reads as unpackaged outside Electron', () => {
+  assert.equal(isPackagedApp(), false);
 });
 
 test('resolveRechargeGateway honors the kvStore override in non-packaged builds only', async () => {

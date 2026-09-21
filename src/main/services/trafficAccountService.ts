@@ -869,22 +869,29 @@ export const RECHARGE_GATEWAYS = ['paypal', 'mock'] as const;
 export type RechargeGateway = (typeof RECHARGE_GATEWAYS)[number];
 
 /**
+ * Whether this process is a packaged Electron app. Electron is loaded lazily
+ * here, same pattern as getTrafficClientVersion: outside Electron
+ * require('electron') yields no app, so plain-node tests read as unpackaged.
+ */
+export function isPackagedApp(): boolean {
+  try {
+    const { app } = require('electron');
+    return Boolean(app?.isPackaged);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Gateway used for new recharge orders. Packaged builds always go through the
  * real PayPal gateway — the mock gateway must never be able to credit traffic
  * in production (Phase 4 requirement). Dev builds and plain-node tests default
  * to 'mock' and additionally honor the kvStore `traffic.rechargeGateway`
  * override (Advanced settings), so a dev build can exercise the real PayPal
- * flow end-to-end. Electron is loaded lazily here, same pattern as
- * getTrafficClientVersion: outside Electron require('electron') yields no app.
+ * flow end-to-end.
  */
 export function resolveRechargeGateway(): RechargeGateway {
-  let packaged = false;
-  try {
-    const { app } = require('electron');
-    packaged = Boolean(app?.isPackaged);
-  } catch {
-    // electron unavailable (plain-node tests) — treated as unpackaged
-  }
+  const packaged = isPackagedApp();
   if (!packaged) {
     try {
       const override = readRechargeGatewayOverride(getKvStore());
@@ -1414,7 +1421,7 @@ export function registerTrafficAccountIpcHandlers(deps: { ipcMain: IpcMainLike }
   });
   ipcMain.handle('traffic:getRechargeGateway', async () => {
     try {
-      return { success: true, gateway: resolveRechargeGateway() };
+      return { success: true, gateway: resolveRechargeGateway(), packaged: isPackagedApp() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }

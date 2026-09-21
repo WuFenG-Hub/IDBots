@@ -346,6 +346,7 @@ const TrafficSettings: React.FC = () => {
   const [tariffOpen, setTariffOpen] = useState(false);
   const [rechargeOpen, setRechargeOpen] = useState(false);
   const [rechargeGateway, setRechargeGateway] = useState<'paypal' | 'mock' | null>(null);
+  const [gatewayPackaged, setGatewayPackaged] = useState(false);
   const [pricingPlans, setPricingPlans] = useState<TrafficPricingPlanInfo[] | null>(null);
   const [pricingLoading, setPricingLoading] = useState(false);
   const [pricingError, setPricingError] = useState('');
@@ -525,6 +526,11 @@ const TrafficSettings: React.FC = () => {
             .catch(() => {});
         }
       }
+      trafficApi.getRechargeGateway()
+        .then((res) => {
+          if (!cancelled && res?.success) setGatewayPackaged(Boolean(res.packaged));
+        })
+        .catch(() => {});
       window.electron.metabot.list().then((res) => {
         if (cancelled || !res?.success || !res.list) return;
         const names: Record<string, string> = {};
@@ -763,6 +769,7 @@ const TrafficSettings: React.FC = () => {
     trafficApi.getRechargeGateway()
       .then((res) => {
         if (res?.success && res.gateway) setRechargeGateway(res.gateway);
+        if (res?.success) setGatewayPackaged(Boolean(res.packaged));
       })
       .catch(() => {});
     loadPricingPlans();
@@ -1260,23 +1267,25 @@ const TrafficSettings: React.FC = () => {
             {apiBaseError && <p className="text-xs text-red-500 mt-2">{apiBaseError}</p>}
             {apiBaseNotice && <p className="text-xs text-claude-accent mt-2">{apiBaseNotice}</p>}
 
-            <div className="mt-4">
-              <span className={labelClass}>{i18nService.t('trafficGatewayLabel')}</span>
-              <p className={`${hintClass} mt-1`}>{i18nService.t('trafficGatewayDesc')}</p>
-              <div className="flex items-center gap-2 mt-2">
-                <select
-                  value={settings?.rechargeGateway ?? ''}
-                  onChange={(event) => handleSaveGateway(event.target.value)}
-                  disabled={gatewaySaving || !settings}
-                  className="rounded-lg dark:bg-claude-darkSurfaceInset bg-claude-surfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors disabled:opacity-50"
-                >
-                  <option value="">{i18nService.t('trafficGatewayAuto')}</option>
-                  <option value="paypal">PayPal</option>
-                  <option value="mock">mock</option>
-                </select>
+            {!gatewayPackaged && (
+              <div className="mt-4">
+                <span className={labelClass}>{i18nService.t('trafficGatewayLabel')}</span>
+                <p className={`${hintClass} mt-1`}>{i18nService.t('trafficGatewayDesc')}</p>
+                <div className="flex items-center gap-2 mt-2">
+                  <select
+                    value={settings?.rechargeGateway ?? ''}
+                    onChange={(event) => handleSaveGateway(event.target.value)}
+                    disabled={gatewaySaving || !settings}
+                    className="rounded-lg dark:bg-claude-darkSurfaceInset bg-claude-surfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors disabled:opacity-50"
+                  >
+                    <option value="">{i18nService.t('trafficGatewayAuto')}</option>
+                    <option value="paypal">PayPal</option>
+                    <option value="mock">mock</option>
+                  </select>
+                </div>
+                {gatewayError && <p className="text-xs text-red-500 mt-2">{gatewayError}</p>}
               </div>
-              {gatewayError && <p className="text-xs text-red-500 mt-2">{gatewayError}</p>}
-            </div>
+            )}
           </div>
         )}
       </div>
