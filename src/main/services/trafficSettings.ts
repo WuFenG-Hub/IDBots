@@ -11,8 +11,8 @@
  * - traffic.apiBase: assist-service base URL override (integration testing);
  *   empty/unset means the production default baked into the clients.
  * - traffic.rechargeGateway: recharge payment-gateway override (dev-only E2E
- *   testing): 'paypal' | 'mock'; empty/unset means auto (mock in dev,
- *   paypal in packaged builds). Packaged builds ignore this override.
+ *   testing): 'paypal' | 'mock'; empty/unset means PayPal (the same gateway
+ *   every build uses by default). Packaged builds ignore this override.
  */
 
 export const TRAFFIC_MODE_KEY = 'traffic.mode';
@@ -112,7 +112,7 @@ export interface TrafficSettingsSnapshot {
   fallbackPolicy: TrafficFallbackPolicy;
   /** Configured assist-service base URL override; '' = production default. */
   apiBase: string;
-  /** Recharge gateway override; '' = auto (mock in dev, paypal when packaged). */
+  /** Recharge gateway override; '' = default (PayPal in every build; dev-only override can force mock). */
   rechargeGateway: RechargeGatewayOverride;
 }
 
