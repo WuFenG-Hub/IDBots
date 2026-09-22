@@ -361,7 +361,7 @@ export function startMetaidRpcServer(
     const persist = new URLSearchParams(search || '').get('persist') === 'true';
 
     if (req.method === 'POST' && pathname === BOT_BROWSER_OPEN_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -384,7 +384,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === BOT_BROWSER_TABS_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -406,7 +406,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === SET_METABOT_HOMEPAGE_METAAPP_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -998,7 +998,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === WALLET_BALANCE_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -1077,7 +1077,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === WALLET_MVC_TRANSFER_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -1139,7 +1139,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === WALLET_TRANSFER_RECORDS_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -1681,7 +1681,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_LIST_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -2051,7 +2051,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_SEARCH_CANDIDATES_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -2112,7 +2112,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_SEARCH_REMOTE_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -2477,7 +2477,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_EXPORT_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -2516,7 +2516,7 @@ export function startMetaidRpcServer(
       // contract: reject a body that is not a JSON object instead of ignoring
       // whatever arrived, so a caller's malformed request cannot look like a
       // successful one.
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }

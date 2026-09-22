@@ -13,8 +13,11 @@
  * with a local `parseJsonBody` guard; this module is the same rule, shared, so
  * every route inherits one behaviour instead of re-deriving it:
  *
- *   - an empty body means `{}` (no fields supplied), which is what the routes
- *     that already wrote `JSON.parse(body || '{}')` assumed;
+ *   - an empty body keeps whatever meaning the route already gave it: 400
+ *     `Invalid JSON body` where the route wrote a bare `JSON.parse(body)`, or
+ *     `{}` where it wrote `JSON.parse(body || '{}')` (see `EmptyBodyPolicy`) —
+ *     so this guard changes how a bad body is reported, never what a body
+ *     means to a route;
  *   - malformed JSON is a 400 with the historical message `Invalid JSON body`,
  *     so existing callers that match on it keep working;
  *   - JSON that parses but is not an object is a 400 that names the received
@@ -33,6 +36,22 @@ export const INVALID_JSON_BODY_MESSAGE = 'Invalid JSON body';
 
 /** Message for valid JSON that is not an object (`null`, array, scalar). */
 export const JSON_OBJECT_BODY_REQUIRED_MESSAGE = 'Invalid JSON body: expected a JSON object';
+
+/**
+ * What an empty request body means to a route, taken from how that route read
+ * its body before this guard existed:
+ *
+ * - `invalid` (default): the route wrote a bare `JSON.parse(body)`, so an empty
+ *   body was a `SyntaxError` — reported as 400 `Invalid JSON body` (or, before
+ *   this guard, thrown inside the handler and left unanswered).
+ * - `object`: the route wrote `JSON.parse(body || '{}')`, or reads no field at
+ *   all, so an empty body legitimately means "no fields supplied".
+ */
+export type EmptyBodyPolicy = 'invalid' | 'object';
+
+export type RpcJsonBodyOptions = {
+  emptyBody?: EmptyBodyPolicy;
+};
 
 /**
  * One flat shape rather than a discriminated union: this project compiles the
@@ -64,14 +83,14 @@ export const RPC_POST_BODY_CONTRACTS: Record<string, Record<string, string>> = {
     name: 'string (required; MetaBot display name, matched case-insensitively)',
   },
   '/api/idbots/metabot/account-summary': {
-    metabot_id: 'positive integer (required)',
+    metabot_id: 'positive integer (required; enforced by the account lookup, so a missing id fails there rather than inline)',
   },
   '/api/idbots/address/balance': {
-    metabot_id: 'positive integer (optional; resolves that MetaBot\'s wallet addresses)',
-    addresses: 'object (optional) { mvc?, btc?, doge? } — explicit addresses to query',
+    metabot_id: 'positive integer (optional; required unless `addresses` is given — at least one of the two must be present)',
+    addresses: 'object (optional) { mvc?, btc?, doge? } — explicit addresses to query; at least one of `metabot_id` / `addresses` must be present',
   },
   '/api/idbots/wallet/balance': {
-    metabot_id: 'positive integer (optional)',
+    metabot_id: 'positive integer (optional; at least one of metabot_id / metabot_ids / address must be present)',
     metabot_ids: 'positive integer[] (optional; batches the same query)',
     address: 'address string (optional; queried as-is per chain)',
     chain: '"mvc" | "btc" | "doge" (optional; omitted queries all three)',
@@ -81,7 +100,7 @@ export const RPC_POST_BODY_CONTRACTS: Record<string, Record<string, string>> = {
     metabot_id: 'positive integer (optional; filters the audit ledger)',
   },
   '/api/idbots/wallet/btc/sign-message': {
-    metabot_id: 'positive integer (required)',
+    metabot_id: 'positive integer (required; enforced by the wallet lookup, so a missing id fails there rather than inline)',
     message: 'non-empty string (required)',
     encoding: 'BufferEncoding (optional; passed through to signMessage)',
   },
@@ -124,9 +143,15 @@ export function describeJsonBodyType(rawBody: string, parsed?: unknown): string 
  * Never throws: the caller gets either the object (plus the body string its own
  * `JSON.parse` expects) or a fixed 400 message.
  */
-export function parseRpcJsonObjectBody(rawBody: string): RpcJsonObjectBodyResult {
+export function parseRpcJsonObjectBody(
+  rawBody: string,
+  options: RpcJsonBodyOptions = {},
+): RpcJsonObjectBodyResult {
   if (rawBody.trim() === '') {
-    return { ok: true, body: '{}', value: {}, error: '' };
+    if ((options.emptyBody ?? 'invalid') === 'object') {
+      return { ok: true, body: '{}', value: {}, error: '' };
+    }
+    return { ok: false, body: '', value: {}, error: INVALID_JSON_BODY_MESSAGE };
   }
 
   let parsed: unknown;
@@ -185,9 +210,10 @@ export async function readRpcJsonObjectBody(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
+  options: RpcJsonBodyOptions = {},
 ): Promise<string | null> {
   const rawBody = await readRpcRequestBody(req);
-  const result = parseRpcJsonObjectBody(rawBody);
+  const result = parseRpcJsonObjectBody(rawBody, options);
   if (!result.ok) {
     res.writeHead(400);
     res.end(JSON.stringify(buildRpcBodyRejection(pathname, result.error)));

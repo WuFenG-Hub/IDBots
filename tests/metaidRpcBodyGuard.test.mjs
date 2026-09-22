@@ -59,6 +59,31 @@ const EXPECTED_FIELD_CONTRACTS = {
   '/api/idbots/group-task/show': ['before_id', 'limit', 'task_id', 'view'],
 };
 
+/**
+ * Routes for which an empty body legitimately means `{}`, taken from the
+ * baseline source: these wrote `JSON.parse(body || '{}')` on `upstream/main`,
+ * plus `/api/idbots/list-metabots`, which reads no body at all. Every other
+ * route wrote a bare `JSON.parse(body)`, where an empty body was a
+ * `SyntaxError` reported as 400 `Invalid JSON body` — so the guard keeps that
+ * meaning instead of quietly turning an empty body into "no fields supplied".
+ *
+ * Hard-coded on purpose (the implementation's own choice of policy is not the
+ * reference), so a policy change on any route fails this test.
+ */
+const EMPTY_BODY_MEANS_OBJECT_ROUTES = [
+  '/api/idbots/bot-browser/open',
+  '/api/idbots/bot-browser/tabs',
+  '/api/idbots/group-task/export',
+  '/api/idbots/group-task/list',
+  '/api/idbots/group-task/search-candidates',
+  '/api/idbots/group-task/search-remote-candidates',
+  '/api/idbots/list-metabots',
+  '/api/idbots/metabot/homepage/set-metaapp',
+  '/api/idbots/wallet/balance',
+  '/api/idbots/wallet/mvc/transfer',
+  '/api/idbots/wallet/transfer/records',
+];
+
 const unhandledRejections = [];
 process.on('unhandledRejection', (reason) => {
   unhandledRejections.push(reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason));
@@ -307,25 +332,41 @@ test('malformed JSON keeps the historical "Invalid JSON body" message', async ()
   }
 });
 
-test('an empty body means {} — no route hangs and required fields are still reported', async () => {
-  const resolveRoute = await postRaw('/api/idbots/resolve-metabot-id', '');
-  assert.equal(resolveRoute.status, 400);
-  assert.equal(resolveRoute.json.error, 'name is required');
+test('an empty body keeps the meaning each route already gave it — and never stalls', async () => {
+  // Routes that wrote `JSON.parse(body || '{}')` keep going with `{}`.
+  const tolerantBalance = await postRaw('/api/idbots/wallet/balance', '');
+  assert.equal(tolerantBalance.status, 400);
+  assert.match(String(tolerantBalance.json.error), /metabot_id, metabot_ids, or address is required/);
 
-  const showRoute = await postRaw('/api/idbots/group-task/show', '');
-  assert.equal(showRoute.status, 400);
-  assert.equal(showRoute.json.error, 'task_id is required');
+  const tolerantOpen = await postRaw('/api/idbots/bot-browser/open', '');
+  assert.notEqual(tolerantOpen.json.error, 'Invalid JSON body');
 
-  const balanceRoute = await postRaw('/api/idbots/wallet/balance', '');
-  assert.equal(balanceRoute.status, 400);
-  assert.match(String(balanceRoute.json.error), /metabot_id, metabot_ids, or address is required/);
+  // Routes that wrote a bare `JSON.parse(body)` reported an empty body as
+  // invalid JSON; that is unchanged apart from being answered at all.
+  const strictResolve = await postRaw('/api/idbots/resolve-metabot-id', '');
+  assert.equal(strictResolve.status, 400);
+  assert.equal(strictResolve.json.error, 'Invalid JSON body');
+
+  const strictShow = await postRaw('/api/idbots/group-task/show', '');
+  assert.equal(strictShow.status, 400);
+  assert.equal(strictShow.json.error, 'Invalid JSON body');
 
   const stalled = [];
+  const misclassified = [];
   for (const route of GUARDED_POST_ROUTES) {
-    const { status } = await postRaw(route, '');
-    if (status === 0) stalled.push(route);
+    const { status, json } = await postRaw(route, '');
+    if (status === 0) {
+      stalled.push(route);
+      continue;
+    }
+    const invalidJsonBody = json?.error === 'Invalid JSON body';
+    const expectedTolerant = EMPTY_BODY_MEANS_OBJECT_ROUTES.includes(route);
+    if (invalidJsonBody === expectedTolerant) {
+      misclassified.push(`${route}: ${expectedTolerant ? 'expected to accept an empty body' : 'expected 400 Invalid JSON body'} but got ${JSON.stringify(json?.error)}`);
+    }
   }
   assert.deepEqual(stalled, [], `routes that returned no response for an empty body:\n${stalled.join('\n')}`);
+  assert.deepEqual(misclassified, [], `empty-body policy drift:\n${misclassified.join('\n')}`);
 });
 
 test('the ledger-named routes advertise the fields their validation actually reads', async () => {
