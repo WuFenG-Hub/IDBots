@@ -262,6 +262,15 @@ export function getActiveA2AReplyTaskIds(): string[] {
 const privateChatSkillTurnRetries = new Map<string, { attempts: number; nextRetryAt: number }>();
 
 /**
+ * Row ids whose ciphertext failed to decrypt with every known shared-secret
+ * variant. Those rows stay unprocessed (is_processed = 0) so a later daemon
+ * start — e.g. after an app update adds the missing key variant — retries
+ * them; the set only keeps the poll loop from redoing the ECDH/decrypt work
+ * and log line on every 5s tick. Cleared in stopPrivateChatDaemon.
+ */
+const privateChatDecryptFailedIds = new Set<number>();
+
+/**
  * How long a row may be deferred because its A2A session still has an active
  * runner turn. A turn that outlives this cap is treated as wedged: the row
  * falls through to the normal flow (pickup or a fresh turn) so one leaked
@@ -3789,6 +3798,11 @@ async function processOne(
     let plaintext = '';
     let sharedSecretForReply = '';
     if (wallet?.mnemonic?.trim() && fromChatPubkey) {
+      if (privateChatDecryptFailedIds.has(row.id)) {
+        // Already known undecryptable for this daemon run; skip quietly while
+        // keeping the row unprocessed so a restart can retry it.
+        return;
+      }
       let privateKeyBuffer: Buffer;
       try {
         privateKeyBuffer = await getPrivateKeyBufferForEcdh(wallet.mnemonic, wallet.path ?? "m/44'/10001'/0'/0/0");
@@ -3840,10 +3854,17 @@ async function processOne(
             sharedSecretForReply = sharedSecretRaw;
             emitLog('[PrivateChat] Decrypt fallback: using raw shared secret for legacy payload.');
           } else {
+            // Loss-stop: an undecryptable message must NOT be marked
+            // processed, otherwise the ciphertext is silently consumed and
+            // can never be retried (e.g. once an app update adds the missing
+            // key variant). Keep is_processed = 0 and only remember the id so
+            // the 5s poll loop skips the repeated ECDH/decrypt work;
+            // stopPrivateChatDaemon clears the set, so every daemon start
+            // retries these rows once.
+            privateChatDecryptFailedIds.add(row.id);
             emitLog(
-              `[PrivateChat] Skip message ${row.id}: decrypt failed for both sha256/raw shared secret`
+              `[PrivateChat] Keep message ${row.id} unprocessed: decrypt failed for both sha256/raw shared secret`
             );
-            markProcessed(db, row.id, saveDb);
             return;
           }
         }
@@ -5938,6 +5959,7 @@ export async function stopPrivateChatDaemon(options?: { waitForTick?: boolean })
   privateChatSkillTurnRetries.clear();
   privateChatBusyDeferredSince.clear();
   privateChatA2AWakes.clear();
+  privateChatDecryptFailedIds.clear();
   if (options?.waitForTick) {
     await activeTickPromise?.catch(() => undefined);
     await Promise.allSettled(detachedWork);
