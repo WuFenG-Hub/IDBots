@@ -50,6 +50,8 @@ docs/*
 !docs/metaweb-qa-frontend-metaapp-guide.md
 !docs/gasfee-flow/
 !docs/gasfee-flow/**
+!docs/design/
+!docs/design/**
 !docs/analysis/
 !docs/analysis/**
 !docs/tickets/
