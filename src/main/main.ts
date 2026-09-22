@@ -287,6 +287,8 @@ import { TwinOrchestrationService } from './services/twinOrchestrationService';
 import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
 import { TrackedTaskBoardService } from './services/trackedTaskBoard';
 import { LongTermTaskStore } from './longTermTaskStore';
+import { HeartbeatService } from './services/heartbeatService';
+import { LongTermAdvanceService, LONGTERM_ADVANCE_INTERVAL_MS } from './services/longTermAdvanceService';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
   CoworkTurnSubmissionController,
@@ -3305,6 +3307,17 @@ const startSqliteDaemons = (): void => {
   const skillMgr = getSkillManager();
   // Publish the chain write ledger store before any daemon/RPC flow can pin.
   getChainContentHistoryStore();
+  // Heartbeat (first-class, decoupled from long-term tasks): one 5s master
+  // tick; long-term advancement is its first throttled handler. start() is
+  // idempotent — safe on sqlite-recovery re-entry.
+  getHeartbeatService().registerHandler({
+    name: 'longterm.advance',
+    intervalMs: LONGTERM_ADVANCE_INTERVAL_MS,
+    run: async (nowMs) => {
+      await getLongTermAdvanceService().run(nowMs);
+    },
+  });
+  getHeartbeatService().start();
   setGroupChatTransportMetabotStoreGetter(getMetabotStore);
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
@@ -6721,6 +6734,38 @@ const getLongTermTaskStore = () => {
     longTermTaskStore = new LongTermTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return longTermTaskStore;
+};
+
+let heartbeatService: HeartbeatService | null = null;
+/**
+ * First-class heartbeat (decoupled from long-term tasks): one 5s master tick;
+ * every periodic concern registers as a named handler with its own throttle.
+ */
+const getHeartbeatService = () => {
+  if (!heartbeatService) heartbeatService = new HeartbeatService();
+  return heartbeatService;
+};
+
+let longTermAdvanceService: LongTermAdvanceService | null = null;
+/** The `longterm.advance` heartbeat handler: cheap local checks, escalation
+ *  into a bound longterm session only when actionable. */
+const getLongTermAdvanceService = () => {
+  if (!longTermAdvanceService) {
+    longTermAdvanceService = new LongTermAdvanceService({
+      store: () => getLongTermTaskStore(),
+      coworkStore: () => getCoworkStore(),
+      coworkRunner: () => getCoworkRunner(),
+      resolveTwinMetabotId: () => {
+        const twin = getMetabotStore().listMetabots().find((bot) => bot.metabot_type === 'twin' && bot.enabled);
+        return twin?.id ?? null;
+      },
+      resolveWorkingDirectory: (metabotId) =>
+        resolveSessionWorkingDirectory(getCoworkStore().getConfig().workingDirectory, metabotId),
+      getBaseSystemPrompt: () => getCoworkStore().getConfig().systemPrompt,
+      getSkillsPrompt: async () => getSkillManager().buildAutoRoutingPrompt(),
+    });
+  }
+  return longTermAdvanceService;
 };
 
 /**

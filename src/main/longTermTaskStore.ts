@@ -54,6 +54,16 @@ const SUBTASK_STATUSES: LongTermSubtaskStatus[] = [
   'skipped',
 ];
 
+/** kv key of the per-task heartbeat nudge throttle map (advance service). */
+export const LONGTERM_NUDGE_STATE_KV_KEY = 'longterm_nudge_state';
+
+/** Throttle state for one task's heartbeat escalations. */
+export interface LongTermNudgeState {
+  lastNudgeAtMs: number;
+  /** Event-journal id at the last nudge — anything newer counts as "changed". */
+  lastEventId: number;
+}
+
 const CHANNELS: LongTermPreferredChannel[] = ['delegate_bot', 'group_task', 'owner_external', 'owner_together'];
 
 function nowIso(): string {
@@ -819,6 +829,50 @@ export class LongTermTaskStore {
     this.touch(taskId);
     this.saveDb();
     return { ok: true, value: null };
+  }
+
+  // ── heartbeat nudge support (longTermAdvanceService) ─────────────────────
+
+  /**
+   * Journal a heartbeat escalation ('nudged' event, actor 'system'): the
+   * advance handler opened/continued a session for this sub-project. The
+   * journal is the owner's audit of every proactive move the TwinBot made.
+   */
+  recordNudge(taskId: string, subtaskId: string, detail: string): void {
+    this.addEvent(taskId, subtaskId, 'nudged', 'system', detail);
+    this.touch(taskId);
+    this.saveDb();
+  }
+
+  /** Per-task nudge throttle state, one kv JSON map row (`longterm_nudge_state`). */
+  getNudgeState(taskId: string): LongTermNudgeState | null {
+    const map = this.readNudgeStateMap();
+    const entry = map[taskId];
+    if (!entry || typeof entry !== 'object') return null;
+    const lastNudgeAtMs = Number((entry as LongTermNudgeState).lastNudgeAtMs);
+    const lastEventId = Number((entry as LongTermNudgeState).lastEventId);
+    if (!Number.isFinite(lastNudgeAtMs)) return null;
+    return { lastNudgeAtMs, lastEventId: Number.isFinite(lastEventId) ? lastEventId : 0 };
+  }
+
+  setNudgeState(taskId: string, state: LongTermNudgeState): void {
+    const map = this.readNudgeStateMap();
+    map[taskId] = { lastNudgeAtMs: Math.trunc(state.lastNudgeAtMs), lastEventId: Math.trunc(state.lastEventId) };
+    this.db.run(
+      'INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      [LONGTERM_NUDGE_STATE_KV_KEY, JSON.stringify(map), Date.now()],
+    );
+    this.saveDb();
+  }
+
+  private readNudgeStateMap(): Record<string, LongTermNudgeState> {
+    try {
+      const row = this.getOne<{ value: string }>('SELECT value FROM kv WHERE key = ?', [LONGTERM_NUDGE_STATE_KV_KEY]);
+      const parsed = row?.value ? JSON.parse(row.value) : null;
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, LongTermNudgeState>) : {};
+    } catch {
+      return {};
+    }
   }
 
   /** Heartbeat read: open sub-projects waiting on a time-based condition that's now due. */

@@ -61,6 +61,8 @@ tests/*
 !tests/fixtures/longTaskBoardSeed.mjs
 !tests/trackedTaskBoard.test.mjs
 !tests/longTermTaskStore.test.mjs
+!tests/heartbeatService.test.mjs
+!tests/longTermAdvanceService.test.mjs
 !tests/mvcSponsorCircuitBreaker.test.mjs
 !tests/groupTaskChatMode.test.mjs
 !tests/devWindowLoadRetry.test.mjs
