@@ -2,6 +2,15 @@ import type { McpServerConfig, McpServerFormData } from './mcp';
 import type { ProjectFormData, ProjectRecord } from './project';
 import type { GroupChatTranscriptMessage } from './groupTask';
 import type { TrackedCardArchiveResult, TrackedCardBoard, TrackedCardCloseResult, TrackedCardDetail } from './trackedTask';
+import type {
+  LongTermBoard,
+  LongTermResult,
+  LongTermSubtask,
+  LongTermSubtaskDraft,
+  LongTermSubtaskUpdateInput,
+  LongTermTaskDetail,
+  LongTermTaskUpdateInput,
+} from './longTermTask';
 import type { OpenTeamCollabSummary, OpenTeamGuestInvite } from './openTeamCollab';
 import type {
   BrowserCommandResult as CoreBrowserCommandResult,
@@ -1499,6 +1508,27 @@ interface IElectronAPI {
      * `seq` 进程内单调：丢弃 `seq <= lastSeenSeq` 的帧，只增量重取 `taskIds`；
      * 漏推时 30s 轮询兜底。
      */
+    onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => () => void;
+  };
+  /**
+   * Long-term task board (first-class redesign). Read the board/detail, owner
+   * actions (update / pause·resume·cancel / subtask edit / accept·reject /
+   * unblock / note). The Twin's channel is the longterm_* agent tools.
+   * Main-process implementation: src/main/longTermTaskStore.ts.
+   */
+  longtermTask: {
+    board: () => Promise<{ success: boolean; board?: LongTermBoard; error?: string }>;
+    get: (input: { taskId: string }) => Promise<{ success: boolean; detail?: LongTermTaskDetail; error?: string }>;
+    update: (input: LongTermTaskUpdateInput) => Promise<LongTermResult<LongTermTaskDetail>>;
+    setStage: (input: { taskId: string; action: 'pause' | 'resume' | 'cancel'; note?: string }) => Promise<LongTermResult<LongTermTaskDetail | null>>;
+    subtaskAdd: (input: { taskId: string } & LongTermSubtaskDraft) => Promise<LongTermResult<LongTermSubtask>>;
+    subtaskUpdate: (input: LongTermSubtaskUpdateInput) => Promise<LongTermResult<LongTermSubtask>>;
+    begin: (input: { subtaskId: string; channel?: LongTermSubtask['preferredChannel'] }) => Promise<LongTermResult<LongTermSubtask>>;
+    accept: (input: { subtaskId: string; note?: string }) => Promise<LongTermResult<LongTermSubtask>>;
+    reject: (input: { subtaskId: string; feedback: string }) => Promise<LongTermResult<LongTermSubtask>>;
+    unblock: (input: { subtaskId: string; note?: string }) => Promise<LongTermResult<LongTermSubtask>>;
+    note: (input: { taskId: string; subtaskId?: string; text: string }) => Promise<LongTermResult<null>>;
+    /** seq is monotonic per process: drop frames with seq <= lastSeenSeq and refetch. */
     onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => () => void;
   };
   groupTask: {

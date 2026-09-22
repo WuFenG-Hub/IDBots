@@ -214,6 +214,7 @@ import {
   buildTrackedTaskClosureAgentTools,
   type TrackedTaskClosureAgentControl,
 } from './trackedTaskClosureAgentTools';
+import { buildLongTermTaskAgentTools, type LongTermTaskAgentControl } from './longTermTaskAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import { buildPostSimpleLogAgentTools } from './postSimpleLogAgentTools';
@@ -1801,6 +1802,12 @@ export interface CoworkRunnerOptions {
    */
   trackedTaskClosureTools?: TrackedTaskClosureAgentControl;
   /**
+   * Long-term task board (redesign): the Twin's first-class create/drive/accept
+   * tool surface over LongTermTaskStore. Registered for every cowork surface —
+   * creation grilling and advancement both happen in ordinary owner sessions.
+   */
+  longTermTaskTools?: LongTermTaskAgentControl;
+  /**
    * When set, every cowork session gets the upload_file tool backed by
    * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
    * on-chain semantics: direct vs chunked mode, MVC sponsor-first direct upload
@@ -2019,6 +2026,7 @@ export class CoworkRunner extends EventEmitter {
   private metawebSurf?: MetawebSurfControl;
   private scheduledTaskTools?: ScheduledTaskAgentControl;
   private trackedTaskClosureTools?: TrackedTaskClosureAgentControl;
+  private longTermTaskTools?: LongTermTaskAgentControl;
   private metaFileUpload?: MetaFileUploadControl;
   private walletTools?: WalletToolsControl;
   private visionRelay?: VisionRelayControl;
@@ -2149,6 +2157,7 @@ export class CoworkRunner extends EventEmitter {
     this.metawebSurf = options?.metawebSurf;
     this.scheduledTaskTools = options?.scheduledTaskTools;
     this.trackedTaskClosureTools = options?.trackedTaskClosureTools;
+    this.longTermTaskTools = options?.longTermTaskTools;
     this.metaFileUpload = options?.metaFileUpload;
     this.walletTools = options?.walletTools;
     this.visionRelay = options?.visionRelay;
@@ -9823,6 +9832,18 @@ export class CoworkRunner extends EventEmitter {
         ...buildTrackedTaskClosureAgentTools({
           tool,
           control: this.trackedTaskClosureTools,
+        })
+      );
+    }
+    // Long-term task board (redesign): the Twin's first-class tools for
+    // creating and driving long-term tasks — registered for every cowork
+    // surface, since creation grilling and advancement both happen in
+    // ordinary owner-facing sessions.
+    if (this.longTermTaskTools) {
+      memoryTools.push(
+        ...buildLongTermTaskAgentTools({
+          tool,
+          control: this.longTermTaskTools,
         })
       );
     }

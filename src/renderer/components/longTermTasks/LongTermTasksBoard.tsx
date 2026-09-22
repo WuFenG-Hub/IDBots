@@ -1,0 +1,133 @@
+import React, { useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { RootState } from '../../store';
+import { selectTask } from '../../store/slices/longTermTaskSlice';
+import { longTermTaskService } from '../../services/longTermTask';
+import { i18nService } from '../../services/i18n';
+import { LONG_TERM_COLUMN_LABEL_KEYS, LONG_TERM_COLUMN_ORDER, type LongTermColumn, type LongTermTaskSummary } from '../../types/longTermTask';
+import LongTermTaskCard from './LongTermTaskCard';
+import LongTermTaskDetail from './LongTermTaskDetail';
+
+/**
+ * Long-term task board (redesign) — status-column kanban, one page, all tasks.
+ * Columns: waiting-owner first (attention), then in-progress, waiting-external,
+ * defining, paused, done. Cards come from the main-process projection; this
+ * component renders and navigates, never derives.
+ */
+
+const COLUMN_DOT_CLASS: Record<LongTermColumn, string> = {
+  waiting_owner: 'bg-amber-400',
+  in_progress: 'bg-sky-400',
+  waiting_external: 'bg-violet-400',
+  defining: 'bg-claude-textSecondary dark:bg-claude-darkTextSecondary',
+  paused: 'bg-zinc-500',
+  done: 'bg-emerald-400',
+};
+
+const COLUMN_FRAME_CLASS: Record<LongTermColumn, string> = {
+  waiting_owner: 'border-amber-500/30',
+  in_progress: 'dark:border-claude-darkBorder/40 border-claude-border/40',
+  waiting_external: 'dark:border-claude-darkBorder/40 border-claude-border/40',
+  defining: 'border-dashed dark:border-claude-darkBorder/50 border-claude-border/50',
+  paused: 'dark:border-claude-darkBorder/30 border-claude-border/30',
+  done: 'dark:border-claude-darkBorder/30 border-claude-border/30',
+};
+
+const LongTermTasksBoard: React.FC = () => {
+  const dispatch = useDispatch();
+  const { available, bridgeMissingReason, board, loading, selectedTaskId } = useSelector(
+    (state: RootState) => state.longTermTask,
+  );
+
+  useEffect(() => {
+    void longTermTaskService.init();
+  }, []);
+
+  const openCreationSession = () => {
+    window.dispatchEvent(
+      new CustomEvent('cowork:newChatWithDraft', { detail: { text: i18nService.t('longTermTask.newTaskDraft') } }),
+    );
+  };
+
+  if (selectedTaskId) {
+    return <LongTermTaskDetail taskId={selectedTaskId} />;
+  }
+
+  const cardById = new Map<string, LongTermTaskSummary>((board?.cards ?? []).map((card) => [card.id, card]));
+  const isEmpty = (board?.cards.length ?? 0) === 0;
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Toolbar: creation entry + hint */}
+      <div className="flex shrink-0 items-center gap-3 px-4 pt-3">
+        <button type="button" onClick={openCreationSession} className="btn-idchat-primary-filled px-3 py-1.5 text-sm font-medium">
+          {i18nService.t('longTermTask.newTask')}
+        </button>
+        <p className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('longTermTask.newTaskHint')}
+        </p>
+      </div>
+
+      {!available && (
+        <div className="mx-4 mt-4 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface p-4">
+          <div className="text-sm font-semibold dark:text-claude-darkText text-claude-text">
+            {i18nService.t('longTermTask.bridgeMissingTitle')}
+          </div>
+          <div className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {bridgeMissingReason ?? i18nService.t('longTermTask.bridgeMissingHint')}
+          </div>
+        </div>
+      )}
+
+      {available && isEmpty && !loading && (
+        <div className="mx-4 mt-4 rounded-xl border border-dashed dark:border-claude-darkBorder border-claude-border p-6 text-center">
+          <div className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('longTermTask.empty')}
+          </div>
+        </div>
+      )}
+
+      {/* Kanban columns */}
+      {available && !isEmpty && (
+        <div className="mt-3 flex-1 overflow-x-auto overflow-y-hidden">
+          <div className="flex h-full gap-3 px-4 pb-3" style={{ minWidth: 'max-content' }}>
+            {LONG_TERM_COLUMN_ORDER.map((column) => {
+              const columnDef = board?.columns.find((entry) => entry.column === column);
+              const cards = (columnDef?.cardIds ?? [])
+                .map((id) => cardById.get(id))
+                .filter((card): card is LongTermTaskSummary => Boolean(card));
+              return (
+                <section
+                  key={column}
+                  className={`flex w-72 shrink-0 flex-col rounded-xl border dark:bg-claude-darkSurface/40 bg-claude-surface/40 ${COLUMN_FRAME_CLASS[column]}`}
+                >
+                  <header className="flex items-center gap-2 border-b dark:border-claude-darkBorder/30 border-claude-border/30 px-3 py-2.5">
+                    <span className={`h-2 w-2 rounded-full ${COLUMN_DOT_CLASS[column]}`} />
+                    <span className="text-xs font-semibold dark:text-claude-darkText text-claude-text">
+                      {i18nService.t(LONG_TERM_COLUMN_LABEL_KEYS[column])}
+                    </span>
+                    <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{cards.length}</span>
+                  </header>
+                  <div className="flex-1 space-y-2 overflow-y-auto p-2">
+                    {cards.map((card) => (
+                      <LongTermTaskCard
+                        key={card.id}
+                        card={card}
+                        onOpen={(taskId) => {
+                          dispatch(selectTask(taskId));
+                          void longTermTaskService.loadTask(taskId);
+                        }}
+                      />
+                    ))}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default LongTermTasksBoard;

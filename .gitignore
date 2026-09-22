@@ -60,6 +60,7 @@ tests/*
 !tests/fixtures/
 !tests/fixtures/longTaskBoardSeed.mjs
 !tests/trackedTaskBoard.test.mjs
+!tests/longTermTaskStore.test.mjs
 !tests/mvcSponsorCircuitBreaker.test.mjs
 !tests/groupTaskChatMode.test.mjs
 !tests/devWindowLoadRetry.test.mjs

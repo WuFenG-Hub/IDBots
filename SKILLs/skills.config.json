@@ -44,6 +44,13 @@
       "installedAt": 1740969600000,
       "enabled": true
     },
+    "long-term-task": {
+      "order": 22,
+      "version": "1.0.0",
+      "creator-metaid": "",
+      "installedAt": 1740969600000,
+      "enabled": true
+    },
     "docx": {
       "order": 50,
       "version": "1.0.0",

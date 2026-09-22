@@ -905,6 +905,47 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('trackedTask:update', handler);
     },
   },
+  longtermTask: {
+    // Long-term task board (first-class redesign): board read + owner actions.
+    // The Twin's channel is the longterm_* agent tools; these are the owner's.
+    board: () => ipcRenderer.invoke('longtermTask:board'),
+    get: (input: { taskId: string }) => ipcRenderer.invoke('longtermTask:get', input),
+    update: (input: { taskId: string; title?: string; goal?: string; acceptanceDelegate?: boolean }) =>
+      ipcRenderer.invoke('longtermTask:update', input),
+    setStage: (input: { taskId: string; action: 'pause' | 'resume' | 'cancel'; note?: string }) =>
+      ipcRenderer.invoke('longtermTask:setStage', input),
+    subtaskAdd: (input: {
+      taskId: string;
+      title: string;
+      description?: string;
+      acceptanceCriteria?: string[];
+      dependsOnOrdinals?: number[];
+      preferredChannel?: 'delegate_bot' | 'group_task' | 'owner_external' | 'owner_together';
+      notes?: string;
+    }) => ipcRenderer.invoke('longtermTask:subtaskAdd', input),
+    subtaskUpdate: (input: {
+      subtaskId: string;
+      title?: string;
+      description?: string;
+      acceptanceCriteria?: string[];
+      dependsOn?: string[];
+      preferredChannel?: 'delegate_bot' | 'group_task' | 'owner_external' | 'owner_together' | null;
+      notes?: string;
+      ordinal?: number;
+    }) => ipcRenderer.invoke('longtermTask:subtaskUpdate', input),
+    begin: (input: { subtaskId: string; channel?: 'delegate_bot' | 'group_task' | 'owner_external' | 'owner_together' }) =>
+      ipcRenderer.invoke('longtermTask:begin', input),
+    accept: (input: { subtaskId: string; note?: string }) => ipcRenderer.invoke('longtermTask:accept', input),
+    reject: (input: { subtaskId: string; feedback: string }) => ipcRenderer.invoke('longtermTask:reject', input),
+    unblock: (input: { subtaskId: string; note?: string }) => ipcRenderer.invoke('longtermTask:unblock', input),
+    note: (input: { taskId: string; subtaskId?: string; text: string }) => ipcRenderer.invoke('longtermTask:note', input),
+    /** Monotonic seq per process: drop frames with seq <= lastSeenSeq. */
+    onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('longtermTask:update', handler);
+      return () => ipcRenderer.removeListener('longtermTask:update', handler);
+    },
+  },
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[]; mode?: 'task' | 'chat' }) =>
       ipcRenderer.invoke('groupTask:create', input),

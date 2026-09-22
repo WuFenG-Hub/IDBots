@@ -286,6 +286,7 @@ import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService'
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
 import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
 import { TrackedTaskBoardService } from './services/trackedTaskBoard';
+import { LongTermTaskStore } from './longTermTaskStore';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
   CoworkTurnSubmissionController,
@@ -5801,6 +5802,11 @@ const getCoworkRunner = () => {
         listPendingClosures: (input) => getTrackedTaskBoard().listPendingClosures(input),
         acknowledgeClosure: (input) => getTrackedTaskBoard().acknowledgeClosure(input),
       },
+      // Long-term task board (redesign): the Twin's create/drive/accept tools.
+      // The store handle is injected so the agent layer holds no db handle.
+      longTermTaskTools: {
+        store: () => getLongTermTaskStore(),
+      },
       scheduledTaskTools: {
         createTask: (input) => {
           const store = getScheduledTaskStore();
@@ -6703,6 +6709,20 @@ const getTrackedTaskBoard = () => {
   return trackedTaskBoard;
 };
 
+let longTermTaskStore: LongTermTaskStore | null = null;
+/**
+ * Long-term task board (redesign): first-class store over its own three tables
+ * (long_term_tasks / long_term_subtasks / long_term_events) — deliberately NOT
+ * the delegation ledger, so group/scheduled/twin-delegation rows never appear.
+ */
+const getLongTermTaskStore = () => {
+  if (!longTermTaskStore) {
+    const sqliteStore = getStore();
+    longTermTaskStore = new LongTermTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return longTermTaskStore;
+};
+
 /**
  * Broadcast a `trackedTask:update` event so an open board refreshes after a
  * write that changes card state (currently: closing a card). The payload
@@ -6715,6 +6735,20 @@ const broadcastTrackedTaskUpdate = (taskIds: string[], reason: string): void => 
     if (!win.isDestroyed()) {
       try {
         win.webContents.send('trackedTask:update', payload);
+      } catch { /* ignore */ }
+    }
+  });
+};
+
+let longTermTaskUpdateSeq = 0;
+/** Long-term board refresh push; the seq is a process-local monotonic counter. */
+const broadcastLongTermTaskUpdate = (taskIds: string[], reason: string): void => {
+  longTermTaskUpdateSeq += 1;
+  const payload = { seq: longTermTaskUpdateSeq, taskIds, reason };
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) {
+      try {
+        win.webContents.send('longtermTask:update', payload);
       } catch { /* ignore */ }
     }
   });
@@ -11835,6 +11869,132 @@ if (!gotTheLock) {
       return result;
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'Failed to archive the card' };
+    }
+  });
+
+  // ==================== Long-Term Task IPC (first-class board, redesign) ====================
+  // Owner-side channel (actor='owner'); the Twin acts through the longterm_*
+  // agent tools. Every mutation broadcasts longtermTask:update.
+
+  ipcMain.handle('longtermTask:board', async () => {
+    try {
+      return { success: true, board: getLongTermTaskStore().listBoard() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the long-term task board' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:get', async (_event, input: { taskId: string }) => {
+    try {
+      const detail = getLongTermTaskStore().getTask(input?.taskId);
+      if (!detail) return { success: false, error: 'Task not found' };
+      return { success: true, detail };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the task' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:update', async (_event, input: {
+    taskId: string; title?: string; goal?: string; acceptanceDelegate?: boolean;
+  }) => {
+    try {
+      const result = getLongTermTaskStore().updateTask(input, 'owner');
+      if (result.ok) broadcastLongTermTaskUpdate([input.taskId], 'updated');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to update the task' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:setStage', async (_event, input: {
+    taskId: string; action: 'pause' | 'resume' | 'cancel'; note?: string;
+  }) => {
+    try {
+      const store = getLongTermTaskStore();
+      const result = input?.action === 'pause'
+        ? store.pauseTask(input.taskId, 'owner', input?.note ?? '')
+        : input?.action === 'resume'
+          ? store.activateTask(input.taskId, 'owner')
+          : store.cancelTask(input.taskId, 'owner', input?.note ?? '');
+      if (result.ok) broadcastLongTermTaskUpdate([input.taskId], `stage_${input.action}`);
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to change the task stage' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:subtaskAdd', async (_event, input: { taskId: string } & Record<string, unknown>) => {
+    try {
+      const result = getLongTermTaskStore().addSubtask(input?.taskId, input as never, 'owner');
+      if (result.ok) broadcastLongTermTaskUpdate([input.taskId], 'subtask_added');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to add the sub-project' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:subtaskUpdate', async (_event, input: { subtaskId: string } & Record<string, unknown>) => {
+    try {
+      const store = getLongTermTaskStore();
+      const result = store.updateSubtask(input as never, 'owner');
+      if (result.ok) broadcastLongTermTaskUpdate([result.value?.taskId ?? ''], 'subtask_updated');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to update the sub-project' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:begin', async (_event, input: { subtaskId: string; channel?: never }) => {
+    try {
+      const store = getLongTermTaskStore();
+      const result = store.beginSubtask(input?.subtaskId, 'owner', input?.channel ?? null);
+      if (result.ok) broadcastLongTermTaskUpdate([result.value?.taskId ?? ''], 'subtask_began');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to begin the sub-project' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:accept', async (_event, input: { subtaskId: string; note?: string }) => {
+    try {
+      const store = getLongTermTaskStore();
+      const result = store.acceptSubtask(input?.subtaskId, 'owner', input?.note ?? '');
+      if (result.ok) broadcastLongTermTaskUpdate([result.value?.taskId ?? ''], 'subtask_accepted');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to accept the sub-project' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:reject', async (_event, input: { subtaskId: string; feedback: string }) => {
+    try {
+      const store = getLongTermTaskStore();
+      const result = store.rejectSubtask(input?.subtaskId, 'owner', input?.feedback ?? '');
+      if (result.ok) broadcastLongTermTaskUpdate([result.value?.taskId ?? ''], 'subtask_rejected');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to reject the sub-project' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:unblock', async (_event, input: { subtaskId: string; note?: string }) => {
+    try {
+      const store = getLongTermTaskStore();
+      const result = store.unblockSubtask(input?.subtaskId, 'owner', input?.note ?? '');
+      if (result.ok) broadcastLongTermTaskUpdate([result.value?.taskId ?? ''], 'subtask_unblocked');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to resume the sub-project' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:note', async (_event, input: { taskId: string; subtaskId?: string; text: string }) => {
+    try {
+      const result = getLongTermTaskStore().addNote(input?.taskId, input?.subtaskId ?? null, input?.text ?? '', 'owner');
+      if (result.ok) broadcastLongTermTaskUpdate([input.taskId], 'note');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to add the note' };
     }
   });
 

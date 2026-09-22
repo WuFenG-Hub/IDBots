@@ -9,7 +9,7 @@ import TaskForm from './TaskForm';
 import TaskDetail from './TaskDetail';
 import AllRunsHistory from './AllRunsHistory';
 import DeleteConfirmModal from './DeleteConfirmModal';
-import { TrackedTasksSection } from '../trackedTasks';
+import LongTermTasksBoard from '../longTermTasks/LongTermTasksBoard';
 import type { TrackingTabId } from '../../types/trackedTask';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
@@ -217,7 +217,7 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-hidden">
         {trackingTab === 'longTerm' ? (
-          <TrackedTasksSection />
+          <LongTermTasksBoard />
         ) : (
           <div className="h-full overflow-y-auto">
             {showScheduledSubTabs && scheduledSubTab === 'history' ? (
