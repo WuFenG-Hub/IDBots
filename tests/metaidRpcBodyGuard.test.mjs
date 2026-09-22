@@ -127,6 +127,40 @@ function listPostRoutes(source) {
 const POST_ROUTES = listPostRoutes(readRpcServerSource());
 const GUARDED_POST_ROUTES = POST_ROUTES.filter((route) => !UNGUARDED_POST_ROUTES.includes(route));
 
+/**
+ * Routes whose request body is parsed by one of the delegated gateway route
+ * modules rather than in `metaidRpcServer.ts` itself.
+ *
+ * Derived from the server source rather than hard-coded: a route is delegated
+ * when its dispatch block calls a chat/memory gateway handler with the raw body
+ * string. Those modules decide their own empty-body meaning (see the module
+ * check below), so a behavioural review of this file alone cannot see it — the
+ * first version of this guard mis-classified exactly these five routes.
+ */
+function listDelegatedBodyRoutes(source) {
+  const constants = new Map();
+  for (const match of source.matchAll(/^const ([A-Z0-9_]+_PATH) = '([^']+)';$/gm)) {
+    constants.set(match[1], match[2]);
+  }
+
+  const guards = [];
+  for (const match of source.matchAll(/if \(req\.method === 'POST' && pathname === ([A-Z0-9_]+)\) \{/g)) {
+    guards.push({ name: match[1], start: match.index, end: source.length });
+  }
+  for (let i = 0; i < guards.length - 1; i += 1) guards[i].end = guards[i + 1].start;
+
+  const delegated = [];
+  for (const guard of guards) {
+    const block = source.slice(guard.start, guard.end);
+    if (/\((?:chatGatewayDeps|getMemoryBackend), body\)/.test(block)) {
+      delegated.push(constants.get(guard.name));
+    }
+  }
+  return delegated;
+}
+
+const DELEGATED_BODY_ROUTES = listDelegatedBodyRoutes(readRpcServerSource());
+
 // Pin the bearer token for this process: the gateway mirrors its token into
 // <userData>/metaid-rpc-token (userData is mocked to os.tmpdir() here) and
 // adopts a leftover mirror, which would mismatch this run's client token.
@@ -399,6 +433,29 @@ test('no gateway route reads its request body inline any more', () => {
     `expected the inline body read to survive only for ${UNGUARDED_POST_ROUTES.join(', ')}`,
   );
   assert.match(source, /readRpcJsonObjectBody\(/, 'the shared body guard is not wired into the gateway');
+});
+
+test('the empty-body policy covers the routes that delegate their parsing', () => {
+  assert.ok(DELEGATED_BODY_ROUTES.length >= 5, `expected the delegated gateways routes, got ${DELEGATED_BODY_ROUTES.length}`);
+
+  // Which empty-body meaning the delegated modules give their routes: they parse
+  // with `rawBody || '{}'`, i.e. an empty body is "no fields supplied". If that
+  // changes, the routes' explicit policy has to be revisited, so this check
+  // fails loudly instead of letting the two drift apart.
+  for (const modulePath of [
+    new URL('../src/main/services/chatGatewayRoutes.ts', import.meta.url),
+    new URL('../src/main/services/memoryGatewayRoutes.ts', import.meta.url),
+  ]) {
+    const moduleSource = fs.readFileSync(modulePath, 'utf8');
+    assert.match(
+      moduleSource,
+      /JSON\.parse\(rawBody \|\| '\{\}'\)/,
+      `${modulePath.pathname} no longer treats an empty body as {} — re-check the emptyBody policy of the routes that delegate to it`,
+    );
+  }
+
+  const missing = DELEGATED_BODY_ROUTES.filter((route) => !EMPTY_BODY_MEANS_OBJECT_ROUTES.includes(route));
+  assert.deepEqual(missing, [], `delegated routes missing from the empty-body tolerant list:\n${missing.join('\n')}`);
 });
 
 test('the sweep raised no unhandled rejection', async () => {
