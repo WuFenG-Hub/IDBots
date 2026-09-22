@@ -6731,7 +6731,14 @@ let longTermTaskStore: LongTermTaskStore | null = null;
 const getLongTermTaskStore = () => {
   if (!longTermTaskStore) {
     const sqliteStore = getStore();
-    longTermTaskStore = new LongTermTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+    longTermTaskStore = new LongTermTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction(), {
+      // Participant chips on cards/detail: ids → display rows from the metabot directory.
+      resolveParticipants: (ids) =>
+        ids.map((id) => {
+          const bot = getMetabotStore().getMetabotById(id);
+          return { id, name: bot?.name ?? `#${id}`, avatar: bot?.avatar ?? null };
+        }),
+    });
   }
   return longTermTaskStore;
 };
@@ -6763,6 +6770,8 @@ const getLongTermAdvanceService = () => {
         resolveSessionWorkingDirectory(getCoworkStore().getConfig().workingDirectory, metabotId),
       getBaseSystemPrompt: () => getCoworkStore().getConfig().systemPrompt,
       getSkillsPrompt: async () => getSkillManager().buildAutoRoutingPrompt(),
+      // The heartbeat hand-off message follows the owner's UI language.
+      getAppLanguage: () => getPersistedAppLanguage(),
     });
   }
   return longTermAdvanceService;

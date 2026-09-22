@@ -7,6 +7,7 @@ import type {
   LongTermEvent,
   LongTermEventKind,
   LongTermEvidence,
+  LongTermParticipant,
   LongTermPreferredChannel,
   LongTermProgress,
   LongTermResult,
@@ -176,10 +177,13 @@ interface EventRow {
 export class LongTermTaskStore {
   private readonly db: Database;
   private readonly saveDb: () => void;
+  /** Resolves metabot ids to display rows (name + avatar) for participant chips. */
+  private readonly resolveParticipants: (ids: number[]) => LongTermParticipant[];
 
-  constructor(db: Database, saveDb: () => void) {
+  constructor(db: Database, saveDb: () => void, options?: { resolveParticipants?: (ids: number[]) => LongTermParticipant[] }) {
     this.db = db;
     this.saveDb = saveDb;
+    this.resolveParticipants = options?.resolveParticipants ?? ((ids) => ids.map((id) => ({ id, name: `#${id}`, avatar: null })));
     this.ensureTables();
   }
 
@@ -359,10 +363,39 @@ export class LongTermTaskStore {
       currentWaitNote: current && current.waitNote ? current.waitNote : null,
       progress: deriveProgress(subtasks),
       counts,
+      participants: this.resolveParticipants(this.listParticipantIds(taskRow, subtasks)),
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
       doneAt: task.doneAt,
     };
+  }
+
+  /**
+   * Participating bots, derived read-time from the task's sessions: the bot
+   * that ran each bound session (the Twin on longterm/definition sessions) ∪
+   * workers delegated from those sessions (orchestration assignees) ∪ members
+   * of group tasks sourced from them.
+   */
+  private listParticipantIds(taskRow: TaskRow, subtasks: LongTermSubtask[]): number[] {
+    const sessionIds = [taskRow.definition_session_id, ...subtasks.map((sub) => sub.sessionId)]
+      .filter((id): id is string => Boolean(id));
+    if (sessionIds.length === 0) return [];
+    const placeholders = sessionIds.map(() => '?').join(',');
+    const ids = new Set<number>();
+    const collect = (sql: string) => {
+      for (const row of this.getAll<{ id: unknown }>(sql, sessionIds)) {
+        const id = Number(row.id);
+        if (Number.isFinite(id)) ids.add(id);
+      }
+    };
+    collect(`SELECT DISTINCT metabot_id AS id FROM cowork_sessions WHERE id IN (${placeholders}) AND metabot_id IS NOT NULL`);
+    collect(`SELECT DISTINCT s.assignee_metabot_id AS id FROM orchestration_steps s
+             JOIN orchestration_tasks t ON t.id = s.task_id
+             WHERE t.source_session_id IN (${placeholders}) AND s.assignee_metabot_id IS NOT NULL`);
+    collect(`SELECT DISTINCT m.metabot_id AS id FROM group_task_members m
+             JOIN group_tasks g ON g.id = m.task_id
+             WHERE g.source_session_id IN (${placeholders}) AND m.metabot_id IS NOT NULL`);
+    return [...ids].sort((a, b) => a - b);
   }
 
   // ── task lifecycle ───────────────────────────────────────────────────────

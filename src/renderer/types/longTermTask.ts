@@ -134,6 +134,13 @@ export interface LongTermProgress {
   percent: number;
 }
 
+/** A bot participating in the task (avatar = data URL or URL, null = none). */
+export interface LongTermParticipant {
+  id: number;
+  name: string;
+  avatar: string | null;
+}
+
 /** Board card (summary projection; column/progress/current derived by main). */
 export interface LongTermTaskSummary {
   id: string;
@@ -149,6 +156,8 @@ export interface LongTermTaskSummary {
   currentWaitNote: string | null;
   progress: LongTermProgress;
   counts: Record<LongTermSubtaskStatus, number>;
+  /** Participating bots: twin + delegated workers + group-task members (derived read-time). */
+  participants: LongTermParticipant[];
   createdAt: string;
   updatedAt: string;
   doneAt: string | null;

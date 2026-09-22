@@ -1,6 +1,7 @@
 import React from 'react';
 import { i18nService } from '../../services/i18n';
 import type { LongTermColumn, LongTermTaskSummary } from '../../types/longTermTask';
+import ParticipantAvatars from './ParticipantAvatars';
 
 /**
  * One long-term task card on the status-column kanban. Content follows the
@@ -67,7 +68,10 @@ const LongTermTaskCard: React.FC<{ card: LongTermTaskSummary; onOpen: (taskId: s
           : 'dark:border-claude-darkBorder border-claude-border hover:border-brand/60'
       } ${dimmed ? 'opacity-75 hover:opacity-100' : ''} ${card.column === 'defining' ? 'border-dashed' : ''}`}
     >
-      <h3 className="text-[13px] font-semibold leading-snug dark:text-claude-darkText text-claude-text">{card.title}</h3>
+      <div className="flex items-start gap-2">
+        <h3 className="flex-1 text-[13px] font-semibold leading-snug dark:text-claude-darkText text-claude-text">{card.title}</h3>
+        <ParticipantAvatars participants={card.participants} size="sm" />
+      </div>
       <div className="mt-2 h-1.5 w-full rounded-full dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover">
         <div className={`h-1.5 rounded-full ${COLUMN_BAR_CLASS[card.column]}`} style={{ width: `${card.progress.percent}%` }} />
       </div>

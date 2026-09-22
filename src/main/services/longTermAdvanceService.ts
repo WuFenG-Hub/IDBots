@@ -25,7 +25,8 @@ import type { LongTermSubtask, LongTermTaskDetail } from '../../renderer/types/l
 export const LONGTERM_ADVANCE_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_MAX_ESCALATIONS_PER_RUN = 2;
 const DEFAULT_NUDGE_THROTTLE_MS = 30 * 60_000;
-const DEFAULT_OWNER_REMINDER_MS = 4 * 3_600_000;
+const DEFAULT_WAITING_OWNER_REMINDER_MS = 30 * 60_000;
+const DEFAULT_EXTERNAL_REMINDER_MS = 4 * 3_600_000;
 
 /** Minimal session-store shape (satisfied by CoworkStore). */
 export interface LongTermAdvanceSessionStore {
@@ -59,10 +60,16 @@ export interface LongTermAdvanceDeps {
   resolveWorkingDirectory: (metabotId: number | null) => string;
   getBaseSystemPrompt: () => string;
   getSkillsPrompt?: () => Promise<string | null>;
+  /** Owner's UI language ('zh' | 'en') — the nudge prompt follows it. */
+  getAppLanguage?: () => string;
   emitLog?: (line: string) => void;
   maxEscalationsPerRun?: number;
   nudgeThrottleMs?: number;
-  ownerReminderMs?: number;
+  /** Quiet time before reminding on an owner decision (default 30 min — a
+   *  fresh proposal should reach the owner fast). */
+  waitingOwnerReminderMs?: number;
+  /** Quiet time before re-checking an untimed external wait (default 4h). */
+  externalReminderMs?: number;
 }
 
 export interface LongTermAdvanceReport {
@@ -71,7 +78,25 @@ export interface LongTermAdvanceReport {
   skipped: Array<{ taskId: string; reason: string }>;
 }
 
-function buildNudgePrompt(detail: LongTermTaskDetail, current: LongTermSubtask, reasons: string[]): string {
+function buildNudgePrompt(detail: LongTermTaskDetail, current: LongTermSubtask, reasons: string[], language: string): string {
+  if (language === 'zh') {
+    return [
+      '你是正在为主人推进长期任务的 TwinBot。这个回合由心跳自动开启（不是主人发起的），因为任务看起来可以继续推进。',
+      '',
+      `任务：「${detail.title}」（taskId: ${detail.id}）`,
+      `当前子项目：#${current.ordinal}「${current.title}」（subtaskId: ${current.id}）`,
+      `开启原因：${reasons.join('；')}。`,
+      '',
+      '要求：',
+      '1. 先用 longterm_task_get 读取完整状态简报——不要凭记忆推进。',
+      '2. 然后按 longterm-task-exec 的纪律行动：',
+      '   - 如果现在能推进，就推进（begin/继续，走约定好的通道）。',
+      '   - 如果需要主人决策，就问他——恰好一个问题，选择题形式、你的推荐项放最前；始终允许他用文字给出自己的答案。',
+      '   - 如果被外部条件卡住，用 longterm_subtask_wait 记录等待（精确的备注 + 知道日期就写 waitUntil）。',
+      '   - 如果交付物可验证地满足全部验收标准，带上证据提请验收。',
+      '3. 用主人的语言回复。',
+    ].join('\n');
+  }
   return [
     'You are the TwinBot driving the owner\'s long-term task. This turn was opened by the heartbeat (not by the owner) because the task looks advanceable.',
     '',
@@ -94,14 +119,16 @@ export class LongTermAdvanceService {
   private readonly deps: LongTermAdvanceDeps;
   private readonly maxEscalationsPerRun: number;
   private readonly nudgeThrottleMs: number;
-  private readonly ownerReminderMs: number;
+  private readonly waitingOwnerReminderMs: number;
+  private readonly externalReminderMs: number;
   private readonly emitLog: (line: string) => void;
 
   constructor(deps: LongTermAdvanceDeps) {
     this.deps = deps;
     this.maxEscalationsPerRun = Math.max(1, Math.trunc(deps.maxEscalationsPerRun ?? DEFAULT_MAX_ESCALATIONS_PER_RUN));
     this.nudgeThrottleMs = Math.max(60_000, Math.trunc(deps.nudgeThrottleMs ?? DEFAULT_NUDGE_THROTTLE_MS));
-    this.ownerReminderMs = Math.max(3_600_000, Math.trunc(deps.ownerReminderMs ?? DEFAULT_OWNER_REMINDER_MS));
+    this.waitingOwnerReminderMs = Math.max(60_000, Math.trunc(deps.waitingOwnerReminderMs ?? DEFAULT_WAITING_OWNER_REMINDER_MS));
+    this.externalReminderMs = Math.max(3_600_000, Math.trunc(deps.externalReminderMs ?? DEFAULT_EXTERNAL_REMINDER_MS));
     this.emitLog = deps.emitLog ?? ((line: string) => console.log(line));
   }
 
@@ -127,15 +154,15 @@ export class LongTermAdvanceService {
         report.skipped.push({ taskId: card.id, reason: 'no open sub-project' });
         continue;
       }
-      const reasons = this.collectReasons(detail, current, nowMs);
+      const latestEventId = detail.events[0]?.id ?? 0;
+      const nudgeState = store.getNudgeState(card.id);
+      const reasons = this.collectReasons(detail, current, nowMs, nudgeState === null || latestEventId > nudgeState.lastEventId);
       if (reasons.length === 0) {
         report.skipped.push({ taskId: card.id, reason: `current sub-project is ${current.status}, nothing due` });
         continue;
       }
       // Throttle: one escalation per task per window, unless the journal moved
       // (new information) or a timed wait expired (a clock condition, not noise).
-      const latestEventId = detail.events[0]?.id ?? 0;
-      const nudgeState = store.getNudgeState(card.id);
       const waitDue =
         current.status === 'waiting_external' &&
         current.waitUntil !== null &&
@@ -183,7 +210,7 @@ export class LongTermAdvanceService {
     return report;
   }
 
-  private collectReasons(detail: LongTermTaskDetail, current: LongTermSubtask, nowMs: number): string[] {
+  private collectReasons(detail: LongTermTaskDetail, current: LongTermSubtask, nowMs: number, hasNewEventsSinceNudge: boolean): string[] {
     const lastActivityAtMs = detail.events[0] ? Date.parse(detail.events[0].createdAt) : Date.parse(detail.updatedAt);
     const quietMs = nowMs - lastActivityAtMs;
     switch (current.status) {
@@ -200,15 +227,27 @@ export class LongTermAdvanceService {
         if (current.waitUntil !== null && Date.parse(current.waitUntil) <= nowMs) {
           return [`timed wait expired — re-check the condition (${current.waitNote})`];
         }
-        if (quietMs > this.ownerReminderMs) {
-          return [`external wait has gone quiet for >${Math.round(this.ownerReminderMs / 3_600_000)}h — re-check (${current.waitNote})`];
+        if (quietMs > this.externalReminderMs) {
+          return [`external wait has gone quiet for >${Math.round(this.externalReminderMs / 3_600_000)}h — re-check (${current.waitNote})`];
         }
         return [];
-      case 'waiting_owner':
-        if (quietMs > this.ownerReminderMs) {
-          return [`owner decision still pending for >${Math.round(this.ownerReminderMs / 3_600_000)}h (${current.waitNote})`];
+      case 'waiting_owner': {
+        // A fresh acceptance proposal reaches the owner at the next heartbeat
+        // tick — not after a quiet window (owner ruling: 一提请就叫你).
+        const latestEvent = detail.events[0];
+        if (
+          latestEvent &&
+          latestEvent.kind === 'proposed' &&
+          latestEvent.subtaskId === current.id &&
+          hasNewEventsSinceNudge
+        ) {
+          return ['acceptance proposal awaiting the owner\'s call'];
+        }
+        if (quietMs > this.waitingOwnerReminderMs) {
+          return [`owner decision still pending for >${Math.round(this.waitingOwnerReminderMs / 60_000)}min (${current.waitNote})`];
         }
         return [];
+      }
       default:
         return [];
     }
@@ -223,7 +262,8 @@ export class LongTermAdvanceService {
     const coworkStore = this.deps.coworkStore();
     const runner = this.deps.coworkRunner();
     const twinId = this.deps.resolveTwinMetabotId();
-    const prompt = buildNudgePrompt(detail, current, reasons);
+    const language = this.deps.getAppLanguage?.() ?? 'en';
+    const prompt = buildNudgePrompt(detail, current, reasons, language);
 
     let sessionId = current.sessionId ?? '';
     let reusedSession = false;

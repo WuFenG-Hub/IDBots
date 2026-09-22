@@ -12,6 +12,8 @@ import {
   type LongTermSubtaskStatus,
 } from '../../types/longTermTask';
 import { formatRelativeTime } from './LongTermTaskCard';
+import CopyIdChip from './CopyIdChip';
+import ParticipantAvatars from './ParticipantAvatars';
 
 /**
  * Long-term task detail page (frozen prototype screen 2): goal + progress on
@@ -127,6 +129,7 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
           <ArrowLeftIcon className="h-5 w-5" />
         </button>
         <h1 className="text-lg font-semibold leading-snug dark:text-claude-darkText text-claude-text">{detail.title}</h1>
+        <CopyIdChip id={detail.id} />
         <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
           {i18nService.t(LONG_TERM_COLUMN_LABEL_KEYS[detail.column])}
         </span>
@@ -170,6 +173,14 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
             {detail.progress.accepted}/{detail.progress.total} · {detail.progress.percent}%
           </span>
         </div>
+        {detail.participants.length > 0 && (
+          <div className="mt-3 flex items-center gap-2 border-t dark:border-claude-darkBorder/30 border-claude-border/30 pt-2.5">
+            <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('longTermTask.participants')}
+            </span>
+            <ParticipantAvatars participants={detail.participants} size="md" showNames maxVisible={6} />
+          </div>
+        )}
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-5">
@@ -234,6 +245,7 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                 <span className="text-sm font-semibold dark:text-claude-darkText text-claude-text">
                   {selectedSubtask.ordinal}. {selectedSubtask.title}
                 </span>
+                <CopyIdChip id={selectedSubtask.id} />
                 <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${SUBTASK_CHIP_CLASS[selectedSubtask.status]}`}>
                   {i18nService.t(LONG_TERM_SUBTASK_STATUS_LABEL_KEYS[selectedSubtask.status])}
                 </span>
@@ -296,7 +308,22 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                     {i18nService.t('longTermTask.subtask.session')}
                   </div>
                   <div className="mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {selectedSubtask.sessionId ?? i18nService.t('longTermTask.subtask.noSession')}
+                    {selectedSubtask.sessionId ? (
+                      <button
+                        type="button"
+                        title={i18nService.t('longTermTask.viewSession')}
+                        onClick={() =>
+                          window.dispatchEvent(
+                            new CustomEvent('cowork:viewSession', { detail: { sessionId: selectedSubtask.sessionId } }),
+                          )
+                        }
+                        className="text-sky-600 hover:underline dark:text-sky-400"
+                      >
+                        {i18nService.t('longTermTask.openBoundSession')}
+                      </button>
+                    ) : (
+                      i18nService.t('longTermTask.subtask.noSession')
+                    )}
                   </div>
                 </div>
               </div>
@@ -342,7 +369,7 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                     {i18nService.t('longTermTask.action.unblock')}
                   </button>
                 )}
-                {(selectedSubtask.status === 'waiting_owner' || selectedSubtask.status === 'in_progress') && (
+                {selectedSubtask.status === 'waiting_owner' && (
                   <>
                     <button
                       type="button"

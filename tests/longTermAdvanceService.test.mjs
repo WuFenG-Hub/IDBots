@@ -203,3 +203,34 @@ test('paused / defining / done tasks are never escalated', async () => {
   assert.equal(report.checkedTasks, 0);
   assert.equal(report.escalated.length, 0);
 });
+
+test('a fresh acceptance proposal escalates at the next tick (一提请就叫你), not after the reminder window', async () => {
+  const { store, advance, runner } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  // One escalation to establish the session + nudge state.
+  await advance.run(now);
+  assert.equal(runner.starts.length, 1);
+
+  // Twin begins and proposes acceptance with evidence — 2 minutes ago.
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.proposeSubtask(subtask.id, { evidence: [{ kind: 'dir', uri: '/tmp/deliverable' }], summary: 'criteria met' }, 'twin').ok);
+  assert.equal(store.getTask(taskId).column, 'waiting_owner');
+
+  // Next tick, 2 minutes later: fresh proposed event → immediate escalation.
+  const report = await advance.run(now + 2 * 60_000);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /acceptance proposal/);
+});
+
+test('nudge prompt follows the owner locale (zh owners get the Chinese hand-off)', async () => {
+  const { store, runner, deps } = await openWorld();
+  deps.getAppLanguage = () => 'zh';
+  const advance = new LongTermAdvanceService(deps);
+  await createActive(store);
+  await advance.run(Date.now());
+  assert.equal(runner.starts.length, 1);
+  assert.match(runner.starts[0].prompt, /心跳自动开启/);
+  assert.match(runner.starts[0].prompt, /用主人的语言回复/);
+});
