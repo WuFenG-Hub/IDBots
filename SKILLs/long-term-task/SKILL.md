@@ -118,19 +118,33 @@ longterm_task_create({
 This creates a **draft** (`defining` stage) — visible on the board's
 "Defining" column, not yet driven.
 
-## Step 4 — Present the full split, then activate
+## Step 4 — Present the COMPLETE definition, then activate (the confirmation round)
 
-Present the created split in chat as a compact table (ordinal / title /
-acceptance criteria / dependencies / channel) and ask explicitly for a final
-verdict, e.g. "确认就这样拆分吗？要改哪一项直接说。" Only after the owner
-confirms **in prose**:
+The confirmation round happens **entirely in chat**: the owner must be able to
+review every detail of the long-term task without ever opening the board.
+After creating the draft, read it back (`longterm_task_get`) and present the
+FULL definition in one well-structured message:
+
+- **任务标题 + 目标全文** — including the whole-task done-ness definition
+  (never omit this; a sub-project table alone is NOT the definition).
+- **每个子项目的全部字段**: ordinal / title / description（含义与边界）/
+  acceptance criteria（逐条列出）/ dependencies / preferred channel / notes.
+- **已锁定的关键决策**（架构、费用、范围等）与**预估节奏**（各阶段粗排期）。
+- **已知的等待点**: external deliveries, owner decisions, dates.
+
+Ask explicitly for the verdict, e.g. "这个长期任务的定义就是上面这样——有要
+改的直接说（哪一项、改成什么）；没有的话我就正式激活开工。"
+
+- A change request sends you back to Step 2 for that branch of the tree, then
+  apply it (`longterm_subtask_update` / `longterm_subtask_add` /
+  `longterm_task_update`) and **re-present the updated full definition**.
+- Only after the owner confirms **in prose**:
 
 ```
 longterm_task_activate({ taskId })
 ```
 
 Never activate on your own initiative — activation is the owner's sign-off.
-A change request sends you back to Step 2 for that branch of the tree.
 
 ## Resuming an interrupted definition
 
