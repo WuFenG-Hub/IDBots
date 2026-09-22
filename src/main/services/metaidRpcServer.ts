@@ -2595,7 +2595,7 @@ export function startMetaidRpcServer(
     };
 
     if (req.method === 'POST' && pathname === PRIVATE_SEND_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -2612,7 +2612,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === PRIVATE_HISTORY_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -2629,7 +2629,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_HISTORY_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -2651,7 +2651,7 @@ export function startMetaidRpcServer(
     // (pure functions, unit-testable without Electron); these handlers only
     // collect the body, delegate, and write back the result.
     if (req.method === 'POST' && pathname === MEMORY_LIST_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }
@@ -2662,7 +2662,7 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === MEMORY_CREATE_PATH) {
-      const body = await readRpcJsonObjectBody(req, res, pathname);
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
       if (body === null) {
         return;
       }

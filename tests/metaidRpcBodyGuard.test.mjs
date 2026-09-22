@@ -61,11 +61,14 @@ const EXPECTED_FIELD_CONTRACTS = {
 
 /**
  * Routes for which an empty body legitimately means `{}`, taken from the
- * baseline source: these wrote `JSON.parse(body || '{}')` on `upstream/main`,
- * plus `/api/idbots/list-metabots`, which reads no body at all. Every other
- * route wrote a bare `JSON.parse(body)`, where an empty body was a
- * `SyntaxError` reported as 400 `Invalid JSON body` — so the guard keeps that
- * meaning instead of quietly turning an empty body into "no fields supplied".
+ * baseline source: these parsed their body with `body || '{}'` on
+ * `upstream/main` — the ten in this file plus five that delegate to
+ * `chatGatewayRoutes.ts` / `memoryGatewayRoutes.ts`, whose own `parseJsonBody`
+ * uses `rawBody || '{}'` — plus `/api/idbots/list-metabots`, which reads no body
+ * at all. Every other route wrote a bare `JSON.parse(body)`, where an empty body
+ * was a `SyntaxError` reported as 400 `Invalid JSON body` — so the guard keeps
+ * that meaning instead of quietly turning an empty body into "no fields
+ * supplied".
  *
  * Hard-coded on purpose (the implementation's own choice of policy is not the
  * reference), so a policy change on any route fails this test.
@@ -73,11 +76,16 @@ const EXPECTED_FIELD_CONTRACTS = {
 const EMPTY_BODY_MEANS_OBJECT_ROUTES = [
   '/api/idbots/bot-browser/open',
   '/api/idbots/bot-browser/tabs',
+  '/api/idbots/chat/group-history',
+  '/api/idbots/chat/private-history',
+  '/api/idbots/chat/private-send',
   '/api/idbots/group-task/export',
   '/api/idbots/group-task/list',
   '/api/idbots/group-task/search-candidates',
   '/api/idbots/group-task/search-remote-candidates',
   '/api/idbots/list-metabots',
+  '/api/idbots/memory/create',
+  '/api/idbots/memory/list',
   '/api/idbots/metabot/homepage/set-metaapp',
   '/api/idbots/wallet/balance',
   '/api/idbots/wallet/mvc/transfer',
