@@ -399,3 +399,19 @@ test('pin_content fetchText failures surface as an error result', async () => {
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /omni_read pin_content failed: HTTP 404/);
 });
+
+test('complete under-cap results carry no truncation note (three states stay mutually exclusive)', async () => {
+  // H-71 探针（对侧验收亦用此形态）：
+  // 完整页（无 cursor、未截断）⇒ 不得出现 first-N-of-M
+  // 若该状态实现上不可能出现，则「断言其不可能」本身就是护栏。
+  const small = { code: 0, data: { list: [{ id: 'p1' }], total: 1 } };
+  const { byName } = makeHarness({ fetchJsonResult: small });
+  const text = (await byName.omni_read.handler({ action: 'indexer_status' })).content[0].text;
+  assert.ok(text.length <= 20000);
+  assert.ok(!/first \d+ of \d+ chars/.test(text), 'complete page must not declare a truncation');
+  assert.ok(
+    !text.includes('no pagination cursor in the response'),
+    'complete page must not declare a missing cursor',
+  );
+  assert.equal(text, JSON.stringify(small, null, 2), 'complete page is the exact pretty-printed body');
+});
