@@ -1986,7 +1986,7 @@ async function fetchMetaidUserInfoByGlobalMetaId(globalMetaId: string): Promise<
   }
   const localPath = `/api/v1/users/info/metaid/${encodeURIComponent(normalizedGlobalMetaId)}`;
   const fallbackUrl = `https://file.metaid.io/metafile-indexer/api/v1/info/metaid/${encodeURIComponent(normalizedGlobalMetaId)}`;
-  const res = await fetchJsonWithFallbackOnMiss(localPath, fallbackUrl, isSemanticallyEmptyMetaidInfoPayload);
+  const res = await fetchJsonWithFallbackOnMiss(localPath, fallbackUrl, isSemanticallyEmptyMetaidInfoPayload, { degradeToLocalOnRemoteError: true });
   const payload = await res.json() as { code?: number; message?: string; data?: Record<string, unknown> };
   const data = unwrapMetaidInfoRecord(payload?.data);
   if (data) {

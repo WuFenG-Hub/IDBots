@@ -223,8 +223,12 @@ test('a metadata-only local stub is a semantic miss for metaid info payloads', (
   assert.equal(isSemanticallyEmptyMetaidInfoPayload(LOCAL_ADDRESS_INFO_STUB), true);
   // Real profile content is a hit.
   assert.equal(isSemanticallyEmptyMetaidInfoPayload({ code: 1, data: { name: 'WuFenG' } }), false);
-  // An initialized identity without profile fields stays a hit.
-  assert.equal(isSemanticallyEmptyMetaidInfoPayload({ code: 1, data: { isInit: true } }), false);
+  // A content-less payload is a miss even when it carries isInit: the flag is
+  // not proof that profile pins are synced locally.
+  assert.equal(isSemanticallyEmptyMetaidInfoPayload({ code: 1, data: { isInit: true } }), true);
+  assert.equal(isSemanticallyEmptyMetaidInfoPayload({ code: 1, data: { metaid: 'm', isInit: true } }), true);
+  // A bare generic pinId is not profile content either.
+  assert.equal(isSemanticallyEmptyMetaidInfoPayload({ code: 1, data: { pinId: 'any-pin' } }), true);
   assert.equal(isSemanticallyEmptyMetaidInfoPayload({ code: 1, data: null }), true);
 });
 
@@ -304,4 +308,81 @@ test('fetchMetaidRestoreProfile keeps the local hit when it already carries the 
   assert.equal(profile.name, 'Local Winston');
   assert.equal(calls.length, 1);
   assert.ok(calls[0].includes('127.0.0.1:59998'), 'a real local hit must not trigger the remote');
+});
+
+// Review round: a failed remote attempt must degrade to the local response
+// again (pre-fallback semantics), not turn a remote outage into a hard failure.
+
+test('remote failure degrades to the local stub instead of failing the restore', async () => {
+  const calls = [];
+  const outcome = await withLocalBase('http://127.0.0.1:59997', async () => {
+    globalThis.fetch = async (input) => {
+      const url = typeof input === 'string' ? input : input.url;
+      calls.push(url);
+      if (url.includes('/api/v1/users/info/address/')) {
+        return jsonResponse(LOCAL_ADDRESS_INFO_STUB);
+      }
+      if (url.includes('/api/v1/info/address/')) {
+        throw new TypeError('remote down');
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+    try {
+      await fetchMetaidRestoreProfile('1FRUmweLcWcLa7VYumSnh9w3soAmydQSzX');
+      return 'resolved';
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  });
+
+  // The degraded local stub has no name, so the restore keeps its pre-existing
+  // NAME_EMPTY contract (the import stores an empty name and fills it later).
+  assert.equal(outcome, 'NAME_EMPTY');
+  assert.equal(calls.length, 2);
+});
+
+test('a remote error status degrades to the local stub as well', async () => {
+  const outcome = await withLocalBase('http://127.0.0.1:59996', async () => {
+    globalThis.fetch = async (input) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/api/v1/users/info/address/')) {
+        return jsonResponse(LOCAL_ADDRESS_INFO_STUB);
+      }
+      if (url.includes('/api/v1/info/address/')) {
+        return new Response('upstream unavailable', { status: 503 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+    try {
+      await fetchMetaidRestoreProfile('1FRUmweLcWcLa7VYumSnh9w3soAmydQSzX');
+      return 'resolved';
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  });
+
+  assert.equal(outcome, 'NAME_EMPTY');
+});
+
+test('a remote failure with no local response still propagates', async () => {
+  const outcome = await withLocalBase('http://127.0.0.1:59995', async () => {
+    globalThis.fetch = async (input) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/api/v1/users/info/address/')) {
+        throw new TypeError('local down');
+      }
+      if (url.includes('/api/v1/info/address/')) {
+        throw new TypeError('remote down');
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+    try {
+      await fetchMetaidRestoreProfile('1X');
+      return 'resolved';
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  });
+
+  assert.equal(outcome, 'remote down');
 });
