@@ -28,6 +28,7 @@ import type {
 } from '../groupTaskStore';
 import type { MetaIDExperienceStore } from '../metaidExperienceStore';
 import type { MetaIDImpressionStore } from '../metaidImpressionStore';
+import { MAX_OBSERVATION_TEXT } from '../metaidImpressionStore';
 import type { Metabot } from '../types/metabot';
 import { normalizeGlobalMetaID, type GlobalMetaID } from '../shared/globalMetaId';
 
@@ -164,6 +165,33 @@ function collectCollaborationPinIds(
     if (uriPin) pins.add(uriPin);
   }
   return [...pins];
+}
+
+/**
+ * Render the `Pins:` list for an observation text within `budget` chars. The
+ * impression store hard-caps observation texts (MAX_OBSERVATION_TEXT) and
+ * rejects longer ones — ledger H-79: a 55-pin close produced a 4,642-char
+ * text that was rejected and then silently skipped by the caller's catch.
+ * Keeps as many leading pins as fit, then a count line; the full list stays
+ * available in dimensions.collaborationFact.pinIds.
+ */
+function formatObservationPinList(pinIds: readonly string[], budget: number): string {
+  const total = pinIds.length;
+  if (total === 0) return '';
+  const joined = pinIds.join(', ');
+  if (joined.length <= budget) return joined;
+  const suffix = `, … ${total} pins in total`;
+  const avail = Math.max(0, budget - suffix.length);
+  let keep = 0;
+  let used = 0;
+  while (keep < total) {
+    const cost = pinIds[keep].length + (keep > 0 ? 2 : 0);
+    if (used + cost > avail) break;
+    used += cost;
+    keep += 1;
+  }
+  const keptText = keep > 0 ? pinIds.slice(0, keep).join(', ') : '';
+  return keptText ? `${keptText}${suffix}` : `… ${total} pins in total`;
 }
 
 function resolveSeatRoleForSubject(
@@ -439,6 +467,10 @@ export function recordTaskCloseImpressions(
           ? 'closed with outcome "done"'
           : `closed with outcome "cancelled"${closeReason ? ` (recorded reason: "${closeReason}")` : ''}`;
         const origin = subject.metabotId == null ? 'remote teammate' : 'local teammate';
+        const headText =
+          `Collaboration record: group task #${task.id} "${task.title}" ${outcomeText}. `
+          + `The subject joined as a ${origin}. Host-recorded participation: `
+          + formatParticipationStats(stats) + removedNote;
         const appended = appendEventObservation({
           deps,
           observer,
@@ -458,10 +490,7 @@ export function recordTaskCloseImpressions(
             seatRole: seatRole ?? null,
           },
           observationText:
-            `Collaboration record: group task #${task.id} "${task.title}" ${outcomeText}. `
-            + `The subject joined as a ${origin}. Host-recorded participation: `
-            + formatParticipationStats(stats) + removedNote
-            + ` Pins: ${pinIds.join(', ')}.`,
+            `${headText} Pins: ${formatObservationPinList(pinIds, MAX_OBSERVATION_TEXT - headText.length - ' Pins: .'.length)}.`,
           interpretationText: outcome === 'done'
             ? 'The subject took part in a group-task collaboration that reached completion; '
               + 'the figures and pins above are host-recorded facts, not a warmth judgment.'
