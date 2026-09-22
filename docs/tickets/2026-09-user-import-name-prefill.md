@@ -66,6 +66,7 @@ FETCH CALLS:
 - `fetchMetaidInfoByAddress` takes an optional miss predicate; `fetchMetaidRestoreProfile` passes the restore one.
 - Regression tests added (4 cases): stub-is-miss, restore-needs-name, remote-fallback-after-stub, local-hit-still-wins.
 - Review follow-up (2026-09-23, PR #45 round): a failed remote attempt (unreachable or non-2xx) degrades to the local response again for the metaid-info reads, so an offline import keeps its previous empty-name behavior instead of hard-failing; content-less payloads — bare metadata, a bare `isInit` flag, or a bare `pinId` — are always semantic misses. Negative tests added: remote-reject → `NAME_EMPTY`, remote-503 → `NAME_EMPTY`, no-local-response → the error still propagates. Re-verified: compile / lint / build:skills clean; targeted suites 34/34; full suite shows no new failures vs the pristine-`main` baseline.
+- Review follow-up 2 (2026-09-23, PR #45 round two): the remote fallback is bounded by an 8s timeout (blackholed routes could hang a read); a content-less remote payload now also degrades to the local response; the `metaid:getUserInfo` IPC degrades to an empty payload instead of rejecting on lookup failure; the empty-name fallback is covered by an import-level acceptance test (local stub + remote reject ⇒ `success: true`, `profileSource: 'local'`, `name: ''`, publishes only `/info/chatpubkey`). Re-verified: 36/36 targeted green; full suite unchanged vs baseline.
 
 ## Verification
 

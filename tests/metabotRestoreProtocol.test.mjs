@@ -7,6 +7,9 @@ const {
   isSemanticallyEmptyRestoreProfilePayload,
   fetchMetaidRestoreProfile,
 } = await import('../dist-electron/main/services/metabotRestoreService.js');
+const {
+  fetchJsonWithFallbackOnMiss,
+} = await import('../dist-electron/main/services/localIndexerProxy.js');
 
 test('new protocol fields override legacy bio JSON', () => {
   const parsed = parseMetaidRestoreProfileInfo({
@@ -385,4 +388,62 @@ test('a remote failure with no local response still propagates', async () => {
   });
 
   assert.equal(outcome, 'remote down');
+});
+
+test('a content-less remote payload degrades to the local response too (remote re-check)', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalBase = process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
+  process.env.IDBOTS_MAN_P2P_LOCAL_BASE = 'http://127.0.0.1:59993';
+  const calls = [];
+  globalThis.fetch = async (input) => {
+    const url = typeof input === 'string' ? input : input.url;
+    calls.push(url);
+    if (url.includes('/api/v1/users/info/address/')) {
+      return jsonResponse({
+        code: 1,
+        message: 'ok',
+        data: {
+          metaid: 'LOCAL-MARK',
+          name: '',
+          address: '1X',
+          globalMetaId: 'idq1local',
+          isInit: false,
+        },
+      });
+    }
+    if (url.includes('/api/v1/info/address/')) {
+      // Remote answers fine but its payload is content-less as well.
+      return jsonResponse({
+        code: 1,
+        message: 'success',
+        data: {
+          metaid: 'REMOTE-MARK',
+          name: '',
+          address: '1X',
+          globalMetaId: 'idq1remote',
+        },
+      });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  try {
+    const res = await fetchJsonWithFallbackOnMiss(
+      '/api/v1/users/info/address/1X',
+      'https://file.metaid.io/metafile-indexer/api/v1/info/address/1X',
+      isSemanticallyEmptyRestoreProfilePayload,
+      { degradeToLocalOnRemoteError: true },
+    );
+    const payload = await res.json();
+    // Both sides are semantic misses: the local response wins (same degrade
+    // contract as an unreachable remote).
+    assert.equal(payload.data.metaid, 'LOCAL-MARK');
+    assert.equal(calls.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalBase === undefined) {
+      delete process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
+    } else {
+      process.env.IDBOTS_MAN_P2P_LOCAL_BASE = originalBase;
+    }
+  }
 });
