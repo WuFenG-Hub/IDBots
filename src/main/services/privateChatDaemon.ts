@@ -379,14 +379,28 @@ function cancelPrivateChatA2AWakesForConversation(
   emitLog?.(`[PrivateChat] Cancelled pending wake for ${externalConversationId.slice(0, 30)}… (${reason}).`);
 }
 
-/** Fire due wakes: re-drive their inbound row and let the poll pick it up. */
+/**
+ * The disposition a fired wake attaches to the row it re-drives: the handler
+ * and the presentation layer can then tell a re-served old message apart from
+ * a true new inbound (H-64 leg B). Written at throw time, never retroactively.
+ */
+export interface PrivateChatWakeReDriveDisposition {
+  reServed: true;
+  /** private_chat_messages row id of the original message being re-served. */
+  originalRowId: number;
+}
+
+/** Fire due wakes: re-drive their inbound row and let the poll pick it up.
+ * Returns the re-drive disposition for every row it actually threw back so
+ * the poll can hand it straight to processOne and the presentation layer. */
 function fireDuePrivateChatA2AWakes(deps: {
   db: Pick<Database, 'exec' | 'run'>;
   saveDb: SaveDbFn;
   coworkStore: Pick<CoworkStore, 'getConversationMapping' | 'getSessionWithoutMessages' | 'addMessage' | 'updateSession'>;
   emitLog: (msg: string) => void;
   emitToRenderer?: (channel: string, data: unknown) => void;
-}): void {
+}): Map<number, PrivateChatWakeReDriveDisposition> {
+  const reDrivenDispositions = new Map<number, PrivateChatWakeReDriveDisposition>();
   const now = Date.now();
   for (const [taskKey, wake] of [...privateChatA2AWakes]) {
     if (wake.running || wake.fireAt > now) continue;
@@ -428,6 +442,9 @@ function fireDuePrivateChatA2AWakes(deps: {
       deps.emitLog(`[PrivateChat] Wake for ${wake.externalConversationId.slice(0, 30)}… failed to re-drive message ${wake.rowId}: ${error instanceof Error ? error.message : String(error)}`);
       continue;
     }
+    // H-64 leg B: the disposition is written when the row is thrown back
+    // into the pipeline — never retroactively after presentation.
+    reDrivenDispositions.set(wake.rowId, { reServed: true, originalRowId: wake.rowId });
     appendPrivateChatA2AMessage({
       coworkStore: deps.coworkStore,
       sessionId: wake.sessionId,
@@ -444,6 +461,7 @@ function fireDuePrivateChatA2AWakes(deps: {
     });
     deps.emitLog(`[PrivateChat] Wake ${wake.fires} fired for ${wake.externalConversationId.slice(0, 30)}…; re-driving message ${wake.rowId}.`);
   }
+  return reDrivenDispositions;
 }
 
 export function shouldDeferForBusyRunnerSession(
@@ -3651,6 +3669,8 @@ async function processOne(
   experienceStore?: MetaIDExperienceStore,
   getMetaIDCognitionPromptBlock?: GetMetaIDCognitionPromptBlockFn,
   isSessionTurnActive?: (sessionId: string) => boolean,
+  /** Written by the wake dispatch point at throw time (H-64 leg B). */
+  wakeDisposition?: PrivateChatWakeReDriveDisposition,
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -3660,9 +3680,12 @@ async function processOne(
   }
   // A wake turn re-drives a previously processed row whose conversation went
   // silent without a bye; it re-decides under a host wake notice instead of a
-  // new peer message.
+  // new peer message. The disposition arrives as a parameter straight from
+  // the wake dispatch point; the in-memory wake map stays as the carrier for
+  // rows re-picked on a later tick (e.g. deferred behind a busy runner turn),
+  // whose fire happened in an earlier tick.
   const wakeEntry = privateChatA2AWakes.get(taskKey);
-  const isWakeTurn = wakeEntry?.running === true;
+  const isWakeTurn = wakeDisposition?.reServed === true || wakeEntry?.running === true;
   thinkingTasks.add(taskKey);
   try {
     const toGlobalMetaId = (row.to_global_metaid ?? row.to_metaid ?? '').trim();
@@ -5091,6 +5114,14 @@ async function processOne(
           txId: row.tx_id,
           pinId: row.pin_id,
         }),
+        // H-64 leg B: a re-drive that actually re-presents this row (the
+        // session-scoped dedup above missed) must not masquerade as a true
+        // new inbound — carry the wake disposition to the renderer. The
+        // already-presented original bubble is never retroactively marked.
+        ...(isWakeTurn ? {
+          privateChatReServed: true,
+          privateChatReServedForMessageId: String(wakeDisposition?.originalRowId ?? wakeEntry?.rowId ?? row.id),
+        } : {}),
         ...(episodeStarted ? {
           refreshSessionSummary: true,
           a2aEpisodeStarted: true,
@@ -5840,8 +5871,9 @@ export function startPrivateChatDaemon(
     const runActiveTickWork = async (): Promise<void> => {
       try {
         // Fire due wakes first: a fired wake resets its row to unprocessed so
-        // the query below re-drives it in this same tick.
-        fireDuePrivateChatA2AWakes({
+        // the query below re-drives it in this same tick. The returned
+        // dispositions ride along with those rows into processOne.
+        const reDrivenWakeDispositions = fireDuePrivateChatA2AWakes({
           db,
           saveDb,
           coworkStore,
@@ -5890,6 +5922,7 @@ export function startPrivateChatDaemon(
               experienceStore,
               getMetaIDCognitionPromptBlock,
               isSessionTurnActive,
+              reDrivenWakeDispositions.get(row.id),
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);
