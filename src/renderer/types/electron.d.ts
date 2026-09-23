@@ -29,6 +29,8 @@ import type {
 import type {
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
+  CoworkA2AOwnerMessageRequest,
+  CoworkA2AOwnerMessageResult,
   CoworkKnowledgeEntry,
   CoworkMessageFeedbackRecord,
   CoworkPermissionMode,
@@ -1120,6 +1122,7 @@ interface IElectronAPI {
     clearSessionError: (sessionId: string) => Promise<{ success: boolean; status?: CoworkSessionStatus; error?: string }>;
     ensureA2ASession: (input: CoworkEnsureA2ASessionInput) => Promise<CoworkEnsureA2ASessionResult>;
     queueA2AGuidance: (input: CoworkA2AGuidanceRequest) => Promise<CoworkA2AGuidanceResult>;
+    sendOwnerA2AMessage: (input: CoworkA2AOwnerMessageRequest) => Promise<CoworkA2AOwnerMessageResult>;
     resendA2ADeliveryArtifact: (input: string | { sessionId: string; orderTxid?: string | null }) => Promise<{ success: boolean; deliveryPinId?: string | null; error?: string }>;
     archiveSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     unarchiveSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;

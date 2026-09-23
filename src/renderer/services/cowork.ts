@@ -57,6 +57,8 @@ import type {
   CoworkPermissionResult,
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
+  CoworkA2AOwnerMessageRequest,
+  CoworkA2AOwnerMessageResult,
   CoworkA2AHistoryCursor,
   CoworkA2AHistoryPage,
   CoworkPermissionMode,
@@ -688,6 +690,40 @@ class CoworkService {
       return {
         success: false,
         error: error instanceof Error ? error.message : i18nService.t('a2aGuidanceFailed'),
+      };
+    }
+  }
+
+  /**
+   * Owner speaks as themselves in an A2A private chat (peer = the configured
+   * local user). The main process signs the simplemsg with the user-identity
+   * wallet and records it as an incoming peer message; the appended message
+   * reaches this renderer through the usual cowork:stream:message event, so
+   * no manual session reload is needed here.
+   */
+  async sendOwnerA2AMessage(input: CoworkA2AOwnerMessageRequest): Promise<CoworkA2AOwnerMessageResult> {
+    const request = {
+      sessionId: String(input.sessionId || '').trim(),
+      content: String(input.content || '').trim(),
+    };
+    const cowork = window.electron?.cowork;
+    if (!cowork?.sendOwnerA2AMessage) {
+      return { success: false, error: 'Owner A2A message API not available' };
+    }
+    if (!request.sessionId || !request.content) {
+      return { success: false, error: i18nService.t('a2aOwnerChatFailed') };
+    }
+
+    try {
+      const result = await cowork.sendOwnerA2AMessage(request);
+      if (result?.success) {
+        return { success: true, messageId: result.messageId ?? null };
+      }
+      return { success: false, error: result?.error || i18nService.t('a2aOwnerChatFailed') };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : i18nService.t('a2aOwnerChatFailed'),
       };
     }
   }

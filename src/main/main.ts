@@ -162,6 +162,7 @@ import {
   interruptPrivateChatA2AGuidanceTurnBeforeOutput,
   PRIVATE_CHAT_CONTEXT_MAX_MESSAGES,
   recordOutgoingPrivateChatA2ADisplay,
+  recordOwnerSentPrivateChatA2AMessage,
   startPrivateChatDaemon,
   stopPrivateChatDaemon,
 } from './services/privateChatDaemon';
@@ -238,7 +239,7 @@ import {
   stopOpenTeamInviteWatchers,
 } from './services/openTeamService';
 import { getMetaIdDetail, searchMetaIds } from './services/metaIdSearchService';
-import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
+import { A2A_GUIDANCE_MAX_LENGTH, a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import { coworkLog } from './libs/coworkLogger';
 import {
   buildA2AGuidanceRestartPrompt,
@@ -293,7 +294,7 @@ import {
   CoworkTurnSubmissionController,
   type CoworkSubmitInput,
 } from './services/coworkTurnSubmission';
-import { createPin, getPinData, resolveCreatePinNetwork } from './services/metaidCore';
+import { createPin, createPinForIdentity, getPinData, resolveCreatePinNetwork } from './services/metaidCore';
 import {
   listOwnerMetaApps,
   publishMetaApp,
@@ -9980,6 +9981,144 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to queue A2A guidance',
+        };
+      }
+    });
+  });
+
+  // Owner direct message in an A2A private chat. When the peer is the
+  // configured local user (Settings > Users), the human speaks as themselves:
+  // the simplemsg is signed by the user-identity wallet (createPinForIdentity)
+  // and recorded as an INCOMING peer message, and the daemon's normal
+  // owner-reply policy answers it once the pin syncs back. This deliberately
+  // bypasses the guidance flow — the words are the human's own, not a steer
+  // for the bot's next LLM turn.
+  ipcMain.handle('cowork:session:sendOwnerA2AMessage', async (_event, input: {
+    sessionId?: unknown;
+    content?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:session:sendOwnerA2AMessage', async () => {
+      try {
+        const sessionId = toSafeString(input?.sessionId).trim();
+        const content = String(input?.content ?? '').trim();
+        if (!sessionId) throw new Error('A2A session id is required');
+        if (!content) throw new Error('Message content is required');
+        if (content.length > A2A_GUIDANCE_MAX_LENGTH) {
+          throw new Error(`Message must be ${A2A_GUIDANCE_MAX_LENGTH} characters or fewer.`);
+        }
+
+        const coworkStoreInst = getCoworkStore();
+        const session = coworkStoreInst.getSession(sessionId);
+        if (!session) throw new Error('A2A session not found');
+        if (session.sessionType !== 'a2a') throw new Error('Only A2A sessions support owner chat');
+        if (typeof session.metabotId !== 'number') throw new Error('A2A session has no local MetaBot id');
+
+        const sourceContext = coworkStoreInst.getConversationSourceContextBySession(sessionId);
+        if (sourceContext.sourceChannel !== 'metaweb_private' || !sourceContext.externalConversationId) {
+          throw new Error('Only MetaWeb private-chat A2A sessions support owner chat');
+        }
+
+        const identity = getUserIdentityStore().get();
+        const ownerGlobalMetaId = toSafeString(identity?.globalmetaid).trim();
+        if (!identity || !ownerGlobalMetaId) throw new Error('Local user identity is not set up');
+        if (!identity.mnemonic?.trim()) throw new Error('Local user identity wallet is not ready');
+
+        const currentMapping = coworkStoreInst.getConversationMapping(
+          'metaweb_private',
+          sourceContext.externalConversationId,
+          session.metabotId,
+        );
+        const currentMetadata = parseJsonRecord(currentMapping?.metadataJson);
+        const peerGlobalMetaId = toSafeString(
+          session.peerGlobalMetaId || currentMetadata.peerGlobalMetaId
+        ).trim();
+        if (!peerGlobalMetaId) throw new Error('A2A peer GlobalMetaID is missing');
+        if (peerGlobalMetaId.toLowerCase() !== ownerGlobalMetaId.toLowerCase()) {
+          throw new Error('The A2A peer is not the local user');
+        }
+
+        const metabotStoreInst = getMetabotStore();
+        const metabot = metabotStoreInst.getMetabotById(session.metabotId);
+        const botGlobalMetaId = toSafeString(metabot?.globalmetaid).trim();
+        const botChatPubkey = toSafeString(metabot?.chat_public_key).trim();
+        if (!metabot || !botGlobalMetaId || !botChatPubkey) {
+          throw new Error('Local MetaBot chat identity is not ready');
+        }
+
+        const db = getStore().getDatabase();
+        const latestPinRow = db.exec(
+          `SELECT pin_id
+           FROM private_chat_messages
+           WHERE ((from_global_metaid = ? AND to_global_metaid = ?)
+              OR (from_global_metaid = ? AND to_global_metaid = ?))
+             AND pin_id IS NOT NULL
+             AND TRIM(pin_id) != ''
+           ORDER BY id DESC
+           LIMIT 1`,
+          [ownerGlobalMetaId, botGlobalMetaId, botGlobalMetaId, ownerGlobalMetaId]
+        );
+        const replyPin = toSafeString(latestPinRow[0]?.values?.[0]?.[0]).trim();
+
+        const sent = await sendEncryptedSimplemsg({
+          metabotId: session.metabotId,
+          wallet: { mnemonic: identity.mnemonic, path: identity.path },
+          peerGlobalMetaId: botGlobalMetaId,
+          peerChatPubkey: botChatPubkey,
+          plaintext: content,
+          replyPin,
+          createPin: async (_metabotId, payload) => createPinForIdentity({
+            mnemonic: identity.mnemonic,
+            path: identity.path,
+            metaidData: payload,
+            options: { feeRate: getGlobalFeeRate('mvc') },
+          }),
+        });
+
+        // The owner re-engaging reopens a closed conversation (auto-bye or a
+        // stale human end), mirroring the guided-restart flag reset so the
+        // daemon answers the synced pin instead of storing it silently.
+        coworkStoreInst.updateConversationMappingMetadata(
+          'metaweb_private',
+          sourceContext.externalConversationId,
+          session.metabotId,
+          {
+            ...currentMetadata,
+            byeSent: false,
+            endedByHuman: false,
+            endedByAutoPolicy: false,
+            restartedAt: Date.now(),
+            peerGlobalMetaId,
+          },
+        );
+
+        const recorded = recordOwnerSentPrivateChatA2AMessage({
+          coworkStore: coworkStoreInst,
+          sessionId,
+          externalConversationId: sourceContext.externalConversationId,
+          metabotId: session.metabotId,
+          ownerGlobalMetaId,
+          ownerName: identity.name,
+          ownerAvatar: identity.avatar,
+          content,
+          chain: { txids: sent.txids, pinId: sent.pinId },
+        });
+        if (recorded && !recorded.duplicate) {
+          emitCoworkStreamMessage(sessionId, recorded.message);
+        }
+        coworkLog('INFO', 'A2A Owner Chat', 'Owner message delivered on-chain', {
+          sessionId,
+          metabotId: session.metabotId,
+          messageId: recorded?.message?.id ?? null,
+          pinId: sent.pinId,
+          duplicate: recorded?.duplicate ?? false,
+        });
+
+        return { success: true, messageId: recorded?.message?.id ?? null };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to send owner message',
         };
       }
     });

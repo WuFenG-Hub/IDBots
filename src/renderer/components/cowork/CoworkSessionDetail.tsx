@@ -1867,6 +1867,86 @@ const A2AGuidanceControls = React.memo(({
   );
 });
 
+// Composer for A2A sessions whose peer is the local human owner: the human
+// speaks as themselves over the encrypted on-chain private chat (same
+// Enter-to-send contract as the group-task composer), replacing the
+// guidance/end observer controls.
+const A2AOwnerComposer = React.memo(({
+  sessionId,
+}: {
+  sessionId: string;
+}) => {
+  const sessionIdRef = useRef(sessionId);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+    setDraft('');
+    setSending(false);
+    setSendError(null);
+  }, [sessionId]);
+
+  const handleSend = useCallback(async () => {
+    const content = draft.trim();
+    const requestSessionId = sessionId;
+    if (!requestSessionId || sending || !content) return;
+
+    setSending(true);
+    setSendError(null);
+    const result = await coworkService.sendOwnerA2AMessage({
+      sessionId: requestSessionId,
+      content,
+    });
+    if (sessionIdRef.current !== requestSessionId) return;
+    if (!result.success) {
+      setSendError(result.error || i18nService.t('a2aOwnerChatFailed'));
+      setSending(false);
+      return;
+    }
+
+    setDraft('');
+    setSending(false);
+  }, [draft, sending, sessionId]);
+
+  return (
+    <>
+      <div className="flex items-end gap-2">
+        <textarea
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            // Enter sends, Shift+Enter inserts a newline; Enter during IME
+            // composition confirms the candidate instead of sending.
+            const isComposing = event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229;
+            if (event.key === 'Enter' && !event.shiftKey && !isComposing) {
+              event.preventDefault();
+              void handleSend();
+            }
+          }}
+          rows={2}
+          maxLength={2000}
+          placeholder={i18nService.t('a2aOwnerChatPlaceholder')}
+          aria-label={i18nService.t('a2aOwnerChatPlaceholder')}
+          className="flex-1 rounded-2xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3 py-2 text-sm leading-relaxed dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent/50 resize-none"
+        />
+        <button
+          type="button"
+          onClick={() => void handleSend()}
+          disabled={!draft.trim() || sending}
+          className="btn-idchat-primary-filled px-4 py-2 text-sm font-medium disabled:opacity-50"
+        >
+          {sending ? i18nService.t('a2aOwnerChatSending') : i18nService.t('a2aOwnerChatSend')}
+        </button>
+      </div>
+      {sendError && (
+        <p className="text-right text-xs text-red-500">{sendError}</p>
+      )}
+    </>
+  );
+});
+
 // Streaming activity bar shown between messages and input
 const StreamingActivityBar: React.FC<{ messages: CoworkMessage[]; fallbackText?: string }> = ({
   messages,
@@ -2733,6 +2813,41 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       ? firstIncomingMetadata.senderGlobalMetaId.trim() || null
       : null;
   }, [currentSession?.sessionType, currentSession?.peerGlobalMetaId, currentSession?.messages]);
+
+  // Local user identity (Settings > Users). When the A2A peer IS the
+  // configured local user, this session is a direct owner<->bot chat: the
+  // local bot's bubbles move to the left, the human's read on the right, and
+  // the guidance/end controls give way to a composer. Without a configured
+  // identity we cannot tell, so the regular observer UI stays.
+  const [ownerGlobalMetaId, setOwnerGlobalMetaId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isA2ASession) {
+      setOwnerGlobalMetaId(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await window.electron?.userIdentity?.get?.();
+        if (cancelled) return;
+        const gmid = result?.success && typeof result.identity?.globalmetaid === 'string'
+          ? result.identity.globalmetaid.trim()
+          : '';
+        setOwnerGlobalMetaId(gmid || null);
+      } catch {
+        if (!cancelled) setOwnerGlobalMetaId(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isA2ASession, currentSession?.id]);
+  const isA2APeerOwner = Boolean(
+    isPrivateA2ASession
+    && ownerGlobalMetaId
+    && a2aPeerGlobalMetaId
+    && a2aPeerGlobalMetaId.toLowerCase() === ownerGlobalMetaId.toLowerCase()
+  );
   const normalizedFocusedOrderTxid = normalizeOrderFocusTxid(focusedOrderTxid);
   const refundStatusDismissKey = useMemo(() => (
     buildRefundStatusDismissKey(currentSession?.id, currentSession?.serviceOrderSummary)
@@ -3995,6 +4110,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   metabotAvatar={currentSession.metabotAvatar}
                   peerGlobalMetaId={a2aPeerGlobalMetaId}
                   localGlobalMetaId={sessionMetabot?.globalmetaid}
+                  invertSides={isA2APeerOwner}
                   onOpenBotInBrowser={onOpenBotInBrowser}
                   canResendDigitalDelivery={canResendDigitalDelivery}
                   isResendingDigitalDelivery={Boolean(resendingDeliveryOrderTxid)}
@@ -4105,7 +4221,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       {isA2ASession ? (
         <div className="px-4 py-3 shrink-0 border-t dark:border-claude-darkBorder border-claude-border">
           <div className="mx-auto flex max-w-[clamp(680px,64%,920px)] flex-col items-stretch gap-2">
-            {isPrivateA2ASession && (
+            {isA2APeerOwner ? (
+              <A2AOwnerComposer
+                key={currentSession.id}
+                sessionId={currentSession.id}
+              />
+            ) : isPrivateA2ASession && (
               <A2AGuidanceControls
                 key={currentSession.id}
                 sessionId={currentSession.id}

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   CoworkA2AGuidanceRequest,
+  CoworkA2AOwnerMessageRequest,
   CoworkPermissionMode,
   CoworkSubmitInput,
   CoworkSubmitInputResult,
@@ -431,6 +432,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:ensureA2A', input),
     queueA2AGuidance: (input: CoworkA2AGuidanceRequest) =>
       ipcRenderer.invoke('cowork:session:queueA2AGuidance', input),
+    sendOwnerA2AMessage: (input: CoworkA2AOwnerMessageRequest) =>
+      ipcRenderer.invoke('cowork:session:sendOwnerA2AMessage', input),
     resendA2ADeliveryArtifact: (input: string | { sessionId: string; orderTxid?: string | null }) =>
       ipcRenderer.invoke('cowork:session:resendA2ADeliveryArtifact', input),
     archiveSession: (sessionId: string) =>

@@ -291,6 +291,17 @@ export interface CoworkA2AGuidanceResult {
   error?: string;
 }
 
+export interface CoworkA2AOwnerMessageRequest {
+  sessionId: string;
+  content: string;
+}
+
+export interface CoworkA2AOwnerMessageResult {
+  success: boolean;
+  messageId?: string | null;
+  error?: string;
+}
+
 // Cowork session
 export interface CoworkContextUsage {
   /** Estimated tokens currently consumed by the conversation. */

@@ -1318,11 +1318,23 @@ export function isRepeatPrivateChatInboundMessage(params: {
   messages: CoworkMessage[];
   plaintext: string;
   now?: number;
+  /**
+   * Chain identity of the row currently being processed. Messages matching it
+   * are the SAME chain message already recorded locally (e.g. the owner sent
+   * it from this machine and the UI appended it optimistically) — not a
+   * retransmission — so they must not suppress the reply turn.
+   */
+  excludeChainRow?: PrivateChatMessageRow | null;
 }): boolean {
   const target = String(params.plaintext ?? '').trim();
   if (!target) return false;
   const now = Number.isFinite(params.now) ? (params.now as number) : Date.now();
-  const a2aMessages = params.messages.filter(isPrivateA2AMessage);
+  const a2aMessages = params.messages
+    .filter(isPrivateA2AMessage)
+    .filter((message) => (
+      !params.excludeChainRow
+      || !metadataHasPrivateChatChainIdentity(message.metadata, params.excludeChainRow)
+    ));
   for (let i = a2aMessages.length - 1; i >= 0; i -= 1) {
     const message = a2aMessages[i];
     if (!message) continue;
@@ -2438,6 +2450,76 @@ export function recordOutgoingPrivateChatA2ADisplay(params: {
     message,
     duplicate: false,
   };
+}
+
+export interface RecordOwnerSentPrivateChatA2AMessageResult {
+  message: CoworkMessage;
+  duplicate: boolean;
+}
+
+/**
+ * Make an owner-sent private-chat message visible in the local MetaBot's A2A
+ * session. The human signed the simplemsg with the user-identity wallet, so
+ * from the session's perspective this is an INCOMING peer message: type
+ * 'user', direction 'incoming', sender = owner. Dedupes by chain identity so
+ * the daemon's later sync of the same pin reuses this message
+ * (findPrivateChatA2AInboundMessage) instead of double-bubbling.
+ */
+export function recordOwnerSentPrivateChatA2AMessage(params: {
+  coworkStore: CoworkStore;
+  sessionId: string;
+  externalConversationId: string;
+  metabotId: number;
+  ownerGlobalMetaId: string;
+  ownerName?: string | null;
+  ownerAvatar?: string | null;
+  content: string;
+  chain?: { txId?: unknown; txids?: unknown; pinId?: unknown };
+  emitToRenderer?: RendererEmitter;
+}): RecordOwnerSentPrivateChatA2AMessageResult | null {
+  const content = String(params.content ?? '');
+  if (!content.trim()) return null;
+
+  const chainMetadata = buildPrivateChatA2AChainMetadata(params.chain ?? {});
+  const identityRow = {
+    pin_id: normalizePrivateChatPinId(chainMetadata.pinId),
+    tx_id: normalizeA2AChainTxid(chainMetadata.txid),
+  } as PrivateChatMessageRow;
+  if (identityRow.pin_id || identityRow.tx_id) {
+    const existing = findPrivateChatA2AInboundMessage({
+      coworkStore: params.coworkStore,
+      sessionId: params.sessionId,
+      externalConversationId: params.externalConversationId,
+      row: identityRow,
+    });
+    if (existing) {
+      return { message: existing, duplicate: true };
+    }
+  }
+
+  const message = appendPrivateChatA2AMessage({
+    coworkStore: params.coworkStore,
+    sessionId: params.sessionId,
+    externalConversationId: params.externalConversationId,
+    type: 'user',
+    content,
+    senderGlobalMetaId: params.ownerGlobalMetaId,
+    senderName: params.ownerName ?? null,
+    senderAvatar: params.ownerAvatar ?? null,
+    extraMetadata: {
+      simplemsgKind: 'private_chat',
+      ownerSent: true,
+      ...chainMetadata,
+    },
+    emitToRenderer: params.emitToRenderer,
+  });
+  params.coworkStore.touchConversationMapping(
+    'metaweb_private',
+    params.externalConversationId,
+    params.metabotId,
+  );
+
+  return { message, duplicate: false };
 }
 
 function getPrivateChatSkillWaitNoticeKey(row: PrivateChatMessageRow): string {
@@ -4870,9 +4952,12 @@ async function processOne(
     // new information — the first copy already drove a reply turn — and
     // answering each copy again is what turns leaked silence notes into an
     // endless ping-pong (2026-09-17). Byte-equality only, no wording checks.
+    // The row's own chain identity is excluded first: a locally recorded copy
+    // of THIS message (owner composer optimistic append) is not a repeat.
     if (mappedSessionId && isRepeatPrivateChatInboundMessage({
       messages: coworkStore.getRecentPrivateA2AMessages(mappedSessionId, 20),
       plaintext,
+      excludeChainRow: row,
     })) {
       emitLog(
         `[PrivateChat] Skip message ${row.id}: identical to the previous inbound message from ${fromGlobalMetaId.slice(0, 12)}… in this conversation segment; the earlier copy already drove a reply turn.`
