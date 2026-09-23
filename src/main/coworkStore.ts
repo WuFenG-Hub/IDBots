@@ -554,7 +554,7 @@ export function buildA2AParticipantPairKey(localGlobalMetaId: string, peerGlobal
 export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error' | 'error_retried' | 'stopped';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
-export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task';
+export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task' | 'longterm';
 export type CoworkPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 const SERVICE_ORDER_RATING_SESSION_HOLD_MS = 24 * 60 * 60 * 1000;

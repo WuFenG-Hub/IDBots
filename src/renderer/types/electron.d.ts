@@ -1,8 +1,15 @@
 import type { McpServerConfig, McpServerFormData } from './mcp';
 import type { ProjectFormData, ProjectRecord } from './project';
 import type { GroupChatTranscriptMessage } from './groupTask';
-import type { TrackedCardArchiveResult, TrackedCardBoard, TrackedCardCloseResult, TrackedCardDetail } from './trackedTask';
-import type { RsiLadderSnapshotResult } from './rsiLadder';
+import type {
+  LongTermBoard,
+  LongTermResult,
+  LongTermSubtask,
+  LongTermSubtaskDraft,
+  LongTermSubtaskUpdateInput,
+  LongTermTaskDetail,
+  LongTermTaskUpdateInput,
+} from './longTermTask';
 import type { OpenTeamCollabSummary, OpenTeamGuestInvite } from './openTeamCollab';
 import type {
   BrowserCommandResult as CoreBrowserCommandResult,
@@ -1441,75 +1448,32 @@ interface IElectronAPI {
     onRunUpdate: (callback: (data: any) => void) => () => void;
   };
   /**
-   * 长期任务看板读/写路径（架构契约 v1.4 [SEC-05]）。
-   * 主进程实现在 src/main/services/trackedTaskBoard.ts，channel 前缀 `trackedTask:*`。
-   * 卡面状态、排序权重、closureDue 级别一律由主进程投影给出，renderer 只消费。
+   * Long-term task board (first-class redesign). Read the board/detail, owner
+   * actions (update / pause·resume·cancel / subtask edit / accept·reject /
+   * unblock / note). The Twin's channel is the longterm_* agent tools.
+   * Main-process implementation: src/main/longTermTaskStore.ts.
    */
-  trackedTask: {
-    list: (input?: {
-      ownerGlobalMetaId?: string;
-      scope?: 'default' | 'all' | 'archived';
-      limit?: number;
-      offset?: number;
-    }) => Promise<{
+  longtermTask: {
+    board: () => Promise<{ success: boolean; board?: LongTermBoard; error?: string }>;
+    get: (input: { taskId: string }) => Promise<{ success: boolean; detail?: LongTermTaskDetail; error?: string }>;
+    update: (input: LongTermTaskUpdateInput) => Promise<LongTermResult<LongTermTaskDetail>>;
+    setStage: (input: { taskId: string; action: 'pause' | 'resume' | 'cancel'; note?: string }) => Promise<LongTermResult<LongTermTaskDetail | null>>;
+    subtaskAdd: (input: { taskId: string } & LongTermSubtaskDraft) => Promise<LongTermResult<LongTermSubtask>>;
+    subtaskUpdate: (input: LongTermSubtaskUpdateInput) => Promise<LongTermResult<LongTermSubtask>>;
+    begin: (input: { subtaskId: string; channel?: LongTermSubtask['preferredChannel'] }) => Promise<LongTermResult<LongTermSubtask>>;
+    accept: (input: { subtaskId: string; note?: string }) => Promise<LongTermResult<LongTermSubtask>>;
+    reject: (input: { subtaskId: string; feedback: string }) => Promise<LongTermResult<LongTermSubtask>>;
+    unblock: (input: { subtaskId: string; note?: string }) => Promise<LongTermResult<LongTermSubtask>>;
+    note: (input: { taskId: string; subtaskId?: string; text: string }) => Promise<LongTermResult<null>>;
+    /** Session-side origin chip: the owning task/sub-project, null = independent session. */
+    forSession: (input: { sessionId: string }) => Promise<{
       success: boolean;
-      board?: TrackedCardBoard;
+      hit?: { taskId: string; taskTitle: string; subtaskId: string | null; subtaskTitle: string | null } | null;
       error?: string;
     }>;
-    /**
-     * Admission mode (v1.1). One `kv` row, no schema change: `wide` admits
-     * ADM-1..ADM-5, `strict` admits ADM-1 v ADM-3. Switching is reversible and
-     * never touches the ledger.
-     */
-    admissionMode: () => Promise<{
-      success: boolean;
-      mode?: 'wide' | 'strict';
-      error?: string;
-    }>;
-    setAdmissionMode: (input: { mode: 'wide' | 'strict' }) => Promise<{
-      success: boolean;
-      mode?: 'wide' | 'strict';
-      error?: string;
-    }>;
-    detail: (input: { cardId: string }) => Promise<{
-      success: boolean;
-      detail?: TrackedCardDetail;
-      code?: string;
-      error?: string;
-    }>;
-    cardsForSession: (input: { sessionId: string }) => Promise<{
-      success: boolean;
-      cards?: Array<{ cardId: string; role: string }>;
-      error?: string;
-    }>;
-    close: (input: {
-      cardId: string;
-      /** v1.4：结论可空——空白/留空＝仅确认验收，落库为 NULL。 */
-      conclusion: string | null;
-      by: 'owner' | 'twin';
-      targetStatus?: 'completed' | 'cancelled';
-      pinId?: string | null;
-    }) => Promise<TrackedCardCloseResult>;
-    /**
-     * v1.3 手工归档 override：既有 kv 表单行、可逆、不动台账行本身。
-     * archived:true 把卡移进归档投影（admitted := admitted ∧ ¬override），
-     * 行保留可查，admitted+archived===total 不变量不受影响。
-     */
-    archiveCard: (input: { cardId: string; archived: boolean }) => Promise<TrackedCardArchiveResult>;
-    /**
-     * `seq` 进程内单调：丢弃 `seq <= lastSeenSeq` 的帧，只增量重取 `taskIds`；
-     * 漏推时 30s 轮询兜底。
-     */
+    moveSubtask: (input: { subtaskId: string; direction: 'up' | 'down' }) => Promise<LongTermResult<LongTermSubtask>>;
+    /** seq is monotonic per process: drop frames with seq <= lastSeenSeq and refetch. */
     onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => () => void;
-  };
-  /**
-   * RSI 爬梯卡（跟踪任务入口下的独立顶层星标卡）读路径。
-   * 主进程实现在 src/main/services/rsiLadderCard.ts，channel `rsiLadder:snapshot`。
-   * 唯一数据源=链上 taskkey=local:88 的 /protocols/simplelog 记录；本地仅缓存，
-   * 与链上冲突时以链上为准（需求稿 §2.5，pin://8f14471c…552i0）。
-   */
-  rsiLadder: {
-    snapshot: (input?: { refresh?: boolean }) => Promise<RsiLadderSnapshotResult>;
   };
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) => Promise<any>;

@@ -208,10 +208,7 @@ import { buildLikePinAgentTools } from './likePinAgentTools';
 import { buildCommentPinAgentTools } from './commentPinAgentTools';
 import { createSurfCreatePinGuard, recordSurfDeepRead, type SurfSessionWriteState } from './surfInteractionGuard';
 import { buildScheduledTaskAgentTools, type ScheduledTaskAgentControl } from './scheduledTaskAgentTools';
-import {
-  buildTrackedTaskClosureAgentTools,
-  type TrackedTaskClosureAgentControl,
-} from './trackedTaskClosureAgentTools';
+import { buildLongTermTaskAgentTools, type LongTermTaskAgentControl } from './longTermTaskAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import { buildPostSimpleLogAgentTools } from './postSimpleLogAgentTools';
@@ -1790,14 +1787,9 @@ export interface CoworkRunnerOptions {
    * main.ts wires the control over scheduledTaskStore + Scheduler.
    */
   scheduledTaskTools?: ScheduledTaskAgentControl;
-  /**
-   * Long-task board v1.2 (task #86): the Twin-side closure execution channel —
-   * list the conclusions still waiting to be executed and file the receipt for
-   * one. Registered for EVERY cowork surface (the routine sweep is an ordinary
-   * session, so a surf-only marker would hide the tool exactly where it is
-   * needed). main.ts wires the control over the tracked-task board service.
-   */
-  trackedTaskClosureTools?: TrackedTaskClosureAgentControl;
+  /** Long-term task board (redesign): the Twin's create/drive/accept tools over
+   *  LongTermTaskStore, registered for every cowork surface. */
+  longTermTaskTools?: LongTermTaskAgentControl;
   /**
    * When set, every cowork session gets the upload_file tool backed by
    * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
@@ -2016,7 +2008,7 @@ export class CoworkRunner extends EventEmitter {
   private metawebStudy?: MetawebStudyControl;
   private metawebSurf?: MetawebSurfControl;
   private scheduledTaskTools?: ScheduledTaskAgentControl;
-  private trackedTaskClosureTools?: TrackedTaskClosureAgentControl;
+  private longTermTaskTools?: LongTermTaskAgentControl;
   private metaFileUpload?: MetaFileUploadControl;
   private walletTools?: WalletToolsControl;
   private visionRelay?: VisionRelayControl;
@@ -2146,7 +2138,7 @@ export class CoworkRunner extends EventEmitter {
     // chat tools never registered. A duplicate like slipped through as proof.
     this.metawebSurf = options?.metawebSurf;
     this.scheduledTaskTools = options?.scheduledTaskTools;
-    this.trackedTaskClosureTools = options?.trackedTaskClosureTools;
+    this.longTermTaskTools = options?.longTermTaskTools;
     this.metaFileUpload = options?.metaFileUpload;
     this.walletTools = options?.walletTools;
     this.visionRelay = options?.visionRelay;
@@ -9812,15 +9804,11 @@ export class CoworkRunner extends EventEmitter {
         })
       );
     }
-    // Long-task board v1.2 (task #86 §6): the Twin's closure-execution channel.
-    // Registered for EVERY cowork surface without a marker gate — the routine
-    // sweep that must execute outstanding conclusions IS an ordinary session, so
-    // gating this behind the surf marker would hide it exactly where it is used.
-    if (this.trackedTaskClosureTools) {
+    if (this.longTermTaskTools) {
       memoryTools.push(
-        ...buildTrackedTaskClosureAgentTools({
+        ...buildLongTermTaskAgentTools({
           tool,
-          control: this.trackedTaskClosureTools,
+          control: this.longTermTaskTools,
         })
       );
     }

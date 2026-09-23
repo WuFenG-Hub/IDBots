@@ -18,7 +18,7 @@
     "probe:model-thinking": "node scripts/probe-model-thinking.mjs",
     "check:cross-platform-paths:full": "node scripts/check-cross-platform-paths.js --with-build",
     "fixture:long-task-board": "pnpm run compile:electron && node tests/fixtures/longTaskBoardSeed.mjs --check",
-    "test:tracked-task": "pnpm run compile:electron && node --test tests/trackedTaskBoard.test.mjs && npx tsx --test tests/trackedTaskRanking.test.ts",
+    "test:long-term-task": "pnpm run compile:electron && node --test tests/longTermTaskStore.test.mjs tests/heartbeatService.test.mjs tests/longTermAdvanceService.test.mjs",
     "test:memory": "npx rimraf dist-electron && pnpm run build && pnpm run compile:electron && node --test tests/memoryScopeResolver.test.mjs tests/memoryScopeParse.test.mjs tests/memoryScopeList.test.mjs tests/memorySessionScope.test.mjs tests/memoryMigrationInference.test.mjs tests/memoryScopedCrud.test.mjs tests/memoryScopedRecall.test.mjs tests/memoryPromptBlocks.test.mjs tests/privateChatScopedMemory.test.mjs tests/metaidContactView.test.mjs tests/memoryHygieneService.test.mjs tests/teamCultureStore.test.mjs tests/teamCultureDistillation.test.mjs tests/cognitiveChatCompletion.test.mjs tests/llmFallback.test.mjs tests/systemBrain.test.mjs tests/claudeSettingsModelResolution.test.mjs",
     "test:wallet": "pnpm run compile:electron && node --test tests/metabotWalletService.test.mjs",
     "test:im-gateway": "pnpm run compile:electron && node --test tests/imGatewayConnectivity.test.mjs",
@@ -33,7 +33,7 @@
     "test:release-regressions": "pnpm run test:group-tasks && pnpm run test:skill-assignment && pnpm run test:cowork-proxy && pnpm run test:proposals && pnpm run test:bot-browser && pnpm run test:release-regressions-extra",
     "test:release-regressions-extra": "pnpm run compile:electron && node --test tests/privateChatNoReplySentinel.test.mjs tests/privateChatClosedReopen.test.mjs tests/coworkDshWarmupStaleSessionRoute.test.mjs tests/p2pRuntimeConfigMode.test.mjs && npx tsx --test tests/coworkSessionBrainProvider.test.ts tests/coworkSessionSortAnchor.test.ts && pnpm run test:simplelog",
     "test:workspace-instructions": "node --test tests/workspaceInstructionsBoundary.test.mjs tests/coworkSessionDetailGitBranch.test.mjs",
-    "test:group-tasks": "pnpm run compile:electron && node --test tests/chainIdentifierPrompt.test.mjs tests/groupTaskDaemon.test.mjs tests/groupTaskDaemonProtocol.test.mjs tests/groupTaskCheckpoints.test.mjs tests/groupTaskPlanChange.test.mjs tests/groupTaskRemotePresence.test.mjs tests/groupTaskService.test.mjs tests/groupTaskStaffing.test.mjs tests/groupTaskCandidateSearch.test.mjs tests/groupTaskEntropyP0.test.mjs tests/groupTaskComposerEnterSend.test.mjs tests/groupTaskUtils.test.mjs tests/groupTaskDeliverableParser.test.mjs tests/trackedTaskClosureAgentTools.test.mjs",
+    "test:group-tasks": "pnpm run compile:electron && node --test tests/chainIdentifierPrompt.test.mjs tests/groupTaskDaemon.test.mjs tests/groupTaskDaemonProtocol.test.mjs tests/groupTaskCheckpoints.test.mjs tests/groupTaskPlanChange.test.mjs tests/groupTaskRemotePresence.test.mjs tests/groupTaskService.test.mjs tests/groupTaskStaffing.test.mjs tests/groupTaskCandidateSearch.test.mjs tests/groupTaskEntropyP0.test.mjs tests/groupTaskComposerEnterSend.test.mjs tests/groupTaskUtils.test.mjs tests/groupTaskDeliverableParser.test.mjs",
     "test:skill-assignment": "pnpm run compile:electron && node --test tests/skillAssignmentStore.test.mjs tests/metabotManageService.test.mjs tests/metabotManageAgentTools.test.mjs tests/metabotAvatarAgentTool.test.mjs tests/avatarNormalize.test.mjs tests/chatSkillAuthorization.test.mjs tests/skillAgentTools.test.mjs",
     "test:cowork-proxy": "pnpm run compile:electron && node --test tests/coworkProxyBindHost.test.mjs tests/coworkProxyScheduledTasksApi.test.mjs tests/coworkTurnSubmission.test.mjs tests/coworkDshFallbackRoute.test.mjs tests/opencodeGatewayHeaders.test.mjs tests/dshRuntimeOpencodeSessionHeaders.test.mjs",
     "test:pinned-skills": "node --test tests/pinnedSkillBackstop.test.mjs tests/botInternetComposerReuse.test.mjs",
@@ -86,10 +86,7 @@
     "release:runbook": "node scripts/release-runbook.mjs",
     "preelectron:dev:dsh": "pnpm run check:dsh-deps",
     "electron:dev:dsh": "cross-env IDBOTS_USER_DATA_PATH=./.dev-userdata-dsh IDBOTS_APP_DATA_PATH=./.dev-appdata-dsh concurrently \"vite --host 127.0.0.1 --port 5185\" \"wait-on -v -t 120000 -d 10000 http://127.0.0.1:5185 && node scripts/wait-electron-dev-build.mjs dist-electron && cross-env NODE_ENV=development IDBOTS_DISABLE_SINGLE_INSTANCE_LOCK=1 ELECTRON_START_URL=http://127.0.0.1:5185 electron .\"",
-    "test:rsi-ladder": "npx tsx --test tests/rsiLadderCompute.test.ts tests/rsiLadderIndex.test.ts tests/rsiLadderMountStatic.test.ts tests/rsiLadderRegistryCli.test.ts tests/rsiLadderRegistryE2e.test.ts",
-    "rsi-ladder:dedup": "npx tsx scripts/rsi-ladder-registry.ts dedup",
-    "rsi-ladder:receipt": "npx tsx scripts/rsi-ladder-registry.ts receipt",
-    "test": "pnpm run compile:electron && node --test tests/llmSafeText.test.mjs && pnpm run test:tracked-task && node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs && pnpm run test:workspace-instructions && pnpm run test:pinned-skills && pnpm run test:release-regressions && pnpm run test:memory && pnpm run test:metaweb"
+    "test": "pnpm run compile:electron && node --test tests/llmSafeText.test.mjs && pnpm run test:long-term-task && node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs && pnpm run test:workspace-instructions && pnpm run test:pinned-skills && pnpm run test:release-regressions && pnpm run test:memory && pnpm run test:metaweb"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",

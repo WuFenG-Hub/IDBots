@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>长期任务 · 看板与详情页原型（需求对齐用）</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // 与 IDBots 渲染层一致的暗色主题 token（src/renderer/index.css dark 值）
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          app: {
+            bg: '#142030',
+            sidebar: '#0b1323',
+            panel: '#1f2937',
+            hover: '#1E293B',
+            border: '#6b7280',
+            text: '#ffffff',
+            text2: '#94A3B8',
+            brand: '#FFDC51',
+            brandInk: '#303133',
+            accent: '#22D3EE',
+          },
+        },
+      },
+    },
+  };
+</script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Segoe UI', sans-serif; }
+  .chip { @apply inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #33415566; border-radius: 4px; }
+</style>
+</head>
+<body class="bg-app-bg text-app-text min-h-screen">
+
+<!-- ═══════════════════════ 屏幕 1：看板视图（按状态分列） ═══════════════════════ -->
+<div id="view-board" class="flex h-screen flex-col">
+
+  <!-- 页面头（沿用现有「跟踪任务」页结构） -->
+  <div class="flex h-12 shrink-0 items-center justify-between border-b border-app-border/40 px-4">
+    <h1 class="text-lg font-semibold">跟踪任务</h1>
+  </div>
+  <div class="flex shrink-0 items-center justify-between border-b border-app-border/40 pr-4">
+    <div class="flex">
+      <button class="relative px-4 py-2.5 text-sm font-medium">
+        长期任务
+        <span class="absolute bottom-0 left-0 right-0 h-0.5 rounded-t bg-app-brand"></span>
+      </button>
+      <button class="px-4 py-2.5 text-sm font-medium text-app-text2">定时任务</button>
+    </div>
+    <button class="rounded-lg bg-app-brand px-3 py-1 text-sm font-medium text-app-brandInk">+ 新建长期任务</button>
+  </div>
+
+  <!-- 看板：按状态分列，横向滚动 -->
+  <div class="flex-1 overflow-x-auto overflow-y-hidden">
+    <div class="flex h-full gap-3 px-4 py-3" style="min-width: max-content">
+
+      <!-- 列 1：等你拍板（最需要你的一列，固定最左） -->
+      <section class="flex w-72 shrink-0 flex-col rounded-xl border border-amber-500/30 bg-app-panel/40">
+        <header class="flex items-center gap-2 border-b border-app-border/30 px-3 py-2.5">
+          <span class="h-2 w-2 rounded-full bg-amber-400"></span>
+          <span class="text-xs font-semibold">等你拍板</span>
+          <span class="text-[11px] text-app-text2">1</span>
+        </header>
+        <div class="flex-1 space-y-2 overflow-y-auto p-2">
+
+          <button onclick="showDetail()" class="w-full rounded-lg border border-amber-500/40 bg-app-panel p-3 text-left transition hover:border-app-brand/60">
+            <h3 class="text-[13px] font-semibold leading-snug">AI 互联网整体概念发布与冷启动宣传</h3>
+            <div class="mt-2 h-1.5 w-full rounded-full bg-app-hover">
+              <div class="h-1.5 rounded-full bg-app-brand" style="width: 33%"></div>
+            </div>
+            <div class="mt-1 flex justify-between text-[10px] text-app-text2">
+              <span>已验收 2 · 进行中 1 · 待开始 3</span><span>2/6</span>
+            </div>
+            <div class="mt-2 rounded-md bg-app-hover/70 px-2.5 py-1.5">
+              <div class="text-xs">当前：<b>③ 宣传视频制作（约 3 分钟）</b></div>
+              <div class="mt-0.5 text-[11px] text-amber-400">下一步：等你选择制作方式 —— TwinBot 给了 3 个选项</div>
+            </div>
+            <div class="mt-2 flex items-center justify-between text-[10px] text-app-text2">
+              <span>更新于 12 分钟前</span><span>创建于 9 月 15 日</span>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      <!-- 列 2：进行中 -->
+      <section class="flex w-72 shrink-0 flex-col rounded-xl border border-app-border/30 bg-app-panel/40">
+        <header class="flex items-center gap-2 border-b border-app-border/30 px-3 py-2.5">
+          <span class="h-2 w-2 rounded-full bg-sky-400"></span>
+          <span class="text-xs font-semibold">进行中</span>
+          <span class="text-[11px] text-app-text2">1</span>
+        </header>
+        <div class="flex-1 space-y-2 overflow-y-auto p-2">
+
+          <button class="w-full rounded-lg border border-app-border/40 bg-app-panel p-3 text-left transition hover:border-app-brand/60">
+            <h3 class="text-[13px] font-semibold leading-snug">官网内容 SEO 与文档站完善</h3>
+            <div class="mt-2 h-1.5 w-full rounded-full bg-app-hover">
+              <div class="h-1.5 rounded-full bg-sky-400" style="width: 34%"></div>
+            </div>
+            <div class="mt-1 flex justify-between text-[10px] text-app-text2">
+              <span>已验收 1 · 进行中 1 · 待开始 1</span><span>1/3</span>
+            </div>
+            <div class="mt-2 rounded-md bg-app-hover/70 px-2.5 py-1.5">
+              <div class="text-xs">当前：<b>② 文档站骨架搭建</b></div>
+              <div class="mt-0.5 text-[11px] text-sky-300">TwinBot 推进中 · 已委派 Bot，预计明天出初稿</div>
+            </div>
+            <div class="mt-2 flex items-center justify-between text-[10px] text-app-text2">
+              <span>更新于 26 分钟前</span><span>创建于 9 月 18 日</span>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      <!-- 列 3：等外部 -->
+      <section class="flex w-72 shrink-0 flex-col rounded-xl border border-app-border/30 bg-app-panel/40">
+        <header class="flex items-center gap-2 border-b border-app-border/30 px-3 py-2.5">
+          <span class="h-2 w-2 rounded-full bg-violet-400"></span>
+          <span class="text-xs font-semibold">等外部</span>
+          <span class="text-[11px] text-app-text2">1</span>
+        </header>
+        <div class="flex-1 space-y-2 overflow-y-auto p-2">
+
+          <button class="w-full rounded-lg border border-app-border/40 bg-app-panel p-3 text-left transition hover:border-app-brand/60">
+            <h3 class="text-[13px] font-semibold leading-snug">应用商店上架与公证</h3>
+            <div class="mt-2 h-1.5 w-full rounded-full bg-app-hover">
+              <div class="h-1.5 rounded-full bg-violet-400" style="width: 60%"></div>
+            </div>
+            <div class="mt-1 flex justify-between text-[10px] text-app-text2">
+              <span>已验收 3 · 等外部 1 · 待开始 1</span><span>3/5</span>
+            </div>
+            <div class="mt-2 rounded-md bg-app-hover/70 px-2.5 py-1.5">
+              <div class="text-xs">当前：<b>④ 等待 Apple 公证与审核</b></div>
+              <div class="mt-0.5 text-[11px] text-violet-300">心跳持续盯审核状态，状态一变自动推进 ⑤</div>
+            </div>
+            <div class="mt-2 flex items-center justify-between text-[10px] text-app-text2">
+              <span>更新于 2 小时前</span><span>创建于 9 月 8 日</span>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      <!-- 列 4：定义中 -->
+      <section class="flex w-72 shrink-0 flex-col rounded-xl border border-dashed border-app-border/40 bg-app-panel/30">
+        <header class="flex items-center gap-2 border-b border-app-border/30 px-3 py-2.5">
+          <span class="h-2 w-2 rounded-full bg-app-text2"></span>
+          <span class="text-xs font-semibold">定义中</span>
+          <span class="text-[11px] text-app-text2">1</span>
+        </header>
+        <div class="flex-1 space-y-2 overflow-y-auto p-2">
+
+          <button class="w-full rounded-lg border border-dashed border-app-border/50 bg-app-panel/70 p-3 text-left transition hover:border-app-accent/50">
+            <h3 class="text-[13px] font-semibold leading-snug">链上联机游戏中心</h3>
+            <div class="mt-1 text-[10px] text-app-text2">0/6 子项目（草案）</div>
+            <div class="mt-2 rounded-md bg-app-hover/70 px-2.5 py-1.5">
+              <div class="text-xs">当前：<b>需求对齐 · 第 3 轮问答</b></div>
+              <div class="mt-0.5 text-[11px] text-app-accent">下一步：TwinBot 给出子项目拆分提案（含验收标准与依赖排序），等你确认</div>
+            </div>
+            <div class="mt-2 flex items-center justify-between text-[10px] text-app-text2">
+              <span>更新于 1 小时前</span><span>创建于 昨天</span>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      <!-- 列 5：已暂停 -->
+      <section class="flex w-72 shrink-0 flex-col rounded-xl border border-app-border/20 bg-app-panel/20">
+        <header class="flex items-center gap-2 border-b border-app-border/20 px-3 py-2.5">
+          <span class="h-2 w-2 rounded-full bg-zinc-500"></span>
+          <span class="text-xs font-semibold text-app-text2">已暂停</span>
+          <span class="text-[11px] text-app-text2">1</span>
+        </header>
+        <div class="flex-1 space-y-2 overflow-y-auto p-2">
+
+          <button class="w-full rounded-lg border border-app-border/30 bg-app-panel/60 p-3 text-left opacity-75 transition hover:opacity-100">
+            <h3 class="text-[13px] font-semibold leading-snug">个人知识库体系整理</h3>
+            <div class="mt-2 h-1.5 w-full rounded-full bg-app-hover">
+              <div class="h-1.5 rounded-full bg-zinc-500" style="width: 25%"></div>
+            </div>
+            <div class="mt-1 flex justify-between text-[10px] text-app-text2">
+              <span>已验收 1 · 待开始 3</span><span>1/4</span>
+            </div>
+            <div class="mt-2 rounded-md bg-app-hover/70 px-2.5 py-1.5 text-[11px] text-app-text2">
+              暂停于 9 月 10 日 · 原因：等 AI 互联网发布任务收尾
+            </div>
+            <div class="mt-2 text-[10px] text-app-text2">更新于 11 天前</div>
+          </button>
+        </div>
+      </section>
+
+      <!-- 列 6：已完成 -->
+      <section class="flex w-72 shrink-0 flex-col rounded-xl border border-app-border/20 bg-app-panel/20">
+        <header class="flex items-center gap-2 border-b border-app-border/20 px-3 py-2.5">
+          <span class="h-2 w-2 rounded-full bg-emerald-400"></span>
+          <span class="text-xs font-semibold text-app-text2">已完成</span>
+          <span class="text-[11px] text-app-text2">1</span>
+        </header>
+        <div class="flex-1 space-y-2 overflow-y-auto p-2">
+
+          <button class="w-full rounded-lg border border-emerald-500/20 bg-app-panel/50 p-3 text-left opacity-75 transition hover:opacity-100">
+            <h3 class="text-[13px] font-semibold leading-snug">IDBots v0.9.4 版本发布</h3>
+            <div class="mt-2 h-1.5 w-full rounded-full bg-app-hover">
+              <div class="h-1.5 rounded-full bg-emerald-400" style="width: 100%"></div>
+            </div>
+            <div class="mt-1 flex justify-between text-[10px] text-app-text2">
+              <span>5/5 子项目全部验收</span><span>✓</span>
+            </div>
+            <div class="mt-2 rounded-md bg-app-hover/70 px-2.5 py-1.5 text-[11px] text-emerald-300/90">
+              完成于 9 月 18 日 · 全程 12 天 · 证据与结论已归档
+            </div>
+          </button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 图例 / 机制说明 -->
+  <div class="shrink-0 border-t border-app-border/30 bg-app-panel/40 px-4 py-2 text-[11px] leading-5 text-app-text2">
+    <b class="text-app-text">列顺序：</b>等你拍板（最优先）· 进行中 · 等外部 · 定义中 · 已暂停 · 已完成。
+    <b class="text-app-text">心跳：</b>主循环每 5 秒一跳；长期任务检查是挂载其上的一个节流处理器（默认每 5 分钟做本地廉价检查）——只有「可推进 / 需要你」时才发起会话找你，等外部则持续盯条件变化。
+    验收默认由你拍板，可按任务授权 TwinBot 自验收。
+  </div>
+</div>
+
+<!-- ═══════════════════════ 屏幕 2：任务详情页 ═══════════════════════ -->
+<div id="view-detail" class="mx-auto hidden max-w-6xl px-6 py-6">
+
+  <!-- 顶部：返回 + 标题 + 状态 + 操作 -->
+  <div class="flex items-center gap-3">
+    <button onclick="showBoard()" class="rounded-lg p-1.5 text-app-text2 hover:bg-app-hover">←</button>
+    <h1 class="text-lg font-semibold leading-snug">AI 互联网整体概念发布与冷启动宣传</h1>
+    <span class="chip bg-amber-500/15 text-amber-400">等你拍板</span>
+    <span class="flex-1"></span>
+    <label class="flex cursor-pointer items-center gap-1.5 text-[11px] text-app-text2" title="默认每个子项目都由你拍板验收；打开后 TwinBot 可对满足验收标准的子项目自行验收">
+      <input type="checkbox" class="accent-[#FFDC51]" />
+      授权 TwinBot 验收
+    </label>
+    <button class="rounded-lg border border-app-border/40 px-3 py-1 text-xs text-app-text2 hover:bg-app-hover">暂停</button>
+  </div>
+
+  <!-- 目标 -->
+  <div class="mt-4 rounded-xl border border-app-border/40 bg-app-panel p-4">
+    <div class="text-[11px] font-semibold uppercase tracking-wide text-app-text2">目标</div>
+    <p class="mt-1 text-sm leading-6">完成「AI 互联网」整体概念的对外发布与冷启动：新版官网上线、3 分钟宣传视频、宣传文章、OAC 新版本发布、新用户 onboarding 自动化测试。冷启动成功的口径：发布渠道全部落地 + 官网可注册 + onboarding 测试通过。</p>
+    <div class="mt-3 flex items-center gap-3">
+      <div class="h-1.5 flex-1 rounded-full bg-app-hover"><div class="h-1.5 rounded-full bg-app-brand" style="width: 33%"></div></div>
+      <span class="text-xs text-app-text2">2/6 · 33%</span>
+      <span class="text-[11px] text-app-text2">下次心跳检查 ~4 分钟</span>
+    </div>
+  </div>
+
+  <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-5">
+    <!-- 左：子项目清单（有序、可勾选推进） -->
+    <div class="rounded-xl border border-app-border/40 bg-app-panel p-3 lg:col-span-2">
+      <div class="flex items-center justify-between px-1 pb-2">
+        <span class="text-[11px] font-semibold uppercase tracking-wide text-app-text2">子项目（按依赖排序）</span>
+        <button class="text-[11px] text-app-accent hover:underline">+ 添加 / 调整</button>
+      </div>
+      <div id="subtask-list" class="space-y-1"></div>
+    </div>
+
+    <!-- 右：选中子项目详情 -->
+    <div class="space-y-4 lg:col-span-3">
+      <div id="subtask-detail" class="rounded-xl border border-app-border/40 bg-app-panel p-4"></div>
+
+      <!-- 事件流 -->
+      <div class="rounded-xl border border-app-border/40 bg-app-panel p-4">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-app-text2">事件流</div>
+        <div class="mt-2 space-y-1.5 text-xs leading-5">
+          <div class="flex gap-2"><span class="w-28 shrink-0 text-app-text2">今天 14:20</span><span>⏳ TwinBot 提请拍板：③ 的制作方式（3 个选项）<span class="text-app-text2">— 长期任务会话 #3</span></span></div>
+          <div class="flex gap-2"><span class="w-28 shrink-0 text-app-text2">今天 09:05</span><span>▶ ③ 开始推进（通道：待定）</span></div>
+          <div class="flex gap-2"><span class="w-28 shrink-0 text-app-text2">昨天 18:40</span><span>✓ ② 验收通过 · 证据 <span class="font-mono text-app-accent">metaapp://idbots-website-v2</span>（委派 Bot 完成）</span></div>
+          <div class="flex gap-2"><span class="w-28 shrink-0 text-app-text2">昨天 11:12</span><span>✓ ① 验收通过 · 证据 <span class="font-mono text-app-accent">pin://9f3c…e1</span></span></div>
+          <div class="flex gap-2"><span class="w-28 shrink-0 text-app-text2">9月15日 21:03</span><span>◎ 创建：4 轮问答对齐，6 个子项目 + 验收标准由你确认</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── 数据：子项目（详情页左列 + 右栏共用） ──────────────────────────
+  const STATUS = {
+    accepted:   { label: '已验收',  icon: '✓', chip: 'bg-emerald-500/15 text-emerald-400' },
+    in_progress:{ label: '进行中',  icon: '●', chip: 'bg-sky-500/15 text-sky-400' },
+    waiting:    { label: '等你拍板', icon: '⏳', chip: 'bg-amber-500/15 text-amber-400' },
+    external:   { label: '等外部',  icon: '☁', chip: 'bg-violet-500/15 text-violet-400' },
+    pending:    { label: '待开始',  icon: '○', chip: 'bg-app-hover text-app-text2' },
+  };
+  const subtasks = [
+    { n: 1, title: '确定发布叙事与核心信息屋', st: 'accepted', dep: null,
+      accept: ['信息屋文档：一句话定位 + 3 层论据', '你确认文案基调'],
+      evidence: ['pin://9f3c…e1'], sessions: ['创建会话 #1'], note: '' },
+    { n: 2, title: 'IDBots 新版官网制作与发布', st: 'accepted', dep: '依赖 ①',
+      accept: ['官网可访问且可注册', '视觉与你确认的原型一致'],
+      evidence: ['metaapp://idbots-website-v2'], sessions: ['长期任务会话 #1', '群任务 #97'], note: '通道：委派 Bot 完成' },
+    { n: 3, title: '宣传视频制作（约 3 分钟）', st: 'waiting', dep: null, current: true,
+      accept: ['成片 2.5–3.5 分钟', '覆盖信息屋三个核心点', '有中英双语字幕'],
+      evidence: [], sessions: ['长期任务会话 #3 · 进行中'],
+      note: 'TwinBot 建议：① 委派 Bot（hyperframes 流水线，2–3 天，零成本）② 外部团队（质量上限高，需预算）③ 你自己剪（最快但占你时间）',
+      options: ['委派 Bot 制作', '外部团队制作', '我自己剪'] },
+    { n: 4, title: '宣传文章准备', st: 'pending', dep: '依赖 ①',
+      accept: ['中文 + 英文各一篇', '发布渠道清单确认'], evidence: [], sessions: [], note: '' },
+    { n: 5, title: 'OAC 相关新版本发布', st: 'pending', dep: null,
+      accept: ['release notes 归档', '升级路径回归通过'], evidence: [], sessions: [], note: '' },
+    { n: 6, title: '新用户 onboarding 自动化测试', st: 'pending', dep: '依赖 ②',
+      accept: ['核心路径自动化用例全绿', '首次启动 5 分钟内完成引导'], evidence: [], sessions: [], note: '前置已解除（② 已验收），可排期' },
+  ];
+
+  let selected = 3;
+  const $ = (id) => document.getElementById(id);
+
+  function renderList() {
+    $('subtask-list').innerHTML = subtasks.map((s) => {
+      const st = STATUS[s.st];
+      const active = s.n === selected;
+      return `
+      <button onclick="selectSubtask(${s.n})"
+        class="w-full rounded-lg border px-3 py-2 text-left transition ${active ? 'border-app-brand/60 bg-app-hover' : 'border-transparent hover:bg-app-hover/60'}">
+        <div class="flex items-center gap-2">
+          <span class="w-5 text-center text-xs ${s.st === 'accepted' ? 'text-emerald-400' : 'text-app-text2'}">${st.icon}</span>
+          <span class="text-xs font-medium ${s.st === 'accepted' ? 'text-app-text2 line-through' : ''}">${s.n}. ${s.title}</span>
+          ${s.current ? '<span class="chip bg-app-brand/15 text-app-brand">当前</span>' : ''}
+          <span class="flex-1"></span>
+          <span class="chip ${st.chip}">${st.label}</span>
+        </div>
+        <div class="ml-7 mt-0.5 flex items-center gap-2 text-[10px] text-app-text2">
+          ${s.dep ? `<span>${s.dep}</span>` : ''}
+          ${s.evidence.length ? `<span class="font-mono text-app-accent/80">证据 ${s.evidence.length}</span>` : ''}
+          ${s.sessions.length ? `<span>会话 ${s.sessions.length}</span>` : ''}
+        </div>
+      </button>`;
+    }).join('');
+  }
+
+  function renderDetail() {
+    const s = subtasks.find((x) => x.n === selected);
+    const st = STATUS[s.st];
+    $('subtask-detail').innerHTML = `
+      <div class="flex items-center gap-2">
+        <span class="text-sm font-semibold">子项目 ${s.n} · ${s.title}</span>
+        <span class="chip ${st.chip}">${st.label}</span>
+        ${s.dep ? `<span class="text-[10px] text-app-text2">${s.dep}</span>` : ''}
+      </div>
+
+      <div class="mt-3">
+        <div class="text-[11px] font-semibold uppercase tracking-wide text-app-text2">验收标准</div>
+        <ul class="mt-1 list-inside list-disc space-y-0.5 text-xs leading-5">
+          ${s.accept.map((a) => `<li>${a}</li>`).join('')}
+        </ul>
+      </div>
+
+      ${s.note ? `
+      <div class="mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200/90">${s.note}</div>
+      <div class="mt-2 flex flex-wrap gap-2">
+        ${(s.options || []).map((o, i) => `
+          <button class="rounded-lg ${i === 0 ? 'bg-app-brand text-app-brandInk font-medium' : 'border border-app-border/40 text-app-text2 hover:bg-app-hover'} px-3 py-1.5 text-xs">${o}</button>`).join('')}
+      </div>` : ''}
+
+      <div class="mt-3 grid grid-cols-2 gap-3 text-xs">
+        <div>
+          <div class="text-[11px] font-semibold uppercase tracking-wide text-app-text2">证据</div>
+          <div class="mt-1 space-y-0.5">
+            ${s.evidence.length
+              ? s.evidence.map((e) => `<div class="font-mono text-app-accent">${e}</div>`).join('')
+              : '<div class="text-app-text2">暂无 — 验收时需附：本地目录 / MetaApp / pin / URL</div>'}
+          </div>
+        </div>
+        <div>
+          <div class="text-[11px] font-semibold uppercase tracking-wide text-app-text2">关联会话</div>
+          <div class="mt-1 space-y-0.5">
+            ${s.sessions.length
+              ? s.sessions.map((e) => `<div class="text-app-accent hover:underline cursor-pointer">${e}</div>`).join('')
+              : '<div class="text-app-text2">暂无</div>'}
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-4 flex gap-2 border-t border-app-border/30 pt-3">
+        <button class="rounded-lg bg-app-brand px-3 py-1.5 text-xs font-medium text-app-brandInk">继续讨论（打开会话）</button>
+        <button class="rounded-lg border border-app-border/40 px-3 py-1.5 text-xs text-app-text2 hover:bg-app-hover">修改定义 / 验收标准</button>
+        <button class="rounded-lg border border-app-border/40 px-3 py-1.5 text-xs text-app-text2 hover:bg-app-hover">提请验收</button>
+      </div>`;
+  }
+
+  function selectSubtask(n) { selected = n; renderList(); renderDetail(); }
+  function showDetail() { $('view-board').classList.add('hidden'); $('view-detail').classList.remove('hidden'); renderList(); renderDetail(); }
+  function showBoard() { $('view-detail').classList.add('hidden'); $('view-board').classList.remove('hidden'); }
+</script>
+</body>
+</html>

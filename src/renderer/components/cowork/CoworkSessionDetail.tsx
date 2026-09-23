@@ -21,7 +21,7 @@ import PermissionModeSelector from './PermissionModeSelector';
 import SubagentPanel from './SubagentPanel';
 import TodoPanel from './TodoPanel';
 import UsageStatsChip from './UsageStatsChip';
-import { TrackedTaskOriginChip } from '../trackedTasks';
+import LongTermTaskOriginChip from '../longTermTasks/LongTermTaskOriginChip';
 import ManualCompactButton from './ManualCompactButton';
 import A2AMessageItem from './A2AMessageItem';
 import MessageFeedbackControls from './MessageFeedbackControls';
@@ -3764,8 +3764,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               {i18nService.t('coworkOnChainBadge')}
             </span>
           )}
-          {/* 会话 → 所属长期任务（验收⑤ 反向）；0 关联时该组件不渲染任何东西 */}
-          <TrackedTaskOriginChip sessionId={currentSession.id} />
+          {/* 会话 → 所属长期任务（新一等实体看板）；0 关联时该组件不渲染任何东西 */}
+          <LongTermTaskOriginChip sessionId={currentSession.id} />
           {normalizedFocusedOrderTxid && (
             <span className="non-draggable inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-medium text-amber-700 dark:text-amber-300">
               order {normalizedFocusedOrderTxid.slice(0, 8)}
