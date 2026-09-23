@@ -254,6 +254,58 @@ test('importUserIdentity rejects invalid mnemonics and surfaces fetch failures',
   store.close();
 });
 
+test('importUserIdentity keeps the empty-name fallback when the remote profile fetch is unreachable', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock();
+  const originalFetch = globalThis.fetch;
+  const originalBase = process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
+  process.env.IDBOTS_MAN_P2P_LOCAL_BASE = 'http://127.0.0.1:59994';
+  let remoteSignalSeen = false;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v1/users/info/address/')) {
+      // Fresh-machine local stub: identity mapping present, no profile content.
+      return new Response(JSON.stringify({
+        code: 1,
+        message: 'ok',
+        data: {
+          metaid: '7777775fe18df248b375c3a381401bac84276688b4ce4e8cde12975f9a5922e8',
+          name: '',
+          nameId: '',
+          address: '1FRUmweLcWcLa7VYumSnh9w3soAmydQSzX',
+          globalMetaId: 'idq1ncewm6vda5ryqjerwcmsqlty3x89n05k6dp6jv',
+          avatar: '',
+          chatpubkey: '',
+          isInit: false,
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.includes('/api/v1/info/address/')) {
+      remoteSignalSeen = Boolean(init && init.signal);
+      throw new TypeError('fetch failed');
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  try {
+    const result = await importUserIdentity(userStore, { mnemonic: TEST_MNEMONIC }, baseDeps(pinMock));
+    assert.equal(result.success, true);
+    assert.equal(result.profileSource, 'local');
+    assert.equal(result.identity.name, '');
+    assert.equal(remoteSignalSeen, true, 'the remote fallback must carry a timeout signal');
+    // The degraded import must not publish profile steps — only the chat pubkey.
+    const paths = pinMock.calls.map((c) => c.metaidData.path);
+    assert.deepEqual(paths, ['/info/chatpubkey']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalBase === undefined) {
+      delete process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
+    } else {
+      process.env.IDBOTS_MAN_P2P_LOCAL_BASE = originalBase;
+    }
+    store.close();
+  }
+});
+
 test('logout deletes the identity and allows a fresh create', async () => {
   const { store, userStore } = await makeStores();
   const pinMock = makePinMock();

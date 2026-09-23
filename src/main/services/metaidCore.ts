@@ -759,7 +759,7 @@ export async function createPin(
             appendMetaidLog('WARN', `Fresh MVC funding request after ${trigger} failed`, {
               metabot_id,
               mvcAddress,
-              error: subsidy.error || 'MVC gas subsidy request failed',
+              error: subsidy.error || 'Traffic subsidy request failed',
             });
             return false;
           }

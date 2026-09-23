@@ -94,6 +94,7 @@ import { parseAddressIndexFromPath } from './metabotWalletService';
 import { executeMrc20Transfer } from './mrc20Service';
 import { buildMetaappHomepage } from './metabotHomepage';
 import { METAAPP_PIN_ID_PATTERN } from './metaAppProtocol';
+import { readRpcJsonObjectBody } from './rpcJsonObjectBody';
 import type {
   BotBrowserTabAction,
   BotBrowserTabCommand,
@@ -146,6 +147,43 @@ const GROUP_HISTORY_PATH = '/api/idbots/chat/group-history';
 const MEMORY_LIST_PATH = '/api/idbots/memory/list';
 const MEMORY_CREATE_PATH = '/api/idbots/memory/create';
 const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
+
+/**
+ * Field contract for POST /api/idbots/wallet/transfer.
+ *
+ * Callers reach this route through the local RPC gateway, so the response body
+ * is the only place they can learn which field names and units are accepted.
+ * Every 400 from this route therefore echoes the contract, and names any keys
+ * the caller sent that this route does not read: a bare "amount must be
+ * positive" after a caller sent `amount_sats` (a field this route never
+ * accepts, because `amount` is already denominated in SPACE/DOGE) is
+ * indistinguishable from a genuinely bad value and costs a blind retry.
+ */
+const WALLET_TRANSFER_FIELDS: Record<string, string> = {
+  metabot_id: 'positive integer (required)',
+  chain: '"mvc" | "btc" | "doge" (required; "space" is an alias of "mvc")',
+  to_address: 'recipient address string (required)',
+  amount: 'number > 0 (required; unit SPACE on mvc and DOGE on doge, never sats)',
+  fee_rate: 'number > 0 in sats per byte (optional; defaults to the chain fee tier)',
+};
+
+function walletTransferRejection(
+  message: string,
+  requestBody: Record<string, unknown>,
+): Record<string, unknown> {
+  const accepted = Object.keys(WALLET_TRANSFER_FIELDS);
+  const unrecognized = Object.keys(requestBody).filter((key) => !accepted.includes(key));
+  return {
+    success: false,
+    error: unrecognized.length
+      ? `${message}; unrecognized field(s): ${unrecognized.join(', ')} — accepted fields: ${accepted.join(', ')}`
+      : message,
+    contract: {
+      path: EXECUTE_TRANSFER_PATH,
+      fields: WALLET_TRANSFER_FIELDS,
+    },
+  };
+}
 
 export type BotBrowserRpcOpenRequest = {
   uri: string;
@@ -360,9 +398,9 @@ export function startMetaidRpcServer(
     const persist = new URLSearchParams(search || '').get('persist') === 'true';
 
     if (req.method === 'POST' && pathname === BOT_BROWSER_OPEN_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
 
       let parsed: { uri?: unknown; actorId?: unknown };
@@ -383,9 +421,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === BOT_BROWSER_TABS_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
 
       try {
@@ -405,9 +443,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === SET_METABOT_HOMEPAGE_METAAPP_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
 
       let parsed: { metabot_id?: unknown; pin_id?: unknown; sync?: unknown };
@@ -488,9 +526,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === SIGN_BTC_MESSAGE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
 
       let parsed: { metabot_id?: number; message?: string; encoding?: BufferEncoding };
@@ -533,9 +571,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === SIGN_BTC_PSBT_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
 
       let parsed: {
@@ -608,9 +646,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === EXECUTE_MRC20_TRANSFER_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
 
       let parsed: {
@@ -711,9 +749,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === RESOLVE_METABOT_ID_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: { name?: string };
       try {
@@ -756,9 +794,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === ASSIGN_GROUP_CHAT_TASK_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let params: AssignGroupChatTaskParams;
       try {
@@ -783,9 +821,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === METABOT_ACCOUNT_SUMMARY_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: { metabot_id?: number };
       try {
@@ -808,9 +846,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === ADDRESS_BALANCE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
 
       let parsed: { metabot_id?: number; addresses?: { mvc?: string; btc?: string; doge?: string } };
@@ -898,6 +936,12 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === EXECUTE_TRANSFER_PATH) {
+      // Deliberately left on its own inline read: the wallet-transfer
+      // field-contract change owns this route's body handling (including its
+      // non-object rejection and per-route contract), so routing it through the
+      // shared guard here would duplicate that work in a conflicting hunk.
+      // Moving it onto `readRpcJsonObjectBody` is a drop-in follow-up once that
+      // change lands.
       let body = '';
       for await (const chunk of req) {
         body += chunk;
@@ -919,32 +963,43 @@ export function startMetaidRpcServer(
         };
       } catch {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        res.end(JSON.stringify(walletTransferRejection('Invalid JSON body: expected a JSON object', {})));
+        return;
+      }
+
+      // `JSON.parse` accepts a literal `null`, and every field read below would
+      // then throw inside this async handler: the caller gets no response at all
+      // (the request hangs until it times out) and the process sees an
+      // unhandled rejection. Reject a non-object body the same way malformed
+      // JSON is rejected.
+      if (parsed === null || typeof (parsed as unknown) !== 'object') {
+        res.writeHead(400);
+        res.end(JSON.stringify(walletTransferRejection('Invalid JSON body: expected a JSON object', {})));
         return;
       }
 
       const chainRaw = String(parsed.chain || '').toLowerCase().trim();
       if (!chainRaw) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'chain is required' }));
+        res.end(JSON.stringify(walletTransferRejection('chain is required', parsed)));
         return;
       }
       const chain = chainRaw === 'space' ? 'mvc' : chainRaw;
       if (chain !== 'mvc' && chain !== 'btc' && chain !== 'doge') {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'Unsupported chain' }));
+        res.end(JSON.stringify(walletTransferRejection(`Unsupported chain "${chainRaw}"`, parsed)));
         return;
       }
       const metabotId = Number(parsed.metabot_id);
       if (!Number.isFinite(metabotId) || metabotId <= 0) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'metabot_id is required' }));
+        res.end(JSON.stringify(walletTransferRejection('metabot_id is required', parsed)));
         return;
       }
       const toAddress = String(parsed.to_address || '').trim();
       if (!toAddress) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'to_address is required' }));
+        res.end(JSON.stringify(walletTransferRejection('to_address is required', parsed)));
         return;
       }
       const amountRaw = parsed.amount ?? '';
@@ -952,7 +1007,7 @@ export function startMetaidRpcServer(
       const amountValue = Number(amount);
       if (!amount || !Number.isFinite(amountValue) || amountValue <= 0) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'amount must be positive' }));
+        res.end(JSON.stringify(walletTransferRejection('amount must be positive', parsed)));
         return;
       }
       let feeRate: number;
@@ -960,7 +1015,7 @@ export function startMetaidRpcServer(
         const feeRateValue = Number(parsed.fee_rate);
         if (!Number.isFinite(feeRateValue) || feeRateValue <= 0) {
           res.writeHead(400);
-          res.end(JSON.stringify({ success: false, error: 'fee_rate must be positive' }));
+          res.end(JSON.stringify(walletTransferRejection('fee_rate must be positive', parsed)));
           return;
         }
         feeRate = feeRateValue;
@@ -978,22 +1033,22 @@ export function startMetaidRpcServer(
         });
         if (!result.success) {
           res.writeHead(400);
-          res.end(JSON.stringify({ success: false, error: result.error || 'Transfer failed' }));
+          res.end(JSON.stringify(walletTransferRejection(result.error || 'Transfer failed', parsed)));
           return;
         }
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, txid: result.txId }));
       } catch (err) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+        res.end(JSON.stringify(walletTransferRejection(String((err as Error)?.message || err), parsed)));
       }
       return;
     }
 
     if (req.method === 'POST' && pathname === WALLET_BALANCE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       let parsed: {
         metabot_id?: number;
@@ -1070,9 +1125,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === WALLET_MVC_TRANSFER_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       let parsed: {
         metabot_id?: number;
@@ -1132,9 +1187,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === WALLET_TRANSFER_RECORDS_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       let parsed: { limit?: number; metabot_id?: number };
       try {
@@ -1162,9 +1217,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === UPLOAD_LARGEFILE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
 
       let parsed: {
@@ -1206,9 +1261,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === BUILD_MVC_TRANSFER_RAW_TX_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: {
         metabot_id?: number;
@@ -1249,9 +1304,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === BUILD_MVC_FT_TRANSFER_RAW_TX_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
         let parsed: {
           metabot_id?: number;
@@ -1317,9 +1372,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === BUILD_MVC_RAW_TX_BUNDLE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: {
         metabot_id?: number;
@@ -1449,9 +1504,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_PROPOSE_STAFFING_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: {
         title?: string;
@@ -1516,9 +1571,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_CREATE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: {
         title?: string;
@@ -1674,9 +1729,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_LIST_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       let parsed: { status?: string };
       try {
@@ -1706,9 +1761,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_SHOW_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: { task_id?: number; view?: string; before_id?: number; limit?: number };
       try {
@@ -1762,9 +1817,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_SEND_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: {
         task_id?: number;
@@ -1895,9 +1950,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_INVITE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: { task_id?: number; metabot_id?: number; metabot_name?: string };
       try {
@@ -1949,9 +2004,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_MEMBER_STATUS_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: { task_id?: number };
       try {
@@ -1982,9 +2037,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_KICK_MEMBER_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: { task_id?: number; metabot_id?: number; metabot_name?: string; globalmetaid?: string; reason?: string };
       try {
@@ -2044,9 +2099,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_SEARCH_CANDIDATES_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       let parsed: {
         query?: string;
@@ -2105,9 +2160,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_SEARCH_REMOTE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       let parsed: { query?: string; skill?: string; limit?: number };
       try {
@@ -2140,9 +2195,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_INVITE_REMOTE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: { task_id?: number; globalmetaid?: string; name?: string; required_skills?: unknown[]; allow_reinvite?: unknown };
       try {
@@ -2192,9 +2247,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_CLOSE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: {
         task_id?: number;
@@ -2256,9 +2311,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_DELIVERABLE_DELETE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: { task_id?: number; deliverable_id?: number };
       try {
@@ -2293,9 +2348,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_SET_MEMBER_STATUS_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: {
         task_id?: number;
@@ -2354,9 +2409,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_REWORK_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: {
         task_id?: number;
@@ -2409,9 +2464,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_SUPERVISE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
       }
       let parsed: {
         task_id?: number;
@@ -2470,9 +2525,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_TASK_EXPORT_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       let parsed: { task_id?: number; message_limit?: number };
       try {
@@ -2505,6 +2560,14 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === LIST_METABOTS_PATH) {
+      // This route reads no field, but it still speaks the gateway's body
+      // contract: reject a body that is not a JSON object instead of ignoring
+      // whatever arrived, so a caller's malformed request cannot look like a
+      // successful one.
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
+      }
       try {
         const metabots = buildMetabotDirectory(getMetabotStore());
         res.writeHead(200);
@@ -2580,9 +2643,9 @@ export function startMetaidRpcServer(
     };
 
     if (req.method === 'POST' && pathname === PRIVATE_SEND_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       try {
         const result = await handlePrivateSendRoute(chatGatewayDeps, body);
@@ -2597,9 +2660,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === PRIVATE_HISTORY_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       try {
         const result = await handlePrivateHistoryRoute(chatGatewayDeps, body);
@@ -2614,9 +2677,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === GROUP_HISTORY_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       try {
         const result = await handleGroupHistoryRoute(chatGatewayDeps, body);
@@ -2636,9 +2699,9 @@ export function startMetaidRpcServer(
     // (pure functions, unit-testable without Electron); these handlers only
     // collect the body, delegate, and write back the result.
     if (req.method === 'POST' && pathname === MEMORY_LIST_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       const result = handleMemoryListRoute(getMemoryBackend, body);
       res.writeHead(result.status);
@@ -2647,9 +2710,9 @@ export function startMetaidRpcServer(
     }
 
     if (req.method === 'POST' && pathname === MEMORY_CREATE_PATH) {
-      let body = '';
-      for await (const chunk of req) {
-        body += chunk;
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
       }
       const result = handleMemoryCreateRoute(getMemoryBackend, body);
       res.writeHead(result.status);
@@ -2663,9 +2726,9 @@ export function startMetaidRpcServer(
       return;
     }
 
-    let body = '';
-    for await (const chunk of req) {
-      body += chunk;
+    const body = await readRpcJsonObjectBody(req, res, pathname);
+    if (body === null) {
+      return;
     }
 
     let payload: { metabot_id: number; metaidData: MetaidDataPayload; network?: string; fee_rate?: number };

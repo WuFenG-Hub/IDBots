@@ -328,6 +328,27 @@ const unwrapMetaidInfo = (payload: unknown): Record<string, unknown> | null => {
   return record;
 };
 
+/**
+ * Profile-content keys that make a metaid-info payload a real hit. Bare
+ * identity metadata (metaid / globalMetaId / address) does NOT count: a fresh
+ * local P2P node answers address/metaid lookups with a stub that carries only
+ * that mapping while every profile field is empty (`isInit: false`). Treating
+ * the stub as a hit skips the remote fallback and starves callers that need
+ * profile fields (name / avatar / chatpubkey). A bare `pinId` is deliberately
+ * not content either — it can point at any pin and does not prove that a
+ * profile pin is synced locally.
+ */
+const METAID_PROFILE_CONTENT_KEYS = [
+  'name',
+  'avatar',
+  'avatarId',
+  'avatarPinId',
+  'chatpubkey',
+  'chatPublicKey',
+  'nameId',
+  'namePinId',
+] as const;
+
 export function isSemanticallyEmptyMetaidInfoPayload(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') {
     return true;
@@ -337,34 +358,41 @@ export function isSemanticallyEmptyMetaidInfoPayload(payload: unknown): boolean 
   if (!info) {
     return true;
   }
-  const identityKeys = [
-    'metaid',
-    'metaId',
-    'globalMetaId',
-    'globalMetaid',
-    'name',
-    'address',
-    'avatar',
-    'avatarId',
-    'avatarPinId',
-    'chatpubkey',
-    'chatPublicKey',
-    'pinId',
-    'nameId',
-    'namePinId',
-  ];
-  const hasIdentityValue = identityKeys.some((key) => {
+  const hasContentValue = METAID_PROFILE_CONTENT_KEYS.some((key) => {
     const value = info[key];
     return typeof value === 'string' && value.trim().length > 0;
   });
-  if (hasIdentityValue) {
-    return false;
-  }
-  return info.isInit !== true;
+  // A content-less payload is always a semantic miss — including one that
+  // merely carries `isInit: true`: the init flag is not evidence that the
+  // profile pins are available locally, so profile readers must be allowed to
+  // reach the remote indexer for the complete record.
+  return !hasContentValue;
 }
 
-const fetchMetaidInfo = async (localPath: string, remoteUrl: string): Promise<MetaidAddressInfo | null> => {
-  const res = await fetchJsonWithFallbackOnMiss(localPath, remoteUrl, isSemanticallyEmptyMetaidInfoPayload);
+/**
+ * Stricter miss check for restore flows, which need a usable profile name: a
+ * payload without one must fall through to the remote indexer even when the
+ * local node already holds other profile fields (the name pin may simply not
+ * be synced yet).
+ */
+export function isSemanticallyEmptyRestoreProfilePayload(payload: unknown): boolean {
+  if (isSemanticallyEmptyMetaidInfoPayload(payload)) {
+    return true;
+  }
+  const data = (payload as { data?: unknown }).data;
+  const info = unwrapMetaidInfo(data);
+  const name = info && typeof info.name === 'string' ? info.name.trim() : '';
+  return name.length === 0;
+}
+
+const fetchMetaidInfo = async (
+  localPath: string,
+  remoteUrl: string,
+  isSemanticMiss: (payload: unknown) => boolean = isSemanticallyEmptyMetaidInfoPayload,
+): Promise<MetaidAddressInfo | null> => {
+  const res = await fetchJsonWithFallbackOnMiss(localPath, remoteUrl, isSemanticMiss, {
+    degradeToLocalOnRemoteError: true,
+  });
   if (!res.ok) {
     throw new Error(`metaid info fetch failed: ${res.status} ${res.statusText}`);
   }
@@ -375,12 +403,15 @@ const fetchMetaidInfo = async (localPath: string, remoteUrl: string): Promise<Me
   return (unwrapMetaidInfo(json?.data) as MetaidAddressInfo | null) ?? null;
 };
 
-export const fetchMetaidInfoByAddress = async (address: string): Promise<MetaidAddressInfo | null> => {
+export const fetchMetaidInfoByAddress = async (
+  address: string,
+  isSemanticMiss: (payload: unknown) => boolean = isSemanticallyEmptyMetaidInfoPayload,
+): Promise<MetaidAddressInfo | null> => {
   const trimmed = address.trim();
   if (!trimmed) return null;
   const url = `${METAID_INFO_BY_ADDRESS}/${encodeURIComponent(trimmed)}`;
   const localPath = `/api/v1/users/info/address/${encodeURIComponent(trimmed)}`;
-  return fetchMetaidInfo(localPath, url);
+  return fetchMetaidInfo(localPath, url, isSemanticMiss);
 };
 
 export const fetchMetaidInfoByMetaid = async (metaid: string): Promise<MetaidAddressInfo | null> => {
@@ -406,7 +437,7 @@ const fetchAvatarDataUrl = async (pinId: string): Promise<string | null> => {
 };
 
 export const fetchMetaidRestoreProfile = async (address: string): Promise<MetaidRestoreProfile> => {
-  const info = await fetchMetaidInfoByAddress(address);
+  const info = await fetchMetaidInfoByAddress(address, isSemanticallyEmptyRestoreProfilePayload);
   if (!info) {
     throw new Error('CHAIN_INFO_EMPTY');
   }

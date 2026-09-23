@@ -1986,7 +1986,7 @@ async function fetchMetaidUserInfoByGlobalMetaId(globalMetaId: string): Promise<
   }
   const localPath = `/api/v1/users/info/metaid/${encodeURIComponent(normalizedGlobalMetaId)}`;
   const fallbackUrl = `https://file.metaid.io/metafile-indexer/api/v1/info/metaid/${encodeURIComponent(normalizedGlobalMetaId)}`;
-  const res = await fetchJsonWithFallbackOnMiss(localPath, fallbackUrl, isSemanticallyEmptyMetaidInfoPayload);
+  const res = await fetchJsonWithFallbackOnMiss(localPath, fallbackUrl, isSemanticallyEmptyMetaidInfoPayload, { degradeToLocalOnRemoteError: true });
   const payload = await res.json() as { code?: number; message?: string; data?: Record<string, unknown> };
   const data = unwrapMetaidInfoRecord(payload?.data);
   if (data) {
@@ -5879,7 +5879,12 @@ const getCoworkRunner = () => {
         resolveMetabotIdByName: (name) => resolveMetabotIdByName(getMetabotStore(), name),
         getMetabotMvcAddress: (metabotId) =>
           getMetabotStore().getMetabotById(metabotId)?.mvc_address ?? null,
-        transfer: (params) => withChainWriteBudget(
+        // `host` carries the session-scoped owner-confirmation callback the
+        // tool layer passes in (coworkRunner wires it from the host approval
+        // dialog). It MUST reach the service deps: without it the channel-B
+        // gate has no dialog to satisfy it, so every external transfer is
+        // refused no matter what the owner approves.
+        transfer: (params, host) => withChainWriteBudget(
           'wallet_transfer',
           () => executeWalletMvcTransfer(
             {
@@ -5887,6 +5892,7 @@ const getCoworkRunner = () => {
               transferStore: getBotWalletTransferStore(),
               settingsReader: getStore(),
               getFeeRate: () => getGlobalFeeRate('mvc'),
+              confirmExternal: host?.confirmExternal,
             },
             params,
           ),
@@ -15210,7 +15216,15 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   });
 
   ipcMain.handle('metaid:getUserInfo', async (_e: Electron.IpcMainInvokeEvent, params: { globalMetaId: string }) => {
-    return fetchMetaidUserInfoByGlobalMetaId(params.globalMetaId);
+    try {
+      return await fetchMetaidUserInfoByGlobalMetaId(params.globalMetaId);
+    } catch (error) {
+      // Local-first read: a lookup failure (e.g. the local node is down and the
+      // remote indexer is unreachable) degrades to an empty payload instead of
+      // rejecting the IPC call.
+      console.warn('[MetaID] getUserInfo failed', params?.globalMetaId, error instanceof Error ? error.message : String(error));
+      return {};
+    }
   });
 
   ipcMain.handle('metaid:resolveAvatarSource', async (_e: Electron.IpcMainInvokeEvent, params: { reference: string }) => {
