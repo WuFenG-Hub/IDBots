@@ -8,9 +8,8 @@ export type OrchestrationAttemptStatus = 'queued' | 'running' | 'completed' | 'f
 /**
  * v1.5 (owner ruling 「谁发起，谁验收」): who initiated the card. `owner` is
  * the default for every legacy and owner-facing path; only the Twin's local
- * worker delegation writes `twin_delegate`. The card's closer is DERIVED at
- * read time (see TrackedTaskBoardService) — this column is the fallback fact,
- * never the authority for group/scheduled-linked cards.
+ * worker delegation writes `twin_delegate`. Plain fact column on the ledger
+ * row (the board that derived closer roles from it has been retired).
  */
 export type OrchestrationTaskOrigin = 'owner' | 'twin_delegate';
 

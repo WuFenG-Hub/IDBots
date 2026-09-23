@@ -10,7 +10,9 @@ import TaskDetail from './TaskDetail';
 import AllRunsHistory from './AllRunsHistory';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import LongTermTasksBoard from '../longTermTasks/LongTermTasksBoard';
-import type { TrackingTabId } from '../../types/trackedTask';
+
+/** 跟踪任务页的外层 Tab：「长期任务」默认在前，「定时任务」原样保留。 */
+type TrackingTabId = 'longTerm' | 'scheduled';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -37,10 +39,10 @@ const tabButtonClass = (active: boolean): string =>
 /**
  * 跟踪任务页（原「定时任务」入口）。
  *
- * 两层 Tab（已冻结口径）：
+ * 两层 Tab：
  *   L1：长期任务（默认在前） | 定时任务
  *   L2：仅「定时任务」内 —— 任务 | 历史（原样保留）
- * 长期任务 Tab 的主体是跨 session 共享的长期任务看板（components/trackedTasks）。
+ * 长期任务 Tab 的主体是一等实体的长期任务看板（components/longTermTasks）。
  */
 const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
   isSidebarCollapsed,

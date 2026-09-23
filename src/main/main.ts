@@ -285,7 +285,6 @@ import { withChainWriteBudget } from './libs/chainWriteBudget';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
 import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
-import { TrackedTaskBoardService } from './services/trackedTaskBoard';
 import { LongTermTaskStore } from './longTermTaskStore';
 import { HeartbeatService } from './services/heartbeatService';
 import { LongTermAdvanceService, LONGTERM_ADVANCE_INTERVAL_MS } from './services/longTermAdvanceService';
@@ -3764,28 +3763,6 @@ const startSqliteDaemons = (): void => {
     // P1-2: the daemon's stuck-session reclaim stops the inert worker session
     // through the runner (working directory + artifacts preserved).
     stopWorkerSession: (sessionId) => getCoworkRunner().stopSession(sessionId, { finalStatus: 'stopped' }),
-    // Task #83: the existing daemon tick carries the tracking-board zombie
-    // assessment (read-only) plus the kv process beat, throttled to once an
-    // hour inside the daemon so the 5s tick never becomes a write storm.
-    // v1.4: before the assessment, heal the detached group-task pairs the
-    // pre-v1.4 board produced (canonical closed by a human, group task still
-    // in review). Best-effort: a failure on one pair is skipped, never thrown.
-    sweepTrackedCards: () => {
-      try {
-        const heal = getGroupTaskOrchestrationBridge().healAcceptedGroupTaskCards();
-        if (heal.healed.length > 0) {
-          console.log(`[TrackedBoard] self-healed ${heal.healed.length} detached group-task card(s): `
-            + heal.healed.map((entry) => `gt#${entry.groupTaskId}`).join(', '));
-        }
-        if (heal.skipped.length > 0) {
-          console.log(`[TrackedBoard] self-heal skipped ${heal.skipped.length} group-task card(s)`);
-        }
-      } catch (error) {
-        console.warn('[TrackedBoard] group-task self-heal failed (skipped):',
-          error instanceof Error ? error.message : String(error));
-      }
-      getTrackedTaskBoard().sweep();
-    },
     // Task #60: ground-truth "a turn is still executing on this session" probe
     // for the skill-turn watchdog latch and the session-busy dispatch hold —
     // the session status column can transiently read 'error' while the runner
@@ -5807,14 +5784,6 @@ const getCoworkRunner = () => {
       // prompt and schedule. A schedule that never fires (past 'at' datetime,
       // unparsable cron — the store computes nextRunAtMs=null for both) rolls
       // back and throws: a silently dead task is the worst outcome.
-      // Long-task board v1.2 (task #86 §6): the Twin's closure-execution
-      // channel. Both methods delegate straight to the board service, so the
-      // queue derivation stays in its single implementation and the agent layer
-      // owns no database handle of its own.
-      trackedTaskClosureTools: {
-        listPendingClosures: (input) => getTrackedTaskBoard().listPendingClosures(input),
-        acknowledgeClosure: (input) => getTrackedTaskBoard().acknowledgeClosure(input),
-      },
       // Long-term task board (redesign): the Twin's create/drive/accept tools.
       // The store handle is injected so the agent layer holds no db handle.
       longTermTaskTools: {
@@ -6705,23 +6674,6 @@ const getGroupTaskOrchestrationBridge = () => {
   return groupTaskOrchestrationBridge;
 };
 
-let trackedTaskBoard: TrackedTaskBoardService | null = null;
-const getTrackedTaskBoard = () => {
-  if (!trackedTaskBoard) {
-    const sqliteStore = getStore();
-    trackedTaskBoard = new TrackedTaskBoardService({
-      db: sqliteStore.getDatabase(),
-      orchestrationStore: getOrchestrationStore(),
-      saveDb: sqliteStore.getSaveFunction(),
-      // v1.4: closing a group-task-linked card goes THROUGH the bridge so the
-      // group task and the canonical ledger move together (one closure record,
-      // whole-card rejection when the bridge refuses).
-      resolveGroupTaskBridge: () => getGroupTaskOrchestrationBridge(),
-    });
-  }
-  return trackedTaskBoard;
-};
-
 let longTermTaskStore: LongTermTaskStore | null = null;
 /**
  * Long-term task board (redesign): first-class store over its own three tables
@@ -6775,23 +6727,6 @@ const getLongTermAdvanceService = () => {
     });
   }
   return longTermAdvanceService;
-};
-
-/**
- * Broadcast a `trackedTask:update` event so an open board refreshes after a
- * write that changes card state (currently: closing a card). The payload
- * carries a monotonic `seq` so the renderer can drop out-of-order frames, and
- * `taskIds` is the incremental refetch hint.
- */
-const broadcastTrackedTaskUpdate = (taskIds: string[], reason: string): void => {
-  const payload = { seq: getTrackedTaskBoard().nextSeq(), taskIds, reason };
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('trackedTask:update', payload);
-      } catch { /* ignore */ }
-    }
-  });
 };
 
 let longTermTaskUpdateSeq = 0;
@@ -11804,128 +11739,6 @@ if (!gotTheLock) {
     }
   });
 
-  // ==================== Tracked Task (long-task board) IPC ====================
-  // The board reads the single authoritative ledger (orchestration_tasks). The
-  // renderer never touches sqlite and never derives card state itself.
-
-  ipcMain.handle('trackedTask:list', async (_event, input?: {
-    ownerGlobalMetaId?: string;
-    scope?: 'default' | 'all';
-    limit?: number;
-    offset?: number;
-  }) => {
-    try {
-      const board = getTrackedTaskBoard().listCards(input ?? {});
-      return { success: true, board };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to list tracked cards' };
-    }
-  });
-
-  ipcMain.handle('trackedTask:detail', async (_event, input: { cardId: string }) => {
-    try {
-      const detail = getTrackedTaskBoard().getCard(input?.cardId);
-      if (!detail) return { success: false, code: 'NOT_FOUND', error: 'Card not found' };
-      return { success: true, detail };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the card' };
-    }
-  });
-
-  ipcMain.handle('trackedTask:cardsForSession', async (_event, input: { sessionId: string }) => {
-    try {
-      const cards = getTrackedTaskBoard().listCardsForSession(input?.sessionId);
-      return { success: true, cards };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to resolve the card for this session' };
-    }
-  });
-
-  ipcMain.handle('trackedTask:unattachedScheduledTasks', async () => {
-    try {
-      return { success: true, tasks: getTrackedTaskBoard().listUnattachedScheduledTasks() };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to list scheduled tasks' };
-    }
-  });
-
-  ipcMain.handle('trackedTask:attachScheduledTasks', async (_event, input: { scheduledTaskIds: string[] }) => {
-    try {
-      const twin = getMetabotStore().listMetabots().find((bot) => bot.metabot_type === 'twin' && bot.enabled);
-      if (!twin) return { attached: [], skipped: [], error: 'No enabled local Twin Bot to own the cards.' };
-      const ownerGlobalMetaId = getUserIdentityStore().get()?.globalmetaid ?? '';
-      const result = getTrackedTaskBoard().attachScheduledTasks({
-        scheduledTaskIds: input?.scheduledTaskIds ?? [],
-        ownerGlobalMetaId,
-        twinMetabotId: twin.id,
-      });
-      if (result.attached.length > 0) {
-        broadcastTrackedTaskUpdate(result.attached.map((entry) => entry.cardId), 'scheduled_attached');
-      }
-      return result;
-    } catch (error) {
-      return { attached: [], skipped: [], error: error instanceof Error ? error.message : 'Failed to attach' };
-    }
-  });
-
-  ipcMain.handle('trackedTask:close', async (_event, input: {
-    cardId: string;
-    /** v1.4: nullable — a blank/absent conclusion is acceptance without an instruction. */
-    conclusion: string | null;
-    by: 'owner' | 'twin';
-    targetStatus?: 'completed' | 'cancelled';
-    pinId?: string | null;
-  }) => {
-    try {
-      const result = getTrackedTaskBoard().closeCard({
-        taskId: input?.cardId,
-        conclusion: input?.conclusion,
-        by: input?.by,
-        targetStatus: input?.targetStatus,
-        pinId: input?.pinId ?? null,
-      });
-      if (result.ok) broadcastTrackedTaskUpdate([input.cardId], 'closed');
-      return result;
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : 'Failed to close the card' };
-    }
-  });
-  ipcMain.handle('trackedTask:admissionMode', async () => {
-    try {
-      return { success: true, mode: getTrackedTaskBoard().getAdmissionMode() };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the admission mode' };
-    }
-  });
-
-  ipcMain.handle('trackedTask:setAdmissionMode', async (_event, input: { mode: string }) => {
-    try {
-      const mode = getTrackedTaskBoard().setAdmissionMode(input?.mode ?? '');
-      // The mode decides which rows are admitted, so it changes cards, counts and
-      // the archive population at once: refresh the open board, never patch it.
-      broadcastTrackedTaskUpdate([], 'admission_mode');
-      return { success: true, mode };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to set the admission mode' };
-    }
-  });
-
-  // v1.3 手工归档（kv 单行 override，可逆）：只动投影，不动台账行本身。
-  ipcMain.handle('trackedTask:archiveCard', async (_event, input: { cardId: string; archived: boolean }) => {
-    try {
-      const result = getTrackedTaskBoard().archiveCard({
-        cardId: input?.cardId,
-        archived: input?.archived,
-      });
-      // The override shifts the admitted/archived population and counts:
-      // refresh open boards the same way an admission-mode switch does.
-      if (result.ok) broadcastTrackedTaskUpdate([input.cardId], 'archived');
-      return result;
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : 'Failed to archive the card' };
-    }
-  });
-
   // ==================== Long-Term Task IPC (first-class board, redesign) ====================
   // Owner-side channel (actor='owner'); the Twin acts through the longterm_*
   // agent tools. Every mutation broadcasts longtermTask:update.
@@ -12049,6 +11862,31 @@ if (!gotTheLock) {
       return result;
     } catch (error) {
       return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to add the note' };
+    }
+  });
+
+  /** Session-side origin chip: which long-term task/sub-project owns this session (null = independent session). */
+  ipcMain.handle('longtermTask:forSession', async (_event, input: { sessionId: string }) => {
+    try {
+      const hit = getLongTermTaskStore().findBySessionId(input?.sessionId);
+      return {
+        success: true,
+        hit: hit
+          ? { taskId: hit.task.id, taskTitle: hit.task.title, subtaskId: hit.subtask?.id ?? null, subtaskTitle: hit.subtask?.title ?? null }
+          : null,
+      };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to resolve the task for this session' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:moveSubtask', async (_event, input: { subtaskId: string; direction: 'up' | 'down' }) => {
+    try {
+      const result = getLongTermTaskStore().moveSubtask(input?.subtaskId, input?.direction, 'owner');
+      if (result.ok) broadcastLongTermTaskUpdate([result.value?.taskId ?? ''], 'subtask_moved');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to move the sub-project' };
     }
   });
 

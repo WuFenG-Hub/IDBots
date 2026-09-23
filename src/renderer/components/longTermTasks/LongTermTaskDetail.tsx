@@ -4,7 +4,7 @@ import { RootState } from '../../store';
 import { selectTask } from '../../store/slices/longTermTaskSlice';
 import { longTermTaskService } from '../../services/longTermTask';
 import { i18nService } from '../../services/i18n';
-import { ArrowLeftIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 import {
   LONG_TERM_COLUMN_LABEL_KEYS,
   LONG_TERM_SUBTASK_STATUS_LABEL_KEYS,
@@ -190,48 +190,75 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
             {i18nService.t('longTermTask.subtasks')}
           </div>
           <div className="space-y-1">
-            {detail.subtasks.map((subtask) => {
+            {detail.subtasks.map((subtask, index) => {
               const icon = SUBTASK_ICON[subtask.status];
               const isSelected = selectedSubtask?.id === subtask.id;
               const isCurrent = detail.currentSubtaskId === subtask.id;
+              const movable =
+                subtask.status !== 'accepted' &&
+                subtask.status !== 'skipped' &&
+                (detail.stage === 'active' || detail.stage === 'defining');
               return (
-                <button
-                  key={subtask.id}
-                  type="button"
-                  onClick={() => setSelectedSubtaskId(subtask.id)}
-                  className={`w-full rounded-lg border px-3 py-2 text-left transition ${
-                    isSelected
-                      ? 'border-brand/60 dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover'
-                      : 'border-transparent dark:hover:bg-claude-darkSurfaceHover/60 hover:bg-claude-surfaceHover/60'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className={`w-5 text-center text-xs ${icon.className}`}>{icon.glyph}</span>
-                    <span
-                      className={`text-xs font-medium dark:text-claude-darkText text-claude-text ${
-                        subtask.status === 'accepted' ? 'line-through opacity-70' : ''
-                      }`}
-                    >
-                      {subtask.ordinal}. {subtask.title}
+                <div key={subtask.id} className="flex items-stretch gap-1">
+                  {movable && (
+                    <span className="flex w-4 shrink-0 flex-col items-center justify-center">
+                      <button
+                        type="button"
+                        disabled={index === 0}
+                        title={i18nService.t('longTermTask.moveUp')}
+                        onClick={() => void runAction(() => longTermTaskService.moveSubtask(detail.id, subtask.id, 'up'))}
+                        className="p-0 dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text disabled:opacity-25"
+                      >
+                        <ChevronUpIcon className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={index === detail.subtasks.length - 1}
+                        title={i18nService.t('longTermTask.moveDown')}
+                        onClick={() => void runAction(() => longTermTaskService.moveSubtask(detail.id, subtask.id, 'down'))}
+                        className="p-0 dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text disabled:opacity-25"
+                      >
+                        <ChevronDownIcon className="h-3.5 w-3.5" />
+                      </button>
                     </span>
-                    {isCurrent && (
-                      <span className="inline-flex items-center rounded-full bg-brand/15 px-2 py-0.5 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
-                        {i18nService.t('longTermTask.subtask.current')}
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSubtaskId(subtask.id)}
+                    className={`flex-1 rounded-lg border px-3 py-2 text-left transition ${
+                      isSelected
+                        ? 'border-brand/60 dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover'
+                        : 'border-transparent dark:hover:bg-claude-darkSurfaceHover/60 hover:bg-claude-surfaceHover/60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={`w-5 text-center text-xs ${icon.className}`}>{icon.glyph}</span>
+                      <span
+                        className={`text-xs font-medium dark:text-claude-darkText text-claude-text ${
+                          subtask.status === 'accepted' ? 'line-through opacity-70' : ''
+                        }`}
+                      >
+                        {subtask.ordinal}. {subtask.title}
                       </span>
-                    )}
-                    <span className="flex-1" />
-                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${SUBTASK_CHIP_CLASS[subtask.status]}`}>
-                      {i18nService.t(LONG_TERM_SUBTASK_STATUS_LABEL_KEYS[subtask.status])}
-                    </span>
-                  </div>
-                  <div className="ml-7 mt-0.5 flex items-center gap-2 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {subtask.dependsOn.length > 0 && (
-                      <span>{i18nService.t('longTermTask.dependsOn').replace('{ids}', String(subtask.dependsOn.length))}</span>
-                    )}
-                    {subtask.evidence.length > 0 && <span className="text-sky-600 dark:text-sky-400">{i18nService.t('longTermTask.subtask.evidence')} {subtask.evidence.length}</span>}
-                    {subtask.sessionId && <span>●</span>}
-                  </div>
-                </button>
+                      {isCurrent && (
+                        <span className="inline-flex items-center rounded-full bg-brand/15 px-2 py-0.5 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                          {i18nService.t('longTermTask.subtask.current')}
+                        </span>
+                      )}
+                      <span className="flex-1" />
+                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${SUBTASK_CHIP_CLASS[subtask.status]}`}>
+                        {i18nService.t(LONG_TERM_SUBTASK_STATUS_LABEL_KEYS[subtask.status])}
+                      </span>
+                    </div>
+                    <div className="ml-7 mt-0.5 flex items-center gap-2 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {subtask.dependsOn.length > 0 && (
+                        <span>{i18nService.t('longTermTask.dependsOn').replace('{ids}', String(subtask.dependsOn.length))}</span>
+                      )}
+                      {subtask.evidence.length > 0 && <span className="text-sky-600 dark:text-sky-400">{i18nService.t('longTermTask.subtask.evidence')} {subtask.evidence.length}</span>}
+                      {subtask.sessionId && <span>●</span>}
+                    </div>
+                  </button>
+                </div>
               );
             })}
           </div>

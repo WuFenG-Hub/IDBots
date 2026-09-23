@@ -11,7 +11,7 @@ const { LongTermTaskStore } = require('../dist-electron/main/longTermTaskStore.j
 
 /**
  * Long-term task store (P0). Runs against the compiled output
- * (pnpm run compile:electron first), same as trackedTaskBoard.test.mjs.
+ * (pnpm run compile:electron first).
  */
 
 async function openStore() {

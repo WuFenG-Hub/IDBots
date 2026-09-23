@@ -908,6 +908,54 @@ export class LongTermTaskStore {
     }
   }
 
+  /** Reverse lookup for the session-side origin chip: which task/sub-project owns this session. */
+  findBySessionId(sessionId: string): { task: LongTermTaskSummary; subtask: LongTermSubtask | null } | null {
+    const trimmed = asText(sessionId).trim();
+    if (!trimmed) return null;
+    const subRow = this.getOne<SubtaskRow>('SELECT * FROM long_term_subtasks WHERE session_id = ?', [trimmed]);
+    if (subRow) {
+      const taskRow = this.getTaskRow(subRow.task_id);
+      if (!taskRow) return null;
+      const subtasks = this.listSubtaskRows(taskRow.id).map((row) => this.mapSubtask(row));
+      return { task: this.toSummary(taskRow, subtasks), subtask: this.mapSubtask(subRow) };
+    }
+    const taskRow = this.getOne<TaskRow>('SELECT * FROM long_term_tasks WHERE definition_session_id = ?', [trimmed]);
+    if (!taskRow) return null;
+    const subtasks = this.listSubtaskRows(taskRow.id).map((row) => this.mapSubtask(row));
+    return { task: this.toSummary(taskRow, subtasks), subtask: null };
+  }
+
+  /**
+   * Move a sub-project one slot up/down (swap ordinals with the neighbor).
+   * The UNIQUE(task_id, ordinal) pair makes a direct swap impossible, so the
+   * current row parks at a temp ordinal mid-flight.
+   */
+  moveSubtask(subtaskId: string, direction: 'up' | 'down', actor: LongTermActor): LongTermResult<LongTermSubtask> {
+    const current = this.getSubtask(subtaskId);
+    if (!current) return { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
+    if (current.status === 'accepted' || current.status === 'skipped') {
+      return { ok: false, code: 'VALIDATION', error: `cannot move a ${current.status} sub-project` };
+    }
+    const siblings = this.listSubtaskRows(current.taskId)
+      .map((row) => this.mapSubtask(row))
+      .sort((a, b) => a.ordinal - b.ordinal);
+    const index = siblings.findIndex((sub) => sub.id === subtaskId);
+    const neighbor = direction === 'up' ? siblings[index - 1] : siblings[index + 1];
+    if (!neighbor) {
+      return { ok: false, code: 'VALIDATION', error: direction === 'up' ? 'already first' : 'already last' };
+    }
+    const now = nowIso();
+    const tempOrdinal = siblings.reduce((max, sub) => Math.max(max, sub.ordinal), 0) + 1;
+    this.db.run('UPDATE long_term_subtasks SET ordinal = ?, updated_at = ? WHERE id = ?', [tempOrdinal, now, current.id]);
+    this.db.run('UPDATE long_term_subtasks SET ordinal = ?, updated_at = ? WHERE id = ?', [current.ordinal, now, neighbor.id]);
+    this.db.run('UPDATE long_term_subtasks SET ordinal = ?, updated_at = ? WHERE id = ?', [neighbor.ordinal, now, current.id]);
+    this.addEvent(current.taskId, current.id, 'replanned', actor, `moved ${direction} (#${current.ordinal} → #${neighbor.ordinal})`);
+    this.touch(current.taskId);
+    this.saveDb();
+    const updated = this.getSubtask(subtaskId);
+    return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
+  }
+
   /** Heartbeat read: open sub-projects waiting on a time-based condition that's now due. */
   listDueWaits(now: Date = new Date()): LongTermSubtask[] {
     return this.getAll<SubtaskRow>(

@@ -36,8 +36,8 @@ import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice'
 import { setDraftPrompt, setPreferredMetabotId } from './store/slices/coworkSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
 import { setActiveSkillIds } from './store/slices/skillSlice';
-import { selectCard as selectTrackedCard } from './store/slices/trackedTaskSlice';
-import { trackedTaskService } from './services/trackedTask';
+import { selectTask as selectLongTermTask } from './store/slices/longTermTaskSlice';
+import { longTermTaskService } from './services/longTermTask';
 import { selectTask as selectGroupTask } from './store/slices/groupTasksSlice';
 import type { ApiConfig } from './services/api';
 import type { MetaAppRecord } from './types/metaApp';
@@ -1052,19 +1052,19 @@ const App: React.FC = () => {
     return () => window.removeEventListener('scheduledTask:viewSession', handleViewSession);
   }, []);
 
-  // 监听「打开看板里的这张卡」事件（会话侧 chip → 跟踪任务页）
+  // 监听「打开看板里的这个长期任务」事件（会话侧 chip → 跟踪任务页）
   useEffect(() => {
-    const handleViewTrackedCard = (event: Event) => {
+    const handleViewLongTermTask = (event: Event) => {
       const detail = (event as CustomEvent).detail ?? {};
-      const cardId = typeof detail.cardId === 'string' ? detail.cardId.trim() : '';
-      if (!cardId) return;
+      const taskId = typeof detail.taskId === 'string' ? detail.taskId.trim() : '';
+      if (!taskId) return;
       botBrowserShell.switchToHome();
       setMainView('scheduledTasks');
-      dispatch(selectTrackedCard(cardId));
-      void trackedTaskService.loadCard(cardId);
+      dispatch(selectLongTermTask(taskId));
+      void longTermTaskService.loadTask(taskId);
     };
-    window.addEventListener('trackedTask:viewCard', handleViewTrackedCard);
-    return () => window.removeEventListener('trackedTask:viewCard', handleViewTrackedCard);
+    window.addEventListener('longtermTask:viewTask', handleViewLongTermTask);
+    return () => window.removeEventListener('longtermTask:viewTask', handleViewLongTermTask);
   }, [botBrowserShell.switchToHome, dispatch]);
 
   useEffect(() => {

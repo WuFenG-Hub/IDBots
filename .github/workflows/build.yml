@@ -103,13 +103,11 @@ jobs:
       - name: Run LLM-safe text tests
         run: node --test tests/llmSafeText.test.mjs
 
-      # The tracked-task board suite guards the long-task board (tasks #83/#84):
-      # the ledger admission gate, the one-time backfill of pre-upgrade terminal
-      # rows, the card ordering contract, and the closing-modal copy contract.
-      # It sat outside any workflow step until now, so a regression here could
-      # ship green.
-      - name: Run tracked-task board tests
-        run: node --test tests/trackedTaskBoard.test.mjs && pnpm exec tsx --test tests/trackedTaskRanking.test.ts
+      # The long-term task suite guards the first-class board (redesign):
+      # the entity store lifecycle, the heartbeat dispatcher, and the
+      # longterm.advance escalation rules.
+      - name: Run long-term task tests
+        run: node --test tests/longTermTaskStore.test.mjs tests/heartbeatService.test.mjs tests/longTermAdvanceService.test.mjs
 
       - name: Validate runtime dependency contracts
         run: |

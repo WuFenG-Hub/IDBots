@@ -17,7 +17,7 @@ const FALLBACK_POLL_MS = 30_000;
 
 /**
  * Long-term task board (redesign) — renderer service layer: IPC → Redux, no
- * derivation. Mirrors the trackedTask service shape.
+ * derivation. Follows the repo's standard slice/service split.
  *
  * Push: `longtermTask:update` frames carry a monotonic seq; stale frames are
  * dropped. A 30s poll backstops a missed push.
@@ -163,6 +163,10 @@ class LongTermTaskService {
 
   async unblockSubtask(taskId: string, subtaskId: string, note?: string) {
     return this.runAction(taskId, () => this.api()!.unblock({ subtaskId, note }));
+  }
+
+  async moveSubtask(taskId: string, subtaskId: string, direction: 'up' | 'down') {
+    return this.runAction(taskId, () => this.api()!.moveSubtask({ subtaskId, direction }));
   }
 
   async addNote(taskId: string, text: string, subtaskId?: string) {

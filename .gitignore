@@ -58,8 +58,6 @@ docs/*
 !docs/tickets/**
 tests/*
 !tests/fixtures/
-!tests/fixtures/longTaskBoardSeed.mjs
-!tests/trackedTaskBoard.test.mjs
 !tests/longTermTaskStore.test.mjs
 !tests/heartbeatService.test.mjs
 !tests/longTermAdvanceService.test.mjs

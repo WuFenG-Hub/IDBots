@@ -855,56 +855,6 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('scheduledTask:runUpdate', handler);
     },
   },
-  trackedTask: {
-    // Long-task board over the single authoritative ledger (orchestration_tasks).
-    // The renderer must read card state through these channels only.
-    list: (input?: {
-      ownerGlobalMetaId?: string;
-      scope?: 'default' | 'all' | 'archived';
-      limit?: number;
-      offset?: number;
-    }) => ipcRenderer.invoke('trackedTask:list', input),
-    /**
-     * v1.1 admission mode (freeze doc §2). `wide` = ADM-1..ADM-5, `strict` =
-     * ADM-1 v ADM-3. It is one row in the existing `kv` table, so switching is
-     * reversible and changes no stored data shape.
-     */
-    admissionMode: () => ipcRenderer.invoke('trackedTask:admissionMode'),
-    setAdmissionMode: (input: { mode: 'wide' | 'strict' }) =>
-      ipcRenderer.invoke('trackedTask:setAdmissionMode', input),
-    detail: (input: { cardId: string }) => ipcRenderer.invoke('trackedTask:detail', input),
-    cardsForSession: (input: { sessionId: string }) => ipcRenderer.invoke('trackedTask:cardsForSession', input),
-    /** D2 batch confirm: list the scheduled tasks that are not on a card yet. */
-    unattachedScheduledTasks: () => ipcRenderer.invoke('trackedTask:unattachedScheduledTasks'),
-    /** Attach exactly the named scheduled tasks; never a blanket backfill. */
-    attachScheduledTasks: (input: { scheduledTaskIds: string[] }) =>
-      ipcRenderer.invoke('trackedTask:attachScheduledTasks', input),
-    close: (input: {
-      cardId: string;
-      /** v1.4: nullable — a blank/absent conclusion is acceptance without an instruction. */
-      conclusion: string | null;
-      by: 'owner' | 'twin';
-      targetStatus?: 'completed' | 'cancelled';
-      pinId?: string | null;
-    }) => ipcRenderer.invoke('trackedTask:close', input),
-    /**
-     * v1.3 manual archive override: one `kv` row, reversible, ledger untouched.
-     * `archived: true` moves the card into the archive projection; the row
-     * stays queryable and nothing is deleted.
-     */
-    archiveCard: (input: { cardId: string; archived: boolean }) =>
-      ipcRenderer.invoke('trackedTask:archiveCard', input),
-    /**
-     * `seq` is monotonic per process: drop any frame with `seq <= lastSeenSeq`
-     * and refetch only `taskIds`. Poll once every 30s as a fallback for a
-     * missed push.
-     */
-    onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => {
-      const handler = (_event: any, data: any) => callback(data);
-      ipcRenderer.on('trackedTask:update', handler);
-      return () => ipcRenderer.removeListener('trackedTask:update', handler);
-    },
-  },
   longtermTask: {
     // Long-term task board (first-class redesign): board read + owner actions.
     // The Twin's channel is the longterm_* agent tools; these are the owner's.
@@ -939,6 +889,9 @@ contextBridge.exposeInMainWorld('electron', {
     reject: (input: { subtaskId: string; feedback: string }) => ipcRenderer.invoke('longtermTask:reject', input),
     unblock: (input: { subtaskId: string; note?: string }) => ipcRenderer.invoke('longtermTask:unblock', input),
     note: (input: { taskId: string; subtaskId?: string; text: string }) => ipcRenderer.invoke('longtermTask:note', input),
+    /** Reverse lookup for the session-side origin chip. */
+    forSession: (input: { sessionId: string }) => ipcRenderer.invoke('longtermTask:forSession', input),
+    moveSubtask: (input: { subtaskId: string; direction: 'up' | 'down' }) => ipcRenderer.invoke('longtermTask:moveSubtask', input),
     /** Monotonic seq per process: drop frames with seq <= lastSeenSeq. */
     onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => {
       const handler = (_event: any, data: any) => callback(data);
