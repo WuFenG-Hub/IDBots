@@ -41,10 +41,13 @@ import { buildMetaBotToggleViewModel, canShowMetabotTwinSwitch } from './metaBot
 
 const AVATAR_MAX_SIZE_BYTES = 200 * 1024; // 200KB
 
-// A2A private-chat limits; keep in sync with src/main/services/a2aChatLimits.ts.
+// A2A private-chat limits; keep in sync with src/main/services/a2aChatLimits.ts
+// (pinned by tests/quotaRendererSync.test.mjs — the quota audit 2026-09-17
+// raised the main default and this copy lagged, silently downgrading every
+// edited bot back to the old cap).
 const A2A_MAX_INCOMING_TURNS_OPTIONS: readonly number[] = [20, 30, 50, 80, 100, 150, 200];
 const A2A_BYE_COOLDOWN_MS_OPTIONS: readonly number[] = [60_000, 300_000, 600_000, 1_800_000, 3_600_000];
-const DEFAULT_A2A_MAX_INCOMING_TURNS = 30;
+const DEFAULT_A2A_MAX_INCOMING_TURNS = 50;
 const DEFAULT_A2A_BYE_COOLDOWN_MS = 300_000;
 
 export const normalizeA2AMaxIncomingTurnsOption = (value: unknown): number =>

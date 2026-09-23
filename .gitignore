@@ -66,6 +66,7 @@ tests/*
 !tests/longTermTaskAgentTools.test.mjs
 !tests/heartbeatService.test.mjs
 !tests/longTermAdvanceService.test.mjs
+!tests/quotaRendererSync.test.mjs
 !tests/rsiLadderCompute.test.ts
 !tests/rsiLadderIndex.test.ts
 !tests/rsiLadderMountStatic.test.ts

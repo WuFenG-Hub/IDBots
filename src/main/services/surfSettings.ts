@@ -4,7 +4,8 @@
  * Persisted through the generic metabot_settings kv store and whitelisted for
  * the renderer in metabotSettingsService. Read helpers centralize the defaults
  * so a bot that never touched the settings gets the product defaults
- * (surf-before-dream OFF — opt-in, interaction budget 20).
+ * (surf-before-dream OFF — opt-in, interaction budget 50; the renderer copy in
+ * SurfSection.tsx is pinned to these values by tests/quotaRendererSync.test.mjs).
  */
 
 import type { MetabotStore } from '../metabotStore';
