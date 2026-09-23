@@ -27,6 +27,9 @@ import {
 } from '../orchestrationStore';
 import type { CoworkCrossSessionInsertResult } from './coworkCrossSession';
 import type { Metabot } from '../types/metabot';
+import type { LongTermTaskStore } from '../longTermTaskStore';
+import { buildDelegationAnchorBlock, LONGTERM_ANCHOR_MARKER } from '../libs/longTermDelegationAnchor';
+import { getPersistedAppLanguage } from '../libs/appLanguage';
 
 /**
  * Round-4 r6: cross-session notify seam. Defaults to the host CoworkRunner's
@@ -78,6 +81,13 @@ export interface TwinOrchestrationServiceDeps {
   directory: TwinWorkerDirectoryDeps;
   getMetabotById(id: number): Metabot | null;
   getWorkerWorkspace(metabotId: number): string;
+  /**
+   * Long-term delegation anchor (hard gate): when set, a delegation whose
+   * source session is bound to a long-term sub-project always has the
+   * <longterm_anchor> block prepended if the Twin forgot it (skill discipline
+   * is advisory; this service makes it structural).
+   */
+  longTermTaskStore?: () => LongTermTaskStore;
   runWorkerTurn?: (params: RunOrchestratorSkillTurnParams) => Promise<string>;
   /**
    * Round-4 r6: worker-completion notification to the Twin. Defaults to the
@@ -475,6 +485,23 @@ export class TwinOrchestrationService {
     }
   }
 
+  /**
+   * Long-term delegation anchor (hard gate): when the source session is bound
+   * to a long-term sub-project and the objective lacks the anchor marker,
+   * prepend a freshly built anchor block. The exec skill asks the Twin to
+   * include it; this service guarantees the worker always receives it.
+   */
+  private withLongTermAnchor(sourceSessionId: string, objective: string): string {
+    if (objective.includes(LONGTERM_ANCHOR_MARKER)) return objective;
+    const store = this.deps.longTermTaskStore?.();
+    if (!store) return objective;
+    const hit = store.findBySessionId(sourceSessionId);
+    if (!hit?.subtask) return objective;
+    const detail = store.getTask(hit.task.id);
+    if (!detail) return objective;
+    return `${buildDelegationAnchorBlock(detail, hit.subtask, getPersistedAppLanguage())}\n\n${objective}`;
+  }
+
   async delegateLocalWorker(sourceSessionId: string, input: DelegateLocalWorkerInput): Promise<DelegateLocalWorkerResult> {
     const { twin, ownerGlobalMetaId } = authorizeTwinSession(sourceSessionId, this.deps.directory);
     const workerMetabotId = Math.trunc(Number(input.workerMetabotId));
@@ -485,6 +512,11 @@ export class TwinOrchestrationService {
     if (!worker.enabled) throw new Error('WORKER_DISABLED');
     const objective = String(input.objective ?? '').trim();
     if (!objective) throw new Error('WORKER_OBJECTIVE_REQUIRED');
+    // Long-term delegation anchor (hard gate): a delegation issued from a
+    // long-term-bound session ALWAYS carries the <longterm_anchor> block —
+    // prepended here when the Twin left it out (skill discipline is advisory;
+    // this service makes it structural).
+    const delegatedObjective = this.withLongTermAnchor(sourceSessionId, objective);
 
     const requestedIdempotencyKey = String(input.idempotencyKey ?? '').trim();
     if (requestedIdempotencyKey) {
@@ -540,7 +572,7 @@ export class TwinOrchestrationService {
         taskId: task.id,
         ordinal: existingSteps.length + 1,
         title: worker.name,
-        objective,
+        objective: delegatedObjective,
         acceptanceCriteria: input.acceptanceCriteria ?? [],
         assigneeMetabotId: worker.id,
         permissionScope: input.permissionScope ?? { workspace: 'read_write', network: 'read_only' },
@@ -565,13 +597,13 @@ export class TwinOrchestrationService {
       stepId: step.id,
       idempotencyKey,
       workerMetabotId: worker.id,
-      prompt: objective,
+      prompt: delegatedObjective,
     });
     // 清单 #12: a retry supersedes this step's earlier failed attempt — mark
     // its worker session so the UI shows "already retried" instead of a bare
     // error that reads like an abandoned task.
     this.markSupersededAttemptSessions(step.id);
-    void this.executeAttempt(task, step, attempt, worker, input);
+    void this.executeAttempt(task, step, attempt, worker, { ...input, objective: delegatedObjective });
     return {
       task: this.deps.orchestrationStore.getTask(task.id)!,
       step: this.deps.orchestrationStore.getStep(step.id)!,
