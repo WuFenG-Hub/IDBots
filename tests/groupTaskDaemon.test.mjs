@@ -6994,7 +6994,7 @@ test('Task #83 F3: an open checkpoint gone stale after the owner\'s reply remind
   }
 });
 
-test('Task #83 F3: an open checkpoint with NO owner reply re-reminds the owner once', async () => {
+test('Task #83 F3: an open checkpoint with NO owner reply re-reminds the owner on a bounded ladder', async () => {
   const milestones = [];
   const h = await createHarness({
     deps: {
@@ -7005,7 +7005,7 @@ test('Task #83 F3: an open checkpoint with NO owner reply re-reminds the owner o
     const task = h.createTask([2]);
     h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-f3', task.id]);
     h.state.nowMs = Date.now();
-    h.groupTaskStore.openCheckpoint({
+    const checkpoint = h.groupTaskStore.openCheckpoint({
       taskId: task.id, topic: 'draft approval', msgPinId: 'pin-f3b-open',
     });
     await h.loop.runTick();
@@ -7014,19 +7014,174 @@ test('Task #83 F3: an open checkpoint with NO owner reply re-reminds the owner o
     // 46 min of total silence: the opening notice may have been missed.
     h.state.nowMs += 46 * 60_000;
     await h.loop.runTick();
-    const reminders = milestones.filter(
+    const stallReminders = () => milestones.filter(
       (m) => m.kind === 'checkpoint' && typeof m.subject === 'string' && m.subject.startsWith('checkpoint_stall:'),
     );
-    assert.equal(reminders.length, 1, 'one owner re-reminder per checkpoint');
-    assert.match(reminders[0].message, /draft approval/);
+    assert.equal(stallReminders().length, 1, 'first owner re-reminder at 45 min');
+    assert.match(stallReminders()[0].message, /draft approval/);
+    assert.match(stallReminders()[0].message, /reminder #1|第 1 次提醒/, 'the rung is named in the notice');
+    // The same rung also re-sends on the chair→owner private channel (the
+    // origin-session note alone never reached the owner in task #94).
+    const privateReminders = () => h.ownerReportCalls.filter((c) => c.kind === 'checkpoint');
+    assert.equal(privateReminders().length, 1, 'rung #1 re-sends the private A2A reminder');
+    assert.match(privateReminders()[0].text, /draft approval/);
 
+    // Inside the window: no early repeat.
     h.state.nowMs += 60_000;
     await h.loop.runTick();
+    assert.equal(stallReminders().length, 1, 'no repeat inside the 45-min window');
+
+    // Rungs #2…#4 land every 45 min while the owner stays silent.
+    h.state.nowMs += 45 * 60_000;
+    await h.loop.runTick();
+    assert.equal(stallReminders().length, 2, 'rung #2 after another 45 min');
+    h.state.nowMs += 45 * 60_000;
+    await h.loop.runTick();
+    h.state.nowMs += 45 * 60_000;
+    await h.loop.runTick();
+    assert.equal(stallReminders().length, 4, 'the ladder climbs while the owner is silent');
+    assert.equal(privateReminders().length, 4, 'every rung re-sends the private reminder');
+
+    // Bounded: past the cap the ladder stops (the task view carries the wait).
+    h.state.nowMs += 45 * 60_000;
+    await h.loop.runTick();
+    assert.equal(stallReminders().length, 4, 'the ladder is capped — no rung #5');
+    assert.equal(privateReminders().length, 4, 'private reminders stop at the cap too');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #94: an owner reply to an open checkpoint preempts the chair\'s lingering session', async () => {
+  const stoppedSessions = [];
+  const h = await createHarness({
+    deps: {
+      stopWorkerSession: (sessionId) => stoppedSessions.push(sessionId),
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    const checkpoint = h.groupTaskStore.openCheckpoint({
+      taskId: task.id, topic: '像素实读门的关闭方式', msgPinId: 'pin-t94-open',
+    });
+    // The chair's group-task session is still monopolized by the pre-checkpoint
+    // turn (task #94: the chair opened the checkpoint mid-turn, then kept
+    // running 10-min download probes — the owner's ruling sat behind the
+    // 45-min session-busy hold).
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 1, 'Twin Bot');
+    h.coworkStore.updateSession(session.id, { status: 'running' });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-t94-ruling', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: 'B',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 2,
+    });
+    await h.loop.runTick();
+    assert.deepEqual(stoppedSessions, [session.id], 'the owner reply aborts the lingering chair turn');
     assert.equal(
-      milestones.filter((m) => m.subject?.startsWith('checkpoint_stall:')).length,
-      1,
-      'no repeated re-reminder',
+      h.store.get(`group_task_checkpoint_owner_preempted:${task.id}:${checkpoint.id}`),
+      '1',
+      'the preemption is kv-stamped',
     );
+
+    // Once per checkpoint: later ticks never re-stop the session.
+    await h.loop.runTick();
+    assert.equal(stoppedSessions.length, 1, 'preemption fires once per checkpoint');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #94: owner silence with an IDLE chair session never preempts', async () => {
+  const stoppedSessions = [];
+  const h = await createHarness({
+    deps: {
+      stopWorkerSession: (sessionId) => stoppedSessions.push(sessionId),
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    h.groupTaskStore.openCheckpoint({
+      taskId: task.id, topic: 'gate', msgPinId: 'pin-t94c-open',
+    });
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 1, 'Twin Bot');
+    // Session idle (default status) — nothing to preempt even though the owner replies.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-t94c-ruling', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: 'A',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) + 2,
+    });
+    await h.loop.runTick();
+    assert.equal(stoppedSessions.length, 0, 'no preemption when the chair session is idle');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #94: a signal turn deferred by an open checkpoint is not drive activity (no phantom heartbeat)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    const oldSec = Math.floor(h.state.nowMs / 1000) - 3600;
+    h.groupTaskStore.updateLastDrivenAt(task.id, oldSec);
+    h.groupTaskStore.addSupervisorSignal({ taskId: task.id, kind: 'nudge', note: 'status please' });
+    h.groupTaskStore.openCheckpoint({ taskId: task.id, topic: 'gate', msgPinId: 'pin-t94b-open' });
+    await h.loop.runTick();
+    await h.loop.runTick();
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).lastDrivenAt,
+      oldSec,
+      'a signal turn that only defers to the human gate must not refresh lastDrivenAt',
+    );
+    assert.equal(h.chatCalls.length + h.skillTurnCalls.length, 0, 'no chair LLM work was dispatched');
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      1,
+      'the signal stays pending for the first post-checkpoint tick',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('task #94: a busy-but-silent chair session only delays the no-progress nudge up to the stall window', async () => {
+  const h = await createHarness({
+    deps: { noProgressNudgeMs: 60_000, noProgressStallMs: 300_000 },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 1, 'Twin Bot');
+    const refreshSession = () => h.db.run(
+      'UPDATE cowork_sessions SET updated_at = ? WHERE id = ?',
+      [h.state.nowMs - 5_000, session.id],
+    );
+    refreshSession();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-t94d-last', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: 'working on it',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000) - 200, // 200s idle: past the nudge window, inside the stall window
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.groupTaskStore.listPendingSupervisorSignals(task.id).length,
+      0,
+      'inside the stall window a recently-active chair session still suppresses the nudge',
+    );
+
+    // Past the stall window with zero group output, the chair owes a status
+    // report no matter how busy its session looks (task #94's 51-min silence).
+    h.state.nowMs += 200_000; // idle is now 400s > 300s stall window
+    refreshSession(); // the session still looks busy
+    await h.loop.runTick();
+    const pending = h.groupTaskStore.listPendingSupervisorSignals(task.id);
+    assert.equal(pending.length, 1, 'the nudge fires once the stall window is exceeded');
+    assert.equal(pending[0].kind, 'nudge');
   } finally {
     h.cleanup();
   }

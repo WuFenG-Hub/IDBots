@@ -791,25 +791,29 @@ export function buildSourceSessionCheckpointNotice(input: {
 /**
  * Task #83 audit (F3): re-reminder when an open checkpoint has waited with NO
  * owner reply for a long stretch — the opening notice may have been missed,
- * and the whole group stays paused meanwhile.
+ * and the whole group stays paused meanwhile. Repeats on a bounded ladder
+ * (reminderCount = which rung this is), so the "once per checkpoint" wording
+ * is gone.
  */
 export function buildSourceSessionCheckpointStallNotice(input: {
   title: string;
   status: string;
   topic: string | null;
   waitingMinutes: number;
+  reminderCount?: number;
 }, language: AppLanguage = groupTaskLanguage()): string {
   const topic = (input.topic ?? '').trim();
+  const rung = input.reminderCount != null ? input.reminderCount : null;
   if (language === 'en') {
     return [
-      `[GROUP_TASK_CHECKPOINT] Group task "${input.title}" (status: ${input.status}) is still paused at a decision point${topic ? ` (${topic})` : ''} — no reply from you for ~${input.waitingMinutes} min.`,
-      'The group cannot resume until you rule. Reply in the task group or to the chair directly; if this wait is intentional, no action is needed (this reminder fires once per checkpoint).',
+      `[GROUP_TASK_CHECKPOINT] Group task "${input.title}" (status: ${input.status}) is still paused at a decision point${topic ? ` (${topic})` : ''} — no reply from you for ~${input.waitingMinutes} min${rung != null ? ` (reminder #${rung})` : ''}.`,
+      'The group cannot resume until you rule. Reply in the task group or to the chair directly; if this wait is intentional, no action is needed.',
       taskPanelPointerLine(language),
     ].join('\n');
   }
   return [
-    `[GROUP_TASK_CHECKPOINT] 群任务「${input.title}」（状态：${input.status}）仍停在人工检查点${topic ? `（${topic}）` : ''}——已约 ${input.waitingMinutes} 分钟未收到你的裁定。`,
-    '在你裁定之前整组保持暂停。请在任务群内回复或直接回复 chair；若有意搁置可忽略（每个检查点只提醒一次）。',
+    `[GROUP_TASK_CHECKPOINT] 群任务「${input.title}」（状态：${input.status}）仍停在人工检查点${topic ? `（${topic}）` : ''}——已约 ${input.waitingMinutes} 分钟未收到你的裁定${rung != null ? `（第 ${rung} 次提醒）` : ''}。`,
+    '在你裁定之前整组保持暂停。请在任务群内回复或直接回复 chair；若有意搁置可忽略。',
     taskPanelPointerLine(language),
   ].join('\n');
 }
