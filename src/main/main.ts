@@ -6757,6 +6757,8 @@ const getTwinOrchestrationService = () => new TwinOrchestrationService({
   orchestrationStore: getOrchestrationStore(),
   coworkStore: getCoworkStore(),
   coworkRunner: getCoworkRunner(),
+  // Hard gate: delegations from long-term-bound sessions always carry the anchor.
+  longTermTaskStore: () => getLongTermTaskStore(),
   directory: {
     getSession: (id) => getCoworkStore().getSession(id),
     listMetabots: () => getMetabotStore().listMetabots(),
