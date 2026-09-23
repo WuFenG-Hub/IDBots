@@ -12,14 +12,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const metaAppsRoot = path.join(repoRoot, 'METAAPPs');
 
-const bundledApps = fs
-  .readdirSync(metaAppsRoot)
-  .filter((name) => fs.statSync(path.join(metaAppsRoot, name)).isDirectory())
-  .filter((name) => fs.existsSync(path.join(metaAppsRoot, name, 'APP.md')));
+// TRACKED apps only: a developer install also carries gitignored locally
+// installed chain apps under METAAPPs/ whose APP.md shape follows the chain
+// /protocols/metaapp registry, not the bundled frontmatter contract.
+const bundledApps = execFileSync('git', ['ls-files', 'METAAPPs/*/APP.md'], { cwd: repoRoot })
+  .toString()
+  .split('\n')
+  .filter(Boolean)
+  .map((entry) => path.basename(path.dirname(entry)));
 
 // Only git-tracked bundled apps ship in the package; locally installed chain
 // apps live under METAAPPs/ too but are gitignored. The tracked set today is
