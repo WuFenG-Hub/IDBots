@@ -169,6 +169,41 @@ function dreamRunKey(metabotId: number, date: string): string {
   return `${metabotId}:${date}`;
 }
 
+/** Separator set the diary uses inside composite references (「A=B」「甲→乙」). */
+const DIARY_REF_SPLIT_RE = /[·→+=|/\\、，,。：:；;！!？?（）()\[\]【】""'']+\s*|\s+/;
+
+/**
+ * Whether a diary 「」 span is anchored in the day's raw record text. Anchors,
+ * in order of strength:
+ *  1. the full span appears verbatim (a quoted catchphrase: 「屌丝」 found in
+ *     the messages);
+ *  2. a separator-delimited fragment of ≥4 chars appears verbatim (composites
+ *     the diary condenses from real records: 「密文相同=同载荷铁证」 anchors
+ *     through 密文相同 in a chain-read excerpt);
+ *  3. any contiguous window of ≥ max(4, ⌈span/2⌉) chars appears verbatim
+ *     (condensed CJK claims like 「十一枚应为十枚」 whose wording tracks the
+ *     original dispute without matching it whole).
+ * Deliberately fail-safe toward "grounded": this counter feeds a trust proxy,
+ * so a stray anchor (a fabricated phrase sharing a generic run with real text)
+ * undercounts rather than crying hallucination. Window scans are bounded by
+ * the 40-char span cap, so a huge day costs at most a few hundred substring
+ * searches over the joined record text.
+ */
+function diarySpanAnchoredInText(span: string, rawText: string): boolean {
+  if (!rawText || !span) return false;
+  if (rawText.includes(span)) return true;
+  for (const fragment of span.split(DIARY_REF_SPLIT_RE)) {
+    const trimmed = fragment.trim();
+    if (trimmed.length >= 4 && rawText.includes(trimmed)) return true;
+  }
+  const windowLen = Math.max(4, Math.ceil(span.length / 2));
+  if (windowLen >= span.length) return false;
+  for (let start = 0; start + windowLen <= span.length; start += 1) {
+    if (rawText.includes(span.slice(start, start + windowLen))) return true;
+  }
+  return false;
+}
+
 export class DreamService {
   private readonly performChat: DreamPerformChat;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -772,6 +807,7 @@ export class DreamService {
       const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
       const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
+      const diaryRefs = this.auditDiaryRefs(output.dailySummary, activity, surfReport);
       // P2a telemetry: the dream policy becomes tunable once it is measurable.
       this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
         emptyDay: false,
@@ -780,7 +816,11 @@ export class DreamService {
         estimatedActivityTokens: prepared.meta.estimatedInputTokens,
         outputChars: JSON.stringify(output).length,
         implicitSignals: activity.implicitSignals?.length ?? 0,
-        diaryUnmatchedRefs: this.countUnmatchedDiaryRefs(output.dailySummary, activity),
+        diaryUnmatchedRefs: diaryRefs.unmatched,
+        // Denominator for the diary-trust ratio (renderer trend panel). Runs
+        // written before 2026-09-23 have no total recorded — their ratio is
+        // genuinely not measurable and renders as a gap.
+        diaryTotalRefs: diaryRefs.total,
         validation,
         replay,
         weeklyLongDream,
@@ -1084,30 +1124,67 @@ export class DreamService {
   }
 
   /**
-   * Grounding telemetry (F2): count 「」-quoted spans in the diary that match
-   * no real session title, task title, or peer name from the day's record.
-   * Telemetry-only — a noisy proxy for hallucinated references, never a gate.
+   * Grounding telemetry (F2): audit 「」-quoted spans in the diary against the
+   * day's records. A span is GROUNDED when it matches either
+   *  (a) a real record TITLE — session titles, peer names, group task / chat
+   *      titles, chain-read titles — fuzzily (containment either way), or
+   *  (b) the day's RAW RECORD TEXT — session message bodies, group-chat
+   *      messages, chain-write content, chain-read excerpts/summaries, group
+   *      task goals, and the pre-dream surf report — via the anchor rules in
+   *      {@link diarySpanAnchoredInText}.
+   * Before 2026-09-23 only (a) with four title kinds counted as matched, so
+   * every quoted dialogue catchphrase, chain-read concept and surf phrase was
+   * scored as a hallucination — the twin bot's rising "日记幻觉引用" trend was
+   * almost entirely that false positive (spot audit of 2026-09-20/21: 9 of 15
+   * "unmatched" spans were verbatim record text). Telemetry-only — a proxy for
+   * hallucinated references, never a gate.
    */
-  private countUnmatchedDiaryRefs(summaryText: string, activity: DreamDayActivity): number {
+  private auditDiaryRefs(
+    summaryText: string,
+    activity: DreamDayActivity,
+    surfReport?: string | null,
+  ): { total: number; unmatched: number } {
     const knownNames = new Set<string>();
+    const rawChunks: string[] = [];
     for (const session of activity.sessions) {
       if (session.title.trim()) knownNames.add(session.title.trim());
       if (session.peerName?.trim()) knownNames.add(session.peerName.trim());
+      for (const message of session.messages) {
+        if (message.content) rawChunks.push(message.content);
+      }
     }
     for (const task of activity.groupTasks ?? []) {
       if (task.title.trim()) knownNames.add(task.title.trim());
+      if (task.goal?.trim()) rawChunks.push(task.goal.trim());
     }
     for (const chat of activity.groupChats ?? []) {
       if (chat.title.trim()) knownNames.add(chat.title.trim());
+      for (const message of chat.messages) {
+        if (message.content) rawChunks.push(message.content);
+      }
     }
+    for (const write of activity.chainWrites ?? []) {
+      const text = (write.contentText || write.summary || '').trim();
+      if (text) rawChunks.push(text);
+    }
+    for (const read of activity.chainReads ?? []) {
+      if (read.title?.trim()) knownNames.add(read.title.trim());
+      const text = (read.contentExcerpt || read.summary || '').trim();
+      if (text) rawChunks.push(text);
+    }
+    if (surfReport?.trim()) rawChunks.push(surfReport.trim());
+    const rawText = rawChunks.join('\n');
+
+    let total = 0;
     let unmatched = 0;
     for (const match of summaryText.matchAll(/「([^」]{2,40})」/g)) {
       const span = (match[1] ?? '').trim();
       if (!span) continue;
+      total += 1;
       const known = [...knownNames].some((name) => span === name || span.includes(name) || name.includes(span));
-      if (!known) unmatched += 1;
+      if (!known && !diarySpanAnchoredInText(span, rawText)) unmatched += 1;
     }
-    return unmatched;
+    return { total, unmatched };
   }
 
   private writeDreamResults(

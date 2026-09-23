@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runsToTelemetryDays, movingAverage, cumulative } from '../src/renderer/components/settings/dreamTelemetrySeries.ts';
+import { runsToTelemetryDays, movingAverage, cumulative, diaryTrustRatios } from '../src/renderer/components/settings/dreamTelemetrySeries.ts';
 
 test('runsToTelemetryDays keeps only completed runs and sorts ascending', () => {
   const days = runsToTelemetryDays([
@@ -115,4 +115,26 @@ test('cumulative accumulates running totals', () => {
   assert.deepEqual(cumulative([1, 2, 3]), [1, 3, 6]);
   assert.deepEqual(cumulative([]), []);
   assert.deepEqual(cumulative([0, 0, 5]), [0, 0, 5]);
+});
+
+test('runsToTelemetryDays maps the diary-trust denominator and keeps legacy runs null', () => {
+  const days = runsToTelemetryDays([
+    { dreamDate: '2026-09-22', status: 'completed', telemetry: { diaryUnmatchedRefs: 12 } },
+    { dreamDate: '2026-09-23', status: 'completed', telemetry: { diaryUnmatchedRefs: 2, diaryTotalRefs: 14 } },
+    { dreamDate: '2026-09-24', status: 'completed', telemetry: { emptyDay: true } },
+  ]);
+  assert.equal(days[0].totalRefs, null, 'runs before 2026-09-23 recorded no denominator');
+  assert.equal(days[1].totalRefs, 14);
+  assert.equal(days[2].totalRefs, null, 'empty days write no diary');
+});
+
+test('diaryTrustRatios yields unmatched/total and null where not measurable', () => {
+  const days = runsToTelemetryDays([
+    { dreamDate: '2026-09-22', status: 'completed', telemetry: { diaryUnmatchedRefs: 12 } },
+    { dreamDate: '2026-09-23', status: 'completed', telemetry: { diaryUnmatchedRefs: 2, diaryTotalRefs: 14 } },
+    { dreamDate: '2026-09-24', status: 'completed', telemetry: { diaryUnmatchedRefs: 0, diaryTotalRefs: 9 } },
+    { dreamDate: '2026-09-25', status: 'completed', telemetry: { diaryUnmatchedRefs: 0, diaryTotalRefs: 0 } },
+    { dreamDate: '2026-09-26', status: 'completed', telemetry: { emptyDay: true } },
+  ]);
+  assert.deepEqual(diaryTrustRatios(days), [null, 2 / 14, 0, null, null]);
 });

@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { i18nService } from '../../services/i18n';
 import {
   cumulative,
+  diaryTrustRatios,
   movingAverage,
   runsToTelemetryDays,
   type DreamRunLike,
@@ -154,10 +155,20 @@ const DreamTelemetryPanel: React.FC<DreamTelemetryPanelProps> = ({ runs }) => {
   const lessonsTotal = lessonsCumulative.length > 0 ? lessonsCumulative[lessonsCumulative.length - 1] : 0;
   const sedimentMax = Math.max(1, ...skillsCumulative, ...lessonsCumulative);
 
-  // Chart 3: unmatched diary references, skipping null days.
-  const refsValues = days.map((day) => day.unmatchedRefs);
-  const refsMax = Math.max(1, maxOf([refsValues]));
+  // Chart 3: diary-trust ratio (unmatched refs / total quoted spans), as a
+  // percent. Days without a denominator (pre-2026-09-23 runs) render as gaps.
+  const refsValues = diaryTrustRatios(days).map((ratio) => (ratio == null ? null : ratio * 100));
+  const refsMax = 100;
   const refsLatest = lastNonNull(refsValues);
+  const refsLatestCounts = (() => {
+    for (let index = days.length - 1; index >= 0; index -= 1) {
+      const day = days[index];
+      if (day.unmatchedRefs != null && day.totalRefs != null && day.totalRefs > 0) {
+        return `${day.unmatchedRefs}/${day.totalRefs}`;
+      }
+    }
+    return null;
+  })();
 
   // Chart 4: per-day validation gate stacked bars.
   const gateDays = days.map((day) => {
@@ -291,7 +302,7 @@ const DreamTelemetryPanel: React.FC<DreamTelemetryPanelProps> = ({ runs }) => {
 
         <ChartCard
           title={i18nService.t('dreamTelemetryDiaryTrust')}
-          headline={refsLatest == null ? '–' : String(refsLatest)}
+          headline={refsLatest == null ? '–' : `${refsLatest.toFixed(0)}%${refsLatestCounts ? ` (${refsLatestCounts})` : ''}`}
           caption={i18nService.t('dreamTelemetryDiaryTrustHint')}
         >
           <ChartSvg>

@@ -259,6 +259,53 @@ test('fragment budget stays compact for a brain that can truly disable thinking'
   }
 });
 
+test('diary trust audit grounds quoted spans against titles and raw record text', async () => {
+  // 2026-09-23 precision fix: the old counter only knew four title kinds, so
+  // quoted dialogue catchphrases, chain-read concepts and surf phrases all
+  // scored as "hallucinations" (the twin bot's rising trend was ~9/15 false
+  // positives on a spot audit). A span is grounded when it matches a record
+  // TITLE (now including chain-read titles) or anchors in the day's RAW TEXT
+  // (message bodies, chain-write/read content, surf report) verbatim or via
+  // a substantial fragment.
+  const { db, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
+  const dreamStore = new DreamStore(db, () => {});
+  seedActivity(coworkStore, db); // session 「和用户聊发布」, messages incl. 视频做好了吗
+  db.run(
+    'INSERT INTO metabot_chain_reads (metabot_id, pin_id, path, protocol, title, content_excerpt, first_read_at_ms, last_read_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [5, 'chain-g1', '/protocols/simplenote', 'simplenote', '链上必读指南', '争议判定要点:密文相同 即视为同一载荷的铁证依据', DAY_START + 5000, DAY_START + 5000]
+  );
+  const service = new DreamService({
+    coworkStore,
+    metabotStore: {
+      listMetabots: () => [
+        { id: 5, name: '小火', role: '视频创作者', soul: '认真严谨', llm_id: 'deepseek-flash', enabled: true },
+      ],
+    },
+    dreamStore,
+    performChat: async () => makePayload({
+      daily_summary: '今天在「和用户聊发布」里反复确认,用户问「视频做好了吗」;顺带读了「链上必读指南」,里面强调「密文相同=同载荷铁证」。还提到「根本不存在的事」。',
+    }),
+    emitToRenderer: () => {},
+    llmTimeoutMs: 5000,
+    now: () => new Date(2026, 7, 1, 3, 0),
+  });
+  try {
+    await service.runNow(5, DAY);
+    const run = dreamStore.getRun(5, DAY);
+    assert.equal(run.status, 'completed');
+    const telemetry = run.telemetry ?? {};
+    assert.equal(telemetry.diaryTotalRefs, 5, 'all five quoted spans are counted in the denominator');
+    assert.equal(
+      telemetry.diaryUnmatchedRefs, 1,
+      'title match + verbatim message anchor + chain-read title + fragment anchor ground four spans; only the fabricated one counts',
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('a concurrent manual trigger waits for the active queue run', async () => {
   let release;
   const blocked = new Promise((resolve) => { release = resolve; });
