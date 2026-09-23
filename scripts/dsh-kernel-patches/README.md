@@ -42,6 +42,26 @@ The patch ORs `0x08000000` into all three creation-flag call sites
 — piped restricted spawns). `CREATE_NO_WINDOW` only suppresses console
 allocation; it does not affect GUI windows.
 
+### `@deepseek-ai+dsh-tool-ask-user+0.1.5-rc.2.patch`
+
+Upstream's `ask_user_question` ships a one-line description ("Ask the user a
+concise question…") that actively pushes the model toward firing the question
+panel cold: observed in production, the bot writes the full background and
+recommendation in its (invisible) reasoning and then pops the modal with no
+visible context, leaving the user staring at options like "方案A/方案B" with no
+idea what is being decided. The downstream chain already supports a per-question
+`detail` markdown block — `dsh-user-questions` passes it through, the
+idbots-sdk-server bridge forwards it, and the host modal renders it above the
+options (that is how exit_plan_mode plan reviews render) — but the stock tool
+neither declares `detail` in its schema nor forwards it in `execute()`.
+
+The patch: (1) extends the tool description to require a short visible
+explanation (background, why asking, recommendation) in the same assistant
+message before the tool call, plus spelling out internal shorthand;
+(2) declares the optional `detail` string property so the model can attach that
+context to the panel itself; (3) threads `detail` through `execute()` into the
+`ctx.userQuestions.ask` payload so it actually reaches the modal.
+
 ## Adding / rebasing a patch
 
 1. Edit the installed file under `dsh-runtime/node_modules/<pkg>/` directly.

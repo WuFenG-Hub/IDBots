@@ -5026,6 +5026,11 @@ export class CoworkRunner extends EventEmitter {
       memoryRecallPrompt.push(
         '- Memories may be injected as scoped blocks such as <ownerMemories>, <contactMemories>, <conversationMemories>, or <ownerOperationalPreferences>.',
         '- Treat each injected memory block as stable context only for that scope; do not assume omitted scopes are available.',
+        // Surfacing rule: memory entries are internal shorthand ("S5 免额差值
+        // WARN") with no session pointer; the user has not been inside the
+        // sessions that wrote them. Pending-item mentions must therefore
+        // restate the background and link the source conversation.
+        '- When you surface a memory-tracked pending item to the user (an unresolved task, a follow-up, or a decision still waiting on them), do not present it as bare shorthand: restate which project or task it belongs to and what actually happened, spell out internal codes and metric names, and link the related conversation as IDBots://{sessionId} (look the id up with `conversation_search` when unknown) so the user can jump back.',
         // Write semantics follow the memoryImplicitUpdateEnabled switch:
         // off = explicit user requests only; on = proactive durable-fact
         // capture is allowed. The memory_user_edits tool description mirrors

@@ -87,6 +87,11 @@ const main = async () => {
     && ask.params.questions?.[0]?.id === 'q1'
     && ask.params.questions?.[0]?.options?.some((o) => o.label === 'Red'),
     JSON.stringify(ask.params.questions?.[0] ?? {}).slice(0, 80))
+  // The kernel patch (scripts/dsh-kernel-patches/@deepseek-ai+dsh-tool-ask-user)
+  // declares + forwards per-question `detail` context so the host modal can
+  // render background above the options; this guards the passthrough.
+  record('ask question detail context survives the bridge',
+    ask.params.questions?.[0]?.detail === 'Picking a color refreshes the theme; Red is warm, Blue is calm.')
   await client.request('idbots/ask/respond', {
     id: ask.params.id,
     answers: [{ id: 'q1', selected: ['Blue'] }],
