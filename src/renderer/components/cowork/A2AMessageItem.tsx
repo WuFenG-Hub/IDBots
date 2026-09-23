@@ -29,6 +29,12 @@ interface A2AMessageItemProps {
   peerGlobalMetaId?: string | null;
   /** Local MetaBot GlobalMetaID */
   localGlobalMetaId?: string | null;
+  /**
+   * Flip the left/right layout: used when the peer is the local human owner,
+   * so the owner's messages read on the right and the local bot's on the
+   * left. Sender identity (name/avatar) is unaffected.
+   */
+  invertSides?: boolean;
   onOpenBotInBrowser?: (input: {
     globalMetaId: string;
     name?: string | null;
@@ -684,6 +690,7 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
   metabotAvatar,
   peerGlobalMetaId,
   localGlobalMetaId,
+  invertSides = false,
   onOpenBotInBrowser,
   canResendDigitalDelivery = false,
   isResendingDigitalDelivery = false,
@@ -758,6 +765,11 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
   const isLocal = message.metadata?.direction !== undefined
     ? message.metadata.direction === 'outgoing'
     : message.type === 'assistant';
+  // Layout side: normally the local bot reads on the right. When the peer is
+  // the local human owner (invertSides), the sides flip so the owner's
+  // messages read on the right. Sender identity (name/avatar below) stays
+  // keyed on isLocal either way.
+  const displayRight = invertSides ? !isLocal : isLocal;
 
   // Resolve display name and avatar.
   // For local sender: always use the session-level metabotName/metabotAvatar — never
@@ -793,11 +805,11 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
     ? deliveryResult
     : stripOrderProtocolTag(message.content);
   const metafileItems = extractMetafileItems(contentToRender);
-  const markdownClassName = messengerMarkdownClassName(isLocal);
+  const markdownClassName = messengerMarkdownClassName(displayRight);
   const txidPreview = formatA2ATxidPreview(txid);
 
   return (
-    <div className={messengerRowClassName(isLocal)}>
+    <div className={messengerRowClassName(displayRight)}>
       <Avatar
         src={fromAvatar}
         name={fromName}
@@ -805,11 +817,11 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
         browserGlobalMetaId={fromGlobalMetaId}
         onOpenInBrowser={handleOpenSenderInBrowser}
       />
-      <div className={messengerColumnClassName(isLocal)}>
+      <div className={messengerColumnClassName(displayRight)}>
         <span className={messengerNameClassName}>
           {fromName}
         </span>
-        <div className={messengerBubbleClassName(isLocal)}>
+        <div className={messengerBubbleClassName(displayRight)}>
           <MarkdownContent content={contentToRender} className={markdownClassName} />
         </div>
         {metafileItems.length > 0 && (
@@ -822,7 +834,7 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
         {txidPreview ? (
           // Meta row: time and txid share one line (two-space gap via gap-1 +
           // ml-1); formats unchanged, copy button stays beside the txid.
-          <div className={messengerTxidRowClassName(isLocal)}>
+          <div className={messengerTxidRowClassName(displayRight)}>
             <span>{formatTime(message.timestamp)}</span>
             <span className="ml-1 font-mono">txid: {txidPreview}</span>
             <button

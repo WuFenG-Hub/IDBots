@@ -467,6 +467,8 @@ man_base_data_pebble/
 
 # bye-closed private chat reopen regression (local-re-engagement)
 !tests/privateChatClosedReopen.test.mjs
+# owner-composer A2A display + retransmission-guard chain-identity exclusion
+!tests/privateChatOwnerSentA2ADisplay.test.mjs
 !tests/trackedTaskBoardUiWiring.test.mjs
 !tests/manual/
 !tests/manual/electron-drag-region-harness.mjs
