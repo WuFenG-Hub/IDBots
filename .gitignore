@@ -67,6 +67,7 @@ tests/*
 !tests/heartbeatService.test.mjs
 !tests/longTermAdvanceService.test.mjs
 !tests/quotaRendererSync.test.mjs
+!tests/surfHostStatsFold.test.mjs
 !tests/rsiLadderCompute.test.ts
 !tests/rsiLadderIndex.test.ts
 !tests/rsiLadderMountStatic.test.ts
