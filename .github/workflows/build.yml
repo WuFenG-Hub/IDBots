@@ -107,7 +107,7 @@ jobs:
       # the entity store lifecycle, the heartbeat dispatcher, and the
       # longterm.advance escalation rules.
       - name: Run long-term task tests
-        run: node --test tests/longTermTaskStore.test.mjs tests/heartbeatService.test.mjs tests/longTermAdvanceService.test.mjs
+        run: node --test tests/longTermTaskStore.test.mjs tests/heartbeatService.test.mjs tests/longTermAdvanceService.test.mjs tests/longTermTaskAgentTools.test.mjs
 
       - name: Validate runtime dependency contracts
         run: |

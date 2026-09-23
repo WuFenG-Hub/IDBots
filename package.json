@@ -18,7 +18,7 @@
     "probe:model-thinking": "node scripts/probe-model-thinking.mjs",
     "check:cross-platform-paths:full": "node scripts/check-cross-platform-paths.js --with-build",
     "fixture:long-task-board": "pnpm run compile:electron && node tests/fixtures/longTaskBoardSeed.mjs --check",
-    "test:long-term-task": "pnpm run compile:electron && node --test tests/longTermTaskStore.test.mjs tests/heartbeatService.test.mjs tests/longTermAdvanceService.test.mjs",
+    "test:long-term-task": "pnpm run compile:electron && node --test tests/longTermTaskStore.test.mjs tests/heartbeatService.test.mjs tests/longTermAdvanceService.test.mjs tests/longTermTaskAgentTools.test.mjs",
     "test:memory": "npx rimraf dist-electron && pnpm run build && pnpm run compile:electron && node --test tests/memoryScopeResolver.test.mjs tests/memoryScopeParse.test.mjs tests/memoryScopeList.test.mjs tests/memorySessionScope.test.mjs tests/memoryMigrationInference.test.mjs tests/memoryScopedCrud.test.mjs tests/memoryScopedRecall.test.mjs tests/memoryPromptBlocks.test.mjs tests/privateChatScopedMemory.test.mjs tests/metaidContactView.test.mjs tests/memoryHygieneService.test.mjs tests/teamCultureStore.test.mjs tests/teamCultureDistillation.test.mjs tests/cognitiveChatCompletion.test.mjs tests/llmFallback.test.mjs tests/systemBrain.test.mjs tests/claudeSettingsModelResolution.test.mjs",
     "test:wallet": "pnpm run compile:electron && node --test tests/metabotWalletService.test.mjs",
     "test:im-gateway": "pnpm run compile:electron && node --test tests/imGatewayConnectivity.test.mjs",

@@ -59,6 +59,7 @@ docs/*
 tests/*
 !tests/fixtures/
 !tests/longTermTaskStore.test.mjs
+!tests/longTermTaskAgentTools.test.mjs
 !tests/heartbeatService.test.mjs
 !tests/longTermAdvanceService.test.mjs
 !tests/mvcSponsorCircuitBreaker.test.mjs
