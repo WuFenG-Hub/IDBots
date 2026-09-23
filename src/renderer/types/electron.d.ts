@@ -1849,7 +1849,7 @@ interface IElectronAPI {
         id: string;
         metabotId: number;
         dreamDate: string;
-        status: 'running' | 'completed' | 'failed';
+        status: 'running' | 'completed' | 'failed' | 'terminal-failed';
         attemptCount: number;
         llmId: string | null;
         dreamVersion: number;
@@ -1857,7 +1857,7 @@ interface IElectronAPI {
         telemetry: Record<string, unknown> | null;
         startedAt: number;
         completedAt: number | null;
-        /** Failed runs only: when the scheduler's backoff makes the date eligible again. */
+        /** Failed runs only: when the scheduler's backoff makes the date eligible again; null for terminal-failed runs. */
         nextRetryAt: number | null;
       }>;
       error?: string;
@@ -1870,7 +1870,7 @@ interface IElectronAPI {
         id: string;
         metabotId: number;
         dreamDate: string;
-        status: 'running' | 'completed' | 'failed';
+        status: 'running' | 'completed' | 'failed' | 'terminal-failed';
         attemptCount: number;
         llmId: string | null;
         dreamVersion: number;

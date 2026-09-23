@@ -49,6 +49,7 @@ import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../li
 import { budgetAssumesThinking } from '../libs/modelThinking';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { metabotBrainOptions } from './llmFallback';
+import { classifyDreamError, DREAM_RETRY_MAX_ATTEMPTS } from '../libs/dreamRetryPolicy';
 import {
   applyMetaIDDreamImpressionUpdates,
   buildMetaIDDreamImpressionContext,
@@ -691,7 +692,7 @@ export class DreamService {
     this.emitDreaming(metabotId, true);
     const runStartedAtMs = Date.now();
     const brain = this.resolveDreamBrain(metabot);
-    this.deps.dreamStore.beginRun(metabotId, date, brain.llmId, DREAM_VERSION);
+    const currentRun = this.deps.dreamStore.beginRun(metabotId, date, brain.llmId, DREAM_VERSION);
     try {
       // Pre-dream surf ("做梦前自动冲浪"): the bot browses MetaWeb first so
       // tonight's dream can fold what it learned into long-term memory. The
@@ -788,8 +789,21 @@ export class DreamService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
-      this.deps.dreamStore.finishRun(metabotId, date, 'failed', message);
+      // H-80: deterministic provider rejections (HTTP 4xx passthrough, quota,
+      // auth) can never succeed on retry, and a retryable failure must not
+      // back off forever — both leave the auto-retry queue as terminal-failed;
+      // only transient errors below the attempt cap stay in the backoff class.
+      if (classifyDreamError(message) === 'terminal' || currentRun.attemptCount >= DREAM_RETRY_MAX_ATTEMPTS) {
+        console.warn(
+          `[DreamService] Dream terminally failed for metabot ${metabotId} date ${date} `
+          + `(attempt ${currentRun.attemptCount}, no further auto-retry):`,
+          message,
+        );
+        this.deps.dreamStore.finishRun(metabotId, date, 'terminal-failed', message);
+      } else {
+        console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
+        this.deps.dreamStore.finishRun(metabotId, date, 'failed', message);
+      }
     } finally {
       this.dreamingBots.delete(metabotId);
       this.emitDreaming(metabotId, false);

@@ -15,7 +15,9 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
  * prompt is the caller's concern (libs/dreamPrompt).
  */
 
-export type DreamRunStatus = 'running' | 'completed' | 'failed';
+/** terminal-failed = deterministic failure or exhausted retry budget: the
+ * scheduler stops queueing the date; only a manual dream run revives it. */
+export type DreamRunStatus = 'running' | 'completed' | 'failed' | 'terminal-failed';
 export type DreamFragmentStatus = 'running' | 'completed' | 'failed';
 
 export interface DreamRun {
@@ -495,7 +497,7 @@ export class DreamStore {
       id: row.id,
       metabotId: parseIdNumber(row.metabot_id) ?? 0,
       dreamDate: row.dream_date,
-      status: (row.status === 'completed' || row.status === 'failed' ? row.status : 'running') as DreamRunStatus,
+      status: (row.status === 'completed' || row.status === 'failed' || row.status === 'terminal-failed' ? row.status : 'running') as DreamRunStatus,
       attemptCount: parseIdNumber(row.attempt_count) ?? 1,
       llmId: row.llm_id ?? null,
       dreamVersion: parseIdNumber(row.dream_version) ?? 0,
@@ -584,7 +586,9 @@ export class DreamStore {
     return run;
   }
 
-  finishRun(metabotId: number, dreamDate: string, status: 'completed' | 'failed', error?: string | null): void {
+  /** terminal-failed marks a run that must not be auto-retried (deterministic
+   * error or exhausted retry budget); the error text says which. */
+  finishRun(metabotId: number, dreamDate: string, status: 'completed' | 'failed' | 'terminal-failed', error?: string | null): void {
     const now = Date.now();
     this.db.run(`
       UPDATE metabot_dream_runs
@@ -818,7 +822,7 @@ export class DreamStore {
     );
     for (const row of rows) {
       states.set(row.dream_date, {
-        status: (row.status === 'completed' || row.status === 'failed' ? row.status : 'running') as DreamRunStatus,
+        status: (row.status === 'completed' || row.status === 'failed' || row.status === 'terminal-failed' ? row.status : 'running') as DreamRunStatus,
         attemptCount: parseIdNumber(row.attempt_count) ?? 1,
         startedAt: Number(row.started_at),
         dreamVersion: parseIdNumber(row.dream_version) ?? 0,

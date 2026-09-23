@@ -139,6 +139,9 @@ jobs:
       - name: Run memory and team-culture tests
         run: pnpm run test:memory
 
+      - name: Run dream retry classification tests
+        run: pnpm run test:dream-retry
+
       - name: Run MetaWeb agent-tool tests
         run: pnpm run test:metaweb
 

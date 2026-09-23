@@ -61,7 +61,7 @@ type DreamDiaryRun = {
   id: string;
   metabotId: number;
   dreamDate: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'terminal-failed';
   attemptCount: number;
   llmId: string | null;
   dreamVersion: number;
@@ -498,7 +498,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   > = useMemo(() => [
     ...dreamSummaries.map((summary) => ({ kind: 'summary' as const, date: summary.summaryDate, summary })),
     ...dreamRuns
-      .filter((run) => run.status === 'failed')
+      .filter((run) => run.status === 'failed' || run.status === 'terminal-failed')
       .filter((run) => !dreamSummaries.some((summary) => summary.summaryDate === run.dreamDate))
       .map((run) => ({ kind: 'failed' as const, date: run.dreamDate, run })),
   ].sort((a, b) => b.date.localeCompare(a.date)), [dreamSummaries, dreamRuns]);
@@ -545,7 +545,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       if (!result?.success) {
         throw new Error(result?.error || i18nService.t('dreamDiaryForceFailed'));
       }
-      if (result.run?.status === 'failed') {
+      if (result.run?.status === 'failed' || result.run?.status === 'terminal-failed') {
         setDreamNotice(`${i18nService.t('dreamDiaryForceFailed')}: ${result.run.error || i18nService.t('dreamDiaryForceFailed')}`);
       } else {
         setDreamNotice(i18nService.t('dreamDiaryForceCompleted'));
@@ -1376,6 +1376,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             {dreamEntries.map((entry) => {
               if (entry.kind === 'failed') {
                 const { run } = entry;
+                const isTerminal = run.status === 'terminal-failed';
                 const retryPending = run.nextRetryAt == null || run.nextRetryAt <= Date.now();
                 return (
                   <div key={`failed-${run.id}`} className="px-3 py-3 text-xs">
@@ -1384,7 +1385,9 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                       <span className="flex-1 min-w-0">
                         <span className="font-medium dark:text-claude-darkText text-claude-text">{run.dreamDate}</span>
                         <span className="ml-2 rounded-full border px-2 py-0.5 text-amber-600 border-amber-300 dark:text-amber-400 dark:border-amber-500/40">
-                          {i18nService.t('dreamDiaryFailedBadge')}
+                          {isTerminal
+                            ? i18nService.t('dreamDiaryTerminalBadge')
+                            : i18nService.t('dreamDiaryFailedBadge')}
                         </span>
                         <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
                           {`${i18nService.t('dreamDiaryFailedAttempts')}: ${run.attemptCount}`}
@@ -1393,9 +1396,11 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                           <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">{run.error}</span>
                         )}
                         <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          {retryPending
-                            ? i18nService.t('dreamDiaryRetryPending')
-                            : `${i18nService.t('dreamDiaryNextRetry')}: ${new Date(run.nextRetryAt ?? 0).toLocaleString()}`}
+                          {isTerminal
+                            ? i18nService.t('dreamDiaryTerminalNoRetry')
+                            : retryPending
+                              ? i18nService.t('dreamDiaryRetryPending')
+                              : `${i18nService.t('dreamDiaryNextRetry')}: ${new Date(run.nextRetryAt ?? 0).toLocaleString()}`}
                         </span>
                       </span>
                       <button
