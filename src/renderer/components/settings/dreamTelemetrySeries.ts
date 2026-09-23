@@ -16,6 +16,12 @@ export interface DreamRunTelemetry {
   implicitSignals?: number;
   /** Absent on empty days; hallucination proxy (lower = better). */
   diaryUnmatchedRefs?: number;
+  /**
+   * Total 「」-quoted spans in the diary — the ratio denominator. Written since
+   * 2026-09-23 (grounding-audit counter); older runs have no total, so their
+   * trust ratio is genuinely not measurable.
+   */
+  diaryTotalRefs?: number;
   validation?: { checked?: number; validated?: number; rejected?: number };
   replay?: { points?: number; lessons?: number; pointsByKind?: Record<string, number> };
   weeklyLongDream?: boolean;
@@ -34,10 +40,13 @@ export interface TelemetryDay {
   draftsValidated: number | null;
   draftsRejected: number | null;
   /**
-   * Diary references matching no real record. Null on empty days (no diary was
-   * written) and on runs without usable telemetry — genuinely not measurable.
+   * Diary references matching no real record (titles or raw record text — see
+   * dreamService.auditDiaryRefs). Null on empty days (no diary was written)
+   * and on runs without usable telemetry — genuinely not measurable.
    */
   unmatchedRefs: number | null;
+  /** Total quoted spans in the diary; null when the run predates the denominator (or empty day). */
+  totalRefs: number | null;
   activityTokens: number | null;
 }
 
@@ -69,6 +78,7 @@ const nullDay = (date: string): TelemetryDay => ({
   draftsValidated: null,
   draftsRejected: null,
   unmatchedRefs: null,
+  totalRefs: null,
   activityTokens: null,
 });
 
@@ -101,10 +111,25 @@ export function runsToTelemetryDays(runs: DreamRunLike[]): TelemetryDay[] {
       draftsValidated: coerceNumber(validation?.validated) ?? 0,
       draftsRejected: coerceNumber(validation?.rejected) ?? 0,
       unmatchedRefs: emptyDay ? null : coerceNumber(telemetry.diaryUnmatchedRefs),
+      totalRefs: emptyDay ? null : (coerceNumber(telemetry.diaryTotalRefs) ?? null),
       activityTokens: emptyDay ? 0 : (coerceNumber(telemetry.estimatedActivityTokens) ?? 0),
     });
   }
   return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * Diary-trust ratio per day: unmatched refs / total quoted spans, as a 0..1
+ * fraction. Null when the ratio is not measurable — empty days, runs without
+ * telemetry, and runs recorded before the denominator existed (2026-09-23).
+ * A ratio (not the absolute count) keeps busy days with many legitimate
+ * quotes from looking worse than quiet days.
+ */
+export function diaryTrustRatios(days: TelemetryDay[]): Array<number | null> {
+  return days.map((day) => {
+    if (day.unmatchedRefs == null || day.totalRefs == null || day.totalRefs <= 0) return null;
+    return Math.min(1, Math.max(0, day.unmatchedRefs / day.totalRefs));
+  });
 }
 
 /**
