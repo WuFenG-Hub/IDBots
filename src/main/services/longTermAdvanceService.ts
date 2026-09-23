@@ -79,39 +79,52 @@ export interface LongTermAdvanceReport {
 }
 
 function buildNudgePrompt(detail: LongTermTaskDetail, current: LongTermSubtask, reasons: string[], language: string): string {
+  const criteria = current.acceptanceCriteria.length > 0
+    ? current.acceptanceCriteria.map((criterion, index) => `   ${index + 1}. ${criterion}`).join('\n')
+    : '   (no acceptance criteria on file — align them with the owner before pushing)';
   if (language === 'zh') {
     return [
       '你是正在为主人推进长期任务的 TwinBot。这个回合由心跳自动开启（不是主人发起的），因为任务看起来可以继续推进。',
       '',
       `任务：「${detail.title}」（taskId: ${detail.id}）`,
+      `目标（done-ness 定义）：${detail.goal}`,
       `当前子项目：#${current.ordinal}「${current.title}」（subtaskId: ${current.id}）`,
+      '该子项目的验收标准：',
+      criteria,
       `开启原因：${reasons.join('；')}。`,
       '',
       '要求：',
       '1. 先用 longterm_task_get 读取完整状态简报——不要凭记忆推进。',
-      '2. 然后按 longterm-task-exec 的纪律行动：',
+      '2. 先用 2–3 句话向主人复述你对该子项目的理解（它要达成什么、验收看什么），再继续——锚定不对就停下来问，不要带着错误理解开工。',
+      '3. 然后按 longterm-task-exec 的纪律行动：',
       '   - 如果现在能推进，就推进（begin/继续，走约定好的通道）。',
+      '   - 如果下一步要引入目标或事件流里没有的假设、基建或配置（新配置面、新通道、新依赖），先停下来问主人——这是提问，不是你可以自行拍板的事。',
       '   - 如果需要主人决策，就问他——恰好一个问题，选择题形式、你的推荐项放最前；始终允许他用文字给出自己的答案。',
       '   - 如果被外部条件卡住，用 longterm_subtask_wait 记录等待（精确的备注 + 知道日期就写 waitUntil）。',
       '   - 如果交付物可验证地满足全部验收标准，带上证据提请验收。',
-      '3. 用主人的语言回复。',
+      '4. 用主人的语言回复。',
     ].join('\n');
   }
   return [
     'You are the TwinBot driving the owner\'s long-term task. This turn was opened by the heartbeat (not by the owner) because the task looks advanceable.',
     '',
     `Task: "${detail.title}" (taskId: ${detail.id})`,
+    `Goal (done-ness definition): ${detail.goal}`,
     `Current sub-project: #${current.ordinal} "${current.title}" (subtaskId: ${current.id})`,
+    'Its acceptance criteria:',
+    criteria,
     `Why this turn was opened: ${reasons.join('; ')}.`,
     '',
     'Required:',
     '1. Read the full state brief with longterm_task_get first — never push from memory.',
-    '2. Then act per the longterm-task-exec discipline:',
+    '2. Restate your understanding of this sub-project to the owner in 2-3 sentences (what it must achieve, what acceptance looks like) before continuing — if the anchor is wrong, stop and ask; never build on a misunderstood requirement.',
+    '3. Then act per the longterm-task-exec discipline:',
     '   - If the sub-project can advance now, advance it (begin/continue via the agreed channel).',
+    '   - If the next step introduces any assumption, infrastructure, or config not present in the goal or the journal (a new config surface, channel, or dependency), stop and ask the owner first — that is a question, never your call alone.',
     '   - If you need the owner, ask — exactly ONE question, multiple choice with your recommended option first; free-text answers always allowed.',
     '   - If blocked externally, record the wait with longterm_subtask_wait (precise note + waitUntil when known).',
     '   - If the deliverable verifiably meets every acceptance criterion, propose acceptance with evidence.',
-    '3. Reply in the owner\'s language.',
+    '4. Reply in the owner\'s language.',
   ].join('\n');
 }
 

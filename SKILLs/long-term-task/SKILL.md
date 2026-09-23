@@ -91,6 +91,9 @@ this list):
    or too fine (merge)?
 3. **Acceptance criteria per sub-project** — checkable, one per line. "官网做
    好了" is not a criterion; "官网可访问且可注册、视觉与原型一致" is.
+   **Include non-functional budgets where relevant** — latency, cost, resource
+   limits ("每手棋 ≤2 分钟", "一局成本 ≤ X sats"). Missing budgets are where
+   "works but is unusable" bugs are born.
 4. **Dependencies and order** — what must be accepted before what.
 5. **Preferred execution channel** per sub-project: `delegate_bot` /
    `group_task` / `owner_external` (the user arranges it outside) /
@@ -98,7 +101,62 @@ this list):
 6. Likely **waits**: external deliveries, owner decisions, dates — they become
    `wait_note`/`wait_until` later; name them now.
 
-## Step 3 — Create the draft
+## Step 2.5 — Anti-drift gates (read the scar before every definition)
+
+Long tasks die by drift: a bot misunderstands, never says so, and builds the
+wrong thing for weeks. These three gates exist because that has already
+happened more than once. Do not skip them when they apply.
+
+**Gate 1 — Host-model grounding.** Before designing anything that runs on the
+owner's or users' machines, write down the host model explicitly: MetaBots run
+inside IDBots with their own already-configured LLM identity — they act
+THROUGH the host, never through a parallel config channel you invent. If your
+architecture introduces a new configuration surface (per-seat LLM config, a
+separate model mapping, a second runtime), it is suspect: present it to the
+owner as a question, never bake it in silently.
+
+**Gate 2 — Universality check.** A feature built for every user must not
+depend on anything that exists only on THIS machine: absolute paths, config
+files, installed tools, credentials. `~/.anything` in a design is a bug, not a
+shortcut. If the blueprint you're studying reads local config, the blueprint's
+assumption does not survive the port — say so and redesign that part.
+
+**Gate 3 — Assumption ledger.** While researching, keep a list of load-bearing
+premises (where something is configured, what a component depends on, how a
+protocol behaves). Each must end up either **verified** (cite the evidence —
+file read, pin opened, test run) or **confirmed by the owner**. "不知道自己不
+知道" is handled by asking, never by building. Surface the risky ones as
+questions in the grilling rounds.
+
+## Step 3 — Write back your understanding and get it APPROVED (mandatory gate)
+
+Understanding ≠ plan. Before any draft exists, present **what you understood**
+in one explicit, complete message — never let the sub-project table be the
+first time the owner sees your interpretation. The write-back covers:
+
+1. **这个任务是为了什么** — the purpose in your own words (not an echo of the
+   owner's sentence): who it's for, what problem it solves.
+2. **完成长什么样** — the done-ness definition, including non-functional
+   budgets (latency / cost / resource).
+3. **范围**: explicitly what's IN and what's OUT.
+4. **宿主模型与关键技术理解** — your host-model grounding and the preliminary
+   technical directions from your research (this is where a wrong architecture
+   gets caught: "席位需要独立 LLM 通道" on paper is refusable; the same
+   premise silently baked into code costs weeks).
+5. **假设清单** — every load-bearing premise, marked 已验证（附证据）/ 待确认.
+   待确认 items are questions, never silent foundations.
+
+For anything structural (architecture, protocol, flow, data shape), **show,
+don't only tell**: an HTML prototype, a flow diagram, a comparison table —
+whichever makes the interpretation checkable at a glance. Open it for the
+owner; the write-back message links it.
+
+Then ask plainly: "这就是我对这个任务的理解——哪里不对直接说，确认了我才去拆
+分子项目。" **Hard gate: you do NOT call `longterm_task_create` until the owner
+confirms the understanding in prose.** A correction sends you back to Step 1/2
+for that branch — and the corrected understanding gets written back again.
+
+## Step 4 — Create the draft
 
 Only when the split is concrete and the user has seen the full picture:
 
@@ -118,7 +176,7 @@ longterm_task_create({
 This creates a **draft** (`defining` stage) — visible on the board's
 "Defining" column, not yet driven.
 
-## Step 4 — Present the COMPLETE definition, then activate (the confirmation round)
+## Step 5 — Present the COMPLETE definition, then activate (the confirmation round)
 
 The confirmation round happens **entirely in chat**: the owner must be able to
 review every detail of the long-term task without ever opening the board.
