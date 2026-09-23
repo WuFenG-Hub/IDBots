@@ -58,10 +58,18 @@ docs/*
 !docs/tickets/**
 tests/*
 !tests/fixtures/
+!tests/fixtures/longTaskBoardSeed.mjs
+!tests/trackedTaskBoard.test.mjs
+!tests/metaAppBundleEntry.test.mjs
 !tests/longTermTaskStore.test.mjs
 !tests/longTermTaskAgentTools.test.mjs
 !tests/heartbeatService.test.mjs
 !tests/longTermAdvanceService.test.mjs
+!tests/rsiLadderCompute.test.ts
+!tests/rsiLadderIndex.test.ts
+!tests/rsiLadderMountStatic.test.ts
+!tests/rsiLadderRegistryCli.test.ts
+!tests/rsiLadderRegistryE2e.test.ts
 !tests/mvcSponsorCircuitBreaker.test.mjs
 !tests/groupTaskChatMode.test.mjs
 !tests/devWindowLoadRetry.test.mjs
@@ -263,6 +271,10 @@ METAAPPs/*
 !METAAPPs/chat/**
 !METAAPPs/qanda/
 !METAAPPs/qanda/**
+!METAAPPs/metatask-viz/
+!METAAPPs/metatask-viz/**
+!METAAPPs/simplelog-timeline/
+!METAAPPs/simplelog-timeline/**
 METAAPPs/metaapps.config.json
 METAAPPs/**/.DS_Store
 
