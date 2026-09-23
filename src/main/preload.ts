@@ -168,7 +168,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
   agentGame: {
     // browser.app.session.* dispatch (start/list/status/pause/resume/stop).
-    session: (input: { method: string; payload?: unknown; actorId?: string }) =>
+    session: (input: { method: string; payload?: unknown; actorId?: string; resourceUri?: string }) =>
       ipcRenderer.invoke('agentGame:session', input),
     respondConsent: (input: { requestId: string; approved: boolean; reason?: string }) =>
       ipcRenderer.invoke('agentGame:respondConsent', input),

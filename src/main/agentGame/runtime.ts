@@ -63,7 +63,7 @@ export interface RuntimeDeps {
   /** Fetch + parse a GameManifest from its URI. */
   manifestFetch: (manifestUri: string) => Promise<GameManifest>;
   /** Resolve a local filesystem path for the adapter module from manifestUri. */
-  adapterPathFor: (manifestUri: string, manifest: GameManifest) => string;
+  adapterPathFor: (manifestUri: string, manifest: GameManifest) => Promise<string>;
   /** Clock injection (tests). */
   now?: () => number;
   /** Log sink. */
@@ -436,7 +436,7 @@ export class AgentGameRuntime extends EventEmitter {
     if (manifest.gameId !== params.gameId) {
       throw runtimeError('adapter_invalid', `manifest gameId ${manifest.gameId} != ${params.gameId}`);
     }
-    const adapterPath = this.deps.adapterPathFor(params.manifestUri, manifest);
+    const adapterPath = await this.deps.adapterPathFor(params.manifestUri, manifest);
     const sandbox = await loadAdapterSandbox(adapterPath, manifest.adapterHash);
     await sandbox.smokeTest({ gameId: params.gameId, seat: params.seat });
 
@@ -555,7 +555,7 @@ export class AgentGameRuntime extends EventEmitter {
   private async ensureSandbox(s: GameSession): Promise<void> {
     if (this.sandboxes.has(s.sessionId)) return;
     const manifest = await this.deps.manifestFetch(s.manifestUri);
-    const adapterPath = this.deps.adapterPathFor(s.manifestUri, manifest);
+    const adapterPath = await this.deps.adapterPathFor(s.manifestUri, manifest);
     const sandbox = await loadAdapterSandbox(adapterPath, s.adapterHash);
     await sandbox.smokeTest({ gameId: s.gameId, seat: s.seat });
     this.sandboxes.set(s.sessionId, sandbox);

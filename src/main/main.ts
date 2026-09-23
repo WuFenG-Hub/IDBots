@@ -6813,17 +6813,20 @@ const resolveAgentGameManifest = async (manifestUri: string): Promise<GameManife
   return parsed as GameManifest;
 };
 
-const resolveAgentGameAdapterPath = (manifestUri: string, manifest: GameManifest): string => {
+const resolveAgentGameAdapterPath = async (manifestUri: string, manifest: GameManifest): Promise<string> => {
   const pinId = manifestUri.startsWith('metaapp://')
     ? decodeURIComponent(manifestUri.slice('metaapp://'.length))
     : manifestUri;
-  // Adapter path is resolved lazily from the manifest when the sandbox loads;
-  // here we return the manifest-declared relative path joined to the artifact.
-  // The cache lookup happens in resolveAgentGameManifest; reuse the same pin.
-  // NOTE: artifactDir resolution is deferred to the sandbox load to avoid a
-  // second async cache hit here; the sandbox reads the file and verifies hash.
-  void pinId;
-  return manifest.adapter || './adapter.js';
+  // The sandbox verifies the adapter hash by reading this path directly, so it
+  // MUST be absolute: join the manifest-declared (relative) adapter path with
+  // the cached MetaApp artifact dir for this source pin.
+  const cache = getBotBrowserMetaAppCacheService();
+  const artifact = await cache.getMetaAppArtifactDir(pinId);
+  if (!artifact?.artifactDir) {
+    throw new Error(`agent-game: artifact dir not cached for ${manifestUri}`);
+  }
+  const adapter = manifest.adapter || './adapter.js';
+  return path.isAbsolute(adapter) ? adapter : path.join(artifact.artifactDir, adapter);
 };
 
 const startAgentGameHost = (): void => {
@@ -6851,6 +6854,8 @@ const startAgentGameHost = (): void => {
     manifestFetch: resolveAgentGameManifest,
     adapterPathFor: resolveAgentGameAdapterPath,
     resolveActor: () => owner?.globalmetaid ?? '',
+    actorNameFor: (globalMetaId) =>
+      getMetabotStore().getMetabotByGlobalMetaId(globalMetaId)?.name?.trim() || '',
     log: (msg) => console.log(msg),
   });
   // Start background housekeeping + recover unfinished sessions.
@@ -8893,7 +8898,7 @@ if (!gotTheLock) {
 
   // Agent-Game-v2 `browser.app.session.*` host surface (docs/14 §1). IDBots is
   // the authorization + session-state owner; ABC (when integrated) forwards.
-  ipcMain.handle('agentGame:session', async (_event, input: { method: string; payload?: unknown; actorId?: string } | undefined) => {
+  ipcMain.handle('agentGame:session', async (_event, input: { method: string; payload?: unknown; actorId?: string; resourceUri?: string } | undefined) => {
     const host = getAgentGameHost();
     if (!host) {
       return { __error: true, code: 'unsupported_method', message: 'Agent-Game runtime not started' };
@@ -8901,7 +8906,8 @@ if (!gotTheLock) {
     const method = toSafeString(input?.method);
     const payload = input?.payload;
     const actorId = toSafeString(input?.actorId) || (getUserIdentityStore().get()?.globalmetaid ?? '');
-    return host.handleSessionMethod(method, payload, actorId);
+    const resourceUri = toSafeString(input?.resourceUri) || undefined;
+    return host.handleSessionMethod(method, payload, actorId, { resourceUri });
   });
 
   ipcMain.handle('agentGame:respondConsent', async (_event, input: { requestId: string; approved: boolean; reason?: string } | undefined) => {

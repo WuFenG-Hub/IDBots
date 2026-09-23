@@ -970,7 +970,7 @@ interface IElectronAPI {
     }>;
   };
   agentGame: {
-    session: (input: { method: string; payload?: unknown; actorId?: string }) => Promise<import('./agentGame').AgentGameSessionResult>;
+    session: (input: { method: string; payload?: unknown; actorId?: string; resourceUri?: string }) => Promise<import('./agentGame').AgentGameSessionResult>;
     respondConsent: (input: { requestId: string; approved: boolean; reason?: string }) => Promise<{ success: boolean; error?: string }>;
     listPendingConsent: () => Promise<{ cards: import('./agentGame').AgentGameConsentCardInfo[] }>;
     listSessions: (input?: { appId?: string; status?: string; groupId?: string }) => Promise<{ sessions: import('./agentGame').AgentGameSessionView[] }>;
