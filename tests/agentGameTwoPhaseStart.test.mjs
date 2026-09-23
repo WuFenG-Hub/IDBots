@@ -21,6 +21,32 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return originalLoad.call(this, request, parent, isMain);
 };
 
+
+/** 陈旧产物守卫（fix/agent-game-test-stale-dist-guard）：本套件直接对 dist-electron 编译产物
+ *  跑回归（gitignored，不随 merge 更新）。合并只带来源码；旧产物里 start 走两阶段改造前的
+ *  consent await（等外部 respond 才 resolve），按新契约调用会零输出永挂（2026-09-23 实证，
+ *  e6079dae 上 timeout 60 强杀）。此处先做特征探针：产物缺失或缺两阶段 confirmToken 标记 →
+ *  立即显式失败并给出重编译提示，把「静默永挂」变成「显式红灯」。 */
+const DIST_INDEX_JS = path.join(projectRoot, 'dist-electron', 'main', 'agentGame', 'index.js');
+(function assertFreshAgentGameDist() {
+  let src;
+  try {
+    src = fs.readFileSync(DIST_INDEX_JS, 'utf8');
+  } catch {
+    throw new Error(`[stale-dist-guard] ${DIST_INDEX_JS} 不存在：先编译 electron 主进程（pnpm run compile:electron）再跑本套件`);
+  }
+  if (!src.includes('confirmToken')) {
+    throw new Error('[stale-dist-guard] dist-electron/main/agentGame 是缺两阶段契约的旧产物（无 confirmToken 特征）：start 会挂死在旧版 consent await 上。请重编译（pnpm run compile:electron）后重跑');
+  }
+})();
+
+/** 套件级看门狗：90s 未结束即 exit(1) 带原因（防任何未来的静默挂起吊死运行方）。
+ *  unref：正常跑完不拖住进程退出；挂起时其他句柄维持进程，本定时器仍会触发。 */
+setTimeout(() => {
+  console.error('[suite-watchdog] 套件 90s 未结束：静默挂起（疑似 dist-electron 陈旧或资源竞争），强制 exit 1');
+  process.exit(1);
+}, 90_000).unref();
+
 /** Minimal SqliteDatabase-shape adapter over node:sqlite (mirrors chatSkillAuthorization.test.mjs). */
 class TestSqliteDb {
   constructor() {
@@ -231,7 +257,7 @@ async function codeOf(promise) {
   return result && result.__error ? result.code : null;
 }
 
-test('phase 1 issues a confirmation bound to resource + actor', async () => {
+test('phase 1 issues a confirmation bound to resource + actor', { timeout: 15_000 }, async () => {
   const { host } = buildHost();
   try {
     const result = await host.handleSessionMethod('start', startParams(), OWNER_ACTOR, { resourceUri: RESOURCE_URI });
@@ -251,7 +277,7 @@ test('phase 1 issues a confirmation bound to resource + actor', async () => {
   }
 });
 
-test('phase 1 rejects invalid payloads with contract error codes', async () => {
+test('phase 1 rejects invalid payloads with contract error codes', { timeout: 15_000 }, async () => {
   const { host } = buildHost();
   try {
     const ctx = { resourceUri: RESOURCE_URI };
@@ -269,7 +295,7 @@ test('phase 1 rejects invalid payloads with contract error codes', async () => {
   }
 });
 
-test('phase 1 maps manifest failures to adapter_invalid', async () => {
+test('phase 1 maps manifest failures to adapter_invalid', { timeout: 15_000 }, async () => {
   const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-game-fixture-'));
   const db = new TestSqliteDb();
   createAgentGameTables(db);
@@ -300,7 +326,7 @@ test('phase 1 maps manifest failures to adapter_invalid', async () => {
   }
 });
 
-test('phase 2 denies tampered token / resource / actor echoes', async () => {
+test('phase 2 denies tampered token / resource / actor echoes', { timeout: 15_000 }, async () => {
   const { host } = buildHost();
   try {
     const phaseOne = await host.handleSessionMethod('start', startParams(), OWNER_ACTOR, { resourceUri: RESOURCE_URI });
@@ -314,7 +340,7 @@ test('phase 2 denies tampered token / resource / actor echoes', async () => {
   }
 });
 
-test('phase 2 starts the session, persists the grant, scopes list, replays idempotently', async () => {
+test('phase 2 starts the session, persists the grant, scopes list, replays idempotently', { timeout: 15_000 }, async () => {
   const { host, manifest } = buildHost();
   try {
     const phaseOne = await host.handleSessionMethod('start', startParams(), OWNER_ACTOR, { resourceUri: RESOURCE_URI });
@@ -358,7 +384,7 @@ test('phase 2 starts the session, persists the grant, scopes list, replays idemp
   }
 });
 
-test('pause/resume/stop stay idempotent and status scoping holds', async () => {
+test('pause/resume/stop stay idempotent and status scoping holds', { timeout: 15_000 }, async () => {
   const { host } = buildHost();
   try {
     const phaseOne = await host.handleSessionMethod('start', startParams(), OWNER_ACTOR, { resourceUri: RESOURCE_URI });
@@ -388,7 +414,7 @@ test('pause/resume/stop stay idempotent and status scoping holds', async () => {
   }
 });
 
-test('second runner on the same (groupId, seat) is rejected with session_conflict', async () => {
+test('second runner on the same (groupId, seat) is rejected with session_conflict', { timeout: 15_000 }, async () => {
   const { host } = buildHost();
   try {
     const first = await host.handleSessionMethod('start', startParams(), OWNER_ACTOR, { resourceUri: RESOURCE_URI });
@@ -411,7 +437,7 @@ test('second runner on the same (groupId, seat) is rejected with session_conflic
   }
 });
 
-test('negative control: a bare relative adapter path fails hash load (pre-IDB-3 behavior)', async () => {
+test('negative control: a bare relative adapter path fails hash load (pre-IDB-3 behavior)', { timeout: 15_000 }, async () => {
   const { loadAdapterSandbox } = require('../dist-electron/main/agentGame/adapterSandbox.js');
   await assert.rejects(
     () => loadAdapterSandbox('./adapter.js', 'sha256:whatever'),
