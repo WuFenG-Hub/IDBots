@@ -5791,6 +5791,7 @@ const getCoworkRunner = () => {
       // The store handle is injected so the agent layer holds no db handle.
       longTermTaskTools: {
         store: () => getLongTermTaskStore(),
+        getAppLanguage: () => getPersistedAppLanguage(),
       },
       scheduledTaskTools: {
         createTask: (input) => {

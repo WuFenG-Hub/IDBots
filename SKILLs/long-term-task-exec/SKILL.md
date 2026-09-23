@@ -93,6 +93,16 @@ the explicit rule: **do not invent infrastructure — if a premise is
 unverified, ask before building.** A worker that receives only the step's
 letter will build the plausible thing, not the right thing.
 
+**Mandatory anchor block.** Before writing the objective, call
+`longterm_delegation_anchor(taskId, subtaskId)` and paste the returned
+`<longterm_anchor>` block into the delegation objective VERBATIM. It carries
+the ids, the goal, the criteria, recent journal events, and the worker's
+duties — including "call `longterm_task_get` yourself before acting", so the
+worker pulls the full context from the source instead of relying on your
+relay. A delegation without this anchor is a lossy relay and is how drift
+starts. The worker sessions already have the longterm tools; point them at
+the ids and they can check everything themselves.
+
 When the worker reports back, verify against the GOAL and the acceptance
 criteria — not just the step's letter. If the deliverable meets the letter but
 misses the point, it misses.
