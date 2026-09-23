@@ -147,6 +147,43 @@ const MEMORY_LIST_PATH = '/api/idbots/memory/list';
 const MEMORY_CREATE_PATH = '/api/idbots/memory/create';
 const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
 
+/**
+ * Field contract for POST /api/idbots/wallet/transfer.
+ *
+ * Callers reach this route through the local RPC gateway, so the response body
+ * is the only place they can learn which field names and units are accepted.
+ * Every 400 from this route therefore echoes the contract, and names any keys
+ * the caller sent that this route does not read: a bare "amount must be
+ * positive" after a caller sent `amount_sats` (a field this route never
+ * accepts, because `amount` is already denominated in SPACE/DOGE) is
+ * indistinguishable from a genuinely bad value and costs a blind retry.
+ */
+const WALLET_TRANSFER_FIELDS: Record<string, string> = {
+  metabot_id: 'positive integer (required)',
+  chain: '"mvc" | "btc" | "doge" (required; "space" is an alias of "mvc")',
+  to_address: 'recipient address string (required)',
+  amount: 'number > 0 (required; unit SPACE on mvc and DOGE on doge, never sats)',
+  fee_rate: 'number > 0 in sats per byte (optional; defaults to the chain fee tier)',
+};
+
+function walletTransferRejection(
+  message: string,
+  requestBody: Record<string, unknown>,
+): Record<string, unknown> {
+  const accepted = Object.keys(WALLET_TRANSFER_FIELDS);
+  const unrecognized = Object.keys(requestBody).filter((key) => !accepted.includes(key));
+  return {
+    success: false,
+    error: unrecognized.length
+      ? `${message}; unrecognized field(s): ${unrecognized.join(', ')} — accepted fields: ${accepted.join(', ')}`
+      : message,
+    contract: {
+      path: EXECUTE_TRANSFER_PATH,
+      fields: WALLET_TRANSFER_FIELDS,
+    },
+  };
+}
+
 export type BotBrowserRpcOpenRequest = {
   uri: string;
   actorId: string | null;
@@ -919,32 +956,43 @@ export function startMetaidRpcServer(
         };
       } catch {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        res.end(JSON.stringify(walletTransferRejection('Invalid JSON body: expected a JSON object', {})));
+        return;
+      }
+
+      // `JSON.parse` accepts a literal `null`, and every field read below would
+      // then throw inside this async handler: the caller gets no response at all
+      // (the request hangs until it times out) and the process sees an
+      // unhandled rejection. Reject a non-object body the same way malformed
+      // JSON is rejected.
+      if (parsed === null || typeof (parsed as unknown) !== 'object') {
+        res.writeHead(400);
+        res.end(JSON.stringify(walletTransferRejection('Invalid JSON body: expected a JSON object', {})));
         return;
       }
 
       const chainRaw = String(parsed.chain || '').toLowerCase().trim();
       if (!chainRaw) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'chain is required' }));
+        res.end(JSON.stringify(walletTransferRejection('chain is required', parsed)));
         return;
       }
       const chain = chainRaw === 'space' ? 'mvc' : chainRaw;
       if (chain !== 'mvc' && chain !== 'btc' && chain !== 'doge') {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'Unsupported chain' }));
+        res.end(JSON.stringify(walletTransferRejection(`Unsupported chain "${chainRaw}"`, parsed)));
         return;
       }
       const metabotId = Number(parsed.metabot_id);
       if (!Number.isFinite(metabotId) || metabotId <= 0) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'metabot_id is required' }));
+        res.end(JSON.stringify(walletTransferRejection('metabot_id is required', parsed)));
         return;
       }
       const toAddress = String(parsed.to_address || '').trim();
       if (!toAddress) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'to_address is required' }));
+        res.end(JSON.stringify(walletTransferRejection('to_address is required', parsed)));
         return;
       }
       const amountRaw = parsed.amount ?? '';
@@ -952,7 +1000,7 @@ export function startMetaidRpcServer(
       const amountValue = Number(amount);
       if (!amount || !Number.isFinite(amountValue) || amountValue <= 0) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: 'amount must be positive' }));
+        res.end(JSON.stringify(walletTransferRejection('amount must be positive', parsed)));
         return;
       }
       let feeRate: number;
@@ -960,7 +1008,7 @@ export function startMetaidRpcServer(
         const feeRateValue = Number(parsed.fee_rate);
         if (!Number.isFinite(feeRateValue) || feeRateValue <= 0) {
           res.writeHead(400);
-          res.end(JSON.stringify({ success: false, error: 'fee_rate must be positive' }));
+          res.end(JSON.stringify(walletTransferRejection('fee_rate must be positive', parsed)));
           return;
         }
         feeRate = feeRateValue;
@@ -978,14 +1026,14 @@ export function startMetaidRpcServer(
         });
         if (!result.success) {
           res.writeHead(400);
-          res.end(JSON.stringify({ success: false, error: result.error || 'Transfer failed' }));
+          res.end(JSON.stringify(walletTransferRejection(result.error || 'Transfer failed', parsed)));
           return;
         }
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, txid: result.txId }));
       } catch (err) {
         res.writeHead(400);
-        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+        res.end(JSON.stringify(walletTransferRejection(String((err as Error)?.message || err), parsed)));
       }
       return;
     }
