@@ -8,7 +8,7 @@
  * refreshToken (the surfStatusChanged broadcast for this bot).
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowPathIcon, ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import MarkdownContent from '../MarkdownContent';
@@ -68,6 +68,7 @@ const SurfReportsPanel: React.FC<SurfReportsPanelProps> = ({ metabotId, refreshT
   const [panelError, setPanelError] = useState('');
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [expandedDigestRunId, setExpandedDigestRunId] = useState<string | null>(null);
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const loadRuns = useCallback(async () => {
     try {
@@ -97,12 +98,31 @@ const SurfReportsPanel: React.FC<SurfReportsPanelProps> = ({ metabotId, refreshT
     setExpandedDigestRunId(null);
   }, [metabotId]);
 
+  // The list lives in a height-capped scroll box, so a freshly expanded run
+  // must be brought back into view (block: 'nearest' scrolls the minimum
+  // amount, and is a no-op when already visible). Guarded because jsdom-style
+  // test environments have no scrollIntoView.
+  useEffect(() => {
+    if (!expandedRunId) return;
+    const card = cardRefs.current[expandedRunId];
+    if (card && typeof card.scrollIntoView === 'function') {
+      card.scrollIntoView({ block: 'nearest' });
+    }
+  }, [expandedRunId]);
+
   const renderRunCard = (run: MetawebSurfRunInfo) => {
     const expanded = expandedRunId === run.id;
     const digestExpanded = expandedDigestRunId === run.id;
     const statsSummary = formatRunStats(run.stats);
     return (
-      <div key={run.id} className={cardClass} data-slot={`surf-report-run-${run.id}`}>
+      <div
+        key={run.id}
+        ref={(el) => {
+          cardRefs.current[run.id] = el;
+        }}
+        className={cardClass}
+        data-slot={`surf-report-run-${run.id}`}
+      >
         <div
           role="button"
           tabIndex={0}
@@ -185,6 +205,12 @@ const SurfReportsPanel: React.FC<SurfReportsPanelProps> = ({ metabotId, refreshT
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider dark:text-claude-darkTextSecondary text-claude-textSecondary">
           <span>{i18nService.t('surfReportsTitle')}</span>
+          <span
+            data-slot="surf-reports-count"
+            className="inline-flex items-center rounded-full border dark:border-claude-darkBorder border-claude-border px-1.5 py-0.5 text-[10px] font-medium tabular-nums dark:text-claude-darkTextSecondary text-claude-textSecondary"
+          >
+            {runs.length}
+          </span>
         </div>
         <button
           type="button"
@@ -202,7 +228,12 @@ const SurfReportsPanel: React.FC<SurfReportsPanelProps> = ({ metabotId, refreshT
       {loaded && !panelError && runs.length === 0 ? (
         <p className={hintClass}>{i18nService.t('surfReportsEmpty')}</p>
       ) : (
-        runs.map(renderRunCard)
+        <div
+          data-slot="surf-reports-list"
+          className="max-h-[min(420px,50vh)] overflow-y-auto overscroll-contain pr-1 space-y-3"
+        >
+          {runs.map(renderRunCard)}
+        </div>
       )}
     </div>
   );
