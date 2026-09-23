@@ -70,6 +70,22 @@ import {
 
 const DREAM_TICK_INTERVAL_MS = 60_000;
 const DREAM_LLM_TIMEOUT_MS = 180_000;
+// Final-synthesis (and self-identity expansion) calls get a much wider window
+// than fragments: they carry a ~30K-token prompt (23 fragment summaries + 60
+// knowledge entries + impressions on a busy day) and emit the full dream JSON
+// under a 32K ceiling. Fragment calls measured fine inside 180s (each ≤80s,
+// first-try green), but the 2026-09-23 midday force-dream hit the 180s wall
+// on BOTH the primary and the fallback brain in the same run (each aborted at
+// exactly 180s while every fragment passed). 10 minutes is sized from the
+// worst LEGITIMATE case, not the average: prefill on a 30K+ prompt (30-90s,
+// uncached) + 6-8K tokens of dream JSON at heavily-throttled flash-tier speed
+// (~20-25 tok/s → 250-400s) + proxy/TLS overhead ≈ 8-10 minutes. Only a call
+// exceeding that is genuinely stalled (or the provider unusable) and SHOULD
+// abort to the fallback / run-level retry — the timeout's actual job. The
+// nightly cost is bounded arithmetic: ~20 bots × one synthesis each, worst
+// case 10 min per synthesis = 200 min, still inside the 6-hour nightly window
+// with fragments (≤80s each) and post-dream passes (4K ceilings) alongside.
+const DREAM_SYNTHESIS_TIMEOUT_MS = 600_000;
 // The requested ceiling is clamped to the selected model's declared limit
 // (DeepSeek V4 declares 32K, unknown models now share that 32K default). The dream JSON is
 // far smaller in practice; the headroom only matters so a long day is never
@@ -440,12 +456,15 @@ export class DreamService {
     userMessage: string,
     brain: DreamBrainPair,
     maxTokens?: number,
+    attemptTimeoutMs?: number,
   ): Promise<string> {
     return await this.performChat(systemPrompt, userMessage, brain.llmId, {
       // Each attempt (primary, then fallback) gets its own fresh timeout
       // window — a primary that burns the full budget must not leave the
-      // fallback retry a dead shared signal.
-      attemptTimeoutMs: this.deps.llmTimeoutMs ?? DREAM_LLM_TIMEOUT_MS,
+      // fallback retry a dead shared signal. Callers emitting the full dream
+      // JSON (synthesis, self-identity) pass the wider window; fragments and
+      // post-dream passes keep the lean default.
+      attemptTimeoutMs: attemptTimeoutMs ?? this.deps.llmTimeoutMs ?? DREAM_LLM_TIMEOUT_MS,
       maxTokens: maxTokens ?? this.resolveDreamBudgets(brain).maxOutputTokens,
       llmProvider: brain.llmProvider,
       fallbackLlmId: brain.fallbackLlmId,
@@ -651,6 +670,7 @@ export class DreamService {
         prompt.user,
         brain,
         budgets.maxOutputTokens,
+        DREAM_SYNTHESIS_TIMEOUT_MS,
       );
       return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: 0 } };
     }
@@ -669,7 +689,13 @@ export class DreamService {
         surfReport,
         weeklyReview,
       });
-      const output = await this.generateAndParse(prompt.system, prompt.user, brain, budgets.maxOutputTokens);
+      const output = await this.generateAndParse(
+        prompt.system,
+        prompt.user,
+        brain,
+        budgets.maxOutputTokens,
+        DREAM_SYNTHESIS_TIMEOUT_MS,
+      );
       return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: 0 } };
     }
 
@@ -710,6 +736,7 @@ export class DreamService {
       prompt.user,
       brain,
       budgets.maxOutputTokens,
+      DREAM_SYNTHESIS_TIMEOUT_MS,
     );
     return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: chunks.length } };
   }
@@ -799,6 +826,7 @@ export class DreamService {
           prepared.prompt.user,
           brain,
           this.resolveDreamBudgets(brain).maxOutputTokens,
+          DREAM_SYNTHESIS_TIMEOUT_MS,
         );
       }
       this.writeDreamResults(metabotId, date, output, activity, brain.llmId, isRepair, impressionSubjects, metabot.globalmetaid);
@@ -842,8 +870,9 @@ export class DreamService {
     user: string,
     brain: DreamBrainPair,
     maxTokens?: number,
+    attemptTimeoutMs?: number,
   ): Promise<DreamOutput> {
-    const firstRaw = await this.callDreamLlm(system, user, brain, maxTokens);
+    const firstRaw = await this.callDreamLlm(system, user, brain, maxTokens, attemptTimeoutMs);
     const first = parseDreamOutput(firstRaw);
     if (first.ok) return first.output;
     const firstError = (first as { ok: false; error: string }).error;
@@ -853,6 +882,7 @@ export class DreamService {
       `${user}\n\n(上一次输出无法解析:${firstError}。请严格只输出一个 JSON 对象,不要输出任何其他文字。)`,
       brain,
       maxTokens,
+      attemptTimeoutMs,
     );
     const retry = parseDreamOutput(retryRaw);
     if (retry.ok) return retry.output;
@@ -866,6 +896,7 @@ export class DreamService {
     user: string,
     brain: DreamBrainPair,
     maxTokens?: number,
+    attemptTimeoutMs?: number,
   ): Promise<DreamOutput> {
     const validation = validateSelfIdentity(output.selfIdentity);
     if (validation.valid) return output;
@@ -875,6 +906,7 @@ export class DreamService {
       `${user}\n\n(上一次的 self_identity ${output.selfIdentity ? `只有 ${validation.charCount} 个非空白字符` : '缺失'}。请重新输出完整 JSON,其中 self_identity 不少于 200 个非空白字符,认真写一段「我是谁」。)`,
       brain,
       maxTokens,
+      attemptTimeoutMs,
     );
     const retry = parseDreamOutput(retryRaw);
     if (retry.ok && validateSelfIdentity(retry.output.selfIdentity).valid) {

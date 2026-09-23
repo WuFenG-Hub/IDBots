@@ -38,10 +38,17 @@ import { metabotBrainOptions } from './llmFallback';
 
 const HYGIENE_TICK_INTERVAL_MS = 60_000;
 const HYGIENE_STATUS_CHANNEL = 'memoryHygiene:statusChanged';
-// Aligned with the dream pass budget (DREAM_LLM_TIMEOUT_MS): consolidation
-// prompts carry up to ~160 belief-layer rows, and a thinking-defaulted brain
-// (or a slow relay) needs more than the old 120s to finish the JSON.
-const DEEP_CONSOLIDATION_LLM_TIMEOUT_MS = 180_000;
+// Aligned with the dream synthesis budget (DREAM_SYNTHESIS_TIMEOUT_MS):
+// consolidation prompts carry up to ~160 belief-layer rows + 60 knowledge
+// entries and emit up to a 12K-token JSON at flash-tier generation speed.
+// The 2026-09-23 04:00 run timed out on bots 22 and 10 (both glm-5.3-flash,
+// last successful consolidations 09-13/09-15 — persistent failures) under
+// the pre-fix build where the GLM thinking toggle was dropped upstream; the
+// low-effort mapping (a5681845) shrinks the output but heavily-throttled
+// generation of a full inventory JSON still legitimately runs 8-10 minutes,
+// so 180s had the same squeeze as the dream synthesis before 600s. Only a
+// genuinely stalled call exceeds 10 minutes and should abort to the fallback.
+const DEEP_CONSOLIDATION_LLM_TIMEOUT_MS = 600_000;
 // Explicit output budget for the consolidation JSON. The transport default
 // for thinking-disabled calls (4_096) truncated real inventories mid-JSON
 // (bots with 150+ belief-layer rows hit "unparseable output" on 2026-09-02);
