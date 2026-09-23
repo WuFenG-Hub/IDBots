@@ -159,7 +159,7 @@ test('runNow completes the full dream pipeline and writes all artifacts', async 
 test('large activity uses resumable map-reduce fragments and reuses completed fragments', async () => {
   const calls = [];
   const ctx = await setup(async (system, user, llmId, options) => {
-    calls.push({ system, user, llmId, maxTokens: options?.maxTokens });
+    calls.push({ system, user, llmId, maxTokens: options?.maxTokens, attemptTimeoutMs: options?.attemptTimeoutMs });
     return makePayload();
   });
   try {
@@ -194,6 +194,15 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
     const synthesisCall = calls.find((call) => call.user.includes('分块证据摘要'));
     assert.ok(synthesisCall, 'fragment synthesis call exists');
     assert.equal(synthesisCall.maxTokens, 32768, 'final synthesis uses the default model output limit');
+    // 2026-09-23 midday force-dream: every fragment first-try green, but the
+    // synthesis hit the 180s wall on BOTH brains (30K-token prompt + full
+    // dream JSON at flash-tier speed). Synthesis (and self-identity) ride the
+    // wider 300s window; fragments keep the lean default (here the test's 5s
+    // llmTimeoutMs override).
+    assert.equal(synthesisCall.attemptTimeoutMs, 300000, 'synthesis gets the wide 300s window');
+    const fragmentCall = calls.find((call) => call.user.includes('分块提炼阶段'));
+    assert.ok(fragmentCall, 'fragment call exists');
+    assert.equal(fragmentCall.attemptTimeoutMs, 5000, 'fragment calls keep the configured lean window');
     assert.ok(synthesisCall.user.includes('## 当日写入链上的内容'), 'synthesis keeps published chain content');
     assert.ok(synthesisCall.user.includes('今天试了链上记录功能'), 'synthesis renders the write text');
     assert.ok(synthesisCall.user.includes('## 当日阅读的链上内容'), 'synthesis keeps read chain content');
