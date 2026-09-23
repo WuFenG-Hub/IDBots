@@ -612,14 +612,17 @@ export function hasWorkerUpstreamWait(content: string | null | undefined): boole
  */
 const CLAUSE_DEADLINE_TAG = /\[DEADLINE\s*:/i;
 const attachFloatingDeadlineSegment = (text: string, base: string, baseEndIndex: number): string | null => {
-  if (CLAUSE_DEADLINE_TAG.test(base)) return null;
+  if (CLAUSE_DEADLINE_TAG.test(stripGroupTaskQuotedCode(base))) return null;
   const remainder = text.slice(baseEndIndex);
   const segments = remainder.split(/(?:\r?\n[ \t]*\r?\n)+/);
   for (const segment of segments) {
     const trimmed = segment.trim();
     if (!trimmed) continue;
     if (trimmed.includes('@')) continue; // someone's clause / a handle citation
-    if (!CLAUSE_DEADLINE_TAG.test(trimmed)) continue;
+    // GT#87 release-audit follow-up: the tag test runs on the quote-stripped
+    // segment — a floating block whose only [DEADLINE:] is backticked or
+    // fenced is a citation of someone else's clock, not this member's.
+    if (!CLAUSE_DEADLINE_TAG.test(stripGroupTaskQuotedCode(trimmed))) continue;
     return `${base}\n\n${trimmed}`;
   }
   return null;
@@ -7050,7 +7053,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       } catch {
         status = null;
       }
-      const capReached = now() - startedAt >= TURN_LATCH_MAX_MS;
+      const capReached = now() - startedAt >= turnHardCapMs;
       if (status === 'running' && !capReached) return;
       // Task #60: a non-'running' status read is NOT proof the turn ended. The
       // skill-turn bridge stamps the session 'error' at the watchdog fire
@@ -7082,11 +7085,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       latchedTurnKeys.delete(key);
       // GT#87 (P1): harvest BEFORE the guard release + next-tick drain — the
       // deferred-entry retirement inside must win the race against the drain
-      // re-driving the now-answered trigger. Safe on the cap-forced release
-      // too: the harvest only posts an actually-settled final assistant
-      // message, and a still-running turn has none after its user message.
-      if (harvest) {
+      // re-driving the now-answered trigger.
+      // Release-audit follow-up: harvest ONLY on the settled path. The old
+      // "a still-running turn has none after its user message" invariant was
+      // wrong — the runner appends INTERIM assistant messages during a turn,
+      // so on a cap-forced release while the turn still runs, the harvest
+      // would post an interim narration as the member's final answer AND
+      // retire the durable re-drive, orphaning the real final reply (the
+      // GT#87 P1 loss on a rarer timing). Still-running releases skip the
+      // harvest; the re-drive stands and delivers when the turn truly settles.
+      const turnPossiblyStillRunning = sessionActive || status === 'running';
+      if (harvest && !turnPossiblyStillRunning) {
         harvestDetachedTurnReply(sessionId, taskId, botId, harvest.message, harvest.memberRole);
+      } else if (harvest) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${taskId}: latch cap reached while bot ${botId}'s turn may still be ` +
+          `running (message #${harvest.message.id}) — harvest skipped: an interim assistant message is ` +
+          'not a final reply; the deferred re-drive stands',
+        );
       }
       turnInFlight.delete(key);
       emitTurnActivity();
@@ -8865,6 +8881,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * Returns the clause's minutes only when the member was addressed; when a
    * deadline tag exists but the member was NOT addressed, logs the skip so
    * future false-bell debriefs can see the arming decision on the record.
+   *
+   * GT#87 release-audit follow-up: the minutes are parsed from the
+   * quote-stripped clause. A `[DEADLINE: …]` inside backticks or a fenced
+   * block is a CITATION (the chair quoting another worker's clock), never a
+   * clock source — the wake gate and the ACK-watch gate already honor this
+   * rule; the arming parse must too, or "@阿力 注意阿码的 `[DEADLINE: 140m]`
+   * 时钟照旧" arms 阿力 with 阿码's 140m the moment 阿力 ACKs.
    */
   const parseAddressedChairDeadlineMinutes = (
     taskId: number,
@@ -8875,7 +8898,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     mention: string | null | undefined,
     clause: string | null | undefined,
   ): number | null => {
-    const minutes = parseChairDeadlineMinutes(clause ?? null);
+    const minutes = parseChairDeadlineMinutes(stripGroupTaskQuotedCode(clause ?? null));
     if (minutes == null || minutes <= 0) return minutes;
     if (
       memberAddressedInAssignment(

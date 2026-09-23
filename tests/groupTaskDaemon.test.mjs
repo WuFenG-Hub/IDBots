@@ -1370,6 +1370,29 @@ test('extractMemberDispatchClause (GT#87 P2-4): floating attachment never crosse
   assert.equal(parseChairDeadlineMinutes(designer), 45, "Designer's own clause keeps its 45m");
 });
 
+test('extractMemberDispatchClause (GT#87 audit): a floating segment whose only [DEADLINE] is a quoted citation never attaches', () => {
+  const { extractMemberDispatchClause, parseChairDeadlineMinutes } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  // The chair's own playbook discipline: quote a restated tag in backticks so
+  // the host reads it as a citation. Pre-fix, the floating attach tested the
+  // RAW segment, so a trailing "clock reference sample" paragraph armed the
+  // tagless member's clock with the cited minutes.
+  const content = '@Coder Bot 冻结稿 v1.1 已逐节复核，交付随你节奏。\n\n'
+    + '参考（引用样例，非你的时钟）：阿码的 `[DEADLINE: 140m]` 时钟照旧（5863 起算）。';
+  const clause = extractMemberDispatchClause(content, 'Coder Bot');
+  assert.equal(parseChairDeadlineMinutes(clause), null,
+    'a floating block whose only tag is a backtick citation never attaches to the member\'s clause');
+  // Fence-quoted citations behave the same as inline backticks.
+  const fenced = '@Coder Bot 冻结稿 v1.1 已逐节复核，交付随你节奏。\n\n'
+    + '参考：\n```\n[DEADLINE: 90m] 他人时钟\n```';
+  const fencedClause = extractMemberDispatchClause(fenced, 'Coder Bot');
+  assert.equal(parseChairDeadlineMinutes(fencedClause), null,
+    'a fenced citation paragraph never attaches either');
+  // Control: an UNQUOTED floating trailing deadline still attaches (P2-4).
+  const real = '@Coder Bot 冻结稿 v1.1 已逐节复核。\n\n[DEADLINE: 20m]';
+  assert.equal(parseChairDeadlineMinutes(extractMemberDispatchClause(real, 'Coder Bot')), 20,
+    'the unquoted floating tag keeps its P2-4 attachment');
+});
+
 test('cursor advances on no-reply messages; a failing turn\'s retry coalesces with newer queued triggers (task #64)', async () => {
   // Cooldowns off: this test isolates the retry/ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
@@ -7628,6 +7651,69 @@ test('GT#87: a detached turn that settles silent retires the re-drive without po
   }
 });
 
+test('GT#87 audit: a cap-forced latch release while the turn still runs skips the harvest — an interim message is not the final reply', async () => {
+  const logs = [];
+  const skillTurnAttempts = [];
+  let runnerActive = false;
+  const h = await createHarness({
+    emitLog: (message) => logs.push(message),
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    deps: {
+      isCoworkSessionActive: () => runnerActive,
+      latchWatchIntervalMs: 15,
+      turnHardCapMs: 120, // force the cap while the detached runner is still going
+      runSkillTurn: async (params) => {
+        skillTurnAttempts.push(params);
+        runnerActive = true; // and it NEVER settles inside this test
+        throw new SkillTurnTimeoutError('session-timeout-gt87cap', 300_000);
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-gt87-cap-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot deliver the second baton',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 1, 'the detached turn ran once');
+
+    // The runner streams an INTERIM narration mid-turn (every text event is
+    // appended as an assistant message while the turn keeps executing).
+    const { ensureGroupTaskSession } = require('../dist-electron/main/services/groupTaskSession.js');
+    const { session } = ensureGroupTaskSession(h.coworkStore, task, 2, 'Coder Bot');
+    const interim = '进度：正在核对断言清单……';
+    h.coworkStore.addMessage(session.id, { type: 'assistant', content: interim });
+    // Session stays active; only the latch cap releases the guard. The daemon
+    // clock is the harness's frozen state clock, so advance it past the cap.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !logs.some((line) => line.includes('harvest skipped'))) {
+      h.state.nowMs += 50;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(
+      logs.some((line) => line.includes('harvest skipped') && line.includes('not a final reply')),
+      'the skip is on the record',
+    );
+    assert.ok(
+      !h.sends.some((s) => s.content === interim),
+      'the interim narration must never be posted as the member\'s answer',
+    );
+    const queued = JSON.parse(h.store.get(`group_task_deferred:${task.id}`) ?? '[]');
+    assert.equal(queued.length, 1, 'the durable re-drive stands so the real final reply still gets delivered');
+
+    // When the re-drive later runs, the trigger is not lost.
+    runnerActive = false;
+    await h.loop.runTick();
+    assert.equal(skillTurnAttempts.length, 2, 'the deferred re-drive picks the trigger back up');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('GT#87: a detached turn with NO settled reply keeps the re-drive (pre-fix recovery intact)', async () => {
   const logs = [];
   const skillTurnAttempts = [];
@@ -10434,6 +10520,43 @@ test('GT#87: a deadline restated for another worker never arms the bare-named me
     const armed = h.store.get(`group_task_expected_delivery:${task.id}:2`);
     assert.ok(armed, 'the @-addressed worker\'s own deadline still arms');
     assert.equal(JSON.parse(armed).dueAt - JSON.parse(armed).ackedAt, 140 * 60_000);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('GT#87 audit: a backtick-quoted [DEADLINE] citation never arms the @-addressed member\'s own clock', async () => {
+  const logs = [];
+  const h = await createHarness({ emitLog: (message) => logs.push(message) });
+  try {
+    const task = h.createTask([2, 3]);
+    // @-addressed dispatch for Designer Bot, but the ONLY [DEADLINE] in the
+    // message is a backticked citation of Coder Bot's clock — the chair
+    // playbook's own "quote restatements in backticks" discipline. Pre-fix,
+    // the ACK-arming parse read the RAW clause, so Designer's [WORKING] ACK
+    // armed Coder's 140m onto Designer's clock (the GT#87 phantom-clock shape
+    // the branch claimed to close; the wake and ACK-watch gates got the
+    // quote-strip, the arming parse did not).
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-quoted-cite-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '@Designer Bot 状态锁定：部署断言清单由你复核，现在开工。'
+        + '注意阿码的 `[DEADLINE: 140m]` 时钟照旧（5863 起算），那是他的实现时钟，与你的复核无关。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'gt87-quoted-cite-ack-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[WORKING] 已接单：复核开工，预计 30 分钟。',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.store.get(`group_task_expected_delivery:${task.id}:3`) ?? null,
+      null,
+      'a quoted [DEADLINE] citation of another worker\'s clock never arms the @-addressed member',
+    );
   } finally {
     h.cleanup();
   }
