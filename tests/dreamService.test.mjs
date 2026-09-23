@@ -197,9 +197,11 @@ test('large activity uses resumable map-reduce fragments and reuses completed fr
     // 2026-09-23 midday force-dream: every fragment first-try green, but the
     // synthesis hit the 180s wall on BOTH brains (30K-token prompt + full
     // dream JSON at flash-tier speed). Synthesis (and self-identity) ride the
-    // wider 300s window; fragments keep the lean default (here the test's 5s
-    // llmTimeoutMs override).
-    assert.equal(synthesisCall.attemptTimeoutMs, 300000, 'synthesis gets the wide 300s window');
+    // wide 10-minute window — sized for the worst legitimate case (throttled
+    // ~20-25 tok/s generation of a 6-8K-token JSON + 30K-token prefill);
+    // fragments keep the lean default (here the test's 5s llmTimeoutMs
+    // override).
+    assert.equal(synthesisCall.attemptTimeoutMs, 600000, 'synthesis gets the wide 600s window');
     const fragmentCall = calls.find((call) => call.user.includes('分块提炼阶段'));
     assert.ok(fragmentCall, 'fragment call exists');
     assert.equal(fragmentCall.attemptTimeoutMs, 5000, 'fragment calls keep the configured lean window');

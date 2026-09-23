@@ -70,17 +70,22 @@ import {
 
 const DREAM_TICK_INTERVAL_MS = 60_000;
 const DREAM_LLM_TIMEOUT_MS = 180_000;
-// Final-synthesis (and self-identity expansion) calls get a wider window than
-// fragments: they carry a ~30K-token prompt (23 fragment summaries + 60
+// Final-synthesis (and self-identity expansion) calls get a much wider window
+// than fragments: they carry a ~30K-token prompt (23 fragment summaries + 60
 // knowledge entries + impressions on a busy day) and emit the full dream JSON
-// under a 32K ceiling at flash-tier generation speed (~35-50 tok/s). Fragment
-// calls measured fine inside 180s (each ≤80s, first-try green), but the
-// 2026-09-23 midday force-dream hit the 180s wall on BOTH the primary and the
-// fallback brain in the same run — each aborted at exactly 180s while a
-// direct same-shape probe finished in ~51s off-peak. Busy-day midday
-// generation needs headroom; 5 minutes keeps a primary+fallback pair inside
-// the nightly window with hours to spare.
-const DREAM_SYNTHESIS_TIMEOUT_MS = 300_000;
+// under a 32K ceiling. Fragment calls measured fine inside 180s (each ≤80s,
+// first-try green), but the 2026-09-23 midday force-dream hit the 180s wall
+// on BOTH the primary and the fallback brain in the same run (each aborted at
+// exactly 180s while every fragment passed). 10 minutes is sized from the
+// worst LEGITIMATE case, not the average: prefill on a 30K+ prompt (30-90s,
+// uncached) + 6-8K tokens of dream JSON at heavily-throttled flash-tier speed
+// (~20-25 tok/s → 250-400s) + proxy/TLS overhead ≈ 8-10 minutes. Only a call
+// exceeding that is genuinely stalled (or the provider unusable) and SHOULD
+// abort to the fallback / run-level retry — the timeout's actual job. The
+// nightly cost is bounded arithmetic: ~20 bots × one synthesis each, worst
+// case 10 min per synthesis = 200 min, still inside the 6-hour nightly window
+// with fragments (≤80s each) and post-dream passes (4K ceilings) alongside.
+const DREAM_SYNTHESIS_TIMEOUT_MS = 600_000;
 // The requested ceiling is clamped to the selected model's declared limit
 // (DeepSeek V4 declares 32K, unknown models now share that 32K default). The dream JSON is
 // far smaller in practice; the headroom only matters so a long day is never
