@@ -5879,7 +5879,12 @@ const getCoworkRunner = () => {
         resolveMetabotIdByName: (name) => resolveMetabotIdByName(getMetabotStore(), name),
         getMetabotMvcAddress: (metabotId) =>
           getMetabotStore().getMetabotById(metabotId)?.mvc_address ?? null,
-        transfer: (params) => withChainWriteBudget(
+        // `host` carries the session-scoped owner-confirmation callback the
+        // tool layer passes in (coworkRunner wires it from the host approval
+        // dialog). It MUST reach the service deps: without it the channel-B
+        // gate has no dialog to satisfy it, so every external transfer is
+        // refused no matter what the owner approves.
+        transfer: (params, host) => withChainWriteBudget(
           'wallet_transfer',
           () => executeWalletMvcTransfer(
             {
@@ -5887,6 +5892,7 @@ const getCoworkRunner = () => {
               transferStore: getBotWalletTransferStore(),
               settingsReader: getStore(),
               getFeeRate: () => getGlobalFeeRate('mvc'),
+              confirmExternal: host?.confirmExternal,
             },
             params,
           ),

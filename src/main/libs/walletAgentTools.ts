@@ -193,7 +193,7 @@ export function buildWalletAgentTools(deps: {
     [
       'Transfer SPACE (MVC native coin) from THIS session MetaBot\'s own wallet to a target address or local MetaBot.',
       'Use when the owner asks to top up / recharge a worker bot, move funds between local bots, or send SPACE. `to` accepts a local metabot_id, a local bot name, or a raw MVC address; `amount` is in SPACE.',
-      'Channel A (target resolves to the local roster): executes immediately, no confirmation. Channel B (external address): asks the owner by default (from/to/amount/estimated fee), unless disabled in settings.',
+      'Channel A (target resolves to the local roster): executes immediately, no confirmation. Channel B (external address): asks the owner by default (from/to/amount/estimated fee), unless disabled in settings; when the surface has no owner dialog, the owner\'s explicit in-conversation approval must be passed as `external_confirmed: true` (the same acknowledgement the RPC path accepts).',
       'Every attempt (broadcast, refused, failed) is recorded in the local transfer audit ledger. Insufficient balance fails fast with a structured have/need error. Signing stays inside the host; no key material is exposed.',
     ].join(' '),
     {
@@ -206,8 +206,15 @@ export function buildWalletAgentTools(deps: {
         .positive()
         .describe('Amount in SPACE (e.g. 0.001). Dust limit applies (600 sats).'),
       memo: z.string().optional().describe('Optional note stored in the audit record.'),
+      external_confirmed: z
+        .boolean()
+        .optional()
+        .describe(
+          'Set true ONLY when the owner has already approved this external transfer in the conversation. ' +
+            'Equivalent to the RPC path\'s external_confirmed. Ignored whenever the host renders its own owner dialog.'
+        ),
     },
-    async (args: { to: string; amount: number; memo?: string }) => {
+    async (args: { to: string; amount: number; memo?: string; external_confirmed?: boolean }) => {
       const metabotId = resolveMetabotId(sessionId);
       if (metabotId == null) {
         return textResult(
@@ -267,6 +274,10 @@ export function buildWalletAgentTools(deps: {
             memo: asString(args.memo) || undefined,
             sessionId,
             origin: 'tool:wallet_transfer',
+            // Channel-B owner acknowledgement for surfaces that render no dialog.
+            // The service consults it ONLY when no confirmExternal callback is
+            // wired, so a host dialog always keeps precedence.
+            externalConfirmed: args.external_confirmed === true ? true : undefined,
           },
           deps.confirmExternalTransfer ? { confirmExternal: deps.confirmExternalTransfer } : undefined,
         );
