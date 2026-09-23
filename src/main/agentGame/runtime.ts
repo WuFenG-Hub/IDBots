@@ -9,7 +9,8 @@
  * Injected deps keep the Runtime testable and decoupled from Electron:
  *  - messageStore: reads group_chat_messages rows since a cursor
  *  - llmComplete: chatCompletionWithTools (same stack as Cowork/bridge)
- *  - chainWrite: sendGroupChatMessageAsIdentity (host owner identity signs)
+ *  - chainWrite: group-chat write (owner identity signs; seat claims pass
+ *    `asAgentId` so the transport signs them as the session agent's bot)
  *  - manifestFetch: loads + JSON-parses a GameManifest
  *  - adapterPathFor: resolves a local adapter.js path from manifestUri
  */
@@ -27,6 +28,7 @@ import {
   type GameEvent,
   type GameManifest,
   type GameSession,
+  type SeatClaimedEvent,
   type SessionBudget,
   type SessionConsent,
   type SessionError,
@@ -47,8 +49,24 @@ export interface SessionMessage {
   msgIndex: number | null;
   content: string;
   senderGlobalMetaId: string | null;
+  /** Chain timestamp of the message (docs/07 §2 event metadata). */
+  chainTimestamp: number | null;
   pinId: string;
 }
+
+/** docs/07 §2: the group message's `index`, `senderMetaId`, `timestamp` are
+ *  event metadata — conveyed alongside the envelope, never inside the body. */
+export interface EventMeta {
+  index?: number;
+  senderMetaId?: string;
+  timestamp?: number;
+}
+
+export type MetaStampedEvent = GameEvent & { meta?: EventMeta };
+
+/** Internal write-log slot for non-action events: protocol `actionSeq` starts
+ *  at 1 (docs/07 §2), so 0 never collides with a real action. */
+const NON_ACTION_LEDGER_SEQ = 0;
 
 export interface RuntimeDeps {
   store: AgentGameSessionStore;
@@ -58,12 +76,19 @@ export interface RuntimeDeps {
   };
   /** One-shot LLM call (chatCompletionWithTools). Throws on abort/timeout. */
   llmComplete: (messages: import('../services/cognitiveChatCompletion').ChatMessage[], opts: { timeoutMs: number }) => Promise<ChatCompletionResult>;
-  /** Write an encrypted agent-game/1 event to the group (returns pinId). */
-  chainWrite: (groupId: string, plaintext: string) => Promise<{ pinId: string }>;
+  /**
+   * Write an encrypted agent-game/1 event to the group (returns pinId).
+   * `opts.asAgentId`: sign as this session agent's local bot identity instead
+   * of the host owner — seat claims are attributed by the chain message's
+   * `senderMetaId` (docs/07 §3), so identity writes MUST come from the agent.
+   */
+  chainWrite: (groupId: string, plaintext: string, opts?: { asAgentId?: string }) => Promise<{ pinId: string }>;
   /** Fetch + parse a GameManifest from its URI. */
   manifestFetch: (manifestUri: string) => Promise<GameManifest>;
   /** Resolve a local filesystem path for the adapter module from manifestUri. */
   adapterPathFor: (manifestUri: string, manifest: GameManifest) => Promise<string>;
+  /** Resolve a display name for the session agent (seat.claimed payload); optional. */
+  agentNameFor?: (agentId: string) => string;
   /** Clock injection (tests). */
   now?: () => number;
   /** Log sink. */
@@ -98,7 +123,7 @@ export class AgentGameRuntime extends EventEmitter {
   /** Sessions currently inside the action loop (re-entry guard). */
   private busy = new Set<string>();
   /** Pending (in-flight) write per session for retry/dedup. */
-  private pending = new Map<string, { event: ActionEvent; key: WriteLogKey }>();
+  private pending = new Map<string, { event: GameEvent; key: WriteLogKey }>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
@@ -229,11 +254,19 @@ export class AgentGameRuntime extends EventEmitter {
       if (!env || env.protocol !== 'agent-game/1' || env.gameId !== s.gameId || env.rulesHash !== s.rulesHash) {
         continue;
       }
+      // A landed event clears its own pending retry (action or seat.claimed).
+      const pending = this.pending.get(sessionId);
+      if (pending && pending.key.eventId === env.eventId) {
+        this.pending.delete(sessionId);
+      }
       if (sandbox && state !== undefined) {
         try {
-          // reduce accepts only the decrypted, ordered game event (docs/07 §3).
-          // Sender identity is conveyed by group-chat metadata, not the body.
-          state = await sandbox.reduce(state, env as GameEvent);
+          // reduce accepts the decrypted, ordered game event. docs/07 §2: the
+          // row's index / senderMetaId / timestamp ARE the event metadata —
+          // attached here so adapter attribution (senderSeat) replays exactly
+          // like the page/third-party clients. Values come from the message
+          // row itself; nothing is synthesized.
+          state = await sandbox.reduce(state, withRowMeta(env as MetaStampedEvent, msg));
         } catch (err) {
           this.log(`${sessionId}: reduce failed for ${env.eventId}: ${errMsg(err)}`);
         }
@@ -244,10 +277,6 @@ export class AgentGameRuntime extends EventEmitter {
         const key: WriteLogKey = { groupId: s.groupId, actionSeq: ae.actionSeq, eventId: ae.eventId };
         if (this.deps.store.isWriteCommitted(key)) {
           // Already recorded by us.
-        }
-        const pending = this.pending.get(sessionId);
-        if (pending && pending.key.eventId === ae.eventId) {
-          this.pending.delete(sessionId);
         }
         if (ae.actionSeq > s.lastActionSeq) {
           s.lastActionSeq = ae.actionSeq;
@@ -388,23 +417,38 @@ export class AgentGameRuntime extends EventEmitter {
     const attempt = entry?.attempts ?? 0;
     try {
       const plaintext = JSON.stringify(event);
-      const { pinId } = await this.deps.chainWrite(s.groupId, plaintext);
+      // Seat claims are attributed by the chain message's senderMetaId, so
+      // they are signed as the session agent's identity (falls back to the
+      // host owner inside the transport when the agent is not a local bot).
+      // Action writes keep the established owner-signed path.
+      const writeOpts = isActionEvent(event) ? undefined : { asAgentId: s.agentId };
+      const { pinId } = await this.deps.chainWrite(s.groupId, plaintext, writeOpts);
       s.budget.writesUsed++;
       this.deps.store.markWriteStatus(key, 'committed', { pinId });
       // Advance local state by reducing the event into the working state.
+      // Non-action events (seat.claimed) are attributed by senderMetaId, so
+      // the local reduce carries our own identity — the replayed row meta will
+      // agree (adapter dedup by phase/seq makes the second reduce a no-op).
+      // Action keeps its existing meta-less local reduce: attribution comes
+      // from the replayed row meta via catch-up.
       const state = this.states.get(s.sessionId);
       const sandbox = this.sandboxes.get(s.sessionId);
       if (state !== undefined && sandbox) {
         try {
-          this.states.set(s.sessionId, await sandbox.reduce(state, event as GameEvent));
+          const reduceEvent: MetaStampedEvent = isActionEvent(event)
+            ? event
+            : withOwnMeta(event, s.agentId, this.now());
+          this.states.set(s.sessionId, await sandbox.reduce(state, reduceEvent));
         } catch (err) {
           this.log(`${s.sessionId}: post-write reduce failed: ${errMsg(err)}`);
         }
       }
-      s.lastActionSeq = event.actionSeq;
+      if (isActionEvent(event)) {
+        s.lastActionSeq = event.actionSeq;
+      }
       this.pending.delete(s.sessionId);
       this.persist(s, this.states.get(s.sessionId));
-      this.log(`${s.sessionId}: committed action ${event.actionSeq} (pin ${pinId.slice(0, 12)}…)`);
+      this.log(`${s.sessionId}: committed ${event.type} (pin ${pinId.slice(0, 12)}…)`);
     } catch (err) {
       const backoff = WRITE_BACKOFF_MS[Math.min(attempt, WRITE_BACKOFF_MS.length - 1)];
       this.deps.store.markWriteStatus(key, 'failed', { error: errMsg(err) });
@@ -479,6 +523,10 @@ export class AgentGameRuntime extends EventEmitter {
     this.states.set(sessionId, initialState);
     this.deps.store.upsertSession(session, JSON.stringify(initialState));
     this.deps.store.audit('session-start', sessionId, params.agentId, { groupId: params.groupId, gameId: params.gameId, seat: params.seat });
+    // Seat granted (phase 2 created the session): announce the claim on-chain
+    // (docs/07 §3) so the match can leave `waiting` — without it no client can
+    // seat this agent. Same idempotent-write machinery as actions.
+    this.enqueueSeatClaim(session);
     this.emit('sessionUpdated', session);
     this.scheduleLoop(0);
     return toSessionView(session);
@@ -636,6 +684,35 @@ export class AgentGameRuntime extends EventEmitter {
     };
   }
 
+  /** docs/07 §3 seat.claimed — identity rides the group-message metadata, the
+   *  body only carries role + display info. */
+  private draftSeatClaim(s: GameSession): SeatClaimedEvent {
+    const name = this.deps.agentNameFor?.(s.agentId) || '';
+    return {
+      protocol: 'agent-game/1',
+      gameId: s.gameId,
+      matchId: s.groupId,
+      rulesHash: s.rulesHash,
+      type: 'seat.claimed',
+      eventId: `${s.agentId}:${randomUUID()}`,
+      payload: {
+        requestedRole: s.seat,
+        ...(name ? { name } : {}),
+      },
+    };
+  }
+
+  /** Queue the seat-claim write through the action path's idempotency ledger:
+   *  intent recorded BEFORE the write, dedup by eventId, backoff on failure. */
+  private enqueueSeatClaim(s: GameSession): void {
+    const event = this.draftSeatClaim(s);
+    const key: WriteLogKey = { groupId: s.groupId, actionSeq: NON_ACTION_LEDGER_SEQ, eventId: event.eventId };
+    this.deps.store.recordWriteIntent(key, s.sessionId);
+    this.deps.store.audit('seat-claim-write', s.sessionId, s.agentId, { eventId: event.eventId, seat: s.seat });
+    this.pending.set(s.sessionId, { event, key });
+    this.log(`${s.sessionId}: seat.claimed queued (${s.seat})`);
+  }
+
   private hashOf(serialized: string): string {
     return `sha256:${createHash('sha256').update(serialized).digest('hex')}`;
   }
@@ -660,6 +737,24 @@ function isAbort(err: unknown): boolean {
   if (!err) return false;
   const name = (err as { name?: string }).name;
   return name === 'AbortError' || name === 'BrowserLlmTimeout';
+}
+
+/** Stamp docs/07 §2 event metadata from the group-chat message row itself
+ *  (index / senderMetaId / chain timestamp). Missing row fields stay missing —
+ *  nothing is synthesized (adapters treat an absent senderMetaId as ''). */
+function withRowMeta(env: MetaStampedEvent, msg: SessionMessage): MetaStampedEvent {
+  const meta: EventMeta = {};
+  if (msg.msgIndex !== null && msg.msgIndex >= 0) meta.index = msg.msgIndex;
+  if (msg.senderGlobalMetaId) meta.senderMetaId = msg.senderGlobalMetaId;
+  if (msg.chainTimestamp !== null && Number.isFinite(msg.chainTimestamp)) meta.timestamp = msg.chainTimestamp;
+  return { ...env, meta };
+}
+
+/** Stamp our own write identity for the post-write local reduce of
+ *  identity-signed (non-action) events: the transport signs seat claims as the
+ *  session agent, so the replayed row meta will carry the same senderMetaId. */
+function withOwnMeta(env: MetaStampedEvent, agentId: string, ts: number): MetaStampedEvent {
+  return { ...env, meta: { senderMetaId: agentId, timestamp: ts } };
 }
 
 function errMsg(err: unknown): string {

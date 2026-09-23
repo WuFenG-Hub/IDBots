@@ -30,8 +30,10 @@ export interface AgentGameHostDeps {
   saveDb: () => void;
   /** chatCompletionWithTools (main process LLM entry). */
   llmComplete: (messages: ChatMessage[], opts: { timeoutMs: number; llmId?: string | null }) => Promise<ChatCompletionResult>;
-  /** sendGroupChatMessageAsIdentity (host owner identity signs /protocols/simplegroupchat). */
-  chainWrite: (groupId: string, plaintext: string) => Promise<{ pinId: string }>;
+  /** sendGroupChatMessageAsIdentity (host owner identity signs /protocols/simplegroupchat).
+   *  `opts.asAgentId`: sign as a local bot identity instead — seat.claimed is
+   *  attributed by the chain message's senderMetaId (docs/07 §3). */
+  chainWrite: (groupId: string, plaintext: string, opts?: { asAgentId?: string }) => Promise<{ pinId: string }>;
   /** Fetch + JSON.parse a GameManifest from its URI. */
   manifestFetch: (manifestUri: string) => Promise<GameManifest>;
   /** Resolve a local adapter.js path from manifestUri (e.g. from the MetaApp cache). */
@@ -112,7 +114,7 @@ function requireNonEmpty(params: Record<string, unknown>, keys: string[]): void 
 /** Read group-chat messages for a group strictly after the given msg_index. */
 function readMessagesSince(db: Database, groupId: string, afterMsgIndex: number): SessionMessage[] {
   const result = db.exec(
-    `SELECT pin_id, content, sender_global_metaid, msg_index
+    `SELECT pin_id, content, sender_global_metaid, msg_index, chain_timestamp
      FROM group_chat_messages
      WHERE group_id = ? AND (msg_index IS NULL OR msg_index > ?)
      ORDER BY msg_index ASC NULLS LAST, id ASC`,
@@ -124,6 +126,7 @@ function readMessagesSince(db: Database, groupId: string, afterMsgIndex: number)
     content: String(row[1] ?? ''),
     senderGlobalMetaId: row[2] ? String(row[2]) : null,
     msgIndex: row[3] === null || row[3] === undefined ? null : Number(row[3]),
+    chainTimestamp: row[4] === null || row[4] === undefined ? null : Number(row[4]),
   }));
 }
 
@@ -140,6 +143,7 @@ export function createAgentGameHost(deps: AgentGameHostDeps): AgentGameHost {
     chainWrite: deps.chainWrite,
     manifestFetch: deps.manifestFetch,
     adapterPathFor: deps.adapterPathFor,
+    agentNameFor: deps.actorNameFor,
     log: deps.log,
   };
   const runtime = new AgentGameRuntime(runtimeDeps);

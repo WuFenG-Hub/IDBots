@@ -128,6 +128,19 @@ export interface GameEventBase {
   eventId: string;
 }
 
+/** `seat.claimed` event (docs/07 §3). Identity comes from the group-chat
+ *  message metadata (`senderMetaId`), never from the body. */
+export interface SeatClaimedEvent extends GameEventBase {
+  type: 'seat.claimed';
+  payload: {
+    requestedRole: string;
+    /** Optional display metadata (schema-tolerant adapters default them). */
+    name?: string;
+    model?: string;
+    avatar?: string;
+  };
+}
+
 /** `action` event (docs/07 §3). */
 export interface ActionEvent extends GameEventBase {
   type: 'action';
@@ -138,7 +151,7 @@ export interface ActionEvent extends GameEventBase {
   payload: Record<string, unknown>;
 }
 
-export type GameEvent = GameEventBase | ActionEvent;
+export type GameEvent = GameEventBase | SeatClaimedEvent | ActionEvent;
 
 /** Narrow an envelope to an `action` event. */
 export function isActionEvent(env: GameEvent): env is ActionEvent {

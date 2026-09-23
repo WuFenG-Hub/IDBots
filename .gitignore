@@ -82,6 +82,7 @@ tests/*
 !tests/dshKernelEventMapper.test.mjs
 !tests/chainIdentifierPrompt.test.mjs
 !tests/agentGameTwoPhaseStart.test.mjs
+!tests/agentGameSeatClaim.test.mjs
 !tests/dshKernelRuntime.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/dshRuntimeGlmResponsesBoot.test.mjs

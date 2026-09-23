@@ -6852,7 +6852,19 @@ const startAgentGameHost = (): void => {
         throwOnEmptyContent: true,
       });
     },
-    chainWrite: (groupId, plaintext) => sendGroupChatMessageAsIdentity(groupId, { content: plaintext, nickName: owner?.name ?? '' }),
+    // agent-game event writes: seat.claimed carries asAgentId — it is attributed
+    // by the chain message's senderMetaId (docs/07 §3), so sign it as the
+    // session agent's local bot wallet (走子方自付 per architecture decision ④).
+    // Owner-signed fallback covers non-bot actors; action writes stay owner-signed.
+    chainWrite: (groupId, plaintext, opts) => {
+      const asBot = opts?.asAgentId
+        ? getMetabotStore().getMetabotByGlobalMetaId(opts.asAgentId)
+        : null;
+      if (asBot) {
+        return sendGroupChatMessage(asBot.id, groupId, { content: plaintext, nickName: asBot.name ?? '' });
+      }
+      return sendGroupChatMessageAsIdentity(groupId, { content: plaintext, nickName: owner?.name ?? '' });
+    },
     manifestFetch: resolveAgentGameManifest,
     adapterPathFor: resolveAgentGameAdapterPath,
     resolveActor: () => owner?.globalmetaid ?? '',
