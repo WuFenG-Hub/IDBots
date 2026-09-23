@@ -1306,6 +1306,22 @@ export function shouldSkipPrivateChatAutoReplyText(value: string): boolean {
 }
 
 /**
+ * Consecutive-identical-copy escalation threshold for the inbound
+ * retransmission dedup below: the 2nd copy is absorbed (loop protection),
+ * the 3rd consecutive identical copy runs as an insistent re-ask.
+ */
+const PRIVATE_CHAT_REPEAT_ESCALATION_AFTER = 3;
+
+/**
+ * Per-conversation count of consecutive absorbed verbatim duplicates.
+ * Keyed `${metabotId}:${externalConversationId}`; entries reset when a
+ * different plaintext arrives, when the window lapses, or on escalation.
+ * Module-level because processOne runs per row with no daemon-lifetime
+ * closure to hold it; the window check bounds staleness.
+ */
+const inboundRepeatEscalation = new Map<string, { plaintext: string; count: number; firstAt: number }>();
+
+/**
  * True when the inbound plaintext is verbatim-identical to the immediately
  * previous inbound message of the same active conversation segment. The first
  * copy already drove (or is driving) a reply turn, so re-running the model for
@@ -1400,10 +1416,16 @@ export function analyzePrivateChatA2AConversation(params: {
   let activeSegment: PrivateChatA2AContextMessage[] = [];
   let previousSegmentTail: PrivateChatA2AContextMessage[] = [];
   let previousTimestamp: number | null = null;
-  // Thread-scoped bye pressure: incoming messages since the last outgoing
-  // bye. Deliberately NOT reset by conversation gaps or episode rollovers —
-  // only a real bye (conversation end) resets it. Gap splits above only
-  // govern the context window segmentation.
+  // Conversation-scoped bye pressure: incoming messages since the current
+  // conversation opened. A conversation ends (and the counter resets) on a
+  // >5-min gap or a bye from EITHER side — release-audit follow-up 2026-09-19:
+  // the previous thread-cumulative reading (reset only on our own outgoing
+  // bye) force-byed long-lived threads every maxIncomingTurns CUMULATIVE
+  // inbound messages, which is exactly the twin→owner daily-report pattern:
+  // one short message a day, every conversation well under the cap, and the
+  // thread still got a forced "bye" every 50 cumulative messages, forever.
+  // Continuous chatter still accumulates: a peer keeping the thread hot
+  // without a pause cannot outlive the policy.
   let incomingSinceBye = 0;
 
   for (const message of sortedMessages) {
@@ -1414,6 +1436,7 @@ export function analyzePrivateChatA2AConversation(params: {
     ) {
       previousSegmentTail = activeSegment.slice(-PRIVATE_CHAT_PREVIOUS_SEGMENT_CONTEXT_MESSAGES);
       activeSegment = [];
+      incomingSinceBye = 0;
     }
     previousTimestamp = timestamp;
 
@@ -1423,6 +1446,16 @@ export function analyzePrivateChatA2AConversation(params: {
     const content = String(message.content || '').trim();
     if (!content) continue;
     if (direction === 'outgoing' && isByeText(content)) {
+      previousSegmentTail = [];
+      activeSegment = [];
+      incomingSinceBye = 0;
+      continue;
+    }
+    if (direction === 'incoming' && isByeText(content)) {
+      // The peer ended the conversation — same reset as our own bye: the next
+      // exchange is a new conversation with fresh pressure, and the bye text
+      // itself is neither context nor a counted turn (previously it was
+      // pushed as context AND counted +1 toward our forced bye).
       previousSegmentTail = [];
       activeSegment = [];
       incomingSinceBye = 0;
@@ -4954,16 +4987,47 @@ async function processOne(
     // endless ping-pong (2026-09-17). Byte-equality only, no wording checks.
     // The row's own chain identity is excluded first: a locally recorded copy
     // of THIS message (owner composer optimistic append) is not a repeat.
+    // Release-audit follow-up 2026-09-19: only the SECOND consecutive
+    // identical copy is absorbed. A peer that keeps re-sending the exact same
+    // wording a third time is insistent, not retransmitting — absorbing it
+    // forever left the peer with no reply, no silence handling, and no wake
+    // (audit P2: "permanently ignored"). The third copy escalates into a real
+    // reply turn; the outbound echo guard independently prevents an identical
+    // reply from being delivered twice in a row, so the loop protection holds.
+    const inboundRepeatKey = `${metabot.id}:${externalConversationId}`;
+    const trackedRepeat = inboundRepeatEscalation.get(inboundRepeatKey);
+    if (
+      trackedRepeat
+      && (trackedRepeat.plaintext !== plaintext.trim()
+        || Date.now() - trackedRepeat.firstAt > A2A_SESSION_CONVERSATION_GAP_MS * 2)
+    ) {
+      inboundRepeatEscalation.delete(inboundRepeatKey);
+    }
     if (mappedSessionId && isRepeatPrivateChatInboundMessage({
       messages: coworkStore.getRecentPrivateA2AMessages(mappedSessionId, 20),
       plaintext,
       excludeChainRow: row,
     })) {
+      const priorRepeats = inboundRepeatEscalation.get(inboundRepeatKey);
+      // Which consecutive identical copy is this, counting the original the
+      // peer already sent: no entry means the absorbed candidate is copy #2.
+      const copyNumber = (priorRepeats?.count ?? 1) + 1;
+      if (copyNumber < PRIVATE_CHAT_REPEAT_ESCALATION_AFTER) {
+        inboundRepeatEscalation.set(inboundRepeatKey, {
+          plaintext: plaintext.trim(),
+          count: copyNumber,
+          firstAt: priorRepeats?.firstAt ?? Date.now(),
+        });
+        emitLog(
+          `[PrivateChat] Skip message ${row.id}: identical to the previous inbound message from ${fromGlobalMetaId.slice(0, 12)}… in this conversation segment; the earlier copy already drove a reply turn.`
+        );
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+      inboundRepeatEscalation.delete(inboundRepeatKey);
       emitLog(
-        `[PrivateChat] Skip message ${row.id}: identical to the previous inbound message from ${fromGlobalMetaId.slice(0, 12)}… in this conversation segment; the earlier copy already drove a reply turn.`
+        `[PrivateChat] Message ${row.id}: third consecutive identical copy from ${fromGlobalMetaId.slice(0, 12)}… — treating it as an insistent re-ask, not a retransmission; running a reply turn.`
       );
-      markProcessed(db, row.id, saveDb);
-      return;
     }
     let currentExperienceEvidenceId: string | null = null;
     try {

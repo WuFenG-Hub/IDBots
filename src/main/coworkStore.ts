@@ -4148,71 +4148,120 @@ export class CoworkStore implements MemoryBackend {
     const cursorEpisodeIndex = parseIdNumber(options?.beforeCursor?.episodeIndex);
     const cursorBeforeSequence = parseIdNumber(options?.beforeCursor?.beforeSequence);
     const anchorEpisodeIndex = parseIdNumber(anchor.episode_index) ?? 1;
-    const params: Array<string | number> = [anchor.thread_id];
-    let cursorClause = 'AND episode.episode_index <= ?';
-    if (cursorEpisodeIndex != null && cursorBeforeSequence != null) {
-      cursorClause = `
-        AND (
-          episode.episode_index < ?
-          OR (episode.episode_index = ? AND COALESCE(message.sequence, 0) < ?)
-        )
-      `;
-      params.push(cursorEpisodeIndex, cursorEpisodeIndex, cursorBeforeSequence);
-    } else if (options?.beforeCursor) {
-      // First cross-episode page: a cursor object with null fields means
-      // "strictly below the anchor episode" — the current session's own
-      // window has been exhausted and the view wants earlier episodes only.
-      cursorClause = 'AND episode.episode_index < ?';
-      params.push(anchorEpisodeIndex);
-    } else {
-      params.push(anchorEpisodeIndex);
-    }
-    params.push(limit + 1);
+    const anchorThreadId = anchor.thread_id;
 
-    const rows = this.getAll<CoworkA2AHistoryRow>(`
-      SELECT
-        message.id,
-        message.session_id,
-        message.type,
-        message.content,
-        message.metadata,
-        message.created_at,
-        message.sequence,
-        episode.episode_index
-      FROM a2a_conversation_episodes episode
-      JOIN cowork_messages message ON message.session_id = episode.session_id
-      WHERE episode.thread_id = ?
-      ${cursorClause}
-      ORDER BY
-        episode.episode_index DESC,
-        COALESCE(message.sequence, 0) DESC,
-        message.created_at DESC,
-        message.ROWID DESC
-      LIMIT ?
-    `, params);
-    const hasMoreBefore = rows.length > limit;
-    const pageRows = rows.slice(0, limit);
-    const oldest = pageRows[pageRows.length - 1];
+    // Release-audit follow-up 2026-09-19: hidden internal messages (tool_use,
+    // tool_result, thinking, sentinels) must not consume the VISIBLE page
+    // budget — a skill-heavy old episode returned pages that rendered as
+    // nothing while hasMoreBefore burned down, so "load earlier" looked
+    // broken. Walk raw chunks newest→oldest, keep only displayable rows
+    // (same filter as the in-session pager), and stop at limit+1 visible.
+    const rawChunkSize = Math.max(limit * 3, 60);
+    const maxChunks = 20;
+    const fetchRawRows = (
+      chunkEpisodeIndex: number | null,
+      chunkBeforeSequence: number | null,
+      rawLimit: number,
+      firstPageAnchorMode: boolean,
+    ): CoworkA2AHistoryRow[] => {
+      const params: Array<string | number> = [anchorThreadId];
+      let cursorClause: string;
+      if (chunkEpisodeIndex != null && chunkBeforeSequence != null) {
+        cursorClause = `
+          AND (
+            episode.episode_index < ?
+            OR (episode.episode_index = ? AND COALESCE(message.sequence, 0) < ?)
+          )
+        `;
+        params.push(chunkEpisodeIndex, chunkEpisodeIndex, chunkBeforeSequence);
+      } else if (firstPageAnchorMode) {
+        // First cross-episode page: a cursor object with null fields means
+        // "strictly below the anchor episode" — the current session's own
+        // window has been exhausted and the view wants earlier episodes only.
+        cursorClause = 'AND episode.episode_index < ?';
+        params.push(anchorEpisodeIndex);
+      } else {
+        cursorClause = 'AND episode.episode_index <= ?';
+        params.push(anchorEpisodeIndex);
+      }
+      params.push(rawLimit);
+      return this.getAll<CoworkA2AHistoryRow>(`
+        SELECT
+          message.id,
+          message.session_id,
+          message.type,
+          message.content,
+          message.metadata,
+          message.created_at,
+          message.sequence,
+          episode.episode_index
+        FROM a2a_conversation_episodes episode
+        JOIN cowork_messages message ON message.session_id = episode.session_id
+        WHERE episode.thread_id = ?
+          ${cursorClause}
+        ORDER BY
+          episode.episode_index DESC,
+          COALESCE(message.sequence, 0) DESC,
+          message.created_at DESC,
+          message.ROWID DESC
+        LIMIT ?
+      `, params);
+    };
 
-    return {
-      threadId: thread.id,
-      participantPairKey: thread.participant_pair_key,
-      messages: pageRows.reverse().map((row) => ({
-        sessionId: row.session_id,
-        episodeIndex: parseIdNumber(row.episode_index) ?? 1,
-        message: {
+    const visible: Array<{ row: CoworkA2AHistoryRow; episodeIndex: number }> = [];
+    let firstPageAnchorMode = Boolean(options?.beforeCursor)
+      && !(cursorEpisodeIndex != null && cursorBeforeSequence != null);
+    let chunkEpisodeIndex: number | null = cursorEpisodeIndex;
+    let chunkBeforeSequence: number | null = cursorBeforeSequence;
+    let rawExhausted = false;
+    for (let chunkIndex = 0; chunkIndex < maxChunks && visible.length <= limit; chunkIndex += 1) {
+      const rows = fetchRawRows(chunkEpisodeIndex, chunkBeforeSequence, rawChunkSize + 1, firstPageAnchorMode);
+      if (rows.length === 0) {
+        rawExhausted = true;
+        break;
+      }
+      rawExhausted = rows.length <= rawChunkSize;
+      const rowsPage = rows.slice(0, rawChunkSize);
+      for (const row of rowsPage) {
+        const message: CoworkMessage = {
           id: row.id,
           type: row.type as CoworkMessageType,
           content: row.content,
           timestamp: row.created_at,
           metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+        };
+        if (shouldHideA2AInternalMessage(message)) continue;
+        visible.push({ row, episodeIndex: parseIdNumber(row.episode_index) ?? 1 });
+      }
+      if (rawExhausted) break;
+      const oldestRaw = rowsPage[rowsPage.length - 1];
+      chunkEpisodeIndex = parseIdNumber(oldestRaw.episode_index) ?? 1;
+      chunkBeforeSequence = parseIdNumber(oldestRaw.sequence) ?? 1;
+      firstPageAnchorMode = false;
+    }
+    const hasMoreBefore = visible.length > limit || (!rawExhausted && visible.length === limit && visible.length > 0);
+    const pageEntries = visible.slice(0, limit);
+    const oldestEntry = pageEntries[pageEntries.length - 1];
+
+    return {
+      threadId: thread.id,
+      participantPairKey: thread.participant_pair_key,
+      messages: pageEntries.slice().reverse().map((entry) => ({
+        sessionId: entry.row.session_id,
+        episodeIndex: entry.episodeIndex,
+        message: {
+          id: entry.row.id,
+          type: entry.row.type as CoworkMessageType,
+          content: entry.row.content,
+          timestamp: entry.row.created_at,
+          metadata: entry.row.metadata ? JSON.parse(entry.row.metadata) : undefined,
         },
       })),
       hasMoreBefore,
-      beforeCursor: hasMoreBefore && oldest
+      beforeCursor: hasMoreBefore && oldestEntry
         ? {
-            episodeIndex: parseIdNumber(oldest.episode_index) ?? 1,
-            beforeSequence: parseIdNumber(oldest.sequence) ?? 1,
+            episodeIndex: oldestEntry.episodeIndex,
+            beforeSequence: parseIdNumber(oldestEntry.row.sequence) ?? 1,
           }
         : null,
     };

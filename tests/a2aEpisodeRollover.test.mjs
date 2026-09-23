@@ -552,7 +552,7 @@ test('daemon rolls the episode over and answers from the successor session', asy
   assert.ok(closed.summary && closed.summary.trim().length > 0);
 });
 
-test('bye pressure analysis counts across gaps and resets only on an outgoing bye', () => {
+test('bye pressure is conversation-scoped: gaps and either side\'s bye reset it; continuous chatter still forces', () => {
   const base = 1_770_000_000_000;
   const incoming = (id, ts) => ({
     id,
@@ -568,16 +568,38 @@ test('bye pressure analysis counts across gaps and resets only on an outgoing by
     timestamp: ts,
     metadata: { direction: 'outgoing', sourceChannel: 'metaweb_private' },
   });
+  const incomingBye = (id, ts) => ({
+    id,
+    type: 'user',
+    content: 'bye',
+    timestamp: ts,
+    metadata: { direction: 'incoming', sourceChannel: 'metaweb_private' },
+  });
 
+  // Release-audit follow-up 2026-09-19: a >5-min gap starts a NEW
+  // conversation — only the post-gap conversation's inbound counts. The old
+  // thread-cumulative reading force-byed the twin→owner daily-report thread
+  // (one short message a day) every 50 CUMULATIVE messages forever.
   const acrossGaps = analyzePrivateChatA2AConversation({
     messages: [
       incoming('a', base),
       incoming('b', base + 10_000),
-      incoming('c', base + 10_000 + 6 * 60_000), // > 5 min gap — pressure must survive
+      incoming('c', base + 10_000 + 6 * 60_000), // > 5 min gap — new conversation
     ],
     now: base + 20_000_000,
   });
-  assert.equal(acrossGaps.incomingTurnCount, 3);
+  assert.equal(acrossGaps.incomingTurnCount, 1, 'a conversation gap resets the pressure');
+
+  // Continuous chatter (no gap) still accumulates and still forces the bye —
+  // a peer keeping the thread hot cannot outlive the policy. (Cap must be a
+  // selectable option: the analyzer normalizes off-list values to the default.)
+  const continuous = analyzePrivateChatA2AConversation({
+    messages: Array.from({ length: 20 }, (_, i) => incoming(`hot-${i}`, base + i * 60_000)),
+    now: base + 20_000_000,
+    maxIncomingTurns: 20,
+  });
+  assert.equal(continuous.incomingTurnCount, 20);
+  assert.equal(continuous.shouldForceBye, true, 'a hot conversation still hits the cap');
 
   const afterBye = analyzePrivateChatA2AConversation({
     messages: [
@@ -588,4 +610,20 @@ test('bye pressure analysis counts across gaps and resets only on an outgoing by
     now: base + 20_000_000,
   });
   assert.equal(afterBye.incomingTurnCount, 1);
+
+  // A PEER's bye also ends the conversation (previously it counted +1 toward
+  // our own forced bye and stayed in the context window).
+  const afterPeerBye = analyzePrivateChatA2AConversation({
+    messages: [
+      incoming('a', base),
+      incomingBye('bye', base + 10_000),
+      incoming('d', base + 20_000),
+    ],
+    now: base + 20_000_000,
+  });
+  assert.equal(afterPeerBye.incomingTurnCount, 1, "the peer's bye resets the pressure too");
+  assert.ok(
+    afterPeerBye.contextMessages.every((m) => m.content !== 'bye'),
+    "the peer's bye text is not carried as conversation context",
+  );
 });
