@@ -373,6 +373,10 @@ const TOOL_INPUT_PREVIEW_MAX_ITEMS = 30;
 const SKILLS_MARKER = '/skills/';
 const TASK_WORKSPACE_CONTAINER_DIR = '.idbots-tasks';
 const PERMISSION_RESPONSE_TIMEOUT_MS = 60_000;
+// AskUserQuestion pacing: each question step in the wizard gets its own
+// window (renderer-owned); the main-process watchdog is only a backstop
+// scaled by question count so it never fires before the last step's window.
+const ASK_PER_QUESTION_TIMEOUT_MS = 120_000;
 const DELETE_TOOL_NAMES = new Set(['delete', 'remove', 'unlink', 'rmdir']);
 // Coalescing window for high-frequency task_progress / tool_progress events
 // per task_id, so the subagent panel updates don't flood the message stream.
@@ -1115,6 +1119,10 @@ export interface PermissionRequest {
   requestId: string;
   toolName: string;
   toolInput: Record<string, unknown>;
+  // AskUserQuestion only: per-question countdown the renderer wizard applies
+  // to each displayed step. null/undefined = no timeout (plan reviews,
+  // long-term-task defining sessions).
+  perQuestionTimeoutMs?: number | null;
 }
 
 export type LocalBufferedSteer = {
@@ -4974,7 +4982,7 @@ export class CoworkRunner extends EventEmitter {
           '- Never use normal assistant text as the confirmation channel in modal mode.',
           '- Continue only when the question tool returns explicit allow.',
           '- Under bypassPermissions only, low-risk confirmations (e.g. deleting merged branches/worktrees) may mark every question with header "auto-confirm" to auto-approve without a modal; keep high-risk confirmations unmarked so they still ask.',
-          '- If a question goes unanswered for 60s, it auto-answers with the recommended option, so always mark one option "(Recommended)" and put it first; questions without options count as unanswered.',
+          '- If a question goes unanswered for 120s while it is displayed, it auto-answers with the recommended option, so always mark one option "(Recommended)" and put it first; questions without options count as unanswered.',
         ];
 
     return [
@@ -8373,11 +8381,20 @@ export class CoworkRunner extends EventEmitter {
               // options so the user can read what they are approving.
               ...(typeof q.detail === 'string' && q.detail.length > 0 ? { detail: q.detail } : {}),
             }));
-            const wireAnswersFromModal = (modalAnswers: Record<string, unknown> | undefined) =>
+            const wireAnswersFromModal = (
+              modalAnswers: Record<string, unknown> | undefined,
+              autoAnswered?: ReadonlySet<string>,
+            ) =>
               (ask.questions ?? []).map((q) => {
                 const raw = modalAnswers?.[q.question];
                 if (typeof raw !== 'string' || raw.trim().length === 0) {
-                  return { id: q.id, selected: [], custom: 'The user declined to answer.' };
+                  return {
+                    id: q.id,
+                    selected: [],
+                    custom: autoAnswered?.has(q.question)
+                      ? 'The user did not answer within the 120s per-question window.'
+                      : 'The user declined to answer.',
+                  };
                 }
                 // Segments matching one of the question's option labels go to
                 // selected; anything else is free-form feedback (the plan-mode
@@ -8389,6 +8406,12 @@ export class CoworkRunner extends EventEmitter {
                 for (const segment of raw.split('|||').map((v) => v.trim()).filter(Boolean)) {
                   if (labels.has(segment)) selected.push(segment);
                   else customParts.push(segment);
+                }
+                // Renderer-side auto-picks (per-question timer expired) carry
+                // the same bot-visible note the backstop path uses, so the
+                // model can tell them apart from the user's own clicks.
+                if (autoAnswered?.has(q.question)) {
+                  customParts.push('Auto-selected the recommended option because the user did not answer within the 120s per-question window.');
                 }
                 return customParts.length > 0
                   ? { id: q.id, selected, custom: customParts.join(' ') }
@@ -8406,10 +8429,43 @@ export class CoworkRunner extends EventEmitter {
                 return;
               }
             }
+            // Timeout policy: each question step gets its own 120s window in
+            // the renderer wizard; the main-process watchdog below is only a
+            // backstop (scaled by question count) for asks whose prompt never
+            // reaches a human (dropped IPC, unrenderable payload, hidden
+            // window, dead renderer) so the turn cannot wedge in "running".
+            // On backstop expiry, answer with the recommended option
+            // (explicit "(Recommended)" marker first, schema-mandated first
+            // option as the default); questions without options count as
+            // unanswered.
+            // EXEMPTIONS (no timeout at all):
+            // - plan-mode exit reviews (intent.kind 'plan-review'): the
+            //   recommended pick is "Approve", but the appended custom note
+            //   makes the kernel treat the answer as keep-planning, so an
+            //   unattended review re-presented forever — burning a full
+            //   plan's tokens per cycle. Plan mode is only ever entered by a
+            //   watching human, so the review simply stays pending; session
+            //   cancel cleans it up.
+            // - long-term-task defining-phase sessions: the twin grills the
+            //   owner about scope/boundaries there; those answers shape the
+            //   whole task and must never be auto-picked.
+            const isPlanReviewAsk = (ask.questions ?? []).some(
+              (q) => (q.intent as { kind?: string } | undefined)?.kind === 'plan-review'
+            );
+            let isLongTermDefiningSession = false;
+            try {
+              const hit = this.longTermTaskTools?.store().findBySessionId(sessionId) ?? null;
+              isLongTermDefiningSession = !!hit && hit.subtask === null && hit.task.stage === 'defining';
+            } catch {
+              // A store hiccup must never break asks — fall back to timed.
+              isLongTermDefiningSession = false;
+            }
+            const timeoutExempt = isPlanReviewAsk || isLongTermDefiningSession;
             const request: PermissionRequest = {
               requestId: ask.id,
               toolName: 'AskUserQuestion',
               toolInput: { questions: modalQuestions },
+              perQuestionTimeoutMs: timeoutExempt ? null : ASK_PER_QUESTION_TIMEOUT_MS,
             };
             let askTimeout: ReturnType<typeof setTimeout> | null = null;
             this.pendingPermissions.set(ask.id, {
@@ -8433,30 +8489,16 @@ export class CoworkRunner extends EventEmitter {
                   return;
                 }
                 const answers = (result.updatedInput as Record<string, unknown> | undefined)?.answers;
-                void hub.respondAsk(ask.id, wireAnswersFromModal(answers as Record<string, unknown> | undefined))
+                const autoAnsweredRaw = (result.updatedInput as Record<string, unknown> | undefined)?.autoAnswered;
+                const autoAnswered = Array.isArray(autoAnsweredRaw)
+                  ? new Set(autoAnsweredRaw.filter((v): v is string => typeof v === 'string'))
+                  : undefined;
+                void hub.respondAsk(ask.id, wireAnswersFromModal(answers as Record<string, unknown> | undefined, autoAnswered))
                   .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask respond failed', { error: String(error) }));
               },
             });
-            // Same 60s ceiling the approval path enforces
-            // (waitForPermissionResponse): an ask whose prompt never reaches a
-            // human (dropped IPC, unrenderable payload, hidden window) — or
-            // whose human simply never clicks — used to pin the turn in
-            // "running" until the tool-call hard cap, or forever. On expiry,
-            // answer with the recommended option (explicit "(Recommended)"
-            // marker first, schema-mandated first option as the default) so
-            // the bot keeps working; questions without options count as
-            // unanswered.
-            // EXEMPTION: plan-mode exit reviews (intent.kind 'plan-review').
-            // There the recommended pick is "Approve", but the appended
-            // custom note makes the kernel treat the answer as keep-planning,
-            // so an unattended review re-presented forever — burning a full
-            // plan's tokens per 60s cycle. Plan mode is only ever entered by
-            // a watching human (sidebar chip / /plan), so the review simply
-            // stays pending; session cancel cleans it up.
-            const isPlanReviewAsk = (ask.questions ?? []).some(
-              (q) => (q.intent as { kind?: string } | undefined)?.kind === 'plan-review'
-            );
-            if (!isPlanReviewAsk) {
+            if (!timeoutExempt) {
+              const backstopMs = ASK_PER_QUESTION_TIMEOUT_MS * Math.max(1, (ask.questions ?? []).length);
               askTimeout = setTimeout(() => {
               askTimeout = null;
               if (!this.pendingPermissions.delete(ask.id)) return;
@@ -8467,13 +8509,13 @@ export class CoworkRunner extends EventEmitter {
               const timeoutAnswers = (ask.questions ?? []).map((q) => {
                 const recommended = pickRecommendedOptionLabel(q.options);
                 return recommended
-                  ? { id: q.id, selected: [recommended], custom: 'Auto-selected the recommended option because the user did not answer within 60s.' }
-                  : { id: q.id, selected: [], custom: 'The user did not answer within 60s.' };
+                  ? { id: q.id, selected: [recommended], custom: 'Auto-selected the recommended option because the user did not answer within the 120s per-question window.' }
+                  : { id: q.id, selected: [], custom: 'The user did not answer within the 120s per-question window.' };
               });
-              coworkLog('WARN', 'runDshSessionLocal', 'ask_user_question unanswered for 60s; auto-answering with the recommended option where one exists', { sessionId, askId: ask.id, autoPicked: timeoutAnswers.filter((a) => a.selected.length > 0).length, questionCount: timeoutAnswers.length });
+              coworkLog('WARN', 'runDshSessionLocal', 'ask_user_question backstop elapsed (120s per question); auto-answering with the recommended option where one exists', { sessionId, askId: ask.id, autoPicked: timeoutAnswers.filter((a) => a.selected.length > 0).length, questionCount: timeoutAnswers.length });
               void hub.respondAsk(ask.id, timeoutAnswers)
                 .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask timeout respond failed', { error: String(error) }));
-            }, PERMISSION_RESPONSE_TIMEOUT_MS);
+            }, backstopMs);
             askTimeout.unref?.();
             }
             activeSession.pendingPermission = request;

@@ -240,6 +240,7 @@ class CoworkService {
         toolInput: request.toolInput,
         requestId: request.requestId,
         toolUseId: request.toolUseId ?? null,
+        perQuestionTimeoutMs: request.perQuestionTimeoutMs ?? null,
       }));
     });
     this.streamListenerCleanups.push(permissionCleanup);
