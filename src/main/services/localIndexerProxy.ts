@@ -69,17 +69,38 @@ export async function fetchFromLocalOrFallback(
   return fetch(fallbackUrl, options);
 }
 
+/** Bound the remote fallback so a blackholed route cannot hang a read. */
+const REMOTE_JSON_TIMEOUT_MS = 8_000;
+
+/**
+ * Try to fetch from the local P2P indexer first; fall back to a remote URL
+ * when the local node is unavailable or answers with a semantically empty
+ * payload.
+ *
+ * @param localPath      Path starting with '/', e.g. '/api/pin/abc'
+ * @param fallbackUrl    Full remote URL to use when local is unavailable
+ * @param isSemanticMiss Predicate marking an otherwise-valid local payload as empty
+ * @param opts.request   Optional RequestInit forwarded to both fetch calls
+ * @param opts.degradeToLocalOnRemoteError
+ *        When true and the remote attempt fails (unreachable or non-2xx),
+ *        return the local response when one exists instead of surfacing the
+ *        failure. This preserves the pre-fallback degrade-gracefully semantics
+ *        for reads whose local payload may be an incomplete stub (e.g. the
+ *        profile lookup during user-identity import on a fresh machine).
+ */
 export async function fetchJsonWithFallbackOnMiss(
   localPath: string,
   fallbackUrl: string,
   isSemanticMiss: (payload: unknown) => boolean,
-  options?: RequestInit,
+  opts?: { request?: RequestInit; degradeToLocalOnRemoteError?: boolean },
 ): Promise<Response> {
   const localUrl = getP2PLocalBase() + localPath;
+  const degradeToLocal = opts?.degradeToLocalOnRemoteError === true;
+  let localRes: Response | null = null;
 
   try {
-    const localRes = await fetch(localUrl, {
-      ...options,
+    localRes = await fetch(localUrl, {
+      ...(opts?.request ?? {}),
       signal: AbortSignal.timeout(2000),
     });
 
@@ -93,7 +114,37 @@ export async function fetchJsonWithFallbackOnMiss(
     void _err;
   }
 
-  return fetch(fallbackUrl, options);
+  let remoteRes: Response | null = null;
+  try {
+    remoteRes = await fetch(fallbackUrl, {
+      ...(opts?.request ?? {}),
+      signal: AbortSignal.timeout(REMOTE_JSON_TIMEOUT_MS),
+    });
+  } catch (error) {
+    // Remote unreachable: with degradation requested and a local response in
+    // hand, hand it back rather than turning a remote outage into a hard
+    // failure for a read the local node already answered.
+    if (degradeToLocal && localRes) {
+      return localRes;
+    }
+    throw error;
+  }
+
+  if (degradeToLocal && localRes) {
+    // Re-check the remote payload with the same predicate: when the remote
+    // cannot provide a usable payload either (error status, or a content-less
+    // body — e.g. a legitimately nameless identity), keep the same degradation
+    // contract instead of routing the caller onto a hop that adds nothing.
+    if (!remoteRes.ok) {
+      return localRes;
+    }
+    const remotePayload = await parseJsonClone(remoteRes);
+    if (isSemanticMiss(remotePayload)) {
+      return localRes;
+    }
+  }
+
+  return remoteRes;
 }
 
 /**
