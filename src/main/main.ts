@@ -3514,7 +3514,9 @@ const startSqliteDaemons = (): void => {
     },
     performChatCompletionForOrchestrator,
     async (metabotId: number, groupId: string, nickName: string, content: string) => {
-      await sendGroupChatMessage(metabotId, groupId, { content, nickName });
+      // Issue #40: hand the transport ACK (pinId) back to the orchestrator so
+      // the outbox can record it instead of discarding the return value.
+      return await sendGroupChatMessage(metabotId, groupId, { content, nickName });
     },
     {
       getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),

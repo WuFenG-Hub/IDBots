@@ -3,6 +3,9 @@
  * Phase 1: Attention filter (mention + probability/cooldown).
  * Task 12.2: Context assembly, LLM reply, /protocols/simplegroupchat broadcast.
  * Task 12.4: Cowork-style skill list + Read/Bash only (no per-skill OpenAI tools).
+ * Issue #40: every reply gets a durable delivery obligation (groupChatOutbox)
+ * BEFORE the broadcast; a failed send is retried by the outbox drain and the
+ * task cursor only advances once the obligation reaches a terminal state.
  */
 
 import type { SqliteDatabase as Database } from '../sqliteTypes';
@@ -17,6 +20,15 @@ import {
   type OpenAITool,
   type ToolCallResult,
 } from './cognitiveChatCompletion';
+import {
+  ensureGroupChatOutboxSchema,
+  enqueueGroupChatSend,
+  findGroupChatSendByTrigger,
+  listPendingGroupChatSends,
+  lowestPendingTriggerMsgId,
+  markGroupChatSendFailed,
+  markGroupChatSendSubmitted,
+} from './groupChatOutbox';
 import { toLlmEffortLevel } from '../libs/llmEffort';
 import { copyRespondingPlaceholder } from '../libs/groupTaskCopy';
 import { getMetaidRpcBase, getMetaidRpcToken } from './metaidRpcEndpoint';
@@ -120,13 +132,33 @@ export type PerformChatCompletionFn = (
     thinking?: 'enabled' | 'disabled';
   }
 ) => Promise<string>;
-/** (metabotId, groupId, nickName, content) => void; signs and broadcasts via create-pin */
+/**
+ * Transport ACK for one group-chat broadcast. pinId is returned by
+ * groupChatTransport.sendGroupChatMessage once the pin is signed and
+ * broadcast (issue #40: previously this value was discarded and the
+ * fire-and-forget path had no ACK at all).
+ */
+export interface GroupChatBroadcastAck {
+  pinId?: string;
+}
+/** (metabotId, groupId, nickName, content) => ack; signs and broadcasts via create-pin */
 export type BroadcastGroupChatFn = (
   metabotId: number,
   groupId: string,
   nickName: string,
   content: string
-) => Promise<void>;
+) => Promise<GroupChatBroadcastAck | void>;
+
+/**
+ * pinId from a broadcast ack; tolerates legacy in-tree callers/test doubles
+ * that still return nothing. Returns null when no ACK pinId is available.
+ */
+function ackPinId(ack: unknown): string | null {
+  if (ack && typeof ack === 'object' && typeof (ack as GroupChatBroadcastAck).pinId === 'string') {
+    return (ack as GroupChatBroadcastAck).pinId ?? null;
+  }
+  return null;
+}
 
 /** Optional override for tool-loop LLM (e.g. test mock). Same signature as chatCompletionWithTools. */
 export type ChatWithToolsFn = (
@@ -576,12 +608,15 @@ async function executeBash(
 }
 
 /**
- * Run the reply pipeline: context -> prompt -> LLM (with optional tool loop) -> broadcast -> update state.
+ * Run the reply pipeline: context -> prompt -> LLM (with optional tool loop) ->
+ * durable outbox obligation -> broadcast -> update state.
  * Boss turns can use all enabled skills; other chat turns use the MetaBot chat allowlist.
  * Must be wrapped in try/catch and finally(thinkingTasks.delete).
  */
 async function runReplyPipeline(
   task: GroupChatTaskRow,
+  /** group_chat_messages.id of the message that triggered this reply (outbox key). */
+  triggerMsgId: number,
   db: Database,
   saveDb: SaveDbFn,
   getMetabotById: GetMetabotByIdFn,
@@ -815,17 +850,91 @@ async function runReplyPipeline(
     return;
   }
 
+  // Issue #40: persist the delivery obligation BEFORE the first send. A failed
+  // broadcast must leave a durable retry record, not just a log line.
+  // (group_id, metabot_id, trigger_msg_id) is UNIQUE: THIS bot can never
+  // enqueue a second obligation for the same triggering message, while every
+  // OTHER bot of the group still owes its own reply for that message (rework
+  // N1: the old group-level key swallowed the second bot's reply).
+  const outboxId = enqueueGroupChatSend(db, {
+    metabotId: task.metabot_id,
+    groupId: task.group_id,
+    triggerMsgId,
+    nickName: metabot.name,
+    content: trimmed,
+  });
+  saveDb();
+
   try {
-    await broadcastGroupChat(task.metabot_id, task.group_id, metabot.name, trimmed);
+    const ack = await broadcastGroupChat(task.metabot_id, task.group_id, metabot.name, trimmed);
+    // ACK: the transport returns the pinId; record it on the obligation so the
+    // delivery is auditable (a future CONFIRMED phase can read it back).
+    markGroupChatSendSubmitted(db, outboxId, ackPinId(ack));
+    saveDb();
   } catch (err) {
     rethrowSqliteWasmBoundsError(err);
-    console.error('[Orchestrator] Broadcast failed:', err instanceof Error ? err.message : err);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[Orchestrator] Broadcast failed:', message);
+    // Durable retry record: the obligation stays PENDING (or becomes ABANDONED
+    // after GROUP_CHAT_OUTBOX_MAX_ATTEMPTS); tick()'s drain re-broadcasts the
+    // SAME text without re-running the LLM.
+    const outcome = markGroupChatSendFailed(db, outboxId, message);
+    saveDb();
+    console.error(
+      `[Orchestrator] Reply for message ${triggerMsgId} kept in outbox (state=${outcome.state}, attempts=${outcome.attempts})`
+    );
     return;
   }
 
   const nowIso = new Date().toISOString();
   db.run('UPDATE group_chat_tasks SET last_replied_at = ? WHERE id = ?', [nowIso, task.id]);
   saveDb();
+}
+
+/**
+ * Retry PENDING group-chat sends whose backoff elapsed (issue #40). Runs at the
+ * start of each task's tick, before new messages are read, so a reply whose
+ * broadcast failed is re-sent from the outbox (same stored text) instead of
+ * re-running the LLM. Returns the lowest trigger message id still pending AFTER
+ * the drain for THIS task's bot — the per-task cursor floor that keeps the
+ * failed reply's trigger message "unconsumed" until its obligation is terminal.
+ * (The retry scan stays group-wide: every row is self-contained — it carries its
+ * own metabot_id, nickname and text — so re-sending another bot's row only
+ * advances that row's own obligation and never writes into this bot's rows; the
+ * returned floor is still computed per (group, bot) for THIS task.)
+ */
+async function drainPendingGroupChatSends(
+  db: Database,
+  saveDb: SaveDbFn,
+  broadcastGroupChat: BroadcastGroupChatFn,
+  task: GroupChatTaskRow
+): Promise<number | null> {
+  ensureGroupChatOutboxSchema(db);
+  const pending = listPendingGroupChatSends(db, task.group_id);
+  if (pending.length === 0) return null;
+
+  const now = Date.now();
+  for (const row of pending) {
+    if (Number(row.next_attempt_at) > now) continue;
+    try {
+      const ack = await broadcastGroupChat(row.metabot_id, row.group_id, row.nick_name ?? '', row.content);
+      markGroupChatSendSubmitted(db, row.id, ackPinId(ack));
+      saveDb();
+      console.log(
+        `[Orchestrator] Outbox retry delivered reply for message ${row.trigger_msg_id} (pin=${ackPinId(ack) ?? 'n/a'})`
+      );
+    } catch (err) {
+      rethrowSqliteWasmBoundsError(err);
+      const message = err instanceof Error ? err.message : String(err);
+      const outcome = markGroupChatSendFailed(db, row.id, message);
+      saveDb();
+      console.error(
+        `[Orchestrator] Outbox retry failed for message ${row.trigger_msg_id} (state=${outcome.state}, attempts=${outcome.attempts}): ${message}`
+      );
+    }
+  }
+
+  return lowestPendingTriggerMsgId(listPendingGroupChatSends(db, task.group_id, task.metabot_id));
 }
 
 /**
@@ -886,6 +995,11 @@ async function tick(
       db.run('UPDATE group_chat_tasks SET last_processed_msg_id = 0 WHERE id = ?', [task.id]);
       saveDb();
     }
+
+    // Issue #40: retry due PENDING sends for this group BEFORE reading new
+    // messages, then keep the remaining pending floor — a failed reply's
+    // trigger message must stay "unconsumed" until its obligation is terminal.
+    const pendingFloor = await drainPendingGroupChatSends(db, saveDb, broadcastGroupChat, task);
 
     const newMsgResult = db.exec(
       `SELECT id, group_id, content, mention, sender_global_metaid, sender_metaid FROM group_chat_messages
@@ -969,10 +1083,25 @@ async function tick(
       }
 
       if (shouldReply) {
+        // Issue #40: never re-run the LLM for a message whose reply is already
+        // a durable obligation (pending retry, or already submitted/abandoned).
+        // Scoped to THIS bot (rework N1): another bot's obligation on the same
+        // trigger message must not block this bot's own reply. The cursor
+        // floor below keeps the message unconsumed while the obligation is
+        // still pending.
+        if (findGroupChatSendByTrigger(db, task.group_id, task.metabot_id, msgId)) {
+          break;
+        }
+        if (pendingFloor != null && msgId > pendingFloor) {
+          // An older reply is still awaiting (re)delivery. Keep reply ordering:
+          // defer this message instead of replying out of order.
+          break;
+        }
         thinkingTasks.add(task.id);
         try {
           await runReplyPipeline(
             task,
+            msgId,
             db,
             saveDb,
             getMetabotById,
@@ -988,9 +1117,22 @@ async function tick(
       }
     }
 
+    // Issue #40: the cursor only advances past messages whose reply reached a
+    // terminal delivery outcome. A still-PENDING obligation for THIS bot pins
+    // the cursor just below its trigger message, so the outbox drain retries
+    // the SAME reply (no LLM re-run) before later messages move on. Other bots'
+    // obligations in the same group never pin this task's cursor.
+    let nextCursor = maxProcessedId;
+    const pendingFloorAfter = lowestPendingTriggerMsgId(
+      listPendingGroupChatSends(db, task.group_id, task.metabot_id)
+    );
+    if (pendingFloorAfter != null) {
+      const cap = Math.max(pendingFloorAfter - 1, effectiveLastProcessed);
+      if (cap < nextCursor) nextCursor = cap;
+    }
     db.run(
       'UPDATE group_chat_tasks SET last_processed_msg_id = ? WHERE id = ?',
-      [maxProcessedId, task.id]
+      [nextCursor, task.id]
     );
   }
 
