@@ -18,6 +18,39 @@ recent journal events, what it is waiting on. **Never push from memory** —
 another session may have moved the task since you last saw it. Read the recent
 events to understand WHY it is where it is.
 
+## Anchor before you act (anti-drift)
+
+At the start of every advancement turn, restate in 2–3 sentences — in the
+journal (`longterm_event_note`) when useful: the task goal, the current
+sub-project's meaning, and its acceptance criteria. Then check your planned
+action against them:
+
+- **New-infrastructure alarm.** If the action introduces ANY premise not
+  present in the goal or the journal — a new config surface, a new channel, a
+  new dependency, a file/format nobody agreed on — STOP. That is a question for
+  the owner, never a decision you may take alone. (Real scar: a seat runtime
+  that "needed" its own LLM channel and a host config edit — the whole point
+  was that MetaBots already play through their host. Weeks wasted.)
+- **Load-bearing premise rule.** A premise the architecture stands on (where
+  something is configured, what a component depends on) must be verified
+  (evidence) or confirmed by the owner. 不知道自己不知道 is handled by
+  asking, never by building.
+- **Universality check.** Never design around resources that exist only on
+  this machine (paths, configs, credentials) — the feature ships to every
+  user's host.
+- **Host-model grounding.** MetaBots act THROUGH IDBots with their own
+  configured identity. Do not invent parallel config channels; if the work
+  seems to require one, you have misunderstood — ask.
+
+## Re-anchor on drift signals
+
+If the work starts looking unlike the goal — a different architecture, a
+different deliverable shape, a growing pile of machinery nobody asked for —
+STOP. Present the drift honestly in the session ("这里和我理解的目标出现偏差
+……"), re-read the goal with the owner, and replan. Never push deeper to make
+sunk work make sense. Asking a "dumb" question early is always cheaper than a
+confident wrong month.
+
 ## Decide: advance / ask / wait
 
 Exactly one of these per turn, in this priority:
@@ -51,11 +84,40 @@ Exactly one of these per turn, in this priority:
 Whatever the channel, record what you did in the journal
 (`longterm_event_note`) so the next session never has to reconstruct it.
 
+### Delegation briefs carry the anchor
+
+When you delegate (worker bot or group task), the brief must include, every
+time: the task goal in one breath, this sub-project's acceptance criteria
+verbatim, the constraints that apply (host model, universality, budgets), and
+the explicit rule: **do not invent infrastructure — if a premise is
+unverified, ask before building.** A worker that receives only the step's
+letter will build the plausible thing, not the right thing.
+
+When the worker reports back, verify against the GOAL and the acceptance
+criteria — not just the step's letter. If the deliverable meets the letter but
+misses the point, it misses.
+
 ## Acceptance loop
 
-- Propose only when the deliverable **verifiably meets every acceptance
-  criterion**: attach evidence (local dir, metaapp:// URI, pin:// id, URL)
-  and summarize how each criterion is met (`longterm_subtask_propose`).
+**The two-level check before every proposal.** Proposing acceptance is not a
+formality — it is your verdict that the sub-project is DONE. Before calling
+`longterm_subtask_propose`, run both levels and write the verdicts into the
+proposal summary:
+
+1. **对照本子项目验收标准**: every criterion, one by one, with the evidence
+   that proves it (local dir, metaapp:// URI, pin:// id, URL). A criterion
+   without evidence is unmet.
+2. **对照总目标**: re-read the task goal and ask — does this outcome still
+   serve it? A deliverable can meet every line of its sub-project and still
+   drift from the whole (a per-seat LLM config system that satisfies "对局可
+   运行" while missing the point of "bot 原生参战、宿主即配即用"). If the
+   answer is not an unqualified yes — do NOT propose. Present the drift in
+   the session and replan instead; a proposal is forever, a question costs a
+   minute.
+
+- Propose only when both levels pass: attach the evidence and summarize how
+  each criterion is met AND why the outcome serves the total goal
+  (`longterm_subtask_propose`).
 - The owner accepts or rejects. Rejection is information: read the feedback,
   iterate on the SAME sub-project (do not start a new one), and re-propose
   when the gap is actually closed.

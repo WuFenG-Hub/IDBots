@@ -234,3 +234,29 @@ test('nudge prompt follows the owner locale (zh owners get the Chinese hand-off)
   assert.match(runner.starts[0].prompt, /心跳自动开启/);
   assert.match(runner.starts[0].prompt, /用主人的语言回复/);
 });
+
+test('nudge prompt anchors the turn to the goal + acceptance criteria (anti-drift)', async () => {
+  const { store, runner, deps } = await openWorld();
+  const advance = new LongTermAdvanceService(deps);
+  await createActive(store);
+  await advance.run(Date.now());
+  const prompt = runner.starts[0].prompt;
+  // The task goal (done-ness definition) rides every heartbeat turn.
+  assert.ok(prompt.includes('Ship the on-chain game hub.'), 'goal text missing from the nudge prompt');
+  // The turn must restate understanding before acting, and escalate new infra as a question.
+  assert.match(prompt, /复述.*理解|restate your understanding/i);
+  assert.match(prompt, /自行拍板|never your call alone/i);
+});
+
+test('nudge prompt embeds acceptance criteria lines', async () => {
+  const { store, runner, deps } = await openWorld();
+  const advance = new LongTermAdvanceService(deps);
+  const withCriteria = store.createTask(
+    { title: 't1', goal: 'g', subtasks: [{ title: 's1', acceptanceCriteria: ['criterion one', 'criterion two'] }] },
+    'owner',
+  );
+  assert.ok(withCriteria.ok);
+  assert.ok(store.activateTask(withCriteria.value.id, 'owner').ok);
+  await advance.run(Date.now());
+  assert.ok(runner.starts[0].prompt.includes('criterion one'), 'criteria lines missing');
+});
