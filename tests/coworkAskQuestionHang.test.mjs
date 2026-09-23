@@ -30,15 +30,46 @@ const onAskRequestBody = (() => {
   return runnerSource.slice(start, end);
 })();
 
-test('ask_user_question modal path auto-answers with the recommended option after the shared 60s ceiling', () => {
-  assert.match(onAskRequestBody, /setTimeout\(\(\) => \{[\s\S]*?PERMISSION_RESPONSE_TIMEOUT_MS\)/);
-  assert.match(onAskRequestBody, /unanswered for 60s; auto-answering with the recommended option where one exists/);
+test('ask_user_question modal path auto-answers with the recommended option after the per-question backstop', () => {
+  // Per-question pacing: the renderer wizard owns a 120s window per displayed
+  // step; the main-process watchdog is a backstop scaled by question count so
+  // it never fires before the last step's window.
+  assert.match(runnerSource, /const ASK_PER_QUESTION_TIMEOUT_MS = 120_000;/);
+  assert.match(onAskRequestBody, /const backstopMs = ASK_PER_QUESTION_TIMEOUT_MS \* Math\.max\(1, \(ask\.questions \?\? \[\]\)\.length\);/);
+  assert.match(onAskRequestBody, /setTimeout\(\(\) => \{[\s\S]*?\}, backstopMs\)/);
+  assert.match(onAskRequestBody, /backstop elapsed \(120s per question\); auto-answering with the recommended option where one exists/);
   assert.match(onAskRequestBody, /pickRecommendedOptionLabel\(q\.options\)/);
   // The model must be able to tell the pick was automatic, not the user's.
-  assert.match(onAskRequestBody, /Auto-selected the recommended option because the user did not answer within 60s\./);
+  assert.match(onAskRequestBody, /Auto-selected the recommended option because the user did not answer within the 120s per-question window\./);
   // Questions without options still count as unanswered rather than hanging.
-  assert.match(onAskRequestBody, /The user did not answer within 60s\./);
+  assert.match(onAskRequestBody, /The user did not answer within the 120s per-question window\./);
   assert.match(onAskRequestBody, /hub\.respondAsk\(ask\.id, timeoutAnswers\)/);
+});
+
+test('plan reviews and long-term-task defining sessions are exempt from the ask timeout', () => {
+  assert.match(onAskRequestBody, /kind === 'plan-review'/);
+  // Defining-phase detection: reverse-lookup the session in the long-term
+  // task store; only the definition chat of a task still in 'defining' stage
+  // counts (subtask execution sessions keep the normal timeout).
+  assert.match(onAskRequestBody, /findBySessionId\(sessionId\)/);
+  assert.match(onAskRequestBody, /hit\.subtask === null && hit\.task\.stage === 'defining'/);
+  assert.match(onAskRequestBody, /const timeoutExempt = isPlanReviewAsk \|\| isLongTermDefiningSession;/);
+  assert.match(onAskRequestBody, /perQuestionTimeoutMs: timeoutExempt \? null : ASK_PER_QUESTION_TIMEOUT_MS/);
+  assert.match(onAskRequestBody, /if \(!timeoutExempt\) \{/);
+});
+
+test('the question wizard arms a fresh per-question timer as each step is displayed', () => {
+  // The renderer owns the real per-question pacing: one timer per step,
+  // keyed on currentStep, auto-picking the recommended option when the step
+  // lapses unanswered, and submitting everything when the last step lapses.
+  assert.match(panelSource, /permission\.perQuestionTimeoutMs/);
+  assert.match(panelSource, /window\.setTimeout\(\(\) => \{[\s\S]*?\}, timeoutMs\)/);
+  assert.match(panelSource, /if \(alreadyAnswered\) return;/);
+  assert.match(panelSource, /pickRecommendedOptionLabel\(question\.options\)/);
+  // Auto-picks are reported to main so the wire answers carry the
+  // "auto-selected" note the model sees.
+  assert.match(panelSource, /autoAnswered: Array\.from\(autoAnsweredRef\.current\)/);
+  assert.match(onAskRequestBody, /\?\.autoAnswered/);
 });
 
 test('ask timeout is cleared when the question settles through any path', () => {

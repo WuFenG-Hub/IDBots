@@ -24,7 +24,7 @@ interface CoworkPermissionOverlayProps {
  * panel's response semantics: safety approvals answer the confirmation
  * question with its first (allow) option; plain question wizards answer
  * every question with its first option — the same fallback the runner's
- * 60s auto-answer applies.
+ * ask-timeout backstop applies.
  */
 const buildAllowResult = (permission: CoworkPermissionRequest): CoworkPermissionResult => {
   const questions = parseQuestions(permission);
@@ -59,7 +59,7 @@ const buildAllowResult = (permission: CoworkPermissionRequest): CoworkPermission
  * renders prompts for the currently open chat (and never for A2A
  * conversations), so prompts raised by background, IM-automation, A2A or
  * hidden sessions would otherwise queue with nowhere to render and burn the
- * runner's 60s watchdog into an automatic denial. This overlay floats above
+ * runner's ask-timeout backstop into an automatic answer. This overlay floats above
  * every view, answers prompts in place with allow/deny, and links back to the
  * owning session.
  */

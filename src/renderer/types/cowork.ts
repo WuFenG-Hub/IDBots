@@ -723,6 +723,8 @@ export interface CoworkPermissionRequest {
   toolInput: Record<string, unknown>;
   requestId: string;
   toolUseId?: string | null;
+  // AskUserQuestion only: per-question countdown for the wizard; null/undefined = no timeout.
+  perQuestionTimeoutMs?: number | null;
 }
 
 export type CoworkPermissionResult =

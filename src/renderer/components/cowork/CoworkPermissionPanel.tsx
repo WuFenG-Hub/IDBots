@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CoworkPermissionRequest, CoworkPermissionResult } from '../../types/cowork';
+import { pickRecommendedOptionLabel } from '../../../main/shared/pickRecommendedOption';
 import {
   ChevronDownIcon,
   ChevronLeftIcon,
@@ -128,12 +129,21 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [otherInputs, setOtherInputs] = useState<Record<number, string>>({});
   const [skippedQuestions, setSkippedQuestions] = useState<Record<string, boolean>>({});
+  // Question texts the per-question timer picked on its own; forwarded as
+  // updatedInput.autoAnswered so main can tag those wire answers with the
+  // "auto-selected" note the model sees.
+  const autoAnsweredRef = useRef<Set<string>>(new Set());
+  // Latest-state snapshot for the timer callback (it outlives the render
+  // that armed it).
+  const latestRef = useRef({ answers, otherInputs, skippedQuestions, questions });
+  latestRef.current = { answers, otherInputs, skippedQuestions, questions };
 
   useEffect(() => {
     setExpanded(false);
     setCurrentStep(0);
     setOtherInputs({});
     setSkippedQuestions({});
+    autoAnsweredRef.current = new Set();
     const rawAnswers = toRecord(permission.toolInput.answers);
     if (!rawAnswers) {
       setAnswers({});
@@ -145,6 +155,87 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
     });
     setAnswers(initial);
   }, [permission.requestId, permission.toolInput]);
+
+  // Per-question timeout: each wizard step gets its own window, armed when
+  // the step becomes visible (main sends perQuestionTimeoutMs; null means
+  // exempt — plan reviews, long-term-task defining sessions). If the current
+  // step lapses still unanswered, the recommended option is auto-picked and
+  // the wizard advances; lapsing on the last step submits everything. An
+  // already-answered step never fires (the user's pick stands and the wizard
+  // waits for their click). The main-process watchdog is only a backstop
+  // scaled by question count for asks that never reach this panel.
+  useEffect(() => {
+    const timeoutMs = permission.perQuestionTimeoutMs;
+    if (!isQuestionRequest || responding || !timeoutMs) return;
+    const step = currentStep;
+    const timer = window.setTimeout(() => {
+      const { questions: qs, answers: ans, otherInputs: others, skippedQuestions: skipped } = latestRef.current;
+      const question = qs[step];
+      if (!question) return;
+      const alreadyAnswered = Boolean(ans[question.question]?.trim())
+        || Boolean(others[step]?.trim())
+        || skipped[question.question] === true;
+      if (alreadyAnswered) return;
+      const recommended = pickRecommendedOptionLabel(question.options);
+      if (recommended) {
+        autoAnsweredRef.current.add(question.question);
+        setAnswers((previous) => ({ ...previous, [question.question]: recommended }));
+        if (!question.multiSelect) {
+          setOtherInputs((previous) => {
+            const next = { ...previous };
+            delete next[step];
+            return next;
+          });
+        }
+      } else {
+        setSkippedQuestions((previous) => ({ ...previous, [question.question]: true }));
+      }
+      if (step < qs.length - 1) {
+        setCurrentStep((value) => Math.min(value + 1, qs.length - 1));
+        return;
+      }
+      // Last step lapsed: submit, auto-filling any still-unanswered
+      // questions with their recommended option (user skips stay skipped).
+      const finalAnswers: Record<string, string> = { ...latestRef.current.answers };
+      if (recommended) finalAnswers[question.question] = recommended;
+      else delete finalAnswers[question.question];
+      Object.entries(others).forEach(([stepIndex, customValue]) => {
+        const entry = qs[Number(stepIndex)];
+        if (!entry || !customValue.trim()) return;
+        if (entry.multiSelect) {
+          const selected = (finalAnswers[entry.question] ?? '')
+            .split('|||')
+            .map((value) => value.trim())
+            .filter(Boolean);
+          finalAnswers[entry.question] = [...selected, customValue.trim()].join('|||');
+        } else {
+          finalAnswers[entry.question] = customValue.trim();
+        }
+      });
+      qs.forEach((entry) => {
+        const done = Boolean(finalAnswers[entry.question]?.trim())
+          || Boolean(latestRef.current.skippedQuestions[entry.question])
+          || entry.question === question.question;
+        if (done) return;
+        const pick = pickRecommendedOptionLabel(entry.options);
+        if (pick) {
+          finalAnswers[entry.question] = pick;
+          autoAnsweredRef.current.add(entry.question);
+        } else {
+          setSkippedQuestions((previous) => ({ ...previous, [entry.question]: true }));
+        }
+      });
+      onRespond({
+        behavior: 'allow',
+        updatedInput: {
+          ...permission.toolInput,
+          answers: finalAnswers,
+          autoAnswered: Array.from(autoAnsweredRef.current),
+        },
+      });
+    }, timeoutMs);
+    return () => window.clearTimeout(timer);
+  }, [permission.requestId, currentStep, isQuestionRequest, responding, permission.perQuestionTimeoutMs]);
 
   const currentQuestion = questions[currentStep];
   const totalSteps = questions.length;
@@ -269,7 +360,11 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
       });
       onRespond({
         behavior: 'allow',
-        updatedInput: { ...permission.toolInput, answers: finalAnswers },
+        updatedInput: {
+          ...permission.toolInput,
+          answers: finalAnswers,
+          autoAnswered: Array.from(autoAnsweredRef.current),
+        },
       });
       return;
     }
