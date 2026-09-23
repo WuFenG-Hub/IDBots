@@ -528,7 +528,7 @@ function writeMetabotSubsidyState(
       SUBSIDY_STATE_KEY,
       JSON.stringify({
         state: subsidy.success ? 'claimed' : 'failed',
-        error: subsidy.success ? undefined : (subsidy.error ?? 'MVC gas subsidy request failed.'),
+        error: subsidy.success ? undefined : (subsidy.error ?? 'Traffic subsidy request failed.'),
         updatedAt: Date.now(),
       }),
     );
@@ -855,7 +855,7 @@ export async function resumeMetabotSetupCore(
     }
     writeMetabotSubsidyState(store, metabotId, subsidy);
     if (!subsidy.success) {
-      return { success: false, mode, metabot, subsidy, error: subsidy.error ?? 'MVC gas subsidy request failed.' };
+      return { success: false, mode, metabot, subsidy, error: subsidy.error ?? 'Traffic subsidy request failed.' };
     }
     const chain = await syncToChain(store, metabotId, { ownerBindingPayload });
     recordFullSyncOutcome(store, metabotId, {
