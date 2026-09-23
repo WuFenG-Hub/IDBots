@@ -117,6 +117,16 @@ jobs:
           # would catch a step that reinstalls dsh-runtime after the apply).
           node scripts/apply-dsh-kernel-patches.cjs --check
 
+      # Behavioral depth defense for the ask_user_question kernel patch:
+      # --check proves the bytes applied, this proves the patched tool still
+      # forwards per-question detail context across the runtime → host bridge
+      # (ask-bridge E2E, mock provider, no network), and the static test pins
+      # the patch + prompt contract in source.
+      - name: Run dsh ask-context tests
+        run: |
+          node dsh-runtime/test/ask-bridge.test.mjs
+          node --test tests/coworkAskContextPrompt.test.mjs
+
       # Static source-contract tests for the workspace-instructions line
       # (AGENTS.md/CLAUDE.md injection + git branch chip). Pure file-read +
       # regex assertions: no compile step needed, safe on every matrix OS.
@@ -308,6 +318,17 @@ jobs:
             exit 1
           }
           Write-Host "Kernel patch verified in packaged app ($count/3 CREATE_NO_WINDOW flags)."
+          $ask = 'release\win-unpacked\resources\dsh-runtime\node_modules\@deepseek-ai\dsh-tool-ask-user\lib\index.js'
+          if (-not (Test-Path $ask)) {
+            Write-Error "Packaged kernel file missing: $ask"
+            exit 1
+          }
+          $askCount = (Select-String -Path $ask -Pattern 'question\.detail !== void 0' -AllMatches | ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
+          if ($askCount -lt 1) {
+            Write-Error "ask_user_question patch NOT in the packaged app (no detail passthrough found in dsh-tool-ask-user). The pipeline dropped scripts/dsh-kernel-patches — do not ship."
+            exit 1
+          }
+          Write-Host "ask_user_question patch verified in packaged app (detail passthrough present)."
 
       - name: Notarize app (macOS)
         if: runner.os == 'macOS'

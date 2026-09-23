@@ -21,8 +21,11 @@
 nodeLinker: hoisted
 
 # pnpm does not run npm-era `pre`/`post` scripts by default; IDBots relies on
-# them: preelectron:dev / preelectron:dev:dsh run the check:dsh-deps gate and
-# predist:mac runs the renderer/main/skills build before packaging.
+# them: preelectron:dev / preelectron:dev:dsh run the check:dsh-deps gate,
+# predist:mac runs the renderer/main/skills build before packaging, and every
+# packaging entry (prepack / predist / predist:mac* / predist:win /
+# predist:linux) re-runs the check:dsh-deps gate so a wiped kernel patch can
+# never ride an electron-builder run silently (v0.9.3 lesson).
 enablePrePostScripts: true
 
 # Ported verbatim from the npm `overrides` field (package.json) — pin the
