@@ -24,7 +24,7 @@
  *     enqueue/markSubmitted never cross-write another bot's obligation row.
  *   - SUBMITTED is terminal in this slice. External read-back confirmation
  *     (pin readback / verifyPinSources, the issue's CONFIRMED phase) is
- *     deliberately deferred — see fix-plan.md.
+ *     deliberately deferred — see docs/design/2026-09-23-group-chat-outbox-issue-40.md.
  *
  * The table is owned by this module (same pattern as dreamStore /
  * teamCultureStore): ensureGroupChatOutboxSchema() is idempotent and is called
