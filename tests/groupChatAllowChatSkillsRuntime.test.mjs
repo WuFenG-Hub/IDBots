@@ -58,6 +58,11 @@ function makeDb(senderGlobalMetaId, overrides = {}) {
           values: [[1, 'group-1', messageContent, 'Sender', senderGlobalMetaId]],
         }];
       }
+      if (/group_chat_outbox/.test(sql)) {
+        // Issue #40 outbox reads: these fixtures exercise skill routing, not
+        // delivery durability — report "no obligations" for every read.
+        return [{ columns: [], values: [] }];
+      }
       throw new Error(`Unexpected SQL: ${sql} ${JSON.stringify(params)}`);
     },
     run(sql, params) {

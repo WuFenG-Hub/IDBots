@@ -111,6 +111,7 @@ tests/*
 !tests/chatSkillAuthorization.test.mjs
 !tests/orchestratorCoworkBridgeSkillIds.test.mjs
 !tests/groupChatAllowChatSkillsRuntime.test.mjs
+!tests/groupChatOutboxDurability.test.mjs
 !tests/groupTaskStore.test.mjs
 !tests/groupTasksI18nKeys.test.mjs
 !tests/metabotWalletService.test.mjs
