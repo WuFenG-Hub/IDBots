@@ -764,7 +764,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                 )}
               </p>
             </div>
-            {detail.stall === true && (
+            {/* The generic stall banner is for UNEXPLAINED silence only. When a
+                human gate already has its own banner below (open checkpoint /
+                review / supervisor pause), the task is waiting on the owner —
+                not stuck — and showing both banners reads as a contradiction. */}
+            {detail.stall === true && !openCheckpoint && detail.status !== 'review' && detail.dispatchPausedAt == null && (
               <div className="mt-2 rounded-lg border border-orange-300 dark:border-orange-500/40 bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-xs dark:text-orange-200 text-orange-800">
                 {i18nService
                   .t('groupTasksStallBanner')

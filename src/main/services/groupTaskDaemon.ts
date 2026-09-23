@@ -832,14 +832,30 @@ const GROUP_TASK_CHECKPOINT_REPORTED_KV_PREFIX = 'group_task_checkpoint_reported
  * - Activity after the opening (owner reply and/or chair speech) but no
  *   resolution for CHECKPOINT_STALL_NOTE_MS → one host environment note to the
  *   chair (`group_task_checkpoint_stall_noted:<taskId>:<checkpointId>`).
- * - No owner reply at all for CHECKPOINT_OWNER_REMIND_MS → one re-reminder to
- *   the owner's origin session
- *   (`group_task_checkpoint_owner_reminded:<taskId>:<checkpointId>`).
+ * - No owner reply at all for CHECKPOINT_OWNER_REMIND_MS → a re-reminder to
+ *   the owner's origin session AND a private A2A reminder on the chair→owner
+ *   channel, repeating every CHECKPOINT_OWNER_REMIND_MS up to
+ *   CHECKPOINT_OWNER_REMIND_MAX times
+ *   (`group_task_checkpoint_owner_reminded:<taskId>:<checkpointId>` holds the
+ *   count, `group_task_checkpoint_owner_remind_last:<taskId>:<checkpointId>`
+ *   the last fire time). The ladder is bounded but no longer one-shot: a
+ *   single missed notification used to pause the group forever (task #94).
  */
 const CHECKPOINT_STALL_NOTE_MS = 10 * 60_000;
 const CHECKPOINT_OWNER_REMIND_MS = 45 * 60_000;
+/** Bounded ladder: reminders fire at 45/90/135/180 min of owner silence. */
+const CHECKPOINT_OWNER_REMIND_MAX = 4;
 const CHECKPOINT_STALL_NOTED_KV_PREFIX = 'group_task_checkpoint_stall_noted:';
 const CHECKPOINT_OWNER_REMINDED_KV_PREFIX = 'group_task_checkpoint_owner_reminded:';
+const CHECKPOINT_OWNER_REMIND_LAST_PREFIX = 'group_task_checkpoint_owner_remind_last:';
+/**
+ * One owner-reply preemption per checkpoint
+ * (`group_task_checkpoint_owner_preempted:<taskId>:<checkpointId>`): the first
+ * owner reply after the opening aborts a chair turn that started BEFORE the
+ * checkpoint and is still monopolizing the session, so the ruling dispatches
+ * immediately instead of waiting out the session-busy hold.
+ */
+const CHECKPOINT_OWNER_PREEMPTED_KV_PREFIX = 'group_task_checkpoint_owner_preempted:';
 const ACK_PENDING_PREFIX = 'group_task_ack_pending:';
 const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
 /**
@@ -7691,7 +7707,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const turnToken: object = {};
     turnInFlight.set(guardKey, { startedAt: now(), token: turnToken });
     emitTurnActivity();
-    if (liveness) noteDriveActivity(liveness.taskId); // a dispatched turn is real drive work
+    // GT-01: deliberately NO noteDriveActivity here. A dispatched turn only
+    // earns the drive stamp when it is still live on the next tick (the
+    // heartbeat in processTask) — a fn that early-returns (supervisor signals
+    // deferred to an open checkpoint, a planning turn gated by roster/attempts)
+    // would otherwise pin lastDrivenAt at "now" every tick and hide the stall
+    // signal forever (task #94: a deferred signal turn masked 50+ min of
+    // checkpoint silence).
     // GT-01: same hard cap as dispatchReplyTurn — a task-level chair turn whose
     // await never settles must not leak the guard (and with it the chair's
     // whole turn budget) forever. On fire the guard releases so later ticks
@@ -9514,7 +9536,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           return false;
         }
       })();
-      if (!anyTurnInFlight && !anyLocalSessionActive) {
+      // The session-activity exemption is capped at the stall-anomaly window:
+      // "busy session" is evidence of progress only for a while. Past
+      // noProgressStallMs with zero group output the chair owes a status
+      // report no matter how busy its session looks (task #94: relay-outage
+      // probe turns kept the chair session "active" through 51 min of group
+      // silence, suppressing every nudge — nothing ever re-kicked the task).
+      const sessionActivitySuppresses = anyLocalSessionActive && idleMs < noProgressStallMs;
+      if (!anyTurnInFlight && !sessionActivitySuppresses) {
         // GT-03 (task #56): a PLANNING task needs its planning turn re-armed,
         // not a status-report nudge — the chair has nothing to report yet and
         // the supervisor directive forbids [STATUS:*] anyway. When the plan was
@@ -9915,12 +9944,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * enforced), so nothing else notices when the pause itself goes stale —
    * task #84 idled 24 min: the owner's ruling came in, the chair relayed it
    * without [CHECKPOINT_RESOLVED:], and every status field read "executing".
-   * Two rails, each once per checkpoint:
+   * Rail 1 fires once per checkpoint; rail 2 is a bounded periodic ladder:
    *  - activity after the opening (owner reply and/or chair speech) but no
    *    resolution for CHECKPOINT_STALL_NOTE_MS → host note to the chair (the
    *    checkpoint_stall kind is let through the human-gate deferral);
-   *  - no owner reply at all for CHECKPOINT_OWNER_REMIND_MS → one re-reminder
-   *    to the owner's origin session (the opening report may have been missed).
+   *  - no owner reply at all → re-remind the owner every
+   *    CHECKPOINT_OWNER_REMIND_MS (origin-session milestone + a private A2A
+   *    reminder on the chair→owner channel), capped at
+   *    CHECKPOINT_OWNER_REMIND_MAX fires. The old one-shot reminder let a
+   *    single missed notification pause the group forever (task #94).
    */
   const monitorCheckpointLiveness = (
     task: GroupTask,
@@ -9958,6 +9990,47 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // the chair has been active while the gate stayed closed.
     const chairSpokeAfterOpen = chairLastMs != null && chairLastMs > openedAtMs + 1000;
     const nowMs = now();
+    // Owner-reply preemption: the owner has ruled, but the chair session may
+    // still be monopolized by a LINGERING PRE-CHECKPOINT turn (task #94: the
+    // chair opened the checkpoint mid-turn, then kept running 10-min download
+    // probes — the owner's reply sat behind the 45-min session-busy hold and
+    // every recovery turn skipped on the in-flight guard). The checkpoint IS
+    // the chair's own declaration that the group is paused, so once the owner
+    // answers, the lingering turn's continued output is stale by definition:
+    // abort it so the owner's trigger dispatches on the next tick. Session
+    // history and on-disk artifacts survive the stop; a turn that started
+    // AFTER the checkpoint opened (e.g. answering an earlier owner message)
+    // is legitimate and left alone. Once per checkpoint.
+    if (ownerReplied && chairMember?.metabotId != null && deps.stopWorkerSession) {
+      const preemptKey = `${CHECKPOINT_OWNER_PREEMPTED_KV_PREFIX}${task.id}:${checkpoint.id}`;
+      if (sqlite.get<string>(preemptKey) == null) {
+        const chairMetabotId = chairMember.metabotId;
+        const inFlight = turnInFlight.get(keyOf(task.id, chairMetabotId));
+        const chairSessionId = getLocalMemberSessionInfo(task.id, chairMetabotId)?.sessionId ?? null;
+        // An in-flight turn is preempted only when it predates the checkpoint
+        // (a post-open turn is legitimate checkpoint-phase work, e.g. answering
+        // an earlier owner message). With NO in-flight entry the guard already
+        // released — a still-busy session then means a rotting runner turn the
+        // hard cap left behind (or a foreign writer), which preemption clears.
+        let preempt = inFlight != null && inFlight.startedAt < openedAtMs;
+        if (!preempt && inFlight == null && chairSessionId) {
+          try {
+            preempt = deps.getCoworkStore().getSession(chairSessionId)?.status === 'running'
+              || deps.isCoworkSessionActive?.(chairSessionId) === true;
+          } catch {
+            preempt = false; // best-effort read — retry next tick
+          }
+        }
+        if (preempt && chairSessionId) {
+          sqlite.set(preemptKey, '1');
+          deps.stopWorkerSession(chairSessionId);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: owner replied to open checkpoint #${checkpoint.id} — ` +
+            'aborted the chair\'s lingering pre-checkpoint turn so the owner\'s reply can dispatch',
+          );
+        }
+      }
+    }
     if (ownerReplied || chairSpokeAfterOpen) {
       const activityMs = Math.max(openedAtMs, ownerLastMs ?? 0, chairSpokeAfterOpen ? (chairLastMs ?? 0) : 0);
       if (nowMs - activityMs < CHECKPOINT_STALL_NOTE_MS) return;
@@ -9982,12 +10055,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       );
       return;
     }
-    if (nowMs - openedAtMs >= CHECKPOINT_OWNER_REMIND_MS) {
-      const remindKey = `${CHECKPOINT_OWNER_REMINDED_KV_PREFIX}${task.id}:${checkpoint.id}`;
-      if (sqlite.get<string>(remindKey) != null) return;
-      sqlite.set(remindKey, '1');
-      // Best-effort (the milestone rail is itself subject-guarded per
-      // checkpoint): re-remind the owner that the group is still paused.
+    // Rail 2 (bounded periodic ladder): no owner reply at all. The reminder
+    // count persists in the existing kv key (legacy rows hold '1' and simply
+    // continue the ladder at #2); the last-fire timestamp slides the window.
+    const remindKey = `${CHECKPOINT_OWNER_REMINDED_KV_PREFIX}${task.id}:${checkpoint.id}`;
+    const remindLastKey = `${CHECKPOINT_OWNER_REMIND_LAST_PREFIX}${task.id}:${checkpoint.id}`;
+    const remindCount = Number(sqlite.get<number>(remindKey) ?? 0) || 0;
+    if (remindCount >= CHECKPOINT_OWNER_REMIND_MAX) return;
+    const lastRemindMs = Number(sqlite.get<number>(remindLastKey) ?? 0) || 0;
+    const remindBasisMs = lastRemindMs > 0 ? lastRemindMs : openedAtMs;
+    if (nowMs - remindBasisMs >= CHECKPOINT_OWNER_REMIND_MS) {
+      const nextCount = remindCount + 1;
+      sqlite.set(remindKey, String(nextCount));
+      sqlite.set(remindLastKey, String(nowMs));
+      const waitingMinutes = Math.round((nowMs - openedAtMs) / 60_000);
+      // The milestone subject carries the count so the per-subject dedupe
+      // guard lets each rung of the ladder through.
       notifySourceSessionMilestone(
         task,
         'checkpoint',
@@ -9995,13 +10078,38 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           title: task.title,
           status: task.status,
           topic: checkpoint.topic,
-          waitingMinutes: Math.round((nowMs - openedAtMs) / 60_000),
+          waitingMinutes,
+          reminderCount: nextCount,
         }),
-        `checkpoint_stall:${checkpoint.id}`,
+        `checkpoint_stall:${checkpoint.id}:${nextCount}`,
       );
+      // Same chair→owner private channel the opening report used — the
+      // origin-session note alone never reached the owner in task #94.
+      // Fire-and-forget: a delivery failure only logs, never blocks the tick.
+      const ownerReportGmid = (chairBot?.boss_global_metaid ?? '').trim();
+      if (deps.sendOwnerPrivateReport && chairBot?.id != null && ownerReportGmid) {
+        void deps.sendOwnerPrivateReport({
+          taskId: task.id,
+          metabotId: chairBot.id,
+          ownerGlobalMetaId: ownerReportGmid,
+          text:
+            `[Checkpoint reminder] Group task "${task.title}" is still paused at checkpoint ` +
+            `#${checkpoint.id}${checkpoint.topic ? ` (${checkpoint.topic})` : ''} — no reply from you for ` +
+            `~${waitingMinutes} min, and the group cannot resume until you rule. Reply in the task group ` +
+            'or right here; the chair resumes once you confirm. ' +
+            `(Automated reminder ${nextCount}/${CHECKPOINT_OWNER_REMIND_MAX} — ignore if this wait is intentional.)`,
+          kind: 'checkpoint',
+          checkpointId: checkpoint.id,
+        }).catch((error) => {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: checkpoint #${checkpoint.id} private reminder failed (tick continues): ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: checkpoint #${checkpoint.id} open ` +
-        `${Math.round((nowMs - openedAtMs) / 60_000)} min with no owner reply — re-reminded the owner`,
+        `${waitingMinutes} min with no owner reply — re-reminded the owner (${nextCount}/${CHECKPOINT_OWNER_REMIND_MAX})`,
       );
     }
   };
@@ -10797,7 +10905,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const hasPendingSignals = store
         .listPendingSupervisorSignals(task.id)
         .some((signal) => signal.kind === 'nudge' || signal.kind === 'flag');
-      if (hasPendingSignals && chairMemberId != null) {
+      // While a human checkpoint is open the signal turn only defers inside
+      // processSupervisorSignals — dispatching it every tick is a pure no-op
+      // spin (task #94). Skip it here; the signals stay pending and drive a
+      // real turn on the first tick after the checkpoint resolves.
+      if (hasPendingSignals && chairMemberId != null && !checkpointOpenAtTick) {
         runTurnAsync(
           keyOf(task.id, chairMemberId),
           `Task ${task.id} supervisor-signal turn`,
