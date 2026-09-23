@@ -38,6 +38,32 @@ export interface AgentGameConsentCardInfo {
   budget: { llmCalls: number; writes: number };
 }
 
+/** Authorization card issued by the host two-phase start (ABC renders it). */
+export interface AgentGameSessionConfirmation {
+  actor: { uri: string; globalMetaId: string; name: string };
+  resourceUri: string;
+  appId: string;
+  sessionType: string;
+  groupId: string;
+  gameId: string;
+  manifestUri: string;
+  rulesHash: string;
+  adapterHash: string;
+  seat: string;
+  protocolPaths: string[];
+  ttlMs: number;
+  llmBudget: number;
+  writeBudget: number;
+  expiresAt: number;
+}
+
+/** Host-issued confirmRequest the page must echo verbatim in Phase 2. */
+export interface AgentGameSessionConfirmRequest {
+  kind: 'app-session-start';
+  resourceUri: string;
+  payload: Record<string, unknown>;
+}
+
 /** Dispatch result envelope ({ __error: true, code, message } on failure). */
 export interface AgentGameSessionResult {
   __error?: boolean;
@@ -51,4 +77,8 @@ export interface AgentGameSessionResult {
   expiresAt?: number;
   budget?: AgentGameSessionView['budget'];
   sessions?: AgentGameSessionView[];
+  /** Two-phase start Phase 1 outcome (manual_action_required). */
+  manualAction?: boolean;
+  confirmation?: AgentGameSessionConfirmation;
+  confirmRequest?: AgentGameSessionConfirmRequest;
 }

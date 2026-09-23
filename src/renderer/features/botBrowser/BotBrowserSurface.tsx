@@ -188,6 +188,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
         completeLlm: (input) => window.electron.botBrowser.completeLlm(input),
         requestPermissions: (input) => window.electron.botBrowser.requestPermissions(input),
         sendPrivateChat: (input) => window.electron.botBrowser.sendPrivateChat(input),
+        runAgentGameSession: (input) => window.electron.agentGame.session(input),
         openConversation: (request) => callbacksRef.current.onOpenConversation(request),
       });
       endpointShimRef.current = createBrowserEndpointShim(adapter);

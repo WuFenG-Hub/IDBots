@@ -13,6 +13,7 @@ import {
 } from '@openagentinternet/agent-browser-core';
 import {
   browserFailure,
+  browserManualActionRequired,
   browserSuccess,
   type BrowserCacheClearInput,
   type BrowserCacheClearResult,
@@ -50,6 +51,17 @@ import {
   normalizeMetaAppSourcePinId,
 } from './metaAppBrowserModel.js';
 import type { BotBrowserConversationRequest } from './types';
+import type { AgentGameSessionResult } from '../../types/agentGame';
+
+/** browser.app.session.<method> trusted-action kinds → host session methods. */
+const APP_SESSION_METHODS: Partial<Record<BrowserTrustedActionKind, string>> = {
+  'app-session-start': 'start',
+  'app-session-list': 'list',
+  'app-session-status': 'status',
+  'app-session-pause': 'pause',
+  'app-session-resume': 'resume',
+  'app-session-stop': 'stop',
+};
 
 export interface IdBotsBrowserHostAdapterInput {
   listMetabots: () => Promise<Metabot[]>;
@@ -88,6 +100,18 @@ export interface IdBotsBrowserHostAdapterInput {
     replyPin?: string;
   }) => Promise<{ success: boolean; pinId?: string; txids?: string[]; error?: string }>;
   fetch?: typeof fetch;
+  /**
+   * Dispatches a browser.app.session.* method to the Agent-Game-v2 host
+   * (docs/09 §4, docs/14 §1). Returns the raw IPC envelope: a SessionView /
+   * { sessions }, a { __error } envelope, or the two-phase start Phase 1
+   * outcome ({ manualAction, confirmation, confirmRequest }).
+   */
+  runAgentGameSession?: (input: {
+    method: string;
+    payload?: unknown;
+    actorId?: string;
+    resourceUri?: string;
+  }) => Promise<AgentGameSessionResult>;
 }
 
 export interface BotBrowserBridgeTrustedActionRequest {
@@ -599,6 +623,71 @@ export function createIdbotsBrowserHostAdapter(
           'Session write permission request failed.',
           'Session write permissions are not supported in this IDBots build.',
         );
+      }
+
+      // browser.app.session.* (Agent-Game-v2, docs/09 §4): forward to the
+      // AgentGame host IPC. `start` is two-phase — the host's Phase 1 answer
+      // comes back as manual_action_required { confirmation, confirmRequest }
+      // which ABC renders; the page's Phase 2 echo carries the confirmToken.
+      const appSessionMethod = APP_SESSION_METHODS[actionInput.kind];
+      if (appSessionMethod) {
+        if (!input.runAgentGameSession) {
+          return browserFailure(
+            'unsupported_method',
+            'App sessions are not supported in this IDBots build.',
+          );
+        }
+        const actorId = text(actionInput.actorId);
+        if (!actorId) {
+          return browserFailure('browser_action_missing_actor', 'A local Bot actor is required.');
+        }
+        const localMetabotId = parseLocalMetabotActorId(actorId);
+        if (localMetabotId === null) {
+          return browserFailure('browser_action_invalid_actor', 'The selected actor is not an available local Bot.');
+        }
+        const metabots = await input.listMetabots();
+        const actorGlobalMetaId = normalizeBrowserGlobalMetaId(
+          metabots.find((metabot) => metabot.id === localMetabotId)?.globalmetaid,
+        );
+        if (!actorGlobalMetaId) {
+          return browserFailure('browser_action_invalid_actor', 'The selected actor is not an available local Bot.');
+        }
+
+        try {
+          const result = await input.runAgentGameSession({
+            method: appSessionMethod,
+            payload: actionInput.payload,
+            actorId: actorGlobalMetaId,
+            resourceUri: actionInput.resourceUri,
+          });
+          if (result.__error) {
+            return browserFailure(
+              text(result.code) || 'internal_error',
+              safeBridgeMessage(result.message, 'App session request failed.'),
+            );
+          }
+          if (result.manualAction && result.confirmation && result.confirmRequest) {
+            return browserManualActionRequired(
+              'manual_action_required',
+              'Approve the app session request to continue.',
+              {
+                data: {
+                  confirmation: result.confirmation,
+                  confirmRequest: result.confirmRequest,
+                } as Record<string, unknown>,
+              },
+            );
+          }
+          return trustedActionSuccess(actionInput.kind, result);
+        } catch (error) {
+          if (isMissingIpcHandlerError(error, 'agentGame:session')) {
+            return browserFailure(
+              'unsupported_method',
+              'App sessions are not supported in this IDBots build.',
+            );
+          }
+          return browserFailure('internal_error', 'App session request failed.');
+        }
       }
 
       if (actionInput.kind === 'copy-uri') {
