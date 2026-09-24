@@ -49,14 +49,31 @@ jobs:
       - name: Enable pnpm
         run: corepack enable
 
-      - name: Get pnpm store directory
-        id: pnpm-store
-        shell: bash
+      # The self-hosted win-sign runner has no bash on PATH until the
+      # "Setup MinGit (Windows)" step much later in this job, so `shell: bash`
+      # dies here with "bash: command not found" (first pnpm-era Windows run,
+      # 2026-09-24). Resolve the store path per platform instead (SOP 11.10).
+      - name: Get pnpm store directory (Windows)
+        if: runner.os == 'Windows'
+        id: pnpm-store-win
+        shell: powershell
+        run: |
+          $store = (pnpm store path 2>$null | Where-Object { $_ -and $_.Trim() } | Select-Object -Last 1)
+          if (-not $store) {
+            Write-Error "pnpm store path returned no usable path"
+            exit 1
+          }
+          # AppendAllText writes UTF-8 without a BOM (Out-File/Add-Content differ per PS version).
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "STORE_PATH=$($store.Trim())`n")
+
+      - name: Get pnpm store directory (non-Windows)
+        if: runner.os != 'Windows'
+        id: pnpm-store-nix
         run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v4
         with:
-          path: ${{ steps.pnpm-store.outputs.STORE_PATH }}
+          path: ${{ steps.pnpm-store-win.outputs.STORE_PATH || steps.pnpm-store-nix.outputs.STORE_PATH }}
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'dsh-runtime/pnpm-lock.yaml', 'SKILLs/web-search/pnpm-lock.yaml') }}
           restore-keys: pnpm-store-${{ runner.os }}-
 
