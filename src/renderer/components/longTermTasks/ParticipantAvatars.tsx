@@ -16,20 +16,24 @@ const ParticipantAvatars: React.FC<{
   const dim = size === 'sm' ? 'h-5 w-5 text-[9px]' : 'h-7 w-7 text-[11px]';
   const visible = participants.slice(0, maxVisible);
   const overflow = participants.length - visible.length;
+  // Every avatar cell is the same fixed-size flex box: image and letter
+  // fallback then center identically (an inline img baselines differently
+  // from an inline-flex letter circle and used to sag a few px).
+  const cell = `${dim} relative inline-flex shrink-0 items-center justify-center`;
   return (
     <span className="inline-flex items-center">
-      <span className="flex -space-x-1.5">
+      <span className="flex -space-x-1.5 items-center">
         {visible.map((bot) => (
-          <span key={bot.id} title={bot.name} className="relative inline-block">
+          <span key={bot.id} title={bot.name} className={cell}>
             {bot.avatar ? (
               <img
                 src={bot.avatar}
                 alt={bot.name}
-                className={`${dim} rounded-full border dark:border-claude-darkBorder border-claude-border object-cover bg-claude-surface dark:bg-claude-darkSurface`}
+                className="block h-full w-full rounded-full border dark:border-claude-darkBorder border-claude-border object-cover bg-claude-surface dark:bg-claude-darkSurface"
               />
             ) : (
               <span
-                className={`${dim} inline-flex items-center justify-center rounded-full border dark:border-claude-darkBorder border-claude-border bg-sky-500/20 font-semibold text-sky-700 dark:text-sky-300`}
+                className="inline-flex h-full w-full items-center justify-center rounded-full border dark:border-claude-darkBorder border-claude-border bg-sky-500/20 font-semibold text-sky-700 dark:text-sky-300"
               >
                 {bot.name.slice(0, 1)}
               </span>
@@ -38,7 +42,7 @@ const ParticipantAvatars: React.FC<{
         ))}
         {overflow > 0 && (
           <span
-            className={`${dim} inline-flex items-center justify-center rounded-full border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary`}
+            className={`${cell} rounded-full border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary`}
           >
             +{overflow}
           </span>

@@ -2207,6 +2207,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     'longTermTask.openBoundSession': '打开关联会话',
     'longTermTask.moveUp': '上移',
     'longTermTask.moveDown': '下移',
+    'longTermTask.expand': '展开',
+    'longTermTask.collapse': '收起',
     'longTermTask.origin.label': '所属长期任务',
     'longTermTask.origin.open': '打开看板里的这个任务',
     scheduledTasks: '跟踪任务',
@@ -4812,6 +4814,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     'longTermTask.openBoundSession': 'Open bound session',
     'longTermTask.moveUp': 'Move up',
     'longTermTask.moveDown': 'Move down',
+    'longTermTask.expand': 'Expand',
+    'longTermTask.collapse': 'Collapse',
     'longTermTask.origin.label': 'Long-term task',
     'longTermTask.origin.open': 'Open this task on the board',
     // Tracking Tasks (formerly Scheduled Tasks)
