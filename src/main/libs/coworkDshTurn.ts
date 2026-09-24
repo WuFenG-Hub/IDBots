@@ -230,9 +230,17 @@ class DshTurnController {
   handleTurnEnd(reason: { kind: string; reason?: unknown }, emptyTerminal?: boolean): void {
     const outcome = emptyTerminal === true ? { ...reason, emptyTerminal: true } : reason
     // Fatal outcomes and non-steer aborts (user stop, stall watchdog) always
-    // settle through — a pending steer never outranks them.
+    // settle through — a pending steer never outranks them. The steer abort
+    // reads as the pre-0.1.7 string cause 'steer' or, since the kernel's
+    // closed cancel-cause union, the V4 hook form {kind:'hook',reason:'steer'}
+    // the wire extension now translates it into.
+    const abortCause = reason.reason
+    const isSteerAbort = abortCause === 'steer'
+      || (typeof abortCause === 'object' && abortCause !== null
+        && (abortCause as { kind?: unknown }).kind === 'hook'
+        && (abortCause as { reason?: unknown }).reason === 'steer')
     const settlesThrough = reason.kind === 'error'
-      || (reason.kind === 'aborted' && reason.reason !== 'steer')
+      || (reason.kind === 'aborted' && !isSteerAbort)
     if (this.steerFollowUpExpected && !settlesThrough) {
       // Swallow exactly one boundary — the steer's cancel(keepInbox) abort,
       // or a natural end that raced the steer (an unconsumed inbox steer is

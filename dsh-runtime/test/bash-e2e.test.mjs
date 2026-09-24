@@ -98,9 +98,9 @@ const main = async () => {
   const end = await turnDone
   console.log('[test] turn ended:', JSON.stringify(end.data?.reason))
   await approvalRace.catch(() => undefined)
-  const bashResult = events.find((e) => e.type === 'tool/result' && JSON.stringify(e).includes('bash') === false && e.data?.message?.content?.[0]?.toolCallId)
+  const bashResult = events.find((e) => e.type === 'tool/result' && JSON.stringify(e).includes('bash') === false && e.data?.message?.toolCallId)
   const anyToolResult = events.filter((e) => e.type === 'tool/result')
-  for (const r of anyToolResult) console.log('[result]', JSON.stringify(r.data?.message?.content?.[0]?.content ?? '').slice(0, 160))
+  for (const r of anyToolResult) console.log('[result]', JSON.stringify(r.data?.message?.content ?? '').slice(0, 160))
   console.log('[test] PASS criteria: a tool result contains BASH_WORKS =', events.some((e) => JSON.stringify(e).includes('BASH_WORKS')))
 
   subscription.close()

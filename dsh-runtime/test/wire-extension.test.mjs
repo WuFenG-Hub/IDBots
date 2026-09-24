@@ -53,7 +53,7 @@ const main = async () => {
   pumping.catch(() => {})
 
   const waitFor = (predicate, timeoutMs = 20000) => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timeout waiting for session event (${events.length} seen)`)), timeoutMs)
+    const timer = setTimeout(() => reject(new Error(`timeout waiting for session event (${events.length} seen): ${JSON.stringify(events).slice(0, 3000)}`)), timeoutMs)
     const wait = (entry) => {
       if (predicate(entry)) {
         clearTimeout(timer)
@@ -101,7 +101,7 @@ const main = async () => {
 
   const ended = await turnEndPromise()
   const abortedWithCause = ended.data?.reason?.kind === 'aborted' && JSON.stringify(ended).includes('m1 wire cancel')
-  record('cancelled turn closes as aborted with our cause', abortedWithCause, JSON.stringify(ended.data?.reason))
+  record('cancelled turn closes as aborted with our cause', abortedWithCause, JSON.stringify(ended.data).slice(0, 600))
 
   // ---- 4. stock behavior intact -------------------------------------------
   try {

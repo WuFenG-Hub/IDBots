@@ -579,7 +579,16 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     // is a documented no-op that never emits a turn boundary, and the host's
     // steer latch arms only on a real interrupt.
     const cancelled = agent.status === 'running'
-    agent.cancel(cause ?? 'idbots client cancel', { keepInbox: keepInbox === true })
+    // 0.1.7: agent.cancel takes the closed AgentCancelCause union
+    // ({kind:'user'|'parent'|'disposed'} or {kind:'hook', reason}). A bare
+    // string now slips past abortedCancelCause into assertNever, and the
+    // turn/end lands with reason:null. Free-form wire strings ('steer',
+    // watchdog texts, …) ride the V4-legal hook form so the cause survives
+    // in the log; a bare cancel is the user's own stop.
+    const cancelCause = typeof cause === 'string' && cause.length > 0
+      ? { kind: 'hook', reason: cause }
+      : { kind: 'user' }
+    agent.cancel(cancelCause, { keepInbox: keepInbox === true })
     return { cancelled }
   }
 

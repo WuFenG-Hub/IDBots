@@ -237,9 +237,17 @@ export class DshEventMapper {
       }
 
       case 'tool/result': {
-        const block = data.message?.content?.find?.((b: { type: string }) => b.type === 'tool-result')
-        const content = textOf(block?.content)
-        const isError = Boolean(block?.isError)
+        // 0.1.7: the message IS the tool result — role 'tool', top-level
+        // toolCallId/isError, content = raw result blocks. Pre-0.1.7 wrapped
+        // it in a content block typed 'tool-result'; keep the fallback so
+        // replayed pre-upgrade history still maps.
+        const message = data.message as
+          | { toolCallId?: unknown; isError?: unknown; content?: Array<{ type: string; toolCallId?: unknown; isError?: unknown; content?: Array<{ type: string; text?: string }> } & { type: string; text?: string }> }
+          | undefined
+        const legacyBlock = message?.content?.find?.((b) => b.type === 'tool-result')
+        const content = textOf(legacyBlock ? legacyBlock.content : message?.content)
+        const isError = Boolean(legacyBlock ? legacyBlock.isError : message?.isError)
+        const rawCallId = legacyBlock?.toolCallId ?? message?.toolCallId
         actions.push({
           kind: 'message',
           message: {
@@ -247,7 +255,7 @@ export class DshEventMapper {
             content,
             metadata: {
               toolResult: content,
-              toolUseId: typeof block?.toolCallId === 'string' ? block.toolCallId : null,
+              toolUseId: typeof rawCallId === 'string' ? rawCallId : null,
               error: isError ? content || 'Tool execution failed' : undefined,
               isError,
             },

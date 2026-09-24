@@ -49,7 +49,7 @@ const main = async () => {
   pumping.catch(() => {})
 
   const waitFor = (predicate, timeoutMs = 20000) => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timeout waiting for notification (${sessionEvents.length} session events seen)`)), timeoutMs)
+    const timer = setTimeout(() => reject(new Error(`timeout waiting for notification (${sessionEvents.length} session events seen): ${JSON.stringify(sessionEvents.map((e) => e.type)).slice(0, 2000)} | ${JSON.stringify(sessionEvents.at(-1)).slice(0, 800)}`)), timeoutMs)
     const wait = (notification) => {
       if (predicate(notification)) {
         clearTimeout(timer)
