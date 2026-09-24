@@ -474,7 +474,21 @@ export class DshKernel {
         }
       }
     } catch (error) {
-      if (!this.closed) this.opts.handlers.onError?.(error instanceof Error ? error : new Error(String(error)))
+      if (!this.closed) {
+        // The transport died without our hand (runtime crash/OOM/kill — e.g.
+        // the 2026-09-24 spill-ENOENT kernel exit). Drop the dead client so
+        // `running` reports false and the next ensureRuntime boots a successor
+        // instead of "reusing the live runtime" that no longer exists; the
+        // identity guard keeps a superseded pump from nulling a successor's
+        // client after restart() already swapped it. In-flight turns were
+        // settled through onError below; requests racing the death reject on
+        // the dead client and the turn hub's respawn-once path covers them.
+        if (this.client === client) {
+          this.client = null
+          this.pump = null
+        }
+        this.opts.handlers.onError?.(error instanceof Error ? error : new Error(String(error)))
+      }
     }
   }
 

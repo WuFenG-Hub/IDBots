@@ -62,6 +62,33 @@ message before the tool call, plus spelling out internal shorthand;
 context to the panel itself; (3) threads `detail` through `execute()` into the
 `ctx.userQuestions.ask` payload so it actually reaches the modal.
 
+### `@deepseek-ai+dsh-subprocess-local+0.1.5-rc.2.patch`
+
+Incident (2026-09-24, ~1 in 50 sessions): an external tmp cleanup removed the
+shared DSH runtime's private `dsh-subprocess-*` spill directory
+(`/var/folders/…/T/dsh-subprocess-ysdKLS`) while the process was serving turns.
+The next overflowing bash stdout hit `openSync(spillFile, "wx")` ENOENT inside
+the socket `data` handler (`OutputCollector.spillAll`); the uncaught throw
+killed the whole runtime process (exit 1, "DSH runtime is not running") and
+cascaded into every active conversation for minutes (146 log entries, two
+user-visible broken conversations). Upstream already contains the degradation
+concept — `discardSpill()` for an over-cap stream, `spillPath ?? "(unavailable)"`
+in the bash truncation notice, a contained `seal()` — but the spill open/append
+path itself is unprotected.
+
+The patch makes the collector resilient without changing its behavior on the
+happy path: (1) `spillAll` routes file establishment through a new `openSpill()`
+that on ENOENT recreates the private directory once (`mkdirSync` recursive,
+0700) and retries — an external deletion self-heals and full-output recovery
+keeps working; (2) when the spill target stays unavailable the collector
+degrades via `discardSpill()` (in-memory tail only, truncation flagged, no
+crash) instead of throwing; (3) append failures (`writeSync`) are contained the
+same way; (4) the `stream.on("data")` handler wraps `collector.push(chunk)` so
+no residual collector failure can escape into the event loop. Regression test:
+`dsh-runtime/test/subprocess-spill-resilience.test.mjs` reproduces the exact
+incident (mid-stream spill-dir deletion crashes the unpatched process) and the
+unrecoverable-spill degradation case.
+
 ## Adding / rebasing a patch
 
 1. Edit the installed file under `dsh-runtime/node_modules/<pkg>/` directly.

@@ -120,6 +120,8 @@ tests/*
 !tests/coworkCwdSelfHeal.test.mjs
 !tests/sessionViewGrouping.test.ts
 !tests/coworkDshRuntimeDrain.test.mjs
+!tests/coworkDshRuntimeCrashRespawn.test.mjs
+!tests/coworkDshKernelCrashDropsClient.test.mjs
 !tests/coworkDshPerRouteCredential.test.mjs
 !tests/dshHostToolRegistry.test.mjs
 !tests/promptComposer.test.mjs
