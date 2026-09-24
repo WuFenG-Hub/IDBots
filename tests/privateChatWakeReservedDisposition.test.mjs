@@ -420,3 +420,75 @@ test('wake re-drive never retroactively marks the existing presentation and stil
   assert.equal(harness.row.is_processed, 1);
   assert.equal(handle.createPinCount, 0, 'a permanently silent conversation delivers nothing on-chain');
 });
+
+// ---- H-64 leg B addendum (a3, verification-surface completion) ----
+// The shipped wake ladder is THREE scheduled tiers (900s -> 7200s -> 43200s)
+// plus a fourth terminal state (budget exhaustion). The two tests above shrink
+// the ladder for speed; the full shape itself must be pinned so no tier can
+// silently disappear: exact default values locked below, a complete three-tier
+// walk proving every rung schedules AND fires, and the exhausted state proven
+// to stop the re-drive and arm nothing new.
+
+test('wake ladder default shape is locked: 900s -> 7200s -> 43200s, then exhausted', () => {
+  assert.deepEqual(
+    [...PRIVATE_CHAT_A2A_DEFAULT_WAKE_DELAYS_MS],
+    [900_000, 7_200_000, 43_200_000],
+    'the shipped ladder must keep exactly three tiers: 900s, 7200s, 43200s',
+  );
+  const t0 = 1_700_000_000_000;
+  assert.equal(nextPrivateChatA2AWakeAt(0, t0), t0 + 900_000, 'tier 1 schedules at +900s');
+  assert.equal(nextPrivateChatA2AWakeAt(1, t0), t0 + 7_200_000, 'tier 2 schedules at +7200s');
+  assert.equal(nextPrivateChatA2AWakeAt(2, t0), t0 + 43_200_000, 'tier 3 schedules at +43200s');
+  assert.equal(nextPrivateChatA2AWakeAt(3, t0), null, 'after the third fire the wake budget is exhausted');
+  setPrivateChatA2AWakeDelaysForTests([]);
+  assert.equal(nextPrivateChatA2AWakeAt(0, t0), null, 'an emptied ladder is exhausted immediately');
+  setPrivateChatA2AWakeDelaysForTests(PRIVATE_CHAT_A2A_DEFAULT_WAKE_DELAYS_MS);
+  assert.equal(nextPrivateChatA2AWakeAt(0, t0), t0 + 900_000, 'the default ladder is restored');
+});
+
+test('full three-tier walk: every tier fires, exhaustion stops re-drives and arms nothing new', async () => {
+  setPrivateChatA2AWakeDelaysForTests([300, 300, 300]);
+  const harness = createWakeDispositionHarness();
+  const logs = [];
+  const handle = startDispositionHarnessDaemon(harness, logs, (params, call, coworkStore) => {
+    const persisted = coworkStore.addMessage(params.sessionId, {
+      type: 'assistant',
+      content: '[NO_REPLY]',
+      metadata: { isStreaming: false, isFinal: true },
+    });
+    return { replyText: '[NO_REPLY]', assistantMessageId: persisted.id };
+  });
+
+  try {
+    await waitFor(() => logs.some((message) => message.includes('Wake budget exhausted')), 30_000);
+    // Give the exhausted state room to misbehave: nothing may fire after it.
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+  } finally {
+    await stopPrivateChatDaemon({ waitForTick: true });
+    setPrivateChatA2AWakeDelaysForTests(PRIVATE_CHAT_A2A_DEFAULT_WAKE_DELAYS_MS);
+  }
+
+  // Per-tier scheduling evidence — the four rungs of the shipped ladder.
+  assert.ok(logs.some((message) => message.includes('Wake 1 scheduled')), 'tier-1 (900s) scheduling evidence missing');
+  assert.ok(logs.some((message) => message.includes('Wake 2 scheduled')), 'tier-2 (7200s) scheduling evidence missing');
+  assert.ok(logs.some((message) => message.includes('Wake 3 scheduled')), 'tier-3 (43200s) scheduling evidence missing');
+  assert.ok(!logs.some((message) => message.includes('Wake 4 scheduled')), 'exhaustion must arm no fourth wake');
+  assert.equal(
+    logs.filter((message) => message.includes('Wake budget exhausted')).length,
+    1,
+    'budget exhaustion must be logged exactly once',
+  );
+
+  // Firing evidence: all three tiers produced a wake turn with the notice;
+  // the exhausted budget then stops the chain (no fifth turn ever runs).
+  const wakeTurns = handle.skillTurnCalls.filter((params) => params.systemPrompt.includes('Host Wake Check'));
+  assert.equal(wakeTurns.length, 3, 'each of the three tiers fired exactly one wake turn');
+  assert.equal(handle.skillTurnCalls.length, 4, 'original turn + three wake fires, then the exhausted budget stops the re-drive');
+  assert.equal(harness.row.is_processed, 1);
+  assert.equal(handle.createPinCount, 0, 'a permanently silent conversation delivers nothing on-chain');
+
+  // The exhausted conversation keeps a single, unmarked presentation.
+  const bubbles = harness.inboundBubbles();
+  assert.equal(bubbles.length, 1, 'the exhausted conversation must not duplicate its inbound bubble');
+  assert.notEqual(bubbles[0].metadata?.privateChatReServed, true, 'exhaustion must not retro-mark the presentation');
+});

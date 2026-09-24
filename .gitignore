@@ -474,6 +474,7 @@ man_base_data_pebble/
 !tests/manual/electron-drag-region-harness.mjs
 !tests/manual/run-drag-harness.mjs
 !tests/coworkSessionA2aDmOrdering.test.mjs
+!tests/privateChatWakeReservedDisposition.test.mjs
 
 # macOS AppleDouble sidecars (._foo) created for xattr-bearing files on the
 # exFAT worktree SSD volume; gitignored so status stays clean there
