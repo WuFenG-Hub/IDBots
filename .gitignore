@@ -85,6 +85,7 @@ tests/*
 !tests/agentGameTwoPhaseStart.test.mjs
 !tests/agentGameSeatJoinRpc.test.mjs
 !tests/agentGameSeatClaim.test.mjs
+!tests/agentGameLlmTimeout.test.mjs
 !tests/dshKernelRuntime.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/dshRuntimeGlmResponsesBoot.test.mjs

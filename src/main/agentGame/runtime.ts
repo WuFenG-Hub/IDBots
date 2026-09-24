@@ -36,6 +36,7 @@ import {
   type SessionStartParams,
   type SessionStatus,
   type SessionView,
+  type TimeoutClaimedEvent,
 } from './abi';
 import type { ChatCompletionResult } from '../services/cognitiveChatCompletion';
 
@@ -122,6 +123,18 @@ const LLM_MAX_PARSE_ATTEMPTS = 3;
 /** Backoff schedule (ms) for failed writes / LLM calls — bounded, no quota burst. */
 const WRITE_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000];
 const ACTION_LOOP_DEBOUNCE_MS = 500;
+/**
+ * GAP-4 move window for timeout.claimed (architecture decision ②'s fault
+ * criterion, game-side twin): adapters judge a claim from CHAIN timestamps
+ * with a 900s per-move window (xiangqi MOVE_TIMEOUT_MS) — the runtime only
+ * decides WHEN to spend a pin on the claim, the adapter's reduce stays the
+ * judge. A premature claim reduces to a no-op there but still costs a pin,
+ * so the trigger waits out the full window plus a margin.
+ */
+const MOVE_TIMEOUT_MS = 900_000;
+/** Safety margin over the adapter window so chain-timestamp skew and write
+ *  latency can never make the claim land inside the still-open window. */
+const MOVE_CLAIM_MARGIN_MS = 60_000;
 
 /* ------------------------------------------------------------------ */
 /* Runtime                                                            */
@@ -137,6 +150,14 @@ export class AgentGameRuntime extends EventEmitter {
   private busy = new Set<string>();
   /** Pending (in-flight) write per session for retry/dedup. */
   private pending = new Map<string, { event: GameEvent; key: WriteLogKey }>();
+  /** GAP-4: wall-clock anchor of the last ACCEPTED game progress per session
+   *  (accepted = the adapter changed its serialized state — the same notion
+   *  the adapter's own lastProgressTs tracks, approximated on the host). */
+  private lastProgressAt = new Map<string, number>();
+  /** GAP-4: wall-clock time of the last timeout.claimed we queued, for the
+   *  one-claim-per-progress-epoch guard (a rejected claim is final: the
+   *  adapter judged the window still open, re-claiming would burn pins). */
+  private lastClaimAt = new Map<string, number>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
@@ -304,26 +325,32 @@ export class AgentGameRuntime extends EventEmitter {
           reduceFailed = true;
         }
         if (!reduceFailed) {
-          if (isActionEvent(env as GameEvent)) {
-            // GAP-3b: lastActionSeq is the expected-next-seq cursor and must
-            // advance only across actions the adapter ACCEPTED (move applied).
-            // serializeState is the ABI-canonical form, so an accepted action
-            // always changes it while adapter-rejected ones (out-of-turn /
-            // illegal / seq-skip / dedup replay) leave it identical. Counting
-            // rejected events desynced our expectation from the converged
-            // third-party view and permanently wedged replay (924-2: black
-            // lastActionSeq=12 while the stream converges at plies=1).
-            let afterSerialized: string | null = null;
-            try {
-              afterSerialized = await sandbox.serializeState(reduced);
-            } catch {
-              afterSerialized = null;
-            }
-            if (
-              beforeSerialized !== null &&
-              afterSerialized !== null &&
-              afterSerialized !== beforeSerialized
-            ) {
+          // Change detection covers EVERY accepted event, not just actions:
+          // GAP-4's timeout.claimed trigger keys off "the game last progressed
+          // here", and a seat claim (waiting→playing) or a finished match are
+          // progress too. serializeState is the ABI-canonical form, so an
+          // adapter-accepted event always changes it while rejected ones
+          // (out-of-turn / illegal / seq-skip / dedup replay) leave it
+          // identical.
+          let afterSerialized: string | null = null;
+          try {
+            afterSerialized = await sandbox.serializeState(reduced);
+          } catch {
+            afterSerialized = null;
+          }
+          if (
+            beforeSerialized !== null &&
+            afterSerialized !== null &&
+            afterSerialized !== beforeSerialized
+          ) {
+            this.lastProgressAt.set(sessionId, this.now());
+            if (isActionEvent(env as GameEvent)) {
+              // GAP-3b: lastActionSeq is the expected-next-seq cursor and must
+              // advance only across actions the adapter ACCEPTED (move applied).
+              // Counting rejected events desynced our expectation from the
+              // converged third-party view and permanently wedged replay
+              // (924-2: black lastActionSeq=12 while the stream converges at
+              // plies=1).
               const ae = env as ActionEvent;
               if (ae.actionSeq > s.lastActionSeq) {
                 s.lastActionSeq = ae.actionSeq;
@@ -392,7 +419,12 @@ export class AgentGameRuntime extends EventEmitter {
         await this.finish(s);
         return;
       }
-      if (turn.phase !== 'playing' || turn.seat !== s.seat) return;
+      if (turn.phase !== 'playing' || turn.seat !== s.seat) {
+        // GAP-4: while we WAIT for the mover, watch the move window — a stalled
+        // opponent must be claimable without human resume (S1 legal endgame).
+        this.considerTimeoutClaim(s, turn);
+        return;
+      }
 
       // Generate a candidate action via the host LLM (≤ N parse attempts).
       const observation = await sandbox.getObservation(state, s.seat);
@@ -467,6 +499,40 @@ export class AgentGameRuntime extends EventEmitter {
     }
   }
 
+  /**
+   * GAP-4: the waiting seat automates timeout.claimed. The ADAPTER stays the
+   * judge — its reduce re-checks the 900s window from chain timestamps and
+   * finishes the match with the stalled seat losing; a premature claim reduces
+   * to a no-op there. This side only decides when to spend a pin: game
+   * playing, not our turn, no accepted progress for window+margin, and at
+   * most one claim per progress epoch (a rejected claim is final — the
+   * adapter judged the window still open, and re-claiming it would loop).
+   */
+  private considerTimeoutClaim(s: GameSession, turn: { phase: string; seat?: string | null }): void {
+    if (turn.phase !== 'playing' || turn.seat == null || turn.seat === s.seat) return;
+    const anchoredAt = this.lastProgressAt.get(s.sessionId);
+    if (anchoredAt === undefined) return;
+    if (this.now() - anchoredAt <= MOVE_TIMEOUT_MS + MOVE_CLAIM_MARGIN_MS) return;
+    const lastClaim = this.lastClaimAt.get(s.sessionId);
+    if (lastClaim !== undefined && lastClaim >= anchoredAt) return;
+    if (this.pending.has(s.sessionId)) return; // a write is already in flight
+    this.lastClaimAt.set(s.sessionId, this.now());
+    const event: TimeoutClaimedEvent = {
+      protocol: 'agent-game/1',
+      gameId: s.gameId,
+      matchId: s.groupId,
+      rulesHash: s.rulesHash,
+      type: 'timeout.claimed',
+      eventId: `${s.agentId}:${randomUUID()}`,
+      payload: {},
+    };
+    const key: WriteLogKey = { groupId: s.groupId, actionSeq: NON_ACTION_LEDGER_SEQ, eventId: event.eventId };
+    this.deps.store.recordWriteIntent(key, s.sessionId);
+    this.deps.store.audit('timeout-claim-write', s.sessionId, s.agentId, { eventId: event.eventId });
+    this.pending.set(s.sessionId, { event, key });
+    this.log(`${s.sessionId}: timeout.claimed queued (no accepted progress for ${MOVE_TIMEOUT_MS + MOVE_CLAIM_MARGIN_MS}ms)`);
+  }
+
   /** Attempt the pending write; on failure back off; on success advance state. */
   private async retryPendingWrite(s: GameSession): Promise<void> {
     const pending = this.pending.get(s.sessionId);
@@ -507,6 +573,8 @@ export class AgentGameRuntime extends EventEmitter {
           this.log(`${s.sessionId}: post-write reduce failed: ${errMsg(err)}`);
         }
       }
+      // GAP-4: a committed write is progress — re-anchor the move window.
+      this.lastProgressAt.set(s.sessionId, this.now());
       if (isActionEvent(event)) {
         // Monotonic: another seat's valid action may have advanced the cursor
         // via catch-up while our write was in flight — never roll it back.
@@ -533,6 +601,8 @@ export class AgentGameRuntime extends EventEmitter {
 
   private async finish(s: GameSession): Promise<void> {
     this.leases.release(s.groupId, s.seat, s.sessionId);
+    this.lastProgressAt.delete(s.sessionId);
+    this.lastClaimAt.delete(s.sessionId);
     this.markStatus(s.sessionId, 'finished', null);
     this.deps.store.audit('match-finished', s.sessionId, s.agentId, {});
     this.log(`${s.sessionId}: match finished, lease released`);
@@ -593,6 +663,9 @@ export class AgentGameRuntime extends EventEmitter {
     const initialState = await sandbox.initialState({ gameId: params.gameId, seat: params.seat });
     this.states.set(sessionId, initialState);
     this.deps.store.upsertSession(session, JSON.stringify(initialState));
+    // GAP-4: the move window starts at seat time (the pending seat.claimed is
+    // the first progress the adapter itself anchors on).
+    this.lastProgressAt.set(sessionId, now);
     this.deps.store.audit('session-start', sessionId, params.agentId, { groupId: params.groupId, gameId: params.gameId, seat: params.seat });
     // Seat granted (phase 2 created the session): announce the claim on-chain
     // (docs/07 §3) so the match can leave `waiting` — without it no client can
@@ -680,6 +753,12 @@ export class AgentGameRuntime extends EventEmitter {
     this.sandboxes.set(s.sessionId, sandbox);
     if (!this.states.has(s.sessionId)) {
       this.states.set(s.sessionId, await sandbox.initialState({ gameId: s.gameId, seat: s.seat }));
+    }
+    // GAP-4: (re)anchor conservatively — after a restart we cannot know when
+    // the game last progressed, so the move window restarts from now rather
+    // than risking a premature claim.
+    if (!this.lastProgressAt.has(s.sessionId)) {
+      this.lastProgressAt.set(s.sessionId, this.now());
     }
   }
 
@@ -824,7 +903,10 @@ function runtimeError(code: SessionErrorCode, message: string): RuntimeError {
 function isAbort(err: unknown): boolean {
   if (!err) return false;
   const name = (err as { name?: string }).name;
-  return name === 'AbortError' || name === 'BrowserLlmTimeout';
+  // TimeoutError: the WHATWG name AbortSignal.timeout aborts with — the
+  // GAP-4 per-attempt LLM window surfaces as this when the raw signal reason
+  // escapes the transport.
+  return name === 'AbortError' || name === 'TimeoutError' || name === 'BrowserLlmTimeout';
 }
 
 /** Stamp docs/07 §2 event metadata from the group-chat message row itself

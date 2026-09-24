@@ -6839,9 +6839,13 @@ const startAgentGameHost = (): void => {
   agentGameHost = createAgentGameHost({
     db: sqliteStore.getDatabase(),
     saveDb: sqliteStore.getSaveFunction(),
-    llmComplete: (messages) => {
+    llmComplete: (messages, opts) => {
       // Game moves are a system automation: ride the Twin Bot system brain
       // (with fallback), not the bare app default model.
+      // GAP-4: the runtime contract's timeoutMs (2-min move-LLM fault window,
+      // architecture decision ②) rides the fallback stack's per-attempt
+      // window — dropped here, a hung upstream kept a seat stalled for
+      // 18-45+ min until the HTTP layer died on its own (G1 game 2026-09-24).
       const brain = resolveSystemBrainOptions(getMetabotStore().listMetabots());
       return chatCompletionWithTools(messages, {
         llmId: brain.llmId,
@@ -6851,6 +6855,7 @@ const startAgentGameHost = (): void => {
         effort: brain.effort,
         fallbackEffort: brain.fallbackEffort,
         throwOnEmptyContent: true,
+        attemptTimeoutMs: opts.timeoutMs,
       });
     },
     // agent-game event writes: every game event is signed as the session

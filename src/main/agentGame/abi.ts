@@ -151,7 +151,17 @@ export interface ActionEvent extends GameEventBase {
   payload: Record<string, unknown>;
 }
 
-export type GameEvent = GameEventBase | SeatClaimedEvent | ActionEvent;
+/** `timeout.claimed` (docs/07 §3): written by the NOT-on-turn seat when the
+ *  mover's move window (adapter-defined; 900s for xiangqi) lapses without an
+ *  accepted move. Identity and the judging timestamps come from the group-chat
+ *  message metadata; the adapter's reduce re-checks the window at replay —
+ *  the write only triggers the judgment, it never decides it. */
+export interface TimeoutClaimedEvent extends GameEventBase {
+  type: 'timeout.claimed';
+  payload: Record<string, unknown>;
+}
+
+export type GameEvent = GameEventBase | SeatClaimedEvent | ActionEvent | TimeoutClaimedEvent;
 
 /** Narrow an envelope to an `action` event. */
 export function isActionEvent(env: GameEvent): env is ActionEvent {
