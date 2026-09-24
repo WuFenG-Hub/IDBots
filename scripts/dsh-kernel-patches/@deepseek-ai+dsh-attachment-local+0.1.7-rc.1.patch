@@ -1,0 +1,59 @@
+--- a/dsh-runtime/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js
++++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js
+@@ -4,7 +4,7 @@
+ import { dshCachePath, resolveDshHome } from "@deepseek-ai/dsh-home-paths";
+ import { createHash, randomUUID } from "node:crypto";
+ import { constants, createReadStream } from "node:fs";
+-import { chmod, link, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
++import { chmod, copyFile, link, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+ import { createLazyRequire } from "@deepseek-ai/dsh-lazy-require";
+ //#region lib/types/compression-limiter.js
+ /** Instance-owned concurrency bound for native image transformations. */
+@@ -479,9 +479,20 @@
+ 		try {
+ 			await link(source, target);
+ 		} catch (error) {
+-			/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */
+-			if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+-			if (await digestFile(target) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");
++			// IDBots kernel patch: volumes without hard links (exFAT/FAT32/SMB)
++			// publish through an exclusive copy; an existing target races into
++			// the same digest verification as link's EEXIST branch.
++			if (error instanceof Error && "code" in error && error.code === "ENOTSUP") try {
++				await copyFile(source, target, constants.COPYFILE_EXCL);
++			} catch (copyError) {
++				if (!(copyError instanceof Error && "code" in copyError && copyError.code === "EEXIST")) throw copyError;
++				if (await digestFile(target) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");
++			}
++			else {
++				/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */
++				if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
++				if (await digestFile(target) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");
++			}
+ 		}
+ 		await chmod(target, 256);
+ 		const stop = resolve(root);
+@@ -540,9 +551,20 @@
+ 		try {
+ 			await link(staged.path, target);
+ 		} catch (error) {
+-			/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */
+-			if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+-			if (await digestFile(target) !== staged.sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");
++			// IDBots kernel patch: volumes without hard links (exFAT/FAT32/SMB)
++			// publish through an exclusive copy; an existing target races into
++			// the same digest verification as link's EEXIST branch.
++			if (error instanceof Error && "code" in error && error.code === "ENOTSUP") try {
++				await copyFile(staged.path, target, constants.COPYFILE_EXCL);
++			} catch (copyError) {
++				if (!(copyError instanceof Error && "code" in copyError && copyError.code === "EEXIST")) throw copyError;
++				if (await digestFile(target) !== staged.sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");
++			}
++			else {
++				/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */
++				if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
++				if (await digestFile(target) !== staged.sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");
++			}
+ 		}
+ 		await unlink(staged.path);
+ 		await chmod(target, 256);

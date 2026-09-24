@@ -62,6 +62,32 @@ message before the tool call, plus spelling out internal shorthand;
 context to the panel itself; (3) threads `detail` through `execute()` into the
 `ctx.userQuestions.ask` payload so it actually reaches the modal.
 
+### `@deepseek-ai+dsh-session-persistence-jsonl+0.1.7-rc.1.patch`
+
+The 0.1.7 V4 session log publishes staged files with a hard `link()` on
+every POSIX path (`publishCurrentExclusive` for generation/migration
+publish, `materializePosix` for new-log creation). Volumes without hard
+links — exFAT/FAT32/SMB — answer ENOTSUP and EVERY session write fails
+("ENOTSUP: operation not supported on socket, link …"). Production
+userData sits on APFS/NTFS, but IDBots dev loops run on an exFAT external
+SSD (`.worktrees` symlink target, repo-local `.dev-userdata-*`), where
+this is fatal.
+
+The patch falls back to `copyFile(..., COPYFILE_EXCL)` on ENOTSUP at both
+sites: the exclusive-publish semantics (EEXIST → caller decides) are
+preserved, and the staged bytes were already fsynced. `copyFile` is added
+to the injectable `defaultFileSystem` seam so the internals contract
+stays intact.
+
+### `@deepseek-ai+dsh-attachment-local+0.1.7-rc.1.patch`
+
+Same defect class as the persistence patch: `publishImmutableAlias` and
+`publishStagedObject` commit attachment objects with `link()` and treat
+EEXIST as the only recoverable race. On volumes without hard links every
+attachment write fails with ENOTSUP. The patch adds an ENOTSUP branch
+that publishes through an exclusive `copyFile`; an existing target races
+into the same sha256 digest verification as the EEXIST branch.
+
 ## Adding / rebasing a patch
 
 1. Edit the installed file under `dsh-runtime/node_modules/<pkg>/` directly.
