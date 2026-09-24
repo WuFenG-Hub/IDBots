@@ -13,7 +13,7 @@ technical debt that must be rebased or deleted at the next
 ## Naming
 
 `<package-name>+<exact-version>.patch` — the same convention patch-package
-uses, e.g. `@deepseek-ai+dsh-win32-process+0.1.5-rc.2.patch`. The apply
+uses, e.g. `@deepseek-ai+dsh-win32-process+0.1.7-rc.1.patch`. The apply
 script refuses to run a patch whose version differs from the installed
 package, so a kernel upgrade without a patch rebase fails loudly instead of
 silently shipping an unpatched kernel.
@@ -23,7 +23,7 @@ the script applies them with plain `git apply` from the repo root.
 
 ## Current patches
 
-### `@deepseek-ai+dsh-win32-process+0.1.5-rc.2.patch`
+### `@deepseek-ai+dsh-win32-process+0.1.7-rc.1.patch`
 
 On Windows the kernel's subprocess-local service launches every tool
 subprocess (bash.exe first of all) through a dedicated "Job runner" child,
@@ -42,7 +42,7 @@ The patch ORs `0x08000000` into all three creation-flag call sites
 — piped restricted spawns). `CREATE_NO_WINDOW` only suppresses console
 allocation; it does not affect GUI windows.
 
-### `@deepseek-ai+dsh-tool-ask-user+0.1.5-rc.2.patch`
+### `@deepseek-ai+dsh-tool-ask-user+0.1.7-rc.1.patch`
 
 Upstream's `ask_user_question` ships a one-line description ("Ask the user a
 concise question…") that actively pushes the model toward firing the question
