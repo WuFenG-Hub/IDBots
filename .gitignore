@@ -499,6 +499,7 @@ man_base_data_pebble/
 !tests/coworkSessionA2aDmOrdering.test.mjs
 # undecryptable private chat rows must stay retryable (loss-stop regression)
 !tests/privateChatDecryptFailureRetry.test.mjs
+!tests/privateChatWakeReservedDisposition.test.mjs
 
 # macOS AppleDouble sidecars (._foo) created for xattr-bearing files on the
 # exFAT worktree SSD volume; gitignored so status stays clean there

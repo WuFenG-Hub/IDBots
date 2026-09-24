@@ -150,6 +150,15 @@ jobs:
       - name: Run group-task / skill-assignment / cowork-proxy regression tests
         run: pnpm run test:release-regressions
 
+      # H-64 leg B: a wake re-drive must be identifiable at the presentation
+      # layer — the re-presented row carries the re-served bit plus the
+      # original message id, never retroactively, with the wake scheduling
+      # semantics unchanged. Pins the disposition contract and the
+      # [NO_REPLY] -> wake -> fired -> re-drive flow (the script runs
+      # compile:electron first, project convention).
+      - name: Run private-chat wake re-drive disposition tests
+        run: pnpm run test:private-chat-wake-disposition
+
       - name: Run memory and team-culture tests
         run: pnpm run test:memory
 
