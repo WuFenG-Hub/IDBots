@@ -46,13 +46,13 @@ record('generator: three apiFormats map to three pi-ai protocols',
   && piEntry.config.providers.opencode.api === 'openai-responses'
   && piEntry.config.providers['claude-direct'].api === 'anthropic-messages')
 // Since f80b128e the official DeepSeek route rides the first-party
-// dsh-llm-deepseek adapter (native off/low/high/max effort ladder) and never
+// dsh-llm-deepseek-api-key plugin (native off/low/high/max effort ladder) and never
 // enters the pi-ai providers dict; since 0.1.7 the adapter is Messages-API
 // only, so the generator normalizes any DeepSeek base URL onto the Messages
 // root (`<origin>/anthropic`) and declares systemPromptUpdate: in-history on
 // every catalog model (changed system snapshots append after the cached
 // prefix instead of rewriting the leading system message).
-const nativeEntry = unit.find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek')
+const nativeEntry = unit.find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek-api-key')
 record('generator: native DeepSeek route rides dsh-llm-deepseek (never pi-ai)',
   nativeEntry !== undefined
   && piEntry.config.providers.deepseek === undefined
@@ -62,6 +62,7 @@ record('generator: native DeepSeek route rides dsh-llm-deepseek (never pi-ai)',
   && nativeEntry.config.reasoningEffort === 'high'
   && nativeEntry.config.models[0].maxTokens === 32768
   && nativeEntry.config.models[0].systemPromptUpdate === 'in-history'
+  && nativeEntry.config.models[0].toolUpdate === 'in-history'
   && piEntry.config.providers.opencode.models[0].maxTokens === 8192)
 const visionNative = generateRuntimeConfig({
   sessionRoot: '/tmp/x',
@@ -70,7 +71,7 @@ const visionNative = generateRuntimeConfig({
     apiKeyEnv: 'K4',
     models: [{ id: 'deepseek-v4-flash-vision-exp', contextWindow: 1_000_000, input: ['text', 'image'] }],
   }],
-}).find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek')
+}).find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek-api-key')
 record('generator: native vision catalog emits inputModalities + image budgets',
   Array.isArray(visionNative?.config?.models?.[0]?.inputModalities)
   && visionNative.config.models[0].inputModalities.includes('image')
@@ -83,7 +84,7 @@ const nativeBaseURLFor = (baseUrl) => generateRuntimeConfig({
   sessionRoot: '/tmp/x',
   providers: [{ key: 'deepseek', native: true, apiFormat: 'openai', baseUrl, apiKeyEnv: 'K4', models: [{ id: 'm', contextWindow: 128000 }] }],
   sections: [],
-}).find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek')?.config?.baseURL
+}).find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek-api-key')?.config?.baseURL
 record('generator: legacy DeepSeek base URL shapes migrate to the Messages root',
   nativeBaseURLFor('https://api.deepseek.com') === 'https://api.deepseek.com/anthropic'
   && nativeBaseURLFor('https://api.deepseek.com/') === 'https://api.deepseek.com/anthropic'

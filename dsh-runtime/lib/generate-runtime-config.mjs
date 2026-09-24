@@ -132,7 +132,10 @@ const modelDeclaresImageInput = (model) =>
  *  effort rides session/ensure; the off/low/high/max ladder is adapter-owned). */
 const nativeDeepSeekEntry = (provider) => ({
   id: `llm-deepseek-${sanitizeRouteKey(provider.key)}`,
-  name: '@deepseek-ai/dsh-llm-deepseek',
+  // 0.1.7-rc.2 split the plugin out of the library package: this entry owns
+  // `apiKeyEnv` credential resolution (credentials seam, else the launching
+  // environment) and calls registerDeepSeekProvider for `deepseek-official`.
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key',
   config: {
     apiKeyEnv: provider.apiKeyEnv,
     // 0.1.7 Messages-API root (`<origin>/anthropic`); undefined omits the key
@@ -156,6 +159,11 @@ const nativeDeepSeekEntry = (provider) => ({
       // after the cached prefix instead of rewriting the leading system
       // message — keeps our per-turn prompt-sections updates cache-friendly.
       systemPromptUpdate: 'in-history',
+      // rc.2 tool-update mode: tool additions and removals are declared
+      // in history (mid-conversation-tool-changes beta) instead of
+      // rewriting the request header — plan mode toggles exit_plan_mode
+      // per turn, so this is the cache-friendly and removal-capable mode.
+      toolUpdate: 'in-history',
       // 0.1.1 rejects image blocks unless the catalog entry lists `image`.
       ...(modelDeclaresImageInput(model) ? {
         inputModalities: model.input,
