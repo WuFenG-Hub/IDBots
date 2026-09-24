@@ -2,6 +2,12 @@
 // 2.0 (initialize → tools/list → tools/call). One tool: `echo` returns its
 // arguments as text. Used by mcp-bridge.test.mjs to prove the generator's
 // dsh-mcp-client entries surface real user MCP tools to the model.
+//
+// MCP SDK v2 note: unknown REQUESTS (anything with an `id` we do not handle,
+// e.g. the `server/discover` era-negotiation probe the v2 client sends in
+// `versionNegotiation: {mode:'auto'}`) must be answered with -32601 Method
+// not found. Silently dropping them leaves the client waiting for a reply
+// until its (60s default) probe timeout classifies us as a legacy server.
 
 import readline from 'node:readline'
 
@@ -42,6 +48,14 @@ rl.on('line', (line) => {
       jsonrpc: '2.0',
       id: message.id,
       result: { content: [{ type: 'text', text: `MCP-ECHO: ${note}` }] },
+    })
+  } else if (message.id !== undefined) {
+    // Unknown request (e.g. server/discover): standard Method-not-found reply
+    // so SDK v2 era negotiation classifies this fixture as legacy at once.
+    send({
+      jsonrpc: '2.0',
+      id: message.id,
+      error: { code: -32601, message: `Method not found: ${String(message.method)}` },
     })
   }
   // notifications (initialized, cancelled) need no response.

@@ -26,6 +26,9 @@ const runtimeDir = path.resolve(here, '..')
 // v4 vision calculator so image-bearing sessions compact against real token
 // pressure (vision models price images; text-only routes degrade to the
 // text-only price, pi-ai stays on the fixed heuristic).
+// 0.1.6: priceImages consumes image OCCURRENCES ({ attachment: ref, offloaded
+// }) — the durable normalized attachment ref carries width/height/mediaType,
+// and offloaded occurrences price as their placeholder text (zero tokens).
 {
   const { deepSeekImageRequestPricing } = await import('@deepseek-ai/dsh-llm-deepseek')
   const connection = {
@@ -35,12 +38,16 @@ const runtimeDir = path.resolve(here, '..')
     imageOffloadByteQuantum: 64 * 1024,
     imageOffloadCountQuantum: 2,
   }
+  const ref = { attachmentId: 'sha256:0123456789abcdef', width: 1024, height: 768, mediaType: 'image/png' }
   const vision = deepSeekImageRequestPricing(connection, 'deepseek-v4-pro', undefined)
-  const priced = vision.priceImages([{ bytes: 400 * 1024, width: 1024, height: 768 }])
+  const priced = vision.priceImages([{ attachment: ref }])
   assert.ok(Number.isFinite(priced[0]?.visualTokens) && priced[0].visualTokens > 0,
     'vision model image priced with a finite positive token cost')
+  const offloaded = vision.priceImages([{ attachment: ref, offloaded: true }])
+  assert.ok(offloaded[0]?.visualTokens === 0 && offloaded[0]?.text?.includes('omitted'),
+    'offloaded occurrence prices as its placeholder text (zero token cost)')
   const textOnly = deepSeekImageRequestPricing(connection, 'deepseek-v4-text-only', undefined)
-  const textPriced = textOnly.priceImages([{ bytes: 400 * 1024 }])
+  const textPriced = textOnly.priceImages([{ attachment: ref }])
   assert.ok(textPriced[0]?.visualTokens === 0 && textPriced[0]?.text?.includes('text only'),
     'text-only route degrades images to the omission note (zero token cost)')
   console.log('PASS  native DeepSeek route carries the v4 image request pricing calculator')

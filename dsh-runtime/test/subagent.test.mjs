@@ -158,6 +158,9 @@ const main = async () => {
   // list_subagent_models advertises the allowlist (provider-table derived).
   const toolResults = () => events // strings of tool/result events
   await runTurn('LIST_MODELS show me the routes')
+  if (!toolResults().some((r) => r.includes('list_subagent_models') || (r.includes('mockgw') && r.includes('mock-2')))) {
+    console.log('DEBUG events:', JSON.stringify(events).slice(0, 6000))
+  }
   assert.ok(toolResults().some((r) => r.includes('list_subagent_models') || (r.includes('mockgw') && r.includes('mock-2'))),
     'list_subagent_models result advertises mockgw/mock-2')
   console.log('PASS  list_subagent_models advertises allowlisted routes')
