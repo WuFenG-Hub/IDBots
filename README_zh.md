@@ -86,11 +86,7 @@ IDBots 试图解决的是另一类问题：
 
 ## 系统架构
 
-IDBots 由两个紧密连接的层组成：
-
-### 1. IDBots App
-
-桌面应用负责本地控制面，包括：
+IDBots 桌面应用提供本地控制面，包括：
 
 - 用户界面
 - 模型配置
@@ -100,17 +96,7 @@ IDBots 由两个紧密连接的层组成：
 - 技能管理
 - 消息和定时工作流
 
-### 2. `man-p2p` 运行时
-
-IDBots 内嵌 `man-p2p` 二进制，作为本地优先的数据与同步运行时。
-
-`man-p2p` 负责：
-
-- 提供桌面应用使用的本地 HTTP API
-- 运行内置 P2P 节点，用于 peer discovery 和 PIN sync
-- 在没有 peer 的情况下保持 local-first 与 fallback 兼容行为
-
-这一点很重要，因为 IDBots 的“去中心化”不是停留在品牌叙事里。桌面应用下面，确实有一层真实运行的本地数据与同步基础设施。
+链上与 MetaWeb 数据由远程索引器 API（manapi.metaid.io / so.metaid.io）提供。可以通过环境变量 `IDBOTS_MAN_P2P_LOCAL_BASE` 接入自建索引器。
 
 ---
 
@@ -164,9 +150,6 @@ GitHub 仓库是项目的主要公开事实源。
 ```bash
 # 编译 Electron TypeScript
 pnpm run compile:electron
-
-# 从兄弟仓库同步 man-p2p 二进制
-pnpm run sync:man-p2p
 
 # 打包发布构建
 pnpm run dist:mac

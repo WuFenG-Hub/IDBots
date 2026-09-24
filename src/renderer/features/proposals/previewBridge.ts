@@ -10,7 +10,6 @@ Object.defineProperty(window, 'electron', { value: {
   store: { get: async (key: string) => values.get(key) ?? null,
     set: async (key: string, value: unknown) => { values.set(key, value); },
     remove: async (key: string) => { values.delete(key); }, onChanged: unsubscribe },
-  p2p: { getStatus: async () => ({ running: false }), onStatusUpdate: unsubscribe },
   powerGuard: { getStatus: async () => ({ active: false, engaged: false, sources: [] }), onChanged: unsubscribe },
   cowork: { isDelegationBlocking: async () => false, onDelegationStateChange: unsubscribe,
     listSessionFeedback: async () => ({ success: true, feedback: [] }) },

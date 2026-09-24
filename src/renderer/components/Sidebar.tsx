@@ -21,7 +21,6 @@ import Tooltip from './ui/Tooltip';
 import ComposeIcon from './icons/ComposeIcon';
 import FilterLinesIcon from './icons/FilterLinesIcon';
 import SidebarToggleIcon from './icons/SidebarToggleIcon';
-import { P2PStatusBadge } from './p2p/P2PStatusBadge';
 import BackgroundTasksBadge from './cowork/BackgroundTasksBadge';
 import { getSidebarInternetNavModel, getSidebarPrimaryNavModel } from './sidebar/sidebarNavigation.js';
 import { SleepGuardBadge } from './SleepGuardBadge';
@@ -772,7 +771,6 @@ const Sidebar: React.FC<SidebarProps> = ({
             {i18nService.t('settings')}
           </button>
           <BackgroundTasksBadge onShowGroupTasks={onShowGroupTasks} />
-          <P2PStatusBadge />
           <SleepGuardBadge />
         </div>
       </div>

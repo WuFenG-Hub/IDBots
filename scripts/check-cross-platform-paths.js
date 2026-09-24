@@ -3,7 +3,6 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const crypto = require('crypto');
 const { PACKAGED_RUNTIMES, extraResourceFilterExcludesNodeModules } = require('./packagedRuntimes.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -31,24 +30,6 @@ function readFileSafe(relPath) {
     return null;
   }
   return fs.readFileSync(filePath, 'utf8');
-}
-
-function readJsonSafe(relPath) {
-  const raw = readFileSafe(relPath);
-  if (raw == null) {
-    return null;
-  }
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    addCheck(`${relPath} parses as JSON`, false, error.message);
-    return null;
-  }
-}
-
-function sha256File(relPath) {
-  const filePath = resolveInProject(relPath);
-  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
 function checkFileContains(relPath, snippets, checkName) {
@@ -218,10 +199,6 @@ function runStaticChecks() {
       const hasSkills = resources.some((r) => r && r.from === 'SKILLs');
       const winResources = Array.isArray(builder.win?.extraResources) ? builder.win.extraResources : [];
       const hasMinGit = winResources.some((r) => r && r.from === 'resources/mingit');
-      const platformHasP2PConfig = (section) => {
-        const extraResources = Array.isArray(section?.extraResources) ? section.extraResources : [];
-        return extraResources.some((r) => r && r.from === 'resources/man-p2p/config.toml');
-      };
       addCheck('electron-builder bundles SKILLs', hasSkills, hasSkills ? 'ok' : 'missing extraResources.from=SKILLs');
       for (const runtime of PACKAGED_RUNTIMES) {
         const bundled = resources.find((r) => r && r.from === runtime.extraResourceFrom);
@@ -253,49 +230,9 @@ function runStaticChecks() {
         hasWinFfmpeg ? 'ok' : 'missing win.extraResources.from=resources/ffmpeg/ffmpeg-win32-x64.exe'
       );
       addCheck('electron-builder bundles mingit for win', hasMinGit, hasMinGit ? 'ok' : 'missing win.extraResources.from=resources/mingit');
-      addCheck(
-        'electron-builder bundles man-p2p config on mac',
-        platformHasP2PConfig(builder.mac),
-        platformHasP2PConfig(builder.mac) ? 'ok' : 'missing mac.extraResources.from=resources/man-p2p/config.toml'
-      );
-      addCheck(
-        'electron-builder bundles man-p2p config on win',
-        platformHasP2PConfig(builder.win),
-        platformHasP2PConfig(builder.win) ? 'ok' : 'missing win.extraResources.from=resources/man-p2p/config.toml'
-      );
-      addCheck(
-        'electron-builder bundles man-p2p config on linux',
-        platformHasP2PConfig(builder.linux),
-        platformHasP2PConfig(builder.linux) ? 'ok' : 'missing linux.extraResources.from=resources/man-p2p/config.toml'
-      );
     } catch (error) {
       addCheck('electron-builder resource checks', false, `invalid JSON: ${error.message}`);
     }
-  }
-
-  const manifest = readJsonSafe('resources/man-p2p/bundle-manifest.json');
-  const releaseArtifacts = [
-    'resources/man-p2p/man-p2p-darwin-arm64',
-    'resources/man-p2p/man-p2p-win32-x64.exe',
-  ];
-  for (const relPath of releaseArtifacts) {
-    const artifactName = path.basename(relPath);
-    const filePath = resolveInProject(relPath);
-    addCheck(
-      `release artifact exists: ${artifactName}`,
-      fs.existsSync(filePath),
-      fs.existsSync(filePath) ? relPath : `missing file: ${relPath}`
-    );
-    if (!manifest || !fs.existsSync(filePath)) {
-      continue;
-    }
-    const manifestSha = manifest.artifacts && manifest.artifacts[artifactName] && manifest.artifacts[artifactName].sha256;
-    const actualSha = sha256File(relPath);
-    addCheck(
-      `release artifact manifest matches: ${artifactName}`,
-      manifestSha === actualSha,
-      manifestSha === actualSha ? actualSha : `manifest=${manifestSha || 'missing'} actual=${actualSha}`
-    );
   }
 }
 

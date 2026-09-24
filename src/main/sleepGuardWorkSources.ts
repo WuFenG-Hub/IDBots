@@ -13,7 +13,7 @@
  *
  * Coverage contract (see the acceptance matrix in the sleep-guard work): a
  * work source must be a bounded unit of work the user is waiting on — never a
- * long-lived daemon. Long-lived daemons (p2p indexer, MCP skill servers, the
+ * long-lived daemon. Long-lived daemons (MCP skill servers, the
  * local MetaApp server, chat listeners) are deliberately excluded: they run
  * for the whole app session, so treating them as work would hold the OS sleep
  * assertion permanently.

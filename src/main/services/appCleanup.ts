@@ -21,7 +21,6 @@ export interface AppCleanupDeps {
   stopDreamService: () => void;
   /** Optional so older cleanup callers that predate the hygiene service still type-check. */
   stopMemoryHygieneService?: () => void;
-  stopP2P: () => Promise<void>;
   stopProviderDiscovery: () => void;
   deactivateGroupChatTasks: () => void;
   log: (message: string) => void;
@@ -57,10 +56,6 @@ export async function runAppCleanup(deps: AppCleanupDeps): Promise<void> {
 
   await deps.stopIMGateways().catch((error) => {
     deps.error('[IM Gateway] Error stopping gateways on quit:', error);
-  });
-
-  await deps.stopP2P().catch((error) => {
-    deps.error('[p2p] Error stopping local indexer on quit:', error);
   });
 
   deps.stopDreamService();

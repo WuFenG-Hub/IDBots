@@ -1,4 +1,4 @@
-import { getP2PLocalBase } from './p2pLocalEndpoint';
+import { getConfiguredP2PLocalBase } from './p2pLocalEndpoint';
 
 function isJsonApiPath(localPath: string): boolean {
   return localPath.startsWith('/api/');
@@ -37,8 +37,9 @@ export function isEmptyListDataPayload(payload: unknown): boolean {
 }
 
 /**
- * Try to fetch from the local P2P indexer first; fall back to a remote URL
- * if the local node is unavailable, returns a non-2xx status, or times out.
+ * Fetch from an external indexer when IDBOTS_MAN_P2P_LOCAL_BASE is set; fall
+ * back to the remote URL when it is unset, unavailable, returns a non-2xx
+ * status, or times out.
  *
  * @param localPath   Path starting with '/', e.g. '/api/pin/abc'
  * @param fallbackUrl Full remote URL to use when local is unavailable
@@ -49,21 +50,23 @@ export async function fetchFromLocalOrFallback(
   fallbackUrl: string,
   options?: RequestInit,
 ): Promise<Response> {
-  const localUrl = getP2PLocalBase() + localPath;
+  const localBase = getConfiguredP2PLocalBase();
+  if (localBase) {
+    const localUrl = localBase + localPath;
 
-  try {
-    const localRes = await fetch(localUrl, {
-      ...options,
-      signal: AbortSignal.timeout(2000),
-    });
+    try {
+      const localRes = await fetch(localUrl, {
+        ...options,
+        signal: AbortSignal.timeout(2000),
+      });
 
-    const isEnvelopeHit = !isJsonApiPath(localPath) || await isSuccessfulEnvelope(localRes);
-    if (localRes.ok && isEnvelopeHit) {
-      return localRes;
+      const isEnvelopeHit = !isJsonApiPath(localPath) || await isSuccessfulEnvelope(localRes);
+      if (localRes.ok && isEnvelopeHit) {
+        return localRes;
+      }
+    } catch (_err: unknown) {
+      void _err;
     }
-
-  } catch (_err: unknown) {
-    void _err;
   }
 
   return fetch(fallbackUrl, options);
@@ -73,9 +76,9 @@ export async function fetchFromLocalOrFallback(
 const REMOTE_JSON_TIMEOUT_MS = 8_000;
 
 /**
- * Try to fetch from the local P2P indexer first; fall back to a remote URL
- * when the local node is unavailable or answers with a semantically empty
- * payload.
+ * Fetch from an external indexer when IDBOTS_MAN_P2P_LOCAL_BASE is set; fall
+ * back to the remote URL when it is unset, unavailable, or answers with a
+ * semantically empty payload.
  *
  * @param localPath      Path starting with '/', e.g. '/api/pin/abc'
  * @param fallbackUrl    Full remote URL to use when local is unavailable
@@ -94,24 +97,28 @@ export async function fetchJsonWithFallbackOnMiss(
   isSemanticMiss: (payload: unknown) => boolean,
   opts?: { request?: RequestInit; degradeToLocalOnRemoteError?: boolean },
 ): Promise<Response> {
-  const localUrl = getP2PLocalBase() + localPath;
+  const localBase = getConfiguredP2PLocalBase();
   const degradeToLocal = opts?.degradeToLocalOnRemoteError === true;
   let localRes: Response | null = null;
 
-  try {
-    localRes = await fetch(localUrl, {
-      ...(opts?.request ?? {}),
-      signal: AbortSignal.timeout(2000),
-    });
+  if (localBase) {
+    const localUrl = localBase + localPath;
 
-    const payload = await parseJsonClone(localRes);
-    const isEnvelopeHit = !isJsonApiPath(localPath) || (payload as { code?: unknown } | undefined)?.code === 1;
+    try {
+      localRes = await fetch(localUrl, {
+        ...(opts?.request ?? {}),
+        signal: AbortSignal.timeout(2000),
+      });
 
-    if (localRes.ok && isEnvelopeHit && !isSemanticMiss(payload)) {
-      return localRes;
+      const payload = await parseJsonClone(localRes);
+      const isEnvelopeHit = !isJsonApiPath(localPath) || (payload as { code?: unknown } | undefined)?.code === 1;
+
+      if (localRes.ok && isEnvelopeHit && !isSemanticMiss(payload)) {
+        return localRes;
+      }
+    } catch (_err: unknown) {
+      void _err;
     }
-  } catch (_err: unknown) {
-    void _err;
   }
 
   let remoteRes: Response | null = null;
@@ -148,8 +155,9 @@ export async function fetchJsonWithFallbackOnMiss(
 }
 
 /**
- * Fetch content for a pin from the local P2P indexer, falling back to a remote
- * URL when the local response is absent, has an empty body, or errors out.
+ * Fetch content for a pin from an external indexer when
+ * IDBOTS_MAN_P2P_LOCAL_BASE is set, falling back to a remote URL when it is
+ * unset, the response has an empty body, or errors out.
  *
  * Body emptiness is determined via the Content-Length response header only —
  * the response stream is never consumed so the caller always receives a fresh
@@ -168,39 +176,41 @@ export async function fetchContentWithFallback(
   options?: RequestInit,
   validateContent?: (buffer: Buffer) => boolean,
 ): Promise<Response> {
-  const localPath = `/content/${pinId}`;
-  const localUrl = getP2PLocalBase() + localPath;
+  const localBase = getConfiguredP2PLocalBase();
+  if (localBase) {
+    const localUrl = localBase + `/content/${pinId}`;
 
-  try {
-    const localRes = await fetch(localUrl, {
-      ...options,
-      signal: AbortSignal.timeout(2000),
-    });
+    try {
+      const localRes = await fetch(localUrl, {
+        ...options,
+        signal: AbortSignal.timeout(2000),
+      });
 
-    if (localRes.headers.get('x-man-content-status') === 'metadata-only') {
-      return fetch(fallbackUrl, options);
-    }
-
-    const contentLength = localRes.headers.get('content-length');
-    if (localRes.ok && contentLength && parseInt(contentLength, 10) > 0) {
-      if (
-        !validateContent
-        || validateContent(Buffer.from(await localRes.clone().arrayBuffer()))
-      ) {
-        return localRes;
+      if (localRes.headers.get('x-man-content-status') === 'metadata-only') {
+        return fetch(fallbackUrl, options);
       }
-    }
-    if (localRes.ok && !contentLength) {
-      const bodyBytes = await localRes.clone().arrayBuffer();
-      if (
-        bodyBytes.byteLength > 0
-        && (!validateContent || validateContent(Buffer.from(bodyBytes)))
-      ) {
-        return localRes;
+
+      const contentLength = localRes.headers.get('content-length');
+      if (localRes.ok && contentLength && parseInt(contentLength, 10) > 0) {
+        if (
+          !validateContent
+          || validateContent(Buffer.from(await localRes.clone().arrayBuffer()))
+        ) {
+          return localRes;
+        }
       }
+      if (localRes.ok && !contentLength) {
+        const bodyBytes = await localRes.clone().arrayBuffer();
+        if (
+          bodyBytes.byteLength > 0
+          && (!validateContent || validateContent(Buffer.from(bodyBytes)))
+        ) {
+          return localRes;
+        }
+      }
+    } catch (_err: unknown) {
+      void _err;
     }
-  } catch (_err: unknown) {
-    void _err;
   }
 
   return fetch(fallbackUrl, options);

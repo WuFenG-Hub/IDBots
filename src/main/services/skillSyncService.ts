@@ -6,7 +6,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fetchContentWithFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './localIndexerProxy';
-import { getP2PLocalBase } from './p2pLocalEndpoint';
+import { getConfiguredP2PLocalBase } from './p2pLocalEndpoint';
 import { parseProtocolPinContent } from './protocolPinContent';
 import { resolveWritableSkillsRoot } from '../libs/skillRoots';
 
@@ -462,7 +462,7 @@ function extractPaginationCursor(data: unknown): string | undefined {
 
 async function fetchCommunitySkillPins(): Promise<unknown[]> {
   const REMOTE_BASE = 'https://manapi.metaid.io';
-  const LOCAL_BASE = getP2PLocalBase();
+  const LOCAL_BASE = getConfiguredP2PLocalBase();
   const PAGE_SIZE = 200;
   const MAX_PAGES = 10;
   const allPins: unknown[] = [];
@@ -503,7 +503,9 @@ async function fetchCommunitySkillPins(): Promise<unknown[]> {
     }
   };
 
-  await fetchFromSource(LOCAL_BASE, true);
+  if (LOCAL_BASE) {
+    await fetchFromSource(LOCAL_BASE, true);
+  }
   await fetchFromSource(REMOTE_BASE, false);
 
   return allPins;

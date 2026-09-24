@@ -3996,16 +3996,6 @@ export class SqliteStore {
     }
   }
 
-  getP2PConfig(): Record<string, unknown> | undefined {
-    const raw = this.get<string>('p2p_config');
-    if (!raw) return undefined;
-    try { return JSON.parse(raw); } catch { return undefined; }
-  }
-
-  setP2PConfig(config: Record<string, unknown>): void {
-    this.set('p2p_config', JSON.stringify(config));
-  }
-
   private migrateFromElectronStore(userDataPath: string) {
     const result = this.db.exec('SELECT COUNT(*) as count FROM kv');
     const count = result[0]?.values[0]?.[0] as number;

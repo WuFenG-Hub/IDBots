@@ -68,14 +68,6 @@
     "entitlementsInherit": "build/entitlements.mac.plist",
     "extraResources": [
       {
-        "from": "resources/man-p2p/man-p2p-darwin-${arch}",
-        "to": "man-p2p-darwin-${arch}"
-      },
-      {
-        "from": "resources/man-p2p/config.toml",
-        "to": "man-p2p-config.toml"
-      },
-      {
         "from": "resources/ffmpeg/ffmpeg-darwin-${arch}",
         "to": "ffmpeg/ffmpeg-darwin-${arch}"
       }
@@ -83,7 +75,6 @@
     "extendInfo": {
       "CFBundleIconName": "icon",
       "NSCalendarsUsageDescription": "IDBots 需要访问您的日历来帮助您查看和管理日程安排，例如查找事件、创建会议等。",
-      "NSLocalNetworkUsageDescription": "IDBots 需要访问本地网络，以便发现并连接局域网中的 MAN-P2P 节点，获取本地优先的 MetaID 数据。",
       "NSRemindersUsageDescription": "IDBots 需要访问您的提醒事项来帮助您管理待办事项。",
       "NSAppleEventsUsageDescription": "IDBots 需要使用 Apple Events 来控制 Calendar 应用执行自动化操作。"
     }
@@ -114,14 +105,6 @@
         ]
       },
       {
-        "from": "resources/man-p2p/man-p2p-win32-x64.exe",
-        "to": "man-p2p-win32-x64.exe"
-      },
-      {
-        "from": "resources/man-p2p/config.toml",
-        "to": "man-p2p-config.toml"
-      },
-      {
         "from": "resources/ffmpeg/ffmpeg-win32-x64.exe",
         "to": "ffmpeg/ffmpeg-win32-x64.exe"
       }
@@ -132,17 +115,7 @@
       "AppImage"
     ],
     "icon": "build/icons/png",
-    "category": "Utility",
-    "extraResources": [
-      {
-        "from": "resources/man-p2p/man-p2p-linux-x64",
-        "to": "man-p2p-linux-x64"
-      },
-      {
-        "from": "resources/man-p2p/config.toml",
-        "to": "man-p2p-config.toml"
-      }
-    ]
+    "category": "Utility"
   },
   "nsis": {
     "oneClick": false,

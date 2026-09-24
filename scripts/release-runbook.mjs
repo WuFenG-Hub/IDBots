@@ -233,7 +233,7 @@ function verifyLocalGates() {
     ["npm", ["run", "build"]],
     ["npm", ["run", "compile:electron"]],
     ["npm", ["run", "check:dsh-deps"]],
-    ["node", ["--test", "tests/runtimeDependencyContract.test.mjs", "tests/p2pIndexerServiceRecovery.test.mjs", "tests/dshRuntimeDepsCheck.test.mjs"]],
+    ["node", ["--test", "tests/runtimeDependencyContract.test.mjs", "tests/dshRuntimeDepsCheck.test.mjs"]],
     ["node", ["scripts/check-cross-platform-paths.js", "--skip-lint", "--skip-compile"]],
   ];
   for (const [cmd, args] of commands) {
