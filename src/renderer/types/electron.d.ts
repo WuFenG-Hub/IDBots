@@ -261,33 +261,6 @@ interface AppUpdateDownloadProgress {
   resumed?: boolean;
 }
 
-interface ElectronP2PStatus {
-  running: boolean;
-  peerCount?: number;
-  storageLimitReached?: boolean;
-  storageUsedBytes?: number;
-  dataSource?: string;
-  syncMode?: 'self' | 'selective' | 'full' | string;
-  runtimeMode?: 'p2p-only' | 'chain-enabled' | string;
-  peerId?: string;
-  listenAddrs?: string[];
-  error?: string;
-}
-
-interface ElectronP2PConfig {
-  p2p_sync_mode: 'self' | 'selective' | 'full';
-  p2p_selective_addresses?: string[];
-  p2p_selective_paths?: string[];
-  p2p_block_addresses?: string[];
-  p2p_block_paths?: string[];
-  p2p_max_content_size_kb?: number;
-  p2p_bootstrap_nodes: string[];
-  p2p_enable_relay: boolean;
-  p2p_storage_limit_gb: number;
-  p2p_enable_chain_source: boolean;
-  p2p_own_addresses: string[];
-}
-
 // Cowork types for IPC
 interface CoworkSession {
   id: string;
@@ -1890,17 +1863,13 @@ interface IElectronAPI {
     delete: (id: string) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
     setEnabled: (options: { id: string; enabled: boolean }) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
   };
+  // Namespace kept under its legacy `p2p` name; it only bridges the metaid
+  // user-info/contacts IPC channels.
   p2p: {
-    getStatus: () => Promise<ElectronP2PStatus>;
-    getConfig: () => Promise<ElectronP2PConfig>;
-    setConfig: (config: Partial<ElectronP2PConfig>) => Promise<ElectronP2PConfig>;
-    getPeers: () => Promise<string[]>;
     getUserInfo: (params: { globalMetaId: string }) => Promise<unknown>;
     resolveAvatarSource: (params: { reference: string }) => Promise<unknown>;
     listContacts: (params: { observerGlobalMetaId: string }) => Promise<{ success: boolean; contacts?: CoworkMetaIDContactSummary[]; error?: string }>;
     getContactDetail: (params: { observerGlobalMetaId: string; subjectGlobalMetaId: string }) => Promise<{ success: boolean; detail?: CoworkMetaIDContactDetail; error?: string }>;
-    onStatusUpdate: (callback: (status: ElectronP2PStatus) => void) => () => void;
-    onSyncProgress: (callback: (data: unknown) => void) => () => void;
   };
   providerDiscovery: {
     getOnlineServices: () => Promise<{ success: boolean; services?: unknown[]; error?: string }>;
