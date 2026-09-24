@@ -1,0 +1,78 @@
+--- a/dsh-runtime/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-COYGu0Dl.js
++++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-COYGu0Dl.js
+@@ -1,4 +1,4 @@
+-import { accessSync, chmodSync, closeSync, constants, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
++import { accessSync, chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+ import { basename, dirname, extname, isAbsolute, join } from "node:path";
+ import { scrubbedParentEnv } from "@deepseek-ai/dsh-subprocess";
+ import { execFileSync, spawn, spawnSync } from "node:child_process";
+@@ -718,6 +718,7 @@
+ 	dropped = false;
+ 	spillFd;
+ 	spillFile;
++	spillBacklog;
+ 	spillDisabled;
+ 	/** Total bytes ever pushed (not just retained). */
+ 	total = 0;
+@@ -763,11 +764,45 @@
+ 		}
+ 		if (this.spillFd === void 0) {
+ 			this.spillFile = join(this.spillDir, `dsh-subprocess-${process.pid}-${++spillCounter}-${randomBytes(6).toString("hex")}-${this.label}.log`);
+-			this.spillFd = openSync(this.spillFile, "wx", 384);
+-			for (const prior of this.chunks) writeSync(this.spillFd, prior);
++			if (!this.openSpill()) return;
+ 		}
+-		writeSync(this.spillFd, chunk);
++		try {
++			const backlog = this.spillBacklog;
++			if (backlog !== void 0) {
++				this.spillBacklog = void 0;
++				for (const prior of backlog) writeSync(this.spillFd, prior);
++			}
++			writeSync(this.spillFd, chunk);
++		} catch {
++			this.discardSpill();
++		}
+ 	}
++	/**
++	* Establish the spill file, self-healing once when the private spill
++	* directory vanished beneath this live process (an external tmp cleanup),
++	* and degrading to the in-memory tail when the spill target stays
++	* unavailable — a missing directory must cost the full-output recovery
++	* path, never the host process.
++	* @returns whether the spill file is open and ready for appends.
++	*/
++	openSpill() {
++		for (let attempt = 0; ; attempt++) {
++			try {
++				this.spillFd = openSync(this.spillFile, "wx", 384);
++				this.spillBacklog = this.chunks;
++				return true;
++			} catch (error) {
++				if (attempt === 0 && error?.code === "ENOENT") {
++					try {
++						mkdirSync(this.spillDir, { recursive: true, mode: 448 });
++					} catch {}
++					continue;
++				}
++				this.discardSpill();
++				return false;
++			}
++		}
++	}
+ 	/** Stop spilling and remove the file once it can no longer hold the complete stream. */
+ 	discardSpill() {
+ 		const fd = this.spillFd;
+@@ -978,7 +1013,11 @@
+ 		if (!isCollect(mode) || stream === null) return void 0;
+ 		const collector = new OutputCollector(mode.maxBytes, mode.spill?.maxBytes, label, spillDir);
+ 		stream.on("data", (chunk) => {
+-			collector.push(chunk);
++			try {
++				collector.push(chunk);
++			} catch {
++				collector.discardSpill();
++			}
+ 		});
+ 		return collector;
+ 	};
