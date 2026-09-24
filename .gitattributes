@@ -9,3 +9,13 @@
 #   error: ...: patch does not apply
 # (Windows CI run 34960957498 / 35007381714 failed exactly this way.)
 scripts/dsh-kernel-patches/*.patch -text
+
+# The xiangqi adapter fixture is a byte-level copy of the v1.0.2 game package:
+# agentGameConvergence hashes agent-game/adapter.js against a pinned sha256, and
+# the artifact manifest pins the same hash for the copies handed to the runtime.
+# Git for Windows (core.autocrlf=true by default) rewrites these files to CRLF,
+# so the hash no longer matches and the suite fails on Windows only (Windows CI
+# run 35980098034: expected eabf1f42…, got 32d89355…). Check out byte-exact.
+tests/fixtures/xiangqi-adapter/agent-game/adapter.js -text
+tests/fixtures/xiangqi-adapter/js/notation.js -text
+tests/fixtures/xiangqi-adapter/js/rules.js -text
