@@ -164,7 +164,7 @@ interface EpisodeStatsRow {
 }
 
 const OBSERVATION_STATUSES_SQL = "'active', 'superseded', 'rejected'";
-const MAX_OBSERVATION_TEXT = 4_000;
+export const MAX_OBSERVATION_TEXT = 4_000;
 const MAX_INTERPRETATION_TEXT = 4_000;
 const MAX_GUIDANCE_TEXT = 2_000;
 const MAX_RELEVANCE_TEXT = 500;

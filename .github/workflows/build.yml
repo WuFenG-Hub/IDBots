@@ -153,6 +153,12 @@ jobs:
       - name: Run memory and team-culture tests
         run: pnpm run test:memory
 
+      # Behavioral regression for the OpenTeam task-close fix (H-79): the
+      # task-close pin list is capped so team impressions are never silently
+      # dropped. Runs compile:electron first (project convention).
+      - name: Run open-team impression tests
+        run: pnpm run test:open-team-impression
+
       - name: Run MetaWeb agent-tool tests
         run: pnpm run test:metaweb
 

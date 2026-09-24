@@ -261,6 +261,124 @@ test('task close (done): one observation per collaborator (local + remote) with 
   }
 });
 
+// H-79: a member whose deliverables contributed 55 pin ids produced a 4,642-char
+// observationText ("Pins: ${pinIds.join(', ')}" had no cap), which the impression
+// store rejected (> 4,000 chars) and the per-subject catch swallowed as
+// skipped+=1 — the impression was silently dropped. The close pipeline now
+// truncates the pin list constructively instead.
+test('H-79 regression: 55 deliverable pins truncate the pin list instead of dropping the impression', async () => {
+  const h = await openHarness();
+  try {
+    const hexPin = (n) => `${n.toString(16).padStart(64, '0')}i0`;
+    const seedTask = (title, groupIdSuffix) => {
+      const task = h.groupTaskStore.createTask({
+        groupId: hexPin(0xd0 + groupIdSuffix), title, goal: 'Build and publish the intro MetaApp',
+        chairMetabotId: 1, createdBy: 'user',
+      });
+      h.groupTaskStore.addMember({ taskId: task.id, metabotId: 1, globalmetaid: CHAIR, role: 'chair' });
+      h.groupTaskStore.addMember({ taskId: task.id, metabotId: 2, globalmetaid: WORKER, role: 'worker' });
+      h.groupTaskStore.addMember({ taskId: task.id, metabotId: null, globalmetaid: REMOTE_A, role: 'worker', displayName: 'Remote Bot A' });
+      for (let i = 0; i < 27; i += 1) {
+        h.groupTaskStore.addDeliverable({
+          taskId: task.id,
+          msgPinId: hexPin(0x100 + i),
+          authorGlobalmetaid: REMOTE_A,
+          kind: 'metaapp',
+          uri: `pin://${hexPin(0x180 + i)}`,
+        });
+      }
+      return task;
+    };
+    // Pad the head so its fixed part is exactly 904 chars — the ledger
+    // signature: 904 + 55*66 + 54*2 = 4,642 chars > MAX_OBSERVATION_TEXT.
+    // (First task in a fresh store, so task.id === 1.)
+    const stats27 = '0 group message(s) posted; 27 deliverable(s) submitted (0 accepted, 0 rejected, 27 still pending at close).';
+    const headPrefix = 'Collaboration record: group task #1 "';
+    const headSuffix = '" closed with outcome "done". The subject joined as a remote teammate. Host-recorded participation: ' + stats27;
+    const titleLen = 904 - headPrefix.length - headSuffix.length;
+    assert.ok(titleLen >= 1, `head padding must allow a non-empty title, got ${titleLen}`);
+
+    const task = seedTask('T'.repeat(titleLen), 0);
+    h.wireDeps();
+    // 55 pins: group anchor + 27 deliverables x 2 pin tokens.
+    const result = recordTaskCloseImpressions(task.id, 'done');
+    assert.deepEqual(result, { recorded: 2, created: 2, skipped: 0 });
+
+    const observations = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A });
+    assert.equal(observations.length, 1, 'the impression must not be silently dropped');
+    const observationText = observations[0].observationText;
+    assert.ok(
+      observationText.length <= 4000,
+      `observationText must fit MAX_OBSERVATION_TEXT, got ${observationText.length}`,
+    );
+    assert.match(observationText, /… 55 pins in total\./, 'truncated pin list carries the count line');
+    assert.ok(observationText.includes(hexPin(0x100)), 'keeps leading pins');
+    assert.ok(!observationText.includes(hexPin(0x180 + 26)), 'drops trailing pins');
+    // dimensions carry the full pin list for programmatic readers regardless.
+    assert.equal(observations[0].dimensions.collaborationFact.pinIds.length, 55);
+
+    // Reverse probe: pad so the FULL text lands at 3,999 chars — one under the
+    // limit. If the 904-char head math above were off, this would truncate or
+    // exceed the limit and fail (guards the fixture itself).
+    // PINS_SECTION = 55*66 joined pins + 54*2 separators + ' Pins: ' + '.'
+    const PINS_SECTION = 55 * 66 + 54 * 2 + 8;
+    const titleLenUnder = titleLen - (904 + PINS_SECTION - 3999);
+    const under = seedTask('U'.repeat(titleLenUnder), 1);
+    assert.deepEqual(recordTaskCloseImpressions(under.id, 'done'), { recorded: 2, created: 2, skipped: 0 });
+    const underText = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A })
+      .find((item) => item.idempotencyKey === `collab:task-close:${under.id}:${REMOTE_A}`).observationText;
+    assert.equal(underText.length, 3999, 'full text just under the limit is stored whole');
+    assert.ok(!underText.includes('pins in total'), 'no truncation marker under the limit');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('H-79 boundary: observationText of exactly 4000 chars stores whole; one char over truncates pins', async () => {
+  const h = await openHarness();
+  try {
+    const hexPin = (n) => `${n.toString(16).padStart(64, '0')}i0`;
+    // Fixed minimal pin set: group anchor + msg pin + plain uri label = 3 pins.
+    // Each task gets its own groupId (unique constraint on group_tasks.group_id).
+    const seed = (title, groupIdSuffix) => {
+      const task = h.groupTaskStore.createTask({
+        groupId: hexPin(0xd0 + groupIdSuffix), title, goal: 'Build and publish the intro MetaApp',
+        chairMetabotId: 1, createdBy: 'user',
+      });
+      h.groupTaskStore.addMember({ taskId: task.id, metabotId: 1, globalmetaid: CHAIR, role: 'chair' });
+      h.groupTaskStore.addMember({ taskId: task.id, metabotId: 2, globalmetaid: WORKER, role: 'worker' });
+      h.groupTaskStore.addMember({ taskId: task.id, metabotId: null, globalmetaid: REMOTE_A, role: 'worker', displayName: 'Remote Bot A' });
+      h.groupTaskStore.addDeliverable({ taskId: task.id, msgPinId: hexPin(0xc0), authorGlobalmetaid: REMOTE_A, kind: 'text', uri: 'plain-label' });
+      return task;
+    };
+    h.wireDeps();
+
+    // Probe the fixed overhead once, then pad the title so the untruncated
+    // text lands exactly on the store limit (4000 = stored, >4000 = rejected).
+    const probe = seed('PADTITLE', 0);
+    assert.deepEqual(recordTaskCloseImpressions(probe.id, 'done'), { recorded: 2, created: 2, skipped: 0 });
+    const probeText = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A })[0].observationText;
+    const padLength = 4000 - probeText.length + 'PADTITLE'.length;
+    assert.ok(padLength >= 1, `padding budget must be positive, got ${padLength}`);
+
+    const exact = seed('E'.repeat(padLength), 1);
+    assert.deepEqual(recordTaskCloseImpressions(exact.id, 'done'), { recorded: 2, created: 2, skipped: 0 });
+    const exactText = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A })
+      .find((item) => item.idempotencyKey === `collab:task-close:${exact.id}:${REMOTE_A}`).observationText;
+    assert.equal(exactText.length, 4000, 'exactly at the limit the text is stored whole');
+    assert.ok(!exactText.includes('pins in total'), 'no truncation marker at the boundary');
+
+    const over = seed('F'.repeat(padLength + 1), 2);
+    assert.deepEqual(recordTaskCloseImpressions(over.id, 'done'), { recorded: 2, created: 2, skipped: 0 });
+    const overText = h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A })
+      .find((item) => item.idempotencyKey === `collab:task-close:${over.id}:${REMOTE_A}`).observationText;
+    assert.ok(overText.length <= 4000, `over-limit close still records within budget, got ${overText.length}`);
+    assert.match(overText, /… 3 pins in total\./, 'one char over the boundary truncates the pin list');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('task close (cancelled): reason recorded; member kicked before close is noted', async () => {
   const h = await openHarness();
   try {
