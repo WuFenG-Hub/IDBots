@@ -96,6 +96,33 @@ record('generator: legacy DeepSeek base URL shapes migrate to the Messages root'
   && nativeBaseURLFor('') === undefined)
 record('generator: dsh-authorization is never mounted',
   !unit.some((e) => e.name === '@deepseek-ai/dsh-authorization'))
+// 0.1.7 experimental backends: off by default, mounted on demand.
+record('generator: browser-use + computer-use stay unmounted by default',
+  !unit.some((e) => String(e.name).includes('browser-use') || String(e.name).includes('computer-use')))
+const withBrowser = generateRuntimeConfig({
+  sessionRoot: '/tmp/x',
+  providers: [{ key: 'openai-gw', apiFormat: 'openai', baseUrl: 'https://a.example/v1', apiKeyEnv: 'K1', models: [{ id: 'm1', contextWindow: 64000 }] }],
+  sections: [],
+  browserUse: { mode: 'launch', headless: true, executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' },
+  computerUse: true,
+})
+const browserEntry = withBrowser.find((e) => e.name === '@deepseek-ai/dsh-experimental-browser-use-playwright-mcp')
+record('generator: browserUse mounts the service + Playwright MCP provider',
+  withBrowser.some((e) => e.name === '@deepseek-ai/dsh-browser-use')
+  && browserEntry?.config?.mode === 'launch'
+  && browserEntry?.config?.headless === true
+  && browserEntry?.config?.executablePath === '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+const attachEntry = generateRuntimeConfig({
+  sessionRoot: '/tmp/x',
+  providers: [{ key: 'openai-gw', apiFormat: 'openai', baseUrl: 'https://a.example/v1', apiKeyEnv: 'K1', models: [{ id: 'm1', contextWindow: 64000 }] }],
+  sections: [],
+  browserUse: { mode: 'attach', endpoint: 'http://127.0.0.1:9222' },
+}).find((e) => e.name === '@deepseek-ai/dsh-experimental-browser-use-playwright-mcp')
+record('generator: attach mode carries the debugging endpoint',
+  attachEntry?.config?.mode === 'attach' && attachEntry?.config?.endpoint === 'http://127.0.0.1:9222')
+record('generator: computerUse mounts the service + cua native provider',
+  withBrowser.some((e) => e.name === '@deepseek-ai/dsh-computer-use')
+  && withBrowser.some((e) => e.name === '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native'))
 record('generator: sections config emitted', unit.some((e) => e.config?.sections?.[0]?.name === 'persona:metabot'))
 record('generator: plugin paths are absolute (config location-independent)',
   unit.every((e) => !String(e.name).startsWith('./')))

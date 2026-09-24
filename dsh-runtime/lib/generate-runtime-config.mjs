@@ -47,6 +47,15 @@
 //     maxBytes?: number,               //   rendered baseline byte budget (default 65536)
 //     dshHome?: string,                //   user-global AGENTS.md home (default $DSH_HOME/~/.dsh)
 //   },
+//   browserUse?: {                     // 0.1.7 experimental browser automation
+//     mode: 'launch'|'attach',         //   (dsh-browser-use + Playwright MCP provider):
+//     headless?: boolean,              //   launch starts one headless Chromium per
+//     executablePath?: string,         //   session; attach claims an existing browser's
+//     endpoint?: string,               //   debugging endpoint (tabs + login state ride
+//   },                                 //   along). Tools surface as mcp__playwright-mcp__*.
+//   computerUse?: boolean,             // 0.1.7 experimental desktop control (cua-driver
+//                                      //   native provider): OS desktop permissions must
+//                                      //   be granted to the host app; off by default.
 //   extraEntries?: [...],              // dev/test fixtures appended verbatim
 // }
 //
@@ -580,6 +589,35 @@ export function generateRuntimeConfig(input) {
       // over-cap glob pages take the modification-time head, not sampling.
       { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
       { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
+    ] : []),
+    // 0.1.7 experimental browser automation (off unless the host opts in):
+    // the provider connects one Playwright MCP server + browser per session
+    // inside the serial agent/created window (before the first model
+    // request) and keeps it across turns. Attach mode claims an existing
+    // browser's debugging endpoint with its tabs and login state intact.
+    ...(input.browserUse ? [
+      { id: 'browser-use', name: '@deepseek-ai/dsh-browser-use' },
+      {
+        id: 'browser-use-playwright',
+        name: '@deepseek-ai/dsh-experimental-browser-use-playwright-mcp',
+        config: {
+          mode: input.browserUse.mode === 'attach' ? 'attach' : 'launch',
+          headless: input.browserUse.headless !== false,
+          ...(typeof input.browserUse.executablePath === 'string' && input.browserUse.executablePath.length > 0
+            ? { executablePath: input.browserUse.executablePath }
+            : {}),
+          ...(typeof input.browserUse.endpoint === 'string' && input.browserUse.endpoint.length > 0
+            ? { endpoint: input.browserUse.endpoint }
+            : {}),
+        },
+      },
+    ] : []),
+    // 0.1.7 experimental desktop control (cua-driver native, in-process).
+    // The host app must hold macOS Accessibility/Screen Recording grants;
+    // nothing here requests them. Off unless the host opts in.
+    ...(input.computerUse === true ? [
+      { id: 'computer-use', name: '@deepseek-ai/dsh-computer-use' },
+      { id: 'computer-use-cua-native', name: '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native' },
     ] : []),
     ...(input.extraEntries ?? []),
   ]
