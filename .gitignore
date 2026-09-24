@@ -101,6 +101,7 @@ tests/*
 !tests/coworkSessionGoal.test.mjs
 !tests/coworkSessionGtCloseStatus.test.mjs
 !tests/coworkSessionSortAnchor.test.ts
+!tests/userMessageOrigin.test.ts
 !tests/coworkDshSessionTypes.test.mjs
 !tests/coworkDshStallWatchdog.test.mjs
 !tests/coworkDshDeletePolicy.test.mjs

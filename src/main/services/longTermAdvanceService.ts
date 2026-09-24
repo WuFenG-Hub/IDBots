@@ -40,7 +40,7 @@ export interface LongTermAdvanceSessionStore {
     sessionType: string,
   ): { id: string };
   updateSession(id: string, patch: { status?: string }): unknown;
-  addMessage(id: string, message: { type: string; content: string }): unknown;
+  addMessage(id: string, message: { type: string; content: string; metadata?: Record<string, unknown> }): unknown;
   getSession(id: string): unknown;
 }
 
@@ -308,7 +308,11 @@ export class LongTermAdvanceService {
     }
 
     coworkStore.updateSession(sessionId, { status: 'running' });
-    coworkStore.addMessage(sessionId, { type: 'user', content: prompt });
+    coworkStore.addMessage(sessionId, {
+      type: 'user',
+      content: prompt,
+      metadata: { origin: 'heartbeat' },
+    });
     this.deps.store().recordNudge(detail.id, current.id, `heartbeat escalation (${reasons.join('; ')}) → session ${sessionId}`);
     await runner.startSession(sessionId, prompt, { skipInitialUserMessage: true, confirmationMode: 'text' });
     return { sessionId, reusedSession };
