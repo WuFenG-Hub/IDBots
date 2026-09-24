@@ -207,7 +207,17 @@ export function startMockServer(port = 48787) {
       // Realistic usage so token-meter accounting can cross compaction
       // thresholds: ~4 chars per token over the actual payload sizes.
       const requestChars = (parsed.messages ?? []).reduce((sum, m) => sum + String(m.content ?? '').length + String(JSON.stringify(m.tool_calls ?? '')).length, 0)
-      const promptTokens = Math.max(1, Math.ceil(requestChars / 4))
+      const rawPromptTokens = Math.max(1, Math.ceil(requestChars / 4))
+      // Compaction AUX calls (the summarization replay, identified by the
+      // upstream instruction) report a capped usage instead: pi-ai 0.1.7
+      // classifies any stop whose reported usage exceeds the catalog window
+      // as CONTEXT_WINDOW_EXCEEDED, and the tiny windows compaction tests
+      // run against are always exceeded by the full-history replay. The cap
+      // models a provider that accepts the summary request; conversation
+      // calls keep their honest (threshold-driving, eventually overflowing)
+      // sizes.
+      const isCompactionAux = (parsed.messages ?? []).some((m) => String(m?.content ?? '').includes('summarization request'))
+      const promptTokens = isCompactionAux ? Math.min(rawPromptTokens, 64) : rawPromptTokens
       const usage = { prompt_tokens: promptTokens, completion_tokens: Math.max(1, Math.ceil(reply.length / 4)) }
       // CACHE_HIT marker: report half the prompt as served from cache so
       // usage-projection tests exercise the cacheRead bucket (pi-ai maps
