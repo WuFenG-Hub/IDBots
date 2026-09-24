@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const projectRoot = path.resolve(import.meta.dirname, '..');
 const defaultSource = '/Users/tusm/Documents/MetaID_Projects/man-p2p';
 const targetDir = path.join(projectRoot, 'resources', 'man-p2p');
 const targetManifestPath = path.join(targetDir, 'bundle-manifest.json');

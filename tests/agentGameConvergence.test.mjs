@@ -33,7 +33,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const projectRoot = path.resolve(import.meta.dirname, '..');
 
 /** Electron stub — adapterSandbox only needs app.isPackaged + app.getAppPath(). */
 const electronStub = {

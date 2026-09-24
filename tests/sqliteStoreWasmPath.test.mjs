@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 function resolveRepoRoot() {
-  let current = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  let current = path.resolve(import.meta.dirname, '..');
   while (true) {
     const candidateWasm = path.join(current, 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
     if (fs.existsSync(candidateWasm)) {

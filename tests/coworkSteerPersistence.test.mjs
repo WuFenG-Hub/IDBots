@@ -7,7 +7,7 @@ import test from 'node:test';
 import { createLegacyMemoryDb } from './memoryTestUtils.mjs';
 
 const require = createRequire(import.meta.url);
-const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const projectRoot = path.resolve(import.meta.dirname, '..');
 
 function loadCompiledModule(modulePath) {
   const originalLoad = Module._load;

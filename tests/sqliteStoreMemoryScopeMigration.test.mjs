@@ -10,7 +10,7 @@ const initSqlJs = require('sql.js');
 const Module = require('node:module');
 const { DB_FILENAME } = require('../dist-electron/main/appConstants.js');
 
-const worktreeRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const worktreeRoot = path.resolve(import.meta.dirname, '..');
 
 function resolveRepoRoot() {
   let current = worktreeRoot;

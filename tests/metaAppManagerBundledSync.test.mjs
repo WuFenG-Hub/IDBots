@@ -117,7 +117,7 @@ test('dev without IDBOTS_METAAPPS_ROOT does not sync anything', (t) => {
     makeManager(bundledRoot).syncBundledMetaAppsToUserData();
   });
 
-  const strayRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dist-electron', 'METAAPPs');
+  const strayRoot = path.resolve(import.meta.dirname, '..', 'dist-electron', 'METAAPPs');
   assert.equal(fs.existsSync(strayRoot), false);
 });
 
