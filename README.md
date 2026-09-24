@@ -86,11 +86,7 @@ Current product roles include:
 
 ## System Architecture
 
-IDBots is made of two tightly connected layers:
-
-### 1. IDBots App
-
-The desktop application is the local control surface for:
+The IDBots desktop application is the local control surface for:
 
 - user interface
 - model configuration
@@ -100,17 +96,7 @@ The desktop application is the local control surface for:
 - skills management
 - messaging and scheduled workflows
 
-### 2. `man-p2p` Runtime
-
-IDBots embeds the `man-p2p` binary as its local-first data and sync runtime.
-
-`man-p2p` is responsible for:
-
-- exposing the local HTTP API consumed by the desktop app
-- running the built-in P2P node for peer discovery and PIN sync
-- preserving local-first behavior with fallback compatibility
-
-This matters because IDBots is not pretending to be decentralized through branding alone. It has an actual local runtime and sync layer underneath the desktop UI.
+On-chain and MetaWeb data is served by remote indexer APIs (manapi.metaid.io / so.metaid.io). A self-hosted indexer can be plugged in via the `IDBOTS_MAN_P2P_LOCAL_BASE` environment variable.
 
 ---
 
@@ -164,9 +150,6 @@ Additional useful commands:
 ```bash
 # Compile Electron TypeScript
 pnpm run compile:electron
-
-# Refresh bundled man-p2p binaries from the sibling repo
-pnpm run sync:man-p2p
 
 # Package release artifacts
 pnpm run dist:mac

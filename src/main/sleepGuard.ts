@@ -42,7 +42,7 @@
  *
  * ── What counts as "work" (collection lives in sleepGuardWorkSources.ts) ────
  *  The guard never infers work from "the app is running": long-lived daemons
- *  (p2p indexer, MCP skill servers, the local MetaApp server, listeners) must
+ *  (MCP skill servers, the local MetaApp server, listeners) must
  *  NOT keep the device awake forever. It only tracks bounded units of work:
  *   - `cowork`        — a running cowork session. This is the single long-work
  *                       entry point of the platform: interactive chat, Bot
