@@ -11,6 +11,7 @@
 import type { MetabotStore } from '../metabotStore';
 import { OPENTEAM_ALLOW_REMOTE_COLLAB_KEY } from './openTeamGuestService';
 import { COWORK_MOUNT_MCP_TOOLS_KEY } from './coworkMcpToolsPreference';
+import { COWORK_BROWSER_AUTOMATION_KEY, COWORK_COMPUTER_USE_KEY } from './coworkAutomationPreference';
 import {
   SURF_BEFORE_DREAM_ENABLED_KEY,
   SURF_INTERACTION_BUDGET_KEY,
@@ -33,6 +34,8 @@ interface RendererSettingDef {
 const RENDERER_SETTING_DEFS: Record<string, RendererSettingDef> = {
   [OPENTEAM_ALLOW_REMOTE_COLLAB_KEY]: { normalizeValue: normalizeToggleValue },
   [COWORK_MOUNT_MCP_TOOLS_KEY]: { normalizeValue: normalizeToggleValue },
+  [COWORK_BROWSER_AUTOMATION_KEY]: { normalizeValue: normalizeToggleValue },
+  [COWORK_COMPUTER_USE_KEY]: { normalizeValue: normalizeToggleValue },
   [SURF_BEFORE_DREAM_ENABLED_KEY]: { normalizeValue: normalizeToggleValue },
   [SURF_INTERACTION_BUDGET_KEY]: { normalizeValue: normalizeSurfBudgetValue },
 };

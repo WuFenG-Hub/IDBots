@@ -358,7 +358,7 @@ export function buildBotBrowserAgentTools(deps: {
 
   const botBrowserReadPage = tool(
     'bot_browser_read_page',
-    'Read the visible text content of a Bot Browser tab (the current tab by default). Works fully for first-party pages like bot homepages and pin inspectors. For MetaApps (metaapp:// URIs), the page renders inside a sandboxed frame that cannot be read from outside — this tool then returns the app\'s local SOURCE directory instead; read the source files with your file tools. Use this whenever the user asks what a page says or means, or before modifying a page. When NOT to use: for a local MetaApp whose source you already know, read those files directly instead of going through this tool. NEVER use Playwright or external browser automation — the Bot Browser is not a Playwright browser.',
+    'Read the visible text content of a Bot Browser tab (the current tab by default). Works fully for first-party pages like bot homepages and pin inspectors. For MetaApps (metaapp:// URIs), the page renders inside a sandboxed frame that cannot be read from outside — this tool then returns the app\'s local SOURCE directory instead; read the source files with your file tools. Use this whenever the user asks what a page says or means, or before modifying a page. When NOT to use: for a local MetaApp whose source you already know, read those files directly instead of going through this tool. Do not point browser automation (Playwright MCP, when enabled for this bot) at Bot Browser pages — its sandboxed frames are invisible to external browsers; automation is for ordinary public websites only.',
     {
       tabId: z.number().optional(),
     },

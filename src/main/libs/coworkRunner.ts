@@ -17,7 +17,7 @@ import { DshTurnHub, dshSessionRootFor, isNativeDeepSeekChatRoute, type DshTurnP
 import { isDshShutdownError } from './dshShutdownError';
 import { truncateUtf16Units } from './llmSafeText';
 import { DshStreamUiGate } from './dshStreamUiGate';
-import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
+import type { DshHostToolImagePayload, DshRuntimeConfigInput, DshUsageSnapshot } from './dshKernel/types';
 import { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressure } from './dshUsageProjection';
 import type { DshUsageStatsRow } from './dshUsageProjection';
 import { buildSessionHistoryHandoff, dshApiFormatOf, dshSessionIdOf, isDshSessionHandle, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
@@ -1635,6 +1635,13 @@ export interface CoworkRunnerOptions {
   twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   /** When set, returns enabled user-configured MCP servers for local execution. */
   mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
+  /** Per-bot opt-in for the 0.1.7 experimental browser automation backend
+   * (dsh-browser-use + Playwright MCP). Return the launch/attach config when
+   * the session's bot enabled it, undefined otherwise. */
+  browserAutomationProvider?: (coworkSessionId: string) => DshRuntimeConfigInput['browserUse'] | undefined;
+  /** Per-bot opt-in for the 0.1.7 experimental desktop computer-use backend
+   * (cua-driver native). The host app must hold the OS desktop grants. */
+  computerUseProvider?: (coworkSessionId: string) => boolean;
   /**
    * Cowork skill prompt parts (rules section / volatile catalog / sandbox
    * inline section), composed main-side so the live skill catalog never gets
@@ -1988,6 +1995,8 @@ export class CoworkRunner extends EventEmitter {
   private twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
   private twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   private mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
+  private browserAutomationProvider?: (coworkSessionId: string) => DshRuntimeConfigInput['browserUse'] | undefined;
+  private computerUseProvider?: (coworkSessionId: string) => boolean;
   private coworkSkillPromptsProvider?: (metabotId: number | null) => {
     rules: string | null;
     catalog: string | null;
@@ -2116,6 +2125,8 @@ export class CoworkRunner extends EventEmitter {
     this.twinTaskCancel = options?.twinTaskCancel;
     this.twinTaskReassign = options?.twinTaskReassign;
     this.mcpServerProvider = options?.mcpServerProvider;
+    this.browserAutomationProvider = options?.browserAutomationProvider;
+    this.computerUseProvider = options?.computerUseProvider;
     this.coworkSkillPromptsProvider = options?.coworkSkillPromptsProvider;
     // Optional-chained like every other option — a bare `new CoworkRunner(store)`
     // (tests, minimal embedders) used to crash here on the missing `?.`.
@@ -7711,6 +7722,11 @@ export class CoworkRunner extends EventEmitter {
         // dsh-mcp-client entry exposing mcp__<name>__<tool> tools.
         mcpServersProvider: (coworkSessionId) =>
           (this.mcpServerProvider?.(coworkSessionId) ?? []).map((server) => rewriteWin32McpStdioServer(server)),
+        // Per-bot opt-ins for the 0.1.7 experimental backends (default off).
+        // Browser automation launches one headless Chromium per session;
+        // computer use operates the host desktop under the app's OS grants.
+        browserAutomationProvider: (coworkSessionId) => this.browserAutomationProvider?.(coworkSessionId),
+        computerUseProvider: (coworkSessionId) => this.computerUseProvider?.(coworkSessionId) === true,
         onIdleSessionMessage: (coworkSessionId, message) => {
           const stored = this.store.addMessage(coworkSessionId, message as Omit<CoworkMessage, 'id' | 'timestamp'>);
           this.emit('message', coworkSessionId, stored);

@@ -287,6 +287,14 @@ export interface DshHubOptions {
   /** User-configured MCP servers, read fresh each turn (additions mount on the
    * next turn; the config union never removes until restart, same as providers). */
   mcpServersProvider?: (coworkSessionId: string) => DshMcpServerDefinition[]
+  /** 0.1.7 experimental browser automation (dsh-browser-use + Playwright MCP),
+   *  per-bot opt-in like MCP mounting. One headless Chromium per session; the
+   *  provider activates for every session on a slot once any bot on it opted
+   *  in — the slot composition is shared, so the entry stays until restart. */
+  browserAutomationProvider?: (coworkSessionId: string) => DshRuntimeConfigInput['browserUse'] | undefined
+  /** 0.1.7 experimental desktop control (cua-driver native). Per-bot opt-in;
+   *  the host app must hold the OS desktop permission grants. */
+  computerUseProvider?: (coworkSessionId: string) => boolean
   log?: DshKernelOptions['log']
   /** Extra composition entries for the runtime (test fixtures; later the
    * idbots tools/policy plugins mount here). */
@@ -381,6 +389,10 @@ interface DshRuntimeSlot {
   providersSeen: Map<string, DshProviderRoute>
   routeApiKeys: Map<string, { envName: string; apiKey: string }>
   mcpServersSeen: Map<string, DshMcpServerDefinition>
+  /** First opt-in wins for the slot's lifetime (config unions never remove
+   *  until restart — same stickiness as mcpServersSeen). */
+  browserUseSeen?: DshRuntimeConfigInput['browserUse']
+  computerUseSeen: boolean
   lastUsedAt: number
 }
 
@@ -1013,6 +1025,8 @@ export class DshTurnHub {
       providersSeen: new Map(),
       routeApiKeys: new Map(),
       mcpServersSeen: new Map(),
+      browserUseSeen: undefined,
+      computerUseSeen: false,
       lastUsedAt: Date.now(),
     }
     this.attachKernel(slot)
@@ -1093,6 +1107,16 @@ export class DshTurnHub {
         if (name) slot.mcpServersSeen.set(name, server)
       }
     }
+    // Browser automation / computer use ride the same accumulateMcp gate:
+    // warmup turns must not claim a browser/desktop for a synthetic session.
+    if (options?.accumulateMcp !== false) {
+      if (slot.browserUseSeen === undefined) {
+        slot.browserUseSeen = this.opts.browserAutomationProvider?.(input.sessionId) ?? undefined
+      }
+      if (!slot.computerUseSeen) {
+        slot.computerUseSeen = this.opts.computerUseProvider?.(input.sessionId) === true
+      }
+    }
     if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
       this.webSearchSeen = {
         apiKey: input.provider.apiKey,
@@ -1123,6 +1147,8 @@ export class DshTurnHub {
         workspaceInstructions: { dshHome: join(app.getPath('userData'), 'dsh-home') },
       } : {},
       mcpServers: [...slot.mcpServersSeen.values()],
+      ...(slot.browserUseSeen !== undefined ? { browserUse: slot.browserUseSeen } : {}),
+      ...(slot.computerUseSeen ? { computerUse: true } : {}),
       ...(this.webSearchSeen ? {
         webSearch: {
           apiKeyEnv: DSH_WEBSEARCH_API_KEY_ENV,

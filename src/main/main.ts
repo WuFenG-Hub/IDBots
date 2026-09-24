@@ -233,6 +233,7 @@ import {
   setRendererMetabotSetting,
 } from './services/metabotSettingsService';
 import { isCoworkMcpMountEnabled } from './services/coworkMcpToolsPreference';
+import { isCoworkBrowserAutomationEnabled, isCoworkComputerUseEnabled } from './services/coworkAutomationPreference';
 import {
   resumeOpenTeamInviteWatchers,
   setOpenTeamServiceDeps,
@@ -5149,6 +5150,18 @@ const executeDelegationPipeline = async (
     });
 };
 
+// Prefer an installed Chrome/Chromium for the 0.1.7 browser-automation
+// provider over a Playwright-managed download (offline-safe, no extra ~150MB).
+const detectSystemChromium = (): { executablePath: string } | Record<string, never> => {
+  const candidates = process.platform === 'darwin'
+    ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
+    : process.platform === 'win32'
+      ? [process.env['PROGRAMFILES'] + '\\Google\\Chrome\\Application\\chrome.exe', process.env['PROGRAMFILES(X86)'] + '\\Google\\Chrome\\Application\\chrome.exe']
+      : ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
+  const hit = candidates.find((candidate) => candidate && fs.existsSync(candidate));
+  return hit ? { executablePath: hit } : {};
+};
+
 const getCoworkRunner = () => {
   if (!coworkRunner) {
     const resolveMetaAppSourceByPinId = async (pinId: string) => {
@@ -5285,6 +5298,22 @@ const getCoworkRunner = () => {
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
         if (!isCoworkMcpMountEnabled(getMetabotStore(), metabotId)) return [];
         return getMcpStore().getEnabledServers();
+      },
+      // Per-bot opt-in (default off): 0.1.7 experimental browser automation
+      // (Playwright MCP) launches one headless Chromium per DSH session.
+      // Prefer the installed Chrome over a Playwright-managed download.
+      // See services/coworkAutomationPreference.ts.
+      browserAutomationProvider: (coworkSessionId: string) => {
+        const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
+        if (!isCoworkBrowserAutomationEnabled(getMetabotStore(), metabotId)) return undefined;
+        return { mode: 'launch' as const, headless: true, ...detectSystemChromium() };
+      },
+      // Per-bot opt-in (default off): 0.1.7 experimental desktop computer use
+      // (cua-driver native, in-process). Requires the app to hold the macOS
+      // Accessibility/Screen Recording grants — the OS prompts on first use.
+      computerUseProvider: (coworkSessionId: string) => {
+        const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
+        return isCoworkComputerUseEnabled(getMetabotStore(), metabotId);
       },
       // Skill prompt parts are composed main-side: rules join the system
       // prompt's SKILLS section, the live catalog rides the volatile tail,
@@ -6172,7 +6201,7 @@ const getCoworkRunner = () => {
             '- When the user asks for currently-online Bot services, who can do a task right now, or the live service directory, call list_online_services first (query with short task keywords). Present the table with provider names kept as metaid:// links. Open a provider Bot page with bot_browser_open_uri only when the user wants to view it.',
             '- When the user wants to find a person or bot on-chain (view someone\'s bot page, look up who someone is, find users/bots by personality or skill, find someone to chat with), call search_metaids first (query/skill/chainName/chatOnly/sinceDays), open the best match\'s bot page with bot_browser_open_uri on metaid://<globalMetaId>, and offer 2-3 alternatives by name. Use metaid_profile for a specific identity\'s full profile.',
             '- When you mention a specific app or bot in your reply, write it as a markdown link: [title](metaapp://<pinId>) or [name](metaid://<globalMetaId>) — these render as clickable links that open in the Bot Browser. NEVER shorten, truncate, or ellipsis a globalMetaId or pinId; always output them in full inside the link. Prefer the publisher\'s display name (and avatar when available) for authors, but the full globalMetaId must always be the link target. When search_metaapps, search_metaids, list_online_bots, or list_online_services returns table/bullet lines, reuse them VERBATIM — never restate an app, an author, or a person as plain text.',
-            '- NEVER use Playwright, screenshots, or any external browser automation: the Bot Browser is not a Playwright browser and needs none.',
+            '- External browser automation (Playwright MCP tools, mcp__playwright-mcp__*) exists only when this bot has browser automation enabled, and is for ordinary public websites: the Bot Browser is a separate on-chain surface whose sandboxed pages no external browser can see. Never automate the Bot Browser itself.',
             active?.uri
               ? `<active_tab ${activeTabAttrs}>${escapeXml(active.uri)}</active_tab>`
               : '<active_tab />',
