@@ -49,6 +49,9 @@ const main = async () => {
   const client = runtimeClient({
     args: [path.join(runtimeDir, 'bin.mjs'), configPath],
     env: { ...process.env, BROWSER_KEY: 'sk-browser', SPIKE_QUIET: '1' },
+    // Heaviest composition in the suite (browser provider + MCP discovery);
+    // under a loaded gate run the 10s default boot budget can time out.
+    initializeTimeoutMs: 60000,
   })
   client.start()
   await client.initialize({ cwd: runtimeDir, provider: 'mockgw', model: 'mock-1' })
@@ -90,8 +93,15 @@ const main = async () => {
     console.log('PASS  turn completed after the browser call')
   } finally {
     subscription.close()
-    await client.close()
-    await new Promise((resolve) => server.close(resolve))
+    // Bounded teardown: an initialize timeout can leave the runtime child
+    // mid-boot holding its keep-alive socket, and a bare server.close(cb)
+    // would then wait forever. Close live connections and cap the wait.
+    await Promise.race([client.close(), new Promise((resolve) => setTimeout(resolve, 10000))]).catch(() => {})
+    server.closeAllConnections?.()
+    await Promise.race([
+      new Promise((resolve) => server.close(resolve)),
+      new Promise((resolve) => setTimeout(resolve, 5000)),
+    ])
     fs.rmSync(sessionRoot, { recursive: true, force: true })
     fs.rmSync(configPath, { force: true })
   }
