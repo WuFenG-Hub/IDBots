@@ -1,0 +1,112 @@
+{
+  "description": "S1 首局组C真实污染流（2026-09-24, 15行: match.created + 2 seat.claimed + 12 action, 仅1个有效动作, 第三方重放收敛 plies=1 turn=black）",
+  "groupId": "c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0",
+  "redAgentId": "idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5",
+  "rows": [
+    {
+      "msgIndex": 1,
+      "senderGlobalMetaId": "idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5",
+      "senderMetaId": "3752b67637874d4886b7f0f27b6958c2b44f3e1795dfea42988aaa4be02b7859",
+      "chainTimestamp": 1790223407,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"match.created\",\"eventId\":\"idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5:1f614629-dfed-4ef3-8efc-898cb8d9f535\",\"payload\":{\"title\":\"阿码 vs AI_Sunny · 全自主对局C\",\"manifestUri\":\"metaapp://c2c9923106fae84c89a42afe978649195106bfc0236ae2735ac6dc8e8cedf0d7i0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"maxPlayers\":2,\"turnModel\":\"sequential\"}}"
+    },
+    {
+      "msgIndex": 2,
+      "senderGlobalMetaId": "idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5",
+      "senderMetaId": "3752b67637874d4886b7f0f27b6958c2b44f3e1795dfea42988aaa4be02b7859",
+      "chainTimestamp": 1790223436,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"seat.claimed\",\"eventId\":\"idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5:e4129f0c-ba1f-47f8-b43b-a123154b2aea\",\"payload\":{\"requestedRole\":\"red\",\"name\":\"Builder阿码\"}}"
+    },
+    {
+      "msgIndex": 3,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790223449,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"seat.claimed\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:d2e70234-2aab-451e-999b-60664d63d0aa\",\"payload\":{\"requestedRole\":\"black\",\"name\":\"AI_Sunny\"}}"
+    },
+    {
+      "msgIndex": 4,
+      "senderGlobalMetaId": "idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5",
+      "senderMetaId": "3752b67637874d4886b7f0f27b6958c2b44f3e1795dfea42988aaa4be02b7859",
+      "chainTimestamp": 1790223521,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5:48f3b30b-2e05-4dc4-a3ec-551494acb981\",\"actionSeq\":1,\"prevStateHash\":\"sha256:851d0c0fda8d3bf8dc2ed45230b3ca01c9d962dd655ae65a0d5bdc28f6e073af\",\"stateHash\":\"sha256:851d0c0fda8d3bf8dc2ed45230b3ca01c9d962dd655ae65a0d5bdc28f6e073af\",\"payload\":{\"move\":\"h2e2\",\"note\":\"中炮开局\"}}"
+    },
+    {
+      "msgIndex": 5,
+      "senderGlobalMetaId": "idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5",
+      "senderMetaId": "3752b67637874d4886b7f0f27b6958c2b44f3e1795dfea42988aaa4be02b7859",
+      "chainTimestamp": 1790223545,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq1d5m392ahkhp79wsy9ur79e3vhak7tg729dwdr5:201240b6-4f8d-4d1c-a53c-938122e9e0f4\",\"actionSeq\":2,\"prevStateHash\":\"sha256:851d0c0fda8d3bf8dc2ed45230b3ca01c9d962dd655ae65a0d5bdc28f6e073af\",\"stateHash\":\"sha256:851d0c0fda8d3bf8dc2ed45230b3ca01c9d962dd655ae65a0d5bdc28f6e073af\",\"payload\":{\"move\":\"h2e2\",\"note\":\"当头炮开局，抢占中路\"}}"
+    },
+    {
+      "msgIndex": 6,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790223832,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:5bc5f19f-3c02-4a11-82c9-3d127ec6d849\",\"actionSeq\":3,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"h9g7\",\"note\":\"屏风马稳健应对中炮\"}}"
+    },
+    {
+      "msgIndex": 7,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790223871,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:dad7f06c-3975-4c45-863f-cd4d0ab03d91\",\"actionSeq\":4,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"h9g7\",\"note\":\"屏风马，稳妥应对中炮\"}}"
+    },
+    {
+      "msgIndex": 8,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790223930,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:af96b055-fe6b-4b0e-9373-1e63c0b7637e\",\"actionSeq\":5,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"h9g7\",\"note\":\"跳屏风马，稳步应对中炮\"}}"
+    },
+    {
+      "msgIndex": 9,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790223955,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:0a32e4ae-658b-4326-9678-578d2d402a0a\",\"actionSeq\":6,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"h9g7\",\"note\":\"屏风马起手，稳固中路应红方当头炮。\"}}"
+    },
+    {
+      "msgIndex": 10,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790224010,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:aabb616d-7741-4eec-9e7b-cf4edf2ee699\",\"actionSeq\":7,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"h9g7\",\"note\":\"起屏风马，稳固应对中炮\"}}"
+    },
+    {
+      "msgIndex": 11,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790224057,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:69250723-2629-4f07-9860-5224f694a744\",\"actionSeq\":8,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"b9c7\",\"note\":\"马2进3，屏风马护中卒，稳健应对中炮\"}}"
+    },
+    {
+      "msgIndex": 12,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790224095,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:a13a19ad-7dc2-4f7b-85b9-7f74364d4a3d\",\"actionSeq\":9,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"h9g7\",\"note\":\"起屏风马，稳正应对中炮\"}}"
+    },
+    {
+      "msgIndex": 13,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790224133,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:540d5360-33f6-4b8a-a244-8afcb59e2bf3\",\"actionSeq\":10,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"h9g7\",\"note\":\"屏风马应中炮，稳扎稳打\"}}"
+    },
+    {
+      "msgIndex": 14,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790224165,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:c71cecac-285d-4461-b866-c395b627308e\",\"actionSeq\":11,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"h9g7\",\"note\":\"屏风马起步，稳步应对中炮\"}}"
+    },
+    {
+      "msgIndex": 15,
+      "senderGlobalMetaId": "idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz",
+      "senderMetaId": "2eb21238314aca030b67ed7b7c4c613f2e8cb7e42ee9140589a4df9da3854aa2",
+      "chainTimestamp": 1790224195,
+      "content": "{\"protocol\":\"agent-game/1\",\"gameId\":\"xiangqi\",\"matchId\":\"c7b209fe6bf641f11c1e3b6638030fb15509072be315aae6a25b21b31e6ae62ai0\",\"rulesHash\":\"sha256:eabf1f423c869f91ef9c755e95d61e97ad32189e87a910b4bdfee4678c664a5e\",\"type\":\"action\",\"eventId\":\"idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz:7766a9ab-d455-4ac7-b4cf-259986c6d66d\",\"actionSeq\":12,\"prevStateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"stateHash\":\"sha256:af3d1f17096c4a35394cd73b304b99797d2d342b660882de63a3090cf034b59c\",\"payload\":{\"move\":\"h9g7\",\"note\":\"跳马护中，稳应对中炮\"}}"
+    }
+  ]
+}

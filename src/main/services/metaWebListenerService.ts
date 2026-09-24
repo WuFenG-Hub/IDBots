@@ -46,6 +46,21 @@ export function setGroupMessageInsertedHook(hook: ((groupId: string) => void) | 
 }
 
 /**
+ * Fire the insert hook from any ingest path. GAP-1 (924-2): the group-chat
+ * history backfill persisted recovered rows without waking the Agent-Game
+ * runtime, so a new group's recovered history never reached it (only the WS
+ * path woke it) and the game stayed idle until a manual resume. Both paths
+ * now route through this single hook slot. Failures never break ingest.
+ */
+export function notifyGroupMessageInserted(groupId: string): void {
+  try {
+    onGroupMessageInserted?.(groupId);
+  } catch {
+    // Hook failures must never break normal group-chat ingest.
+  }
+}
+
+/**
  * Speedup R-04: canonical sender-name resolver for LOCAL bots. The chain
  * payload's userInfo.name is whatever name record the indexer resolved for
  * that pin — it flip-flops between a bot's historical names (EP28 rendered
@@ -347,11 +362,7 @@ function routeGroupChat(
   saveDb();
 
   // Notify the Agent-Game runtime (no-op when no session exists for this group).
-  try {
-    onGroupMessageInserted?.(groupId);
-  } catch {
-    // Hook failures must never break normal group-chat ingest.
-  }
+  notifyGroupMessageInserted(groupId);
 
   const timeStr = new Date().toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   emitLog(`[${timeStr}] 📡 [Target: ${targetName}] Group message from group ${groupId.slice(0, 8)}…`);

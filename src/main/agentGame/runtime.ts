@@ -242,13 +242,18 @@ export class AgentGameRuntime extends EventEmitter {
 
   /* ----------------------- catch-up ----------------------- */
 
-  /** Replay messages since the session cursor and advance state. */
-  private async catchUp(sessionId: string): Promise<void> {
+  /**
+   * Replay messages since the session cursor and advance state.
+   * Returns the fresh session record it mutated (callers that persist
+   * afterwards must use it — persisting a pre-catch-up copy rolls back
+   * lastIndex / lastActionSeq and re-triggers the GAP-3b wedge).
+   */
+  private async catchUp(sessionId: string): Promise<GameSession | null> {
     const s = this.deps.store.getSession(sessionId);
-    if (!s) return;
+    if (!s) return null;
     const after = s.lastIndex < 0 ? -1 : s.lastIndex;
     const messages = this.deps.messageStore.readSince(s.groupId, after);
-    if (messages.length === 0) return;
+    if (messages.length === 0) return s;
     let state = this.states.get(sessionId);
     if (state === undefined) {
       const stored = this.deps.store.getSerializedState(sessionId);
@@ -277,26 +282,55 @@ export class AgentGameRuntime extends EventEmitter {
         this.pending.delete(sessionId);
       }
       if (sandbox && state !== undefined) {
+        // Canonical form BEFORE the reduce: adapters may mutate and return the
+        // same object, so the change signal must be captured pre-call.
+        let beforeSerialized: string | null = null;
+        try {
+          beforeSerialized = await sandbox.serializeState(state);
+        } catch {
+          beforeSerialized = null;
+        }
+        let reduced: unknown;
+        let reduceFailed = false;
         try {
           // reduce accepts the decrypted, ordered game event. docs/07 §2: the
           // row's index / senderMetaId / timestamp ARE the event metadata —
           // attached here so adapter attribution (senderSeat) replays exactly
           // like the page/third-party clients. Values come from the message
           // row itself; nothing is synthesized.
-          state = await sandbox.reduce(state, withRowMeta(env as MetaStampedEvent, msg));
+          reduced = await sandbox.reduce(state, withRowMeta(env as MetaStampedEvent, msg));
         } catch (err) {
           this.log(`${sessionId}: reduce failed for ${env.eventId}: ${errMsg(err)}`);
+          reduceFailed = true;
         }
-      }
-      // If this action was one we had pending, it landed — clear the retry.
-      if (isActionEvent(env as GameEvent)) {
-        const ae = env as ActionEvent;
-        const key: WriteLogKey = { groupId: s.groupId, actionSeq: ae.actionSeq, eventId: ae.eventId };
-        if (this.deps.store.isWriteCommitted(key)) {
-          // Already recorded by us.
-        }
-        if (ae.actionSeq > s.lastActionSeq) {
-          s.lastActionSeq = ae.actionSeq;
+        if (!reduceFailed) {
+          if (isActionEvent(env as GameEvent)) {
+            // GAP-3b: lastActionSeq is the expected-next-seq cursor and must
+            // advance only across actions the adapter ACCEPTED (move applied).
+            // serializeState is the ABI-canonical form, so an accepted action
+            // always changes it while adapter-rejected ones (out-of-turn /
+            // illegal / seq-skip / dedup replay) leave it identical. Counting
+            // rejected events desynced our expectation from the converged
+            // third-party view and permanently wedged replay (924-2: black
+            // lastActionSeq=12 while the stream converges at plies=1).
+            let afterSerialized: string | null = null;
+            try {
+              afterSerialized = await sandbox.serializeState(reduced);
+            } catch {
+              afterSerialized = null;
+            }
+            if (
+              beforeSerialized !== null &&
+              afterSerialized !== null &&
+              afterSerialized !== beforeSerialized
+            ) {
+              const ae = env as ActionEvent;
+              if (ae.actionSeq > s.lastActionSeq) {
+                s.lastActionSeq = ae.actionSeq;
+              }
+            }
+          }
+          state = reduced;
         }
       }
     }
@@ -305,6 +339,7 @@ export class AgentGameRuntime extends EventEmitter {
     }
     s.lastIndex = cursor;
     this.persist(s, state);
+    return s;
   }
 
   /* ----------------------- action loop ----------------------- */
@@ -398,7 +433,17 @@ export class AgentGameRuntime extends EventEmitter {
       const draft = structuredClone(state);
       const actionSeq = s.lastActionSeq + 1;
       const draftEvent = this.draftEnvelope(s, actionSeq, prevStateHash, validated.normalizedAction ?? action);
-      const reducedDraft = await sandbox.reduce(draft, draftEvent as GameEvent);
+      // GAP-3a: the pre-write draft reduce must attribute exactly like the
+      // landed row will (the transport signs as the session agent, so the
+      // chain row's senderMetaId == s.agentId). A meta-less draft reduce can't
+      // map the action to our seat, no-ops, and bakes stateHash ==
+      // prevStateHash into the event — every third-party replay then rejects
+      // it and the mover regenerates the same move forever (924-2 组B/C:
+      // 红 h2e2×2 / 黑 h9g7×9). The meta stays LOCAL: docs/07 §2 keeps
+      // identity in row metadata, never in the chain body (chainWrite sends
+      // the meta-free `event` below).
+      const attributedDraft = withOwnMeta(draftEvent as MetaStampedEvent, s.agentId, this.now());
+      const reducedDraft = await sandbox.reduce(draft, attributedDraft);
       const stateHash = this.hashOf(await sandbox.serializeState(reducedDraft));
 
       const event: ActionEvent = {
@@ -428,8 +473,9 @@ export class AgentGameRuntime extends EventEmitter {
     if (!pending) return;
     const { event, key } = pending;
     // If history shows it already landed, just clear + advance.
-    await this.catchUp(s.sessionId);
+    const fresh = await this.catchUp(s.sessionId);
     if (!this.pending.has(s.sessionId)) return; // cleared by catch-up
+    const current = fresh ?? s;
     const entry = this.deps.store.getWriteLogEntry(key);
     const attempt = entry?.attempts ?? 0;
     try {
@@ -442,31 +488,34 @@ export class AgentGameRuntime extends EventEmitter {
       // when the agent is not a local bot (third-party-bot sessions).
       const writeOpts = { asAgentId: s.agentId };
       const { pinId } = await this.deps.chainWrite(s.groupId, plaintext, writeOpts);
-      s.budget.writesUsed++;
+      current.budget.writesUsed++;
       this.deps.store.markWriteStatus(key, 'committed', { pinId });
       // Advance local state by reducing the event into the working state.
-      // Non-action events (seat.claimed) are attributed by senderMetaId, so
-      // the local reduce carries our own identity — the replayed row meta will
-      // agree (adapter dedup by phase/seq makes the second reduce a no-op).
-      // Action keeps its existing meta-less local reduce: attribution comes
-      // from the replayed row meta via catch-up.
+      // GAP-3a: our own writes reduce locally WITH our identity — the same
+      // senderMetaId the replayed row will carry. A meta-less action reduce
+      // can't attribute the move, leaves the working state stale, and the
+      // next tick regenerates the same move under a new actionSeq (the other
+      // half of the 924-2 同着法无限再生). The adapter's seq guard makes the
+      // later row replay a no-op.
       const state = this.states.get(s.sessionId);
       const sandbox = this.sandboxes.get(s.sessionId);
       if (state !== undefined && sandbox) {
         try {
-          const reduceEvent: MetaStampedEvent = isActionEvent(event)
-            ? event
-            : withOwnMeta(event, s.agentId, this.now());
+          const reduceEvent: MetaStampedEvent = withOwnMeta(event, s.agentId, this.now());
           this.states.set(s.sessionId, await sandbox.reduce(state, reduceEvent));
         } catch (err) {
           this.log(`${s.sessionId}: post-write reduce failed: ${errMsg(err)}`);
         }
       }
       if (isActionEvent(event)) {
-        s.lastActionSeq = event.actionSeq;
+        // Monotonic: another seat's valid action may have advanced the cursor
+        // via catch-up while our write was in flight — never roll it back.
+        current.lastActionSeq = Math.max(current.lastActionSeq, event.actionSeq);
       }
       this.pending.delete(s.sessionId);
-      this.persist(s, this.states.get(s.sessionId));
+      // Persist the post-catch-up record: persisting the caller's pre-catch-up
+      // copy would roll back lastIndex / lastActionSeq (lost update).
+      this.persist(current, this.states.get(s.sessionId));
       this.log(`${s.sessionId}: committed ${event.type} (pin ${pinId.slice(0, 12)}…)`);
     } catch (err) {
       const backoff = WRITE_BACKOFF_MS[Math.min(attempt, WRITE_BACKOFF_MS.length - 1)];
