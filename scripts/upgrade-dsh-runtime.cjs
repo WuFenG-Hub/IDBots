@@ -32,7 +32,10 @@ function fail(message) {
 }
 
 function main() {
-  const target = process.argv[2];
+  // pnpm 11 forwards the documented `pnpm run upgrade:dsh -- <version>`
+  // separator literally — skip a leading `--` so both invocation forms work.
+  const args = process.argv.slice(2).filter((arg) => arg !== '--');
+  const target = args[0];
   if (!target || !VERSION_RE.test(target)) {
     fail('usage: pnpm run upgrade:dsh -- <version>   (e.g. pnpm run upgrade:dsh -- 0.1.2-rc.2)');
   }
@@ -64,15 +67,23 @@ function main() {
   const yamlPath = path.join(runtimeDir, 'pnpm-workspace.yaml');
   let yamlText = fs.readFileSync(yamlPath, 'utf8');
   let yamlChanged = 0;
-  yamlText = yamlText.replace(
-    /^(\s*'(@deepseek-ai\/[a-z0-9.-]+)':\s*)(\S+)\s*$/gm,
-    (line, prefix, name, version) => {
-      if (version === target) return line;
+  // Scope the rewrite to the `overrides:` block only: a file-wide replace
+  // also rewrites lookalike keys elsewhere (the 0.1.7-rc.1 bump clobbered
+  // `allowBuilds.'@deepseek-ai/dsh-subprocess-local': true` into a version
+  // pin, which pnpm rejected with ERR_PNPM_IGNORED_BUILDS).
+  const lines = yamlText.split('\n');
+  let inOverrides = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^\S/.test(line)) inOverrides = line.trim() === 'overrides:';
+    if (!inOverrides) continue;
+    const match = line.match(/^(\s*'(@deepseek-ai\/[a-z0-9.-]+)':\s*)(\S+)\s*$/);
+    if (match && match[3] !== target) {
+      lines[i] = `${match[1]}${target}`;
       yamlChanged += 1;
-      return `${prefix}${target}`;
-    },
-  );
-  fs.writeFileSync(yamlPath, yamlText);
+    }
+  }
+  yamlText = lines.join('\n');
   console.log(`[upgrade:dsh] bumped ${yamlChanged} override line(s) in dsh-runtime/pnpm-workspace.yaml to ${target}`);
 
   console.log('[upgrade:dsh] regenerating dsh-runtime/pnpm-lock.yaml via pnpm install ...');
@@ -82,7 +93,10 @@ function main() {
   // packages peer-conflict with the new root pins. Exact root pins make a
   // fresh resolve deterministic, so dropping the stale state is safe.
   fs.rmSync(path.join(runtimeDir, 'pnpm-lock.yaml'), { force: true });
-  fs.rmSync(path.join(runtimeDir, 'node_modules'), { recursive: true, force: true });
+  // maxRetries rides out exFAT/spotlight lag on the external-SSD worktrees:
+  // a plain recursive rm raced directory-entry teardown there and died with
+  // ENOTEMPTY (0.1.7-rc.1 bump).
+  fs.rmSync(path.join(runtimeDir, 'node_modules'), { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
   const install = spawnSync(PNPM_BIN, ['--dir', runtimeDir, 'install'], { stdio: 'inherit' });
   if (install.status !== 0) {
     fail(
