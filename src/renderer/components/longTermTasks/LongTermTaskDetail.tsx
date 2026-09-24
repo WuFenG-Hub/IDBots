@@ -4,7 +4,7 @@ import { RootState } from '../../store';
 import { selectTask } from '../../store/slices/longTermTaskSlice';
 import { longTermTaskService } from '../../services/longTermTask';
 import { i18nService } from '../../services/i18n';
-import { ArrowLeftIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ChevronDownIcon, ChevronUpIcon, LockClosedIcon } from '@heroicons/react/24/outline';
 import {
   LONG_TERM_COLUMN_LABEL_KEYS,
   LONG_TERM_SUBTASK_STATUS_LABEL_KEYS,
@@ -72,6 +72,16 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
     return detail.subtasks.find((sub) => sub.id === wanted) ?? null;
   }, [detail, selectedSubtaskId]);
 
+  /** Dependency-linked sub-projects (has deps OR is depended on) are not manually reorderable. */
+  const linkedIds = useMemo(() => {
+    const linked = new Set<string>();
+    for (const sub of detail?.subtasks ?? []) {
+      if (sub.dependsOn.length > 0) linked.add(sub.id);
+      for (const dep of sub.dependsOn) linked.add(dep);
+    }
+    return linked;
+  }, [detail?.subtasks]);
+
   if (!detail) {
     return (
       <div className="p-6 text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -130,7 +140,7 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
         </button>
         <h1 className="text-lg font-semibold leading-snug dark:text-claude-darkText text-claude-text">{detail.title}</h1>
         <CopyIdChip id={detail.id} />
-        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
+        <span className="inline-flex shrink-0 items-center whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
           {i18nService.t(LONG_TERM_COLUMN_LABEL_KEYS[detail.column])}
         </span>
         <span className="flex-1" />
@@ -194,12 +204,22 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
               const icon = SUBTASK_ICON[subtask.status];
               const isSelected = selectedSubtask?.id === subtask.id;
               const isCurrent = detail.currentSubtaskId === subtask.id;
+              const linked = linkedIds.has(subtask.id);
               const movable =
+                !linked &&
                 subtask.status !== 'accepted' &&
                 subtask.status !== 'skipped' &&
                 (detail.stage === 'active' || detail.stage === 'defining');
               return (
                 <div key={subtask.id} className="flex items-stretch gap-1">
+                  {linked && subtask.status !== 'accepted' && subtask.status !== 'skipped' && (
+                    <span
+                      className="flex w-4 shrink-0 items-center justify-center dark:text-claude-darkTextSecondary text-claude-textSecondary"
+                      title={i18nService.t('longTermTask.reorderLocked')}
+                    >
+                      <LockClosedIcon className="h-3 w-3" />
+                    </span>
+                  )}
                   {movable && (
                     <span className="flex w-4 shrink-0 flex-col items-center justify-center">
                       <button
@@ -232,21 +252,20 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                     }`}
                   >
                     <div className="flex items-center gap-2">
-                      <span className={`w-5 text-center text-xs ${icon.className}`}>{icon.glyph}</span>
+                      <span className={`w-5 shrink-0 text-center text-xs ${icon.className}`}>{icon.glyph}</span>
                       <span
-                        className={`text-xs font-medium dark:text-claude-darkText text-claude-text ${
+                        className={`min-w-0 flex-1 truncate text-xs font-medium dark:text-claude-darkText text-claude-text ${
                           subtask.status === 'accepted' ? 'line-through opacity-70' : ''
                         }`}
                       >
                         {subtask.ordinal}. {subtask.title}
                       </span>
                       {isCurrent && (
-                        <span className="inline-flex items-center rounded-full bg-brand/15 px-2 py-0.5 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                        <span className="inline-flex shrink-0 items-center whitespace-nowrap rounded-full bg-brand/15 px-2 py-0.5 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
                           {i18nService.t('longTermTask.subtask.current')}
                         </span>
                       )}
-                      <span className="flex-1" />
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${SUBTASK_CHIP_CLASS[subtask.status]}`}>
+                      <span className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] ${SUBTASK_CHIP_CLASS[subtask.status]}`}>
                         {i18nService.t(LONG_TERM_SUBTASK_STATUS_LABEL_KEYS[subtask.status])}
                       </span>
                     </div>
@@ -269,11 +288,11 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
           {selectedSubtask && (
             <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface p-4">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold dark:text-claude-darkText text-claude-text">
+                <span className="min-w-0 truncate text-sm font-semibold dark:text-claude-darkText text-claude-text">
                   {selectedSubtask.ordinal}. {selectedSubtask.title}
                 </span>
                 <CopyIdChip id={selectedSubtask.id} />
-                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${SUBTASK_CHIP_CLASS[selectedSubtask.status]}`}>
+                <span className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] ${SUBTASK_CHIP_CLASS[selectedSubtask.status]}`}>
                   {i18nService.t(LONG_TERM_SUBTASK_STATUS_LABEL_KEYS[selectedSubtask.status])}
                 </span>
               </div>

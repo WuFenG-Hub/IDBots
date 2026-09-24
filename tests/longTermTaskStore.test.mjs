@@ -225,3 +225,39 @@ test('board columns follow the frozen display order and sort by recency', async 
   const inProgress = board.columns.find((c) => c.column === 'in_progress');
   assert.equal(inProgress.cardIds.length, 1);
 });
+
+test('dependency-linked sub-projects cannot be manually reordered; free ones can', async () => {
+  const { store } = await openStore();
+  const created = store.createTask({
+    title: 't', goal: 'g',
+    subtasks: [
+      { title: 'A' },
+      { title: 'B', dependsOnOrdinals: [1] },
+      { title: 'C' },
+      { title: 'D' },
+    ],
+  }, 'owner');
+  assert.ok(created.ok, JSON.stringify(created));
+  const [a, b, c, d] = created.value.subtasks;
+
+  // Linked rows: A (depended on), B (has deps) — refused in both directions.
+  const down = store.moveSubtask(a.id, 'down', 'owner');
+  assert.equal(down.ok, false);
+  assert.match(down.error, /dependency-linked/);
+  assert.equal(store.moveSubtask(b.id, 'up', 'owner').ok, false);
+  assert.equal(store.moveSubtask(b.id, 'down', 'owner').ok, false);
+
+  // Free rows: C and D swap cleanly, and swap back.
+  const moved = store.moveSubtask(c.id, 'down', 'owner');
+  assert.ok(moved.ok, JSON.stringify(moved));
+  assert.equal(moved.value.ordinal, 4);
+  assert.equal(store.getSubtask(d.id).ordinal, 3);
+  assert.ok(store.moveSubtask(c.id, 'up', 'owner').ok);
+  assert.equal(store.getSubtask(c.id).ordinal, 3);
+
+  // An ordinal edit is also a manual reorder: refused on linked, allowed on free.
+  const linkedEdit = store.updateSubtask({ subtaskId: a.id, ordinal: 5 }, 'owner');
+  assert.equal(linkedEdit.ok, false);
+  assert.match(linkedEdit.error, /dependency-linked/);
+  assert.ok(store.updateSubtask({ subtaskId: c.id, ordinal: 6 }, 'owner').ok);
+});
