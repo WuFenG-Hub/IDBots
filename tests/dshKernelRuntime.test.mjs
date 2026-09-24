@@ -130,7 +130,9 @@ test('DshKernel E2E', { skip: runtimeReady ? false : 'dsh-runtime/node_modules n
       25000,
       'aborted turn end',
     )
-    assert.match(aborted.reason.reason, /kernel e2e cancel/)
+    // 0.1.7: wire cancel strings ride the closed cause union as
+    // {kind:'hook', reason: <string>} (see idbots-sdk-server idbotsCancel).
+    assert.deepEqual(aborted.reason.reason, { kind: 'hook', reason: 'kernel e2e cancel' })
 
     // ---- 5. restart + resume over the wire --------------------------------
     console.log('[dbg] session root before restart:', JSON.stringify(fs.readdirSync(sessionRoot)))

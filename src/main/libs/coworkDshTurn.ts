@@ -112,16 +112,16 @@ export function isOfficialDeepSeekRoute(provider: Pick<DshTurnProviderRoute, 'ke
 }
 
 /**
- * True when the route rides the first-party dsh-llm-deepseek adapter. That
- * adapter speaks the OFFICIAL chat-completions dialect (thinking /
- * reasoning_effort ladder, root-path `/chat/completions` after the config
- * generator strips `/v1`), so it is only valid against api.deepseek.com. A
- * provider keyed 'deepseek' with a custom base URL — proxy relays preserved
- * by the model-settings migration, which hides the field but keeps stored
- * values — must stay on the generic pi-ai route: the official dialect sent
- * to an OpenAI-compatible relay is an HTTP 400 the relay reports without
- * DeepSeek's `{"error":{...}}` body, surfacing as the generic
- * "DeepSeek API error (HTTP 400)" turn failure.
+ * True when the route rides the first-party dsh-llm-deepseek adapter. Since
+ * kernel 0.1.7 that adapter speaks the OFFICIAL Messages-API dialect
+ * (thinking / `output_config.effort` ladder, `<origin>/anthropic` root after
+ * the config generator's base-URL migration), so it is only valid against
+ * api.deepseek.com. A provider keyed 'deepseek' with a custom base URL —
+ * proxy relays preserved by the model-settings migration, which hides the
+ * field but keeps stored values — must stay on the generic pi-ai route: the
+ * official dialect sent to an OpenAI-compatible relay is an HTTP 400 the
+ * relay reports without DeepSeek's `{"error":{...}}` body, surfacing as the
+ * generic "DeepSeek API error (HTTP 400)" turn failure.
  */
 export function isNativeDeepSeekChatRoute(
   route: { provider?: string | null; baseUrl?: string | null; apiFormat?: string | null },
@@ -233,9 +233,17 @@ class DshTurnController {
   handleTurnEnd(reason: { kind: string; reason?: unknown }, emptyTerminal?: boolean): void {
     const outcome = emptyTerminal === true ? { ...reason, emptyTerminal: true } : reason
     // Fatal outcomes and non-steer aborts (user stop, stall watchdog) always
-    // settle through — a pending steer never outranks them.
+    // settle through — a pending steer never outranks them. The steer abort
+    // reads as the pre-0.1.7 string cause 'steer' or, since the kernel's
+    // closed cancel-cause union, the V4 hook form {kind:'hook',reason:'steer'}
+    // the wire extension now translates it into.
+    const abortCause = reason.reason
+    const isSteerAbort = abortCause === 'steer'
+      || (typeof abortCause === 'object' && abortCause !== null
+        && (abortCause as { kind?: unknown }).kind === 'hook'
+        && (abortCause as { reason?: unknown }).reason === 'steer')
     const settlesThrough = reason.kind === 'error'
-      || (reason.kind === 'aborted' && reason.reason !== 'steer')
+      || (reason.kind === 'aborted' && !isSteerAbort)
     if (this.steerFollowUpExpected && !settlesThrough) {
       // Swallow exactly one boundary — the steer's cancel(keepInbox) abort,
       // or a natural end that raced the steer (an unconsumed inbox steer is
@@ -282,6 +290,14 @@ export interface DshHubOptions {
   /** User-configured MCP servers, read fresh each turn (additions mount on the
    * next turn; the config union never removes until restart, same as providers). */
   mcpServersProvider?: (coworkSessionId: string) => DshMcpServerDefinition[]
+  /** 0.1.7 experimental browser automation (dsh-browser-use + Playwright MCP),
+   *  per-bot opt-in like MCP mounting. One headless Chromium per session; the
+   *  provider activates for every session on a slot once any bot on it opted
+   *  in — the slot composition is shared, so the entry stays until restart. */
+  browserAutomationProvider?: (coworkSessionId: string) => DshRuntimeConfigInput['browserUse'] | undefined
+  /** 0.1.7 experimental desktop control (cua-driver native). Per-bot opt-in;
+   *  the host app must hold the OS desktop permission grants. */
+  computerUseProvider?: (coworkSessionId: string) => boolean
   log?: DshKernelOptions['log']
   /** Extra composition entries for the runtime (test fixtures; later the
    * idbots tools/policy plugins mount here). */
@@ -318,6 +334,8 @@ export function buildDshChildEnv(parts: {
   rpcToken: string
   rpcAuthFile: string
   skillHostEnv?: Record<string, string>
+  /** Absolute path used as DSH_HOME for the runtime process. */
+  dshHome?: string
 }): Record<string, string> {
   return {
     ...Object.fromEntries(
@@ -326,6 +344,10 @@ export function buildDshChildEnv(parts: {
     ...(parts.webSearchApiKey ? { [DSH_WEBSEARCH_API_KEY_ENV]: parts.webSearchApiKey } : {}),
     IDBOTS_RPC_TOKEN: parts.rpcToken,
     [METAID_RPC_AUTHFILE_ENV]: parts.rpcAuthFile,
+    // 0.1.7: pin the kernel home under userData so the DeepSeek Files-API
+    // id-reuse cache (llm-deepseek/files-v3.json) and any other kernel home
+    // state live in app-managed storage instead of ~/.dsh.
+    ...(parts.dshHome ? { DSH_HOME: parts.dshHome } : {}),
     ...(parts.skillHostEnv ?? {}),
   }
 }
@@ -370,6 +392,10 @@ interface DshRuntimeSlot {
   providersSeen: Map<string, DshProviderRoute>
   routeApiKeys: Map<string, { envName: string; apiKey: string }>
   mcpServersSeen: Map<string, DshMcpServerDefinition>
+  /** First opt-in wins for the slot's lifetime (config unions never remove
+   *  until restart — same stickiness as mcpServersSeen). */
+  browserUseSeen?: DshRuntimeConfigInput['browserUse']
+  computerUseSeen: boolean
   lastUsedAt: number
 }
 
@@ -1002,6 +1028,8 @@ export class DshTurnHub {
       providersSeen: new Map(),
       routeApiKeys: new Map(),
       mcpServersSeen: new Map(),
+      browserUseSeen: undefined,
+      computerUseSeen: false,
       lastUsedAt: Date.now(),
     }
     this.attachKernel(slot)
@@ -1082,6 +1110,16 @@ export class DshTurnHub {
         if (name) slot.mcpServersSeen.set(name, server)
       }
     }
+    // Browser automation / computer use ride the same accumulateMcp gate:
+    // warmup turns must not claim a browser/desktop for a synthetic session.
+    if (options?.accumulateMcp !== false) {
+      if (slot.browserUseSeen === undefined) {
+        slot.browserUseSeen = this.opts.browserAutomationProvider?.(input.sessionId) ?? undefined
+      }
+      if (!slot.computerUseSeen) {
+        slot.computerUseSeen = this.opts.computerUseProvider?.(input.sessionId) === true
+      }
+    }
     if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
       this.webSearchSeen = {
         apiKey: input.provider.apiKey,
@@ -1102,13 +1140,18 @@ export class DshTurnHub {
       // scoped registration) — keeping them out of the config is what stops
       // every new session's prompt from restarting this slot's runtime.
       workspace: slot.workspaceSeen ?? input.workspace,
-      // Pin the user-global AGENTS.md home to an empty directory under
-      // userData: the host never reads ~/.dsh, so a global instruction file
-      // left over from another harness cannot silently enter every session.
+      // Pin the user-global AGENTS.md home to a controlled directory under
+      // userData: a global instruction file left over from another harness
+      // cannot silently enter every session. Since 0.1.7 the same directory
+      // is the runtime's real DSH_HOME (see buildDshChildEnv) — kernel home
+      // state like the Files-API image cache lands there too, which is fine:
+      // it stays app-managed either way.
       ...(slot.workspaceSeen ?? input.workspace) ? {
         workspaceInstructions: { dshHome: join(app.getPath('userData'), 'dsh-home') },
       } : {},
       mcpServers: [...slot.mcpServersSeen.values()],
+      ...(slot.browserUseSeen !== undefined ? { browserUse: slot.browserUseSeen } : {}),
+      ...(slot.computerUseSeen ? { computerUse: true } : {}),
       ...(this.webSearchSeen ? {
         webSearch: {
           apiKeyEnv: DSH_WEBSEARCH_API_KEY_ENV,
@@ -1123,6 +1166,7 @@ export class DshTurnHub {
         rpcToken: getMetaidRpcToken(),
         rpcAuthFile: getMetaidRpcTokenFilePath(app.getPath('userData')),
         skillHostEnv: this.opts.skillHostEnvProvider?.(),
+        dshHome: join(app.getPath('userData'), 'dsh-home'),
       }),
     }
   }

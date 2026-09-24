@@ -139,6 +139,7 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_HOST_TOOL_IMAGE') ? 'host_echo_tool'
         : lastUserText.includes('CALL_HOST_TOOL') ? 'host_echo_tool'
         : lastUserText.includes('CALL_MCP_TOOL') ? 'mcp__echo__echo'
+        : lastUserText.includes('CALL_BROWSER_NAV') ? 'mcp__playwright-mcp__browser_navigate'
         : lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'web_search'
         : lastUserText.includes('CALL_ASK_TOOL') ? 'ask_user_question'
         : lastUserText.includes('CALL_WEB_SEARCH') ? 'web_search'
@@ -171,7 +172,7 @@ export function startMockServer(port = 48787) {
         && (parsed.messages ?? []).filter((m) => m?.role === 'tool').length < 4
       if (toolCallFor !== null && (!alreadyHasToolResult || loopRepeating)) {
         const writeMatch = /RUN_BASH_WRITE:([A-Za-z0-9_-]+)/.exec(lastUserText)
-        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
+        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__playwright-mcp__browser_navigate' ? { url: 'data:text/html,<h1>BROWSER_SMOKE_OK</h1>' } : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
           : toolCallFor === 'ask_user_question' ? { questions: [{ id: 'q1', question: 'Pick a color', header: 'auto-confirm', detail: 'Picking a color refreshes the theme; Red is warm, Blue is calm.', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
           : toolCallFor === 'web_search' ? { queries: [lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'fail please' : 'latest stable Node.js version'] }
           : toolCallFor === 'read' ? { file_path: 'readable.txt' } : toolCallFor === 'glob' ? { pattern: '**/*.marker.txt' } : toolCallFor === 'grep' ? { pattern: 'NEEDLE_ALPHA' } : toolCallFor === 'exit_plan_mode' ? { plan: '# Test Plan\n\nDo the thing.' } : toolCallFor === 'bash' ? (lastUserText.includes('RUN_LONG_BASH')
@@ -207,7 +208,17 @@ export function startMockServer(port = 48787) {
       // Realistic usage so token-meter accounting can cross compaction
       // thresholds: ~4 chars per token over the actual payload sizes.
       const requestChars = (parsed.messages ?? []).reduce((sum, m) => sum + String(m.content ?? '').length + String(JSON.stringify(m.tool_calls ?? '')).length, 0)
-      const promptTokens = Math.max(1, Math.ceil(requestChars / 4))
+      const rawPromptTokens = Math.max(1, Math.ceil(requestChars / 4))
+      // Compaction AUX calls (the summarization replay, identified by the
+      // upstream instruction) report a capped usage instead: pi-ai 0.1.7
+      // classifies any stop whose reported usage exceeds the catalog window
+      // as CONTEXT_WINDOW_EXCEEDED, and the tiny windows compaction tests
+      // run against are always exceeded by the full-history replay. The cap
+      // models a provider that accepts the summary request; conversation
+      // calls keep their honest (threshold-driving, eventually overflowing)
+      // sizes.
+      const isCompactionAux = (parsed.messages ?? []).some((m) => String(m?.content ?? '').includes('summarization request'))
+      const promptTokens = isCompactionAux ? Math.min(rawPromptTokens, 64) : rawPromptTokens
       const usage = { prompt_tokens: promptTokens, completion_tokens: Math.max(1, Math.ceil(reply.length / 4)) }
       // CACHE_HIT marker: report half the prompt as served from cache so
       // usage-projection tests exercise the cacheRead bucket (pi-ai maps

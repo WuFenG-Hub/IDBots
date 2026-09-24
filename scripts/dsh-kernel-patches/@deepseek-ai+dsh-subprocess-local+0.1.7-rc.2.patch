@@ -1,0 +1,31 @@
+--- a/dsh-runtime/node_modules/@deepseek-ai/dsh-subprocess-local/lib/output.js
++++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-subprocess-local/lib/output.js
+@@ -1,4 +1,4 @@
+-import { closeSync, mkdtempSync, openSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
++import { closeSync, mkdirSync, mkdtempSync, openSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { randomBytes } from "node:crypto";
+@@ -146,7 +146,21 @@
+ 		try {
+ 			if (this.spillFd === void 0) {
+ 				const file = join(spill.dir, `dsh-subprocess-${process.pid}-${++spillCounter}-${randomBytes(6).toString("hex")}-${this.label}.log`);
+-				const fd = openSync(file, "wx", 384);
++				let fd;
++				try {
++					fd = openSync(file, "wx", 384);
++				} catch (error) {
++					// IDBots kernel patch: an external tmp cleanup can remove the
++					// private spill directory beneath a live process. Recreate it
++					// once so full-output recovery survives (the surrounding catch
++					// still degrades when the target stays unavailable).
++					if (error?.code !== "ENOENT") throw error;
++					mkdirSync(spill.dir, {
++						recursive: true,
++						mode: 448
++					});
++					fd = openSync(file, "wx", 384);
++				}
+ 				this.spillFile = file;
+ 				this.spillFd = fd;
+ 				for (const prior of this.chunks) writeSync(fd, prior);

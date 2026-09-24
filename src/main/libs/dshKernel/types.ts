@@ -184,6 +184,25 @@ export interface DshRuntimeConfigInput {
   /** User-configured MCP servers mounted as dsh-mcp-client plugin entries. */
   mcpServers?: DshMcpServerDefinition[]
   /**
+   * 0.1.7 experimental browser automation (dsh-browser-use + Playwright MCP
+   * provider): one MCP server + Chromium per session, connected inside
+   * agent/created before the first model request. `launch` starts a headless
+   * browser; `attach` claims an existing browser's debugging endpoint (tabs
+   * and login state ride along). Off when absent.
+   */
+  browserUse?: {
+    mode: 'launch' | 'attach'
+    headless?: boolean
+    executablePath?: string
+    endpoint?: string
+  }
+  /**
+   * 0.1.7 experimental desktop control (cua-driver native provider, mounted
+   * in-process). The host app must hold the OS desktop permission grants;
+   * off when absent/false.
+   */
+  computerUse?: boolean
+  /**
    * DeepSeek server-side web search (dsh-web trio): mounts the model-facing
    * `web_search` tool backed by an auxiliary Anthropic-compatible Messages
    * call with the native web_search_20250305 server tool. Present once the

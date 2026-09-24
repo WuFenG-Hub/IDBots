@@ -26,12 +26,28 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const runtimeDir = path.resolve(here, '..')
 
 // The bundle file name carries a content hash that changes per kernel
-// version — resolve it instead of hardcoding COYGu0Dl-style names.
+// version, and the minified export ALIAS churns per release (0.1.5-rc.2
+// exported spawnSubprocess as `E`, 0.1.7-rc.2 as `T`) — so resolve the alias
+// from the bundle's own export map instead of hardcoding either.
 const runnerLaunchDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'lib')
 const runnerLaunchFile = readdirSync(runnerLaunchDir).find((name) => /^runner-launch-.*\.js$/.test(name))
 assert.ok(runnerLaunchFile, 'runner-launch bundle found under dsh-subprocess-local/lib')
-// The bundle minifies export names (`spawnSubprocess` is exported as `E`).
-const { E: spawnSubprocess } = await import(pathToFileURL(path.join(runnerLaunchDir, runnerLaunchFile)).href)
+const runnerLaunchPath = path.join(runnerLaunchDir, runnerLaunchFile)
+/** Map one original export name to its minified alias via the bundle's trailing `export { … as … }`. */
+const aliasOf = (source, originalName) => {
+  const map = /export\s*\{([^}]*)\}\s*;?\s*$/.exec(source.trim())
+  if (map === null) return undefined
+  for (const entry of map[1].split(',')) {
+    const match = /^\s*([A-Za-z0-9_$]+)\s+as\s+([A-Za-z0-9_$]+)\s*$/.exec(entry)
+    if (match !== null && match[1] === originalName) return match[2]
+  }
+  return undefined
+}
+const spawnAlias = aliasOf(fs.readFileSync(runnerLaunchPath, 'utf8'), 'spawnSubprocess')
+assert.ok(spawnAlias, 'spawnSubprocess export alias resolved from the bundle')
+const runnerModule = await import(pathToFileURL(runnerLaunchPath).href)
+const spawnSubprocess = runnerModule[spawnAlias]
+assert.equal(typeof spawnSubprocess, 'function', 'spawnSubprocess export is callable')
 
 const TAIL_CAP = 4096
 const SPILL_CAP = 1 << 20

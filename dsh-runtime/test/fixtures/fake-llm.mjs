@@ -15,7 +15,7 @@
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 
 // stdout belongs to the JSON-RPC wire in sdk runtime mode; gate debug logs.
-const spikeLog = (...args) => { if (!process.env.SPIKE_QUIET) console.log(...args) }
+const spikeLog = (...args) => { if (!process.env.SPIKE_QUIET || process.env.FAKE_LLM_DEBUG) console.log(...args) }
 
 
 const PROVIDER = 'fake'
@@ -33,10 +33,11 @@ function lastUserMessage(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     if (m.role !== 'user') continue
-    // dsh-user-approval (and other plugins) inject runtime-context snapshots as
-    // plugin-source user messages; marker detection must skip them.
-    if (m.source?.kind === 'plugin') continue
-    return m
+    // dsh-user-approval (and other plugins) inject runtime-context snapshots
+    // as non-user-source user messages; marker detection must skip them.
+    // 0.1.7 sources them as kind 'runtime-context' (was 'plugin').
+    if (m.source?.kind !== undefined && m.source.kind !== 'user') continue
+    return { message: m, index: i }
   }
   return undefined
 }
@@ -44,9 +45,12 @@ function lastUserMessage(messages) {
 function lastToolResult(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
+    // 0.1.7: tool results are standalone role 'tool' messages with top-level
+    // toolCallId/isError and raw content blocks.
+    if (m.role === 'tool') return { result: { toolCallId: m.toolCallId, content: m.content ?? [], isError: m.isError }, index: i }
     if (m.role !== 'user') continue
     const block = (m.content ?? []).find((b) => b.type === 'tool-result')
-    if (block) return block
+    if (block) return { result: block, index: i }
   }
   return undefined
 }
@@ -105,11 +109,18 @@ class FakeAdapter extends LlmAdapter {
     this.requests.set(key, n)
 
     const user = lastUserMessage(options.messages)
-    const userText = user ? textOf(user) : ''
-    const result = lastToolResult(options.messages)
+    const userText = user ? textOf(user.message) : ''
+    // A tool result only triggers the summary step when it is NEWER than the
+    // last genuine user text — with 0.1.7 role 'tool' messages the original
+    // prompt otherwise stays the "last user message" forever and every
+    // follow-up request re-fires the tool call.
+    const toolHit = lastToolResult(options.messages)
+    const result = toolHit !== undefined && (user === undefined || toolHit.index > user.index)
+      ? toolHit.result
+      : undefined
     const history = options.messages.map((m) => {
       const kinds = (m.content ?? []).map((b) => b.type).join('+')
-      const preview = textOf(m).slice(0, 36) || (m.content ?? []).map((b) => b.type === 'tool-result' ? `tool-result:${b.toolCallId}` : b.type).join(',')
+      const preview = textOf(m).slice(0, 36) || (m.role === 'tool' ? `tool-result:${m.toolCallId}` : (m.content ?? []).map((b) => b.type === 'tool-result' ? `tool-result:${b.toolCallId}` : b.type).join(','))
       return `${m.role}[${kinds}]${preview ? ` "${preview}"` : ''}`
     }).join(' | ')
     spikeLog(`[fake-llm] req#${n} session=${key} history=${options.messages.length}msg tools=[${(options.tools ?? []).map((t) => t.name).join(',')}] system=${options.system?.length ?? 0}ch`)
@@ -132,7 +143,9 @@ class FakeAdapter extends LlmAdapter {
       return
     }
 
-    if (result && !userText) {
+    if (result) {
+      // result is already tail-gated: it is set only when the tool result is
+      // newer than the last genuine user text (see lastToolResult above).
       // The step after a tool result: summarize what the tool said.
       const summary = (result.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join(' ')
       const reply = result.isError

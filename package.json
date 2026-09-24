@@ -91,7 +91,7 @@
     "setup:ffmpeg:all": "node scripts/setup-ffmpeg.js --required",
     "regenerate:icon": "bash scripts/regenerate-mac-icon.sh",
     "fix:mac-icon": "bash scripts/fix-mac-icon-display.sh",
-    "test:dsh": "npx rimraf dist-electron && pnpm run build && pnpm run compile:electron && node --test --test-concurrency=1 tests/dshStreamUiGate.test.mjs tests/dshReasoningEffort.test.mjs tests/dshKernelEventMapper.test.mjs tests/dshKernelRuntime.test.mjs tests/coworkKernelRouting.test.mjs tests/coworkDshIntegration.test.mjs tests/coworkDshSessionTypes.test.mjs tests/coworkDshStallWatchdog.test.mjs tests/coworkDshDeletePolicy.test.mjs tests/coworkDshWebSearch.test.mjs tests/dshUsageProjection.test.mjs tests/dshPluginManager.test.mjs tests/dshKernelDefault.test.mjs tests/coworkDshModelSwitch.test.mjs tests/coworkDshWarmup.test.mjs tests/coworkDshSessionWorkspace.test.mjs tests/win32StdioCommand.test.mjs tests/dshSkillSessionEnv.test.mjs tests/coworkDshTurnQueue.test.mjs tests/singleInstanceLock.test.mjs tests/llmSafeText.test.mjs && pnpm --dir dsh-runtime test",
+    "test:dsh": "npx rimraf dist-electron && pnpm run build && pnpm run compile:electron && node --test --test-concurrency=1 tests/dshStreamUiGate.test.mjs tests/dshRuntimeConfigEfforts.test.mjs tests/dshReasoningEffort.test.mjs tests/dshKernelEventMapper.test.mjs tests/dshKernelRuntime.test.mjs tests/coworkKernelRouting.test.mjs tests/coworkDshIntegration.test.mjs tests/coworkDshSessionTypes.test.mjs tests/coworkDshStallWatchdog.test.mjs tests/coworkDshDeletePolicy.test.mjs tests/coworkDshWebSearch.test.mjs tests/dshUsageProjection.test.mjs tests/dshPluginManager.test.mjs tests/dshKernelDefault.test.mjs tests/coworkDshModelSwitch.test.mjs tests/coworkDshWarmup.test.mjs tests/coworkDshSessionWorkspace.test.mjs tests/win32StdioCommand.test.mjs tests/dshSkillSessionEnv.test.mjs tests/coworkDshTurnQueue.test.mjs tests/singleInstanceLock.test.mjs tests/llmSafeText.test.mjs && pnpm --dir dsh-runtime test",
     "test:twin-orchestration": "pnpm run compile:electron && node --test tests/twinOrchestrationService.test.mjs tests/twinWorkerSessionStop.test.mjs tests/orchestratorCoworkBridgeSkillIds.test.mjs tests/twinDelegationAnchor.test.mjs",
     "test:release-runbook": "node --test tests/releaseRunbook.test.mjs",
     "release:runbook": "node scripts/release-runbook.mjs",
@@ -185,7 +185,7 @@
     "vite-plugin-electron-renderer": "^0.14.5",
     "wait-on": "^7.2.0"
   },
-  "description": "[中文](README_zh.md)",
+  "description": "[\u4e2d\u6587](README_zh.md)",
   "keywords": [],
   "packageManager": "pnpm@11.24.0"
 }

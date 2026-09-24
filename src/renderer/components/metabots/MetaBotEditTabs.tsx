@@ -62,6 +62,9 @@ export const normalizeA2AAutoReplyEnabledOption = (value: unknown): boolean =>
 const OPENTEAM_ALLOW_REMOTE_COLLAB_KEY = 'openteam.allowRemoteCollab';
 // Keep in sync with COWORK_MOUNT_MCP_TOOLS_KEY in src/main/services/coworkMcpToolsPreference.ts.
 const COWORK_MOUNT_MCP_TOOLS_KEY = 'cowork.mountMcpTools';
+// Keep in sync with src/main/services/coworkAutomationPreference.ts.
+const COWORK_BROWSER_AUTOMATION_KEY = 'cowork.browserAutomation';
+const COWORK_COMPUTER_USE_KEY = 'cowork.computerUse';
 
 export interface MetaBotEditValues {
   name: string;
@@ -260,6 +263,12 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const [coworkMcpTools, setCoworkMcpTools] = useState(false);
   const [coworkMcpToolsLoaded, setCoworkMcpToolsLoaded] = useState(false);
   const [coworkMcpToolsSaving, setCoworkMcpToolsSaving] = useState(false);
+  const [coworkBrowserAutomation, setCoworkBrowserAutomation] = useState(false);
+  const [coworkBrowserAutomationLoaded, setCoworkBrowserAutomationLoaded] = useState(false);
+  const [coworkBrowserAutomationSaving, setCoworkBrowserAutomationSaving] = useState(false);
+  const [coworkComputerUse, setCoworkComputerUse] = useState(false);
+  const [coworkComputerUseLoaded, setCoworkComputerUseLoaded] = useState(false);
+  const [coworkComputerUseSaving, setCoworkComputerUseSaving] = useState(false);
   const [twinDemoteConfirmOpen, setTwinDemoteConfirmOpen] = useState(false);
 
   // Re-initialize when a different bot is loaded into the same mounted editor.
@@ -299,24 +308,32 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
     return () => { cancelled = true; };
   }, [metabotId]);
 
-  // Load the cowork MCP-tools switch for the bot being edited. A missing or
-  // failed read falls back to off, matching the main-process default.
+  // Load the cowork MCP-tools / browser-automation / computer-use switches
+  // for the bot being edited. A missing or failed read falls back to off,
+  // matching the main-process defaults.
   useEffect(() => {
     let cancelled = false;
-    setCoworkMcpTools(false);
-    setCoworkMcpToolsLoaded(false);
-    setCoworkMcpToolsSaving(false);
-    window.electron.metabot.getSetting(metabotId, COWORK_MOUNT_MCP_TOOLS_KEY)
-      .then((result) => {
-        if (cancelled) return;
-        setCoworkMcpTools(result.success ? result.value === '1' : false);
-        setCoworkMcpToolsLoaded(true);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setCoworkMcpTools(false);
-        setCoworkMcpToolsLoaded(true);
-      });
+    const resetters = [
+      [setCoworkMcpTools, setCoworkMcpToolsLoaded, setCoworkMcpToolsSaving, COWORK_MOUNT_MCP_TOOLS_KEY],
+      [setCoworkBrowserAutomation, setCoworkBrowserAutomationLoaded, setCoworkBrowserAutomationSaving, COWORK_BROWSER_AUTOMATION_KEY],
+      [setCoworkComputerUse, setCoworkComputerUseLoaded, setCoworkComputerUseSaving, COWORK_COMPUTER_USE_KEY],
+    ] as const;
+    for (const [setValue, setLoaded, setSaving, key] of resetters) {
+      setValue(false);
+      setLoaded(false);
+      setSaving(false);
+      window.electron.metabot.getSetting(metabotId, key)
+        .then((result) => {
+          if (cancelled) return;
+          setValue(result.success ? result.value === '1' : false);
+          setLoaded(true);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setValue(false);
+          setLoaded(true);
+        });
+    }
     return () => { cancelled = true; };
   }, [metabotId]);
 
@@ -449,22 +466,45 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   };
 
   // Same immediate-effect pattern as the OpenTeam toggle above.
-  const handleCoworkMcpToolsToggle = () => {
-    if (!coworkMcpToolsLoaded || coworkMcpToolsSaving) return;
-    const next = !coworkMcpTools;
-    setCoworkMcpTools(next);
-    setCoworkMcpToolsSaving(true);
+  const makeSettingToggle = (
+    key: string,
+    value: boolean,
+    setValue: (v: boolean) => void,
+    loaded: boolean,
+    saving: boolean,
+    setSaving: (v: boolean) => void,
+    failureToastKey: string,
+  ) => () => {
+    if (!loaded || saving) return;
+    const next = !value;
+    setValue(next);
+    setSaving(true);
     const revertWithToast = () => {
-      setCoworkMcpTools(!next);
-      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotCoworkMcpToolsSaveFailed') }));
+      setValue(!next);
+      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t(failureToastKey) }));
     };
-    window.electron.metabot.setSetting(metabotId, COWORK_MOUNT_MCP_TOOLS_KEY, next ? '1' : '0')
+    window.electron.metabot.setSetting(metabotId, key, next ? '1' : '0')
       .then((result) => {
         if (!result.success) revertWithToast();
       })
       .catch(revertWithToast)
-      .finally(() => setCoworkMcpToolsSaving(false));
+      .finally(() => setSaving(false));
   };
+  const handleCoworkMcpToolsToggle = makeSettingToggle(
+    COWORK_MOUNT_MCP_TOOLS_KEY, coworkMcpTools, setCoworkMcpTools,
+    coworkMcpToolsLoaded, coworkMcpToolsSaving, setCoworkMcpToolsSaving,
+    'metabotCoworkMcpToolsSaveFailed',
+  );
+  const handleCoworkBrowserAutomationToggle = makeSettingToggle(
+    COWORK_BROWSER_AUTOMATION_KEY, coworkBrowserAutomation, setCoworkBrowserAutomation,
+    coworkBrowserAutomationLoaded, coworkBrowserAutomationSaving, setCoworkBrowserAutomationSaving,
+    'metabotCoworkBrowserAutomationSaveFailed',
+  );
+  const handleCoworkComputerUseToggle = makeSettingToggle(
+    COWORK_COMPUTER_USE_KEY, coworkComputerUse, setCoworkComputerUse,
+    coworkComputerUseLoaded, coworkComputerUseSaving, setCoworkComputerUseSaving,
+    'metabotCoworkComputerUseSaveFailed',
+  );
 
   const handleSaveTab = async (tab: MetaBotEditTabKey) => {
     if (savingTab) return;
@@ -542,6 +582,14 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const coworkMcpToolsToggleView = buildMetaBotToggleViewModel({
     enabled: coworkMcpTools,
     disabled: !coworkMcpToolsLoaded || coworkMcpToolsSaving,
+  });
+  const coworkBrowserAutomationToggleView = buildMetaBotToggleViewModel({
+    enabled: coworkBrowserAutomation,
+    disabled: !coworkBrowserAutomationLoaded || coworkBrowserAutomationSaving,
+  });
+  const coworkComputerUseToggleView = buildMetaBotToggleViewModel({
+    enabled: coworkComputerUse,
+    disabled: !coworkComputerUseLoaded || coworkComputerUseSaving,
   });
   const rowClass = 'grid grid-cols-1 md:grid-cols-[132px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
   const labelClass = 'pt-2 text-sm font-medium dark:text-claude-darkText text-claude-text';
@@ -1051,6 +1099,56 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
             </div>
             <p className={hintClass}>
               {i18nService.t('metabotCoworkMcpToolsHint')}
+            </p>
+          </div>
+        </div>
+
+        {/* Browser automation (experimental): per-bot opt-in, immediate effect. */}
+        <div className={rowClass}>
+          <label id="metabot-cowork-browser-automation-label" className={labelClass}>
+            {i18nService.t('metabotCoworkBrowserAutomation')}
+          </label>
+          <div className="min-w-0">
+            <div className="flex items-center gap-3 pt-1">
+              <div
+                role="switch"
+                aria-checked={coworkBrowserAutomation}
+                aria-labelledby="metabot-cowork-browser-automation-label"
+                data-slot="metabot-cowork-browser-automation-switch"
+                title={i18nService.t('metabotCoworkBrowserAutomationHint')}
+                className={coworkBrowserAutomationToggleView.trackClass}
+                onClick={handleCoworkBrowserAutomationToggle}
+              >
+                <div className={coworkBrowserAutomationToggleView.knobClass} />
+              </div>
+            </div>
+            <p className={hintClass}>
+              {i18nService.t('metabotCoworkBrowserAutomationHint')}
+            </p>
+          </div>
+        </div>
+
+        {/* Desktop computer use (experimental): per-bot opt-in, immediate effect. */}
+        <div className={rowClass}>
+          <label id="metabot-cowork-computer-use-label" className={labelClass}>
+            {i18nService.t('metabotCoworkComputerUse')}
+          </label>
+          <div className="min-w-0">
+            <div className="flex items-center gap-3 pt-1">
+              <div
+                role="switch"
+                aria-checked={coworkComputerUse}
+                aria-labelledby="metabot-cowork-computer-use-label"
+                data-slot="metabot-cowork-computer-use-switch"
+                title={i18nService.t('metabotCoworkComputerUseHint')}
+                className={coworkComputerUseToggleView.trackClass}
+                onClick={handleCoworkComputerUseToggle}
+              >
+                <div className={coworkComputerUseToggleView.knobClass} />
+              </div>
+            </div>
+            <p className={hintClass}>
+              {i18nService.t('metabotCoworkComputerUseHint')}
             </p>
           </div>
         </div>

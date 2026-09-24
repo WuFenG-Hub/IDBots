@@ -1,15 +1,15 @@
 --- a/dsh-runtime/node_modules/@deepseek-ai/dsh-tool-ask-user/lib/index.js
 +++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-tool-ask-user/lib/index.js
-@@ -10,7 +10,7 @@ import "@deepseek-ai/dsh-user-questions";
+@@ -10,7 +10,7 @@
  */
  const name = "tool-ask-user";
  const inject = ["tools", "userQuestions"];
--const description = "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. Send one or more questions, each with a stable id that will be echoed in the answer.";
-+const description = "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. Send one or more questions, each with a stable id that will be echoed in the answer. The question panel reaches the user with no surrounding context and your reasoning is invisible to them, so never fire a bare question: in the same assistant message, before calling this tool, write a short visible explanation of the background, why you are asking, and your recommendation, and also fill each question's detail field with that context so it renders with the panel. Spell out internal shorthand — task codes, metric names, and session-local jargon mean nothing to the user on their own.";
+-const description = "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding.";
++const description = "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. The question panel reaches the user with no surrounding context and your reasoning is invisible to them, so never fire a bare question: in the same assistant message, before calling this tool, write a short visible explanation of the background, why you are asking, and your recommendation, and also fill each question's detail field with that context so it renders with the panel. Spell out internal shorthand — task codes, metric names, and session-local jargon mean nothing to the user on their own.";
  function apply(ctx) {
  	ctx.tools.register(defineTool({
  		name: "ask_user_question",
-@@ -37,6 +37,10 @@ function apply(ctx) {
+@@ -37,6 +37,10 @@
  						type: "string",
  						description: "Optional short heading for the question, such as \"Confirm\" or \"Choose Mode\"."
  					},
@@ -20,7 +20,7 @@
  					options: {
  						type: "array",
  						description: "Optional choices to show the user. If you recommend one, put it first and append \"(Recommended)\" to that label.",
-@@ -99,6 +103,7 @@ function apply(ctx) {
+@@ -99,6 +103,7 @@
  					id: question.id,
  					question: question.question,
  					...question.header !== void 0 ? { header: question.header } : {},

@@ -1,0 +1,51 @@
+--- a/dsh-runtime/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js
++++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js
+@@ -1,7 +1,7 @@
+ import z from "@deepseek-ai/schemastery";
+ import { SessionFormatUnsupportedMigrationError, createSessionFormatCatalogWithChildren, historicalSessionFormatCatalog, sessionFormatCatalog } from "@deepseek-ai/dsh-session-format-catalog";
+-import { readdirSync } from "node:fs";
+-import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, truncate } from "node:fs/promises";
++import { constants as fsConstants, readdirSync } from "node:fs";
++import { copyFile, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, truncate } from "node:fs/promises";
+ import { basename, dirname, isAbsolute, join, parse, resolve, toNamespacedPath } from "node:path";
+ import { performance } from "node:perf_hooks";
+ import { scheduler } from "node:timers/promises";
+@@ -1603,6 +1603,7 @@
+ };
+ const defaultFileSystem = {
+ 	open: (path, flags, mode) => open(path, flags, mode),
++	copyFile: (source, target, mode) => copyFile(source, target, mode),
+ 	readFile: (path, signal) => readFile(path, signal === void 0 ? void 0 : { signal }),
+ 	readdir: (path) => readdir(path),
+ 	stat: (path) => stat(path, { bigint: true }),
+@@ -2035,8 +2036,15 @@
+ 	} catch (error) {
+ 		/* v8 ignore else -- a non-collision filesystem error propagates unchanged. */
+ 		if (isEEXIST(error)) return false;
+-		/* v8 ignore next -- the filesystem error is already complete. */
+-		throw error;
++		// IDBots kernel patch: volumes without hard links (exFAT/FAT32/SMB)
++		// fall back to an exclusive copy — same EEXIST publish semantics.
++		if (error instanceof Error && "code" in error && error.code === "ENOTSUP") try {
++			await internals.fs.copyFile(staged, currentPath, fsConstants.COPYFILE_EXCL);
++		} catch (copyError) {
++			if (isEEXIST(copyError)) return false;
++			throw copyError;
++		}
++		else throw error;
+ 	}
+ 	await syncDirectory(dirname(currentPath), internals);
+ 	return true;
+@@ -3140,6 +3148,12 @@
+ 		let linked = false;
+ 		try {
+ 			await link(tmp, finalPath);
++			linked = true;
++		} catch (error) {
++			// IDBots kernel patch: volumes without hard links (exFAT/FAT32/SMB)
++			// fall back to an exclusive copy on the create path too.
++			if (!(error instanceof Error && "code" in error && error.code === "ENOTSUP")) throw error;
++			await copyFile(tmp, finalPath, fsConstants.COPYFILE_EXCL);
+ 			linked = true;
+ 		} finally {
+ 			/* v8 ignore next -- link failure is the TOCTOU/IO race guarded above; not reachable in test */

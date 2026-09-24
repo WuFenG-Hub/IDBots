@@ -41,21 +41,21 @@ test('native deepseek mounts a dedicated llm-deepseek entry, not a pi-ai route',
 
   const native = entryById(config, 'llm-deepseek-deepseek-official')
   assert.ok(native, 'native plugin entry present')
-  assert.equal(native.name, '@deepseek-ai/dsh-llm-deepseek')
+  assert.equal(native.name, '@deepseek-ai/dsh-llm-deepseek-api-key')
   assert.equal(native.config.apiKeyEnv, 'IDBOTS_DSH_API_KEY')
-  assert.equal(native.config.baseURL, 'https://api.deepseek.com')
+  assert.equal(native.config.baseURL, 'https://api.deepseek.com/anthropic')
   assert.equal(native.config.thinking, 'enabled')
   assert.equal(native.config.reasoningEffort, 'high')
   assert.equal(native.config.defaultContextWindow, 1_000_000)
   assert.deepEqual(native.config.models, [
-    { id: 'deepseek-v4-pro', name: 'deepseek-v4-pro', contextWindow: 1_000_000, maxTokens: 16_000 },
+    { id: 'deepseek-v4-pro', name: 'deepseek-v4-pro', contextWindow: 1_000_000, maxTokens: 16_000, systemPromptUpdate: 'in-history', toolUpdate: 'in-history' },
   ])
   // Never a pi-ai route for the native provider; other providers unaffected.
   assert.equal(piAiProviders(config).deepseek, undefined)
   assert.ok(piAiProviders(config).mockgw)
 })
 
-test('native baseURL normalization collapses compat-suffix bases onto the host root', () => {
+test('native baseURL normalization collapses compat-suffix bases onto the Messages root', () => {
   for (const baseUrl of [
     'https://api.deepseek.com',
     'https://api.deepseek.com/',
@@ -66,7 +66,7 @@ test('native baseURL normalization collapses compat-suffix bases onto the host r
   ]) {
     const config = generateRuntimeConfig(baseInput([{ ...nativeDeepSeekRoute, baseUrl }]))
     const native = entryById(config, 'llm-deepseek-deepseek-official')
-    assert.equal(native.config.baseURL, 'https://api.deepseek.com', `base ${baseUrl}`)
+    assert.equal(native.config.baseURL, 'https://api.deepseek.com/anthropic', `base ${baseUrl}`)
   }
 })
 
@@ -99,6 +99,8 @@ test('native vision catalog emits inputModalities and request-image budgets', ()
     name: 'deepseek-v4-flash-vision-exp',
     contextWindow: 1_000_000,
     maxTokens: 32_768,
+    systemPromptUpdate: 'in-history',
+    toolUpdate: 'in-history',
     inputModalities: ['text', 'image'],
     imagePixelBudget: 640_000,
     imageMaxBytes: 1_048_576,
@@ -113,7 +115,7 @@ test('non-native routes mount nothing native', () => {
   const config = generateRuntimeConfig(baseInput([
     { key: 'mockgw', apiFormat: 'responses', baseUrl: 'http://127.0.0.1:48790/v1', apiKeyEnv: 'K', models: [{ id: 'mock-1', contextWindow: 32_768 }] },
   ]))
-  assert.equal(config.filter((e) => e.name === '@deepseek-ai/dsh-llm-deepseek').length, 0)
+  assert.equal(config.filter((e) => e.name === '@deepseek-ai/dsh-llm-deepseek-api-key').length, 0)
   assert.ok(piAiProviders(config).mockgw)
 })
 

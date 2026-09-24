@@ -7,15 +7,17 @@
 
 import { HarnessClient } from '@deepseek-ai/dsh-sdk-client'
 
-/** Spawn `node <args...>` as the runtime process; env replaces the child env wholesale. */
-export function runtimeClient({ args, env, requestTimeoutMs, processCwd } = {}) {
+/** Spawn `node <args...>` as the runtime process; env replaces the child env wholesale.
+ *  `initializeTimeoutMs` is overridable for heavy compositions (the browser-use
+ *  provider's boot can exceed the 10s default under a loaded gate run). */
+export function runtimeClient({ args, env, requestTimeoutMs, processCwd, initializeTimeoutMs } = {}) {
   return new HarnessClient({}, {
     command: process.execPath,
     args,
     ...processCwd === undefined ? {} : { cwd: processCwd },
     environment: () => env,
     description: 'idbots-dsh-runtime',
-    initializeTimeoutMs: 10_000,
+    initializeTimeoutMs: initializeTimeoutMs ?? 10_000,
     ...requestTimeoutMs === undefined ? {} : { requestTimeoutMs },
   })
 }

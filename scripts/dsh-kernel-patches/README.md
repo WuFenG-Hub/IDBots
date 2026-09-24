@@ -13,7 +13,7 @@ technical debt that must be rebased or deleted at the next
 ## Naming
 
 `<package-name>+<exact-version>.patch` — the same convention patch-package
-uses, e.g. `@deepseek-ai+dsh-win32-process+0.1.5-rc.2.patch`. The apply
+uses, e.g. `@deepseek-ai+dsh-win32-process+0.1.7-rc.2.patch`. The apply
 script refuses to run a patch whose version differs from the installed
 package, so a kernel upgrade without a patch rebase fails loudly instead of
 silently shipping an unpatched kernel.
@@ -23,7 +23,7 @@ the script applies them with plain `git apply` from the repo root.
 
 ## Current patches
 
-### `@deepseek-ai+dsh-win32-process+0.1.5-rc.2.patch`
+### `@deepseek-ai+dsh-win32-process+0.1.7-rc.2.patch`
 
 On Windows the kernel's subprocess-local service launches every tool
 subprocess (bash.exe first of all) through a dedicated "Job runner" child,
@@ -42,7 +42,7 @@ The patch ORs `0x08000000` into all three creation-flag call sites
 — piped restricted spawns). `CREATE_NO_WINDOW` only suppresses console
 allocation; it does not affect GUI windows.
 
-### `@deepseek-ai+dsh-tool-ask-user+0.1.5-rc.2.patch`
+### `@deepseek-ai+dsh-tool-ask-user+0.1.7-rc.2.patch`
 
 Upstream's `ask_user_question` ships a one-line description ("Ask the user a
 concise question…") that actively pushes the model toward firing the question
@@ -62,32 +62,55 @@ message before the tool call, plus spelling out internal shorthand;
 context to the panel itself; (3) threads `detail` through `execute()` into the
 `ctx.userQuestions.ask` payload so it actually reaches the modal.
 
-### `@deepseek-ai+dsh-subprocess-local+0.1.5-rc.2.patch`
+### `@deepseek-ai+dsh-subprocess-local+0.1.7-rc.2.patch`
 
 Incident (2026-09-24, ~1 in 50 sessions): an external tmp cleanup removed the
 shared DSH runtime's private `dsh-subprocess-*` spill directory
 (`/var/folders/…/T/dsh-subprocess-ysdKLS`) while the process was serving turns.
 The next overflowing bash stdout hit `openSync(spillFile, "wx")` ENOENT inside
-the socket `data` handler (`OutputCollector.spillAll`); the uncaught throw
-killed the whole runtime process (exit 1, "DSH runtime is not running") and
-cascaded into every active conversation for minutes (146 log entries, two
-user-visible broken conversations). Upstream already contains the degradation
-concept — `discardSpill()` for an over-cap stream, `spillPath ?? "(unavailable)"`
-in the bash truncation notice, a contained `seal()` — but the spill open/append
-path itself is unprotected.
+the socket `data` handler; the uncaught throw killed the whole runtime process
+(exit 1, "DSH runtime is not running") and cascaded into every active
+conversation for minutes.
 
-The patch makes the collector resilient without changing its behavior on the
-happy path: (1) `spillAll` routes file establishment through a new `openSpill()`
-that on ENOENT recreates the private directory once (`mkdirSync` recursive,
-0700) and retries — an external deletion self-heals and full-output recovery
-keeps working; (2) when the spill target stays unavailable the collector
-degrades via `discardSpill()` (in-memory tail only, truncation flagged, no
-crash) instead of throwing; (3) append failures (`writeSync`) are contained the
-same way; (4) the `stream.on("data")` handler wraps `collector.push(chunk)` so
-no residual collector failure can escape into the event loop. Regression test:
-`dsh-runtime/test/subprocess-spill-resilience.test.mjs` reproduces the exact
-incident (mid-stream spill-dir deletion crashes the unpatched process) and the
-unrecoverable-spill degradation case.
+**0.1.7-rc.2 upstreamed the containment half of our fix**: `spillAll` now
+wraps the open/append path, degrades through `discardSpill()` plus an
+`onFailure` reporter, and the collector moved into a stable `lib/output.js`
+(no longer a content-hashed runner bundle). The earlier rebase against the
+hashed `runner-launch-*.js` for 0.1.5-rc.2 was dropped.
+
+What remains ours is the **self-heal**: on ENOENT the patch recreates the
+private spill directory once (`mkdirSync` recursive, 0700) and retries the
+open, so full-output recovery keeps working after an external cleanup instead
+of silently degrading to the bounded in-memory tail. Regression test:
+`dsh-runtime/test/subprocess-spill-resilience.test.mjs` (case A asserts the
+healed file holds the complete output; case B asserts the degraded-but-alive
+path, which upstream now satisfies on its own).
+
+### `@deepseek-ai+dsh-session-persistence-jsonl+0.1.7-rc.2.patch`
+
+The 0.1.7 V4 session log publishes staged files with a hard `link()` on
+every POSIX path (`publishCurrentExclusive` for generation/migration
+publish, `materializePosix` for new-log creation). Volumes without hard
+links — exFAT/FAT32/SMB — answer ENOTSUP and EVERY session write fails
+("ENOTSUP: operation not supported on socket, link …"). Production
+userData sits on APFS/NTFS, but IDBots dev loops run on an exFAT external
+SSD (`.worktrees` symlink target, repo-local `.dev-userdata-*`), where
+this is fatal.
+
+The patch falls back to `copyFile(..., COPYFILE_EXCL)` on ENOTSUP at both
+sites: the exclusive-publish semantics (EEXIST → caller decides) are
+preserved, and the staged bytes were already fsynced. `copyFile` is added
+to the injectable `defaultFileSystem` seam so the internals contract
+stays intact.
+
+### `@deepseek-ai+dsh-attachment-local+0.1.7-rc.2.patch`
+
+Same defect class as the persistence patch: `publishImmutableAlias` and
+`publishStagedObject` commit attachment objects with `link()` and treat
+EEXIST as the only recoverable race. On volumes without hard links every
+attachment write fails with ENOTSUP. The patch adds an ENOTSUP branch
+that publishes through an exclusive `copyFile`; an existing target races
+into the same sha256 digest verification as the EEXIST branch.
 
 ## Adding / rebasing a patch
 
