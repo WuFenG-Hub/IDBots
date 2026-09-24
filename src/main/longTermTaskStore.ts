@@ -640,6 +640,11 @@ export class LongTermTaskStore {
         current.id,
       ]);
       if (occupied) return { ok: false, code: 'VALIDATION', error: `ordinal ${input.ordinal} is taken by another sub-project` };
+      // An ordinal edit is a manual reorder — dependency-linked rows are
+      // reordered by redefining dependencies, never by hand.
+      if (this.dependencyLinkedIds(current.taskId).has(current.id)) {
+        return { ok: false, code: 'VALIDATION', error: 'dependency-linked sub-projects cannot be reordered manually — redefine the dependencies instead' };
+      }
       set('ordinal', input.ordinal, 'order');
     }
     if (Array.isArray(input.dependsOn)) {
@@ -925,10 +930,26 @@ export class LongTermTaskStore {
     return { task: this.toSummary(taskRow, subtasks), subtask: null };
   }
 
+  /** Sub-project ids involved in any dependency edge (has deps OR is depended on). */
+  private dependencyLinkedIds(taskId: string): Set<string> {
+    const linked = new Set<string>();
+    for (const row of this.listSubtaskRows(taskId)) {
+      const sub = this.mapSubtask(row);
+      if (sub.dependsOn.length > 0) linked.add(sub.id);
+      for (const dep of sub.dependsOn) linked.add(dep);
+    }
+    return linked;
+  }
+
   /**
    * Move a sub-project one slot up/down (swap ordinals with the neighbor).
    * The UNIQUE(task_id, ordinal) pair makes a direct swap impossible, so the
    * current row parks at a temp ordinal mid-flight.
+   *
+   * Dependency-linked sub-projects (has deps OR is depended on) are NOT
+   * manually reorderable — dependencies are the real ordering constraint;
+   * ordinal is only the display order among free items. Reorder those by
+   * redefining the dependencies instead (owner ruling 2026-09-24).
    */
   moveSubtask(subtaskId: string, direction: 'up' | 'down', actor: LongTermActor): LongTermResult<LongTermSubtask> {
     const current = this.getSubtask(subtaskId);
@@ -943,6 +964,14 @@ export class LongTermTaskStore {
     const neighbor = direction === 'up' ? siblings[index - 1] : siblings[index + 1];
     if (!neighbor) {
       return { ok: false, code: 'VALIDATION', error: direction === 'up' ? 'already first' : 'already last' };
+    }
+    const linked = this.dependencyLinkedIds(current.taskId);
+    if (linked.has(current.id) || linked.has(neighbor.id)) {
+      return {
+        ok: false,
+        code: 'VALIDATION',
+        error: 'dependency-linked sub-projects cannot be reordered manually — redefine the dependencies instead',
+      };
     }
     const now = nowIso();
     const tempOrdinal = siblings.reduce((max, sub) => Math.max(max, sub.ordinal), 0) + 1;
