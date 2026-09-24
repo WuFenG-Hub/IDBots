@@ -1,4 +1,4 @@
-import { getP2PLocalBase } from './p2pLocalEndpoint';
+import { getConfiguredP2PLocalBase } from './p2pLocalEndpoint';
 import { selectProtocolPinContent } from './protocolPinContent';
 
 export interface ProtocolPinRecord {
@@ -165,18 +165,21 @@ export async function fetchProtocolPinsFromIndexer(
   const fetchImpl = options.fetchImpl ?? fetch;
   const selectContent = options.selectContent ?? defaultSelectContent;
 
-  const localPins = await fetchProtocolPinPages({
-    baseUrl: options.localBaseUrl ?? getP2PLocalBase(),
-    pathname: '/api/pin/path/list',
-    protocolPath: normalizedProtocolPath,
-    pageSize,
-    maxPages,
-    timeoutMs,
-    fetchImpl,
-    selectContent,
-    requireEnvelopeHit: true,
-    sourceOrderStart: 0,
-  });
+  const localBase = options.localBaseUrl ?? getConfiguredP2PLocalBase();
+  const localPins = localBase
+    ? await fetchProtocolPinPages({
+        baseUrl: localBase,
+        pathname: '/api/pin/path/list',
+        protocolPath: normalizedProtocolPath,
+        pageSize,
+        maxPages,
+        timeoutMs,
+        fetchImpl,
+        selectContent,
+        requireEnvelopeHit: true,
+        sourceOrderStart: 0,
+      })
+    : [];
   const remotePins = await fetchProtocolPinPages({
     baseUrl: options.remoteBaseUrl ?? DEFAULT_REMOTE_BASE_URL,
     pathname: '/pin/path/list',
