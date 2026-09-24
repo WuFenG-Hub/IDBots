@@ -475,6 +475,9 @@ man_base_data_pebble/
 !tests/manual/run-drag-harness.mjs
 !tests/coworkSessionA2aDmOrdering.test.mjs
 
+# H-80 addendum: dream retry policy battery (b225a203 wiring follow-up)
+!tests/dreamRetryPolicy.test.mjs
+
 # macOS AppleDouble sidecars (._foo) created for xattr-bearing files on the
 # exFAT worktree SSD volume; gitignored so status stays clean there
 ._*
