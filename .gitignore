@@ -58,6 +58,7 @@ docs/*
 !docs/tickets/**
 tests/*
 !tests/fixtures/
+!tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs
 !tests/trackedTaskBoard.test.mjs
 !tests/metaAppBundleEntry.test.mjs

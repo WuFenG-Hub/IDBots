@@ -11,7 +11,7 @@
 
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import { decryptGroupMessage } from './metaWebCrypto';
-import { resolveGroupChatSenderName } from './metaWebListenerService';
+import { notifyGroupMessageInserted, resolveGroupChatSenderName } from './metaWebListenerService';
 
 export interface GroupChatBackfillServiceDeps {
   db: Database;
@@ -359,6 +359,11 @@ export function createGroupChatBackfillLoop(
         result.inserted += insertedForGroup;
         if (insertedForGroup > 0) {
           emitLog(`[GroupChatBackfill] Recovered ${insertedForGroup} group message(s) for group ${groupId.slice(0, 8)}…`);
+          // GAP-1 (924-2): rows recovered via backfill must wake the same
+          // Agent-Game hook the WS path fires — otherwise a new group's
+          // recovered history never reaches the runtime (no manual resume).
+          // Zero-insert ticks stay silent (INSERT OR IGNORE idempotency).
+          notifyGroupMessageInserted(groupId);
         }
       } catch (error) {
         result.failedGroups += 1;
