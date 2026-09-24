@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import { createLegacyMemoryDb } from './memoryTestUtils.mjs';
 
-const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const projectRoot = path.resolve(import.meta.dirname, '..');
 const require = createRequire(import.meta.url);
 const UUIDS = {
   queued: '11111111-1111-4111-8111-111111111111',

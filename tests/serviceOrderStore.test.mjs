@@ -11,7 +11,7 @@ const Module = require('node:module');
 const { ServiceOrderStore } = require('../dist-electron/main/serviceOrderStore.js');
 const { DB_FILENAME } = require('../dist-electron/main/appConstants.js');
 
-const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const projectRoot = path.resolve(import.meta.dirname, '..');
 const sqlWasmPath = path.join(projectRoot, 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
 
 async function createSqlDatabase() {

@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import { DatabaseSync } from 'node:sqlite';
 
 const require = createRequire(import.meta.url);
-const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const projectRoot = path.resolve(import.meta.dirname, '..');
 
 /**
  * Agent-Game bot channel (owner directive 2026-09-24):

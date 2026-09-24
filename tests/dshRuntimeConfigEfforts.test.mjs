@@ -12,7 +12,7 @@ import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 
-const worktreeRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
+const worktreeRoot = path.resolve(import.meta.dirname, '..')
 const generatorUrl = pathToFileURL(path.join(worktreeRoot, 'dsh-runtime', 'lib', 'generate-runtime-config.mjs')).href
 const { generateRuntimeConfig } = await import(generatorUrl)
 

@@ -14,7 +14,7 @@ try {
   ServiceRefundSyncService = undefined;
 }
 
-const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const projectRoot = path.resolve(import.meta.dirname, '..');
 
 function findNearestNodeModules(startDir = projectRoot) {
   let currentDir = path.resolve(startDir);

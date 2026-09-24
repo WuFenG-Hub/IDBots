@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const repoRoot = path.resolve(import.meta.dirname, '..');
 
 function readSource(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');

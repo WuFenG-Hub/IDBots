@@ -53,7 +53,7 @@ test('explicit override forces the unsafe shared mode', () => {
 // the lock must isolate the data directory. A script that disables the lock
 // without isolation recreates the 2026-09-21 incident shape.
 test('dev scripts: shared-data entry points hold the lock; only isolated ones disable it', () => {
-  const here = path.dirname(new URL(import.meta.url).pathname)
+  const here = import.meta.dirname
   const root = path.resolve(here, '..')
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
 

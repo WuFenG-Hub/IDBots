@@ -19,7 +19,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 const require = Module.createRequire(import.meta.url)
-const runtimeDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dsh-runtime')
+const runtimeDir = path.resolve(import.meta.dirname, '..', 'dsh-runtime')
 const runtimeReady = fs.existsSync(path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-sdk-client'))
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
