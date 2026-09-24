@@ -84,6 +84,7 @@ function main() {
     }
   }
   yamlText = lines.join('\n');
+  fs.writeFileSync(yamlPath, yamlText);
   console.log(`[upgrade:dsh] bumped ${yamlChanged} override line(s) in dsh-runtime/pnpm-workspace.yaml to ${target}`);
 
   console.log('[upgrade:dsh] regenerating dsh-runtime/pnpm-lock.yaml via pnpm install ...');
