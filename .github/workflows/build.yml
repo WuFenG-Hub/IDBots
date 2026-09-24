@@ -109,6 +109,12 @@ jobs:
       - name: Run long-term task tests
         run: node --test tests/longTermTaskStore.test.mjs tests/heartbeatService.test.mjs tests/longTermAdvanceService.test.mjs tests/longTermTaskAgentTools.test.mjs
 
+      # Agent-Game-v2 runtime: seat.claimed identity writes, membership
+      # bootstrap before the first on-chain write (room 924-2 root cause),
+      # local-bot auto-approve fast lane + the RPC bot channel.
+      - name: Run agent-game tests
+        run: pnpm run test:agent-game
+
       - name: Validate runtime dependency contracts
         run: |
           node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs

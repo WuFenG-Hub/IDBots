@@ -42,6 +42,16 @@ export interface AgentGameHostDeps {
   resolveActor: () => string;
   /** Resolve a display name for the actor (consent card); empty when unknown. */
   actorNameFor?: (globalMetaId: string) => string;
+  /** Membership bootstrap before the runtime's first on-chain write (see
+   *  RuntimeDeps.ensureAgentGroupMember — room 924-2 root cause). */
+  ensureAgentGroupMember?: (agentId: string, groupId: string) => Promise<{ joined: boolean; chargedWrite?: boolean }>;
+  /**
+   * Local-bot fast lane (owner directive 2026-09-24): a session whose actor is
+   * a LOCAL bot skips the manual authorization card entirely — bots seat
+   * themselves for bot-vs-bot matches. Third-party (non-local) actors keep the
+   * two-phase card. Host wiring: the local metabot roster lookup.
+   */
+  autoApproveActor?: (actorId: string) => boolean;
   log?: (msg: string) => void;
 }
 
@@ -144,6 +154,7 @@ export function createAgentGameHost(deps: AgentGameHostDeps): AgentGameHost {
     manifestFetch: deps.manifestFetch,
     adapterPathFor: deps.adapterPathFor,
     agentNameFor: deps.actorNameFor,
+    ensureAgentGroupMember: deps.ensureAgentGroupMember,
     log: deps.log,
   };
   const runtime = new AgentGameRuntime(runtimeDeps);
@@ -248,6 +259,46 @@ export function createAgentGameHost(deps: AgentGameHostDeps): AgentGameHost {
     // the adapter smoke test + protocol replay in runtime.start.
     if (/^\d+$/.test(params.seat) && Number(params.seat) >= manifest.maxPlayers) {
       throw new RuntimeError('seat_unavailable', `seat ${params.seat} outside manifest maxPlayers ${manifest.maxPlayers}`);
+    }
+
+    // Local-bot fast lane (owner directive 2026-09-24): no authorization card,
+    // no confirm token round-trip — the session starts right here. Same
+    // validation + idempotent-reuse semantics as the two-phase path.
+    if (deps.autoApproveActor?.(actorId)) {
+      const reusable = findReusableSession(params);
+      if (reusable) return toSessionView(reusable);
+      const protocolPaths = params.protocolPaths ?? ['/protocols/simplegroupchat'];
+      const consent: SessionConsent = {
+        actorId: params.agentId,
+        appId: params.appId,
+        groupId: params.groupId,
+        gameId: params.gameId,
+        rulesHash: params.rulesHash,
+        adapterHash: manifest.adapterHash,
+        seat: params.seat,
+        resourceUri: grantResourceUriFor(params),
+        protocolPaths,
+        ttlMs: params.ttlMs,
+        budget: {
+          llmCalls: params.budget.llmCalls,
+          llmCallsUsed: 0,
+          writes: params.budget.writes,
+          writesUsed: 0,
+        },
+        grantedAt: Date.now(),
+      };
+      store.audit('consent-granted', null, actorId, {
+        via: 'auto-approve-local-bot',
+        gameId: params.gameId,
+        groupId: params.groupId,
+        seat: params.seat,
+        ttlMs: params.ttlMs,
+      });
+      deps.log?.(`[agent-game] local-bot auto-approved start for ${params.gameId}/${params.seat} in ${params.groupId}`);
+      // `return await` (not a bare `return`): a bare return adopts the
+      // rejection OUTSIDE this handler's try/catch and loses the docs/09
+      // error envelope at the boundary.
+      return await runtime.start(params, consent);
     }
 
     const token = randomUUID();

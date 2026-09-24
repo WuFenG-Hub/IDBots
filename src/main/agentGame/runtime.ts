@@ -89,6 +89,19 @@ export interface RuntimeDeps {
   adapterPathFor: (manifestUri: string, manifest: GameManifest) => Promise<string>;
   /** Resolve a display name for the session agent (seat.claimed payload); optional. */
   agentNameFor?: (agentId: string) => string;
+  /**
+   * Ensure the session agent is a member of the game group before the runtime
+   * writes anything on-chain (docs/03 入座前置, lost in the APP-2 migration):
+   * the chat-api server diverts group writes from non-members — they never
+   * enter the group history index nor the WS fanout, so no client (page,
+   * host catch-up, third-party replay) ever sees them (room 924-2 root cause).
+   * Best-effort per call site; `chargedWrite` marks an actual join pin so the
+   * session budget stays truthful. By contract it must not throw.
+   */
+  ensureAgentGroupMember?: (
+    agentId: string,
+    groupId: string,
+  ) => Promise<{ joined: boolean; chargedWrite?: boolean }>;
   /** Clock injection (tests). */
   now?: () => number;
   /** Log sink. */
@@ -163,6 +176,10 @@ export class AgentGameRuntime extends EventEmitter {
         continue;
       }
       try {
+        // Same membership guarantee as start(): a session that recovered
+        // before its join pin settled (or whose agent was kicked) would
+        // otherwise write into the void again.
+        await this.ensureGroupMembership(s);
         await this.ensureSandbox(s);
         await this.catchUp(s.sessionId);
         // Re-acquire lease (fresh id) — conflict stays paused.
@@ -417,11 +434,13 @@ export class AgentGameRuntime extends EventEmitter {
     const attempt = entry?.attempts ?? 0;
     try {
       const plaintext = JSON.stringify(event);
-      // Seat claims are attributed by the chain message's senderMetaId, so
-      // they are signed as the session agent's identity (falls back to the
-      // host owner inside the transport when the agent is not a local bot).
-      // Action writes keep the established owner-signed path.
-      const writeOpts = isActionEvent(event) ? undefined : { asAgentId: s.agentId };
+      // All game writes are signed as the session agent's local bot wallet
+      // (architecture decision ④ 走子方自付): seat claims because docs/07 §3
+      // attributes them by senderMetaId, actions because the mover pays and
+      // owner-signed moves would vanish in bot-created rooms where the owner
+      // is not a member. The transport falls back to the host owner identity
+      // when the agent is not a local bot (third-party-bot sessions).
+      const writeOpts = { asAgentId: s.agentId };
       const { pinId } = await this.deps.chainWrite(s.groupId, plaintext, writeOpts);
       s.budget.writesUsed++;
       this.deps.store.markWriteStatus(key, 'committed', { pinId });
@@ -519,6 +538,9 @@ export class AgentGameRuntime extends EventEmitter {
     };
     this.sandboxes.set(sessionId, sandbox);
     this.deps.store.upsertGrant(consent);
+    // Membership before the first on-chain write: a seat.claimed from a
+    // non-member never reaches the group history / WS fanout (room 924-2).
+    await this.ensureGroupMembership(session);
     const initialState = await sandbox.initialState({ gameId: params.gameId, seat: params.seat });
     this.states.set(sessionId, initialState);
     this.deps.store.upsertSession(session, JSON.stringify(initialState));
@@ -702,10 +724,27 @@ export class AgentGameRuntime extends EventEmitter {
     };
   }
 
+  /** Best-effort membership bootstrap (docs/03 入座前置). Failures are loud in
+   *  the log but never block the session — the chat-api write paths degrade
+   *  the same way they did before this hook existed. */
+  private async ensureGroupMembership(s: GameSession): Promise<void> {
+    if (!this.deps.ensureAgentGroupMember) return;
+    try {
+      const res = await this.deps.ensureAgentGroupMember(s.agentId, s.groupId);
+      if (res?.joined) {
+        this.log(`${s.sessionId}: agent joined game group ${s.groupId.slice(0, 12)}…${res.chargedWrite ? ' (join pin charged to budget)' : ''}`);
+      }
+      if (res?.chargedWrite) {
+        s.budget.writesUsed++;
+      }
+    } catch (err) {
+      this.log(`${s.sessionId}: ensureAgentGroupMember failed (continuing): ${errMsg(err)}`);
+    }
+  }
+
   /** Queue the seat-claim write through the action path's idempotency ledger:
    *  intent recorded BEFORE the write, dedup by eventId, backoff on failure. */
-  private enqueueSeatClaim(s: GameSession): void {
-    const event = this.draftSeatClaim(s);
+  private enqueueSeatClaim(s: GameSession): void {    const event = this.draftSeatClaim(s);
     const key: WriteLogKey = { groupId: s.groupId, actionSeq: NON_ACTION_LEDGER_SEQ, eventId: event.eventId };
     this.deps.store.recordWriteIntent(key, s.sessionId);
     this.deps.store.audit('seat-claim-write', s.sessionId, s.agentId, { eventId: event.eventId, seat: s.seat });

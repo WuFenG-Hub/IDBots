@@ -6852,10 +6852,11 @@ const startAgentGameHost = (): void => {
         throwOnEmptyContent: true,
       });
     },
-    // agent-game event writes: seat.claimed carries asAgentId — it is attributed
-    // by the chain message's senderMetaId (docs/07 §3), so sign it as the
-    // session agent's local bot wallet (走子方自付 per architecture decision ④).
-    // Owner-signed fallback covers non-bot actors; action writes stay owner-signed.
+    // agent-game event writes: every game event is signed as the session
+    // agent's local bot wallet (走子方自付 per architecture decision ④) —
+    // seat.claimed because docs/07 §3 attributes it by the chain message's
+    // senderMetaId, actions because the mover pays. Owner-signed fallback
+    // covers non-bot actors (third-party-bot sessions).
     chainWrite: (groupId, plaintext, opts) => {
       const asBot = opts?.asAgentId
         ? getMetabotStore().getMetabotByGlobalMetaId(opts.asAgentId)
@@ -6867,6 +6868,33 @@ const startAgentGameHost = (): void => {
     },
     manifestFetch: resolveAgentGameManifest,
     adapterPathFor: resolveAgentGameAdapterPath,
+    // Local-bot fast lane (owner directive 2026-09-24): bot actors seat
+    // themselves without the manual authorization card; human and
+    // third-party actors keep the two-phase card.
+    autoApproveActor: (actorId) =>
+      Boolean(getMetabotStore().getMetabotByGlobalMetaId(actorId)),
+    // docs/03 入座前置, lost in the APP-2 migration: the chat-api server
+    // diverts group writes from non-members (room 924-2 — the black seat's
+    // seat.claimed was on chain but never entered the group history nor the
+    // WS fanout), so the runtime must guarantee membership before its first
+    // on-chain write.
+    ensureAgentGroupMember: async (agentId, groupId) => {
+      const bot = getMetabotStore().getMetabotByGlobalMetaId(agentId);
+      if (!bot) return { joined: false };
+      const identities = [bot.globalmetaid, bot.metaid].filter((v): v is string => Boolean(v));
+      const members = await fetchGroupMembers(groupId, { timeoutMs: 10_000 }).catch(() => null);
+      if (members === null || identities.some((id) => members.some((m) => m.toLowerCase() === id.toLowerCase()))) {
+        // Indexer unreachable → assume the pre-hook state (a guessed join
+        // would double-spend the 606-sat pin); already-member → no-op.
+        return { joined: false };
+      }
+      await joinGroupChat(bot.id, groupId);
+      const confirmed = await waitForMemberJoined(groupId, identities, { timeoutMs: 20_000 });
+      if (!confirmed) {
+        console.warn(`[agent-game] join pin for ${bot.name} in ${groupId.slice(0, 12)}… not yet visible in the member list (indexer lag)`);
+      }
+      return { joined: true, chargedWrite: true };
+    },
     resolveActor: () => owner?.globalmetaid ?? '',
     actorNameFor: (globalMetaId) =>
       getMetabotStore().getMetabotByGlobalMetaId(globalMetaId)?.name?.trim() || '',
@@ -16263,6 +16291,17 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('metaid rpc server start begin');
     metaidRpcServer = startMetaidRpcServer(getMetabotStore, getStore, getCoworkStore, {
       controlBotBrowserTabs: (command) => getBotBrowserTabBridge().execute(command),
+      // Agent-Game bot channel: same browser.app.session.* surface the MetaApp
+      // bridge uses, reached over RPC by local bot sessions (auto-approved for
+      // local bots host-side; startAgentGameHost() is idempotent).
+      agentGameSession: async (input) => {
+        startAgentGameHost();
+        const host = getAgentGameHost();
+        if (!host) {
+          return { __error: true, code: 'unsupported_method', message: 'Agent-Game runtime not started' };
+        }
+        return host.handleSessionMethod(input.method, input.payload, input.actorId, { resourceUri: input.resourceUri });
+      },
     });
     startupLog('metaid rpc server started');
 

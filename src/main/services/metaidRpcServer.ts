@@ -129,6 +129,12 @@ const GROUP_TASK_LIST_PATH = '/api/idbots/group-task/list';
 const GROUP_TASK_SHOW_PATH = '/api/idbots/group-task/show';
 const GROUP_TASK_SEND_PATH = '/api/idbots/group-task/send';
 const GROUP_TASK_INVITE_PATH = '/api/idbots/group-task/invite';
+/** Agent-Game bot channel (owner directive 2026-09-24): params mirror
+ *  browser.app.session.* (docs/09 §4) but reach the host from bot sessions
+ *  via RPC instead of the MetaApp browser bridge. Local-bot actors are
+ *  auto-approved host-side (no authorization card); third-party actors keep
+ *  the card on the browser bridge path. */
+const AGENT_GAME_SESSION_PATH = '/api/idbots/agent-game/session';
 const GROUP_TASK_KICK_MEMBER_PATH = '/api/idbots/group-task/kick-member';
 const GROUP_TASK_CLOSE_PATH = '/api/idbots/group-task/close';
 const GROUP_TASK_MEMBER_STATUS_PATH = '/api/idbots/group-task/member-status';
@@ -195,6 +201,15 @@ export type MetaidRpcServerOptions = {
   controlBotBrowserTabs?: (
     command: BotBrowserTabCommand,
   ) => Promise<BotBrowserTabCommandResult> | BotBrowserTabCommandResult;
+  /** Agent-Game bot channel backend: dispatch a browser.app.session.*-aligned
+   *  method (docs/09 §4) for a local bot actor. Returns the same envelope
+   *  shape as the agentGame:session IPC entry ({ __error } on failure). */
+  agentGameSession?: (input: {
+    method: string;
+    payload: unknown;
+    actorId: string;
+    resourceUri?: string;
+  }) => Promise<unknown>;
 };
 
 const BOT_BROWSER_TAB_ACTIONS = new Set<BotBrowserTabAction>([
@@ -2032,6 +2047,84 @@ export function startMetaidRpcServer(
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);
         res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === AGENT_GAME_SESSION_PATH) {
+      const body = await readRpcJsonObjectBody(req, res, pathname);
+      if (body === null) {
+        return;
+      }
+      let parsed: {
+        method?: string;
+        payload?: unknown;
+        actor_id?: string;
+        metabot_id?: number;
+        metabot_name?: string;
+        resource_uri?: string;
+      };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const method = String(parsed.method ?? '').trim();
+      if (!method) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'method is required' }));
+        return;
+      }
+      // Actor resolution: explicit actor_id (globalMetaId) wins; metabot_id /
+      // metabot_name resolve against the local roster. The channel is for
+      // LOCAL bot sessions — a non-local actor is refused here (its card-
+      // gated path is the browser bridge, docs/09 §4.1 phase 1).
+      const store = getMetabotStore();
+      let actorId = String(parsed.actor_id ?? '').trim();
+      if (!actorId) {
+        const metabotId = Number(parsed.metabot_id);
+        let bot = Number.isInteger(metabotId) && metabotId > 0
+          ? store.getMetabotById(metabotId)
+          : null;
+        if (!bot && parsed.metabot_name) {
+          const resolvedId = resolveMetabotIdByName(store, String(parsed.metabot_name).trim());
+          bot = resolvedId != null ? store.getMetabotById(resolvedId) : null;
+        }
+        actorId = bot?.globalmetaid ?? '';
+      }
+      if (!actorId) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'actor_id (globalMetaId), metabot_id or metabot_name is required' }));
+        return;
+      }
+      if (!store.getMetabotByGlobalMetaId(actorId)) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ success: false, error: `actor is not a local MetaBot: ${actorId}` }));
+        return;
+      }
+      if (!options.agentGameSession) {
+        res.writeHead(501);
+        res.end(JSON.stringify({ success: false, error: 'agent-game session backend not wired' }));
+        return;
+      }
+      try {
+        const result = await options.agentGameSession({
+          method,
+          payload: parsed.payload ?? null,
+          actorId,
+          resourceUri: String(parsed.resource_uri ?? '').trim() || `rpc://agent-game/${actorId}`,
+        });
+        // Same envelope contract as the agentGame:session IPC entry: the
+        // handler returns { __error: true, code, message } on failure and the
+        // method result otherwise — always HTTP 200 so bot callers can branch
+        // on __error exactly like the page bridge does.
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, result }));
+      } catch (err) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: err instanceof Error ? err.message : String(err) }));
       }
       return;
     }
