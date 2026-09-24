@@ -58,7 +58,13 @@ jobs:
         id: pnpm-store-win
         shell: powershell
         run: |
-          $store = (pnpm store path 2>$null | Where-Object { $_ -and $_.Trim() } | Select-Object -Last 1)
+          # The runner executes PowerShell steps with $ErrorActionPreference='Stop',
+          # which turns ANY native-command stderr output into a terminating error.
+          # Corepack's first-run banner ("Corepack is about to download pnpm@...")
+          # goes to stderr and killed the first pnpm-era Windows run (2026-09-24).
+          # Keep stderr non-fatal and judge success by the parsed value instead.
+          $ErrorActionPreference = 'Continue'
+          $store = (pnpm store path | Where-Object { $_ -and "$_".Trim() } | Select-Object -Last 1)
           if (-not $store) {
             Write-Error "pnpm store path returned no usable path"
             exit 1
