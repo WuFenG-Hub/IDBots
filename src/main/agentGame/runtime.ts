@@ -216,7 +216,10 @@ export class AgentGameRuntime extends EventEmitter {
           this.markStatus(s.sessionId, s.status === 'paused' ? 'paused' : 'running', null);
         }
       } catch (err) {
-        this.markStatus(s.sessionId, 'paused', mkError('adapter_error', errMsg(err), this.now));
+        // GAP-5: preserve structured codes (e.g. state_corrupt surfaced by
+        // library hydration) instead of flattening every recovery failure to
+        // adapter_error — the code is what operators page on.
+        this.markStatus(s.sessionId, 'paused', mkError(errorCodeOf(err) ?? 'adapter_error', errMsg(err), this.now));
       }
     }
     this.scheduleLoop(0);
@@ -257,7 +260,14 @@ export class AgentGameRuntime extends EventEmitter {
     const sessions = this.deps.store.listRecoverableSessions().filter((s) => s.groupId === groupId);
     if (sessions.length === 0) return;
     for (const s of sessions) {
-      void this.catchUp(s.sessionId).then(() => this.scheduleLoop(0));
+      void this.catchUp(s.sessionId)
+        .then(() => this.scheduleLoop(0))
+        .catch((err) => {
+          // GAP-5: catchUp can now surface persisted-state corruption
+          // (state_corrupt). Park the session instead of leaving an
+          // unhandled rejection that silently wedges the game.
+          this.markStatus(s.sessionId, 'paused', mkError(errorCodeOf(err) ?? 'adapter_error', errMsg(err), this.now));
+        });
     }
   }
 
@@ -277,14 +287,11 @@ export class AgentGameRuntime extends EventEmitter {
     if (messages.length === 0) return s;
     let state = this.states.get(sessionId);
     if (state === undefined) {
+      // GAP-5: same hydration semantics as ensureSandbox (shared parser) — a
+      // corrupt stored blob surfaces as state_corrupt instead of silently
+      // wedging the session with no state.
       const stored = this.deps.store.getSerializedState(sessionId);
-      if (stored) {
-        try {
-          state = JSON.parse(stored);
-        } catch {
-          state = undefined;
-        }
-      }
+      if (stored) state = parseStoredState(sessionId, stored);
     }
     let cursor = s.lastIndex;
     const sandbox = this.sandboxes.get(sessionId);
@@ -752,7 +759,19 @@ export class AgentGameRuntime extends EventEmitter {
     await sandbox.smokeTest({ gameId: s.gameId, seat: s.seat });
     this.sandboxes.set(s.sessionId, sandbox);
     if (!this.states.has(s.sessionId)) {
-      this.states.set(s.sessionId, await sandbox.initialState({ gameId: s.gameId, seat: s.seat }));
+      // GAP-5: after a restart the in-memory map is empty — hydrate from the
+      // persisted library state FIRST. Presetting a fresh initial board here
+      // would shadow the true mid-game state forever (catchUp only hydrates
+      // when the map is empty) and the session would play from a fabricated
+      // board. Only a session with no persisted state at all falls back to
+      // initialState; a stored blob that cannot parse is library corruption
+      // (state_corrupt) — callers park the session instead of continuing.
+      const stored = this.deps.store.getSerializedState(s.sessionId);
+      if (stored != null) {
+        this.states.set(s.sessionId, parseStoredState(s.sessionId, stored));
+      } else {
+        this.states.set(s.sessionId, await sandbox.initialState({ gameId: s.gameId, seat: s.seat }));
+      }
     }
     // GAP-4: (re)anchor conservatively — after a restart we cannot know when
     // the game last progressed, so the move window restarts from now rather
@@ -930,6 +949,26 @@ function withOwnMeta(env: MetaStampedEvent, agentId: string, ts: number): MetaSt
 function errMsg(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/** GAP-5: parse a persisted serialized game state. A blob that exists but
+ *  cannot parse into a state object is library corruption — recovery must
+ *  never silently fall back to a fresh initial board mid-game, so callers
+ *  surface `state_corrupt` and park the session. */
+function parseStoredState(sessionId: string, stored: string): unknown {
+  try {
+    const parsed: unknown = JSON.parse(stored);
+    if (parsed === null || typeof parsed !== 'object') throw new Error('not a state object');
+    return parsed;
+  } catch (err) {
+    throw runtimeError('state_corrupt', `persisted game state for ${sessionId} is corrupt: ${errMsg(err)}`);
+  }
+}
+
+/** Structured code of a RuntimeError, for callers translating errors into
+ *  session lastError without flattening every failure to adapter_error. */
+function errorCodeOf(err: unknown): SessionErrorCode | null {
+  return err instanceof RuntimeError ? err.code : null;
 }
 
 /** Build a SessionError with the current timestamp. */

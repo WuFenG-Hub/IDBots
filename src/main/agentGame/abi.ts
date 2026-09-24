@@ -250,6 +250,7 @@ export type SessionErrorCode =
   | 'seat_unavailable'
   | 'adapter_error'
   | 'adapter_timeout'
+  | 'state_corrupt'
   | 'llm_unavailable'
   | 'llm_timeout'
   | 'rate_limited'

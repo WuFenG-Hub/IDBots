@@ -86,6 +86,8 @@ tests/*
 !tests/agentGameSeatJoinRpc.test.mjs
 !tests/agentGameSeatClaim.test.mjs
 !tests/agentGameLlmTimeout.test.mjs
+!tests/agentGameLlmFetchResilience.test.mjs
+!tests/agentGameRecoverHydration.test.mjs
 !tests/dshKernelRuntime.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/dshRuntimeGlmResponsesBoot.test.mjs
