@@ -127,7 +127,12 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       // parent's first live seq; mounting for children too keeps nested
       // delegation (maxDepth-gated) identical to the former top-level mount.
       // ctx.plugin returns a cordis Fiber (thenable, no .catch) — wrap it.
-      Promise.resolve(agent.ctx.plugin(dshToolSubagent, {
+      // 0.1.6: agent/created is async-serial and the first model request
+      // waits for listener promises — RETURN the mounts so subagent /
+      // send_message / interrupt_agent are registered before the first
+      // request instead of racing it. The .catch wrappers matter: a rejected
+      // listener now fails agent creation outright.
+      const subagentMount = Promise.resolve(agent.ctx.plugin(dshToolSubagent, {
         provider: 'spawn',
         toolName: 'subagent',
         // 0.1.3-alpha.1 continuable delegation: background by default, the
@@ -136,6 +141,10 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
         // registered by dsh-tool-subagent-control below.
         enableRunInBackground: true,
         backgroundMode: 'continuable',
+        // 0.1.6 moved depth gating behind user settings (default maxDepth 1,
+        // which blocks nested delegation). Pin 3 explicitly to preserve the
+        // 0.1.5 tool-level default IDBots shipped with.
+        maxDepth: 3,
         modelSelectionSettings: this.idbotsSubagentModelSelection,
       })).catch((error) => {
         this.ctx.logger.warn(`idbots-sdk-server: agent-scoped tool-subagent mount failed for ${String(agent.id)}: ${String(error?.message ?? error)}`)
@@ -144,7 +153,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       // every agent — root parents AND resident children — gets send_message
       // (children are prompted by the kernel to report through it) and
       // interrupt_agent (ancestor-scoped turn cancellation).
-      Promise.resolve(agent.ctx.plugin(dshToolSubagentControl)).catch((error) => {
+      const controlMount = Promise.resolve(agent.ctx.plugin(dshToolSubagentControl)).catch((error) => {
         this.ctx.logger.warn(`idbots-sdk-server: agent-scoped tool-subagent-control mount failed for ${String(agent.id)}: ${String(error?.message ?? error)}`)
       })
       // Subagent lineage lives FLATTENED on the session header (not under a
@@ -170,6 +179,9 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
         // task_started/task_notification channel the Claude path emits.
         this.idbotsTransport.notify('idbots/subagent/started', { sessionId: parent, agentId })
       }
+      // Async-serial agent/created: the kernel awaits this before the first
+      // model request of the new agent (see the mount comments above).
+      return Promise.all([subagentMount, controlMount])
     }, { global: true })
     ctx.on('agent/disposed', ({ agent }) => {
       for (const children of this.idbotsSubagentChildren.values()) {
@@ -897,6 +909,10 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     const id = String(sessionId ?? '')
     if (id.length === 0) return []
     const live = this.idbotsAgents.get(id)
+    // ownEvents() is deprecated since 0.1.6 ("existing logic may remain
+    // unmigrated for now") but upstream itself still calls it inside
+    // dsh-agent-loop 0.1.6-alpha.2 and ships no async replacement yet —
+    // re-check at the next kernel bump.
     if (live?.session !== undefined) return [...live.session.ownEvents()]
     if (this.idbotsPersistence === null) return []
     let handle
