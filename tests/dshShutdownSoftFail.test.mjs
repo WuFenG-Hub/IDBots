@@ -514,9 +514,6 @@ test('runAppCleanup stops chat daemons, scheduler and orchestrator before closin
     stopScheduler: record('stopScheduler'),
     stopCognitiveOrchestrator: record('stopCognitiveOrchestrator'),
     stopDreamService: record('stopDreamService'),
-    stopP2P: async () => {
-      order.push('stopP2P');
-    },
     stopProviderDiscovery: record('stopProviderDiscovery'),
     deactivateGroupChatTasks: record('deactivateGroupChatTasks'),
     log: () => undefined,

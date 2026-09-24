@@ -1198,11 +1198,9 @@ contextBridge.exposeInMainWorld('electron', {
   networkStatus: {
     send: (status: 'online' | 'offline') => ipcRenderer.send('network:status-change', status),
   },
+  // Namespace kept under its legacy `p2p` name for the renderer; it now only
+  // bridges the metaid user-info/contacts IPC channels.
   p2p: {
-    getStatus: () => ipcRenderer.invoke('p2p:getStatus'),
-    getConfig: () => ipcRenderer.invoke('p2p:getConfig'),
-    setConfig: (config: unknown) => ipcRenderer.invoke('p2p:setConfig', config),
-    getPeers: () => ipcRenderer.invoke('p2p:getPeers'),
     getUserInfo: (params: { globalMetaId: string }) =>
       ipcRenderer.invoke('metaid:getUserInfo', params),
     resolveAvatarSource: (params: { reference: string }) =>
@@ -1211,15 +1209,5 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('metaid:contacts:list', params),
     getContactDetail: (params: { observerGlobalMetaId: string; subjectGlobalMetaId: string }) =>
       ipcRenderer.invoke('metaid:contacts:detail', params),
-    onStatusUpdate: (callback: (status: unknown) => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
-      ipcRenderer.on('p2p:statusUpdate', handler);
-      return () => ipcRenderer.removeListener('p2p:statusUpdate', handler);
-    },
-    onSyncProgress: (callback: (data: unknown) => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data);
-      ipcRenderer.on('p2p:syncProgress', handler);
-      return () => ipcRenderer.removeListener('p2p:syncProgress', handler);
-    },
   },
 });

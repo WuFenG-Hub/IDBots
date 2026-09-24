@@ -1,6 +1,5 @@
 import { normalizeRawGlobalMetaId } from '../shared/globalMetaId';
 import type { IdchatOnlineStatusEntry, IdchatPresenceService } from './idchatPresenceService';
-import type { LocalPresenceSnapshot } from './p2pPresenceClient';
 
 /** Skip a forced refresh when the last snapshot is younger than the poll cadence. */
 export const DISCOVERY_SNAPSHOT_MIN_AGE_MS = 10 * 1000;
@@ -45,7 +44,6 @@ export interface DiscoverySnapshot {
 
 export interface ProviderDiscoveryServiceDeps {
   presence: Pick<IdchatPresenceService, 'fetchOnlineStatus'>;
-  fetchP2PPresence?: () => Promise<LocalPresenceSnapshot>;
   now?: () => number;
 }
 
@@ -138,18 +136,6 @@ const buildProviderGroups = (services: any[]): ProviderGroup[] => {
 const toLastSeenSec = (entry: IdchatOnlineStatusEntry | undefined): number | null => {
   if (!entry || !entry.isOnline || !Number.isFinite(entry.lastSeenAt) || entry.lastSeenAt <= 0) return null;
   return Math.floor(entry.lastSeenAt / 1000);
-};
-
-const shouldUseP2PPresence = (presence: LocalPresenceSnapshot): boolean => {
-  if (!presence.healthy) return false;
-  const peerCount = Number.isFinite(presence.peerCount) ? Math.max(0, Math.trunc(presence.peerCount)) : 0;
-  return peerCount > 0 || Object.keys(presence.onlineBots || {}).length > 0;
-};
-
-const p2pCheckAtSec = (presence: LocalPresenceSnapshot, fallbackNowSec: number): number => {
-  return typeof presence.nowSec === 'number' && Number.isFinite(presence.nowSec)
-    ? presence.nowSec
-    : fallbackNowSec;
 };
 
 const uniqueGlobalMetaIds = (groups: ProviderGroup[]): string[] => {
@@ -322,22 +308,6 @@ export class ProviderDiscoveryService {
       }
     }
 
-    if (this.deps.fetchP2PPresence) {
-      try {
-        const p2pPresence = await this.deps.fetchP2PPresence();
-        if (shouldUseP2PPresence(p2pPresence)) {
-          this.applySnapshot(
-            this.buildP2PSnapshot(groups, p2pPresence),
-            options.rebroadcast,
-          );
-          this.lastRefreshAtMs = this.nowMs();
-          return;
-        }
-      } catch (error) {
-        console.warn('[ProviderDiscovery] P2P presence fallback failed:', error);
-      }
-    }
-
     this.applySnapshot(
       this.buildIdchatSnapshot(groups, statusByGlobalMetaId, ids.length > 0 ? 'online_status_failed' : null),
       options.rebroadcast,
@@ -380,38 +350,6 @@ export class ProviderDiscoveryService {
 
       if (online) {
         onlineBots[group.globalMetaId] = lastSeenSec ?? lastCheckAt;
-        availableServices.push(...group.services);
-      }
-    }
-
-    return { onlineBots, availableServices, providers };
-  }
-
-  private buildP2PSnapshot(groups: ProviderGroup[], presence: LocalPresenceSnapshot): DiscoverySnapshot {
-    const onlineBots: Record<string, number> = {};
-    const availableServices: any[] = [];
-    const providers: Record<string, DiscoveryProviderState> = {};
-    const lastCheckAt = p2pCheckAtSec(presence, this.nowSec());
-
-    for (const group of groups) {
-      const forcedOffline = Boolean(group.globalMetaId) && this.forcedOfflineGlobalMetaIds.has(group.globalMetaId);
-      const state = !forcedOffline && group.globalMetaId ? presence.onlineBots[group.globalMetaId] : undefined;
-      const online = Boolean(state);
-
-      providers[group.key] = {
-        key: group.key,
-        globalMetaId: group.globalMetaId,
-        address: group.address,
-        lastSeenSec: state?.lastSeenSec ?? null,
-        lastCheckAt,
-        lastSource: 'p2p_presence',
-        lastError: !group.globalMetaId ? 'missing_global_metaid' : forcedOffline ? 'locally_disabled' : null,
-        online,
-        optimisticLocal: false,
-      };
-
-      if (online) {
-        onlineBots[group.globalMetaId] = state!.lastSeenSec;
         availableServices.push(...group.services);
       }
     }

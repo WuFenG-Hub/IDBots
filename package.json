@@ -35,7 +35,7 @@
     "test:surf": "pnpm run compile:electron && node --test tests/metawebSurfStore.test.mjs tests/surfBriefing.test.mjs tests/surfService.test.mjs tests/surfPrompt.test.mjs tests/commentPinAgentTools.test.mjs tests/surfAgentTools.test.mjs tests/surfInteractionGuard.test.mjs tests/surfProtocols.test.mjs tests/coworkRunnerSurfWiringStatic.test.mjs tests/scheduledTaskAgentTools.test.mjs tests/surfReadsService.test.mjs",
     "test:chain-history": "pnpm run compile:electron && node --test tests/chainContentHistoryStore.test.mjs tests/chainWriteLedger.test.mjs tests/chainReadLedger.test.mjs tests/contentSummaryService.test.mjs tests/chainHistoryRecallBlocks.test.mjs",
     "test:release-regressions": "pnpm run test:group-tasks && pnpm run test:skill-assignment && pnpm run test:cowork-proxy && pnpm run test:proposals && pnpm run test:bot-browser && pnpm run test:release-regressions-extra",
-    "test:release-regressions-extra": "pnpm run compile:electron && node --test tests/privateChatNoReplySentinel.test.mjs tests/privateChatClosedReopen.test.mjs tests/privateChatOwnerSentA2ADisplay.test.mjs tests/coworkDshWarmupStaleSessionRoute.test.mjs tests/p2pRuntimeConfigMode.test.mjs tests/metaAppBundleEntry.test.mjs tests/orchestrationOriginMigration.test.mjs tests/surfHostStatsFold.test.mjs && npx tsx --test tests/coworkSessionBrainProvider.test.ts tests/coworkSessionSortAnchor.test.ts && pnpm run test:simplelog",
+    "test:release-regressions-extra": "pnpm run compile:electron && node --test tests/privateChatNoReplySentinel.test.mjs tests/privateChatClosedReopen.test.mjs tests/privateChatOwnerSentA2ADisplay.test.mjs tests/coworkDshWarmupStaleSessionRoute.test.mjs tests/metaAppBundleEntry.test.mjs tests/orchestrationOriginMigration.test.mjs tests/surfHostStatsFold.test.mjs && npx tsx --test tests/coworkSessionBrainProvider.test.ts tests/coworkSessionSortAnchor.test.ts && pnpm run test:simplelog",
     "test:private-chat-wake-disposition": "pnpm run compile:electron && node --test tests/privateChatWakeReservedDisposition.test.mjs",
     "test:workspace-instructions": "node --test tests/workspaceInstructionsBoundary.test.mjs tests/coworkSessionDetailGitBranch.test.mjs",
     "test:group-tasks": "pnpm run compile:electron && node --test tests/chainIdentifierPrompt.test.mjs tests/groupTaskDaemon.test.mjs tests/groupTaskDaemonProtocol.test.mjs tests/groupTaskCheckpoints.test.mjs tests/groupTaskPlanChange.test.mjs tests/groupTaskRemotePresence.test.mjs tests/groupTaskService.test.mjs tests/groupTaskStaffing.test.mjs tests/groupTaskCandidateSearch.test.mjs tests/groupTaskEntropyP0.test.mjs tests/groupTaskComposerEnterSend.test.mjs tests/groupTaskUtils.test.mjs tests/groupTaskDeliverableParser.test.mjs tests/groupChatOutboxDurability.test.mjs",
@@ -57,7 +57,6 @@
     "test:read-pin": "npx ts-node -P electron-tsconfig.json test_read_pin.ts",
     "preview": "vite preview",
     "compile:electron": "npx -p typescript@5 tsc --project electron-tsconfig.json && node scripts/copy-electron-js.cjs",
-    "sync:man-p2p": "node scripts/sync-man-p2p-binary.mjs",
     "build:skills": "node scripts/build-skills.js && node scripts/build-web-search-skill.js",
     "build:skill:web-search": "node scripts/build-web-search-skill.js",
     "start:electron": "cross-env NODE_ENV=development ELECTRON_START_URL=http://127.0.0.1:5175 electron .",
@@ -98,7 +97,7 @@
     "release:runbook": "node scripts/release-runbook.mjs",
     "preelectron:dev:dsh": "pnpm run check:dsh-deps",
     "electron:dev:dsh": "cross-env IDBOTS_USER_DATA_PATH=./.dev-userdata-dsh IDBOTS_APP_DATA_PATH=./.dev-appdata-dsh concurrently \"vite --host 127.0.0.1 --port 5185\" \"wait-on -v -t 120000 -d 10000 http://127.0.0.1:5185 && node scripts/wait-electron-dev-build.mjs dist-electron && cross-env NODE_ENV=development IDBOTS_DISABLE_SINGLE_INSTANCE_LOCK=1 ELECTRON_START_URL=http://127.0.0.1:5185 electron .\"",
-    "test": "pnpm run compile:electron && node --test tests/llmSafeText.test.mjs && pnpm run test:long-term-task && node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs && pnpm run test:workspace-instructions && pnpm run test:pinned-skills && pnpm run test:release-regressions && pnpm run test:memory && pnpm run test:metaweb"
+    "test": "pnpm run compile:electron && node --test tests/llmSafeText.test.mjs && pnpm run test:long-term-task && node --test tests/runtimeDependencyContract.test.mjs tests/dshRuntimeDepsCheck.test.mjs && pnpm run test:workspace-instructions && pnpm run test:pinned-skills && pnpm run test:release-regressions && pnpm run test:memory && pnpm run test:metaweb"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",

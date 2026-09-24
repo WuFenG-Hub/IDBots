@@ -306,7 +306,6 @@ import { shouldForwardCoworkStreamEvent } from './services/coworkStreamForwardin
 import type { DiscoverySnapshot } from './services/providerDiscoveryService';
 import { ProviderDiscoveryService } from './services/providerDiscoveryService';
 import { IdchatPresenceService } from './services/idchatPresenceService';
-import { fetchLocalPresenceSnapshot } from './services/p2pPresenceClient';
 import {
   ProviderPingService,
   resolveDelegationOrderability,
@@ -315,7 +314,6 @@ import {
   PrivateChatHistorySyncService,
   storePrivateChatHistoryMessages,
 } from './services/privateChatHistorySyncService';
-import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt, encryptGroupMessageECB } from './services/metaWebCrypto';
 import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, fetchGroupInfo, fetchGroupMembers, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { recordOutgoingGroupSend, hasOutgoingGroupSendSince } from './services/groupSendLedger';
@@ -329,8 +327,6 @@ import { freshGetUrlAndInit } from './services/freshFetch';
 import { resolveMetaidAvatarSource, resolvePinAssetSource } from './services/pinAssetService';
 import { buildMetafileUri } from './services/metaFileUploadShared';
 import { resolveMetaAppVisualFields } from './services/metaAppVisualService';
-import * as p2pIndexerService from './services/p2pIndexerService';
-import * as p2pConfigService from './services/p2pConfigService';
 import { runAppCleanup as runSharedAppCleanup } from './services/appCleanup';
 import { ensureMetaAppServerReady, stopMetaAppServer } from './services/metaAppLocalServer';
 import { createBotBrowserMetaAppCacheService, type BotBrowserMetaAppCacheService } from './services/botBrowserMetaAppCacheService';
@@ -421,7 +417,6 @@ import {
   installCommunityMetaApp,
   listCommunityMetaApps,
 } from './services/metaAppChainService';
-import { getP2PLocalBase } from './services/p2pLocalEndpoint';
 import { getMetaidRpcBase, getMetaidRpcToken } from './services/metaidRpcEndpoint';
 import { isSemanticallyEmptyMetaidInfoPayload } from './services/metabotRestoreService';
 import {
@@ -3071,13 +3066,6 @@ const ensurePrivateChatListenerReady = async (
   return { success: true };
 };
 
-const syncP2PRuntimeConfigForCurrentMetabots = async (): Promise<void> => {
-  await syncP2PRuntimeConfig({
-    store: getStore(),
-    metabots: getMetabotStore().listMetabots(),
-    configPath: path.join(app.getPath('userData'), 'man-p2p-config.json'),
-  });
-};
 let storeInitPromise: Promise<SqliteStore> | null = null;
 
 const initStore = async (): Promise<SqliteStore> => {
@@ -6978,7 +6966,7 @@ const signOwnerBindingForLocalUser = async (
 
 /**
  * Wire the real MetaBot-management dependencies (wallet creation, gas subsidy,
- * owner-binding signing, on-chain sync, P2P refresh, active owner identity).
+ * owner-binding signing, on-chain sync, active owner identity).
  * Module-level (hoisted) so both the IPC handlers and getCoworkRunner() share
  * one wiring; the Twin-only metabot_manage tools and the manual UI IPC handlers
  * therefore run through the exact same code.
@@ -6998,7 +6986,6 @@ function getMetabotManageDeps(): MetabotManageDeps {
     signOwnerBinding: signOwnerBindingForLocalUser,
     syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
     syncEditChanges: (store, input) => syncMetaBotEditChangesToChain(store, input),
-    onAfterMutation: () => syncP2PRuntimeConfigForCurrentMetabots(),
     onAfterDelete: (deletedMetabot) => {
       // The Welcome Bot's onboarding guide (Bootstrap.md) is only meaningful
       // during initial setup; drop it once the Welcome Bot retires.
@@ -7041,7 +7028,6 @@ function getProviderDiscoveryService(): ProviderDiscoveryService {
   if (!providerDiscoveryService) {
     providerDiscoveryService = new ProviderDiscoveryService({
       presence: getIdchatPresenceService(),
-      fetchP2PPresence: () => fetchLocalPresenceSnapshot(getP2PLocalBase()),
     });
     providerDiscoveryService.subscribe((snapshot) => {
       emitProviderDiscoveryChanged(snapshot);
@@ -12809,7 +12795,6 @@ if (!gotTheLock) {
         skills: [],
         allow_chat_skills: input.allow_chat_skills ?? [],
       });
-      await syncP2PRuntimeConfigForCurrentMetabots();
       return { success: true, metabot };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to create metabot' };
@@ -12939,7 +12924,6 @@ if (!gotTheLock) {
         mnemonic: walletResult.mnemonic,
         path: walletResult.path,
       });
-      await syncP2PRuntimeConfigForCurrentMetabots();
       return { success: true, metabot, subsidy: subsidyResult };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -13263,7 +13247,6 @@ if (!gotTheLock) {
       console.log('[MetaBot] restore success', { id: metabot.id, name: metabot.name });
       // Restore hardcodes 'worker'; heal the zero-Twin edge (e.g. first-ever bot).
       store.ensureTwinExists();
-      await syncP2PRuntimeConfigForCurrentMetabots();
       // Re-read: ensureTwinExists may have promoted this bot to twin.
       return { success: true, metabot: store.getMetabotById(metabot.id) ?? metabot };
     } catch (error) {
@@ -15427,28 +15410,6 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     return false;
   });
 
-  // P2P indexer IPC handlers
-  ipcMain.handle('p2p:getStatus', () => p2pIndexerService.getP2PStatus());
-
-  ipcMain.handle('p2p:getConfig', () => p2pConfigService.getConfig(getStore()));
-
-  ipcMain.handle('p2p:setConfig', async (_e: Electron.IpcMainInvokeEvent, config: unknown) => {
-    const updated = p2pConfigService.setConfig(getStore(), config as Partial<import('./services/p2pConfigService').P2PConfig>);
-    await syncP2PRuntimeConfigForCurrentMetabots();
-    return updated;
-  });
-
-  ipcMain.handle('p2p:getPeers', async () => {
-    try {
-      const res = await fetch(`${getP2PLocalBase()}/api/p2p/peers`, { signal: AbortSignal.timeout(2000) });
-      if (!res.ok) return [];
-      const payload = await res.json();
-      return p2pIndexerService.unwrapPeersPayload(payload);
-    } catch {
-      return [];
-    }
-  });
-
   ipcMain.handle('metaid:getUserInfo', async (_e: Electron.IpcMainInvokeEvent, params: { globalMetaId: string }) => {
     try {
       return await fetchMetaidUserInfoByGlobalMetaId(params.globalMetaId);
@@ -16168,7 +16129,6 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       stopCognitiveOrchestrator,
       stopDreamService,
       stopMemoryHygieneService,
-      stopP2P: () => p2pIndexerService.stop(),
       stopProviderDiscovery: () => {
         if (providerDiscoveryService) {
           providerDiscoveryService.dispose();
@@ -16263,19 +16223,6 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     // RPC server / daemons can broadcast the first pin.
     getChainContentHistoryStore();
     startupLog('chain content history store ready');
-
-    // Start man-p2p local indexer (non-fatal if binary not present)
-    try {
-      const dataDir = path.join(app.getPath('userData'), 'man-p2p');
-      const configPath = path.join(app.getPath('userData'), 'man-p2p-config.json');
-      fs.mkdirSync(dataDir, { recursive: true });
-      await syncP2PRuntimeConfigForCurrentMetabots();
-      await p2pIndexerService.start(dataDir, configPath);
-      console.log('[p2p] man-p2p started');
-      startupLog('p2p ready');
-    } catch (err) {
-      console.warn('[p2p] man-p2p failed to start, continuing without local indexer:', err);
-    }
 
     const listenerConfig = getListenerConfigFromStore();
     startupLog(`listener config loaded (enabled=${shouldRunListener(listenerConfig)})`);

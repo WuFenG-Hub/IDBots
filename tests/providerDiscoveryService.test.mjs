@@ -36,17 +36,6 @@ function createPresenceStub(statuses = {}, options = {}) {
   };
 }
 
-function healthyP2PPresence(onlineBots = {}) {
-  return {
-    healthy: true,
-    peerCount: Object.keys(onlineBots).length > 0 ? 1 : 0,
-    onlineBots,
-    unhealthyReason: null,
-    lastConfigReloadError: null,
-    nowSec: 200,
-  };
-}
-
 test('provider discovery queries idchat online-status for unique service provider globalMetaIds', async () => {
   const { ProviderDiscoveryService } = loadProviderDiscoveryService();
   const presence = createPresenceStub({
@@ -54,7 +43,6 @@ test('provider discovery queries idchat online-status for unique service provide
   });
   const service = new ProviderDiscoveryService({
     presence,
-    fetchP2PPresence: async () => healthyP2PPresence({ idq1providerb: { lastSeenSec: 190, expiresAtSec: 260, peerIds: ['peer-b'] } }),
     now: () => 200_000,
   });
 
@@ -75,14 +63,11 @@ test('provider discovery queries idchat online-status for unique service provide
   assert.equal(snapshot.providers['idq1providerb::mvc-b'].online, false);
 });
 
-test('provider discovery falls back to P2P presence only when idchat online-status fails', async () => {
+test('provider discovery marks providers offline when idchat online-status fails', async () => {
   const { ProviderDiscoveryService } = loadProviderDiscoveryService();
   const presence = createPresenceStub({}, { fail: 'idchat unavailable' });
   const service = new ProviderDiscoveryService({
     presence,
-    fetchP2PPresence: async () => healthyP2PPresence({
-      idq1providera: { lastSeenSec: 190, expiresAtSec: 260, peerIds: ['peer-a'] },
-    }),
     now: () => 200_000,
   });
 
@@ -93,22 +78,20 @@ test('provider discovery falls back to P2P presence only when idchat online-stat
   await service.refreshNow();
 
   const snapshot = service.getDiscoverySnapshot();
-  assert.deepEqual(snapshot.onlineBots, { idq1providera: 190 });
-  assert.deepEqual(snapshot.availableServices.map((entry) => entry.serviceName), ['alpha']);
-  assert.equal(snapshot.providers['idq1providera::mvc-a'].lastSource, 'p2p_presence');
+  assert.deepEqual(snapshot.onlineBots, {});
+  assert.deepEqual(snapshot.availableServices, []);
+  assert.equal(snapshot.providers['idq1providera::mvc-a'].online, false);
+  assert.equal(snapshot.providers['idq1providera::mvc-a'].lastError, 'online_status_failed');
   assert.equal(snapshot.providers['idq1providerb::mvc-b'].online, false);
 });
 
-test('provider discovery does not use P2P presence when idchat says provider is offline', async () => {
+test('provider discovery keeps provider offline when idchat says provider is offline', async () => {
   const { ProviderDiscoveryService } = loadProviderDiscoveryService();
   const presence = createPresenceStub({
     idq1providera: { isOnline: false, lastSeenAt: 199000, deviceCount: 0 },
   });
   const service = new ProviderDiscoveryService({
     presence,
-    fetchP2PPresence: async () => healthyP2PPresence({
-      idq1providera: { lastSeenSec: 199, expiresAtSec: 260, peerIds: ['peer-a'] },
-    }),
     now: () => 200_000,
   });
 
@@ -129,7 +112,6 @@ test('provider discovery treats provider without globalMetaId as offline without
   const presence = createPresenceStub();
   const service = new ProviderDiscoveryService({
     presence,
-    fetchP2PPresence: async () => healthyP2PPresence(),
     now: () => 200_000,
   });
 
@@ -153,7 +135,6 @@ test('provider discovery keeps ping-failed provider offline until explicitly cle
   });
   const service = new ProviderDiscoveryService({
     presence,
-    fetchP2PPresence: async () => healthyP2PPresence(),
     now: () => 200_000,
   });
 
@@ -184,7 +165,6 @@ test('provider discovery only emits on material changes unless rebroadcast is re
   });
   const service = new ProviderDiscoveryService({
     presence,
-    fetchP2PPresence: async () => healthyP2PPresence(),
     now: () => 140_000,
   });
 

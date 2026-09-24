@@ -140,7 +140,7 @@ jobs:
 
       - name: Validate runtime dependency contracts
         run: |
-          node --test tests/runtimeDependencyContract.test.mjs tests/p2pIndexerServiceRecovery.test.mjs tests/dshRuntimeDepsCheck.test.mjs
+          node --test tests/runtimeDependencyContract.test.mjs tests/dshRuntimeDepsCheck.test.mjs
           # Depth defense: prove the kernel patches survived every install
           # step above (they live in gitignored node_modules, so nothing else
           # would catch a step that reinstalls dsh-runtime after the apply).
