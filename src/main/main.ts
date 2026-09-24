@@ -281,6 +281,7 @@ import { collectSleepGuardWorkFrom } from './sleepGuardWorkSources';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
+import { DREAM_RETRY_MAX_ATTEMPTS } from './libs/dreamRetryPolicy';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession, SkillTurnTimeoutError } from './services/orchestratorCoworkBridge';
 import { withChainWriteBudget } from './libs/chainWriteBudget';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
@@ -12329,7 +12330,7 @@ if (!gotTheLock) {
         // when the scheduler will pick the date up again on its own.
         const runs = getDreamStore().listRecentRuns(metabotId, options?.limit).map((run) => ({
           ...run,
-          nextRetryAt: run.status === 'failed'
+          nextRetryAt: run.status === 'failed' && run.attemptCount < DREAM_RETRY_MAX_ATTEMPTS
             ? run.startedAt + computeDreamRetryDelayMs(run.attemptCount)
             : null,
         }));

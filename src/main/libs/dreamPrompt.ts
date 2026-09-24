@@ -10,6 +10,7 @@ import { formatBotWorkspaceDate } from './botWorkspace';
 import { estimateCoworkTextTokens } from './coworkContextBudget';
 import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 import type { DreamActivityChunk } from './dreamFragments';
+import { DREAM_RETRY_MAX_ATTEMPTS } from './dreamRetryPolicy';
 
 /**
  * Dream prompt building and output parsing — pure functions, no I/O.
@@ -165,7 +166,9 @@ export type DreamParseResult =
   | { ok: false; error: string };
 
 export interface DreamRunStateLike {
-  status: 'running' | 'completed' | 'failed';
+  /** terminal-failed = deterministic failure or exhausted retry budget: the
+   * scheduler never queues the date again (manual dream runs still can). */
+  status: 'running' | 'completed' | 'failed' | 'terminal-failed';
   attemptCount: number;
   /** Run start (epoch ms). A completed run is final only when it started after
    * the dream date ended — i.e. it reviewed the whole day. */
@@ -213,7 +216,9 @@ export function computeDreamRetryDelayMs(attemptCount: number): number {
  *   their backoff expires.
  * - Running dates are skipped; failed dates retry after bounded exponential
  *   backoff, so a transient provider failure does not exhaust the date after
- *   a few tightly grouped attempts.
+ *   a few tightly grouped attempts. Deterministic failures (provider 4xx
+ *   rejections) and exhausted retry budgets are terminal-failed and never
+ *   queue again.
  * - A completed run is *final* only when it started after the dream date
  *   ended (it covered the whole day). A non-final run — e.g. triggered
  *   manually mid-day — is due again in the next eligible window.
@@ -240,7 +245,11 @@ export function computeDueDreamDates(input: {
     const dateStr = formatBotWorkspaceDate(candidate);
     const state = input.runStates.get(dateStr);
     if (state?.status === 'running') continue;
+    if (state?.status === 'terminal-failed') continue;
     if (state?.status === 'failed') {
+      // Rows that burned the retry budget before terminal-failed existed
+      // degrade here instead of retrying forever.
+      if (state.attemptCount >= DREAM_RETRY_MAX_ATTEMPTS) continue;
       const retryAt = state.startedAt + computeDreamRetryDelayMs(state.attemptCount);
       if (input.now.getTime() < retryAt) continue;
     }

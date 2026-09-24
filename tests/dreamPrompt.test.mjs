@@ -91,13 +91,15 @@ test('computeDueDreamDates: completed/running dates are skipped and failed dates
     ['2026-08-01', { status: 'completed', attemptCount: 1, startedAt: new Date(2026, 7, 2, 0, 30).getTime(), dreamVersion: 99 }],
     ['2026-07-31', { status: 'running', attemptCount: 1, startedAt: 0, dreamVersion: 0 }],
     ['2026-07-30', { status: 'failed', attemptCount: 3, startedAt: new Date(2026, 7, 2, 2, 30).getTime(), dreamVersion: 0 }],
+    // H-80: attempts at/above the retry cap degrade — the date stops
+    // queueing instead of retrying forever at the 6h-capped backoff.
     ['2026-07-29', { status: 'failed', attemptCount: 99, startedAt: new Date(2026, 7, 1, 20, 0).getTime(), dreamVersion: 0 }],
   ]);
   const { dueDates, repairDates } = computeDueDreamDates({ now, metabotId: 1, runStates });
   assert.equal(dueDates.includes('2026-08-01'), false);
   assert.equal(dueDates.includes('2026-07-31'), false);
   assert.equal(dueDates.includes('2026-07-30'), false, 'recent failure waits for its retry delay');
-  assert.ok(dueDates.includes('2026-07-29'), 'even a high attempt count becomes eligible after bounded backoff');
+  assert.equal(dueDates.includes('2026-07-29'), false, 'a failed date at the attempt cap degrades instead of retrying forever');
   assert.deepEqual(repairDates, [], 'current-version completed runs are fully settled');
 });
 
