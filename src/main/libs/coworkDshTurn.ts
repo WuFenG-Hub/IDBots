@@ -323,6 +323,8 @@ export function buildDshChildEnv(parts: {
   rpcToken: string
   rpcAuthFile: string
   skillHostEnv?: Record<string, string>
+  /** Absolute path used as DSH_HOME for the runtime process. */
+  dshHome?: string
 }): Record<string, string> {
   return {
     ...Object.fromEntries(
@@ -331,6 +333,10 @@ export function buildDshChildEnv(parts: {
     ...(parts.webSearchApiKey ? { [DSH_WEBSEARCH_API_KEY_ENV]: parts.webSearchApiKey } : {}),
     IDBOTS_RPC_TOKEN: parts.rpcToken,
     [METAID_RPC_AUTHFILE_ENV]: parts.rpcAuthFile,
+    // 0.1.7: pin the kernel home under userData so the DeepSeek Files-API
+    // id-reuse cache (llm-deepseek/files-v3.json) and any other kernel home
+    // state live in app-managed storage instead of ~/.dsh.
+    ...(parts.dshHome ? { DSH_HOME: parts.dshHome } : {}),
     ...(parts.skillHostEnv ?? {}),
   }
 }
@@ -1107,9 +1113,12 @@ export class DshTurnHub {
       // scoped registration) — keeping them out of the config is what stops
       // every new session's prompt from restarting this slot's runtime.
       workspace: slot.workspaceSeen ?? input.workspace,
-      // Pin the user-global AGENTS.md home to an empty directory under
-      // userData: the host never reads ~/.dsh, so a global instruction file
-      // left over from another harness cannot silently enter every session.
+      // Pin the user-global AGENTS.md home to a controlled directory under
+      // userData: a global instruction file left over from another harness
+      // cannot silently enter every session. Since 0.1.7 the same directory
+      // is the runtime's real DSH_HOME (see buildDshChildEnv) — kernel home
+      // state like the Files-API image cache lands there too, which is fine:
+      // it stays app-managed either way.
       ...(slot.workspaceSeen ?? input.workspace) ? {
         workspaceInstructions: { dshHome: join(app.getPath('userData'), 'dsh-home') },
       } : {},
@@ -1128,6 +1137,7 @@ export class DshTurnHub {
         rpcToken: getMetaidRpcToken(),
         rpcAuthFile: getMetaidRpcTokenFilePath(app.getPath('userData')),
         skillHostEnv: this.opts.skillHostEnvProvider?.(),
+        dshHome: join(app.getPath('userData'), 'dsh-home'),
       }),
     }
   }
