@@ -17,6 +17,22 @@ export type CoworkPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassP
 // Cowork message types
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 
+// Known origins of a user-type cowork message (who/what submitted the turn).
+// 'user' = local human via the composer, 'quick_action' = human via a quick
+// action entry, 'heartbeat' = long-term task heartbeat, 'schedule' = cron
+// task, 'cross_session' = forwarded from another local session,
+// 'metaweb_group'/'metaweb_private' = relayed MetaWeb messages,
+// 'orchestrator' = orchestrator-injected turn.
+export type CoworkMessageOrigin =
+  | 'user'
+  | 'quick_action'
+  | 'heartbeat'
+  | 'schedule'
+  | 'cross_session'
+  | 'metaweb_group'
+  | 'metaweb_private'
+  | 'orchestrator';
+
 // Cowork execution mode
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 
@@ -48,6 +64,16 @@ export interface CoworkMessageMetadata {
   isThinking?: boolean;
   isDelegationInternal?: boolean;
   skillIds?: string[];
+  /**
+   * Origin of a user-type message — who/what submitted this turn
+   * (composer, heartbeat, scheduled task, cross-session forward, MetaWeb
+   * group/private relay, orchestrator, ...). Absent on legacy messages; the
+   * renderer falls back to heuristics (submission metadata, sourceChannel,
+   * session type) and finally 'user'.
+   */
+  origin?: CoworkMessageOrigin;
+  /** Optional human-readable detail for the origin (e.g. scheduled task name). */
+  originLabel?: string;
   /**
    * Prevent renderer stream listeners from treating this message as a new active run.
    * Used for passive A2A follow-up messages that should appear after completion without

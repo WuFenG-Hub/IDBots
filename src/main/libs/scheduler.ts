@@ -333,6 +333,7 @@ export class Scheduler {
     this.coworkStore.addMessage(sessionId, {
       type: 'user',
       content: task.prompt,
+      metadata: { origin: 'schedule', originLabel: task.name },
     });
 
     // Start the session with normal permission flow (no auto-approve).

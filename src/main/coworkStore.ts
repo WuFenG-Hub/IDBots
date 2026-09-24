@@ -581,6 +581,15 @@ export interface CoworkMessageMetadata {
   skillIds?: string[];
   /** Marks a user turn filled verbatim from a quick action (建议操作) entry. */
   source?: 'quick_action';
+  /**
+   * Origin of a user-type message — who/what submitted this turn
+   * (composer, heartbeat, scheduled task, cross-session forward, MetaWeb
+   * group/private relay, orchestrator, ...). Absent on legacy messages; the
+   * renderer falls back to heuristics and finally 'user'.
+   */
+  origin?: 'user' | 'quick_action' | 'heartbeat' | 'schedule' | 'cross_session' | 'metaweb_group' | 'metaweb_private' | 'orchestrator';
+  /** Optional human-readable detail for the origin (e.g. scheduled task name). */
+  originLabel?: string;
   suppressRunningStatus?: boolean;
   [key: string]: unknown;
 }

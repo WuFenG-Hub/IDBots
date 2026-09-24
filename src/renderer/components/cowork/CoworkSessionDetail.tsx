@@ -24,6 +24,7 @@ import UsageStatsChip from './UsageStatsChip';
 import LongTermTaskOriginChip from '../longTermTasks/LongTermTaskOriginChip';
 import ManualCompactButton from './ManualCompactButton';
 import A2AMessageItem from './A2AMessageItem';
+import UserMessageOriginBadge from './UserMessageOriginBadge';
 import MessageFeedbackControls from './MessageFeedbackControls';
 import { ThinkingBlock, splitThinkTaggedContent } from './ThinkingBlock';
 import { shouldHideA2AInternalMessage, lastA2AErrorDetail } from './a2aInternalMessageFilter';
@@ -1532,7 +1533,9 @@ const renderGigSquareCard = (content: string): React.ReactNode | null => {
 const UserMessageItem: React.FC<{
   message: CoworkMessage;
   skills: Skill[];
-}> = ({ message, skills }) => {
+  sessionType?: string;
+  sessionTitle?: string;
+}> = ({ message, skills, sessionType, sessionTitle }) => {
   const [isHovered, setIsHovered] = useState(false);
   const isSteerMessage = message.metadata?.interactionKind === 'steer';
   const steerStatusKey = isSteerMessage
@@ -1557,6 +1560,11 @@ const UserMessageItem: React.FC<{
           <div className="pl-4 sm:pl-8 md:pl-12">
             <div className="flex items-start gap-3 flex-row-reverse">
               <div className="w-full min-w-0 flex flex-col items-end">
+                <UserMessageOriginBadge
+                  message={message}
+                  sessionType={sessionType}
+                  sessionTitle={sessionTitle}
+                />
                 <div className="w-fit max-w-[min(646px,82%)]">
                   {gigSquareCard}
                 </div>
@@ -1578,6 +1586,11 @@ const UserMessageItem: React.FC<{
         <div className="pl-4 sm:pl-8 md:pl-12">
           <div className="flex items-start gap-3 flex-row-reverse">
             <div className="w-full min-w-0 flex flex-col items-end">
+              <UserMessageOriginBadge
+                message={message}
+                sessionType={sessionType}
+                sessionTitle={sessionTitle}
+              />
               <div className="w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text shadow-subtle">
                 <MarkdownContent
                   content={message.content}
@@ -3753,6 +3766,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               <UserMessageItem
                 message={turn.userMessage}
                 skills={skills}
+                sessionType={currentSession?.sessionType}
+                sessionTitle={currentSession?.title}
               />
             </div>
           )}
