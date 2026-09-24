@@ -40,11 +40,47 @@ const MAN_BASE = 'https://man.metaid.io';
 
 /** Keep large indexer payloads from flooding the conversation. */
 const MAX_RESULT_CHARS = 20000;
+// The dsh-runtime tool-result shaper (plugins/idbots-tool-result-shaping.mjs)
+// head+tail-cuts any result over MAX_RESULT_CHARS — H-71: a 238KB indexer page
+// came back as a spill file cut at char 16000 (mid-JSON, cursor field gone)
+// under a "Full formatted result stored at:" banner. Reserve room for the
+// truncation note so omni_read output always stays under that cap: the spill
+// file then holds this tool's complete, honestly-declared output, unshaped.
+const TRUNCATION_NOTE_RESERVE = 256;
+
+/**
+ * The pagination token echoed by the indexer, if any. manapi paged responses
+ * carry cursor/nextCursor at the top level or under `data`; show.now buzz
+ * lists echo lastId. A truncated page is only recoverable if the note names
+ * the token and its value — the old note pointed at a field it had just cut
+ * out of the JSON.
+ */
+function responseCursor(data: unknown): { key: string; value: string } | null {
+  if (data === null || typeof data !== 'object') return null;
+  const scopes: Array<Record<string, unknown>> = [data as Record<string, unknown>];
+  const nested = (data as Record<string, unknown>).data;
+  if (nested !== null && typeof nested === 'object') scopes.push(nested as Record<string, unknown>);
+  for (const scope of scopes) {
+    for (const key of ['cursor', 'nextCursor', 'lastId'] as const) {
+      const value = scope[key];
+      if (typeof value === 'string' && value.trim()) return { key, value: value.trim() };
+    }
+  }
+  return null;
+}
+
+function truncationNote(kept: number, total: number, cursor: { key: string; value: string } | null): string {
+  if (cursor) {
+    return `[omni_read: first ${kept} of ${total} chars — ${cursor.key} "${cursor.value}" present; re-run with ${cursor.key}="${cursor.value}" for the next page]`;
+  }
+  return `[omni_read: first ${kept} of ${total} chars — no pagination cursor in the response; narrow the query (page/size) to reach the rest]`;
+}
 
 function formatData(data: unknown): string {
   const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
-  if (text.length > MAX_RESULT_CHARS) {
-    return `${truncateUtf16Units(text, MAX_RESULT_CHARS)}\n...(truncated, narrow the query with cursor/size)`;
+  if (text.length > MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE) {
+    const kept = truncateUtf16Units(text, MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE);
+    return `${kept}\n${truncationNote(kept.length, text.length, responseCursor(data))}`;
   }
   return text;
 }
@@ -376,9 +412,11 @@ export function buildOmniReaderAgentTools(deps: {
             // Fire-and-forget chain-read ledger entry; the raw content body
             // has no metadata, so only pin id + text are recorded.
             recordChainReadSafe(readInputFromOmniJson(args.action, body, pinId, resolveMetabotId?.(sessionId ?? '')));
-            const text = body.length > MAX_RESULT_CHARS
-              ? `${truncateUtf16Units(body, MAX_RESULT_CHARS)}\n...(truncated, narrow the query with cursor/size)`
-              : body;
+            let text = body;
+            if (body.length > MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE) {
+              const kept = truncateUtf16Units(body, MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE);
+              text = `${kept}\n[omni_read: first ${kept.length} of ${body.length} chars — raw content body; no pagination cursor]`;
+            }
             return textResult(text);
           }
 

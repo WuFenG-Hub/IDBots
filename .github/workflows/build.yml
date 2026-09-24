@@ -156,6 +156,12 @@ jobs:
       - name: Run MetaWeb agent-tool tests
         run: pnpm run test:metaweb
 
+      # Behavioral regression for the omni_read shaping-cap fix (H-71): a
+      # truncated read must declare first-N-of-M plus a resume cursor instead
+      # of spilling silently. Runs compile:electron first (project convention).
+      - name: Run omni-read agent-tool tests
+        run: pnpm run test:omni-read
+
       - name: Install web-search skill dependencies
         working-directory: SKILLs/web-search
         run: pnpm install --frozen-lockfile

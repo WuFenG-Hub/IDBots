@@ -330,13 +330,60 @@ test('results are pretty-printed JSON', async () => {
   assert.equal(result.content[0].text, JSON.stringify({ code: 0, data: { name: 'alice' } }, null, 2));
 });
 
-test('oversized results are truncated with a narrowing note', async () => {
+test('oversized results carry an honest first-N-of-M note and stay under the 20k shaping cap', async () => {
   const big = { data: 'x'.repeat(30000) };
   const { byName } = makeHarness({ fetchJsonResult: big });
   const result = await byName.omni_read.handler({ action: 'indexer_stats' });
   assert.equal(result.isError, undefined);
-  assert.match(result.content[0].text, /\(truncated, narrow the query with cursor\/size\)/);
-  assert.ok(result.content[0].text.length < 30000);
+  const text = result.content[0].text;
+  const total = JSON.stringify(big, null, 2).length;
+  // H-71: the runtime shaper (dsh-runtime/plugins/idbots-tool-result-shaping.mjs)
+  // head+tail-cuts anything over 20000 chars, so a bigger omni_read result used
+  // to spill as a mid-JSON-cut file under a "Full formatted result" banner.
+  // omni_read output must stay at or under that cap; the spill file then holds
+  // the complete declared output.
+  assert.ok(text.length <= 20000, `output stays under the shaping cap (got ${text.length})`);
+  assert.match(text, new RegExp(`\\[omni_read: first \\d+ of ${total} chars — `));
+  assert.ok(text.includes('no pagination cursor in the response'), 'honestly reports the missing cursor');
+  assert.ok(!text.includes('(truncated, narrow the query with cursor/size)'), 'the old misleading note is gone');
+});
+
+test('truncation note surfaces the response pagination token so the page is recoverable', async () => {
+  // manapi shape: the cursor sits under data — exactly the field the old
+  // 20000-char head cut removed, leaving the note pointing at nothing.
+  const cursor = '4f3c9d1e77a2b608c5e4f19d2a8b7306c95e14f8d27a60b3c8e91f45d2076ab' + 'i0';
+  const big = {
+    code: 0,
+    data: { list: [{ pin: { id: 'p1' }, summary: 'y'.repeat(30000) }], total: 53825, cursor },
+  };
+  const { byName } = makeHarness({ fetchJsonResult: big });
+  const result = await byName.omni_read.handler({ action: 'pins_by_path', path: '/p', size: 100 });
+  const text = result.content[0].text;
+  assert.ok(text.length <= 20000, `output stays under the shaping cap (got ${text.length})`);
+  assert.ok(
+    text.includes(`cursor "${cursor}" present; re-run with cursor="${cursor}" for the next page`),
+    'note echoes the usable cursor value',
+  );
+});
+
+test('truncation note also recognizes top-level nextCursor and nested lastId', async () => {
+  const topCursor = { code: 0, nextCursor: 'nc1', data: 'z'.repeat(30000) };
+  const { byName } = makeHarness({ fetchJsonResult: topCursor });
+  const top = await byName.omni_read.handler({ action: 'indexer_stats' });
+  assert.ok(top.content[0].text.includes('nextCursor "nc1" present'));
+
+  const lastId = { code: 0, data: { list: ['a'.repeat(30000)], lastId: 'L9' } };
+  const { byName: byName2 } = makeHarness({ fetchJsonResult: lastId });
+  const nested = await byName2.omni_read.handler({ action: 'buzz_hot', size: 10 });
+  assert.ok(nested.content[0].text.includes('lastId "L9" present'));
+});
+
+test('pin_content truncation declares first-N-of-M on the raw body', async () => {
+  const { byName } = makeHarness({ fetchTextResult: 'b'.repeat(30000) });
+  const result = await byName.omni_read.handler({ action: 'pin_content', pinId: 'txid1i0' });
+  const text = result.content[0].text;
+  assert.ok(text.length <= 20000, `output stays under the shaping cap (got ${text.length})`);
+  assert.match(text, /\[omni_read: first \d+ of 30000 chars — raw content body; no pagination cursor\]/);
 });
 
 test('fetch failures surface as an error result without throwing', async () => {
@@ -351,4 +398,20 @@ test('pin_content fetchText failures surface as an error result', async () => {
   const result = await byName.omni_read.handler({ action: 'pin_content', pinId: 'missingi0' });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /omni_read pin_content failed: HTTP 404/);
+});
+
+test('complete under-cap results carry no truncation note (three states stay mutually exclusive)', async () => {
+  // H-71 探针（对侧验收亦用此形态）：
+  // 完整页（无 cursor、未截断）⇒ 不得出现 first-N-of-M
+  // 若该状态实现上不可能出现，则「断言其不可能」本身就是护栏。
+  const small = { code: 0, data: { list: [{ id: 'p1' }], total: 1 } };
+  const { byName } = makeHarness({ fetchJsonResult: small });
+  const text = (await byName.omni_read.handler({ action: 'indexer_status' })).content[0].text;
+  assert.ok(text.length <= 20000);
+  assert.ok(!/first \d+ of \d+ chars/.test(text), 'complete page must not declare a truncation');
+  assert.ok(
+    !text.includes('no pagination cursor in the response'),
+    'complete page must not declare a missing cursor',
+  );
+  assert.equal(text, JSON.stringify(small, null, 2), 'complete page is the exact pretty-printed body');
 });
