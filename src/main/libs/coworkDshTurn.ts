@@ -37,7 +37,10 @@ import { DshShutdownError } from './dshShutdownError'
 function isUnexpectedRuntimeExitError(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error ?? '')
   if (text.includes('DshKernel: closed') || text.includes('DshTurnHub: shutting down')) return false
-  return /runtime exited|stream closed/i.test(text)
+  // "runtime is not running" is the request-side face of the same death (a
+  // call raced the crash before the notification pump marked the client
+  // dead) — it must respawn too, not fail the turn.
+  return /runtime exited|stream closed|runtime is not running/i.test(text)
 }
 import type { DshKernelOptions } from './dshKernel/dshKernel'
 import { dshModelReasoningDeclaration } from './dshModelReasoning'
