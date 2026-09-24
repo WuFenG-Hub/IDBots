@@ -762,11 +762,16 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
   // Resolve display name and avatar.
   // For local sender: always use the session-level metabotName/metabotAvatar — never
   // message.metadata.senderAvatar, which stores the *peer's* avatar for incoming messages.
-  // For peer sender: prefer session-level peerAvatar (already resolved to HTTPS) over
-  // message-level senderAvatar (raw MetaWeb value, may be unresolved metafile:// URL).
+  // For peer sender: prefer the session-level peerName/peerAvatar over the message-level
+  // senderName/senderAvatar snapshot. Session-level values are refreshed from the peer's
+  // latest on-chain profile (a2aPeerProfileRefresh, triggered on session open and on
+  // incoming messages), whereas senderName/senderAvatar are captured once from the socket
+  // payload at ingest time — they lag behind a peer rename and the indexer may resolve
+  // historical names. Name and avatar share the same precedence; the snapshot is only a
+  // fallback (senderAvatar is the raw MetaWeb value, possibly an unresolved metafile:// URL).
   const fromName = isLocal
     ? (metabotName || 'MetaBot')
-    : ((message.metadata?.senderName as string | undefined) || peerName || 'Peer');
+    : ((peerName || (message.metadata?.senderName as string | undefined)) || 'Peer');
   const senderAvatar = message.metadata?.senderAvatar as string | undefined;
   const fromAvatar = isLocal
     ? pickRenderableAvatarSource(metabotAvatar)
