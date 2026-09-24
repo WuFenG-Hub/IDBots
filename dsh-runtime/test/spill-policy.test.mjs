@@ -1,11 +1,12 @@
-// Spill-policy + tool-result-pruner E2E (0.1.5).
+// Spill-policy + tool-result-pruner E2E (0.1.7 token-budget form).
 //
 // Workspace compositions mount the spill trio under idbots-tool-result-shaping's
-// hard cap: mid-size all-text tool results (8–20KB) spill to a session-scoped
-// file with the ORIGINAL text recoverable (shaping never engages), while
-// oversized results (>20KB) still take the shaping trim first and spill the
-// trimmed text — history stays bounded either way, and the durable entry
-// carries a "Full formatted result stored at:" notice with the spill path.
+// hard cap: mid-size all-text tool results (over the ~2048-token policy budget,
+// under 20KB) spill to a session-scoped file with the ORIGINAL text recoverable
+// (shaping never engages), while oversized results (>20KB) still take the
+// shaping trim first and spill the trimmed text — history stays bounded either
+// way, and the durable entry carries a "Full formatted result stored at:"
+// notice with the spill path.
 //
 // Run: node test/spill-policy.test.mjs   (from dsh-runtime/)
 
@@ -41,10 +42,10 @@ const main = async () => {
     ],
   })
   // Composition shape: spill trio mounted, pruner present, policy cap under
-  // the shaping budget (default 8192 < 20000).
+  // the shaping budget (default 2048 tokens ≈ the old 8192-byte cap).
   assert.ok(config.find((e) => e.id === 'spill-local'), 'spill-local mounted')
   assert.ok(config.find((e) => e.id === 'spill-policy'), 'spill-policy mounted')
-  assert.equal(config.find((e) => e.id === 'spill-policy')?.config?.maxInlineBytes, 8192, 'default spill cap')
+  assert.equal(config.find((e) => e.id === 'spill-policy')?.config?.maxInlineTokens, 2048, 'default spill cap')
   assert.ok(config.find((e) => e.id === 'tool-result-pruner'), 'tool-result pruner mounted')
   const configPath = path.join(os.tmpdir(), `dsh-spill-${Date.now()}.json`)
   fs.writeFileSync(configPath, JSON.stringify(config))

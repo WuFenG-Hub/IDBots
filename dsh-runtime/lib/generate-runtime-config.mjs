@@ -35,7 +35,7 @@
 //     model: string,                     //   model for the auxiliary search call
 //   },                                   //   mounted once the host has seen a DeepSeek provider
 //   workspace?: { cwd: string },       // mounts DSH-native bash/fs tools at cwd
-//   spill?: { maxInlineBytes?: number }, // 0.1.5 spill-policy cap (default 8192;
+//   spill?: { maxInlineTokens?: number }, // 0.1.7 spill-policy cap in estimated tokens (default 2048;
 //                                        // workspace compositions only)
 //   subagentModelSelection?: {          // child-delegation model choice (0.1.2):
 //     enabled?: boolean,                //   default true; allowlist = every configured
@@ -59,7 +59,9 @@
 // apiFormats (openai-completions / openai-responses / anthropic-messages),
 // which also resolves the Phase 0 open question about the Responses API.
 // The official DeepSeek route is the exception: it rides its first-party
-// dsh-llm-deepseek adapter (chat-completions) via `native: true` on the route.
+// dsh-llm-deepseek adapter (Messages API since 0.1.7 — the chat-completions
+// wire and the `protocol` option were removed) via `native: true` on the
+// route.
 
 const API_FORMAT_TO_PROTOCOL = {
   openai: 'openai-completions',
@@ -69,25 +71,34 @@ const API_FORMAT_TO_PROTOCOL = {
 
 const sanitizeRouteKey = (key) => String(key).replace(/[^a-zA-Z0-9_-]/g, '-')
 
-/** DeepSeek official chat-completions wire: thinking disabled (`off`) or
- *  reasoning_effort low/high/max. Kept for the effort ladder documentation;
- *  the native adapter validates it itself. */
+/** DeepSeek official Messages-API wire: thinking disabled (`off`) or
+ *  reasoning_effort low/high/max (`output_config.effort`). Kept for the
+ *  effort ladder documentation; the native adapter validates it itself. */
 const NATIVE_DEEPSEEK_DEFAULT_MAX_TOKENS = 32_768
 
-/** Normalize any DeepSeek provider base URL onto the host root the native
- *  adapter expects (it appends `/chat/completions` itself): `…/responses`,
- *  `…/anthropic`, `…/anthropic/v1`, and `…/v1` style bases all collapse to
- *  the bare origin — DeepSeek serves chat completions at the root. */
-const deepSeekChatBaseURL = (baseUrl) => {
+/** Normalize any DeepSeek provider base URL onto the Messages API root the
+ *  0.1.7 native adapter expects (it appends `/v1/messages` unless the path
+ *  already ends in `/v1`; the official root is `https://api.deepseek.com/
+ *  anthropic`). Historical chat-completions-era shapes — bare origin,
+ *  `…/v1`, `…/responses`, `…/anthropic`, `…/anthropic/v1`, and a leftover
+ *  `…/chat/completions` suffix — all collapse to `<origin>/anthropic`.
+ *  The native route only ever targets api.deepseek.com (coworkRunner gates
+ *  on the host), so collapsing to the origin is safe; an empty input returns
+ *  undefined so the entry omits baseURL and the adapter default applies. */
+const deepSeekMessagesBaseURL = (baseUrl) => {
   let base = String(baseUrl ?? '').trim().replace(/\/+$/, '')
-  base = base.replace(/\/responses$/, '')
-  base = base.replace(/\/anthropic\/v\d+$/, '')
-  base = base.replace(/\/anthropic$/, '')
-  base = base.replace(/\/v\d+$/, '')
-  return base
+  base = base.replace(/\/chat\/completions$/i, '')
+  base = base.replace(/\/responses$/i, '')
+  base = base.replace(/\/anthropic\/v\d+$/i, '')
+  base = base.replace(/\/anthropic$/i, '')
+  base = base.replace(/\/v\d+$/i, '')
+  return base.length > 0 ? `${base}/anthropic` : undefined
 }
 
-/** Official adapter request-image budgets (dsh-llm-deepseek 0.1.1 defaults). */
+/** Official adapter request-image budgets. These are IDBots-pinned caps
+ *  (carried since 0.1.1), deliberately tighter than the 0.1.7 adapter
+ *  defaults (V4.1 token grid ≈1302² / 2 MiB): kept per the 2026-09-24
+ *  upgrade review to hold request-image cost stable across the bump. */
 const NATIVE_DEEPSEEK_IMAGE_PIXEL_BUDGET = 640_000
 const NATIVE_DEEPSEEK_IMAGE_MAX_BYTES = 1_048_576
 
@@ -115,7 +126,11 @@ const nativeDeepSeekEntry = (provider) => ({
   name: '@deepseek-ai/dsh-llm-deepseek',
   config: {
     apiKeyEnv: provider.apiKeyEnv,
-    baseURL: deepSeekChatBaseURL(provider.baseUrl),
+    // 0.1.7 Messages-API root (`<origin>/anthropic`); undefined omits the key
+    // so the adapter default (https://api.deepseek.com/anthropic) applies.
+    ...(deepSeekMessagesBaseURL(provider.baseUrl) !== undefined
+      ? { baseURL: deepSeekMessagesBaseURL(provider.baseUrl) }
+      : {}),
     thinking: 'enabled',
     reasoningEffort: 'high',
     // Without this the adapter default (5 retries, 500ms→10s) applies — too
@@ -127,6 +142,11 @@ const nativeDeepSeekEntry = (provider) => ({
       name: model.id,
       contextWindow: model.contextWindow,
       maxTokens: Number.isFinite(model.maxOutputTokens) ? model.maxOutputTokens : NATIVE_DEEPSEEK_DEFAULT_MAX_TOKENS,
+      // 0.1.7 Messages mode: read the latest `system` message at any history
+      // position as the effective system prompt; changed snapshots append
+      // after the cached prefix instead of rewriting the leading system
+      // message — keeps our per-turn prompt-sections updates cache-friendly.
+      systemPromptUpdate: 'in-history',
       // 0.1.1 rejects image blocks unless the catalog entry lists `image`.
       ...(modelDeclaresImageInput(model) ? {
         inputModalities: model.input,
@@ -250,9 +270,9 @@ export function generateRuntimeConfig(input) {
       throw new Error(`generate-runtime-config: provider "${provider.key}" has no models`)
     }
     // Official DeepSeek rides its OWN first-party adapter (dsh-llm-deepseek,
-    // chat-completions wire, native off/low/high/max efforts, reasoning in
-    // the dedicated reasoning_content channel) instead of pi-ai — it never
-    // enters the llm-pi-ai providers dict.
+    // Messages-API wire since 0.1.7, native off/low/high/max efforts,
+    // reasoning in the dedicated reasoning channel) instead of pi-ai — it
+    // never enters the llm-pi-ai providers dict.
     if (provider.native) {
       nativeDeepSeekRoutes.push(provider)
       continue
@@ -500,13 +520,14 @@ export function generateRuntimeConfig(input) {
     ...(input.workspace ? [
       { id: 'shell-env', name: '@deepseek-ai/dsh-shell-env' },
       { id: 'subprocess', name: '@deepseek-ai/dsh-subprocess-local' },
-      // 0.1.5 spill trio (workspace compositions only — the model reads a
-      // spill file back through the fs/bash tools mounted below). All-text
-      // tool results over maxInlineBytes land in a session-scoped spill file
-      // with a bounded head/tail preview + path in history; the policy's
-      // cap sits UNDER idbots-tool-result-shaping's 20K so mid-size results
-      // spill recoverably while shaping stays the hard backstop for mixed
-      // content and pathological sizes.
+      // Spill trio (workspace compositions only — the model reads a
+      // spill file back through the fs/bash tools mounted below). 0.1.7:
+      // text AND image results share one estimated-token budget —
+      // over-cap results land in a session-scoped spill file with a
+      // bounded head/tail preview + read-back path in history; the
+      // policy's cap sits UNDER idbots-tool-result-shaping's 20K so
+      // mid-size results spill recoverably while shaping stays the hard
+      // backstop for mixed content and pathological sizes.
       {
         id: 'spill-local',
         name: '@deepseek-ai/dsh-spill-local',
@@ -515,10 +536,13 @@ export function generateRuntimeConfig(input) {
       {
         id: 'spill-policy',
         name: '@deepseek-ai/dsh-spill-policy',
+        // 0.1.7 renamed the cap to estimated TOKENS (text and images now
+        // share one budget; omitted content leaves a read-back path). 2048
+        // tokens ≈ the old 8192-byte cap for ASCII-heavy tool output.
         config: {
-          maxInlineBytes: Number.isFinite(input.spill?.maxInlineBytes) && input.spill.maxInlineBytes > 0
-            ? input.spill.maxInlineBytes
-            : 8192,
+          maxInlineTokens: Number.isFinite(input.spill?.maxInlineTokens) && input.spill.maxInlineTokens > 0
+            ? input.spill.maxInlineTokens
+            : 2048,
         },
       },
       {

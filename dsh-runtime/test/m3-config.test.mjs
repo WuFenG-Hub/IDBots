@@ -47,17 +47,21 @@ record('generator: three apiFormats map to three pi-ai protocols',
   && piEntry.config.providers['claude-direct'].api === 'anthropic-messages')
 // Since f80b128e the official DeepSeek route rides the first-party
 // dsh-llm-deepseek adapter (native off/low/high/max effort ladder) and never
-// enters the pi-ai providers dict; the generator normalizes any DeepSeek base
-// URL onto the bare origin the adapter expects.
+// enters the pi-ai providers dict; since 0.1.7 the adapter is Messages-API
+// only, so the generator normalizes any DeepSeek base URL onto the Messages
+// root (`<origin>/anthropic`) and declares systemPromptUpdate: in-history on
+// every catalog model (changed system snapshots append after the cached
+// prefix instead of rewriting the leading system message).
 const nativeEntry = unit.find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek')
 record('generator: native DeepSeek route rides dsh-llm-deepseek (never pi-ai)',
   nativeEntry !== undefined
   && piEntry.config.providers.deepseek === undefined
   && nativeEntry.config.apiKeyEnv === 'K4'
-  && nativeEntry.config.baseURL === 'https://api.deepseek.com'
+  && nativeEntry.config.baseURL === 'https://api.deepseek.com/anthropic'
   && nativeEntry.config.thinking === 'enabled'
   && nativeEntry.config.reasoningEffort === 'high'
   && nativeEntry.config.models[0].maxTokens === 32768
+  && nativeEntry.config.models[0].systemPromptUpdate === 'in-history'
   && piEntry.config.providers.opencode.models[0].maxTokens === 8192)
 const visionNative = generateRuntimeConfig({
   sessionRoot: '/tmp/x',
@@ -72,6 +76,24 @@ record('generator: native vision catalog emits inputModalities + image budgets',
   && visionNative.config.models[0].inputModalities.includes('image')
   && visionNative.config.models[0].imagePixelBudget === 640000
   && visionNative.config.models[0].imageMaxBytes === 1048576)
+// 0.1.7 Messages-API migration: every historical chat-completions-era base
+// URL shape collapses onto the `<origin>/anthropic` Messages root; an empty
+// base URL omits the key so the adapter default applies.
+const nativeBaseURLFor = (baseUrl) => generateRuntimeConfig({
+  sessionRoot: '/tmp/x',
+  providers: [{ key: 'deepseek', native: true, apiFormat: 'openai', baseUrl, apiKeyEnv: 'K4', models: [{ id: 'm', contextWindow: 128000 }] }],
+  sections: [],
+}).find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek')?.config?.baseURL
+record('generator: legacy DeepSeek base URL shapes migrate to the Messages root',
+  nativeBaseURLFor('https://api.deepseek.com') === 'https://api.deepseek.com/anthropic'
+  && nativeBaseURLFor('https://api.deepseek.com/') === 'https://api.deepseek.com/anthropic'
+  && nativeBaseURLFor('https://api.deepseek.com/v1') === 'https://api.deepseek.com/anthropic'
+  && nativeBaseURLFor('https://api.deepseek.com/chat/completions') === 'https://api.deepseek.com/anthropic'
+  && nativeBaseURLFor('https://api.deepseek.com/responses') === 'https://api.deepseek.com/anthropic'
+  && nativeBaseURLFor('https://api.deepseek.com/anthropic') === 'https://api.deepseek.com/anthropic'
+  && nativeBaseURLFor('https://api.deepseek.com/anthropic/v1') === 'https://api.deepseek.com/anthropic'
+  && nativeBaseURLFor('https://api.deepseek.com/anthropic/v1/') === 'https://api.deepseek.com/anthropic'
+  && nativeBaseURLFor('') === undefined)
 record('generator: dsh-authorization is never mounted',
   !unit.some((e) => e.name === '@deepseek-ai/dsh-authorization'))
 record('generator: sections config emitted', unit.some((e) => e.config?.sections?.[0]?.name === 'persona:metabot'))
@@ -186,9 +208,9 @@ const main = async () => {
   const turn2 = waitForEvent((e) => e.type === 'turn/end')
   await client.prompt(sessionId, [{ type: 'text', text: 'CALL_BIG_TOOL please' }])
   await turn2
-  // tool/result carries the callId, not the tool name; the tool/call event carries the name.
+  // tool/result carries the callId (0.1.7: top-level message.toolCallId), not the tool name; the tool/call event carries the name.
   const bigCall = events.find((e) => e.type === 'tool/call' && e.data?.name === 'big_output_tool')
-  const toolResult = bigCall ? events.find((e) => e.type === 'tool/result' && e.data?.message?.content?.[0]?.toolCallId === bigCall.data.callId) : undefined
+  const toolResult = bigCall ? events.find((e) => e.type === 'tool/result' && e.data?.message?.toolCallId === bigCall.data.callId) : undefined
   record('E2E: tool executed through the real pi-ai path', Boolean(toolResult))
   const shapedLogText = JSON.stringify(toolResult ?? {})
   record('E2E: session log carries the shaped result (marker + bounded)',
@@ -233,7 +255,7 @@ const main = async () => {
     && auxSearch.auth === 'Bearer sk-web-mock-456',
     auxSearch ? `${auxSearch.url}` : 'no /messages request seen')
   const webCall = events.find((e) => e.type === 'tool/call' && e.data?.name === 'web_search')
-  const webResult = webCall ? events.find((e) => e.type === 'tool/result' && e.data?.message?.content?.[0]?.toolCallId === webCall.data.callId) : undefined
+  const webResult = webCall ? events.find((e) => e.type === 'tool/result' && e.data?.message?.toolCallId === webCall.data.callId) : undefined
   const webResultText = JSON.stringify(webResult ?? {})
   record('E2E: web_search tool executed with formatted sources',
     webResultText.includes('Sources:') && webResultText.includes('nodejs.org/en/blog/release/v26.0.0'))
@@ -254,7 +276,7 @@ const main = async () => {
   const failCall = failCalls.at(-1)
   // The mock reuses `call_web_search_1` across turns — match by seq order.
   const failResult = failCall ? events.find((e) => e.type === 'tool/result'
-    && e.data?.message?.content?.[0]?.toolCallId === failCall.data.callId && e.seq > failCall.seq) : undefined
+    && e.data?.message?.toolCallId === failCall.data.callId && e.seq > failCall.seq) : undefined
   const failText = JSON.stringify(failResult ?? {})
   record('E2E: web_search failure reports the endpoint and guidance',
     failText.includes('/anthropic/v1/messages')
