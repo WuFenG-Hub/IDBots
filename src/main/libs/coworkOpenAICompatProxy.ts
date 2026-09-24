@@ -4163,6 +4163,25 @@ export async function startCoworkOpenAICompatProxy(): Promise<void> {
 
     server.on('error', (error) => {
       lastProxyError = error.message;
+      // Pre-listen: surface the bind failure to the starter. Post-listen: a
+      // server-level error (accept-loop EMFILE, socket teardown, ...) can
+      // leave the listening socket dead while proxyServer/proxyPort still
+      // point at it — every resolve then hands out a dead baseURL and ALL
+      // calls fail with "fetch failed" until restart (the 2026-09-25 G2
+      // outage shape). Reset the state so resolves fail explicitly, then
+      // restart once after a short backoff.
+      if (proxyServer === server) {
+        console.error(`[OpenAICompatProxy] server error after listen: ${error.message}; resetting and restarting`);
+        proxyServer = null;
+        proxyPort = null;
+        const timer = setTimeout(() => {
+          void startCoworkOpenAICompatProxy().catch((restartError) => {
+            console.error(`[OpenAICompatProxy] restart failed: ${restartError instanceof Error ? restartError.message : restartError}`);
+          });
+        }, 5_000);
+        timer.unref?.();
+        return;
+      }
       reject(error);
     });
 

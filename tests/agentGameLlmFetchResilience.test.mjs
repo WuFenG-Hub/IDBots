@@ -47,6 +47,7 @@ const DIST_LLM_FETCH_JS = path.join(projectRoot, 'dist-electron', 'main', 'servi
 
 const SRC_CHAT = fs.readFileSync(path.join(projectRoot, 'src/main/services/cognitiveChatCompletion.ts'), 'utf8');
 const SRC_LLMFETCH = fs.readFileSync(path.join(projectRoot, 'src/main/services/llmFetch.ts'), 'utf8');
+const SRC_PROXY = fs.readFileSync(path.join(projectRoot, 'src/main/libs/coworkOpenAICompatProxy.ts'), 'utf8');
 
 test('contract: all three wire styles post through fetchLlmPost with their kind tag', () => {
   assert.equal(SRC_CHAT.split("fetchLlmPost('anthropic'").length - 1, 1, 'anthropic wire must call fetchLlmPost exactly once');
@@ -66,6 +67,12 @@ test('contract: cause-chain logging exists and is wired on both first attempt an
   assert.ok(SRC_LLMFETCH.includes('causes='), 'log line must carry the cause chain');
   const uses = SRC_LLMFETCH.split('logFetchFailureCause(').length - 1;
   assert.ok(uses >= 3, `log helper must be defined plus invoked for first attempt and retry (found ${uses})`);
+});
+
+test('contract: proxy error handler resets post-listen state and restarts', () => {
+  assert.ok(SRC_PROXY.includes('server error after listen'), 'post-listen error must be distinguished from bind failure');
+  assert.ok(SRC_PROXY.includes('proxyServer = null'), 'post-listen error must clear proxyServer so resolves fail explicitly');
+  assert.ok(SRC_PROXY.includes('proxyPort = null'), 'post-listen error must clear proxyPort (dead baseURL)');
 });
 
 /* ---------------- behavior tests (compiled llmFetch, zero electron deps) ---------------- */
