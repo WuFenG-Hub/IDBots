@@ -12,6 +12,7 @@ import { buildOpenCodeGoHeaders } from '../libs/opencodeGatewayHeaders';
 import { effortForAnthropicWire, effortForOpenAiWire, type LlmEffortLevel } from '../libs/llmEffort';
 import { budgetAssumesThinking, modelAlwaysThinks } from '../libs/modelThinking';
 import { runWithLlmFallback } from './llmFallback';
+import { fetchLlmPost } from './llmFetch';
 
 let oneShotPinCounter = 0;
 
@@ -529,7 +530,7 @@ async function callAnthropicStyleWithTools(
   }
   Object.assign(headers, buildOpenCodeGoHeaders(url));
 
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  const response = await fetchLlmPost('anthropic', url, headers, JSON.stringify(body), signal);
   const text = await response.text();
   if (!response.ok) {
     console.error('[Orchestrator] LLM Anthropic error:', response.status, text.slice(0, 500));
@@ -650,7 +651,7 @@ async function callOpenAIStyleWithTools(
   }
   Object.assign(headers, buildOpenCodeGoHeaders(url));
 
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  const response = await fetchLlmPost('openai-compat', url, headers, JSON.stringify(body), signal);
   const text = await response.text();
   if (!response.ok) {
     console.error('[Orchestrator] LLM OpenAI-compat error:', response.status, text.slice(0, 500));
@@ -829,7 +830,7 @@ async function callDeepSeekResponsesStyle(
   }
   Object.assign(headers, buildOpenCodeGoHeaders(url));
 
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  const response = await fetchLlmPost('deepseek-responses', url, headers, JSON.stringify(body), signal);
   const text = await response.text();
   if (!response.ok) {
     console.error('[Orchestrator] DeepSeek Responses error:', response.status, text.slice(0, 500));
