@@ -13,7 +13,7 @@ technical debt that must be rebased or deleted at the next
 ## Naming
 
 `<package-name>+<exact-version>.patch` — the same convention patch-package
-uses, e.g. `@deepseek-ai+dsh-win32-process+0.1.7-rc.1.patch`. The apply
+uses, e.g. `@deepseek-ai+dsh-win32-process+0.1.7-rc.2.patch`. The apply
 script refuses to run a patch whose version differs from the installed
 package, so a kernel upgrade without a patch rebase fails loudly instead of
 silently shipping an unpatched kernel.
@@ -23,7 +23,7 @@ the script applies them with plain `git apply` from the repo root.
 
 ## Current patches
 
-### `@deepseek-ai+dsh-win32-process+0.1.7-rc.1.patch`
+### `@deepseek-ai+dsh-win32-process+0.1.7-rc.2.patch`
 
 On Windows the kernel's subprocess-local service launches every tool
 subprocess (bash.exe first of all) through a dedicated "Job runner" child,
@@ -42,7 +42,7 @@ The patch ORs `0x08000000` into all three creation-flag call sites
 — piped restricted spawns). `CREATE_NO_WINDOW` only suppresses console
 allocation; it does not affect GUI windows.
 
-### `@deepseek-ai+dsh-tool-ask-user+0.1.7-rc.1.patch`
+### `@deepseek-ai+dsh-tool-ask-user+0.1.7-rc.2.patch`
 
 Upstream's `ask_user_question` ships a one-line description ("Ask the user a
 concise question…") that actively pushes the model toward firing the question
@@ -62,7 +62,7 @@ message before the tool call, plus spelling out internal shorthand;
 context to the panel itself; (3) threads `detail` through `execute()` into the
 `ctx.userQuestions.ask` payload so it actually reaches the modal.
 
-### `@deepseek-ai+dsh-session-persistence-jsonl+0.1.7-rc.1.patch`
+### `@deepseek-ai+dsh-session-persistence-jsonl+0.1.7-rc.2.patch`
 
 The 0.1.7 V4 session log publishes staged files with a hard `link()` on
 every POSIX path (`publishCurrentExclusive` for generation/migration
@@ -79,7 +79,7 @@ preserved, and the staged bytes were already fsynced. `copyFile` is added
 to the injectable `defaultFileSystem` seam so the internals contract
 stays intact.
 
-### `@deepseek-ai+dsh-attachment-local+0.1.7-rc.1.patch`
+### `@deepseek-ai+dsh-attachment-local+0.1.7-rc.2.patch`
 
 Same defect class as the persistence patch: `publishImmutableAlias` and
 `publishStagedObject` commit attachment objects with `link()` and treat

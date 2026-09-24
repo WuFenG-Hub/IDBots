@@ -35,7 +35,7 @@ test('memory strategy prompt requires background + session links for pending ite
 
 test('dsh-tool-ask-user kernel patch carries the ask-context fix', () => {
   const patch = readFileSync(
-    new URL('../scripts/dsh-kernel-patches/@deepseek-ai+dsh-tool-ask-user+0.1.7-rc.1.patch', import.meta.url),
+    new URL('../scripts/dsh-kernel-patches/@deepseek-ai+dsh-tool-ask-user+0.1.7-rc.2.patch', import.meta.url),
     'utf8',
   );
   // Description: the model must explain before asking, never fire a bare question.

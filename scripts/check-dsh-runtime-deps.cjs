@@ -51,7 +51,7 @@ function readYaml(filePath) {
 const EXACT_SPEC = /^\d+\.\d+\.\d+(\S*)$/;
 
 // pnpm records peer-suffix annotations on resolved versions
-// (e.g. `0.1.7-rc.1(zod@4.3.6)`); the plain semver is what gets installed.
+// (e.g. `0.1.7-rc.2(zod@4.3.6)`); the plain semver is what gets installed.
 function stripPeerSuffix(version) {
   return String(version).replace(/\(.*\)$/, '');
 }
