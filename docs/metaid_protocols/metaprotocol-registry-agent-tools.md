@@ -41,7 +41,7 @@ Publish (create) and update (modify) share the human square's body JSON:
 | `protocolName` | param |
 | `protocolAttachments` | param (default `[]`) |
 | `metadata` | param (default `''`; strings are `JSON.parse`-ed when possible) |
-| `protocolContent` | JSON5 serialization of `body`, the raw `protocolContent` param, or the verbatim UTF-8 bytes of `protocolContentFile` |
+| `protocolContent` | JSON5 serialization of `body`, the raw `protocolContent` param (surrounding whitespace trimmed), or the verbatim UTF-8 bytes of `protocolContentFile` |
 | `protocolContentType` | param (default `application/json`) |
 
 **Body → JSON5** (human square semantics): a field shaped `{value, description}` emits a `/** description */` comment line (1-space base indent, the on-chain convention) followed by the unwrapped value; plain values serialize directly; nested objects/arrays use 2-space-per-level multiline JSON.
@@ -60,7 +60,7 @@ Publish (create) and update (modify) share the human square's body JSON:
 | outer `version` | `1.0.0` | body version of the version being replaced |
 | payload | body JSON above | body JSON above (`version` = new version) |
 
-**Large definitions (`protocolContentFile`)**: when a definition is too large to pass inline without loss — the host's file/text readers truncate long lines, so a large body cannot be held in-context verbatim — pass an absolute local path via `protocolContentFile`. The file is read as UTF-8 and its bytes become `protocolContent` **verbatim** (no trimming, no re-serialization), so the on-chain body is byte-identical to the file and the 7-tuple above is unchanged (the inline `utf-8` shape, the same outer `version` rule). The existing owner-approval gate for local files (`chainUploadGate.checkUploadAllowed`) applies to the same paths the upload tools gate. Relative paths, missing files and whitespace-only files are refused before the wallet is touched.
+**Large definitions (`protocolContentFile`)**: when a definition is too large to pass inline without loss — the host's file/text readers truncate long lines, so a large body cannot be held in-context verbatim — pass an absolute local path via `protocolContentFile`. The file is read as UTF-8 and its bytes become `protocolContent` **verbatim** (no trimming, no re-serialization), so the `protocolContent` value on-chain is byte-identical to the file and the 7-tuple above is unchanged (the inline `utf-8` shape, the same outer `version` rule). A file that is not valid UTF-8 is refused, because publishing it would replace its invalid bytes. The existing owner-approval gate for local files (`chainUploadGate.checkUploadAllowed`) applies to the same paths the upload tools gate; it runs immediately before the wallet (after the schema, conflict and registrant refusals, so the owner is never asked about a call that would be rejected anyway), and the file is re-read at that point — if it changed while the owner was deciding, the write is refused. When the host wires no gate at all, `protocolContentFile` is refused rather than published ungated. Relative paths, missing files and whitespace-only files are refused before the wallet is touched.
 
 ## 4. MetaSo API contract (§3 mirror)
 

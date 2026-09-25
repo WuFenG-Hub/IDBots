@@ -638,8 +638,9 @@ export function buildMetaProtocolAgentTools(deps: {
     'post_metaprotocol',
     [
       'Publish or update a protocol in the MetaID protocol registry (/protocols/metaprotocol).',
-      '- publish: register a NEW protocol. Requires title, protocolName and a body (field',
-      '  definitions). The registry path /protocols/<protocolName> must be free — if already',
+      '- publish: register a NEW protocol. Requires title, protocolName and a definition',
+      '  (body, protocolContent or protocolContentFile — see below). The registry path',
+      '  /protocols/<protocolName> must be free — if already',
       '  registered by someone else the call fails with the current registrant info; pick another',
       '  protocolName.',
       '- update: publish a new version of an existing protocol. Only the original registrant',
@@ -660,8 +661,8 @@ export function buildMetaProtocolAgentTools(deps: {
       intro: z.string().optional().describe('Short introduction (may be omitted).'),
       version: z.string().optional().describe("publish: defaults to '1.0.0'; update: auto-increments from the current on-chain version when omitted."),
       protocolContentType: z.enum(PROTOCOL_CONTENT_TYPE_ENUM).optional().describe("MIME type of protocolContent. Default: 'application/json'."),
-      body: z.record(z.string(), z.any()).optional().describe('Field definitions: plain values or {value, description} objects (serialized to annotated JSON5). Mutually exclusive with protocolContent.'),
-      protocolContent: z.string().optional().describe('Raw JSON5 protocol definition text. Mutually exclusive with body.'),
+      body: z.record(z.string(), z.any()).optional().describe('Field definitions: plain values or {value, description} objects (serialized to annotated JSON5). Mutually exclusive with protocolContent and protocolContentFile.'),
+      protocolContent: z.string().optional().describe('Raw JSON5 protocol definition text (leading/trailing whitespace is trimmed). Mutually exclusive with body and protocolContentFile.'),
       protocolContentFile: z
         .string()
         .optional()
@@ -723,7 +724,11 @@ export function buildMetaProtocolAgentTools(deps: {
       // zero transcription loss: the file bytes ARE protocolContent, verbatim
       // (no trim, no re-serialization) — the caller never has to hold the body
       // in-context, and the write keeps the inline path's 7-tuple shape.
+      // The bytes are read BEFORE the owner gate (which runs just above the
+      // wallet): holding them across the approval lets the gate prove the
+      // file did not change while the owner was deciding.
       let fileContent = '';
+      let fileBytes: Buffer | null = null;
       if (rawContentFile) {
         if (!path.isAbsolute(rawContentFile)) {
           return textResult(
@@ -734,17 +739,21 @@ export function buildMetaProtocolAgentTools(deps: {
         if (!fs.existsSync(rawContentFile)) {
           return textResult(`post_metaprotocol protocolContentFile not found: ${rawContentFile}`, true);
         }
-        if (gateLocalFile) {
-          const denied = await gateLocalFile(rawContentFile);
-          if (denied) {
-            return textResult(denied, true);
-          }
-        }
         try {
-          fileContent = fs.readFileSync(rawContentFile, 'utf8');
+          fileBytes = fs.readFileSync(rawContentFile);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           return textResult(`post_metaprotocol failed to read protocolContentFile ${rawContentFile}: ${msg}`, true);
+        }
+        fileContent = fileBytes.toString('utf8');
+        // Byte-fidelity is a hard promise here, so a file that does not
+        // survive a UTF-8 round trip is refused instead of being published
+        // with its invalid bytes quietly replaced by U+FFFD.
+        if (!Buffer.from(fileContent, 'utf8').equals(fileBytes)) {
+          return textResult(
+            `post_metaprotocol protocolContentFile is not valid UTF-8 (${rawContentFile}). Re-encode it as UTF-8: publishing it as-is would not preserve its bytes.`,
+            true,
+          );
         }
         if (!fileContent.trim()) {
           return textResult(
@@ -798,10 +807,45 @@ export function buildMetaProtocolAgentTools(deps: {
         return textResult(`Invalid protocol payload: ${detail}. Fix the fields and retry.`, true);
       }
 
+      /**
+       * Owner gate for protocolContentFile, run immediately before the wallet
+       * (after every deterministic refusal, so the owner is never asked about
+       * a call that would have been rejected anyway).
+       *
+       * The file bytes were read before this point, so the approval is checked
+       * against content we already hold: the re-read below catches a swap that
+       * happened while the owner was deciding, and we then publish exactly the
+       * bytes that were verified. Fails CLOSED when the host wired no gate at
+       * all — publishing a local file is irreversible, so an absent gate must
+       * not read as consent (the new parameter deliberately has no legacy
+       * ungated behavior to preserve).
+       */
+      async function localFileApprovalFailure(): Promise<string | null> {
+        if (!rawContentFile || !fileBytes) return null;
+        if (!gateLocalFile) {
+          return `Refusing to publish a local file: this session has no owner-approval gate wired, so the owner cannot be asked about ${rawContentFile}. Pass the definition inline (body / protocolContent) instead.`;
+        }
+        const denied = await gateLocalFile(rawContentFile);
+        if (denied) return denied;
+        let recheck: Buffer;
+        try {
+          recheck = fs.readFileSync(rawContentFile);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          return `protocolContentFile became unreadable while approval was pending (${rawContentFile}): ${msg}`;
+        }
+        if (!recheck.equals(fileBytes)) {
+          return `protocolContentFile changed while approval was pending (${rawContentFile}); refusing to publish content the owner did not approve. Re-run the publish so the current content is approved.`;
+        }
+        return null;
+      }
+
       if (action === 'publish') {
         // §5.4 step 3-4 — MetaSo precheck, MANAPI degraded scan, conflict gate.
         const conflict = await findPublishConflict(payload.path);
         if (conflict) return textResult(conflict, true);
+        const publishApproval = await localFileApprovalFailure();
+        if (publishApproval) return textResult(publishApproval, true);
         try {
           const result = await createPin(
             metabotId,
@@ -839,6 +883,8 @@ export function buildMetaProtocolAgentTools(deps: {
           true,
         );
       }
+      const updateApproval = await localFileApprovalFailure();
+      if (updateApproval) return textResult(updateApproval, true);
       try {
         const result = await createPin(
           metabotId,
