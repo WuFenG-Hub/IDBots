@@ -350,38 +350,30 @@ jobs:
           }
           & $signTool verify /pa /all $installer.FullName
 
-      # Product-level guard: verify the SHIPPED file carries the kernel patch.
-      # extraResources lands verbatim in win-unpacked, so this checks exactly
-      # what users install. Fingerprint = the three CREATE_NO_WINDOW flags the
-      # dsh-win32-process patch adds; update this step together with
-      # scripts/dsh-kernel-patches/@deepseek-ai+dsh-win32-process* when the
-      # patch is rebased.
-      - name: Verify DSH kernel patch in packaged app (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
+      # Product-level guard: verify EVERY committed kernel patch is present in
+      # what users actually install (extraResources lands verbatim in the
+      # unpacked app). Fingerprints live in
+      # scripts/dsh-kernel-patches/manifest.json — one entry per patch, and the
+      # checker itself fails when a .patch has no entry, so a patch cannot ship
+      # unverified (the v0.9.3 incident: a later install step wiped
+      # node_modules, the two hand-written fingerprints then covered only two
+      # of today's five patches, and the installer silently regressed).
+      # Adding or rebasing a patch means updating that manifest.
+      - name: Verify DSH kernel patches in the packaged app
+        shell: bash
         run: |
-          $f = 'release\win-unpacked\resources\dsh-runtime\node_modules\@deepseek-ai\dsh-win32-process\lib\index.js'
-          if (-not (Test-Path $f)) {
-            Write-Error "Packaged kernel file missing: $f"
+          case "$RUNNER_OS" in
+            Windows) ROOT="release/win-unpacked/resources" ;;
+            macOS)   ROOT="$(ls -d release/mac-*/IDBots.app/Contents/Resources 2>/dev/null | head -1)" ;;
+            Linux)   ROOT="release/linux-unpacked/resources" ;;
+            *)       echo "::error::unsupported runner OS $RUNNER_OS"; exit 1 ;;
+          esac
+          if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
+            echo "::error::packaged resources directory not found (RUNNER_OS=$RUNNER_OS)"
             exit 1
-          }
-          $count = (Select-String -Path $f -Pattern '0x08000000' -AllMatches | ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
-          if ($count -ne 3) {
-            Write-Error "Kernel patch NOT in the packaged app (found $count of 3 CREATE_NO_WINDOW flags in dsh-win32-process). The pipeline dropped scripts/dsh-kernel-patches — do not ship."
-            exit 1
-          }
-          Write-Host "Kernel patch verified in packaged app ($count/3 CREATE_NO_WINDOW flags)."
-          $ask = 'release\win-unpacked\resources\dsh-runtime\node_modules\@deepseek-ai\dsh-tool-ask-user\lib\index.js'
-          if (-not (Test-Path $ask)) {
-            Write-Error "Packaged kernel file missing: $ask"
-            exit 1
-          }
-          $askCount = (Select-String -Path $ask -Pattern 'question\.detail !== void 0' -AllMatches | ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
-          if ($askCount -lt 1) {
-            Write-Error "ask_user_question patch NOT in the packaged app (no detail passthrough found in dsh-tool-ask-user). The pipeline dropped scripts/dsh-kernel-patches — do not ship."
-            exit 1
-          }
-          Write-Host "ask_user_question patch verified in packaged app (detail passthrough present)."
+          fi
+          echo "Checking kernel patches in $ROOT"
+          node scripts/verify-dsh-kernel-patches.cjs --root "$ROOT"
 
       - name: Notarize app (macOS)
         if: runner.os == 'macOS'
