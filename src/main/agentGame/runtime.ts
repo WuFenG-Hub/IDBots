@@ -456,8 +456,25 @@ export class AgentGameRuntime extends EventEmitter {
       }
     }
     s.lastIndex = cursor;
-    this.persist(s, state);
+    this.persistOwnedFields(s, state);
     return s;
+  }
+
+  /**
+   * Persist only the fields this runtime path OWNS (cursor, expected seq,
+   * budget, game state) onto a FRESH read of the session record. A stale
+   * in-flight record must never revert a concurrent markStatus: a pause
+   * landing while a catch-up was awaiting was silently resurrected to
+   * running/null by the catch-up's whole-row persist (the runtime-window cut
+   * lost to a racing catch-up; the same ghost produced the "paused → running
+   * again with no resume" flashes in the 2026-09-25 G2 forensics).
+   */
+  private persistOwnedFields(s: GameSession, state: unknown): void {
+    const fresh = this.deps.store.getSession(s.sessionId) ?? s;
+    fresh.lastIndex = s.lastIndex;
+    fresh.lastActionSeq = s.lastActionSeq;
+    fresh.budget = s.budget;
+    this.persist(fresh, state);
   }
 
   /* ----------------------- action loop ----------------------- */
@@ -722,8 +739,10 @@ export class AgentGameRuntime extends EventEmitter {
       }
       this.pending.delete(s.sessionId);
       // Persist the post-catch-up record: persisting the caller's pre-catch-up
-      // copy would roll back lastIndex / lastActionSeq (lost update).
-      this.persist(current, this.states.get(s.sessionId));
+      // copy would roll back lastIndex / lastActionSeq (lost update). Owned-
+      // fields merge: the chain write awaited above must not revert a
+      // markStatus that landed meanwhile (same ghost as catchUp's persist).
+      this.persistOwnedFields(current, this.states.get(s.sessionId));
       this.log(`${s.sessionId}: committed ${event.type} (pin ${pinId.slice(0, 12)}…)`);
     } catch (err) {
       const backoff = WRITE_BACKOFF_MS[Math.min(attempt, WRITE_BACKOFF_MS.length - 1)];

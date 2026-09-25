@@ -393,8 +393,15 @@ test('GAP-3a: 写前 draft 按会话身份归因——链上 body 无 meta、sta
 
     const session = await startSession(host, startParams());
 
-    // 等 red 的动作事件上链（第 1 笔是我们自己的 seat.claimed）。
-    await waitFor(() => recorder.calls.filter((c) => JSON.parse(c.plaintext).type === 'action').length >= 1, { label: 'action write' });
+    // 等 red 的动作事件上链（第 1 笔是我们自己的 seat.claimed）。谓词同时
+    // 要求运行时侧提交已收敛（lastActionSeq=1）——chainWrite 落库与 commit
+    // 的 owned-fields 持久化之间隔着一个 post-write reduce await，只看
+    // recorder 会在重负载下读到提交前的会话视图（本套件的真实抖动源）。
+    await waitFor(async () => {
+      if (!recorder.calls.some((c) => JSON.parse(c.plaintext).type === 'action')) return false;
+      const v = await host.handleSessionMethod('status', { sessionId: session.sessionId }, RED_AGENT, {});
+      return v.lastActionSeq === 1;
+    }, { label: 'action write + commit settled' });
     const actionCall = recorder.calls.find((c) => JSON.parse(c.plaintext).type === 'action');
     const event = JSON.parse(actionCall.plaintext);
 
@@ -445,8 +452,13 @@ test('GAP-3b: 15 行真实污染流收敛——期望 seq 只按 adapter 接受�
     // 黑方会话入场（流中 seats.black.metaId == BLACK_AGENT）：收敛后轮到黑方。
     const session = await startSession(host, startParams({ seat: 'black', agentId: BLACK_AGENT }));
 
-    // 等黑方真实的下一手动作上链。
-    await waitFor(() => recorder.calls.filter((c) => JSON.parse(c.plaintext).type === 'action').length >= 1, { label: 'black action write' });
+    // 等黑方真实的下一手动作上链。同 GAP-3a：谓词一并等待运行时提交收敛
+    // （lastActionSeq=2），消除「看到链写即读会话视图」的观测竞态。
+    await waitFor(async () => {
+      if (!recorder.calls.some((c) => JSON.parse(c.plaintext).type === 'action')) return false;
+      const v = await host.handleSessionMethod('status', { sessionId: session.sessionId }, BLACK_AGENT, {});
+      return v.lastActionSeq === 2;
+    }, { label: 'black action write + commit settled' });
     const actionCall = recorder.calls.find((c) => JSON.parse(c.plaintext).type === 'action');
     const event = JSON.parse(actionCall.plaintext);
 
