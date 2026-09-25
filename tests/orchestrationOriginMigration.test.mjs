@@ -16,10 +16,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { SqliteStore } = await import(`${repoRoot}/dist-electron/main/sqliteStore.js`);
+// Dynamic import needs a file:// URL: on Windows an absolute path is read as
+// the scheme "c:" and the ESM loader rejects it (ERR_UNSUPPORTED_ESM_URL_SCHEME).
+const { SqliteStore } = await import(
+  pathToFileURL(path.join(repoRoot, 'dist-electron', 'main', 'sqliteStore.js')).href,
+);
 
 const insertTask = (db, id, at) => db.run(
   `INSERT INTO orchestration_tasks
