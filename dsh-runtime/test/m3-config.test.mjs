@@ -121,6 +121,24 @@ const attachEntry = generateRuntimeConfig({
 }).find((e) => e.name === '@deepseek-ai/dsh-experimental-browser-use-playwright-mcp')
 record('generator: attach mode carries the debugging endpoint',
   attachEntry?.config?.mode === 'attach' && attachEntry?.config?.endpoint === 'http://127.0.0.1:9222')
+record('generator: time-context stays unmounted without a zone',
+  !unit.some((e) => e.name === '@deepseek-ai/dsh-time-context'))
+const withClock = generateRuntimeConfig({
+  sessionRoot: '/tmp/x',
+  providers: [{ key: 'openai-gw', apiFormat: 'openai', baseUrl: 'https://a.example/v1', apiKeyEnv: 'K1', models: [{ id: 'm1', contextWindow: 64000 }] }],
+  sections: [],
+  timeContext: { timeZone: 'Asia/Shanghai' },
+})
+const clockEntry = withClock.find((e) => e.name === '@deepseek-ai/dsh-time-context')
+record('generator: timeContext mounts the clock plugin with the host zone and a 10-minute default',
+  clockEntry?.config?.timeZone === 'Asia/Shanghai' && clockEntry?.config?.refreshIntervalMs === 600000)
+record('generator: timeContext honours an explicit refresh interval',
+  generateRuntimeConfig({
+    sessionRoot: '/tmp/x',
+    providers: [{ key: 'openai-gw', apiFormat: 'openai', baseUrl: 'https://a.example/v1', apiKeyEnv: 'K1', models: [{ id: 'm1', contextWindow: 64000 }] }],
+    sections: [],
+    timeContext: { timeZone: 'UTC', refreshIntervalMs: 0 },
+  }).find((e) => e.name === '@deepseek-ai/dsh-time-context')?.config?.refreshIntervalMs === 0)
 record('generator: computerUse mounts the service + cua native provider',
   withBrowser.some((e) => e.name === '@deepseek-ai/dsh-computer-use')
   && withBrowser.some((e) => e.name === '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native'))

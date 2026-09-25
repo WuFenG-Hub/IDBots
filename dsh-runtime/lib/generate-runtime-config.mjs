@@ -56,6 +56,10 @@
 //   computerUse?: boolean,             // 0.1.7 experimental desktop control (cua-driver
 //                                      //   native provider): OS desktop permissions must
 //                                      //   be granted to the host app; off by default.
+//   timeContext?: {                    // 0.1.7 clock context (dsh-time-context): appends a
+//     timeZone?: string,               //   durable reading (ISO time + zone + elapsed) each
+//     refreshIntervalMs?: number,      //   eligible step, at most once per interval
+//   },                                 //   (default 10 min). The host passes the user's zone.
 //   extraEntries?: [...],              // dev/test fixtures appended verbatim
 // }
 //
@@ -617,6 +621,24 @@ export function generateRuntimeConfig(input) {
           ...(typeof input.browserUse.endpoint === 'string' && input.browserUse.endpoint.length > 0
             ? { endpoint: input.browserUse.endpoint }
             : {}),
+        },
+      },
+    ] : []),
+    // 0.1.7 clock context: one small durable reading per eligible step so the
+    // model interprets dates/times against the user's zone instead of
+    // guessing. Mounted whenever the host provides a zone (it always does);
+    // omitted entirely otherwise, which is the upstream disabled default.
+    ...(input.timeContext ? [
+      {
+        id: 'time-context',
+        name: '@deepseek-ai/dsh-time-context',
+        config: {
+          ...(typeof input.timeContext.timeZone === 'string' && input.timeContext.timeZone.length > 0
+            ? { timeZone: input.timeContext.timeZone }
+            : {}),
+          refreshIntervalMs: Number.isFinite(input.timeContext.refreshIntervalMs) && input.timeContext.refreshIntervalMs >= 0
+            ? input.timeContext.refreshIntervalMs
+            : 600000,
         },
       },
     ] : []),
