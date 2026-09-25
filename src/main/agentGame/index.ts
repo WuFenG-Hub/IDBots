@@ -28,8 +28,10 @@ import type { ChatCompletionResult, ChatMessage } from '../services/cognitiveCha
 export interface AgentGameHostDeps {
   db: Database;
   saveDb: () => void;
-  /** chatCompletionWithTools (main process LLM entry). */
-  llmComplete: (messages: ChatMessage[], opts: { timeoutMs: number; llmId?: string | null }) => Promise<ChatCompletionResult>;
+  /** chatCompletionWithTools (main process LLM entry). `opts.signal` is the
+   *  runtime's move-window abort — wiring it into the LLM options lets the
+   *  window cut the actual request (see RuntimeDeps.llmComplete). */
+  llmComplete: (messages: ChatMessage[], opts: { timeoutMs: number; signal?: AbortSignal; llmId?: string | null }) => Promise<ChatCompletionResult>;
   /** sendGroupChatMessageAsIdentity (host owner identity signs /protocols/simplegroupchat).
    *  `opts.asAgentId`: sign as a local bot identity instead — seat.claimed is
    *  attributed by the chain message's senderMetaId (docs/07 §3). */

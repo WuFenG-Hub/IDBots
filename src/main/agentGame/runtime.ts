@@ -75,8 +75,11 @@ export interface RuntimeDeps {
   messageStore: {
     readSince(groupId: string, afterMsgIndex: number): SessionMessage[];
   };
-  /** One-shot LLM call (chatCompletionWithTools). Throws on abort/timeout. */
-  llmComplete: (messages: import('../services/cognitiveChatCompletion').ChatMessage[], opts: { timeoutMs: number }) => Promise<ChatCompletionResult>;
+  /** One-shot LLM call (chatCompletionWithTools). Throws on abort/timeout.
+   *  `opts.signal` (GAP-4): the runtime's own move-window abort — a wired
+   *  implementation must cancel the underlying request when it fires, so the
+   *  2-minute contract holds even if the wiring drops `timeoutMs`. */
+  llmComplete: (messages: import('../services/cognitiveChatCompletion').ChatMessage[], opts: { timeoutMs: number; signal?: AbortSignal }) => Promise<ChatCompletionResult>;
   /**
    * Write an encrypted agent-game/1 event to the group (returns pinId).
    * `opts.asAgentId`: sign as this session agent's local bot identity instead
@@ -135,6 +138,10 @@ const MOVE_TIMEOUT_MS = 900_000;
 /** Safety margin over the adapter window so chain-timestamp skew and write
  *  latency can never make the claim land inside the still-open window. */
 const MOVE_CLAIM_MARGIN_MS = 60_000;
+/** How often the move-window sweeper checks for expired move-LLM windows.
+ *  The tick is real-time but the expiry decision uses this.now(), so tests
+ *  drive it with the virtual clock. */
+const LLM_WINDOW_SWEEP_INTERVAL_MS = 1_000;
 
 /* ------------------------------------------------------------------ */
 /* Runtime                                                            */
@@ -158,6 +165,20 @@ export class AgentGameRuntime extends EventEmitter {
    *  one-claim-per-progress-epoch guard (a rejected claim is final: the
    *  adapter judged the window still open, re-claiming would burn pins). */
   private lastClaimAt = new Map<string, number>();
+  /**
+   * GAP-4: in-flight move-LLM windows (one per session — the busy guard keeps
+   * calls single-flight). The runtime OWNS architecture decision ②'s 2-minute
+   * fault window instead of trusting the llmComplete wiring to pass timeoutMs
+   * down: the 2026-09-25 production asar shipped exactly that wiring drop
+   * (`llmComplete: (messages) => …` with no attemptTimeoutMs) and every
+   * attempt hung until undici's default 300s headers timeout — the contract
+   * existed at both ends of the pipe and died at its only joint. Each window
+   * holds an AbortController (wired implementations cancel the underlying
+   * request when it fires) and a race rejector (unwired/hung callees are cut
+   * anyway), so the fault exit is enforced at the contract owner.
+   */
+  private llmWindows = new Map<string, { deadline: number; ac: AbortController; reject: (err: Error) => void }>();
+  private llmWindowTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
@@ -174,12 +195,22 @@ export class AgentGameRuntime extends EventEmitter {
 
   /* ----------------------- lifecycle ----------------------- */
 
-  /** Start background housekeeping (lease heartbeat + loop tick). */
+  /** Start background housekeeping (lease heartbeat + loop tick + move-window sweep). */
   startBackground(): void {
     if (this.heartbeatTimer) return;
     this.heartbeatTimer = setInterval(() => this.housekeeping(), LEASE_HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
+    this.ensureLlmWindowTimer();
     this.scheduleLoop(0);
+  }
+
+  /** The move-window sweeper starts with the background loop, but a window
+   *  must never go unswept just because startBackground wasn't reached yet —
+   *  lazily arm it on first in-flight window too. */
+  private ensureLlmWindowTimer(): void {
+    if (this.llmWindowTimer || this.disposed) return;
+    this.llmWindowTimer = setInterval(() => this.sweepLlmWindows(), LLM_WINDOW_SWEEP_INTERVAL_MS);
+    this.llmWindowTimer.unref?.();
   }
 
   /** Recover unfinished sessions after host restart (docs/14 §5). */
@@ -229,8 +260,16 @@ export class AgentGameRuntime extends EventEmitter {
     this.disposed = true;
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.loopTimer) clearTimeout(this.loopTimer);
+    if (this.llmWindowTimer) clearInterval(this.llmWindowTimer);
     this.heartbeatTimer = null;
     this.loopTimer = null;
+    this.llmWindowTimer = null;
+    // Release every in-flight move window: hung llmComplete promises die with
+    // the process, but the abort must still reach wired transports.
+    for (const [sessionId, w] of this.llmWindows) {
+      this.llmWindows.delete(sessionId);
+      w.ac.abort();
+    }
     for (const sb of this.sandboxes.values()) {
       await sb.dispose().catch(() => {});
     }
@@ -441,12 +480,18 @@ export class AgentGameRuntime extends EventEmitter {
       for (let attempt = 1; attempt <= LLM_MAX_PARSE_ATTEMPTS; attempt++) {
         let text: string;
         try {
-          const result = await this.deps.llmComplete(buildMovePrompt({
+          const result = await this.completeMoveInWindow(sessionId, buildMovePrompt({
             gameId: s.gameId, seat: s.seat, observation, schema, lastError,
-          }), { timeoutMs: LLM_CALL_TIMEOUT_MS });
+          }));
           text = result.content?.trim() ?? '';
         } catch (err) {
-          this.markStatus(sessionId, 'paused', mkError(isAbort(err) ? 'llm_timeout' : 'llm_unavailable', errMsg(err), this.now));
+          // GAP-4: session-correlated failure line — operators must be able to
+          // tell WHICH seat stalled with which classification from the host
+          // log alone (the 2026-09-25 G2 red-seat forensics had neither seat
+          // nor cause in ~50 bare "fetch failed" lines).
+          const code = isAbort(err) ? 'llm_timeout' : 'llm_unavailable';
+          this.log(`${sessionId}: move-LLM failed (${code}, seat ${s.seat}, attempt ${attempt}/${LLM_MAX_PARSE_ATTEMPTS}): ${errMsg(err)}`);
+          this.markStatus(sessionId, 'paused', mkError(code, errMsg(err), this.now));
           return;
         }
         s.budget.llmCallsUsed++;
@@ -503,6 +548,49 @@ export class AgentGameRuntime extends EventEmitter {
       }
     } finally {
       this.busy.delete(sessionId);
+    }
+  }
+
+  /**
+   * GAP-4: one move-LLM call under the runtime-owned window. Two independent
+   * cut paths fire at the contract deadline (LLM_CALL_TIMEOUT_MS): the
+   * AbortController aborts (wired implementations cancel the underlying
+   * request — the socket dies instead of farming the keep-alive pool), and
+   * the race rejector surfaces a BrowserLlmTimeout error (unwired callees
+   * that ignore both timeoutMs and signal are cut anyway). The sweeper is a
+   * real-time tick judging expiry by this.now(), so the virtual clock drives
+   * it in tests.
+   */
+  private completeMoveInWindow(sessionId: string, messages: import('../services/cognitiveChatCompletion').ChatMessage[]): Promise<ChatCompletionResult> {
+    const ac = new AbortController();
+    this.ensureLlmWindowTimer();
+    return new Promise<ChatCompletionResult>((resolve, reject) => {
+      this.llmWindows.set(sessionId, { deadline: this.now() + LLM_CALL_TIMEOUT_MS, ac, reject });
+      this.deps.llmComplete(messages, { timeoutMs: LLM_CALL_TIMEOUT_MS, signal: ac.signal }).then(
+        (result) => {
+          this.llmWindows.delete(sessionId);
+          resolve(result);
+        },
+        (err) => {
+          this.llmWindows.delete(sessionId);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    });
+  }
+
+  /** Cut every expired move-LLM window: abort the transport, reject the race,
+   *  drop the entry (a late callee settlement becomes a no-op). */
+  private sweepLlmWindows(): void {
+    if (this.disposed) return;
+    for (const [sessionId, w] of this.llmWindows) {
+      if (this.now() < w.deadline) continue;
+      this.llmWindows.delete(sessionId);
+      const err = new Error(`move-LLM window of ${LLM_CALL_TIMEOUT_MS}ms exceeded (runtime-enforced, architecture decision ②)`);
+      err.name = 'BrowserLlmTimeout'; // isAbort() → session paused as llm_timeout
+      w.ac.abort(err);
+      w.reject(err);
+      this.log(`${sessionId}: move-LLM window enforced at ${LLM_CALL_TIMEOUT_MS}ms (runtime-owned abort)`);
     }
   }
 
@@ -723,6 +811,13 @@ export class AgentGameRuntime extends EventEmitter {
     if (!s) throw runtimeError('session_not_found', `unknown session ${sessionId}`);
     if (s.status === 'stopped' || s.status === 'finished') return toSessionView(s);
     this.pending.delete(sessionId);
+    // Release an in-flight move window so a hung llmComplete cannot keep the
+    // seat's transport pinned after the session is gone.
+    const window = this.llmWindows.get(sessionId);
+    if (window) {
+      this.llmWindows.delete(sessionId);
+      window.ac.abort();
+    }
     this.leases.releaseSession(sessionId);
     const sb = this.sandboxes.get(sessionId);
     if (sb) {

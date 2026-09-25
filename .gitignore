@@ -89,6 +89,9 @@ tests/*
 !tests/agentGameLlmTimeout.test.mjs
 !tests/agentGameLlmFetchResilience.test.mjs
 !tests/agentGameRecoverHydration.test.mjs
+!tests/agentGameMoveWindow.test.mjs
+!tests/agentGameSeatStallIsolation.test.mjs
+!tests/agentGameCursorStateHeal.test.mjs
 !tests/dshKernelRuntime.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/dshRuntimeGlmResponsesBoot.test.mjs
