@@ -66,16 +66,21 @@ export function startMockServer(port = 48787) {
       // Skip runtime-injected user-role messages (they can land before OR
       // after the real prompt depending on the create path) — markers key on
       // the actual human input only. Injected messages share stable prefixes:
-      // the dsh-system-prompt runtime-context snapshot and the
-      // dsh-agent-instructions workspace baseline/replacement frames.
+      // the dsh-system-prompt runtime-context snapshot, the
+      // dsh-agent-instructions workspace baseline/replacement frames, and the
+      // dsh-time-context clock reading (mounted since 0.1.7 — it is appended
+      // last, so without this every marker scan would read the clock instead
+      // of the prompt).
       const INJECTED_USER_PREFIXES = [
         'Current runtime context.',
+        'Time sampled while preparing turn ',
         '<system-reminder>\nThe following workspace instructions',
         '<system-reminder>\nThis complete workspace instruction baseline',
         '<system-reminder>\nWorkspace instructions were omitted',
       ]
-      const lastUser = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user'
-        && !INJECTED_USER_PREFIXES.some((prefix) => String(m.content).startsWith(prefix)))
+      const isRealUserMessage = (m) => m.role === 'user'
+        && !INJECTED_USER_PREFIXES.some((prefix) => String(m.content).startsWith(prefix))
+      const lastUser = [...(parsed.messages ?? [])].reverse().find(isRealUserMessage)
       const lastUserText = typeof lastUser?.content === 'string' ? lastUser.content : ''
       // A tool result rides as role 'tool'; only the FIRST request of a
       // CALL_BIG_TOOL turn asks for the tool — afterwards answer in plain text
@@ -83,7 +88,7 @@ export function startMockServer(port = 48787) {
       // Tool results ride as role 'tool'; only the CURRENT turn's window
       // (after the last user message) matters — earlier turns already settled.
       const msgs = parsed.messages ?? []
-      const lastUserIdx = msgs.map((m) => m.role === 'user' ? 1 : 0).lastIndexOf(1)
+      const lastUserIdx = msgs.map((m) => isRealUserMessage(m) ? 1 : 0).lastIndexOf(1)
       const alreadyHasToolResult = msgs.slice(Math.max(lastUserIdx, 0)).some((m) => m.role === 'tool')
 
       if (req.method === 'GET' && req.url === '/v1/models') {

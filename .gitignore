@@ -79,6 +79,7 @@ tests/*
 !tests/groupTaskChatMode.test.mjs
 !tests/devWindowLoadRetry.test.mjs
 !tests/runtimeDependencyContract.test.mjs
+!tests/dshClientTimeZone.test.mjs
 !tests/dshRuntimeDepsCheck.test.mjs
 !tests/dshKernelEventMapper.test.mjs
 !tests/chainIdentifierPrompt.test.mjs

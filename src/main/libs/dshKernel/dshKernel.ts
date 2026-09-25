@@ -24,6 +24,7 @@ import { pathToFileURL } from 'url'
 import { resolveElectronExecutablePath } from '../runtimePaths'
 import { mergeDshRuntimeProcessEnv } from '../windowsPathEnv'
 import { DshEventMapper } from './dshEventMapper'
+import { currentClientTimeZone } from './clientTimeZone'
 import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
@@ -240,15 +241,18 @@ export class DshKernel {
     images?: DshHostToolImagePayload[]
   ): Promise<{ messageId: string }> {
     this.requireClient()
-    if (!images || images.length === 0) {
-      return this.client.prompt(sessionId, [{ type: 'text', text }])
-    }
-    // Image attachments ride the idbots/prompt extension: the runtime commits
-    // them through its attachment store and queues [text, ...image blocks].
+    // Every prompt rides the idbots/prompt extension: images are committed
+    // through the runtime's attachment store, and the client time zone is
+    // declared on the user message source so dsh-time-context can resolve the
+    // request zone instead of reporting it unavailable (the stock SDK prompt
+    // has no zone field that reaches the message source). Without a zone the
+    // runtime falls back to the stock prompt path unchanged.
+    const clientTimeZone = currentClientTimeZone()
     return this.client.request('idbots/prompt', {
       sessionId,
       text,
-      ...(images.length > 0 ? { images } : {}),
+      ...(images && images.length > 0 ? { images } : {}),
+      ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
     })
   }
 

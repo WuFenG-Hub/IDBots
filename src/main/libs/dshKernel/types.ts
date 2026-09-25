@@ -203,6 +203,14 @@ export interface DshRuntimeConfigInput {
    */
   computerUse?: boolean
   /**
+   * 0.1.7 clock context (dsh-time-context): a durable time reading appended
+   * at most once per `refreshIntervalMs` (default 10 minutes) so the model
+   * interprets dates and times in the user's zone. The host passes its own
+   * IANA zone; omitted entirely when the host has none (upstream disabled
+   * default).
+   */
+  timeContext?: { timeZone?: string; refreshIntervalMs?: number }
+  /**
    * DeepSeek server-side web search (dsh-web trio): mounts the model-facing
    * `web_search` tool backed by an auxiliary Anthropic-compatible Messages
    * call with the native web_search_20250305 server tool. Present once the

@@ -58,12 +58,36 @@
 // races the turn's AbortSignal against our answer and discards late replies.
 
 import { isAbsolute, resolve } from 'node:path'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { JsonRpcLineTransport } from '@deepseek-ai/dsh-sdk-protocol'
 import { HarnessSdkJsonRpcServer } from '@deepseek-ai/dsh-sdk-jsonrpc-server'
 import * as dshToolSubagent from '@deepseek-ai/dsh-tool-subagent'
 import * as dshToolSubagentControl from '@deepseek-ai/dsh-tool-subagent-control'
 
 const RESPOND_OUTCOMES = new Set(['allowed-once', 'rejected'])
+
+const IANA_TIME_ZONE = /^[A-Za-z][A-Za-z0-9_+.-]*(?:\/[A-Za-z0-9_+.-]+)+$/
+
+/**
+ * Validate the host-supplied client time zone the way dsh-time-context does:
+ * UTC or a CANONICAL IANA Area/Location name. Anything else (missing, an
+ * abbreviation like "CST", a non-canonical alias) is dropped instead of
+ * forwarded — the time-context plugin THROWS on an invalid zone while
+ * assembling the request, so a bad value here would fail the whole turn.
+ * @param value - raw `clientTimeZone` from the idbots/prompt wire params.
+ * @returns the canonical zone, or undefined when the host did not supply one.
+ */
+const canonicalClientTimeZone = (value) => {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  if (value !== 'UTC' && !IANA_TIME_ZONE.test(value)) return undefined
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: value }).resolvedOptions().timeZone === value
+      ? value
+      : undefined
+  } catch {
+    return undefined
+  }
+}
 
 // session/ensure retry budget for SessionAlreadyOwnedError: covers the
 // seconds a superseded/dying runtime takes to exit and release its
@@ -95,6 +119,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsPolicySeq = 0
     this.idbotsAsks = new Map() // id → { resolve, reject }
     this.idbotsAskSeq = 0
+    this.idbotsPromptSeq = 0
     // Per-agent route for the agent/request waterfall (UI model+effort selector).
     // Mid-session model switches MUST override provider/model here — after the
     // first turn the loop seeds every request from the persisted session
@@ -545,7 +570,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   // aggregate-byte limits plus the canonical-base64 check apply exactly as
   // they do to the harness's own browser uploads; a refused batch throws to
   // the RPC caller instead of partially committing.
-  async idbotsPrompt({ sessionId, text, images }) {
+  async idbotsPrompt({ sessionId, text, images, clientTimeZone }) {
     let content = [{ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text ?? '') }]
     const imageList = Array.isArray(images) ? images.filter((image) => typeof image?.data === 'string' && image.data.length > 0) : []
     if (imageList.length > 0) {
@@ -570,7 +595,22 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
         }]
       }
     }
-    return this.prompt({ sessionId, contentBlocks: content })
+    // 0.1.7 time context: the stock SDK prompt builds its user message with a
+    // bare `{kind:'user'}` source, which leaves dsh-time-context reporting
+    // "browser time zone unavailable — ask the user". When the host supplies
+    // its zone we build the message ourselves and carry the zone in the
+    // source (the seam the Web client uses), so the clock reading resolves
+    // instead. No zone on the wire keeps the stock path exactly as before.
+    const zone = canonicalClientTimeZone(clientTimeZone)
+    if (zone === undefined) return this.prompt({ sessionId, contentBlocks: content })
+    const rec = await this.getOrCreateSession(sessionId)
+    this.assertLiveAgent(rec, sessionId)
+    const message = createUserMessage({
+      content,
+      source: { kind: 'user', rpcId: `idbots-${Date.now().toString(36)}-${++this.idbotsPromptSeq}`, clientTimeZone: zone },
+    })
+    rec.handle.agent.followup(message)
+    return { messageId: message.id }
   }
 
   async idbotsCancel({ sessionId, cause, keepInbox }) {

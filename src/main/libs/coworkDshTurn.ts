@@ -44,6 +44,7 @@ function isUnexpectedRuntimeExitError(error: unknown): boolean {
 }
 import type { DshKernelOptions } from './dshKernel/dshKernel'
 import { dshModelReasoningDeclaration } from './dshModelReasoning'
+import { currentClientTimeZone } from './dshKernel/clientTimeZone'
 import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
@@ -1159,6 +1160,11 @@ export class DshTurnHub {
           model: DSH_WEBSEARCH_MODEL,
         },
       } : {}),
+      // 0.1.7 clock context: the model gets a durable reading (ISO time +
+      // zone + elapsed) at most every 10 minutes, in the user's own zone —
+      // bots stop guessing dates for on-chain timestamps, schedules and
+      // memory work. Omitted when the host has no canonical zone.
+      ...(currentClientTimeZone() === undefined ? {} : { timeContext: { timeZone: currentClientTimeZone() } }),
       extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
       env: buildDshChildEnv({
         routeApiKeys: slot.routeApiKeys.values(),
