@@ -122,3 +122,13 @@ into the same sha256 digest verification as the EEXIST branch.
    "already applied", and `--check` must pass.
 4. On the next `pnpm run upgrade:dsh`, delete or rebase each patch; the
    script fails the upgrade until every patch matches the new versions.
+5. **Register the patch's fingerprint in `manifest.json`** (same directory):
+   the target file (package-relative), the exact marker its applied form
+   leaves behind, and the marker's exact occurrence count — plus
+   `platforms: [...]` when the defect only exists on one OS. Deleting a patch
+   means deleting its entry. `pnpm run check:dsh-deps` fails while a `.patch`
+   has no entry, and CI verifies every entry against the packaged app on each
+   OS (`node scripts/verify-dsh-kernel-patches.cjs --root <resources dir>`;
+   `--list` prints the current manifest, `--platform` lets a non-Windows
+   machine check Windows-scoped markers). Keep the count exact: a
+   half-applied patch must fail the gate, not silently pass.

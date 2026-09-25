@@ -161,6 +161,17 @@ function main() {
     console.error(REMEDIATION_PATCH);
     process.exit(1);
   }
+
+  // ...and every patch must carry the packaged-artifact fingerprint the
+  // verifier checks (a patch with no manifest entry would ship unverified).
+  const fingerprints = spawnSync(process.execPath, [path.join(__dirname, 'verify-dsh-kernel-patches.cjs')], {
+    stdio: 'inherit',
+  });
+  if (fingerprints.status !== 0) {
+    console.error('[FAIL] kernel patch fingerprints are incomplete or stale:');
+    console.error('  add/update the entry in scripts/dsh-kernel-patches/manifest.json (see scripts/dsh-kernel-patches/README.md).');
+    process.exit(1);
+  }
 }
 
 if (require.main === module) {

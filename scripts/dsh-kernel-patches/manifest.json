@@ -1,0 +1,61 @@
+{
+  "$comment": "Fingerprints proving each committed kernel patch really landed in an installed or PACKAGED dsh-runtime. scripts/verify-dsh-kernel-patches.cjs consumes this file: it fails when a patch file has no entry (adding a patch without a fingerprint is the silent-drop class of the v0.9.3 incident), when a listed patch file is gone, or when the marker count in the target file does not match. Keep `count` exact so a partially applied patch also fails. Paths are package-root relative, so the same entry works for a checkout and for an unpacked app's resources directory.",
+  "patches": [
+    {
+      "patch": "@deepseek-ai+dsh-win32-process+0.1.7-rc.2.patch",
+      "why": "CREATE_NO_WINDOW on all three raw CreateProcess spawn sites — a dropped patch silently brings back the Windows bash.exe console flash",
+      "platforms": ["win32"],
+      "targets": [
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-win32-process/lib/index.js",
+          "match": "0x08000000",
+          "count": 3
+        }
+      ]
+    },
+    {
+      "patch": "@deepseek-ai+dsh-tool-ask-user+0.1.7-rc.2.patch",
+      "why": "ask_user_question declares and forwards the per-question `detail` context (bare-question incident f3ec66dc)",
+      "targets": [
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-tool-ask-user/lib/index.js",
+          "match": "question.detail !== void 0",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "patch": "@deepseek-ai+dsh-subprocess-local+0.1.7-rc.2.patch",
+      "why": "spill self-heal: recreate an externally deleted private spill directory instead of degrading to the bounded tail — matters on every platform",
+      "targets": [
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-subprocess-local/lib/output.js",
+          "match": "mkdirSync(spill.dir",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "patch": "@deepseek-ai+dsh-session-persistence-jsonl+0.1.7-rc.2.patch",
+      "why": "ENOTSUP fallback for the V4 log's hard-link publish — invisible on APFS/NTFS, fatal on exFAT/FAT32/SMB userData and every dev loop on the SSD worktrees",
+      "targets": [
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
+          "match": "ENOTSUP",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "patch": "@deepseek-ai+dsh-attachment-local+0.1.7-rc.2.patch",
+      "why": "same ENOTSUP fallback for the attachment store's hard-link publish",
+      "targets": [
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js",
+          "match": "ENOTSUP",
+          "count": 2
+        }
+      ]
+    }
+  ]
+}
