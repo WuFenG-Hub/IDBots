@@ -80,7 +80,7 @@ function makeDetail(record = makeRecord()) {
 }
 
 function makeHarness(overrides = {}) {
-  const calls = { createPin: [], check: [], list: [], detail: [], pinVersions: [], fallbackList: [], fallbackVersions: [] };
+  const calls = { createPin: [], check: [], list: [], detail: [], pinVersions: [], fallbackList: [], fallbackVersions: [], gate: [] };
   const createPin = async (metabotId, metaidData, options) => {
     calls.createPin.push({ metabotId, metaidData, options });
     if (overrides.createPinError) throw overrides.createPinError;
@@ -116,6 +116,12 @@ function makeHarness(overrides = {}) {
       return [];
     },
   };
+  const gateLocalFile = 'gateLocalFile' in overrides
+    ? overrides.gateLocalFile
+    : async (filePath) => {
+        calls.gate.push(filePath);
+        return null;
+      };
   const tools = buildMetaProtocolAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, handler }),
     metaProtocol: control,
@@ -123,7 +129,9 @@ function makeHarness(overrides = {}) {
     sessionId: SESSION_ID,
     resolveMetabotId: () => ('metabotId' in overrides ? overrides.metabotId : METABOT_ID),
     resolveActingIdentity: overrides.resolveActingIdentity ?? (() => ACTING_IDENTITY),
-    ...(overrides.gateLocalFile ? { gateLocalFile: overrides.gateLocalFile } : {}),
+    // Default: a gate that approves and records. Pass `gateLocalFile: null` to
+    // simulate a host that wired no gate at all (must fail closed).
+    ...(gateLocalFile ? { gateLocalFile } : {}),
   });
   const byName = Object.fromEntries(tools.map((item) => [item.name, item]));
   return { calls, byName, tools };
@@ -154,8 +162,9 @@ test('registers metaprotocol_registry and post_metaprotocol with the verbatim sp
     byName.post_metaprotocol.description,
     [
       'Publish or update a protocol in the MetaID protocol registry (/protocols/metaprotocol).',
-      '- publish: register a NEW protocol. Requires title, protocolName and a body (field',
-      '  definitions). The registry path /protocols/<protocolName> must be free — if already',
+      '- publish: register a NEW protocol. Requires title, protocolName and a definition',
+      '  (body, protocolContent or protocolContentFile — see below). The registry path',
+      '  /protocols/<protocolName> must be free — if already',
       '  registered by someone else the call fails with the current registrant info; pick another',
       '  protocolName.',
       '- update: publish a new version of an existing protocol. Only the original registrant',
@@ -521,6 +530,106 @@ test('protocolContentFile: honors the local-file approval gate', async () => {
   assert.equal(ok.isError, undefined);
   assert.deepEqual(allowed, [filePath]);
   assert.equal(granting.calls.createPin.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Large definitions: protocolContentFile — owner gate placement and hard edges
+// ---------------------------------------------------------------------------
+
+test('protocolContentFile: a non-UTF-8 file is refused instead of being published lossily', async () => {
+  const filePath = join(largeBodyDir, 'invalid-utf8.json');
+  writeFileSync(filePath, Buffer.from([0x7b, 0x0a, 0x22, 0x61, 0x22, 0x3a, 0x20, 0xff, 0x0a, 0x7d]));
+  const { byName, calls } = makeHarness();
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /not valid UTF-8/);
+  assert.equal(calls.createPin.length, 0, 'an undecodable file must not reach the wallet');
+  assert.equal(calls.gate.length, 0, 'no owner prompt for a file that cannot be published verbatim');
+});
+
+test('protocolContentFile: with no owner gate wired, publishing is refused (fails closed)', async () => {
+  const filePath = writeBodyFile('large-no-gate.json', LARGE_BODY);
+  const { byName, calls } = makeHarness({ gateLocalFile: null });
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'Large Protocol',
+    protocolName: 'LargeProto',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /no owner-approval gate wired/);
+  assert.equal(calls.createPin.length, 0, 'an ungated local-file publish must never happen');
+});
+
+test('protocolContentFile: a file swapped while approval was pending is refused (not published)', async () => {
+  const filePath = writeBodyFile('large-swap.json', LARGE_BODY);
+  const evil = '{"title": "swapped while the owner was deciding"}';
+  const { byName, calls } = makeHarness({
+    gateLocalFile: async (candidate) => {
+      calls.gate.push(candidate);
+      writeFileSync(filePath, evil, 'utf8'); // the swap lands inside the approval window
+      return null;
+    },
+  });
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'Large Protocol',
+    protocolName: 'LargeProto',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /changed while approval was pending/);
+  assert.equal(calls.createPin.length, 0, 'the swapped content must not be published');
+});
+
+test('protocolContentFile: the owner gate runs only after the calls that would be refused anyway', async () => {
+  const filePath = writeBodyFile('large-ordering.json', LARGE_BODY);
+
+  // Schema-invalid definition: refused by the draft-07 gate, no owner prompt.
+  const schemaInvalid = makeHarness();
+  const bad = await schemaInvalid.byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'Bad-Name',
+    protocolContentFile: filePath,
+  });
+  assert.equal(bad.isError, true);
+  assert.match(bad.content[0].text, /Invalid protocol payload/);
+  assert.equal(schemaInvalid.calls.gate.length, 0, 'no owner prompt for a schema-invalid call');
+  assert.equal(schemaInvalid.calls.createPin.length, 0);
+
+  // Occupied path: refused by the conflict precheck, no owner prompt.
+  const conflict = makeHarness({ check: async (p) => ({ path: p, available: false, existing: makeRecord() }) });
+  const occupied = await conflict.byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContentFile: filePath,
+  });
+  assert.equal(occupied.isError, true);
+  assert.match(occupied.content[0].text, /already registered by/);
+  assert.equal(conflict.calls.gate.length, 0, 'no owner prompt for an occupied path');
+
+  // Non-registrant update: refused by the identity cascade, no owner prompt.
+  const foreign = makeHarness({
+    resolveActingIdentity: () => ({ ...ACTING_IDENTITY, globalMetaId: 'idq1someone-else', metaId: 'other', address: 'other-addr' }),
+    detail: () => makeDetail(makeRecord({ payload: { protocolContent: LARGE_BODY } })),
+  });
+  const notMine = await foreign.byName.post_metaprotocol.handler({
+    action: 'update',
+    target: '/protocols/taskboard',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContentFile: filePath,
+  });
+  assert.equal(notMine.isError, true);
+  assert.match(notMine.content[0].text, /Only the original registrant/);
+  assert.equal(foreign.calls.gate.length, 0, 'no owner prompt for a non-registrant update');
 });
 
 // ---------------------------------------------------------------------------
