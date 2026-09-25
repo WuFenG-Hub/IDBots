@@ -9773,6 +9773,7 @@ export class CoworkRunner extends EventEmitter {
             sessionId,
             resolveMetabotId,
             resolveActingIdentity: (metabotId) => this.resolveMetaProtocolActingIdentity(metabotId),
+            gateLocalFile,
           });
           memoryTools.push(metaProtocolTools[metaProtocolTools.length - 1]);
         }

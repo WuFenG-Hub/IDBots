@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { z } from 'zod';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import type {
@@ -256,8 +258,16 @@ export function buildMetaProtocolAgentTools(deps: {
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | undefined;
   resolveActingIdentity?: (metabotId: number) => MetaProtocolActingIdentity | undefined;
+  /**
+   * Owner-approval gate for protocolContentFile
+   * (chainUploadGate.checkUploadAllowed): returns null when the file may be
+   * published, or the denial message. Publishing a local file on-chain is
+   * irreversible, so files outside the session workspace need the owner's
+   * confirmation — same gate as omni_cast's payload_file.
+   */
+  gateLocalFile?: (filePath: string) => Promise<string | null>;
 }): unknown[] {
-  const { tool, metaProtocol, createPin, sessionId, resolveMetabotId, resolveActingIdentity } = deps;
+  const { tool, metaProtocol, createPin, sessionId, resolveMetabotId, resolveActingIdentity, gateLocalFile } = deps;
 
   function isNotFoundError(error: unknown): boolean {
     const msg = error instanceof Error ? error.message : String(error);
@@ -634,6 +644,10 @@ export function buildMetaProtocolAgentTools(deps: {
       '  protocolName.',
       '- update: publish a new version of an existing protocol. Only the original registrant',
       '  (identity check) may update; version auto-increments unless given.',
+      'Either action takes the definition as body (field definitions) or verbatim protocolContent',
+      '(raw JSON5 text) — or as protocolContentFile, an absolute local path whose bytes are used',
+      'as protocolContent unchanged (use it when the body is too large to pass inline without',
+      'transcription loss).',
       'Both actions validate the payload against the metaprotocol schema BEFORE anything reaches',
       'the wallet, then ask the host to sign and broadcast the on-chain pin (fees apply).',
       'Resolve the target for update by protocolPath, protocolName or pinId.',
@@ -648,6 +662,12 @@ export function buildMetaProtocolAgentTools(deps: {
       protocolContentType: z.enum(PROTOCOL_CONTENT_TYPE_ENUM).optional().describe("MIME type of protocolContent. Default: 'application/json'."),
       body: z.record(z.string(), z.any()).optional().describe('Field definitions: plain values or {value, description} objects (serialized to annotated JSON5). Mutually exclusive with protocolContent.'),
       protocolContent: z.string().optional().describe('Raw JSON5 protocol definition text. Mutually exclusive with body.'),
+      protocolContentFile: z
+        .string()
+        .optional()
+        .describe(
+          'Absolute local file path holding the raw JSON5 protocol definition text; the file bytes are used as protocolContent unchanged (UTF-8, no trimming). Use it when the definition is too large to pass inline without transcription loss. Mutually exclusive with body and protocolContent.',
+        ),
       metadata: z.any().optional().describe('Free-form metadata: an object, or a string that is JSON.parse-ed when possible (default empty).'),
       attachments: z.array(z.string()).optional().describe('Attachment URIs (metafile:// or metacode:// references).'),
     },
@@ -664,9 +684,11 @@ export function buildMetaProtocolAgentTools(deps: {
       if (!protocolName) return textResult('post_metaprotocol requires a non-empty protocolName.', true);
       const hasBody = args.body != null && typeof args.body === 'object';
       const rawContent = asString(args.protocolContent);
-      if (hasBody === Boolean(rawContent)) {
+      const rawContentFile = asString(args.protocolContentFile);
+      const contentSources = (hasBody ? 1 : 0) + (rawContent ? 1 : 0) + (rawContentFile ? 1 : 0);
+      if (contentSources !== 1) {
         return textResult(
-          'post_metaprotocol: pass exactly one of body (field definitions) or protocolContent (raw JSON5 text).',
+          'post_metaprotocol: pass exactly one of body (field definitions), protocolContent (raw JSON5 text) or protocolContentFile (absolute path to a file holding the raw JSON5 text).',
           true,
         );
       }
@@ -697,9 +719,45 @@ export function buildMetaProtocolAgentTools(deps: {
       }
 
       // §5.3 body JSON (isomorphic with the human protocol square).
+      // protocolContentFile exists so a large revision can be published with
+      // zero transcription loss: the file bytes ARE protocolContent, verbatim
+      // (no trim, no re-serialization) — the caller never has to hold the body
+      // in-context, and the write keeps the inline path's 7-tuple shape.
+      let fileContent = '';
+      if (rawContentFile) {
+        if (!path.isAbsolute(rawContentFile)) {
+          return textResult(
+            `post_metaprotocol requires an ABSOLUTE local path for protocolContentFile. Received a relative path: "${rawContentFile}". Resolve it to an absolute path first.`,
+            true,
+          );
+        }
+        if (!fs.existsSync(rawContentFile)) {
+          return textResult(`post_metaprotocol protocolContentFile not found: ${rawContentFile}`, true);
+        }
+        if (gateLocalFile) {
+          const denied = await gateLocalFile(rawContentFile);
+          if (denied) {
+            return textResult(denied, true);
+          }
+        }
+        try {
+          fileContent = fs.readFileSync(rawContentFile, 'utf8');
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          return textResult(`post_metaprotocol failed to read protocolContentFile ${rawContentFile}: ${msg}`, true);
+        }
+        if (!fileContent.trim()) {
+          return textResult(
+            `post_metaprotocol protocolContentFile is empty (${rawContentFile}). Write the JSON5 definition to it first.`,
+            true,
+          );
+        }
+      }
       const protocolContent = hasBody
         ? serializeMetaProtocolBody(args.body as Record<string, unknown>)
-        : rawContent;
+        : rawContentFile
+          ? fileContent
+          : rawContent;
       let metadata: unknown = '';
       if (args.metadata !== undefined) {
         if (typeof args.metadata === 'string') {
