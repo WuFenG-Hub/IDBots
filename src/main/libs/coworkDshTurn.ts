@@ -1258,7 +1258,25 @@ export class DshTurnHub {
       },
       onApprovalRequest: (sessionId, ask) => {
         this.askKernelById.set(ask.id, kernelOf())
-        controllerOf(sessionId)?.cb.onApprovalRequest(ask)
+        const controller = controllerOf(sessionId)
+        if (!controller) {
+          // Settle-don't-strand, the same contract onAskRequest enforces: an
+          // approval raised by a kernel-initiated turn (subagent-finished
+          // wake, no host turn controller) must never be dropped silently —
+          // the runtime's approval promise would strand and the turn would
+          // wedge with no stall watchdog armed. Auto-reject THIS call; the
+          // model sees the denial and adapts.
+          this.opts.log?.('warn', 'dshTurnHub.onApprovalRequest', {
+            message: 'approval request has no live turn controller for its DSH session; auto-rejecting',
+            askId: ask.id,
+            toolName: ask.toolName,
+            dshSessionId: sessionId,
+            runtime: slot.key,
+          })
+          void kernelOf().respondApproval(ask.id, 'rejected').catch(() => undefined)
+          return
+        }
+        controller.cb.onApprovalRequest(ask)
       },
       onApprovalCancelled: (askId) => {
         for (const controller of this.controllersByDsh.values()) controller.cb.onApprovalCancelled(askId)
@@ -1336,8 +1354,39 @@ export class DshTurnHub {
       },
       onToolRequest: (request) => {
         // Map the DSH session id back to the cowork id for the executor.
-        const coworkId = this.coworkByDsh.get(request.sessionId)
-        if (!coworkId || !this.opts.executeTool) return
+        // Kernel-initiated turns (subagent-finished wakes, scheduled nudges)
+        // run with NO live host turn controller — the live mapping died with
+        // the last host turn — so resolve through the pinned fallback exactly
+        // like onMessage's idle path does.
+        const coworkId = this.coworkOfDsh(request.sessionId)
+        if (!coworkId || !this.opts.executeTool) {
+          // A silent drop strands the runtime-side bridge promise forever:
+          // the kernel keeps awaiting the tool result, the turn wedges, and
+          // only the 10-minute stall watchdog unwinds it — re-sent prompts
+          // queue behind the wedged turn the whole time (2026-09-25 session
+          // 8665a5fd: a subagent-wake turn's longterm_subtask_wait was dropped
+          // silently, then "继续" stalled for the full watchdog window before
+          // "Error: tool call aborted before dispatch"). Settle the promise
+          // with an explicit error instead — the same contract onAskRequest
+          // already enforces for its bridge.
+          this.opts.log?.('warn', 'dshTurnHub.onToolRequest', {
+            message: !coworkId
+              ? 'host tool request has no cowork session mapping; rejecting so the turn unwinds'
+              : 'host tool request has no host executor; rejecting so the turn unwinds',
+            toolName: request.name,
+            dshSessionId: request.sessionId,
+            runtime: slot.key,
+          })
+          try {
+            void kernelOf().respondTool(request.id, {
+              ok: false,
+              error: `host tool "${request.name}" was rejected: the host has no session mapping for this runtime session (it may have been closed)`,
+            })
+          } catch {
+            // Kernel already closed — nothing left to answer.
+          }
+          return
+        }
         void this.opts.executeTool(coworkId, request.name, request.arguments ?? {})
           .then((result) => kernelOf().respondTool(request.id, result))
           .catch((error) => {
