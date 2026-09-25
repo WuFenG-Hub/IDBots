@@ -75,8 +75,11 @@ export interface RuntimeDeps {
   messageStore: {
     readSince(groupId: string, afterMsgIndex: number): SessionMessage[];
   };
-  /** One-shot LLM call (chatCompletionWithTools). Throws on abort/timeout. */
-  llmComplete: (messages: import('../services/cognitiveChatCompletion').ChatMessage[], opts: { timeoutMs: number }) => Promise<ChatCompletionResult>;
+  /** One-shot LLM call (chatCompletionWithTools). Throws on abort/timeout.
+   *  `opts.signal` (GAP-4): the runtime's own move-window abort — a wired
+   *  implementation must cancel the underlying request when it fires, so the
+   *  2-minute contract holds even if the wiring drops `timeoutMs`. */
+  llmComplete: (messages: import('../services/cognitiveChatCompletion').ChatMessage[], opts: { timeoutMs: number; signal?: AbortSignal }) => Promise<ChatCompletionResult>;
   /**
    * Write an encrypted agent-game/1 event to the group (returns pinId).
    * `opts.asAgentId`: sign as this session agent's local bot identity instead
@@ -135,6 +138,10 @@ const MOVE_TIMEOUT_MS = 900_000;
 /** Safety margin over the adapter window so chain-timestamp skew and write
  *  latency can never make the claim land inside the still-open window. */
 const MOVE_CLAIM_MARGIN_MS = 60_000;
+/** How often the move-window sweeper checks for expired move-LLM windows.
+ *  The tick is real-time but the expiry decision uses this.now(), so tests
+ *  drive it with the virtual clock. */
+const LLM_WINDOW_SWEEP_INTERVAL_MS = 1_000;
 
 /* ------------------------------------------------------------------ */
 /* Runtime                                                            */
@@ -158,6 +165,20 @@ export class AgentGameRuntime extends EventEmitter {
    *  one-claim-per-progress-epoch guard (a rejected claim is final: the
    *  adapter judged the window still open, re-claiming would burn pins). */
   private lastClaimAt = new Map<string, number>();
+  /**
+   * GAP-4: in-flight move-LLM windows (one per session — the busy guard keeps
+   * calls single-flight). The runtime OWNS architecture decision ②'s 2-minute
+   * fault window instead of trusting the llmComplete wiring to pass timeoutMs
+   * down: the 2026-09-25 production asar shipped exactly that wiring drop
+   * (`llmComplete: (messages) => …` with no attemptTimeoutMs) and every
+   * attempt hung until undici's default 300s headers timeout — the contract
+   * existed at both ends of the pipe and died at its only joint. Each window
+   * holds an AbortController (wired implementations cancel the underlying
+   * request when it fires) and a race rejector (unwired/hung callees are cut
+   * anyway), so the fault exit is enforced at the contract owner.
+   */
+  private llmWindows = new Map<string, { deadline: number; ac: AbortController; reject: (err: Error) => void }>();
+  private llmWindowTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
@@ -174,12 +195,22 @@ export class AgentGameRuntime extends EventEmitter {
 
   /* ----------------------- lifecycle ----------------------- */
 
-  /** Start background housekeeping (lease heartbeat + loop tick). */
+  /** Start background housekeeping (lease heartbeat + loop tick + move-window sweep). */
   startBackground(): void {
     if (this.heartbeatTimer) return;
     this.heartbeatTimer = setInterval(() => this.housekeeping(), LEASE_HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
+    this.ensureLlmWindowTimer();
     this.scheduleLoop(0);
+  }
+
+  /** The move-window sweeper starts with the background loop, but a window
+   *  must never go unswept just because startBackground wasn't reached yet —
+   *  lazily arm it on first in-flight window too. */
+  private ensureLlmWindowTimer(): void {
+    if (this.llmWindowTimer || this.disposed) return;
+    this.llmWindowTimer = setInterval(() => this.sweepLlmWindows(), LLM_WINDOW_SWEEP_INTERVAL_MS);
+    this.llmWindowTimer.unref?.();
   }
 
   /** Recover unfinished sessions after host restart (docs/14 §5). */
@@ -229,8 +260,16 @@ export class AgentGameRuntime extends EventEmitter {
     this.disposed = true;
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.loopTimer) clearTimeout(this.loopTimer);
+    if (this.llmWindowTimer) clearInterval(this.llmWindowTimer);
     this.heartbeatTimer = null;
     this.loopTimer = null;
+    this.llmWindowTimer = null;
+    // Release every in-flight move window: hung llmComplete promises die with
+    // the process, but the abort must still reach wired transports.
+    for (const [sessionId, w] of this.llmWindows) {
+      this.llmWindows.delete(sessionId);
+      w.ac.abort();
+    }
     for (const sb of this.sandboxes.values()) {
       await sb.dispose().catch(() => {});
     }
@@ -278,23 +317,49 @@ export class AgentGameRuntime extends EventEmitter {
    * Returns the fresh session record it mutated (callers that persist
    * afterwards must use it — persisting a pre-catch-up copy rolls back
    * lastIndex / lastActionSeq and re-triggers the GAP-3b wedge).
+   *
+   * GAP-5 family (cursor/state decoupling): the cursor may only advance over
+   * messages the state actually reduced. Without a sandbox there is nothing
+   * to reduce with — consumption is deferred (a group message waking the
+   * session before recover() must not burn the cursor). On the hydration
+   * path (no in-memory state) the state is rebuilt by full replay of the
+   * group history — exactly what a third-party client does — and the stored
+   * blob is only a cross-check: a library blob that is missing, stale, or
+   * the bare initial board while the cursor has consumed the full history
+   * (the G2 black-seat wedge: "initial board + idx=19") heals to the
+   * chain-replayed truth. A blob that cannot PARSE is library corruption →
+   * state_corrupt, park (existing GAP-5 contract, untouched).
    */
   private async catchUp(sessionId: string): Promise<GameSession | null> {
     const s = this.deps.store.getSession(sessionId);
     if (!s) return null;
-    const after = s.lastIndex < 0 ? -1 : s.lastIndex;
-    const messages = this.deps.messageStore.readSince(s.groupId, after);
-    if (messages.length === 0) return s;
-    let state = this.states.get(sessionId);
-    if (state === undefined) {
-      // GAP-5: same hydration semantics as ensureSandbox (shared parser) — a
-      // corrupt stored blob surfaces as state_corrupt instead of silently
-      // wedging the session with no state.
-      const stored = this.deps.store.getSerializedState(sessionId);
-      if (stored) state = parseStoredState(sessionId, stored);
-    }
-    let cursor = s.lastIndex;
     const sandbox = this.sandboxes.get(sessionId);
+    let state = this.states.get(sessionId);
+    if (state === undefined && !sandbox) {
+      // Nothing to reduce with — defer consumption until recover/resume has
+      // both the sandbox and a state. Advancing the cursor here is what
+      // created the decoupling wedge.
+      return s;
+    }
+    let heal = false;
+    let storedState: unknown;
+    if (state === undefined) {
+      const stored = this.deps.store.getSerializedState(sessionId);
+      if (stored) storedState = parseStoredState(sessionId, stored); // throws state_corrupt
+      // Full-replay self-heal: rebuild from the initial board over the whole
+      // group history (chain truth). The stored blob (if parseable) is
+      // cross-checked afterwards; it never wins.
+      state = await sandbox!.initialState({ gameId: s.gameId, seat: s.seat });
+      heal = true;
+      // GAP-3b: the expected-next-seq cursor is recomputed from the replay
+      // (a stale-high stored value would bake seq-skips into our next write).
+      s.lastActionSeq = 0;
+      this.log(`${sessionId}: state hydration — full-replay self-heal of group history (stored cursor ${s.lastIndex})`);
+    }
+    const after = heal ? -1 : (s.lastIndex < 0 ? -1 : s.lastIndex);
+    const messages = this.deps.messageStore.readSince(s.groupId, after);
+    if (messages.length === 0 && !heal) return s;
+    let cursor = s.lastIndex;
     for (const msg of messages) {
       // Advance cursor for every consumed message (agent-game or not). Non-agent
       // messages are preserved by the backend but ignored here.
@@ -371,9 +436,45 @@ export class AgentGameRuntime extends EventEmitter {
     if (state !== undefined) {
       this.states.set(sessionId, state);
     }
+    if (heal && storedState !== undefined && sandbox) {
+      // Divergence cross-check: a stored state that disagrees with the chain
+      // replay was the wedge (stale, bare-initial, partially reduced) — the
+      // replay already won; leave an auditable trace instead of healing
+      // silently (the G2 black-seat wedge had "no audit, no logs").
+      try {
+        const storedCanonical = await sandbox.serializeState(storedState);
+        const replayCanonical = await sandbox.serializeState(state);
+        if (storedCanonical !== replayCanonical) {
+          this.deps.store.audit('state-heal', sessionId, s.agentId, {
+            reason: 'stored-diverges-from-replay',
+            storedCursor: s.lastIndex,
+          });
+          this.log(`${sessionId}: state-heal — stored state diverged from full replay and was replaced (audited)`);
+        }
+      } catch {
+        // cross-check only — never blocks the heal
+      }
+    }
     s.lastIndex = cursor;
-    this.persist(s, state);
+    this.persistOwnedFields(s, state);
     return s;
+  }
+
+  /**
+   * Persist only the fields this runtime path OWNS (cursor, expected seq,
+   * budget, game state) onto a FRESH read of the session record. A stale
+   * in-flight record must never revert a concurrent markStatus: a pause
+   * landing while a catch-up was awaiting was silently resurrected to
+   * running/null by the catch-up's whole-row persist (the runtime-window cut
+   * lost to a racing catch-up; the same ghost produced the "paused → running
+   * again with no resume" flashes in the 2026-09-25 G2 forensics).
+   */
+  private persistOwnedFields(s: GameSession, state: unknown): void {
+    const fresh = this.deps.store.getSession(s.sessionId) ?? s;
+    fresh.lastIndex = s.lastIndex;
+    fresh.lastActionSeq = s.lastActionSeq;
+    fresh.budget = s.budget;
+    this.persist(fresh, state);
   }
 
   /* ----------------------- action loop ----------------------- */
@@ -441,12 +542,18 @@ export class AgentGameRuntime extends EventEmitter {
       for (let attempt = 1; attempt <= LLM_MAX_PARSE_ATTEMPTS; attempt++) {
         let text: string;
         try {
-          const result = await this.deps.llmComplete(buildMovePrompt({
+          const result = await this.completeMoveInWindow(sessionId, buildMovePrompt({
             gameId: s.gameId, seat: s.seat, observation, schema, lastError,
-          }), { timeoutMs: LLM_CALL_TIMEOUT_MS });
+          }));
           text = result.content?.trim() ?? '';
         } catch (err) {
-          this.markStatus(sessionId, 'paused', mkError(isAbort(err) ? 'llm_timeout' : 'llm_unavailable', errMsg(err), this.now));
+          // GAP-4: session-correlated failure line — operators must be able to
+          // tell WHICH seat stalled with which classification from the host
+          // log alone (the 2026-09-25 G2 red-seat forensics had neither seat
+          // nor cause in ~50 bare "fetch failed" lines).
+          const code = isAbort(err) ? 'llm_timeout' : 'llm_unavailable';
+          this.log(`${sessionId}: move-LLM failed (${code}, seat ${s.seat}, attempt ${attempt}/${LLM_MAX_PARSE_ATTEMPTS}): ${errMsg(err)}`);
+          this.markStatus(sessionId, 'paused', mkError(code, errMsg(err), this.now));
           return;
         }
         s.budget.llmCallsUsed++;
@@ -503,6 +610,49 @@ export class AgentGameRuntime extends EventEmitter {
       }
     } finally {
       this.busy.delete(sessionId);
+    }
+  }
+
+  /**
+   * GAP-4: one move-LLM call under the runtime-owned window. Two independent
+   * cut paths fire at the contract deadline (LLM_CALL_TIMEOUT_MS): the
+   * AbortController aborts (wired implementations cancel the underlying
+   * request — the socket dies instead of farming the keep-alive pool), and
+   * the race rejector surfaces a BrowserLlmTimeout error (unwired callees
+   * that ignore both timeoutMs and signal are cut anyway). The sweeper is a
+   * real-time tick judging expiry by this.now(), so the virtual clock drives
+   * it in tests.
+   */
+  private completeMoveInWindow(sessionId: string, messages: import('../services/cognitiveChatCompletion').ChatMessage[]): Promise<ChatCompletionResult> {
+    const ac = new AbortController();
+    this.ensureLlmWindowTimer();
+    return new Promise<ChatCompletionResult>((resolve, reject) => {
+      this.llmWindows.set(sessionId, { deadline: this.now() + LLM_CALL_TIMEOUT_MS, ac, reject });
+      this.deps.llmComplete(messages, { timeoutMs: LLM_CALL_TIMEOUT_MS, signal: ac.signal }).then(
+        (result) => {
+          this.llmWindows.delete(sessionId);
+          resolve(result);
+        },
+        (err) => {
+          this.llmWindows.delete(sessionId);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    });
+  }
+
+  /** Cut every expired move-LLM window: abort the transport, reject the race,
+   *  drop the entry (a late callee settlement becomes a no-op). */
+  private sweepLlmWindows(): void {
+    if (this.disposed) return;
+    for (const [sessionId, w] of this.llmWindows) {
+      if (this.now() < w.deadline) continue;
+      this.llmWindows.delete(sessionId);
+      const err = new Error(`move-LLM window of ${LLM_CALL_TIMEOUT_MS}ms exceeded (runtime-enforced, architecture decision ②)`);
+      err.name = 'BrowserLlmTimeout'; // isAbort() → session paused as llm_timeout
+      w.ac.abort(err);
+      w.reject(err);
+      this.log(`${sessionId}: move-LLM window enforced at ${LLM_CALL_TIMEOUT_MS}ms (runtime-owned abort)`);
     }
   }
 
@@ -589,8 +739,10 @@ export class AgentGameRuntime extends EventEmitter {
       }
       this.pending.delete(s.sessionId);
       // Persist the post-catch-up record: persisting the caller's pre-catch-up
-      // copy would roll back lastIndex / lastActionSeq (lost update).
-      this.persist(current, this.states.get(s.sessionId));
+      // copy would roll back lastIndex / lastActionSeq (lost update). Owned-
+      // fields merge: the chain write awaited above must not revert a
+      // markStatus that landed meanwhile (same ghost as catchUp's persist).
+      this.persistOwnedFields(current, this.states.get(s.sessionId));
       this.log(`${s.sessionId}: committed ${event.type} (pin ${pinId.slice(0, 12)}…)`);
     } catch (err) {
       const backoff = WRITE_BACKOFF_MS[Math.min(attempt, WRITE_BACKOFF_MS.length - 1)];
@@ -723,6 +875,13 @@ export class AgentGameRuntime extends EventEmitter {
     if (!s) throw runtimeError('session_not_found', `unknown session ${sessionId}`);
     if (s.status === 'stopped' || s.status === 'finished') return toSessionView(s);
     this.pending.delete(sessionId);
+    // Release an in-flight move window so a hung llmComplete cannot keep the
+    // seat's transport pinned after the session is gone.
+    const window = this.llmWindows.get(sessionId);
+    if (window) {
+      this.llmWindows.delete(sessionId);
+      window.ac.abort();
+    }
     this.leases.releaseSession(sessionId);
     const sb = this.sandboxes.get(sessionId);
     if (sb) {
@@ -758,21 +917,13 @@ export class AgentGameRuntime extends EventEmitter {
     const sandbox = await loadAdapterSandbox(adapterPath, s.adapterHash);
     await sandbox.smokeTest({ gameId: s.gameId, seat: s.seat });
     this.sandboxes.set(s.sessionId, sandbox);
-    if (!this.states.has(s.sessionId)) {
-      // GAP-5: after a restart the in-memory map is empty — hydrate from the
-      // persisted library state FIRST. Presetting a fresh initial board here
-      // would shadow the true mid-game state forever (catchUp only hydrates
-      // when the map is empty) and the session would play from a fabricated
-      // board. Only a session with no persisted state at all falls back to
-      // initialState; a stored blob that cannot parse is library corruption
-      // (state_corrupt) — callers park the session instead of continuing.
-      const stored = this.deps.store.getSerializedState(s.sessionId);
-      if (stored != null) {
-        this.states.set(s.sessionId, parseStoredState(s.sessionId, stored));
-      } else {
-        this.states.set(s.sessionId, await sandbox.initialState({ gameId: s.gameId, seat: s.seat }));
-      }
-    }
+    // GAP-5 family: state hydration belongs to catchUp ALONE. Presetting a
+    // fresh initial board here is what wedged the G2 black seat as "bare
+    // initial board + idx=19" (the preset shadowed the true mid-game state,
+    // and catchUp only hydrates when the map is empty); and hydrating the
+    // raw stored blob here would skip catchUp's full-replay cross-check.
+    // catchUp rebuilds by chain replay and audited-heals divergence; until
+    // it runs, processSession's state===undefined guard keeps the loop idle.
     // GAP-4: (re)anchor conservatively — after a restart we cannot know when
     // the game last progressed, so the move window restarts from now rather
     // than risking a premature claim.

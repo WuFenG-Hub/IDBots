@@ -6863,6 +6863,13 @@ const startAgentGameHost = (): void => {
       // architecture decision ②) rides the fallback stack's per-attempt
       // window — dropped here, a hung upstream kept a seat stalled for
       // 18-45+ min until the HTTP layer died on its own (G1 game 2026-09-24).
+      // opts.signal is the runtime's OWN window abort (the runtime enforces
+      // the contract regardless of this wiring — the 2026-09-25 production
+      // asar shipped a build where this wiring predated the timeoutMs pass-
+      // through and every attempt hung for undici's 300s headers default).
+      // Merging it here lets the runtime cut the actual socket the moment its
+      // window expires, so a wiring regression can never re-farm dead
+      // keep-alive connections (the G2 red-seat failure attractor).
       const brain = resolveSystemBrainOptions(getMetabotStore().listMetabots());
       return chatCompletionWithTools(messages, {
         llmId: brain.llmId,
@@ -6873,6 +6880,7 @@ const startAgentGameHost = (): void => {
         fallbackEffort: brain.fallbackEffort,
         throwOnEmptyContent: true,
         attemptTimeoutMs: opts.timeoutMs,
+        signal: opts.signal,
       });
     },
     // agent-game event writes: every game event is signed as the session

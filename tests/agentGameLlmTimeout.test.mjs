@@ -619,7 +619,13 @@ test('GAP-4 超时判负闭环：黑方挂死 → 红方 900s+margin 自动 time
     assert.equal(recorder.calls.length, writesAtClaim, '同进度纪元至多一次 timeout.claimed');
 
     const blackFinal = await host.handleSessionMethod('status', { sessionId: black.sessionId }, BLACK_AGENT, {});
-    assert.equal(blackFinal.status, 'running', '挂死方（黑）不被申诉路径误伤，仍等自身超时出口');
+    // GAP-4②（runtime-owned window）语义升级：黑方挂死超 120s 合同窗后不再
+    // 「仍 running 等自身超时出口」——runtime 自己就是出口，强断为 paused
+    // llm_timeout（930s/990s 的假钟推进早已越过 120s 窗，sweeper 真实 tick
+    // 必然已切）。申诉路径（红方 timeout.claimed）与黑方自身故障出口互相
+    // 独立，互不误伤。
+    assert.equal(blackFinal.status, 'paused', '挂死方（黑）被 runtime 合同窗强断为 paused（>2min 即故障，架构决策②）');
+    assert.equal(blackFinal.lastError?.code, 'llm_timeout', '黑方出口 = 自身 llm_timeout，非申诉路径误伤');
     void resolveBlack; // 挂死 promise 故意不 resolve（对齐真实挂死形态）
   } finally {
     if (host) await host.runtime.dispose().catch(() => {});
