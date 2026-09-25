@@ -157,6 +157,23 @@ export function dshModelReasoningDeclaration(
   return null;
 }
 
+/**
+ * Family trait for the DSH event mapper's tool-ride text classification:
+ * DeepSeek models narrate tool-round process text in the CONTENT channel —
+ * short "先看仓库结构。" lines riding a tool call — so the mapper folds such
+ * text into the hidden thinking display. GLM keeps its process text in the
+ * reasoning channel, so text riding a tool call is real content and must stay
+ * visible: the 2026-09-25 gas-pool incident had glm-5.3-flash emit the
+ * complete daily report as a text block next to a todo_write call, and the
+ * fold hid it twice — the user saw a one-line summary while the full report
+ * sat in the Think row. Families without a declaration keep the historical
+ * fold default; add them here once their narration dialect is known.
+ */
+export function foldsToolRideTextIntoThinking(modelId: string | undefined | null): boolean {
+  if (!modelId) return true;
+  return !GLM_PATTERN.test(bareModelIdOf(modelId));
+}
+
 const undeclaredEffortWarnedRoutes = new Set<string>();
 
 /**

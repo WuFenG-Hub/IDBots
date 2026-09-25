@@ -9,6 +9,7 @@ import Module from 'node:module'
 const require = Module.createRequire(import.meta.url)
 const { DshEventMapper } = require('../dist-electron/main/libs/dshKernel/dshEventMapper.js')
 const { splitThinkTaggedContent } = require('../dist-electron/main/libs/dshKernel/thinkTags.js')
+const { foldsToolRideTextIntoThinking } = require('../dist-electron/main/libs/dshModelReasoning.js')
 
 const kinds = (actions) => actions.map((a) => a.kind)
 
@@ -804,4 +805,141 @@ test('splitThinkTaggedContent extracts think and thinking tags', () => {
     splitThinkTaggedContent('<think>unclosed'),
     { thinking: 'unclosed', text: '' },
   )
+})
+
+// ---- Family gating: GLM keeps tool-ride text visible ----------------------
+// The narration fold (text riding a tool call → thinking display) is a
+// DeepSeek-family dialect trait. GLM puts its process text in the reasoning
+// channel, so text riding a tool call is CONTENT: the 2026-09-25 gas-pool
+// incident had glm-5.3-flash emit the complete daily report as a text block
+// next to a todo_write call, and the fold hid it twice behind a one-line
+// summary the user mistook for the whole delivery.
+
+const glmHeader = (mapper) => mapper.consume({
+  type: 'request/header',
+  data: { header: { config: { provider: 'zhipu', model: 'glm-5.3-flash' } } },
+})
+
+test('foldsToolRideTextIntoThinking: GLM never folds; DeepSeek and unknown keep the fold', () => {
+  assert.equal(foldsToolRideTextIntoThinking('glm-5.3-flash'), false)
+  assert.equal(foldsToolRideTextIntoThinking('GLM-5.3-Flash'), false)
+  assert.equal(foldsToolRideTextIntoThinking('z-ai/glm-4.6'), false)
+  assert.equal(foldsToolRideTextIntoThinking('glm-4.5-air'), false)
+  assert.equal(foldsToolRideTextIntoThinking('deepseek-v4.1-flash'), true)
+  assert.equal(foldsToolRideTextIntoThinking('deepseek/deepseek-flash'), true)
+  assert.equal(foldsToolRideTextIntoThinking('brand-new-model'), true)
+  assert.equal(foldsToolRideTextIntoThinking(undefined), true)
+})
+
+test('GLM: reasoning + deliverable text + tool call keeps the text visible', () => {
+  const mapper = new DshEventMapper()
+  glmHeader(mapper)
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'reasoning-delta', index: 0, text: 'all data collected' } } })
+  // Text streams visibly while a native reasoning block is live (Claude-path
+  // parity — the hold is a narration-fold-route concern only).
+  const streamed = mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 1, text: '# 巡检报告' } } })
+  assert.equal(streamed.some((a) => a.slot === 'text'), true)
+
+  // A tool-call block-start must NOT convert the streaming text to thinking.
+  const atTool = mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'block-start', index: 2, blockType: 'tool-call' } } })
+  assert.deepEqual(atTool, [])
+
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'all data collected' },
+          { type: 'text', text: '# 巡检报告' },
+          { type: 'tool-call', id: 'c1', name: 'todo_write', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  const textFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(textFinal.content, '# 巡检报告')
+  assert.equal(textFinal.metadata, undefined, 'the deliverable stays visible — no isThinking reclass')
+  const thinkFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.equal(thinkFinal.content, 'all data collected', 'the Think row carries reasoning only')
+})
+
+test('GLM: unassembled report next to a tool call still finalizes visible', () => {
+  // No streamed chunks — the assembled assistant/message alone proves the shape
+  // recorded in the 2026-09-25 incident (reasoning + 4.6k-char report + tool call).
+  const mapper = new DshEventMapper()
+  glmHeader(mapper)
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: '两路数据都已到齐。' },
+          { type: 'text', text: '# 《MVC Subsidy / Sponsor 资金池巡检报告》' },
+          { type: 'tool-call', id: 'c1', name: 'todo_write', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  assert.equal(done.some((a) => a.slot === 'text' && a.kind === 'messageFinalize' && a.metadata?.isThinking), false)
+  const textFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(textFinal.content, '# 《MVC Subsidy / Sponsor 资金池巡检报告》')
+  const thinkFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.equal(thinkFinal.content, '两路数据都已到齐。')
+})
+
+test('GLM (effort off): text before a tool call stays a visible bubble', () => {
+  const mapper = new DshEventMapper()
+  glmHeader(mapper)
+  const opened = mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '先看仓库结构。' } },
+  })
+  assert.equal(opened[0].slot, 'text')
+  const atTool = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
+  })
+  assert.deepEqual(atTool, [], 'no conversion to thinking on GLM routes')
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '先看仓库结构。' },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  const textFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(textFinal.content, '先看仓库结构。')
+  assert.equal(textFinal.metadata, undefined)
+})
+
+test('explicit DeepSeek route keeps the narration fold', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'request/header',
+    data: { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4.1-flash' } } },
+  })
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'need a tool' },
+          { type: 'text', text: '本地没装 tsx，用 npx 临时拉一个跑：' },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  assert.equal(done.some((a) => a.slot === 'text'), false, 'DeepSeek commentary still never becomes a visible bubble')
+  const settled = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.match(settled.content, /need a tool/)
+  assert.match(settled.content, /本地没装 tsx/)
 })
