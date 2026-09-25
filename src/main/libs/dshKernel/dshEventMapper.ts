@@ -18,7 +18,11 @@
 //    the assembled replay state; commentary ("thinking out loud" around tool
 //    calls) is reclassified into the thinking slot at finalize
 //  - Official DeepSeek on dsh-llm-deepseek has no phase tags: text that
-//    accompanies tool calls is treated as commentary. Live reasoning tokens
+//    accompanies tool calls is treated as commentary. A narration-fold
+//    family trait gates this — GLM puts its process text in the reasoning
+//    channel, so text riding a tool call is CONTENT and must stay visible
+//    (foldsToolRideTextIntoThinking; the 2026-09-25 gas-pool incident hid
+//    two full glm-5.3-flash reports behind the fold). Live reasoning tokens
 //    arrive as `reasoning-delta` on assistant/chunk (the pre-0.1.5
 //    `reasoning-chunks` web-UI stream no longer exists). A native reasoning
 //    block already live this step must not
@@ -42,6 +46,7 @@
 
 import type { DshMapperAction, DshSessionEventEnvelope, DshUsageSnapshot } from './types'
 import { splitThinkTaggedContent } from './thinkTags'
+import { foldsToolRideTextIntoThinking } from '../dshModelReasoning'
 
 const textOf = (blocks: Array<{ type: string; text?: string }> | undefined): string =>
   (blocks ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('')
@@ -162,8 +167,12 @@ export class DshEventMapper {
           this.openThinking(actions)
         } else if (chunk?.type === 'block-start' && chunk.blockType === 'tool-call') {
           // Tool-call announced while text streams with no live thinking
-          // display: this text is commentary, not the reply.
-          this.convertRidingTextToThinking(actions)
+          // display: on narration-fold routes (DeepSeek dialect) this text is
+          // commentary, not the reply. GLM keeps process text in the reasoning
+          // channel — its riding text is content and must not convert.
+          if (this.toolRideTextFolds()) {
+            this.convertRidingTextToThinking(actions)
+          }
         } else if (chunk?.type === 'text-delta') {
           this.rawTextBuf += chunk.text ?? ''
           const split = splitThinkTaggedContent(this.rawTextBuf)
@@ -177,10 +186,14 @@ export class DshEventMapper {
             // for the rest of this round (settled at assistant/message).
             this.thinkingBuf = split.text
             actions.push({ kind: 'messageUpdate', slot: 'text', content: this.thinkingBuf })
-          } else if (split.text.length > 0 && !this.reasoningBlockLive) {
+          } else if (split.text.length > 0 && (!this.reasoningBlockLive || !this.toolRideTextFolds())) {
             // Native reasoning already live: hold text until assistant/message
-            // proves it is the final answer. Opening a body bubble here is the
-            // flash the DSH web UI never does (Think row from the first token).
+            // proves it is the final answer — on narration-fold routes
+            // (DeepSeek dialect), where riding text may still be commentary and
+            // opening a body bubble here is the flash the DSH web UI never does
+            // (Think row from the first token). Non-folding families (GLM) put
+            // process text in the reasoning channel, so their text is content
+            // and streams visibly like the Claude path.
             this.openText(actions)
             this.textBuf = split.text
             this.turnSawStreamedText = true
@@ -330,6 +343,17 @@ export class DshEventMapper {
     return this.lastUsage
   }
 
+  /**
+   * Whether this route's family narrates tool-round process text in the
+   * content channel (DeepSeek dialect → fold riding text into the thinking
+   * display). GLM keeps process text in the reasoning channel, so its riding
+   * text is content and stays visible. Unknown families keep the historical
+   * fold default; see foldsToolRideTextIntoThinking for the trait registry.
+   */
+  private toolRideTextFolds(): boolean {
+    return foldsToolRideTextIntoThinking(this.model)
+  }
+
   private openThinking(actions: DshMapperAction[]): void {
     if (this.thinkingOpen) return
     this.thinkingOpen = true
@@ -447,10 +471,13 @@ export class DshEventMapper {
       }
       commentary = commentaryParts.join('\n\n')
       visibleText = splitThinkTaggedContent(finalParts.join('\n\n')).text
-    } else if (hasToolCall) {
+    } else if (hasToolCall && this.toolRideTextFolds()) {
       // Native DeepSeek (dsh-llm-deepseek) has no commentary/final_answer
       // tags. Text that rides alongside tool calls is thinking-aloud — the
       // same class of content the Responses path folded into ThinkingBlock.
+      // Narration-fold only: on non-folding families (GLM) riding text is
+      // real content — folding it hid full deliverables next to bookkeeping
+      // tool calls (2026-09-25 gas-pool report incident), so it stays visible.
       commentary = splitThinkTaggedContent(visibleText).text
       visibleText = ''
     } else if (!reasoning) {
