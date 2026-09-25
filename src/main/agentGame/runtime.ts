@@ -317,23 +317,49 @@ export class AgentGameRuntime extends EventEmitter {
    * Returns the fresh session record it mutated (callers that persist
    * afterwards must use it — persisting a pre-catch-up copy rolls back
    * lastIndex / lastActionSeq and re-triggers the GAP-3b wedge).
+   *
+   * GAP-5 family (cursor/state decoupling): the cursor may only advance over
+   * messages the state actually reduced. Without a sandbox there is nothing
+   * to reduce with — consumption is deferred (a group message waking the
+   * session before recover() must not burn the cursor). On the hydration
+   * path (no in-memory state) the state is rebuilt by full replay of the
+   * group history — exactly what a third-party client does — and the stored
+   * blob is only a cross-check: a library blob that is missing, stale, or
+   * the bare initial board while the cursor has consumed the full history
+   * (the G2 black-seat wedge: "initial board + idx=19") heals to the
+   * chain-replayed truth. A blob that cannot PARSE is library corruption →
+   * state_corrupt, park (existing GAP-5 contract, untouched).
    */
   private async catchUp(sessionId: string): Promise<GameSession | null> {
     const s = this.deps.store.getSession(sessionId);
     if (!s) return null;
-    const after = s.lastIndex < 0 ? -1 : s.lastIndex;
-    const messages = this.deps.messageStore.readSince(s.groupId, after);
-    if (messages.length === 0) return s;
-    let state = this.states.get(sessionId);
-    if (state === undefined) {
-      // GAP-5: same hydration semantics as ensureSandbox (shared parser) — a
-      // corrupt stored blob surfaces as state_corrupt instead of silently
-      // wedging the session with no state.
-      const stored = this.deps.store.getSerializedState(sessionId);
-      if (stored) state = parseStoredState(sessionId, stored);
-    }
-    let cursor = s.lastIndex;
     const sandbox = this.sandboxes.get(sessionId);
+    let state = this.states.get(sessionId);
+    if (state === undefined && !sandbox) {
+      // Nothing to reduce with — defer consumption until recover/resume has
+      // both the sandbox and a state. Advancing the cursor here is what
+      // created the decoupling wedge.
+      return s;
+    }
+    let heal = false;
+    let storedState: unknown;
+    if (state === undefined) {
+      const stored = this.deps.store.getSerializedState(sessionId);
+      if (stored) storedState = parseStoredState(sessionId, stored); // throws state_corrupt
+      // Full-replay self-heal: rebuild from the initial board over the whole
+      // group history (chain truth). The stored blob (if parseable) is
+      // cross-checked afterwards; it never wins.
+      state = await sandbox!.initialState({ gameId: s.gameId, seat: s.seat });
+      heal = true;
+      // GAP-3b: the expected-next-seq cursor is recomputed from the replay
+      // (a stale-high stored value would bake seq-skips into our next write).
+      s.lastActionSeq = 0;
+      this.log(`${sessionId}: state hydration — full-replay self-heal of group history (stored cursor ${s.lastIndex})`);
+    }
+    const after = heal ? -1 : (s.lastIndex < 0 ? -1 : s.lastIndex);
+    const messages = this.deps.messageStore.readSince(s.groupId, after);
+    if (messages.length === 0 && !heal) return s;
+    let cursor = s.lastIndex;
     for (const msg of messages) {
       // Advance cursor for every consumed message (agent-game or not). Non-agent
       // messages are preserved by the backend but ignored here.
@@ -409,6 +435,25 @@ export class AgentGameRuntime extends EventEmitter {
     }
     if (state !== undefined) {
       this.states.set(sessionId, state);
+    }
+    if (heal && storedState !== undefined && sandbox) {
+      // Divergence cross-check: a stored state that disagrees with the chain
+      // replay was the wedge (stale, bare-initial, partially reduced) — the
+      // replay already won; leave an auditable trace instead of healing
+      // silently (the G2 black-seat wedge had "no audit, no logs").
+      try {
+        const storedCanonical = await sandbox.serializeState(storedState);
+        const replayCanonical = await sandbox.serializeState(state);
+        if (storedCanonical !== replayCanonical) {
+          this.deps.store.audit('state-heal', sessionId, s.agentId, {
+            reason: 'stored-diverges-from-replay',
+            storedCursor: s.lastIndex,
+          });
+          this.log(`${sessionId}: state-heal — stored state diverged from full replay and was replaced (audited)`);
+        }
+      } catch {
+        // cross-check only — never blocks the heal
+      }
     }
     s.lastIndex = cursor;
     this.persist(s, state);
@@ -853,21 +898,13 @@ export class AgentGameRuntime extends EventEmitter {
     const sandbox = await loadAdapterSandbox(adapterPath, s.adapterHash);
     await sandbox.smokeTest({ gameId: s.gameId, seat: s.seat });
     this.sandboxes.set(s.sessionId, sandbox);
-    if (!this.states.has(s.sessionId)) {
-      // GAP-5: after a restart the in-memory map is empty — hydrate from the
-      // persisted library state FIRST. Presetting a fresh initial board here
-      // would shadow the true mid-game state forever (catchUp only hydrates
-      // when the map is empty) and the session would play from a fabricated
-      // board. Only a session with no persisted state at all falls back to
-      // initialState; a stored blob that cannot parse is library corruption
-      // (state_corrupt) — callers park the session instead of continuing.
-      const stored = this.deps.store.getSerializedState(s.sessionId);
-      if (stored != null) {
-        this.states.set(s.sessionId, parseStoredState(s.sessionId, stored));
-      } else {
-        this.states.set(s.sessionId, await sandbox.initialState({ gameId: s.gameId, seat: s.seat }));
-      }
-    }
+    // GAP-5 family: state hydration belongs to catchUp ALONE. Presetting a
+    // fresh initial board here is what wedged the G2 black seat as "bare
+    // initial board + idx=19" (the preset shadowed the true mid-game state,
+    // and catchUp only hydrates when the map is empty); and hydrating the
+    // raw stored blob here would skip catchUp's full-replay cross-check.
+    // catchUp rebuilds by chain replay and audited-heals divergence; until
+    // it runs, processSession's state===undefined guard keeps the loop idle.
     // GAP-4: (re)anchor conservatively — after a restart we cannot know when
     // the game last progressed, so the move window restarts from now rather
     // than risking a premature claim.
