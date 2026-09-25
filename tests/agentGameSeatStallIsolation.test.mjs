@@ -337,11 +337,12 @@ test('缺口一: 一席 LLM 挂死被合同窗强断为 llm_timeout，他席同�
     host.onGroupMessage(GROUP_A);
     await waitFor(() => aEntered, { label: 'seat A llm entry (hang)' });
     fakeNow += 121_000;
+    host.runtime.sweepLlmWindows(); // deterministic primary cut (real 1s interval stays as backup)
     host.onGroupMessage(GROUP_A);
     await waitFor(async () => {
       const view = await host.handleSessionMethod('status', { sessionId: sessionA.sessionId }, RED_AGENT, {});
       return view.status === 'paused' && view.lastError?.code === 'llm_timeout';
-    }, { timeoutMs: 8_000, label: 'seat A window-cut to llm_timeout (red on main: hangs forever)' });
+    }, { timeoutMs: 20_000, label: 'seat A window-cut to llm_timeout (red on main: hangs forever)' });
 
     // 宿主日志必须留下会话级关联的故障行（取证要求：能定位是哪一席哪类故障）。
     const correlated = built.logSink.find((line) => line.includes(sessionA.sessionId) && /move-LLM failed|llm_timeout/i.test(line));

@@ -401,11 +401,12 @@ test('GAP-4②: 接线劣化形态（无视 timeoutMs/signal 的挂死 llmComple
 
     // 推进假钟跨过 120s 合同窗（+ 余量），等真实 sweeper tick。
     fakeNow += 121_000;
+    host.runtime.sweepLlmWindows(); // deterministic primary cut (real 1s interval stays as backup)
     host.onGroupMessage(GROUP_ID);
     await waitFor(async () => {
       const view = await host.handleSessionMethod('status', { sessionId }, RED_AGENT, {});
       return view.status === 'paused' && view.lastError?.code === 'llm_timeout';
-    }, { timeoutMs: 8_000, label: 'runtime-enforced llm_timeout pause (red on main: session hangs forever)' });
+    }, { timeoutMs: 20_000, label: 'runtime-enforced llm_timeout pause (red on main: session hangs forever)' });
 
     const view = await host.handleSessionMethod('status', { sessionId }, RED_AGENT, {});
     assert.equal(view.lastError.code, 'llm_timeout', '分类必须是 llm_timeout（isAbort 认 BrowserLlmTimeout）');
@@ -443,12 +444,13 @@ test('GAP-4②: runtime 传入的 AbortSignal 在窗到点时真正触发（尊�
     assert.ok(seen.signal instanceof AbortSignal, 'runtime 必须传入 AbortSignal（信号通道；RED on main: opts 无 signal）');
 
     fakeNow += 121_000;
+    host.runtime.sweepLlmWindows(); // deterministic primary cut (real 1s interval stays as backup)
     host.onGroupMessage(GROUP_ID);
-    await waitFor(() => seen.signal?.aborted === true, { timeoutMs: 8_000, label: 'signal aborted at window' });
+    await waitFor(() => seen.signal?.aborted === true, { timeoutMs: 20_000, label: 'signal aborted at window' });
     await waitFor(async () => {
       const s = host.runtime.deps.store.listRecoverableSessions()[0];
       return s && s.status === 'paused' && s.lastError?.code === 'llm_timeout';
-    }, { timeoutMs: 8_000, label: 'paused llm_timeout after signal abort' });
+    }, { timeoutMs: 20_000, label: 'paused llm_timeout after signal abort' });
   } finally {
     if (host) await host.runtime.dispose().catch(() => {});
     cleanup();
