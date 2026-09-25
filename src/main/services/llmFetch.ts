@@ -2,8 +2,9 @@
  * Connection-level fetch resilience for LLM wire calls.
  *
  * All three wire styles (anthropic / openai-compat / deepseek-responses) post
- * through here. Two problems this solves, both surfaced by the 2026-09-25
- * 00:09-03:27 outage (G2 red seat, three hours of llm_unavailable):
+ * through here. Three problems this solves, surfaced by the 2026-09-25 G2
+ * red-seat outage (~50 consecutive llm_unavailable on one seat while other
+ * seats moved fine the same minute):
  *
  *  1. Undici failures carried zero diagnosable detail — the logged message was
  *     just "fetch failed" while the real transport error (ECONNRESET,
@@ -15,12 +16,27 @@
  *     instantly with no retry, even though undici evicts the poisoned socket
  *     on error — a single immediate retry runs on a fresh connection and
  *     would have absorbed most of the observed 1-2s failure pairs.
+ *
+ *  3. STALL-class failures (the request raced onto a half-dead keep-alive
+ *     socket, wrote into the void, and waited out undici's connection
+ *     timeout — ETIMEDOUT / UND_ERR_HEADERS_TIMEOUT / UND_ERR_BODY_TIMEOUT)
+ *     got no fresh-connection retry at all: they surfaced straight as
+ *     llm_unavailable. undici evicts the stalled socket on timeout exactly
+ *     like on reset, so stall joins reset in the exactly-one-immediate-retry
+ *     set — with the runtime's own move-window abort (GAP-4) cutting hung
+ *     calls first, the retry can only fire on genuinely timed-out transports.
  */
 
-/** Cause codes worth exactly one immediate retry: the socket died mid-flight
- *  (peer dropped a keep-alive connection we raced into). ECONNREFUSED is
- *  deliberately absent — the endpoint is down and a retry just burns the
- *  attempt window; the fallback brain already covers it. */
+/**
+ * Cause codes worth exactly one immediate retry on a fresh connection.
+ * Two families:
+ *  - reset: the socket died mid-flight (peer dropped a keep-alive connection
+ *    we raced into) and undici evicted it on error;
+ *  - stall: the socket looked alive but never answered (half-dead keep-alive
+ *    write into the void) and undici evicted it on timeout.
+ * ECONNREFUSED is deliberately absent — the endpoint is down and a retry just
+ * burns the attempt window; the fallback brain already covers it.
+ */
 const CONNECTION_RETRYABLE_CAUSE_CODES = new Set([
   'ECONNRESET',
   'ECONNABORTED',
@@ -28,6 +44,9 @@ const CONNECTION_RETRYABLE_CAUSE_CODES = new Set([
   'UND_ERR_SOCKET',
   'UND_ERR_CLOSED',
   'UND_ERR_CONNECT_TIMEOUT',
+  'ETIMEDOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
 ]);
 
 /** Classify a fetch error as retryable connection-level failure; null when
