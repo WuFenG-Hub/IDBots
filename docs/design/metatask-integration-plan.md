@@ -65,8 +65,11 @@ worst case on record).
 
 ## 3. Protocol v1.2 change spec
 
-Handed to the designated publishing metabot after owner confirmation. Every
-change below follows the activation process in §3.6.
+Full draft registration body (owner-review copy, Chinese to match the v1.1.0
+registry lineage): `docs/metaid_protocols/metatask-protocol-v1.2-registration-draft.md`
+— the designated publishing metabot publishes that text verbatim (minus the
+handoff preamble) via the metaprotocol registry after owner confirmation.
+Every change below follows the activation process in §3.6.
 
 ### 3.1 Settlement (split) semantics — D-1 Option A (ruled 2026-09-27)
 
