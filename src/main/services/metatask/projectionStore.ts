@@ -1,6 +1,7 @@
 import type { SqliteDatabase as Database } from '../../sqliteTypes';
 import type { MetaTaskEventPath } from './constants';
 import type {
+  MetaTaskAlert,
   MetaTaskBoard,
   MetaTaskBoardTask,
   MetaTaskChainEvent,
@@ -70,6 +71,22 @@ export class MetaTaskProjectionStore {
         seq INTEGER NOT NULL DEFAULT 0
       );
       INSERT OR IGNORE INTO metatask_refresh_state (id) VALUES (1);
+      CREATE TABLE IF NOT EXISTS metatask_watch_state (
+        task_root TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        last_status TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (task_root, node_id)
+      );
+      CREATE TABLE IF NOT EXISTS metatask_alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        root_pin_id TEXT NOT NULL,
+        node_id TEXT,
+        detail TEXT,
+        created_at_ms INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_metatask_alerts_id ON metatask_alerts(id DESC);
     `);
     this.saveDb();
   }
@@ -287,7 +304,61 @@ export class MetaTaskProjectionStore {
         // skip malformed rows; the next refresh rewrites them
       }
     }
-    return { localRosterMetaIds: localRosterMetaIds.filter(Boolean), tasks, refresh: this.refreshInfo() };
+    return { localRosterMetaIds: localRosterMetaIds.filter(Boolean), tasks, alerts: this.listAlerts(), refresh: this.refreshInfo() };
+  }
+
+  // ── watch state + alerts (P2 heartbeat) ────────────────────────────────────
+
+  getWatchStatuses(): { root: string; node: string; status: string }[] {
+    return this.getAll<Row>('SELECT task_root, node_id, last_status FROM metatask_watch_state').map((row) => ({
+      root: String(row.task_root),
+      node: String(row.node_id),
+      status: String(row.last_status),
+    }));
+  }
+
+  setWatchStatuses(entries: { root: string; node: string; status: string }[]): void {
+    const now = new Date().toISOString();
+    for (const entry of entries) {
+      this.db.run(
+        `INSERT INTO metatask_watch_state (task_root, node_id, last_status, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(task_root, node_id) DO UPDATE SET
+           last_status = excluded.last_status,
+           updated_at = excluded.updated_at`,
+        [entry.root, entry.node, entry.status, now]
+      );
+    }
+    this.saveDb();
+  }
+
+  appendAlerts(alerts: MetaTaskAlert[]): void {
+    for (const alert of alerts) {
+      this.db.run(
+        'INSERT INTO metatask_alerts (kind, root_pin_id, node_id, detail, created_at_ms) VALUES (?, ?, ?, ?, ?)',
+        [alert.kind, alert.rootPinId, alert.node, alert.detail, alert.createdAtMs]
+      );
+    }
+    if (alerts.length > 0) this.saveDb();
+  }
+
+  /** Drop alerts older than the horizon so one-shot transition notices decay. */
+  pruneAlerts(olderThanMs: number, nowMs: number): void {
+    this.db.run('DELETE FROM metatask_alerts WHERE created_at_ms < ?', [nowMs - olderThanMs]);
+    this.saveDb();
+  }
+
+  listAlerts(limit = 30): MetaTaskAlert[] {
+    return this.getAll<Row>(
+      'SELECT kind, root_pin_id, node_id, detail, created_at_ms FROM metatask_alerts ORDER BY id DESC LIMIT ?',
+      [limit]
+    ).map((row) => ({
+      kind: String(row.kind) as MetaTaskAlert['kind'],
+      rootPinId: String(row.root_pin_id),
+      node: row.node_id === null ? null : String(row.node_id),
+      detail: row.detail === null ? null : String(row.detail),
+      createdAtMs: Number(row.created_at_ms ?? 0),
+    }));
   }
 
   // ── refresh state ──────────────────────────────────────────────────────────

@@ -2195,6 +2195,10 @@ const translations: Record<LanguageType, Record<string, string>> = {
     'metatask.settlement': '结算清单',
     'metatask.shareBP': '份额',
     'metatask.unpaidCount': '另有 {count} 条未计酬历史（返工/被取代）',
+    'metatask.alert.claimTtlSoon': '节点 {node} 的认领即将到期',
+    'metatask.alert.submissionChange': '节点 {node} 状态变化：{detail}',
+    'metatask.alert.closingDrive': '发布的任务聚合停滞：{detail}',
+    'longTermTask.subtask.metataskChip': '链上任务 {progress}',
     // 长期任务看板（一等实体重构版：状态分列 + 子项目进度）
     'longTermTask.column.waitingOwner': '等你拍板',
     'longTermTask.column.inProgress': '进行中',
@@ -4861,6 +4865,10 @@ const translations: Record<LanguageType, Record<string, string>> = {
     'metatask.settlement': 'Settlement manifest',
     'metatask.shareBP': 'Share',
     'metatask.unpaidCount': 'Plus {count} unpaid-history entries (rework / superseded)',
+    'metatask.alert.claimTtlSoon': 'Claim on node {node} expiring soon',
+    'metatask.alert.submissionChange': 'Node {node} changed: {detail}',
+    'metatask.alert.closingDrive': 'Published task aggregation stalled: {detail}',
+    'longTermTask.subtask.metataskChip': 'MetaTask {progress}',
     // Long-term task board (first-class redesign: status columns + sub-task progress)
     'longTermTask.column.waitingOwner': 'Needs you',
     'longTermTask.column.inProgress': 'In progress',

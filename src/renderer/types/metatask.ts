@@ -112,9 +112,18 @@ export interface MetaTaskBoardTask {
   settlementFinalized: boolean;
 }
 
+export interface MetaTaskAlert {
+  kind: 'claim_ttl_soon' | 'submission_change' | 'closing_drive';
+  rootPinId: string;
+  node: string | null;
+  detail: string | null;
+  createdAtMs: number;
+}
+
 export interface MetaTaskBoard {
   localRosterMetaIds: string[];
   tasks: MetaTaskBoardTask[];
+  alerts: MetaTaskAlert[];
   refresh: {
     lastRefreshAtMs: number | null;
     lastOkAtMs: number | null;

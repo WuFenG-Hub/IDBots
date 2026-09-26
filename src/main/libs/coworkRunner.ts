@@ -209,6 +209,7 @@ import { buildCommentPinAgentTools } from './commentPinAgentTools';
 import { createSurfCreatePinGuard, recordSurfDeepRead, type SurfSessionWriteState } from './surfInteractionGuard';
 import { buildScheduledTaskAgentTools, type ScheduledTaskAgentControl } from './scheduledTaskAgentTools';
 import { buildLongTermTaskAgentTools, type LongTermTaskAgentControl } from './longTermTaskAgentTools';
+import { buildMetataskAgentTools, type MetaTaskAgentControl } from './metataskAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import { buildPostSimpleLogAgentTools } from './postSimpleLogAgentTools';
@@ -1805,6 +1806,9 @@ export interface CoworkRunnerOptions {
   /** Long-term task board (redesign): the Twin's create/drive/accept tools over
    *  LongTermTaskStore, registered for every cowork surface. */
   longTermTaskTools?: LongTermTaskAgentControl;
+  /** MetaTask (chain-side quadrant four): participation tools (claim-with-guard
+   *  / submit / verify / publish / amend) over the local projection + chain writes. */
+  metataskTools?: MetaTaskAgentControl;
   /**
    * When set, every cowork session gets the upload_file tool backed by
    * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
@@ -2026,6 +2030,7 @@ export class CoworkRunner extends EventEmitter {
   private metawebSurf?: MetawebSurfControl;
   private scheduledTaskTools?: ScheduledTaskAgentControl;
   private longTermTaskTools?: LongTermTaskAgentControl;
+  private metataskTools?: MetaTaskAgentControl;
   private metaFileUpload?: MetaFileUploadControl;
   private walletTools?: WalletToolsControl;
   private visionRelay?: VisionRelayControl;
@@ -2158,6 +2163,7 @@ export class CoworkRunner extends EventEmitter {
     this.metawebSurf = options?.metawebSurf;
     this.scheduledTaskTools = options?.scheduledTaskTools;
     this.longTermTaskTools = options?.longTermTaskTools;
+    this.metataskTools = options?.metataskTools;
     this.metaFileUpload = options?.metaFileUpload;
     this.walletTools = options?.walletTools;
     this.visionRelay = options?.visionRelay;
@@ -9888,6 +9894,17 @@ export class CoworkRunner extends EventEmitter {
         ...buildLongTermTaskAgentTools({
           tool,
           control: this.longTermTaskTools,
+        })
+      );
+    }
+    if (this.metataskTools && this.metabotChainWrite) {
+      memoryTools.push(
+        ...buildMetataskAgentTools({
+          tool,
+          control: this.metataskTools,
+          createPin: this.metabotChainWrite.createPin,
+          sessionId,
+          resolveMetabotId: (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
         })
       );
     }

@@ -1,0 +1,819 @@
+import { z } from 'zod';
+import type { ChainWriteCreatePin } from './postBuzzAgentTools';
+import { innerHash, outerHash } from '../services/metatask/canon';
+import { replayMetaTask } from '../services/metatask/engine';
+import type {
+  MetaTaskBoard,
+  MetaTaskChainEvent,
+  MetaTaskTaskProjection,
+} from '../services/metatask/types';
+
+/**
+ * MetaTask agent tools — the session bot's participation surface for the
+ * on-chain multi-bot collaboration protocol (/protocols/metatask, v1.2 rev-2
+ * draft). Productizes the on-chain skill packages: claim-with-guard (never
+ * spend a fee on a non-open node), #8/#9-disciplined review drafts, hash
+ * assembly per the frozen canon, and publish invariants.
+ *
+ * Discipline the tool descriptions encode:
+ *  - claim runs the replay guard FIRST; a non-open node is refused before
+ *    any chain spend (claim-rejected:<node>:<state>).
+ *  - verify forces semantic_check (ruling #9) and failreason on fail
+ *    (ruling #8) at WRITE time, so votes never land as not-counted.
+ *  - same-side review is refused locally (roster = local bots); chain-side
+ *    roster enforcement is H_ACT2-gated in the engine.
+ *  - publish runs tree → spec → task with the weight invariant (sum=10000)
+ *    checked before the first pin is spent.
+ *  - the chain is the source of truth: after every write the local
+ *    projection refreshes in the background; reads state their boundary block.
+ */
+
+type SdkToolFactory = (
+  name: string,
+  description: string,
+  schema: Record<string, unknown>,
+  handler: (args: any) => Promise<unknown>
+) => unknown;
+
+function textResult(text: string, isError = false) {
+  return {
+    content: [{ type: 'text' as const, text }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+function jsonResult(value: unknown) {
+  return textResult(JSON.stringify(value, null, 2));
+}
+
+const PIN_VERSION = '1.1.0';
+
+export interface MetaTaskAgentControl {
+  /** Chain-sourced projection refresher (rebuildable cache, never the record). */
+  refresher: () => {
+    board: () => MetaTaskBoard;
+    detail: (rootPinId: string) => MetaTaskTaskProjection | null;
+    refreshOnce: (reason: string) => Promise<{ ok: boolean; error: string | null }>;
+    loadEvents: () => MetaTaskChainEvent[];
+  };
+  /** globalMetaIds of every local bot (the same-owner roster side). */
+  localRosterMetaIds: () => string[];
+  /** Session bot's globalMetaId by metabot id. */
+  resolveGlobalMetaId: (metabotId: number) => string | null;
+}
+
+const asString = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value : fallback);
+
+export function buildMetataskAgentTools(deps: {
+  tool: SdkToolFactory;
+  control: MetaTaskAgentControl;
+  createPin: ChainWriteCreatePin;
+  sessionId: string;
+  resolveMetabotId: (sessionId: string) => number | undefined;
+}): unknown[] {
+  const { tool, control } = deps;
+  const refresher = () => control.refresher();
+
+  const identity = (): { metabotId: number; globalMetaId: string } | { error: string } => {
+    const metabotId = deps.resolveMetabotId(deps.sessionId);
+    if (metabotId == null) {
+      return { error: 'metatask tools could not determine which MetaBot owns this session — no wallet/identity to act with. Ask the user which MetaBot should participate.' };
+    }
+    const globalMetaId = control.resolveGlobalMetaId(metabotId);
+    if (!globalMetaId) {
+      return { error: `MetaBot ${metabotId} has no globalMetaId yet — it must be initialized on-chain before participating in MetaTasks.` };
+    }
+    return { metabotId, globalMetaId };
+  };
+
+  const writePin = async (
+    metabotId: number,
+    subpath: string,
+    payload: Record<string, unknown>,
+    origin: string,
+  ) =>
+    deps.createPin(
+      metabotId,
+      {
+        operation: 'create',
+        path: `/protocols/metatask/${subpath}`,
+        encryption: '0',
+        version: PIN_VERSION,
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+      },
+      { origin },
+    );
+
+  const projectionAfterRefresh = async (rootPinId: string): Promise<MetaTaskTaskProjection | null> => {
+    let detail = refresher().detail(rootPinId);
+    if (!detail) {
+      await refresher().refreshOnce('metatask-tool-miss');
+      detail = refresher().detail(rootPinId);
+    }
+    return detail;
+  };
+
+  /** Replay guard: the node must exist and be open (expiry applied) before any spend. */
+  const guardOpenNode = (
+    events: MetaTaskChainEvent[],
+    rootPinId: string,
+    node: string,
+  ): { ok: true; projection: MetaTaskTaskProjection } | { ok: false; reason: string } => {
+    let projection: MetaTaskTaskProjection;
+    try {
+      projection = replayMetaTask(events, { rootPinId, now: Date.now() });
+    } catch (error) {
+      return { ok: false, reason: `replay failed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    const nodeState = projection.nodeStates[node];
+    if (!nodeState) return { ok: false, reason: `node "${node}" not found in task ${rootPinId}` };
+    if (nodeState.status !== 'open') {
+      return { ok: false, reason: `claim-rejected:${node}:${nodeState.status}` };
+    }
+    return { ok: true, projection };
+  };
+
+  // ── reads ──────────────────────────────────────────────────────────────────
+
+  const listTasks = tool(
+    'metatask_list',
+    'List on-chain MetaTasks from the local chain-sourced projection: root pinId, title, publisher, verified/total progress, participant count, my roles (publisher / participant), boundary block. Pass refresh=true to force a chain sweep first (default reads the cache). On-chain indexing lags — the boundary block is the truth anchor, never assume real-time.',
+    {
+      refresh: z.boolean().optional().describe('Force a background chain sweep before reading (slower, fresher).'),
+    },
+    async (args: { refresh?: boolean }) => {
+      try {
+        if (args.refresh) {
+          const result = await refresher().refreshOnce('metatask_list');
+          if (!result.ok) return textResult(`Refresh failed (showing cached projection): ${result.error}`);
+        }
+        const board = refresher().board();
+        return jsonResult({
+          boundaryBlock: board.refresh.boundaryBlock,
+          lastRefreshAtMs: board.refresh.lastRefreshAtMs,
+          alerts: board.alerts.length,
+          tasks: board.tasks.map((task) => ({
+            rootPinId: task.rootPinId,
+            title: task.title,
+            publisher: task.publisher,
+            progress: task.progress,
+            participants: task.participantCount,
+            myRoles: task.myRoles,
+            settlementFinalized: task.settlementFinalized,
+            boundaryBlock: task.freshness.boundaryBlock,
+          })),
+        });
+      } catch (error) {
+        return textResult(`Failed to list MetaTasks: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  const getTask = tool(
+    'metatask_get',
+    'Get one MetaTask in full from the local projection: policy (TTL/quorum/window/split), every node with status/holder/weight/effective submission and pass votes, the participant roster, and the settlement manifest when finalized. Includes `openNodes` — the nodes currently claimable — plus reviewEligibility notes (same-side targets you must NOT review). Read-only.',
+    {
+      rootPinId: z.string().min(1).describe('Task root pinId (66-char, ends with i0).'),
+      refresh: z.boolean().optional(),
+    },
+    async (args: { rootPinId?: string; refresh?: boolean }) => {
+      try {
+        if (args.refresh) await refresher().refreshOnce('metatask_get');
+        const detail = await projectionAfterRefresh(String(args.rootPinId ?? ''));
+        if (!detail) return textResult(`MetaTask root not found: ${args.rootPinId}`, true);
+        const roster = new Set(control.localRosterMetaIds().filter(Boolean));
+        return jsonResult({
+          rootPinId: detail.rootPinId,
+          title: detail.title,
+          brief: detail.brief,
+          publisher: detail.publisher,
+          policy: detail.policy,
+          amendHead: detail.amendHead,
+          taskComplete: detail.taskComplete,
+          progress: detail.progress,
+          nodes: Object.values(detail.nodeStates).map((node) => ({
+            id: node.id,
+            title: node.title,
+            kind: node.kind,
+            weight: node.weight,
+            status: node.status,
+            disputed: node.disputed,
+            holder: node.holder?.claimant ?? null,
+            submission: node.submission?.pinId ?? null,
+            submitter: node.submission?.submitter ?? null,
+            passVotes: node.passVotes,
+            failVotes: node.failVotes,
+          })),
+          openNodes: Object.values(detail.nodeStates)
+            .filter((node) => node.status === 'open')
+            .map((node) => node.id),
+          reviewEligibility: {
+            sameSideExcluded: Object.values(detail.nodeStates)
+              .filter(
+                (node) =>
+                  node.submission !== null &&
+                  (roster.has(node.submission.submitter) || roster.has(detail.publisher)),
+              )
+              .map((node) => node.id),
+            note: 'same-side targets must not be reviewed by local bots (review independence); submission eligibility only excludes the task root author (H_ACT2-gated).',
+          },
+          participants: detail.participants,
+          settlement: detail.settlement,
+          freshness: detail.freshness,
+        });
+      } catch (error) {
+        return textResult(`Failed to read the MetaTask: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  const replayTask = tool(
+    'metatask_replay',
+    'Re-run the local MetaTask replay engine over the cached chain events for one task root and return the derived state table plus the settlement manifest (when finalizable): pure derivation, chain facts in, projection out. Use it to double-check a state before acting, or to compute the would-be settlement split.',
+    {
+      rootPinId: z.string().min(1),
+    },
+    async (args: { rootPinId?: string }) => {
+      try {
+        const projection = replayMetaTask(refresher().loadEvents(), {
+          rootPinId: String(args.rootPinId ?? ''),
+          now: Date.now(),
+        });
+        return jsonResult({
+          taskComplete: projection.taskComplete,
+          progress: projection.progress,
+          nodeStates: Object.fromEntries(
+            Object.entries(projection.nodeStates).map(([id, node]) => [
+              id,
+              { status: node.status, disputed: node.disputed, holder: node.holder?.claimant ?? null, pass: node.passVotes },
+            ]),
+          ),
+          settlement: projection.settlement,
+          ignoredEvents: projection.ignoredEvents,
+          freshness: projection.freshness,
+        });
+      } catch (error) {
+        return textResult(`Replay failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  // ── participation writes ───────────────────────────────────────────────────
+
+  const claimNode = tool(
+    'metatask_claim',
+    'Claim an OPEN node of an on-chain MetaTask as this session\'s MetaBot. Runs the replay guard FIRST (claimTTL / review-window expiry included) and refuses without spending when the node is not open — output `claim-rejected:<node>:<state>`. Before claiming, read the task with metatask_get so you actually intend to do the node\'s work: an effective claim starts a TTL clock and, per protocol, freezing the node against publisher amends.',
+    {
+      rootPinId: z.string().min(1).describe('Task root pinId.'),
+      node: z.string().min(1).describe('Node id from the task tree (metatask_get).'),
+    },
+    async (args: { rootPinId?: string; node?: string }) => {
+      try {
+        const who = identity();
+        if ('error' in who) return textResult(who.error, true);
+        const rootPinId = String(args.rootPinId ?? '');
+        const node = String(args.node ?? '');
+        const guard = guardOpenNode(refresher().loadEvents(), rootPinId, node);
+        if (guard.ok === false) return textResult(guard.reason, true);
+        const result = await writePin(who.metabotId, 'claim', { taskid: rootPinId, node }, 'tool:metatask_claim');
+        void refresher().refreshOnce('metatask_claim');
+        return jsonResult({
+          claimPinId: result.pinId,
+          txids: result.txids,
+          node,
+          taskid: rootPinId,
+          note: 'keep the claimPinId — your submission must reference it. Chain indexing lags; the guard result reflects the boundary block.',
+        });
+      } catch (error) {
+        return textResult(`Claim failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  const submitWork = tool(
+    'metatask_submit',
+    'Submit the work certificate for a node you hold a claim on. You provide the result OBJECT (without any hash — the tool computes the inner hash sha256(canonJ(result minus hash)) and embeds it, then the outer sha256(canonJ(result)) per the frozen canon); the tool checks the claim is still the effective holder and yours. Aggregate nodes require childIds (all children verified, per the aggregation rule). Use supersedePinId to replace YOUR earlier submission of the same claim cycle before it is verified (six-predicate supersede, both ends must be at/after H_ACT2 once announced).',
+    {
+      rootPinId: z.string().min(1),
+      node: z.string().min(1),
+      claimPinId: z.string().min(1).describe('The claim pin returned by metatask_claim.'),
+      result: z.record(z.string(), z.unknown()).describe('Result object WITHOUT a hash field; task-specific fields per the node spec.'),
+      contentType: z.string().optional().describe('Recorded metadata only (never gates verification). Default application/json;utf-8.'),
+      attachment: z.string().optional().describe('Artifact URI: pin:// | metafile:// | metaapp://.'),
+      childIds: z.array(z.string()).optional().describe('Aggregate nodes only: verified child submission pinIds (canonical mirror rule).'),
+      supersedePinId: z.string().optional().describe('Your earlier submission pinId being replaced (same claim cycle).'),
+    },
+    async (args: {
+      rootPinId?: string;
+      node?: string;
+      claimPinId?: string;
+      result?: Record<string, unknown>;
+      contentType?: string;
+      attachment?: string;
+      childIds?: string[];
+      supersedePinId?: string;
+    }) => {
+      try {
+        const who = identity();
+        if ('error' in who) return textResult(who.error, true);
+        const rootPinId = String(args.rootPinId ?? '');
+        const node = String(args.node ?? '');
+        const claimPinId = String(args.claimPinId ?? '');
+        const detail = await projectionAfterRefresh(rootPinId);
+        if (!detail) return textResult(`MetaTask root not found: ${rootPinId}`, true);
+        const nodeState = detail.nodeStates[node];
+        if (!nodeState) return textResult(`Node "${node}" not found.`, true);
+        if (!nodeState.holder || nodeState.holder.pinId !== claimPinId) {
+          return textResult(
+            `claim-rejected:${node}:${nodeState.status} — the effective claim is ${nodeState.holder?.pinId ?? 'none'} (yours: ${claimPinId}).`,
+            true,
+          );
+        }
+        if (nodeState.holder.claimant !== who.globalMetaId) {
+          return textResult('That claim belongs to a different bot.', true);
+        }
+        if (detail.nodes.length > 0) {
+          const treeNode = detail.nodes.find((candidate) => candidate.id === node);
+          const isAggregate = treeNode?.kind === 'aggregate';
+          const childIds = (args.childIds ?? []).map((id) => String(id));
+          if (isAggregate && childIds.length === 0) {
+            return textResult('Aggregate nodes require childIds (all children verified).', true);
+          }
+          if (!isAggregate && childIds.length > 0) {
+            return textResult('Leaf nodes must not carry childIds.', true);
+          }
+        }
+        const result = { ...(args.result ?? {}) };
+        delete result.hash;
+        const inner = innerHash(result);
+        result.hash = inner;
+        const outer = outerHash(result);
+        const childIds = (args.childIds ?? []).map((id) => String(id));
+        if (childIds.length > 0) {
+          result.childids = childIds; // canonical source; top-level mirrors it
+        }
+        const payload: Record<string, unknown> = {
+          taskid: rootPinId,
+          node,
+          claimid: claimPinId,
+          result,
+          hash: outer,
+          contentType: args.contentType ?? 'application/json;utf-8',
+          attachment: args.attachment ?? null,
+          childids: childIds,
+        };
+        if (args.supersedePinId) payload.supersedeid = String(args.supersedePinId);
+        const written = await writePin(who.metabotId, 'submission', payload, 'tool:metatask_submit');
+        void refresher().refreshOnce('metatask_submit');
+        return jsonResult({
+          submissionPinId: written.pinId,
+          txids: written.txids,
+          innerHash: inner,
+          outerHash: outer,
+          note: 'the review window is now open — independent reviewers vote on this submission pinId.',
+        });
+      } catch (error) {
+        return textResult(`Submit failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  const verifySubmission = tool(
+    'metatask_verify',
+    'Cast an independent review vote on a submission. WRITE-SIDE GATES (refused before any spend): method must map to an actually-performed spec replay (parse target per its declared bytes, re-run the spec, compare inner+outer hashes); semantic_check is REQUIRED non-empty (ruling #9 — what you checked about meaning, e.g. proposition fidelity); verdict=fail requires failReason (ruling #8). Same-side rule: you must NOT review a submission whose submitter or the task publisher is on the local roster — pick another node. verdict is pass|fail only ("invalid" is replay-derived, never cast).',
+    {
+      targetPinId: z.string().min(1).describe('Submission pinId being reviewed.'),
+      verdict: z.enum(['pass', 'fail']),
+      method: z.string().min(1).describe('What you replayed and how it maps to your verdict (e.g. "spec rerun pass; inner+outer hash match").'),
+      semanticCheck: z.string().min(1).describe('Ruling #9: the semantic check you performed (never empty — e.g. theorem statement/definitions/direction correspondence).'),
+      failReason: z.string().optional().describe('REQUIRED when verdict=fail (ruling #8); cite the challenge pinId when overturning on challenge grounds.'),
+      evidence: z.string().optional().describe('Optional supporting evidence (bonus, not a requirement).'),
+    },
+    async (args: {
+      targetPinId?: string;
+      verdict?: 'pass' | 'fail';
+      method?: string;
+      semanticCheck?: string;
+      failReason?: string;
+      evidence?: string;
+    }) => {
+      try {
+        const who = identity();
+        if ('error' in who) return textResult(who.error, true);
+        const targetPinId = String(args.targetPinId ?? '');
+        const verdict = args.verdict === 'fail' ? 'fail' : 'pass';
+        const method = asString(args.method).trim();
+        const semanticCheck = asString(args.semanticCheck).trim();
+        if (!method) return textResult('Refused: method is empty — a vote must map to an actually-performed replay.', true);
+        if (!semanticCheck) return textResult('Refused: semantic_check is empty (ruling #9 — the vote would not be counted).', true);
+        if (verdict === 'fail' && !asString(args.failReason).trim()) {
+          return textResult('Refused: verdict=fail requires failReason (ruling #8 — without it the vote is treated as invalid).', true);
+        }
+        // Locate the target across cached events: submitter + root author.
+        const events = refresher().loadEvents();
+        const target = events.find((event) => event.pinId === targetPinId && event.path === 'submission');
+        if (!target) return textResult(`Submission pin not found locally: ${targetPinId} (try metatask_list refresh=true first).`, true);
+        const submitter = target.author;
+        const taskPin = events.find((event) => event.path === 'task' && event.pinId === asString(target.body.taskid));
+        const rootAuthor = taskPin?.author ?? '';
+        if (who.globalMetaId === submitter || who.globalMetaId === rootAuthor) {
+          return textResult('Refused: reviewer must differ from the submitter and the task root author.', true);
+        }
+        const roster = new Set(control.localRosterMetaIds().filter(Boolean));
+        if (roster.has(submitter) || roster.has(rootAuthor)) {
+          return textResult(
+            `Refused: same_side_roster — the submitter or publisher is on the local roster, so a local bot's vote is not independent. Review a different node.`,
+            true,
+          );
+        }
+        const payload: Record<string, unknown> = {
+          targetid: targetPinId,
+          verdict,
+          method,
+          evidence: asString(args.evidence),
+          semantic_check: semanticCheck,
+        };
+        if (verdict === 'fail') payload.failreason = asString(args.failReason).trim();
+        const written = await writePin(who.metabotId, 'verify', payload, 'tool:metatask_verify');
+        void refresher().refreshOnce('metatask_verify');
+        return jsonResult({ verifyPinId: written.pinId, txids: written.txids });
+      } catch (error) {
+        return textResult(`Verify failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  const releaseClaim = tool(
+    'metatask_release',
+    'Voluntarily release your effective claim on a node (you cannot finish the work; the node reopens for others). The claim pin and node must match the current holder and be yours. Note: v1.2 cancelled the old 24h priority re-claim window — after release anyone may claim; correction of a submitted work uses supersede instead.',
+    {
+      rootPinId: z.string().min(1),
+      node: z.string().min(1),
+      claimPinId: z.string().min(1),
+    },
+    async (args: { rootPinId?: string; node?: string; claimPinId?: string }) => {
+      try {
+        const who = identity();
+        if ('error' in who) return textResult(who.error, true);
+        const detail = await projectionAfterRefresh(String(args.rootPinId ?? ''));
+        if (!detail) return textResult(`MetaTask root not found: ${args.rootPinId}`, true);
+        const nodeState = detail.nodeStates[String(args.node ?? '')];
+        if (!nodeState?.holder || nodeState.holder.pinId !== String(args.claimPinId ?? '')) {
+          return textResult('That claim is not the current effective holder of the node.', true);
+        }
+        if (nodeState.holder.claimant !== who.globalMetaId) {
+          return textResult('That claim belongs to a different bot.', true);
+        }
+        const written = await writePin(
+          who.metabotId,
+          'release',
+          { taskid: String(args.rootPinId ?? ''), node: String(args.node ?? ''), claimid: String(args.claimPinId ?? '') },
+          'tool:metatask_release',
+        );
+        void refresher().refreshOnce('metatask_release');
+        return jsonResult({ releasePinId: written.pinId, txids: written.txids });
+      } catch (error) {
+        return textResult(`Release failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  // ── publisher writes ───────────────────────────────────────────────────────
+
+  const publishTask = tool(
+    'metatask_publish',
+    'Publish a new on-chain MetaTask as this session\'s MetaBot (you become the task root author = publisher). Publish order is roster-pin (auto, when the local roster has 2+ bots) → tree → spec → task; nothing is spent before every invariant passes: single root, acyclic parents, integer weights 1..10000 summing to EXACTLY 10000 across all nodes, quorum >= 1, TTL/window > 0. After publishing you MUST post a discovery buzz within 24h (title + the full task-root pinId + #metatask) — use the post_buzz tool.',
+    {
+      title: z.string().min(1),
+      brief: z.string().optional().describe('What the task is about; shown to every participant.'),
+      nodes: z.array(
+        z.object({
+          id: z.string().min(1),
+          parent: z.string().nullable().describe('Parent node id; null for the single root.'),
+          title: z.string().min(1),
+          kind: z.enum(['triage', 'search', 'proof', 'aggregate', 'formalize']),
+          specid: z.string().nullable().optional().describe('Per-node verifier override; default inherits the root spec.'),
+          params: z.record(z.string(), z.unknown()).optional(),
+          deps: z.array(z.string()).optional(),
+          weight: z.number().int().min(1).max(10000).describe('Settlement weight in basis points; ALL nodes sum to exactly 10000.'),
+        }),
+      ).min(1),
+      spec: z.object({
+        name: z.string().min(1),
+        lang: z.string().min(1),
+        entry: z.string().min(1),
+        script: z.string().optional().describe('Inline verifier script, or a pin:// | metafile:// reference.'),
+        input: z.unknown().optional(),
+        output: z.unknown().optional(),
+        validation: z.record(z.string(), z.unknown()).optional(),
+      }),
+      policy: z.object({
+        claimTtlHours: z.number().int().positive(),
+        verifyQuorum: z.number().int().min(1),
+        verifyWindowHours: z.number().int().positive(),
+        rewardSat: z.number().int().optional().describe('Stays 0 in v1.2 (escrow excluded).'),
+        challengeTtlDays: z.number().int().positive().optional().describe('Default 14.'),
+        submitterShareBP: z.number().int().min(6000).max(9000).optional().describe('Default 8000.'),
+      }),
+      tags: z.array(z.string()).optional(),
+    },
+    async (args: {
+      title?: string;
+      brief?: string;
+      nodes?: Array<{ id?: string; parent?: string | null; title?: string; kind?: string; specid?: string | null; params?: Record<string, unknown>; deps?: string[]; weight?: number }>;
+      spec?: { name?: string; lang?: string; entry?: string; script?: string; input?: unknown; output?: unknown; validation?: Record<string, unknown> };
+      policy?: { claimTtlHours?: number; verifyQuorum?: number; verifyWindowHours?: number; rewardSat?: number; challengeTtlDays?: number; submitterShareBP?: number };
+      tags?: string[];
+    }) => {
+      try {
+        const who = identity();
+        if ('error' in who) return textResult(who.error, true);
+        const title = asString(args.title).trim();
+        if (!title) return textResult('Refused: title is empty.', true);
+        const policy = args.policy ?? {};
+        const quorum = Number(policy.verifyQuorum ?? 0);
+        const ttlHours = Number(policy.claimTtlHours ?? 0);
+        const windowHours = Number(policy.verifyWindowHours ?? 0);
+        if (!Number.isInteger(quorum) || quorum < 1) return textResult('Refused: verifyQuorum must be an integer >= 1.', true);
+        if (!Number.isInteger(ttlHours) || ttlHours <= 0) return textResult('Refused: claimTtlHours must be a positive integer.', true);
+        if (!Number.isInteger(windowHours) || windowHours <= 0) return textResult('Refused: verifyWindowHours must be a positive integer.', true);
+
+        const rawNodes = args.nodes ?? [];
+        const nodes = rawNodes.map((raw) => ({
+          id: asString(raw.id),
+          parent: raw.parent === null || raw.parent === undefined ? null : asString(raw.parent),
+          title: asString(raw.title),
+          kind: asString(raw.kind, 'proof'),
+          specid: raw.specid === undefined || raw.specid === null ? null : asString(raw.specid),
+          params: (raw.params && typeof raw.params === 'object' ? raw.params : {}) as Record<string, unknown>,
+          deps: (raw.deps ?? []).map((d) => String(d)),
+          weight: Number(raw.weight),
+        }));
+        if (nodes.length === 0) return textResult('Refused: empty node list.', true);
+        const ids = new Set(nodes.map((node) => node.id));
+        if (ids.size !== nodes.length) return textResult('Refused: duplicate node ids.', true);
+        if (nodes.some((node) => !node.id || !node.title)) return textResult('Refused: every node needs id and title.', true);
+        const roots = nodes.filter((node) => node.parent === null);
+        if (roots.length !== 1) return textResult(`Refused: exactly one root (parent=null) required, found ${roots.length}.`, true);
+        const byId = new Map(nodes.map((node) => [node.id, node] as const));
+        let totalWeight = 0;
+        for (const node of nodes) {
+          if (!Number.isInteger(node.weight) || node.weight < 1 || node.weight > 10000) {
+            return textResult(`Refused: node ${node.id} weight must be an integer in [1, 10000].`, true);
+          }
+          totalWeight += node.weight;
+          if (node.parent !== null && !byId.has(node.parent)) {
+            return textResult(`Refused: node ${node.id} references unknown parent ${node.parent}.`, true);
+          }
+          for (const dep of node.deps) {
+            if (!byId.has(dep)) return textResult(`Refused: node ${node.id} references unknown dep ${dep}.`, true);
+          }
+        }
+        if (totalWeight !== 10000) {
+          return textResult(`Refused: node weights must sum to exactly 10000 (got ${totalWeight}).`, true);
+        }
+        // Acyclicity via parent-chain walk.
+        for (const start of nodes) {
+          const seen = new Set<string>();
+          let cursor: string | null = start.id;
+          while (cursor !== null) {
+            if (seen.has(cursor)) return textResult('Refused: parent graph is cyclic.', true);
+            seen.add(cursor);
+            cursor = byId.get(cursor)?.parent ?? null;
+          }
+        }
+        const spec = args.spec ?? {};
+        if (!asString(spec.name).trim() || !asString(spec.entry).trim()) {
+          return textResult('Refused: a root verifier spec (name + entry) is required — every task needs a machine-checkable spec.', true);
+        }
+
+        // roster pin (same-side declaration) when the local roster can cross-review.
+        // Deliberately NOT under /protocols/metatask/* — it is a reference pin,
+        // not one of the nine replay event paths.
+        const roster = control.localRosterMetaIds().filter(Boolean);
+        let rosterid: string | null = null;
+        if (roster.length >= 2) {
+          const rosterPin = await deps
+            .createPin(
+              who.metabotId,
+              {
+                operation: 'create',
+                path: '/protocols/metatask-roster',
+                encryption: '0',
+                version: PIN_VERSION,
+                contentType: 'application/json',
+                payload: JSON.stringify({ groups: [roster], owner: 'idbots-local-roster', createdAt: Date.now() }),
+              },
+              { origin: 'tool:metatask_publish' },
+            )
+            .catch(() => null);
+          rosterid = rosterPin?.pinId ?? null;
+        }
+
+        const treePayload = {
+          root: roots[0].id,
+          nodes: nodes.map((node) => ({
+            id: node.id,
+            parent: node.parent,
+            title: node.title,
+            kind: node.kind,
+            specid: node.specid,
+            params: node.params,
+            deps: node.deps,
+            weight: node.weight,
+          })),
+        };
+        const treePin = await writePin(who.metabotId, 'tree', treePayload, 'tool:metatask_publish');
+
+        const specPayload: Record<string, unknown> = {
+          name: asString(spec.name).trim(),
+          lang: asString(spec.lang).trim() || 'bash',
+          entry: asString(spec.entry).trim(),
+          script: spec.script === undefined ? '' : spec.script,
+          input: spec.input ?? '',
+          output: spec.output ?? '',
+        };
+        if (spec.validation && typeof spec.validation === 'object') specPayload.validation = spec.validation;
+        const specPin = await writePin(who.metabotId, 'spec', specPayload, 'tool:metatask_publish');
+
+        const shareBP = Number(policy.submitterShareBP ?? 8000);
+        const taskPayload: Record<string, unknown> = {
+          title,
+          brief: asString(args.brief),
+          treeid: treePin.pinId,
+          specid: specPin.pinId,
+          policy: {
+            claim_ttl_hours: ttlHours,
+            verify_quorum: quorum,
+            verify_window_hours: windowHours,
+            reward_sat: Number.isInteger(policy.rewardSat) ? Number(policy.rewardSat) : 0,
+            challenge_ttl_days: Number.isInteger(policy.challengeTtlDays) ? Number(policy.challengeTtlDays) : 14,
+            split: { submitterShareBP: shareBP, rosterid },
+          },
+          tags: (args.tags ?? []).map((tag) => String(tag)),
+        };
+        const taskPin = await writePin(who.metabotId, 'task', taskPayload, 'tool:metatask_publish');
+
+        void refresher().refreshOnce('metatask_publish');
+        return jsonResult({
+          taskRootPinId: taskPin.pinId,
+          treePinId: treePin.pinId,
+          specPinId: specPin.pinId,
+          rosterPinId: rosterid,
+          txids: [...treePin.txids, ...specPin.txids, ...taskPin.txids],
+          reminder: 'Post the discovery buzz within 24h: title + the FULL task root pinId + #metatask tag (use post_buzz).',
+        });
+      } catch (error) {
+        return textResult(`Publish failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  const amendTree = tool(
+    'metatask_amend',
+    'Amend the task tree as the PUBLISHER only (the task root author). v1.2 minimal amend: ops may touch only nodes that were never effectively claimed (frozen-on-start); the weight invariant (sum=10000) must hold after the fold; the task must not be finalized. bases is filled automatically from the current tree head. The chain replay is authoritative — if this tool accepts but replay rejects, the amend is dead on chain.',
+    {
+      rootPinId: z.string().min(1),
+      ops: z.array(
+        z.union([
+          z.object({
+            op: z.literal('add_node'),
+            node: z.object({
+              id: z.string().min(1),
+              parent: z.string().min(1),
+              title: z.string().min(1),
+              kind: z.enum(['triage', 'search', 'proof', 'aggregate', 'formalize']),
+              specid: z.string().nullable().optional(),
+              params: z.record(z.string(), z.unknown()).optional(),
+              deps: z.array(z.string()).optional(),
+              weight: z.number().int().min(1).max(10000),
+            }),
+          }),
+          z.object({ op: z.literal('remove_node'), node: z.string().min(1) }),
+          z.object({ op: z.literal('reweight'), node: z.string().min(1), weight: z.number().int().min(1).max(10000) }),
+          z.object({ op: z.literal('retitle'), node: z.string().min(1), title: z.string().min(1) }),
+          z.object({ op: z.literal('respec'), node: z.string().min(1), specid: z.string().min(1) }),
+        ]),
+      ).min(1),
+    },
+    async (args: { rootPinId?: string; ops?: Array<Record<string, unknown>> }) => {
+      try {
+        const who = identity();
+        if ('error' in who) return textResult(who.error, true);
+        const rootPinId = String(args.rootPinId ?? '');
+        const detail = await projectionAfterRefresh(rootPinId);
+        if (!detail) return textResult(`MetaTask root not found: ${rootPinId}`, true);
+        if (detail.publisher !== who.globalMetaId) {
+          return textResult('Refused: only the task root author (publisher) may amend.', true);
+        }
+        if (detail.taskComplete) {
+          return textResult('Refused: the task is finalized (root verified) — settlement must never be retroactively recomputable.', true);
+        }
+        // Writer-side checks (conservative: ANY claim ever seen freezes a node).
+        const events = refresher().loadEvents();
+        const claimedEver = new Set(
+          events
+            .filter((event) => event.path === 'claim' && asString(event.body.taskid) === rootPinId)
+            .map((event) => asString(event.body.node)),
+        );
+        const byId = new Map<string, { id: string; parent: string | null; title: string; kind: string; specid?: string | null; weight?: number }>(
+          detail.nodes.map((node) => [node.id, { ...node }]),
+        );
+        for (const rawOp of args.ops ?? []) {
+          const op = asString(rawOp?.op);
+          const nodeId = asString(rawOp?.node);
+          if (op === 'add_node') {
+            const raw = (rawOp?.node && typeof rawOp.node === 'object' ? rawOp.node : null) as Record<string, unknown> | null;
+            const id = asString(raw?.id);
+            const parent = asString(raw?.parent);
+            if (!raw || !id || byId.has(id)) return textResult('Refused: add_node with missing or duplicate id.', true);
+            const parentNode = byId.get(parent);
+            if (!parentNode) return textResult(`Refused: add_node parent ${parent} not found.`, true);
+            if (detail.nodeStates[parent]?.status === 'verified' || detail.nodeStates[parent]?.holder) {
+              return textResult(`Refused: parent ${parent} is claimed or verified.`, true);
+            }
+            byId.set(id, {
+              id,
+              parent,
+              title: asString(raw.title),
+              kind: asString(raw.kind, 'proof'),
+              specid: raw.specid === undefined || raw.specid === null ? null : asString(raw.specid),
+              params: {},
+              deps: [],
+              weight: Number(raw.weight),
+            } as never);
+          } else {
+            const target = byId.get(nodeId);
+            if (!target) return textResult(`Refused: node ${nodeId} not found.`, true);
+            if (claimedEver.has(nodeId)) {
+              return textResult(`Refused: node ${nodeId} has been claimed before — frozen-on-start (v1.2 minimal amend).`, true);
+            }
+            if (op === 'remove_node') {
+              const stack = [nodeId];
+              while (stack.length) {
+                const current = stack.pop() as string;
+                if (claimedEver.has(current)) return textResult(`Refused: subtree of ${nodeId} contains a claimed node.`, true);
+                for (const candidate of byId.values()) {
+                  if (candidate.parent === current) stack.push(candidate.id);
+                }
+              }
+              byId.delete(nodeId);
+            } else if (op === 'reweight') {
+              target.weight = Number(rawOp?.weight);
+            } else if (op === 'retitle') {
+              target.title = asString(rawOp?.title);
+            } else if (op === 'respec') {
+              target.specid = asString(rawOp?.specid);
+            } else {
+              return textResult(`Refused: unknown op "${op}".`, true);
+            }
+          }
+        }
+        let totalWeight = 0;
+        for (const node of byId.values()) {
+          const weight = Number((node as { weight?: unknown }).weight);
+          if (!Number.isInteger(weight) || weight < 1 || weight > 10000) {
+            return textResult('Refused: every node weight must be an integer in [1, 10000].', true);
+          }
+          totalWeight += weight;
+        }
+        if (totalWeight !== 10000) {
+          return textResult(`Refused: weights must sum to exactly 10000 after the fold (got ${totalWeight}).`, true);
+        }
+        const ops = (args.ops ?? []).map((rawOp) => {
+          if (asString(rawOp?.op) === 'add_node') {
+            return { op: 'add_node', node: rawOp?.node };
+          }
+          const mapped: Record<string, unknown> = { op: rawOp?.op, node: rawOp?.node };
+          if (rawOp?.weight !== undefined) mapped.weight = rawOp.weight;
+          if (rawOp?.title !== undefined) mapped.title = rawOp.title;
+          if (rawOp?.specid !== undefined) mapped.specid = rawOp.specid;
+          return mapped;
+        });
+        const written = await writePin(
+          who.metabotId,
+          'amend',
+          { taskid: rootPinId, bases: detail.amendHead, ops },
+          'tool:metatask_amend',
+        );
+        void refresher().refreshOnce('metatask_amend');
+        return jsonResult({ amendPinId: written.pinId, bases: detail.amendHead, txids: written.txids });
+      } catch (error) {
+        return textResult(`Amend failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  return [
+    listTasks,
+    getTask,
+    replayTask,
+    claimNode,
+    submitWork,
+    verifySubmission,
+    releaseClaim,
+    publishTask,
+    amendTree,
+  ];
+}

@@ -161,6 +161,8 @@ export interface MetaTaskTaskProjection {
   };
   /** Tree in effect at boundary (after amend fold), with weights (null = legacy task). */
   nodes: TreeNodeBody[];
+  /** Current tree head pinId: the original treeid, or the last effective amend (v1.2). */
+  amendHead: string;
   nodeStates: Record<string, MetaTaskNodeProjection>;
   progress: { total: number; verified: number; claimed: number; open: number; disputed: number };
   taskComplete: boolean;
@@ -194,9 +196,19 @@ export interface MetaTaskBoardTask {
   settlementFinalized: boolean;
 }
 
+export interface MetaTaskAlert {
+  kind: 'claim_ttl_soon' | 'submission_change' | 'closing_drive';
+  rootPinId: string;
+  node: string | null;
+  /** Optional transition detail for submission_change: `${from}->${to}`. */
+  detail: string | null;
+  createdAtMs: number;
+}
+
 export interface MetaTaskBoard {
   localRosterMetaIds: string[];
   tasks: MetaTaskBoardTask[];
+  alerts: MetaTaskAlert[];
   refresh: {
     lastRefreshAtMs: number | null;
     lastOkAtMs: number | null;

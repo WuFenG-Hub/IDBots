@@ -151,7 +151,7 @@ const foldAmends = (input: {
   activeCycleNodeIds: Set<string>;
   rootVerified: boolean;
   hAct2: number;
-}): { nodes: Map<string, TreeNodeBody>; ignored: { pinId: string; reason: string }[] } => {
+}): { nodes: Map<string, TreeNodeBody>; ignored: { pinId: string; reason: string }[]; head: string } => {
   const ignored: { pinId: string; reason: string }[] = [];
   const nodes = new Map(input.initialNodes);
   const takenBases = new Set<string>();
@@ -288,7 +288,7 @@ const foldAmends = (input: {
     for (const [id, node] of scratch) nodes.set(id, node);
     head = amend.pinId;
   }
-  return { nodes, ignored };
+  return { nodes, ignored, head };
 };
 
 /**
@@ -590,6 +590,7 @@ export function replayMetaTask(
   });
   ignoredEvents.push(...amendResult.ignored);
   const effectiveTree = amendResult.nodes;
+  const amendHead = amendResult.head;
   for (const id of effectiveTree.keys()) nodeIds.add(id);
 
   // -- challenges (H_ACT2): open = unwithdrawn, unexpired, not overturned ----
@@ -950,6 +951,7 @@ export function replayMetaTask(
       rosterid: split?.rosterid ?? null,
     },
     nodes: Array.from(effectiveTree.values()),
+    amendHead,
     nodeStates,
     progress,
     taskComplete,

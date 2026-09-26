@@ -291,6 +291,7 @@ import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationB
 import { LongTermTaskStore } from './longTermTaskStore';
 import { MetaTaskProjectionStore } from './services/metatask/projectionStore';
 import { MetaTaskRefresher } from './services/metatask/refresher';
+import { MetaTaskWatchService } from './services/metatask/watchService';
 import { HeartbeatService } from './services/heartbeatService';
 import { LongTermAdvanceService, LONGTERM_ADVANCE_INTERVAL_MS } from './services/longTermAdvanceService';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
@@ -3321,6 +3322,23 @@ const startSqliteDaemons = (): void => {
       await getLongTermAdvanceService().run(nowMs);
     },
   });
+  // MetaTask chain sweep (5 min) + watch (10 min): the sweep keeps the local
+  // projection warm; watch turns local-roster-relevant changes into alerts
+  // surfaced on the MetaTask tab. Both are local/cheap; no LLM escalation.
+  getHeartbeatService().registerHandler({
+    name: 'metatask.refresh',
+    intervalMs: 5 * 60_000,
+    run: async () => {
+      await getMetaTaskRefresher().refreshOnce('heartbeat-refresh');
+    },
+  });
+  getHeartbeatService().registerHandler({
+    name: 'metatask.watch',
+    intervalMs: 10 * 60_000,
+    run: (nowMs) => {
+      getMetaTaskWatchService().run(nowMs);
+    },
+  });
   getHeartbeatService().start();
   setGroupChatTransportMetabotStoreGetter(getMetabotStore);
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
@@ -5828,6 +5846,14 @@ const getCoworkRunner = () => {
         store: () => getLongTermTaskStore(),
         getAppLanguage: () => getPersistedAppLanguage(),
       },
+      // MetaTask (chain-side quadrant four): participation tools — claim with
+      // replay guard, #8/#9-disciplined verify drafts, publish invariants.
+      // Same chain-write pipeline as post_buzz (createPinForSession per bot).
+      metataskTools: {
+        refresher: () => getMetaTaskRefresher(),
+        localRosterMetaIds: metaTaskLocalRosterMetaIds,
+        resolveGlobalMetaId: (metabotId) => getMetabotStore().getMetabotById(metabotId)?.globalmetaid ?? null,
+      },
       scheduledTaskTools: {
         createTask: (input) => {
           const store = getScheduledTaskStore();
@@ -6807,6 +6833,38 @@ const getLongTermAdvanceService = () => {
   return longTermAdvanceService;
 };
 
+let metaTaskProjectionStore: MetaTaskProjectionStore | null = null;
+/** Shared rebuildable projection cache (refresher + watch service both use it). */
+const getMetaTaskProjectionStore = () => {
+  if (!metaTaskProjectionStore) {
+    const sqliteStore = getStore();
+    metaTaskProjectionStore = new MetaTaskProjectionStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction()
+    );
+  }
+  return metaTaskProjectionStore;
+};
+
+const metaTaskLocalRosterMetaIds = (): string[] =>
+  getMetabotStore()
+    .listMetabots()
+    .map((bot) => bot.globalmetaid)
+    .filter((id): id is string => typeof id === 'string' && Boolean(id));
+
+const broadcastMetaTaskUpdate = (reason: string): void => {
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) {
+      try {
+        win.webContents.send('metatask:update', {
+          seq: getMetaTaskProjectionStore().bumpSeq(),
+          reason,
+        });
+      } catch { /* ignore */ }
+    }
+  });
+};
+
 let metaTaskRefresher: MetaTaskRefresher | null = null;
 /**
  * MetaTask read path (quadrant four, chain-sourced): the chain is the source
@@ -6815,18 +6873,9 @@ let metaTaskRefresher: MetaTaskRefresher | null = null;
  */
 const getMetaTaskRefresher = () => {
   if (!metaTaskRefresher) {
-    const sqliteStore = getStore();
-    const projectionStore = new MetaTaskProjectionStore(
-      sqliteStore.getDatabase(),
-      sqliteStore.getSaveFunction()
-    );
     metaTaskRefresher = new MetaTaskRefresher({
-      store: () => projectionStore,
-      rosterMetaIds: () =>
-        getMetabotStore()
-          .listMetabots()
-          .map((bot) => bot.globalmetaid)
-          .filter((id): id is string => typeof id === 'string' && Boolean(id)),
+      store: () => getMetaTaskProjectionStore(),
+      rosterMetaIds: metaTaskLocalRosterMetaIds,
       onUpdated: (payload) => {
         BrowserWindow.getAllWindows().forEach((win) => {
           if (!win.isDestroyed()) {
@@ -6839,6 +6888,21 @@ const getMetaTaskRefresher = () => {
     });
   }
   return metaTaskRefresher;
+};
+
+let metaTaskWatchService: MetaTaskWatchService | null = null;
+/** The `metatask.watch` heartbeat handler: local checks over the refreshed
+ * projection — my-claim TTL countdowns, status changes on nodes local bots
+ * hold, publisher closing-drive nudges. Alerts surface in the MetaTask tab. */
+const getMetaTaskWatchService = () => {
+  if (!metaTaskWatchService) {
+    metaTaskWatchService = new MetaTaskWatchService({
+      store: () => getMetaTaskProjectionStore(),
+      rosterMetaIds: metaTaskLocalRosterMetaIds,
+      onAlerts: () => broadcastMetaTaskUpdate('watch-alerts'),
+    });
+  }
+  return metaTaskWatchService;
 };
 
 let longTermTaskUpdateSeq = 0;

@@ -7,7 +7,19 @@ import { setView } from '../../store/slices/metataskSlice';
 import { store } from '../../store';
 import { i18nService } from '../../services/i18n';
 import MetaTaskDetail from './MetaTaskDetail';
-import type { MetaTaskBoardTask } from '../../types/metatask';
+import type { MetaTaskAlert, MetaTaskBoardTask } from '../../types/metatask';
+
+const alertText = (alert: MetaTaskAlert): string => {
+  const node = alert.node ?? '—';
+  const detail = alert.detail ?? '';
+  if (alert.kind === 'claim_ttl_soon') {
+    return `${i18nService.t('metatask.alert.claimTtlSoon').replace('{node}', node)} · ${detail}`;
+  }
+  if (alert.kind === 'submission_change') {
+    return i18nService.t('metatask.alert.submissionChange').replace('{node}', node).replace('{detail}', detail);
+  }
+  return i18nService.t('metatask.alert.closingDrive').replace('{detail}', detail);
+};
 
 /** MetaTask tab (P1 read path). 任务广场 / 我的参与 inner views over the
  * chain-sourced projection; every surface shows the boundary block it was
@@ -83,6 +95,20 @@ const MetaTaskBoard: React.FC = () => {
       {(error || bridgeMissingReason) && (
         <div className="mx-4 mt-3 px-3 py-2 text-sm rounded-lg bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400">
           {bridgeMissingReason ?? error}
+        </div>
+      )}
+      {board && board.alerts.length > 0 && (
+        <div className="mx-4 mt-3 space-y-1">
+          {board.alerts.slice(0, 6).map((alert, index) => (
+            <button
+              key={`${alert.createdAtMs}-${index}`}
+              type="button"
+              onClick={() => metaTaskService.selectTask(alert.rootPinId)}
+              className="block w-full text-left px-3 py-1.5 text-xs rounded-lg bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors"
+            >
+              {alertText(alert)}
+            </button>
+          ))}
         </div>
       )}
       {board?.refresh.lastError && !error && (

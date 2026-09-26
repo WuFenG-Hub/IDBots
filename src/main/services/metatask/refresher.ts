@@ -34,6 +34,11 @@ export class MetaTaskRefresher {
     return this.options.store().getProjection(rootPinId);
   }
 
+  /** All cached chain events — engine input for guards and replays. */
+  loadEvents(): import('./types').MetaTaskChainEvent[] {
+    return this.options.store().loadEvents();
+  }
+
   private roster(): string[] {
     return this.options.rosterMetaIds ? this.options.rosterMetaIds() : [];
   }

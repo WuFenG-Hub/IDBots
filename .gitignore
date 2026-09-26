@@ -70,6 +70,7 @@ tests/*
 !tests/longTermAdvanceService.test.mjs
 !tests/metataskEngine.test.mjs
 !tests/metataskProjectionStore.test.mjs
+!tests/metataskAgentTools.test.mjs
 !tests/quotaRendererSync.test.mjs
 !tests/surfHostStatsFold.test.mjs
 !tests/rsiLadderCompute.test.ts
