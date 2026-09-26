@@ -753,7 +753,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
           bot.name?.trim() || `bot-${bot.id}`,
           { groupId: membership.groupId, taskTitle: membership.taskTitle },
         );
-        coworkStore.addMessage(session.id, { type: 'user', content: user });
+        coworkStore.addMessage(session.id, { type: 'user', content: user, metadata: { origin: 'group_task' } });
         coworkStore.addMessage(session.id, { type: 'assistant', content: finalReply });
       } catch (error) {
         emitLog(
@@ -773,7 +773,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
         'After using Read/Bash to run a skill, reply concisely in the group. Do not paste full skill logs.',
         'If the skill produced a file, put its absolute local path on its own line in your reply — the host uploads it on-chain and appends the [DELIVERABLE] metafile line for you. NEVER write or invent a metafile:// URI yourself.',
       ].join('\n');
-      coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
+      coworkStore.addMessage(session.id, { type: 'user', content: userMessage, metadata: { origin: 'group_task' } });
       try {
         const skillTurnResult = await deps.runSkillTurn!({
           sessionId: session.id,

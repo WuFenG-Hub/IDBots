@@ -247,7 +247,11 @@ export function injectGroupTaskContext(input: {
     `Recent group log (last ${recentCount} messages):`,
     ...logLines,
   ].join('\n');
-  input.coworkStore.addMessage(input.sessionId, { type: 'user', content: snapshot });
+  input.coworkStore.addMessage(input.sessionId, {
+    type: 'user',
+    content: snapshot,
+    metadata: { origin: 'group_task' },
+  });
 }
 
 /**
@@ -315,7 +319,11 @@ export function injectOpenTeamGuestContext(input: {
     `Recent group log (last ${recentCount} messages):`,
     ...logLines,
   ].join('\n');
-  input.coworkStore.addMessage(input.sessionId, { type: 'user', content: snapshot });
+  input.coworkStore.addMessage(input.sessionId, {
+    type: 'user',
+    content: snapshot,
+    metadata: { origin: 'group_task' },
+  });
 }
 
 /** Convenience: full eager-session setup for one local group-task member. */

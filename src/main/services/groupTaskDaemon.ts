@@ -6037,7 +6037,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
 
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
-      coworkStore.addMessage(session.id, { type: 'user', content: directive });
+      coworkStore.addMessage(session.id, { type: 'user', content: directive, metadata: { origin: 'group_task' } });
       coworkStore.addMessage(session.id, { type: 'assistant', content: postedReply });
       const dispatchMention = resolveMentionIdsForWorkers(members, coverage.mentionedWorkers);
       const posted = await postGroupMessage(
@@ -6273,7 +6273,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const canRunSkillTurn = Boolean(
         routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
       );
-      const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
+      const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userTurn, metadata: { origin: 'group_task' } });
       let reply = '';
       if (canRunSkillTurn) {
         const skillSystemPrompt = [
@@ -6574,7 +6574,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const canRunSkillTurn = Boolean(
         routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
       );
-      const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userTurn });
+      const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userTurn, metadata: { origin: 'group_task' } });
       let reply = '';
       if (canRunSkillTurn) {
         const skillSystemPrompt = [
@@ -6784,7 +6784,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         error instanceof Error ? error.message : String(error),
       );
     };
-    const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
+    const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userMessage, metadata: { origin: 'group_task' } });
 
     let reply = '';
     if (canRunSkillTurn) {
@@ -8649,6 +8649,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                   `Your [WORKING] signal went stale ${Math.round(staleMs / 60_000)} min ago with zero session activity while the task waited on you.`,
                   'Check whether your last assignment was fully delivered — especially the final on-chain post; a send that failed or was queued does not count as delivered. If the last step failed, redo just that step and deliver. If the work is genuinely complete, say so in the group.',
                 ].join('\n'),
+                metadata: { origin: 'group_task' },
               });
               coworkStore.setSessionUpdatedAt(session.id, activityBeforeWake);
               deferReply({

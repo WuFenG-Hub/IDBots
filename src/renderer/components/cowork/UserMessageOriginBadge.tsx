@@ -16,9 +16,11 @@ import {
   CpuChipIcon,
   HeartIcon,
   UserCircleIcon,
+  UsersIcon,
 } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { fetchMetaidInfoByGlobalId } from '../../services/metabotInfoService';
+import { pickRenderableAvatarSource } from '../../utils/avatarSource';
 import type { CoworkMessage } from '../../types/cowork';
 import { resolveUserMessageOrigin, type UserMessageOriginKind } from './userMessageOrigin';
 
@@ -54,7 +56,13 @@ const loadLocalIdentity = async (): Promise<LocalIdentity | null> => {
     })();
   }
   const identity = await localIdentityRequest;
-  localIdentityCache = identity;
+  if (identity) {
+    localIdentityCache = identity;
+  } else {
+    // Failure (or no identity yet) is not terminal: drop the promise so the
+    // next mounted badge retries instead of pinning a permanent null.
+    localIdentityRequest = null;
+  }
   return identity;
 };
 
@@ -78,12 +86,46 @@ interface RemoteSenderInfo {
 }
 
 const remoteSenderCache = new Map<string, RemoteSenderInfo>();
+/** In-flight dedup: a long transcript can mount dozens of badges for the
+ * same sender in one frame; they must share a single lookup. */
+const remoteSenderRequests = new Map<string, Promise<RemoteSenderInfo>>();
 
-const useRemoteSenderInfo = (globalMetaId?: string): RemoteSenderInfo | null => {
-  const [info, setInfo] = useState<RemoteSenderInfo | null>(
-    globalMetaId ? remoteSenderCache.get(globalMetaId) ?? null : null,
-  );
+const loadRemoteSenderInfo = (globalMetaId: string): Promise<RemoteSenderInfo> => {
+  const cached = remoteSenderCache.get(globalMetaId);
+  if (cached) return Promise.resolve(cached);
+  let request = remoteSenderRequests.get(globalMetaId);
+  if (!request) {
+    request = fetchMetaidInfoByGlobalId(globalMetaId)
+      .then((result) => {
+        const value: RemoteSenderInfo = { name: result.name, avatarUrl: result.avatarUrl ?? null };
+        remoteSenderCache.set(globalMetaId, value);
+        return value;
+      })
+      .finally(() => {
+        // Failures are not cached — a later mount retries.
+        remoteSenderRequests.delete(globalMetaId);
+      });
+    remoteSenderRequests.set(globalMetaId, request);
+  }
+  return request;
+};
+
+const useRemoteSenderInfo = (
+  globalMetaId?: string,
+  persisted?: { name?: string; avatarUrl?: string },
+): RemoteSenderInfo | null => {
+  const hasPersisted = Boolean(persisted?.name || persisted?.avatarUrl);
+  const [info, setInfo] = useState<RemoteSenderInfo | null>(() => {
+    if (hasPersisted) {
+      return { name: persisted?.name, avatarUrl: persisted?.avatarUrl ?? null };
+    }
+    return globalMetaId ? remoteSenderCache.get(globalMetaId) ?? null : null;
+  });
   useEffect(() => {
+    if (hasPersisted) {
+      setInfo({ name: persisted?.name, avatarUrl: persisted?.avatarUrl ?? null });
+      return;
+    }
     if (!globalMetaId) {
       setInfo(null);
       return;
@@ -94,19 +136,17 @@ const useRemoteSenderInfo = (globalMetaId?: string): RemoteSenderInfo | null => 
       return;
     }
     let cancelled = false;
-    void fetchMetaidInfoByGlobalId(globalMetaId)
-      .then((result) => {
-        const value: RemoteSenderInfo = { name: result.name, avatarUrl: result.avatarUrl ?? null };
-        remoteSenderCache.set(globalMetaId, value);
+    void loadRemoteSenderInfo(globalMetaId)
+      .then((value) => {
         if (!cancelled) setInfo(value);
       })
       .catch(() => {
-        // Keep the id-only fallback; do not cache failures so a later retry can succeed.
+        // Keep the id-only fallback; a later mount retries.
       });
     return () => {
       cancelled = true;
     };
-  }, [globalMetaId]);
+  }, [globalMetaId, hasPersisted, persisted?.name, persisted?.avatarUrl]);
   return info;
 };
 
@@ -118,6 +158,7 @@ const KIND_LABEL_KEYS: Partial<Record<UserMessageOriginKind, string>> = {
   schedule: 'coworkOriginSchedule',
   cross_session: 'coworkOriginCrossSession',
   orchestrator: 'coworkOriginOrchestrator',
+  group_task: 'coworkOriginGroupTask',
 };
 
 const KIND_ICONS: Partial<Record<UserMessageOriginKind, React.ComponentType<{ className?: string }>>> = {
@@ -125,6 +166,7 @@ const KIND_ICONS: Partial<Record<UserMessageOriginKind, React.ComponentType<{ cl
   schedule: ClockIcon,
   cross_session: ArrowsRightLeftIcon,
   orchestrator: CpuChipIcon,
+  group_task: UsersIcon,
 };
 
 const UserMessageOriginBadge: React.FC<{
@@ -135,7 +177,10 @@ const UserMessageOriginBadge: React.FC<{
   const origin = resolveUserMessageOrigin(message, { sessionType, sessionTitle });
   const identity = useLocalIdentity();
   const isMetawebRelay = origin.kind === 'metaweb_group' || origin.kind === 'metaweb_private';
-  const remoteInfo = useRemoteSenderInfo(isMetawebRelay ? origin.senderGlobalMetaId : undefined);
+  const remoteInfo = useRemoteSenderInfo(
+    isMetawebRelay ? origin.senderGlobalMetaId : undefined,
+    isMetawebRelay ? { name: origin.senderName, avatarUrl: origin.senderAvatar } : undefined,
+  );
 
   const containerClass = 'mb-1 flex items-center justify-end gap-1 pr-0.5 select-none';
   const textClass = 'text-[10px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary';
@@ -174,10 +219,11 @@ const UserMessageOriginBadge: React.FC<{
   if (isMetawebRelay) {
     if (origin.senderGlobalMetaId) {
       const senderName = remoteInfo?.name ?? shortenGlobalMetaId(origin.senderGlobalMetaId);
+      const senderAvatarUrl = pickRenderableAvatarSource(remoteInfo?.avatarUrl ?? undefined);
       return (
         <div className={containerClass}>
-          {remoteInfo?.avatarUrl ? (
-            <img src={remoteInfo.avatarUrl} alt="" className={avatarClass} />
+          {senderAvatarUrl ? (
+            <img src={senderAvatarUrl} alt="" className={avatarClass} />
           ) : (
             <UserCircleIcon className="h-3.5 w-3.5 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
           )}
