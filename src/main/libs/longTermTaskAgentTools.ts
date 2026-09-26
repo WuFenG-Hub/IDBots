@@ -50,6 +50,7 @@ const subtaskDraftSchema = z.object({
   dependsOnOrdinals: z.array(z.number()).optional().describe('1-based ordinals of sub-projects that must be accepted first.'),
   preferredChannel: z.enum(CHANNEL_ENUM).optional().describe('delegate_bot | group_task | owner_external | owner_together.'),
   notes: z.string().optional(),
+  expectedMinutes: z.number().int().positive().optional().describe('Rough expected duration in minutes — estimate it during grilling; the supervision heartbeat checks in when the sub-project runs past its budget.'),
 });
 
 export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; control: LongTermTaskAgentControl }): unknown[] {
