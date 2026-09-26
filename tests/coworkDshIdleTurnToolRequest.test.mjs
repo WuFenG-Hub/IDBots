@@ -229,3 +229,138 @@ test('an approval request with no live turn controller auto-rejects instead of s
     await hub.close().catch(() => undefined)
   }
 })
+
+// ---- Policy bridge on kernel-initiated turns (reviewer follow-up) ---------
+// onPolicyRequest used the live-only mapping: an idle-session turn (no live
+// mapping) with a host policy CONFIGURED still settled to the permissive
+// default 'allow' — plan-mode gating, read-image guards, and delete
+// confirmations all lapsed on exactly the turns the tool-bridge fix made
+// functional. The policy line must resolve through the pinned fallback like
+// the tool line, and fail CLOSED (deny) when a configured policy cannot be
+// consulted at all.
+
+const makePolicyHub = (logs, evaluatePolicy) => new (loadModules().DshTurnHub)({
+  runtimeDir,
+  sessionRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-idle-policy-')),
+  log: (level, message, detail) => logs.push({ level, message, detail: detail ?? {} }),
+  ...(evaluatePolicy ? { evaluatePolicy } : {}),
+})
+
+const spyPolicyKernel = (hub) => {
+  const slot = hub.getOrCreateSlot('mockgw')
+  const kernel = slot.kernel
+  const responses = []
+  kernel.respondPolicy = async (id, decision, reason) => {
+    responses.push({ id, decision, reason })
+    return { answered: true }
+  }
+  return { kernel, responses }
+}
+
+test('policy request with no mapping and a configured host policy denies (fail closed)', async () => {
+  const logs = []
+  const hub = makePolicyHub(logs, async () => ({ decision: 'allow' }))
+  try {
+    const { kernel, responses } = spyPolicyKernel(hub)
+    kernel.opts.handlers.onPolicyRequest({
+      sessionId: 'cw-never-mapped',
+      id: 'pol-1',
+      name: 'bash',
+      arguments: { command: 'rm -rf /tmp/x' },
+    })
+    await waitFor(() => responses.length === 1, 5000, 'deny respondPolicy')
+    assert.equal(responses[0].id, 'pol-1')
+    assert.equal(responses[0].decision, 'deny')
+    assert.match(responses[0].reason ?? '', /no cowork session mapping/)
+    assert.ok(
+      logs.some((l) => l.message.includes('dshTurnHub.onPolicyRequest')
+        && String(l.detail.message ?? '').includes('denying')),
+      'the fail-closed denial is visible in the hub log',
+    )
+  } finally {
+    await hub.close().catch(() => undefined)
+  }
+})
+
+test('policy request with no mapping and NO host policy keeps the ungated default-allow', async () => {
+  const logs = []
+  const hub = makePolicyHub(logs, null)
+  try {
+    const { kernel, responses } = spyPolicyKernel(hub)
+    kernel.opts.handlers.onPolicyRequest({
+      sessionId: 'cw-never-mapped',
+      id: 'pol-2',
+      name: 'bash',
+      arguments: { command: 'ls' },
+    })
+    await waitFor(() => responses.length === 1, 5000, 'allow respondPolicy')
+    assert.equal(responses[0].decision, 'allow')
+  } finally {
+    await hub.close().catch(() => undefined)
+  }
+})
+
+test('policy request on an idle turn resolves the pinned mapping and consults the host policy', async () => {
+  const logs = []
+  const consulted = []
+  const hub = makePolicyHub(logs, async (coworkId, name, args) => {
+    consulted.push({ coworkId, name, args })
+    return { decision: 'deny', reason: 'plan mode (test)' }
+  })
+  try {
+    const { kernel, responses } = spyPolicyKernel(hub)
+    // The pinned mapping is exactly what a kernel-initiated turn has left
+    // after runTurn's finally deleted the live entry.
+    hub.pinnedDshIds.set('cowork-idle-policy', 'cw-pinned-policy')
+    kernel.opts.handlers.onPolicyRequest({
+      sessionId: 'cw-pinned-policy',
+      id: 'pol-3',
+      name: 'bash',
+      arguments: { command: 'echo hi' },
+    })
+    await waitFor(() => responses.length === 1, 5000, 'evaluated respondPolicy')
+    assert.deepEqual(
+      consulted.map((c) => c.coworkId),
+      ['cowork-idle-policy'],
+      'the pinned fallback routed the check to the host policy',
+    )
+    assert.equal(responses[0].decision, 'deny')
+    assert.equal(responses[0].reason, 'plan mode (test)')
+  } finally {
+    await hub.close().catch(() => undefined)
+  }
+})
+
+test('a transport death during the reject respondTool never becomes an unhandled rejection', async () => {
+  const logs = []
+  const hub = new (loadModules().DshTurnHub)({
+    runtimeDir,
+    sessionRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-idle-tool-reject-')),
+    log: (level, message, detail) => logs.push({ level, message, detail: detail ?? {} }),
+    executeTool: async () => ({ ok: true, text: 'unreachable' }),
+  })
+  const unhandled = []
+  const onUnhandled = (reason) => unhandled.push(String(reason))
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const slot = hub.getOrCreateSlot('mockgw')
+    const kernel = slot.kernel
+    // The wire request rejects asynchronously — the exact shape of a runtime
+    // dying between the reject decision and the respond delivery.
+    kernel.respondTool = async () => {
+      throw new Error('mock transport dead')
+    }
+    kernel.opts.handlers.onToolRequest({
+      sessionId: 'cw-never-mapped',
+      id: 'tool-reject-1',
+      name: 'host_echo_tool',
+      arguments: {},
+    })
+    // Give the rejection a chance to surface unhandled.
+    await sleep(200)
+    assert.deepEqual(unhandled, [], 'the reject respond must be catch-guarded')
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    await hub.close().catch(() => undefined)
+  }
+})
