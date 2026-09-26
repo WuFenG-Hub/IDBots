@@ -167,6 +167,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       dependsOnOrdinals: z.array(z.number()).optional(),
       preferredChannel: z.enum(CHANNEL_ENUM).optional(),
       notes: z.string().optional(),
+      expectedMinutes: z.number().int().positive().nullable().optional().describe('Expected duration in minutes — the supervision heartbeat checks in when this sub-project runs past its budget.'),
     },
     async (args: { taskId?: string; title?: string } & Record<string, unknown>) => {
       try {
@@ -191,6 +192,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       preferredChannel: z.enum(CHANNEL_ENUM).nullable().optional(),
       notes: z.string().optional(),
       ordinal: z.number().optional(),
+      expectedMinutes: z.number().int().positive().nullable().optional().describe('Set or clear the expected-duration budget in minutes (null = use the supervision default).'),
     },
     async (args: { subtaskId?: string } & Record<string, unknown>) => {
       try {

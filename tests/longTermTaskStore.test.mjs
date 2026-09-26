@@ -261,3 +261,61 @@ test('dependency-linked sub-projects cannot be manually reordered; free ones can
   assert.match(linkedEdit.error, /dependency-linked/);
   assert.ok(store.updateSubtask({ subtaskId: c.id, ordinal: 6 }, 'owner').ok);
 });
+
+test('expected-duration budget: persisted at creation, updated, cleared; invalid values fall back to null', async () => {
+  const { store } = await openStore();
+  const created = store.createTask(
+    { title: 't', goal: 'g', subtasks: [{ title: 's1', expectedMinutes: 90 }, { title: 's2', expectedMinutes: -5 }] },
+    'owner',
+  );
+  assert.ok(created.ok);
+  assert.equal(created.value.subtasks[0].expectedMinutes, 90);
+  assert.equal(created.value.subtasks[1].expectedMinutes, null, 'invalid budget falls back to null');
+
+  const id = created.value.subtasks[0].id;
+  const updated = store.updateSubtask({ subtaskId: id, expectedMinutes: 240 }, 'twin');
+  assert.ok(updated.ok);
+  assert.equal(updated.value.expectedMinutes, 240);
+  assert.match(store.getTask(created.value.id).events[0].detail, /expected duration/);
+
+  const cleared = store.updateSubtask({ subtaskId: id, expectedMinutes: null }, 'twin');
+  assert.ok(cleared.ok);
+  assert.equal(cleared.value.expectedMinutes, null);
+});
+
+test('migration: a pre-P1 database gains expected_minutes via a guarded ALTER, rows intact', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-longterm-mig-'));
+  const sqliteStore = await SqliteStore.create(dir);
+  const db = sqliteStore.getDatabase();
+  // Old shape: no expected_minutes column (pre-P1 databases).
+  db.run(`CREATE TABLE long_term_subtasks (
+    id TEXT PRIMARY KEY, task_id TEXT NOT NULL, ordinal INTEGER NOT NULL, title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '', acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending', depends_on_json TEXT NOT NULL DEFAULT '[]',
+    preferred_channel TEXT, evidence_json TEXT NOT NULL DEFAULT '[]', session_id TEXT,
+    wait_note TEXT NOT NULL DEFAULT '', wait_until TEXT, notes TEXT NOT NULL DEFAULT '',
+    accepted_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, accepted_at TEXT,
+    UNIQUE(task_id, ordinal))`);
+  const now = new Date().toISOString();
+  db.run(
+    `INSERT INTO long_term_subtasks
+     (id, task_id, ordinal, title, status, created_at, updated_at) VALUES ('lts_old', 'ltt_old', 1, 'legacy', 'pending', ?, ?)`,
+    [now, now],
+  );
+
+  const store = new LongTermTaskStore(db, sqliteStore.getSaveFunction());
+  const subtask = store.getSubtask('lts_old');
+  assert.ok(subtask, 'legacy row readable after migration');
+  assert.equal(subtask.expectedMinutes, null, 'legacy row has no budget');
+  // New writes can carry a budget on the migrated table.
+  assert.ok(store.updateSubtask({ subtaskId: 'lts_old', expectedMinutes: 120 }, 'twin').ok);
+  assert.equal(store.getSubtask('lts_old').expectedMinutes, 120);
+});
+
+test('supervision re-arm state: set and read back per task', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  assert.equal(store.getSuperviseState(taskId), null);
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 1234, lastSignal: 'fails:2@a1' });
+  assert.deepEqual(store.getSuperviseState(taskId), { lastSuperviseAtMs: 1234, lastSignal: 'fails:2@a1' });
+});
