@@ -71,13 +71,32 @@ export const LONGTERM_SUPERVISE_STATE_KV_KEY = 'longterm_supervise_state';
 /** Supervision re-arm state for one task's supervise escalations. */
 export interface LongTermSuperviseState {
   lastSuperviseAtMs: number;
-  /** Signature of the supervision signal already escalated (new signal = new turn). */
-  lastSignal: string;
+  /**
+   * Signature of the failure-streak signal already supervised (a NEW failure
+   * changes the signature and fires again). Kept separate from duration
+   * turns, which re-arm purely by lastSuperviseAtMs — one shared slot let a
+   * duration turn reset the failure dedup and cause spurious paired
+   * supervision turns per budget window (review P1-A).
+   */
+  lastFailureSignal?: string;
   /** Timestamps of recent stale-wait convergence escalations (churn breaker). */
   convergenceAtMs?: number[];
 }
 
 const CHANNELS: LongTermPreferredChannel[] = ['delegate_bot', 'group_task', 'owner_external', 'owner_together'];
+
+/** Allowed evidence kinds (LongTermEvidence.kind) — anything else bypasses
+ *  the per-kind URI shape checks and is refused. */
+const EVIDENCE_KINDS = ['dir', 'metaapp', 'pin', 'url', 'other'];
+
+/**
+ * waitUntil must be a full ISO timestamp WITH an explicit timezone designator
+ * (Z or ±HH:MM). Naive local times parse as local, date-only strings parse as
+ * UTC midnight (≈a day off for UTC+8 owners), and unparseable values yield
+ * NaN — silently disabling the quiet-window math. Enforced at every entry
+ * (twin tool, IPC), not just in prompt guidance.
+ */
+export const WAIT_UNTIL_STRICT_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -172,6 +191,7 @@ interface SubtaskRow {
   preferred_channel: string | null;
   evidence_json: string;
   session_id: string | null;
+  session_history_json: string;
   wait_note: string;
   wait_until: string | null;
   notes: string;
@@ -235,6 +255,7 @@ export class LongTermTaskStore {
         preferred_channel TEXT,
         evidence_json TEXT NOT NULL DEFAULT '[]',
         session_id TEXT,
+        session_history_json TEXT NOT NULL DEFAULT '[]',
         wait_note TEXT NOT NULL DEFAULT '',
         wait_until TEXT,
         notes TEXT NOT NULL DEFAULT '',
@@ -260,12 +281,15 @@ export class LongTermTaskStore {
       CREATE INDEX IF NOT EXISTS idx_long_term_events_task
         ON long_term_events(task_id, id DESC);
     `);
-    // P1: `expected_minutes` on an additive column — CREATE TABLE IF NOT EXISTS
-    // cannot extend an existing table, so databases created before P1 get the
-    // column via a guarded ALTER (idempotent first-run migration, rows intact).
+    // P1: additive columns — CREATE TABLE IF NOT EXISTS cannot extend an
+    // existing table, so databases created before these columns get them via
+    // guarded ALTERs (idempotent first-run migration, rows intact).
     const subtaskColumns = this.getAll<{ name: unknown }>('PRAGMA table_info(long_term_subtasks)').map((row) => String(row.name));
     if (!subtaskColumns.includes('expected_minutes')) {
       this.db.run('ALTER TABLE long_term_subtasks ADD COLUMN expected_minutes INTEGER');
+    }
+    if (!subtaskColumns.includes('session_history_json')) {
+      this.db.run("ALTER TABLE long_term_subtasks ADD COLUMN session_history_json TEXT NOT NULL DEFAULT '[]'");
     }
     this.saveDb();
   }
@@ -323,6 +347,13 @@ export class LongTermTaskStore {
         : null,
       evidence: parseJsonArray<LongTermEvidence>(row.evidence_json),
       sessionId: row.session_id ?? null,
+      // Read-time union: a session bound before the column existed still
+      // shows up, so supervision telemetry never misses the pre-upgrade session.
+      sessionHistory: (() => {
+        const history = parseJsonArray<string>(row.session_history_json);
+        const currentSession = row.session_id ?? null;
+        return currentSession && !history.includes(currentSession) ? [...history, currentSession] : history;
+      })(),
       waitNote: row.wait_note ?? '',
       waitUntil: row.wait_until ?? null,
       notes: row.notes ?? '',
@@ -805,6 +836,16 @@ export class LongTermTaskStore {
     if (current.status !== 'in_progress' && current.status !== 'waiting_owner' && current.status !== 'waiting_external') {
       return { ok: false, code: 'VALIDATION', error: `cannot wait from status ${current.status}` };
     }
+    if (input.waitUntil != null) {
+      const waitUntilText = asText(input.waitUntil).trim();
+      if (!WAIT_UNTIL_STRICT_ISO.test(waitUntilText) || !Number.isFinite(Date.parse(waitUntilText))) {
+        return {
+          ok: false,
+          code: 'VALIDATION',
+          error: 'waitUntil must be a full ISO timestamp WITH timezone offset (Z or ±HH:MM), converted to the owner\'s local timezone — bare local times, date-only strings, and unparseable values are rejected',
+        };
+      }
+    }
     const status: LongTermSubtaskStatus = input.kind === 'owner' ? 'waiting_owner' : 'waiting_external';
     this.db.run('UPDATE long_term_subtasks SET status = ?, wait_note = ?, wait_until = ?, updated_at = ? WHERE id = ?', [
       status,
@@ -828,6 +869,15 @@ export class LongTermTaskStore {
     }
     const evidence = (input.evidence ?? []).filter((entry) => entry && asText(entry.uri).trim());
     if (evidence.length === 0) return { ok: false, code: 'VALIDATION', error: 'at least one evidence URI is required' };
+    // Kind gate first: an unknown kind would bypass every per-kind URI check.
+    const unknownKind = evidence.find((entry) => !EVIDENCE_KINDS.includes(asText(entry.kind).trim()));
+    if (unknownKind) {
+      return {
+        ok: false,
+        code: 'VALIDATION',
+        error: `unknown evidence kind "${asText(unknownKind.kind)}" — allowed: ${EVIDENCE_KINDS.join(' | ')}`,
+      };
+    }
     // Shape validation: the acceptance chain is only as good as its evidence
     // — a criterion "proven" by a malformed URI was never proven.
     const malformed = evidence.filter((entry) => {
@@ -932,13 +982,22 @@ export class LongTermTaskStore {
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
   }
 
-  /** Bind (or rebind) the cowork session that hosts this sub-project's work. */
+  /** Bind (or rebind) the cowork session that hosts this sub-project's work.
+   *  Rotation-safe: every bind appends to session_history, which the
+   *  supervision telemetry spans — a rotation must not blind the detectors. */
   bindSession(subtaskId: string, sessionId: string, actor: LongTermActor): LongTermResult<LongTermSubtask> {
     const current = this.getSubtask(subtaskId);
     if (!current) return { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
     const trimmed = asText(sessionId).trim();
     if (!trimmed) return { ok: false, code: 'VALIDATION', error: 'sessionId is required' };
-    this.db.run('UPDATE long_term_subtasks SET session_id = ?, updated_at = ? WHERE id = ?', [trimmed, nowIso(), subtaskId]);
+    const history = [...current.sessionHistory];
+    if (!history.includes(trimmed)) history.push(trimmed);
+    this.db.run('UPDATE long_term_subtasks SET session_id = ?, session_history_json = ?, updated_at = ? WHERE id = ?', [
+      trimmed,
+      JSON.stringify(history),
+      nowIso(),
+      subtaskId,
+    ]);
     this.addEvent(current.taskId, subtaskId, 'note', actor, `session bound: ${trimmed}`);
     this.touch(current.taskId);
     this.saveDb();
@@ -1014,7 +1073,7 @@ export class LongTermTaskStore {
   }
 
   /** Per-task supervision re-arm state (advance service P1): when did the last
-   *  supervise escalation run and which signal signature did it consume. */
+   *  supervise escalation run, and which failure signature did it consume. */
   getSuperviseState(taskId: string): LongTermSuperviseState | null {
     const map = this.readSuperviseStateMap();
     const entry = map[taskId];
@@ -1024,17 +1083,23 @@ export class LongTermTaskStore {
     const convergenceAtMs = Array.isArray((entry as LongTermSuperviseState).convergenceAtMs)
       ? (entry as LongTermSuperviseState).convergenceAtMs.map(Number).filter((value) => Number.isFinite(value))
       : [];
-    return { lastSuperviseAtMs, lastSignal: String((entry as LongTermSuperviseState).lastSignal ?? ''), convergenceAtMs };
+    return {
+      lastSuperviseAtMs,
+      lastFailureSignal: String((entry as LongTermSuperviseState).lastFailureSignal ?? ''),
+      convergenceAtMs,
+    };
   }
 
   setSuperviseState(taskId: string, state: LongTermSuperviseState): void {
     const map = this.readSuperviseStateMap();
-    // Omitted convergenceAtMs preserves the existing trail (a supervision-turn
-    // write must not wipe the churn-breaker history).
+    // Omitted optional fields preserve their existing values: a duration-turn
+    // write must not wipe the failure dedup, and a supervision-turn write
+    // must not wipe the churn-breaker trail.
+    const lastFailureSignal = state.lastFailureSignal ?? map[taskId]?.lastFailureSignal ?? '';
     const convergenceAtMs = state.convergenceAtMs ?? map[taskId]?.convergenceAtMs ?? [];
     map[taskId] = {
       lastSuperviseAtMs: Math.trunc(state.lastSuperviseAtMs),
-      lastSignal: String(state.lastSignal),
+      lastFailureSignal,
       convergenceAtMs: convergenceAtMs.map(Number).filter((value) => Number.isFinite(value)),
     };
     this.db.run(

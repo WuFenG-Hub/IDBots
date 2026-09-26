@@ -390,6 +390,38 @@ test('supervision: duration overrun past the expected budget trips a supervise t
   assert.equal(third.escalated.filter((hit) => hit.reasons[0].startsWith('supervision:')).length, 1, JSON.stringify(third));
 });
 
+test('P1-A regression: a duration turn does not reset the failure-streak dedup (no paired supervision)', async () => {
+  const { store, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.updateSubtask({ subtaskId: subtask.id, expectedMinutes: 60 }, 'twin').ok);
+  deps.listWorkerAttempts = () => [
+    { id: 'a1', label: 'v1', status: 'failed', startedAtMs: now - 3 * HOUR, finishedAtMs: now - 2.5 * HOUR },
+    { id: 'a2', label: 'v2', status: 'failed', startedAtMs: now - 2 * HOUR, finishedAtMs: now - 1.5 * HOUR },
+  ];
+  const supervisor = new LongTermAdvanceService(deps);
+
+  // Failure-streak supervision consumes its signature.
+  const first = await supervisor.run(now);
+  assert.equal(first.escalated.length, 1, JSON.stringify(first));
+  assert.match(first.escalated[0].reasons[0], /supervision: 2 consecutive/);
+
+  // One budget window later (no new failures): duration supervision fires.
+  const second = await supervisor.run(now + 90 * 60_000);
+  assert.equal(second.escalated.length, 1, JSON.stringify(second));
+  assert.match(second.escalated[0].reasons[0], /supervision: in progress for >\d+h without converging/);
+
+  // Five minutes after that duration turn — still no new failures, and the
+  // last nudge is 5 min old (inside the 30-min noise throttle): the OLD
+  // failure signature must NOT look fresh again. With the shared-slot bug
+  // this spurious turn fired and bypassed the throttle.
+  const third = await supervisor.run(now + 95 * 60_000);
+  assert.equal(third.escalated.length, 0, JSON.stringify(third));
+  assert.equal(runner.starts.length, 2, 'exactly two supervision turns total');
+});
+
 test('supervision turn prompt carries the verdict contract, responsibility chain, and dispatch record', async () => {
   const { store, runner, deps } = await openWorld();
   const taskId = await createActive(store);
@@ -436,12 +468,16 @@ test('telemetry wiring: real OrchestrationStore attempts sourced from the bound 
     resolveWorkingDirectory: () => '/tmp/lt',
     getBaseSystemPrompt: () => 'base',
     getSkillsPrompt: async () => null,
-    // Mirrors the main.ts adapter: attempts scoped to the CURRENT sub-project's
-    // bound session only.
+    // Mirrors the main.ts adapter: attempts sourced from every session EVER
+    // bound to this sub-project (rotation-safe), and only this sub-project's.
     listWorkerAttempts: (taskId, subtaskId) => {
       const subtask = store.getSubtask(subtaskId);
-      if (!subtask?.sessionId) return [];
-      return orchestration.listAttemptsForSourceSessions([subtask.sessionId]).map((attempt) => ({
+      if (!subtask) return [];
+      const sessionIds = subtask.sessionHistory.length > 0
+        ? subtask.sessionHistory
+        : (subtask.sessionId ? [subtask.sessionId] : []);
+      if (sessionIds.length === 0) return [];
+      return orchestration.listAttemptsForSourceSessions(sessionIds).map((attempt) => ({
         id: attempt.id,
         label: attempt.idempotencyKey,
         status: attempt.status,
@@ -500,6 +536,68 @@ test('telemetry wiring: real OrchestrationStore attempts sourced from the bound 
   const events = store.getTask(taskId).events;
   assert.equal(events[0].kind, 'supervised');
   assert.equal(events[0].actor, 'system');
+});
+
+test('session rotation does not blind the failure streak (history spans all bound sessions)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-lt-rotate-'));
+  const sqliteStore = await SqliteStore.create(dir);
+  const store = new LongTermTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  const orchestration = new OrchestrationStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  const cowork = makeStubCowork();
+  const runner = makeRunner();
+  const deps = {
+    store: () => store,
+    coworkStore: () => cowork,
+    coworkRunner: () => runner,
+    resolveTwinMetabotId: () => 7,
+    resolveWorkingDirectory: () => '/tmp/lt',
+    getBaseSystemPrompt: () => 'base',
+    getSkillsPrompt: async () => null,
+    listWorkerAttempts: (taskId, subtaskId) => {
+      const subtask = store.getSubtask(subtaskId);
+      if (!subtask) return [];
+      const sessionIds = subtask.sessionHistory.length > 0
+        ? subtask.sessionHistory
+        : (subtask.sessionId ? [subtask.sessionId] : []);
+      if (sessionIds.length === 0) return [];
+      return orchestration.listAttemptsForSourceSessions(sessionIds).map((attempt) => ({
+        id: attempt.id,
+        label: attempt.idempotencyKey,
+        status: attempt.status,
+        startedAtMs: attempt.startedAt ? Date.parse(attempt.startedAt) : null,
+        finishedAtMs: attempt.finishedAt ? Date.parse(attempt.finishedAt) : null,
+      }));
+    },
+  };
+  const advance = new LongTermAdvanceService(deps);
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await advance.run(now); // pending escalation → binds session 1
+  const firstSessionId = store.getTask(taskId).subtasks[0].sessionId;
+  assert.ok(firstSessionId);
+
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  const orch = orchestration.createTask({
+    ownerIntent: 'build the thing', sourceSessionId: firstSessionId,
+    twinMetabotId: 7, ownerGlobalMetaId: 'owner-global', origin: 'twin_delegate',
+  });
+  const step = orchestration.createStep({ taskId: orch.id, ordinal: 1, title: 's', objective: 'o' });
+  const a1 = orchestration.createAttempt({ stepId: step.id, idempotencyKey: 'rot_v1', workerMetabotId: 15, prompt: 'go' });
+  orchestration.updateAttempt(a1.id, 'failed', { error: 'boom' });
+  const a2 = orchestration.createAttempt({ stepId: step.id, idempotencyKey: 'rot_v2', workerMetabotId: 15, prompt: 'go' });
+  orchestration.updateAttempt(a2.id, 'failed', { error: 'boom' });
+
+  // Push the bound session over the rotation budget: the NEXT escalation must
+  // rotate — and the streak from the OLD session must still trip supervision.
+  cowork.counts.set(firstSessionId, 60);
+  const report = await advance.run(now + 10 * 60_000);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /supervision: 2 consecutive failed\/timed-out worker dispatches/);
+  assert.equal(report.escalated[0].reusedSession, false, 'the bound session rotated');
+  assert.notEqual(report.escalated[0].sessionId, firstSessionId);
+  const after = store.getTask(taskId).subtasks[0];
+  assert.deepEqual(after.sessionHistory, [firstSessionId, report.escalated[0].sessionId], 'history spans both sessions');
 });
 
 test('in_progress with fresh work events is NOT re-pushed (quiet rule)', async () => {

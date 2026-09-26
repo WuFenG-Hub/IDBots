@@ -684,6 +684,22 @@ export function buildOrchNotifyCompleted(
     : `[ORCH-NOTIFY] worker ${workerName} 已完成 task ${taskId} → review，请验收；验收后向 owner 交付完整成果，每个链上成果附完整 MetaWeb URI（全文展示，不缩略）`;
 }
 
+/**
+ * Defuse literal delimiter tags inside untrusted payloads (review P1-B): the
+ * author of the payload (a worker, another session) must not be able to close
+ * an untrusted block early and land text outside it, where the receiving Twin
+ * would treat it as instructions. A visible backslash escape keeps the
+ * content readable while breaking the tag.
+ */
+export function defuseUntrustedTag(text: string, tag: 'worker_report' | 'cross_session_message'): string {
+  // Plain split/join (no regex): a literal "<worker_report" / "</worker_report"
+  // becomes "<\worker_report" / "<\/worker_report" — visibly escaped, and no
+  // longer a structural tag.
+  const open = `<${tag}`;
+  const close = `</${tag}`;
+  return text.split(open).join(`<\\${tag}`).split(close).join(`<\\/${tag}`);
+}
+
 export function buildOrchNotifyFailed(
   workerName: string,
   taskId: string | number,
@@ -694,7 +710,10 @@ export function buildOrchNotifyFailed(
   // strings). Delimit it as UNTRUSTED DATA so a compromised or confused
   // worker cannot smuggle instructions into the Twin session through its
   // failure report — the Twin overlay treats worker_report blocks as data.
-  const safeDetail = `<worker_report trust="untrusted">${detail}</worker_report>`;
+  // The payload is defused FIRST so a literal </worker_report> inside the
+  // worker's text cannot close the block early (the structural tags are
+  // added after defusing and stay intact).
+  const safeDetail = `<worker_report trust="untrusted">${defuseUntrustedTag(detail, 'worker_report')}</worker_report>`;
   return language === 'en'
     ? `[ORCH-NOTIFY] worker ${workerName} did not complete task ${taskId}: ${safeDetail} (failed)`
     : `[ORCH-NOTIFY] worker ${workerName} 未完成 task ${taskId}：${safeDetail}（failed）`;
@@ -705,9 +724,17 @@ export function wrapCrossSessionMessage(
   message: string,
   language: AppLanguage = groupTaskLanguage(),
 ): string {
+  // Cross-session inserts are agent-to-agent traffic the receiver must read
+  // as data, never instructions. The outer tag is deliberately DISTINCT from
+  // worker_report: ORCH-NOTIFY texts already carry their own inner wrapper,
+  // and nesting identical tags would be ambiguous. Only this channel's own
+  // tag is defused — inner worker_report wrappers pass through intact and
+  // stay nested data inside this block.
+  const safe = defuseUntrustedTag(message, 'cross_session_message');
+  const body = `<cross_session_message trust="untrusted">${safe}</cross_session_message>`;
   return language === 'en'
-    ? `From ${sourceSessionId}: ${message}`
-    : `来自${sourceSessionId} 的信息：${message}`;
+    ? `From ${sourceSessionId}: ${body}`
+    : `来自${sourceSessionId} 的信息：${body}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -361,14 +361,20 @@ export class LongTermAdvanceService {
         const postEventId = store.getTask(card.id)?.events[0]?.id ?? latestEventId;
         store.setNudgeState(card.id, { lastNudgeAtMs: nowMs, lastEventId: postEventId });
         if (supervision) {
-          store.setSuperviseState(card.id, { lastSuperviseAtMs: nowMs, lastSignal: supervision.signature });
+          // P1-A: the failure-streak marker is written ONLY by failure turns;
+          // duration turns re-arm by time (lastSuperviseAtMs) and must not
+          // clobber the failure signature — the two signals cross-deduped
+          // through one field caused spurious paired supervision turns.
+          store.setSuperviseState(card.id, {
+            lastSuperviseAtMs: nowMs,
+            ...(supervision.failureSignature !== null ? { lastFailureSignal: supervision.failureSignature } : {}),
+          });
         } else if (reasons.some((reason) => CONVERGENCE_REASON_PREFIXES.some((prefix) => reason.startsWith(prefix)))) {
           // A convergence-family escalation: record it on the churn trail.
           const prior = store.getSuperviseState(card.id);
           const trail = [...(prior?.convergenceAtMs ?? []).filter((atMs) => nowMs - atMs < CONVERGENCE_CHURN_WINDOW_MS), nowMs];
           store.setSuperviseState(card.id, {
             lastSuperviseAtMs: prior?.lastSuperviseAtMs ?? 0,
-            lastSignal: prior?.lastSignal ?? '',
             convergenceAtMs: trail,
           });
         }
@@ -394,7 +400,7 @@ export class LongTermAdvanceService {
     current: LongTermSubtask,
     nowMs: number,
     nudgeLastEventId: number,
-    supervision: { reasons: string[]; signature: string } | null,
+    supervision: { reasons: string[]; failureSignature: string | null } | null,
   ): string[] {
     const lastActivityAtMs = detail.events[0] ? Date.parse(detail.events[0].createdAt) : Date.parse(detail.updatedAt);
     const quietMs = nowMs - lastActivityAtMs;
@@ -480,20 +486,22 @@ export class LongTermAdvanceService {
 
   /**
    * P1 supervision: cheap local stall detection on the current in-progress
-   * sub-project — no LLM involved. Two triggers, each self-re-arming via the
-   * per-task supervise state:
+   * sub-project — no LLM involved. Two triggers with SEPARATE consumption
+   * markers (P1-A: a single shared slot let a duration turn reset the failure
+   * dedup, causing spurious paired supervision per budget window):
    *  - failure streak: the N most recent worker dispatches for this task all
-   *    ended failed/timed_out; the signature (count + latest failed id) means
-   *    each NEW failure supervises exactly once;
+   *    ended failed/timed_out; the signature (count + latest failed id) is
+   *    consumed once via lastFailureSignal — each NEW failure supervises
+   *    exactly once, and duration turns never clear it;
    *  - duration overrun: in progress longer than the sub-project's expected
    *    budget (or the default) without converging; re-armed once per budget
-   *    window since the last supervision.
+   *    window via lastSuperviseAtMs (both turn types advance it).
    */
   private supervisionSignal(
     detail: LongTermTaskDetail,
     current: LongTermSubtask,
     nowMs: number,
-  ): { reasons: string[]; signature: string } | null {
+  ): { reasons: string[]; failureSignature: string | null } | null {
     if (current.status !== 'in_progress') return null;
     const state = this.deps.store().getSuperviseState(detail.id);
     // Scoped to THIS sub-project's bound session: a previous sub-project's
@@ -512,12 +520,12 @@ export class LongTermAdvanceService {
     }
     if (streak >= this.failureStreakThreshold) {
       const signature = `fails:${streak}@${latestFailedId}`;
-      if (signature !== state?.lastSignal) {
+      if (signature !== (state?.lastFailureSignal ?? '')) {
         return {
           reasons: [
             `supervision: ${streak} consecutive failed/timed-out worker dispatches (latest ${latestFailedId}) — supervise the delegated work: diagnose the common failure mode and correct course or reassign; a third identical retry is forbidden`,
           ],
-          signature,
+          failureSignature: signature,
         };
       }
     }
@@ -534,7 +542,7 @@ export class LongTermAdvanceService {
         reasons: [
           `supervision: in progress for >${hours}h without converging (budget ${expectedMinutes}min) — supervise: verify the work is still moving toward the acceptance criteria, not looping`,
         ],
-        signature: 'duration',
+        failureSignature: null,
       };
     }
     return null;
