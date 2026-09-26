@@ -9,11 +9,11 @@
  * operates the user's actual desktop and needs OS permission grants held by
  * the host app. Neither should ever be a fleet-wide default.
  *
- * DSH caveat (same as cowork.mountMcpTools): cowork sessions share one DSH
- * runtime per provider slot and the providers mount at composition scope, so
- * once ANY bot on a slot opts in, the backend activates for every session on
- * that slot until the runtime restarts. The toggle still guarantees the
- * default fleet-wide behavior when no bot opts in.
+ * Slot isolation: the backends mount at composition scope (runtime-wide), so
+ * the DSH turn hub keys runtime slots by provider + automation combo
+ * (dshRuntimeKeyOf). Sessions whose bot did not opt in never share a process
+ * with an automation backend, and opting out re-pins the session onto the
+ * clean slot on the very next turn — no runtime restart needed.
  */
 
 import type { MetabotStore } from '../metabotStore';

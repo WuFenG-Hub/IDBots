@@ -103,6 +103,7 @@ tests/*
 !tests/coworkKernelRouting.test.mjs
 !tests/coworkForkSession.test.mjs
 !tests/coworkDshIntegration.test.mjs
+!tests/coworkDshAutomationSlotIsolation.test.mjs
 !tests/composerCommands.test.ts
 !tests/coworkTranscriptExport.test.mjs
 !tests/coworkSessionGoal.test.mjs
