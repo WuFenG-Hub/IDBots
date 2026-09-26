@@ -73,6 +73,8 @@ export interface LongTermSuperviseState {
   lastSuperviseAtMs: number;
   /** Signature of the supervision signal already escalated (new signal = new turn). */
   lastSignal: string;
+  /** Timestamps of recent stale-wait convergence escalations (churn breaker). */
+  convergenceAtMs?: number[];
 }
 
 const CHANNELS: LongTermPreferredChannel[] = ['delegate_bot', 'group_task', 'owner_external', 'owner_together'];
@@ -999,12 +1001,22 @@ export class LongTermTaskStore {
     if (!entry || typeof entry !== 'object') return null;
     const lastSuperviseAtMs = Number((entry as LongTermSuperviseState).lastSuperviseAtMs);
     if (!Number.isFinite(lastSuperviseAtMs)) return null;
-    return { lastSuperviseAtMs, lastSignal: String((entry as LongTermSuperviseState).lastSignal ?? '') };
+    const convergenceAtMs = Array.isArray((entry as LongTermSuperviseState).convergenceAtMs)
+      ? (entry as LongTermSuperviseState).convergenceAtMs.map(Number).filter((value) => Number.isFinite(value))
+      : [];
+    return { lastSuperviseAtMs, lastSignal: String((entry as LongTermSuperviseState).lastSignal ?? ''), convergenceAtMs };
   }
 
   setSuperviseState(taskId: string, state: LongTermSuperviseState): void {
     const map = this.readSuperviseStateMap();
-    map[taskId] = { lastSuperviseAtMs: Math.trunc(state.lastSuperviseAtMs), lastSignal: String(state.lastSignal) };
+    // Omitted convergenceAtMs preserves the existing trail (a supervision-turn
+    // write must not wipe the churn-breaker history).
+    const convergenceAtMs = state.convergenceAtMs ?? map[taskId]?.convergenceAtMs ?? [];
+    map[taskId] = {
+      lastSuperviseAtMs: Math.trunc(state.lastSuperviseAtMs),
+      lastSignal: String(state.lastSignal),
+      convergenceAtMs: convergenceAtMs.map(Number).filter((value) => Number.isFinite(value)),
+    };
     this.db.run(
       'INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
       [LONGTERM_SUPERVISE_STATE_KV_KEY, JSON.stringify(map), Date.now()],

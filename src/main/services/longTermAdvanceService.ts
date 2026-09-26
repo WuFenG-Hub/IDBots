@@ -40,6 +40,11 @@ const DEFAULT_FAILURE_STREAK_THRESHOLD = 2;
 const DEFAULT_EXPECTED_MINUTES = 240;
 /** Bound-session message budget before the heartbeat rotates to a fresh session. */
 const DEFAULT_SESSION_ROTATION_MESSAGES = 60;
+/** Convergence churn breaker: stale-wait convergence turns per window before escalation to the owner. */
+const CONVERGENCE_CHURN_LIMIT = 3;
+const CONVERGENCE_CHURN_WINDOW_MS = 2 * 3_600_000;
+/** Reason prefixes that mark a convergence-family escalation (stale wait / churn). */
+const CONVERGENCE_REASON_PREFIXES = ['stale owner wait', 'convergence churn'];
 
 /** Worker-dispatch telemetry used by supervision (P1) — one row per orchestration attempt tied to the task. */
 export interface LongTermWorkerAttemptSummary {
@@ -357,6 +362,15 @@ export class LongTermAdvanceService {
         store.setNudgeState(card.id, { lastNudgeAtMs: nowMs, lastEventId: postEventId });
         if (supervision) {
           store.setSuperviseState(card.id, { lastSuperviseAtMs: nowMs, lastSignal: supervision.signature });
+        } else if (reasons.some((reason) => CONVERGENCE_REASON_PREFIXES.some((prefix) => reason.startsWith(prefix)))) {
+          // A convergence-family escalation: record it on the churn trail.
+          const prior = store.getSuperviseState(card.id);
+          const trail = [...(prior?.convergenceAtMs ?? []).filter((atMs) => nowMs - atMs < CONVERGENCE_CHURN_WINDOW_MS), nowMs];
+          store.setSuperviseState(card.id, {
+            lastSuperviseAtMs: prior?.lastSuperviseAtMs ?? 0,
+            lastSignal: prior?.lastSignal ?? '',
+            convergenceAtMs: trail,
+          });
         }
         this.emitLog(
           `[LongTermAdvance] escalated task "${detail.title}" sub-project #${current.ordinal} ` +
@@ -426,7 +440,7 @@ export class LongTermAdvanceService {
         // reflects reality. Converge it instead of re-nudging the owner about
         // a decision that may no longer exist (regression: 55 reminders over
         // 40h for a wait the TwinBot had already worked past).
-        const staleReason = this.staleWaitReason(detail, current);
+        const staleReason = this.staleWaitReason(detail, current, nowMs);
         if (staleReason) return [staleReason];
         if (quietMs > this.waitingOwnerReminderMs) {
           if (current.waitUntil !== null) {
@@ -445,15 +459,22 @@ export class LongTermAdvanceService {
    * The wait recorded on this waiting_owner sub-project is stale: the journal
    * shows real work after the latest wait-establishing event ('waiting' or
    * 'proposed'). Direct indexed queries — never the capped 200-event detail
-   * projection. Heartbeat 'nudged' events and system notes (session binds)
-   * are infrastructure, not work.
+   * projection. Heartbeat 'nudged'/'supervised' events and system notes
+   * (session binds) are infrastructure, not work. When the wait keeps going
+   * stale (the Twin re-parks it instead of committing), the churn breaker
+   * replaces the convergence nudge with an owner escalation.
    */
-  private staleWaitReason(detail: LongTermTaskDetail, current: LongTermSubtask): string | null {
+  private staleWaitReason(detail: LongTermTaskDetail, current: LongTermSubtask, nowMs: number): string | null {
     if (current.status !== 'waiting_owner') return null;
     const store = this.deps.store();
     const anchor = store.getLatestSubtaskEventOfKinds(detail.id, current.id, ['waiting', 'proposed']);
     if (!anchor) return null;
     if (!store.hasTwinWorkAfter(detail.id, current.id, anchor.id)) return null;
+    const state = store.getSuperviseState(detail.id);
+    const recentConvergences = (state?.convergenceAtMs ?? []).filter((atMs) => nowMs - atMs < CONVERGENCE_CHURN_WINDOW_MS).length;
+    if (recentConvergences >= CONVERGENCE_CHURN_LIMIT) {
+      return `convergence churn — this wait has gone stale and been re-parked ${recentConvergences} times in the last ${Math.round(CONVERGENCE_CHURN_WINDOW_MS / 3_600_000)}h (${current.waitNote}). Stop the loop: either resolve it definitively (longterm_subtask_unblock and commit to one path) or bring the decision to the owner now — full history, one clear question, your recommendation first`;
+    }
     return `stale owner wait — the journal shows work after the wait was parked (${current.waitNote}); converge the state first: longterm_subtask_unblock to resume, or longterm_subtask_wait to re-record it, then re-present whatever still needs the owner`;
   }
 

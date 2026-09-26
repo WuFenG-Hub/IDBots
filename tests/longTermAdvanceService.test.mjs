@@ -311,6 +311,30 @@ test('session rotation: under-budget bound sessions are reused as before', async
   assert.equal(report.escalated[0].sessionId, firstSessionId);
 });
 
+test('convergence churn breaker: repeated stale-wait convergence escalates to the owner instead of looping', async () => {
+  const { store, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const subtask = store.getTask(taskId).subtasks[0];
+  const advance = new LongTermAdvanceService(deps);
+  const now = Date.now();
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  // Three stale cycles inside the churn window: each is an ordinary
+  // convergence turn (Twin re-parks the wait, works past it again).
+  for (let round = 0; round < 3; round += 1) {
+    assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: `decision ${round}` }, 'twin').ok);
+    assert.ok(store.addNote(taskId, subtask.id, `worked past wait ${round}`, 'twin').ok);
+    const report = await advance.run(now + (round + 1) * 10 * 60_000);
+    assert.equal(report.escalated.length, 1, JSON.stringify(report));
+    assert.match(report.escalated[0].reasons[0], /stale owner wait/);
+  }
+  // The fourth stale cycle inside the window trips the churn breaker.
+  assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'decision 3' }, 'twin').ok);
+  assert.ok(store.addNote(taskId, subtask.id, 'worked past wait 3', 'twin').ok);
+  const report = await advance.run(now + 45 * 60_000);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /convergence churn/);
+});
+
 test('supervision: a leading streak of failed worker dispatches trips a supervise turn, once per new failure', async () => {
   const { store, runner, deps } = await openWorld();
   const taskId = await createActive(store);

@@ -331,5 +331,14 @@ test('supervision re-arm state: set and read back per task', async () => {
   const taskId = await createActive(store);
   assert.equal(store.getSuperviseState(taskId), null);
   store.setSuperviseState(taskId, { lastSuperviseAtMs: 1234, lastSignal: 'fails:2@a1' });
-  assert.deepEqual(store.getSuperviseState(taskId), { lastSuperviseAtMs: 1234, lastSignal: 'fails:2@a1' });
+  assert.deepEqual(
+    store.getSuperviseState(taskId),
+    { lastSuperviseAtMs: 1234, lastSignal: 'fails:2@a1', convergenceAtMs: [] },
+  );
+  // A supervision-turn write preserves the churn trail; a convergence write appends to it.
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 5678, lastSignal: 'duration' });
+  assert.deepEqual(store.getSuperviseState(taskId).convergenceAtMs, [], 'supervision write preserves an empty trail');
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 5678, lastSignal: 'duration', convergenceAtMs: [100, 200] });
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 6000, lastSignal: 'duration' });
+  assert.deepEqual(store.getSuperviseState(taskId).convergenceAtMs, [100, 200], 'omitted field keeps the existing trail');
 });
