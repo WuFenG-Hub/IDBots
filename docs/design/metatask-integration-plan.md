@@ -65,10 +65,18 @@ worst case on record).
 
 ## 3. Protocol v1.2 change spec
 
-Full draft registration body (owner-review copy, Chinese to match the v1.1.0
-registry lineage): `docs/metaid_protocols/metatask-protocol-v1.2-registration-draft.md`
-— the designated publishing metabot publishes that text verbatim (minus the
-handoff preamble) via the metaprotocol registry after owner confirmation.
+Full draft registration body (owner-review copy, **rev 2**, English, MetaID
+protocol reference-doc style with json5 payload schemas):
+`docs/metaid_protocols/metatask-protocol-v1.2-registration-draft.md`
+— the designated publishing metabot publishes that text (minus the
+draft-status header note) via the metaprotocol registry after owner
+confirmation. Rev 2 applies the AI_Sunny clause-review receipt (2026-09-27,
+conditional PASS): height gates for supersedeid / last-valid-vote /
+root-author-submission (preserving both pilots' recorded outcomes), the
+pinned eventSetHash recipe, hash vectors in-body + separate fixture-set pin,
+spec input/output string|object union, content-derived roster filtering, the
+explicit cancellation of the v1.1 24h priority re-claim window, and the
+14-day challenge TTL (owner rulings 2026-09-27: cancel / 14d / ban-gated).
 Every change below follows the activation process in §3.6.
 
 ### 3.1 Settlement (split) semantics — D-1 Option A (ruled 2026-09-27)
@@ -86,11 +94,14 @@ every tree version. Aggregation nodes carry weights too (template guidance:
 
 ```
 split: {
-  submitterShareBP: 8000,        // σ, bounds [6000, 9000]
-  reviewerFloor:   2500,         // accuracy floor a_min, fixed-point /10000
-  smoothing:       laplace       // fixed
+  submitterShareBP: 8000,        // σ, bounds [6000, 9000] — the only tunable payload field
+  rosterid:         null         // same-side roster pin; groups derived by replay from pin CONTENT
 }
 ```
+
+The accuracy floor (2500, ×10⁻⁴) and Laplace smoothing are protocol
+constants in the v1.2 text — deliberately NOT payload fields (clause-review
+must-fix #4: a fillable field is not verifiable independence).
 
 **Per verified node n** (verified per existing replay rules incl. quorum,
 #8/#9 gates, last-per-bot, supersede resolution from the folded v1.1 draft):
@@ -161,12 +172,18 @@ re-parenting / removal of submitted subtrees via supersede machinery.
 
 The pilot #02 stall (aggregation unclaimed, task root never verified) was a
 **monitoring/willingness failure, not a protocol gap**: sibling bots on the
-publisher's side may claim and submit aggregation nodes today (the identity
-rule constrains *reviewers*, not submitters). v1.2 therefore only:
+publisher's side may claim and submit aggregation nodes today. v1.2
+therefore only:
 
-1. **Clarifies in normative text**: submitter must ≠ root author, but
-   same-owner-side bots are eligible submitters; only review independence is
-   restricted (with the roster pin declaring sides).
+1. **Clarifies in normative text (height-gated per the clause review)**:
+   below H_ACT2, v1.1 semantics stand — any bot may submit, including the
+   task root author (the pilot #01 root submission is the on-chain
+   instance); at/after H_ACT2 the root author itself is barred from
+   submitting (owner ruling 2026-09-27, pairs with the 0% publisher share),
+   while same-owner-side bots other than the root author remain eligible
+   submitters on any node, aggregation included. Review independence
+   (reviewer ≠ submitter ≠ root author, plus roster filtering) is the only
+   identity rule in all eras.
 2. Host-side drive (§5.4): IDBots heartbeat watches tasks where the publisher
    is a local bot and aggregation nodes sit unclaimed past a threshold →
    surface a "finish aggregation" assisted flow (claim guard + template
