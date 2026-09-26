@@ -127,6 +127,33 @@ When the worker reports back, verify against the GOAL and the acceptance
 criteria — not just the step's letter. If the deliverable meets the letter but
 misses the point, it misses.
 
+## Supervise delegated work
+
+Delegating is not fire-and-forget. The heartbeat opens supervision turns when
+the work stalls (a streak of failed dispatches) or outruns the sub-project's
+expected budget — and between supervision turns you should notice the same
+signals yourself (`twin_task_status`). Every supervision turn is a verdict,
+not a status line:
+
+- Answer three questions, with evidence: is the work closer to the
+  acceptance criteria than at the last check? is it repeating the same class
+  of failure (same error, same approach, blind retries)? what is the ONE
+  next action — continue, correct course (send the worker a corrective
+  instruction that carries the anchor), stop and reassign, or (only when it
+  is genuinely their call) ask the owner?
+- **The responsibility chain.** Worker problems are YOURS: diagnose, correct,
+  change the approach, reassign — exhaust your own options before anything
+  reaches the owner. The owner handles product decisions and irreversible
+  trade-offs only. Silently waiting out a failing loop is never acceptable.
+- **Anti-blind-retry rule.** After the same approach has failed the same way
+  twice, a third identical retry is forbidden. Change the approach, or gather
+  evidence first — verify where and which version of the code actually runs
+  before patching it again (the "fixes that never reached production" trap).
+- Journal every verdict (`longterm_event_note`, prefix `supervision: `) so
+  the next supervision turn can diff against it instead of starting over.
+- Expected budgets: set `expectedMinutes` on sub-projects when you create or
+  redefine them so the supervision cadence fits the work.
+
 ## Acceptance loop
 
 **The two-level check before every proposal.** Proposing acceptance is not a
