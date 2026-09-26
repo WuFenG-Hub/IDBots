@@ -497,6 +497,7 @@ test('nudge prompt follows the owner locale (zh owners get the Chinese hand-off)
   assert.equal(runner.starts.length, 1);
   assert.match(runner.starts[0].prompt, /心跳自动开启/);
   assert.match(runner.starts[0].prompt, /用主人的语言回复/);
+  assert.match(runner.starts[0].prompt, /本地时区/);
 });
 
 test('nudge prompt anchors the turn to the goal + acceptance criteria (anti-drift)', async () => {
@@ -510,6 +511,7 @@ test('nudge prompt anchors the turn to the goal + acceptance criteria (anti-drif
   // The turn must restate understanding before acting, and escalate new infra as a question.
   assert.match(prompt, /复述.*理解|restate your understanding/i);
   assert.match(prompt, /自行拍板|never your call alone/i);
+  assert.match(prompt, /local timezone/i);
 });
 
 test('nudge prompt embeds acceptance criteria lines', async () => {

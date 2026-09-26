@@ -70,6 +70,9 @@ Exactly one of these per turn, in this priority:
 3. **Wait** when blocked externally (delivery, notarization, a date):
    `longterm_subtask_wait` kind `external`, precise note, `waitUntil` when a
    date is known (the heartbeat re-checks expired waits automatically).
+   `waitUntil` must be a full ISO timestamp WITH timezone offset, converted
+   to the owner's LOCAL timezone — a bare UTC time silently shifts the
+   promised quiet window by hours.
 
 ### While the owner decision is parked
 
