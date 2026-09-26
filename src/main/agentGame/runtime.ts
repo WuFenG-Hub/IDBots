@@ -547,6 +547,14 @@ export class AgentGameRuntime extends EventEmitter {
           }));
           text = result.content?.trim() ?? '';
         } catch (err) {
+          // stop() settles the window with a named error: the session is
+          // already stopped (lease released, sandbox disposed) — return
+          // without any status write, or a late stop-settlement would
+          // resurrect the terminal session as paused/llm_*.
+          if ((err as { name?: string } | null)?.name === 'SessionStoppedError') {
+            this.log(`${sessionId}: move-LLM call interrupted by stop (no status change)`);
+            return;
+          }
           // GAP-4: session-correlated failure line — operators must be able to
           // tell WHICH seat stalled with which classification from the host
           // log alone (the 2026-09-25 G2 red-seat forensics had neither seat
@@ -627,14 +635,20 @@ export class AgentGameRuntime extends EventEmitter {
     const ac = new AbortController();
     this.ensureLlmWindowTimer();
     return new Promise<ChatCompletionResult>((resolve, reject) => {
-      this.llmWindows.set(sessionId, { deadline: this.now() + LLM_CALL_TIMEOUT_MS, ac, reject });
+      const entry = { deadline: this.now() + LLM_CALL_TIMEOUT_MS, ac, reject };
+      this.llmWindows.set(sessionId, entry);
       this.deps.llmComplete(messages, { timeoutMs: LLM_CALL_TIMEOUT_MS, signal: ac.signal }).then(
         (result) => {
-          this.llmWindows.delete(sessionId);
+          // Generational check: only a settlement of the window THIS call
+          // created may remove it. A stale callee settling late (a hung call
+          // already cut by the sweeper, with the session resumed and a fresh
+          // window registered) must not detach the new window — that would
+          // leave the new call unenforced forever (GAP-4 recurrence path).
+          if (this.llmWindows.get(sessionId) === entry) this.llmWindows.delete(sessionId);
           resolve(result);
         },
         (err) => {
-          this.llmWindows.delete(sessionId);
+          if (this.llmWindows.get(sessionId) === entry) this.llmWindows.delete(sessionId);
           reject(err instanceof Error ? err : new Error(String(err)));
         },
       );
@@ -856,7 +870,12 @@ export class AgentGameRuntime extends EventEmitter {
   async resume(sessionId: string): Promise<SessionView> {
     const s = this.deps.store.getSession(sessionId);
     if (!s) throw runtimeError('session_not_found', `unknown session ${sessionId}`);
-    if (s.status === 'finished') return toSessionView(s);
+    // Terminal states: finished is over; stopped was torn down by stop()
+    // (sandbox disposed, lease released) — recovery runs are for
+    // running/paused only, so re-activating a stopped session would
+    // half-execute (fresh lease + scheduled loop) while markStatus's
+    // terminal guard refuses the running write. Return the view as-is.
+    if (s.status === 'finished' || s.status === 'stopped') return toSessionView(s);
     await this.ensureSandbox(s);
     await this.catchUp(sessionId);
     const res = this.leases.acquire(s.groupId, s.seat, sessionId);
@@ -876,11 +895,21 @@ export class AgentGameRuntime extends EventEmitter {
     if (s.status === 'stopped' || s.status === 'finished') return toSessionView(s);
     this.pending.delete(sessionId);
     // Release an in-flight move window so a hung llmComplete cannot keep the
-    // seat's transport pinned after the session is gone.
+    // seat's transport pinned after the session is gone. Abort AND reject:
+    //  - the abort reaches wired transports (socket dies, not the pool);
+    //  - the reject settles the move-loop awaiter even when the wiring
+    //    ignores the signal (a degraded llmComplete would otherwise never
+    //    settle → the busy flag leaks forever), and it beats a late wired
+    //    abort-settlement to the catch with a named error the loop
+    //    recognizes as a stop — a late settle arriving after this function
+    //    returns must not resurrect the stopped session via markStatus.
     const window = this.llmWindows.get(sessionId);
     if (window) {
       this.llmWindows.delete(sessionId);
       window.ac.abort();
+      const stopErr = new Error(`session ${sessionId} stopped while a move-LLM call was in flight`);
+      stopErr.name = 'SessionStoppedError';
+      window.reject(stopErr);
     }
     this.leases.releaseSession(sessionId);
     const sb = this.sandboxes.get(sessionId);
@@ -942,6 +971,14 @@ export class AgentGameRuntime extends EventEmitter {
   private markStatus(sessionId: string, status: SessionStatus, err: SessionError | null): void {
     const s = this.deps.store.getSession(sessionId);
     if (!s) return;
+    // Terminal-state guard: a stopped/finished session is inert (no lease,
+    // no sandbox, excluded from recover/housekeeping/wake). Async paths that
+    // raced a stop/finish — a late settle's catch, a stale recovery loop —
+    // must not flip it back to paused/running (ghost resurrection).
+    if ((s.status === 'stopped' || s.status === 'finished') && (status === 'paused' || status === 'running')) {
+      this.log(`${sessionId}: refusing status change ${s.status} → ${status} (terminal state guard)`);
+      return;
+    }
     s.status = status;
     s.lastError = err;
     s.updatedAt = this.now();
