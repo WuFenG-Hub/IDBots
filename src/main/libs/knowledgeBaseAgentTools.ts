@@ -148,7 +148,7 @@ export function buildKnowledgeBaseAgentTools(deps: {
 
   const knowledgeBaseList = tool(
     'knowledge_base_list',
-    'List YOUR OWN knowledge bases (知识库) — local document corpora you can citation-search with knowledge_base_query. Bare call, no arguments. Returns each KB\'s name, id, description, document/chunk counts, last learned time, and which one is the default (where knowledge_base_add_document lands when no KB is chosen). Use to discover what corpora exist before answering domain questions or saving new material. A KB with 0 documents is still listed — it may simply not have content yet.',
+    'List YOUR OWN knowledge bases (知识库) — bare call, no arguments. Returns each KB\'s name, id, description, doc/chunk counts, last learned time, and the default KB (where knowledge_base_add_document lands when no id is given). Use to see what corpora exist before domain answers or saving material; a 0-document KB is still listed.',
     {},
     async () => {
       const metabotId = requireMetabotId('knowledge_base_list');
@@ -169,7 +169,7 @@ export function buildKnowledgeBaseAgentTools(deps: {
 
   const knowledgeBaseQuery = tool(
     'knowledge_base_query',
-    'Citation-search YOUR OWN knowledge bases (知识库) — documents you or the user collected, learned into a local full-text index. Omitting knowledgeBaseId searches ALL of your KBs merged by score; pass one KB id (from knowledge_base_list) to scope the search. topK caps results (1-50, default 8); minScore sets the relevance bar (0-1, default 0.18). Returns a numbered list of citations: KB name, document title, source path, score, and the matching snippet. Use BEFORE answering domain questions your KBs cover — this is grounding, not optional decoration. An empty result means insufficient evidence in the corpus: say so honestly instead of inventing content, and consider saving relevant material with knowledge_base_add_document.',
+    'Citation-search YOUR OWN knowledge bases (知识库) — documents learned into a local full-text index. Omitting knowledgeBaseId searches all KBs merged by score; topK 1-50 (default 8), minScore 0-1 (default 0.18). Returns numbered citations: KB name, document title, source path, score, snippet. Use BEFORE answering domain questions your KBs cover — grounding, not decoration. Empty result = insufficient evidence: say so honestly instead of inventing, and consider saving material with knowledge_base_add_document.',
     {
       query: z.string().min(1),
       knowledgeBaseId: z.string().optional(),
@@ -207,7 +207,7 @@ export function buildKnowledgeBaseAgentTools(deps: {
 
   const knowledgeBaseAddDocument = tool(
     'knowledge_base_add_document',
-    'Save ONE document into one of YOUR knowledge bases (知识库) so it becomes citation-searchable. The document is written into the KB\'s raw directory under metabot-inbox/ and becomes searchable after the next knowledge_base_learn run — call knowledge_base_learn right after to absorb it immediately. Web2 or synthesized content is stored as SimpleNote-protocol JSON; a MetaWeb pin body is kept verbatim with provenance recorded. sourceType is web (Web2 find, pass url) / metaweb (on-chain pin, pass pinId and the pin body as content) / manual (default). Without knowledgeBaseId the document lands in the default KB; pick a topical KB id from knowledge_base_list when one matches. Not for distilled one-line lessons — those belong to knowledge_upsert.',
+    'Save ONE document into one of YOUR knowledge bases (知识库) so it becomes citation-searchable; call knowledge_base_learn right after to absorb it immediately. Web2 or synthesized content is stored as SimpleNote-protocol JSON; a MetaWeb pin body is kept verbatim with provenance. sourceType: \'web\' (pass url) / \'metaweb\' (pass pinId and the pin body as content) / \'manual\' (default). Without knowledgeBaseId it lands in the default KB; topical ids from knowledge_base_list. Distilled one-line lessons belong to knowledge_upsert instead.',
     {
       title: z.string().min(1),
       content: z.string().min(1),
@@ -270,7 +270,7 @@ export function buildKnowledgeBaseAgentTools(deps: {
 
   const knowledgeBaseLearn = tool(
     'knowledge_base_learn',
-    'Learn (index) the raw documents of YOUR knowledge bases into their local search index, so knowledge_base_query can find them. Incremental by default: only new, changed, or deleted files are processed. full=true wipes the derived index and rebuilds from scratch — expensive; prefer incremental unless the index is suspect. Omitting knowledgeBaseId learns ALL of your KBs. Run this right after knowledge_base_add_document, and after the user adds files to a KB directory. Reports per-KB counts (added/updated/removed/unchanged, docs/chunks indexed) and any failed files.',
+    'Index the raw documents of YOUR knowledge bases so knowledge_base_query can find them. Incremental by default (only new/changed/deleted files); full=true rebuilds from scratch — expensive, use only when the index is suspect. Omitting knowledgeBaseId learns all KBs. Run right after knowledge_base_add_document and after the user adds files to a KB directory. Reports per-KB counts and any failed files.',
     {
       knowledgeBaseId: z.string().optional(),
       full: z.boolean().optional(),

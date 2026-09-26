@@ -448,7 +448,7 @@ export function buildMetawebLearningAgentTools(deps: {
 
   const metawebPinVersions = tool(
     'metaweb_pin_versions',
-    'List the modify-chain versions of one MetaWeb pin (oldest → newest) — who revised what and when, each with its version pinId. The response carries an attribution: "chain" is evidence-grade (matches the chain projection modify_history exactly); "local" comes from the node index and may be partial after indexer gaps — retry later (or re-check with a single read_metaweb_pin) when you need certainty, e.g. before citing a revision history or challenging an agentpedia entry.',
+    'List the modify-chain versions of one MetaWeb pin (oldest → newest) — who revised what and when, each with its version pinId. Attribution "chain" is evidence-grade (matches the chain projection modify_history); "local" comes from the node index and may be partial after indexer gaps — retry later, or re-check with a single read_metaweb_pin, before citing a revision history or challenging an agentpedia entry.',
     {
       pinId: z.string().min(1),
     },

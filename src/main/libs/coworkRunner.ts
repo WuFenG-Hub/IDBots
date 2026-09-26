@@ -5460,7 +5460,7 @@ export class CoworkRunner extends EventEmitter {
       '3. Before each install, tell the owner what you are installing, why, and the source pinId; installs are owner-confirmed — on decline, stop that path and report, never retry silently.',
       '4. Verify with list_installed_skills and read_skill, then apply the capability to the task.',
       '5. Report what you learned, the guiding pins (as pin:// links), and what you installed.',
-      '6. Save the lesson so it is never relearned: repeatable workflows → procedure_save (trigger, steps, pitfalls, sourcePinIds); single facts/names/one-liners → knowledge_upsert. Pick exactly one home per lesson — full tutorial/reference bodies → knowledge_base_add_document (sourceType metaweb + pinId) — and never store the same lesson in two layers.',
+      '6. Save the lesson so it is never relearned: repeatable workflows → procedure_save (trigger, steps, pitfalls, sourcePinIds); single facts/names/one-liners → knowledge_upsert. Pick exactly one home per lesson — full tutorial/reference bodies → knowledge_base_add_document (sourceType \'metaweb\' + pinId) — and never store the same lesson in two layers.',
       '7. When the owner asks you to learn or research a topic in your spare time, queue it with metaweb_study_enqueue; report study status from metaweb_study_status and knowledge_base_query records, never claim unperformed study.',
     ].join('\n');
   }
@@ -9445,7 +9445,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'knowledge_recall',
-          'Recall YOUR OWN reusable knowledge points (经验/知识点) — distilled know-how, pitfalls (坑) and principles from your past work. query keyword-searches topic+summary; kind filters know_how/pitfall/principle; category filters a grouping; limit caps the count (1-50). Use before starting a task that resembles past work, to reuse what worked and avoid traps you already hit. Not facts about the user (memory_user_edits), not a log of past days (experience_recall). An empty result means you have not distilled a point about this yet.',
+          'Recall YOUR OWN distilled knowledge points (经验/知识点) — know-how, pitfalls (坑), principles from past work. query keyword-searches topic+summary; kind filters know_how/pitfall/principle; limit caps the count (1-50). Use before starting a task that resembles past work, to reuse what worked and avoid traps you already hit. Not user facts (memory_user_edits) or day logs (experience_recall). An empty result means you have not distilled a point about this yet.',
           {
             query: z.string().optional(),
             kind: z.enum(['know_how', 'pitfall', 'principle']).optional(),
@@ -9464,7 +9464,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'knowledge_upsert',
-          'Save or update ONE reusable knowledge point (经验/知识点) for future tasks. topic is a reusable theme written so it can be found again; summary is the actionable conclusion; kind is know_how (do this) / pitfall (坑, do NOT do this) / principle; category and tags are optional grouping. Reusing an existing topic REWRITES it (version bump, prior text archived) — update a point when you learn something better, do not create near-duplicates. Use when the human asks you to remember something reusable, or you distill a generalizable lesson from an article/task. Not for one-off ephemeral facts, user-profile facts (memory_user_edits), or conduct rules. Returns the saved topic with its new version.',
+          'Save or update ONE reusable knowledge point (经验/知识点): topic (a findable theme), summary (the actionable conclusion), kind know_how / pitfall (坑) / principle; category/tags optional. Reusing an existing topic REWRITES it (version bump, prior text archived) — update instead of near-duplicating. Use when the human asks you to remember something reusable, or you distill a generalizable lesson. Not one-off facts, user-profile facts (memory_user_edits), or conduct rules. Returns the saved topic with its new version.',
           {
             topic: z.string().min(1),
             summary: z.string().min(1),
@@ -9484,7 +9484,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'procedure_recall',
-          'Recall YOUR OWN reusable procedures (经验) — proven task workflows with triggers, ordered steps and pitfalls from your past work. query matches title+trigger+steps by term coverage — pass several natural keywords at once (e.g. "MetaWeb 安装 技能" or colloquial "装技能"); entries containing any of the query\'s content terms rank in, title hits first. category filters a grouping; limit caps the count (1-50). Use BEFORE starting a task that resembles past work: if a procedure matches, follow its steps directly instead of re-searching MetaWeb. Not for single facts (knowledge_recall) or day logs (experience_recall). An empty result means you have no procedure for this yet — complete the task, then save one with procedure_save.',
+          'Recall YOUR OWN reusable procedures (经验) — proven task workflows with triggers, ordered steps and pitfalls. query matches title+trigger+steps by term coverage — pass several natural keywords at once (e.g. "MetaWeb 安装 技能"); entries containing any query term rank in, title hits first. category filters a grouping; limit caps the count (1-50). Use BEFORE starting a task that resembles past work — follow the matched steps instead of re-searching MetaWeb. Not single facts (knowledge_recall) or day logs (experience_recall). An empty result means no procedure yet — complete the task, then save one with procedure_save.',
           {
             query: z.string().optional(),
             category: z.string().optional(),
@@ -9502,7 +9502,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'procedure_save',
-          'Save or update ONE reusable procedure (经验) — a proven way to GET A TASK DONE, heavier than a knowledge point, lighter than a skill, with no script dependency. title names the task capability so it can be found again; trigger says WHEN to use it ("when the user asks to …"); steps is the ordered checklist that worked; pitfalls lists what backfired; sourcePinIds records the MetaWeb pins this was learned from (provenance). BEFORE saving, procedure_recall the topic: if a same-topic procedure already exists, reuse its EXACT title so this save rewrites that entry (version bump) instead of stacking a near-duplicate. Use after completing a task that is likely to recur — especially after following a MetaWeb tutorial. Not for single facts (knowledge_upsert), user facts (memory_user_edits), or day logs (experience_recall). Returns the saved title with its new version.',
+          'Save or update ONE reusable procedure (经验) — a proven way to get a task done, heavier than a knowledge point, lighter than a skill. title names the task capability; trigger says WHEN to use it; steps is the ordered checklist that worked; pitfalls what backfired; sourcePinIds records provenance pins. BEFORE saving, procedure_recall the topic: reusing a same-topic entry\'s EXACT title makes this save rewrite it (version bump) instead of stacking a near-duplicate. Use after completing a likely-recurring task — especially after following a MetaWeb tutorial. Not single facts (knowledge_upsert), user facts (memory_user_edits), or day logs (experience_recall). Returns the saved title with its new version.',
           {
             title: z.string().min(1),
             trigger: z.string().min(1),

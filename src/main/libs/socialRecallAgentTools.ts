@@ -206,7 +206,7 @@ export function buildSocialRecallAgentTools(deps: {
 
   const searchSocialPosts = tool(
     'search_social_posts',
-    'Search on-chain social posts (simplebuzz). Trigger liberally for post/buzz questions: topic, author, time window, hot, or following feed. Returns up to `size` coarse candidates, newest first (sort=hot: hot-ranked); you pick/rank the top 3-5. Filters combine AND; multiple keywords/publishers match OR. Time: sinceDays (today=1) or since/until Unix seconds. publisher accepts a GlobalMetaID, MetaID, or address; resolve names via search_metaids first. Post engagement: social_post_detail; replies: social_post_comments. Not for identity lookup (search_metaids) or apps (search_metaapps).',
+    'Search on-chain social posts (simplebuzz) — trigger liberally for post/buzz questions: topic, author, time window, hot, or following feed. Returns up to `size` coarse candidates newest-first (sort=hot: hot-ranked); you pick/rank the top 3-5. Filters AND-combine; multiple keywords/publishers match OR. Time via sinceDays (today=1) or since/until Unix seconds; publisher takes GlobalMetaID/MetaID/address (resolve names via search_metaids first). Engagement: social_post_detail; replies: social_post_comments. Not identity lookup (search_metaids) or apps (search_metaapps).',
     {
       query: z.string().optional(),
       keywords: z.array(z.string()).optional(),
@@ -282,7 +282,7 @@ export function buildSocialRecallAgentTools(deps: {
 
   const socialPostDetail = tool(
     'social_post_detail',
-    'Get one on-chain post by pinId: full content, author, timestamps, attachments, engagement (likes, comments, quotes, donates). Use for questions about a concrete post; requires an existing pinId — to find posts use search_social_posts first. For the reply thread use social_post_comments. For the user\'s own latest post, find it via search_social_posts (publisher=your identity), then detail its pinId. Missing/hidden posts are reported honestly.',
+    'Get one on-chain post by pinId: full content, author, timestamps, attachments, engagement (likes, comments, quotes, donates). For questions about a concrete post; find posts first with search_social_posts (your own latest: publisher=your identity, then detail its pinId). Reply thread: social_post_comments. Missing/hidden posts are reported honestly.',
     {
       pinId: z.string().min(1),
     },
@@ -311,7 +311,7 @@ export function buildSocialRecallAgentTools(deps: {
 
   const socialPostComments = tool(
     'social_post_comments',
-    'List the comments/replies attached to a specific on-chain post by pinId (paged, size default 20). Use when the user asks about a post\'s replies — "有没有人回复这个帖子", "看看这个帖子的评论", "what did people say under this post" — or when you want to summarize a post\'s discussion. When NOT to use: for aggregated engagement counts (likes/comments/quotes totals) use social_post_detail instead; and to discover posts in the first place use search_social_posts (this needs an existing pinId).',
+    'List a specific post\'s comments/replies by pinId (paged, size default 20) — for questions about a post\'s discussion. Aggregated engagement totals (likes/comments/quotes) are social_post_detail instead; to discover posts in the first place use search_social_posts (this needs an existing pinId).',
     {
       pinId: z.string().min(1),
       size: z.number().optional(),
