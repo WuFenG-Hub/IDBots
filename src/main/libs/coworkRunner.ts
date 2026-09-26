@@ -9079,8 +9079,22 @@ export class CoworkRunner extends EventEmitter {
     name: string,
     args: Record<string, unknown>
   ): Promise<{ ok: true; text: string; images?: DshHostToolImagePayload[] } | { ok: false; error: string }> {
-    const registry = this.dshHostToolRegistry.get(coworkSessionId)
-    const tool = registry?.get(name)
+    let registry = this.dshHostToolRegistry.get(coworkSessionId)
+    if (!registry) {
+      // Kernel-initiated turns (subagent-finished wakes, scheduled nudges)
+      // dispatch host tools after the last host turn's teardown deleted the
+      // registry. Rebuild it on demand — buildDshHostTools resolves everything
+      // from the store by session id, so the rebuild is always fresh and the
+      // wake turn's tools (longterm_*, journals, …) actually execute instead
+      // of erroring on every call (2026-09-25 session 8665a5fd wedge).
+      try {
+        registry = new Map(this.buildDshHostTools(coworkSessionId).map((tool) => [tool.name, tool]))
+        this.dshHostToolRegistry.set(coworkSessionId, registry)
+      } catch {
+        return { ok: false, error: `unknown host tool: ${name}` }
+      }
+    }
+    const tool = registry.get(name)
     if (!tool) return { ok: false, error: `unknown host tool: ${name}` }
     const policy = await this.evaluateDshToolPolicy(coworkSessionId, name, args)
     if (policy.decision === 'deny') return { ok: false, error: policy.reason ?? 'denied by permission policy' }
