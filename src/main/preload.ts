@@ -889,6 +889,7 @@ contextBridge.exposeInMainWorld('electron', {
       preferredChannel?: 'delegate_bot' | 'group_task' | 'owner_external' | 'owner_together' | null;
       notes?: string;
       ordinal?: number;
+      metataskRoot?: string | null;
     }) => ipcRenderer.invoke('longtermTask:subtaskUpdate', input),
     begin: (input: { subtaskId: string; channel?: 'delegate_bot' | 'group_task' | 'owner_external' | 'owner_together' }) =>
       ipcRenderer.invoke('longtermTask:begin', input),

@@ -196,6 +196,7 @@ interface SubtaskRow {
   wait_until: string | null;
   notes: string;
   expected_minutes: number | null;
+  metatask_root: string | null;
   accepted_by: string | null;
   created_at: string;
   updated_at: string;
@@ -291,6 +292,11 @@ export class LongTermTaskStore {
     if (!subtaskColumns.includes('session_history_json')) {
       this.db.run("ALTER TABLE long_term_subtasks ADD COLUMN session_history_json TEXT NOT NULL DEFAULT '[]'");
     }
+    // P2 MetaTask interop: structured link from a sub-project to its on-chain
+    // MetaTask execution channel (referenced, not mixed in).
+    if (!subtaskColumns.includes('metatask_root')) {
+      this.db.run('ALTER TABLE long_term_subtasks ADD COLUMN metatask_root TEXT');
+    }
     this.saveDb();
   }
 
@@ -358,6 +364,7 @@ export class LongTermTaskStore {
       waitUntil: row.wait_until ?? null,
       notes: row.notes ?? '',
       expectedMinutes: row.expected_minutes ?? null,
+      metataskRoot: row.metatask_root ?? null,
       acceptedBy: row.accepted_by === 'owner' || row.accepted_by === 'twin' ? row.accepted_by : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -732,6 +739,13 @@ export class LongTermTaskStore {
       if (input.preferredChannel !== undefined && input.preferredChannel !== current.preferredChannel) {
         set('preferred_channel', input.preferredChannel, 'preferred channel');
       }
+    }
+    if (input.metataskRoot !== undefined && input.metataskRoot !== current.metataskRoot) {
+      const nextRoot = input.metataskRoot === null ? null : String(input.metataskRoot).trim();
+      if (nextRoot !== null && !/^[0-9a-f]{64}i0$/.test(nextRoot)) {
+        return { ok: false, code: 'VALIDATION', error: 'metataskRoot must be a full 66-char pinId (64 hex + i0) or null' };
+      }
+      set('metatask_root', nextRoot, 'metatask link');
     }
     if (typeof input.ordinal === 'number' && Number.isInteger(input.ordinal) && input.ordinal > 0 && input.ordinal !== current.ordinal) {
       const occupied = this.getOne<SubtaskRow>('SELECT * FROM long_term_subtasks WHERE task_id = ? AND ordinal = ? AND id != ?', [

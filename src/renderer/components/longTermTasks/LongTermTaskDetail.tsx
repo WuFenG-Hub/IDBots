@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { RootState } from '../../store';
+import { RootState, store } from '../../store';
 import { selectTask } from '../../store/slices/longTermTaskSlice';
 import { longTermTaskService } from '../../services/longTermTask';
 import { i18nService } from '../../services/i18n';
@@ -35,6 +35,17 @@ const SUBTASK_ICON: Record<LongTermSubtaskStatus, { glyph: string; className: st
   pending: { glyph: '○', className: 'dark:text-claude-darkTextSecondary text-claude-textSecondary' },
   rejected: { glyph: '✗', className: 'text-red-500' },
   skipped: { glyph: '—', className: 'dark:text-claude-darkTextSecondary text-claude-textSecondary' },
+};
+
+/**
+ * Linked MetaTask progress for a sub-project chip: "verified/total" from the
+ * metatask projection when loaded, "—" otherwise (referenced, not mixed in —
+ * the chip is informational; the MetaTask tab owns the live view).
+ */
+const metataskProgressLabel = (rootPinId: string): string => {
+  const summary = store.getState().metatask.board?.tasks.find((task) => task.rootPinId === rootPinId);
+  if (!summary) return '—';
+  return `${summary.progress.verified}/${summary.progress.total}`;
 };
 
 const SUBTASK_CHIP_CLASS: Record<LongTermSubtaskStatus, string> = {
@@ -272,6 +283,17 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                     <div className="ml-7 mt-0.5 flex items-center gap-2 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                       {subtask.dependsOn.length > 0 && (
                         <span>{i18nService.t('longTermTask.dependsOn').replace('{ids}', String(subtask.dependsOn.length))}</span>
+                      )}
+                      {subtask.metataskRoot && (
+                        <span
+                          className="text-brand"
+                          title={subtask.metataskRoot}
+                        >
+                          {i18nService.t('longTermTask.subtask.metataskChip').replace(
+                            '{progress}',
+                            metataskProgressLabel(subtask.metataskRoot),
+                          )}
+                        </span>
                       )}
                       {subtask.evidence.length > 0 && <span className="text-sky-600 dark:text-sky-400">{i18nService.t('longTermTask.subtask.evidence')} {subtask.evidence.length}</span>}
                       {subtask.sessionId && <span>●</span>}
